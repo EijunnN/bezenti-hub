@@ -18,7 +18,9 @@ import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import { layerTestPeer, TEST_PEER_HEADER } from "./clientConnection.testkit.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
+import * as OwnerPresence from "./OwnerPresence.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import * as SessionStore from "./SessionStore.ts";
 import * as AuthHttp from "./http.ts";
@@ -76,28 +78,37 @@ const layerProjects = RuntimeLayer.layerProjectService.pipe(
   ),
 );
 
-const layerServices = Layer.mergeAll(
-  InvitationService.layer.pipe(
-    Layer.provideMerge(Layer.merge(EnvironmentAuth.layer, SpaceDirectory.layer)),
-  ),
-  layerProjects,
-).pipe(
-  Layer.provide(ManagedPolicy.layerTest()),
-  Layer.provideMerge(SqlitePersistence.layerMemory),
-  Layer.provideMerge(ServerSecretStore.layer),
-  Layer.provide(ServerEnvironment.layerIdentity),
-  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-owner-test-" })),
-  Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
-);
+const makeLayerServices = (config: { readonly publicUrl?: URL }) =>
+  Layer.mergeAll(
+    InvitationService.layer.pipe(
+      Layer.provideMerge(Layer.merge(EnvironmentAuth.layer, SpaceDirectory.layer)),
+    ),
+    layerProjects,
+  ).pipe(
+    Layer.provide(ManagedPolicy.layerTest()),
+    Layer.provideMerge(OwnerPresence.layer),
+    Layer.provideMerge(SqlitePersistence.layerMemory),
+    Layer.provideMerge(ServerSecretStore.layer),
+    Layer.provide(ServerEnvironment.layerIdentity),
+    Layer.provideMerge(
+      Layer.effect(
+        ServerConfig.ServerConfig,
+        Effect.map(ServerConfig.ServerConfig, (base) => ({ ...base, ...config })),
+      ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-owner-test-" }))),
+    ),
+    Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+  );
 
-export const serveAuthHttp = Effect.gen(function* () {
-  const services = yield* Layer.build(layerServices);
+/** A Hub over HTTP routes, optionally published on `publicUrl`. */
+export const serveAuthHttpWith = Effect.fn(function* (config: { readonly publicUrl?: URL } = {}) {
+  const services = yield* Layer.build(makeLayerServices(config));
   const routes = HttpApiBuilder.layer(AuthTestApi).pipe(
     Layer.provide(AuthHttp.layer),
     Layer.provide(SpacesHttp.layer),
     Layer.provide(InvitationsHttp.layer),
     Layer.provide(ProjectHttp.layer),
     Layer.provide(AuthHttp.layerAuthenticatedAuth),
+    Layer.provide(layerTestPeer),
     Layer.provide(Layer.succeedContext(services)),
     Layer.provide(HttpPlatform.layer),
     Layer.provide(Etag.layerWeak),
@@ -110,7 +121,14 @@ export const serveAuthHttp = Effect.gen(function* () {
   const requestContext = Context.merge(services, yield* Effect.context());
   const request = (
     path: string,
-    init?: { body?: unknown; cookie?: string; authorization?: string },
+    init?: {
+      body?: unknown;
+      cookie?: string;
+      authorization?: string;
+      /** The direct peer's address; loopback when omitted. */
+      peer?: string;
+      headers?: Record<string, string>;
+    },
   ) =>
     Effect.promise(async () => {
       const response = await handler(
@@ -122,29 +140,35 @@ export const serveAuthHttp = Effect.gen(function* () {
             "content-type": "application/json",
             ...(init?.cookie ? { cookie: init.cookie } : {}),
             ...(init?.authorization ? { authorization: init.authorization } : {}),
+            ...(init?.peer ? { [TEST_PEER_HEADER]: init.peer } : {}),
+            ...init?.headers,
           },
           ...(init?.body === undefined ? {} : { body: encodeJson(init.body) }),
         }),
         requestContext,
       );
       const text = await response.text();
+      const setCookie = response.headers
+        .getSetCookie()
+        .find((cookie) => cookie.startsWith("t3_session_"));
       return {
         status: response.status,
         body: (text.length > 0 ? decodeJson(text) : null) as Record<string, unknown>,
-        cookie: response.headers
-          .getSetCookie()
-          .find((cookie) => cookie.startsWith("t3_session_"))
-          ?.split(";", 1)[0],
+        cookie: setCookie?.split(";", 1)[0],
+        setCookie,
       };
     });
   return {
     environmentAuth,
+    services,
     request,
     sessions: Context.get(services, SessionStore.SessionStore),
     projects: Context.get(services, ProjectService.ProjectService),
     sql: Context.get(services, SqlClient.SqlClient),
   };
 });
+
+export const serveAuthHttp = serveAuthHttpWith();
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));

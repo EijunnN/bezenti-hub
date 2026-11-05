@@ -153,6 +153,7 @@ import {
 } from "./cloud/config.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as EnvironmentAuthPolicy from "./auth/EnvironmentAuthPolicy.ts";
+import * as OwnerPresence from "./auth/OwnerPresence.ts";
 import * as CloudHttp from "./cloud/http.ts";
 import * as GuestHttp from "./guest/http.ts";
 import * as CloudLink from "./cloud/CloudLink.ts";
@@ -198,7 +199,7 @@ import * as RunFinalizationService from "./orchestration-v2/RunFinalizationServi
 import * as ProjectionMaintenance from "./orchestration-v2/ProjectionMaintenance.ts";
 import * as ProjectionStoreV2 from "./orchestration-v2/ProjectionStore.ts";
 import { makePersistedServerRuntimeState } from "./serverRuntimeState.ts";
-import { acceptsPrivateNetworkConnection, loopbackUrlHostForAddress } from "./startupAccess.ts";
+import { acceptsHubConnection, loopbackUrlHostForAddress } from "./startupAccess.ts";
 import * as OrchestrationHttp from "./orchestration-v2/http.ts";
 import * as ProjectHttp from "./project/http.ts";
 import * as SpaceDirectory from "./spaces/SpaceDirectory.ts";
@@ -340,6 +341,7 @@ const layerHttpServer = Layer.unwrap(
       privateNetworkOnly: config.privateNetworkOnly,
     });
     yield* ManagedLimits.closeTailscaleServeTo(policy, { host: bindHost, port: config.port });
+    const ownerPresence = yield* OwnerPresence.OwnerPresence;
     return NodeHttpServer.layer(
       () => {
         const server = rejectRequestsUntilServing(
@@ -347,7 +349,7 @@ const layerHttpServer = Layer.unwrap(
         );
         if (config.privateNetworkOnly) {
           server.on("connection", (socket) => {
-            if (!acceptsPrivateNetworkConnection(socket)) {
+            if (!acceptsHubConnection(socket, { ownerExists: ownerPresence.exists() })) {
               socket.destroy();
             }
           });
@@ -808,6 +810,7 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.provide(layerCommandReadiness),
   Layer.provide(ServerHttp.layerBrowserApiCors),
   Layer.provide(ServerHttp.layerHttpCompression),
+  Layer.provide(ServerHttp.layerClientConnection),
 );
 
 const layerMakeServer = Layer.unwrap(
@@ -1180,6 +1183,8 @@ const layerMakeServer = Layer.unwrap(
       ),
       Layer.provide(layerActivation),
       Layer.provideMerge(layerHttpServer),
+      // One cell: EnvironmentAuth turns it on, the listener above reads it per connection.
+      Layer.provideMerge(OwnerPresence.layer),
       Layer.provide(layerApplicationObservability),
       Layer.provideMerge(FetchHttpClient.layer),
       Layer.provide(VcsProcess.layer),

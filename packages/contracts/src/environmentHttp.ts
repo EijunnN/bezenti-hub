@@ -133,6 +133,8 @@ export const EnvironmentRequestInvalidReason = Schema.Literals([
   "invalid_history_cursor",
   "thread_transcript_too_large",
   "invalid_origin",
+  // A browser session asked for over plain HTTP from off the server's machine.
+  "insecure_transport",
 ]);
 export type EnvironmentRequestInvalidReason = typeof EnvironmentRequestInvalidReason.Type;
 
@@ -387,6 +389,7 @@ export class EnvironmentCloudEndpointUnavailableError extends Schema.TaggedError
   }
 }
 const EnvironmentSessionCreationErrors = [
+  EnvironmentRequestInvalidError,
   EnvironmentAuthInvalidError,
   EnvironmentInternalError,
 ] as const;

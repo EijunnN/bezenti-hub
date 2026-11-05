@@ -4,10 +4,10 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** done
 
 Spec: ../spec.md
 
-- [ ] Con Owner, se aceptan peers fuera de loopback, red privada o tailnet.
-- [ ] Sesiones de navegador rechazadas por HTTP plano fuera de loopback.
-- [ ] Guía en `docs/user/` para publicar el Hub con reverse proxy y HTTPS.
+- [x] Con Owner, se aceptan peers fuera de loopback, red privada o tailnet.
+- [x] Sesiones de navegador rechazadas por HTTP plano fuera de loopback.
+- [x] Guía en `docs/user/` para publicar el Hub con reverse proxy y HTTPS.

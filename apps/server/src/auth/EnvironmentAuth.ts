@@ -61,6 +61,8 @@ import * as SessionStore from "./SessionStore.ts";
 import * as UserDirectory from "./UserDirectory.ts";
 import { REUSABLE_DEV_SESSION_EXPIRES_AT, resolveReusableDevAuth } from "./ReusableDevAuth.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
+import { OwnerPresence } from "./OwnerPresence.ts";
+import type { AuthRequestMetadata } from "./utils.ts";
 import { DESKTOP_RENDERER_ORIGINS } from "../httpCors.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ManagedLimits from "../policy/managedLimits.ts";
@@ -490,6 +492,15 @@ export class ServerAuthInvalidOriginError extends Schema.TaggedError<ServerAuthI
   }
 }
 
+export class ServerAuthInsecureTransportError extends Schema.TaggedError<ServerAuthInsecureTransportError>()(
+  "ServerAuthInsecureTransportError",
+  {},
+) {
+  override get message(): string {
+    return "Sign in over HTTPS. Browser sessions travel over plain HTTP only on this machine.";
+  }
+}
+
 export class ServerAuthForbiddenOperationError extends Schema.TaggedError<ServerAuthForbiddenOperationError>()(
   "ServerAuthForbiddenOperationError",
   {},
@@ -524,7 +535,7 @@ export class EnvironmentAuth extends Context.Service<
     ) => Effect.Effect<AuthSessionState, ServerAuthInternalError>;
     readonly createBrowserSession: (
       credential: string,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
       previousSessionToken?: string,
     ) => Effect.Effect<
       {
@@ -533,12 +544,12 @@ export class EnvironmentAuth extends Context.Service<
         readonly cookieName?: string;
         readonly expireNormalCookie?: boolean;
       },
-      ServerAuthInvalidCredentialError | ServerAuthInternalError
+      ServerAuthInvalidCredentialError | ServerAuthInsecureTransportError | ServerAuthInternalError
     >;
     readonly exchangeBootstrapCredentialForAccessToken: (
       credential: string,
       requestedScopes: ReadonlyArray<AuthEnvironmentScope> | undefined,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
       input?: {
         readonly proofKeyThumbprint?: string;
       },
@@ -670,12 +681,13 @@ export class EnvironmentAuth extends Context.Service<
     readonly completeOwnerBootstrap: (
       request: HttpServerRequest.HttpServerRequest,
       input: AuthOwnerBootstrapRequest,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
     ) => Effect.Effect<
       { readonly result: AuthOwnerBootstrapResult; readonly sessionToken: string },
       | ServerAuthOwnerAlreadyClaimedError
       | ServerAuthInvalidOriginError
       | ServerAuthInvalidCredentialError
+      | ServerAuthInsecureTransportError
       | ServerAuthInternalError
     >;
     readonly beginPasskeySignIn: (
@@ -684,27 +696,31 @@ export class EnvironmentAuth extends Context.Service<
     readonly completePasskeySignIn: (
       request: HttpServerRequest.HttpServerRequest,
       input: AuthPasskeySignInRequest,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
     ) => Effect.Effect<
       UserBrowserSession,
-      ServerAuthInvalidOriginError | ServerAuthInvalidCredentialError | ServerAuthInternalError
+      | ServerAuthInvalidOriginError
+      | ServerAuthInvalidCredentialError
+      | ServerAuthInsecureTransportError
+      | ServerAuthInternalError
     >;
     readonly signInWithRecoveryCode: (
       request: HttpServerRequest.HttpServerRequest,
       code: string,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
     ) => Effect.Effect<
       UserBrowserSession,
-      ServerAuthInvalidCredentialError | ServerAuthInternalError
+      ServerAuthInvalidCredentialError | ServerAuthInsecureTransportError | ServerAuthInternalError
     >;
     /** Signs in, or answers that the account also needs a TOTP code with the password. */
     readonly signInWithPassword: (
       request: HttpServerRequest.HttpServerRequest,
       input: AuthPasswordSignInRequest,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
     ) => Effect.Effect<
       UserBrowserSession | { readonly response: AuthSecondFactorRequired },
       | ServerAuthInvalidCredentialError
+      | ServerAuthInsecureTransportError
       | UserDirectory.SecondFactorMissingError
       | UserDirectory.SignInThrottledError
       | ServerAuthInternalError
@@ -713,10 +729,11 @@ export class EnvironmentAuth extends Context.Service<
     readonly signInWithTotp: (
       request: HttpServerRequest.HttpServerRequest,
       input: AuthTotpSignInRequest,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
     ) => Effect.Effect<
       UserBrowserSession,
       | ServerAuthInvalidCredentialError
+      | ServerAuthInsecureTransportError
       | UserDirectory.SignInThrottledError
       | ServerAuthInternalError
     >;
@@ -731,10 +748,13 @@ export class EnvironmentAuth extends Context.Service<
     readonly redeemResetLink: (
       request: HttpServerRequest.HttpServerRequest,
       input: AuthResetLinkRedeemRequest,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
     ) => Effect.Effect<
       UserBrowserSession,
-      ServerAuthInvalidOriginError | ServerAuthInvalidCredentialError | ServerAuthInternalError
+      | ServerAuthInvalidOriginError
+      | ServerAuthInvalidCredentialError
+      | ServerAuthInsecureTransportError
+      | ServerAuthInternalError
     >;
     /** The page origin a passkey ceremony from this request is bound to. */
     readonly passkeyOrigin: (
@@ -747,10 +767,10 @@ export class EnvironmentAuth extends Context.Service<
     readonly startUserBrowserSession: (
       request: HttpServerRequest.HttpServerRequest,
       user: AuthUser,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
     ) => Effect.Effect<
       UserBrowserSession,
-      ServerAuthInvalidCredentialError | ServerAuthInternalError
+      ServerAuthInvalidCredentialError | ServerAuthInsecureTransportError | ServerAuthInternalError
     >;
     /** For the Hub's shell (`t3 auth owner-reset`), when the Owner has lost every passkey. */
     readonly issueOwnerResetLink: UserDirectory.UserDirectory["Service"]["issueOwnerResetLink"];
@@ -917,6 +937,8 @@ export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const managedPolicy = yield* ManagedPolicy.ManagedPolicy;
   const devAuth = resolveReusableDevAuth(config);
+  const ownerPresence = yield* OwnerPresence;
+  const publicOrigin = config.publicUrl?.origin;
 
   // A session with no User of its own (the Hub's shell, the startup link, the desktop, MCP
   // clients until they pick a User) belongs to the Owner. Before an Owner exists it has none.
@@ -988,6 +1010,7 @@ export const make = Effect.gen(function* () {
 
   // Cookies span ports; reject cookie-authenticated requests and sockets from other same-site origins.
   const trustedBrowserOrigins = new Set<string>([
+    ...(publicOrigin ? [publicOrigin] : []),
     ...(config.devUrl ? [config.devUrl.origin] : []),
     ...DESKTOP_RENDERER_ORIGINS,
     ...config.devAllowedOrigins,
@@ -1106,6 +1129,7 @@ export const make = Effect.gen(function* () {
         Effect.withSpan("EnvironmentAuth.createBrowserSession"),
       );
     }
+    yield* requireSecureBrowserTransport(requestMetadata);
     const previousSession =
       previousSessionToken === undefined
         ? undefined
@@ -1762,6 +1786,13 @@ export const make = Effect.gen(function* () {
     }
     try {
       const url = new URL(origin);
+      // A published Hub binds every passkey to its public origin, so none is stranded on
+      // another name for the same server, such as a LAN address or localhost.
+      if (publicOrigin !== undefined) {
+        return url.origin === publicOrigin
+          ? Effect.succeed(url.origin)
+          : Effect.fail(new ServerAuthInvalidOriginError({}));
+      }
       return url.protocol === "https:" || url.protocol === "http:"
         ? Effect.succeed(url.origin)
         : Effect.fail(new ServerAuthInvalidOriginError({}));
@@ -1773,8 +1804,9 @@ export const make = Effect.gen(function* () {
   const issueUserBrowserSession = Effect.fn("EnvironmentAuth.issueUserBrowserSession")(function* (
     request: HttpServerRequest.HttpServerRequest,
     user: AuthUser,
-    requestMetadata: AuthClientMetadata,
+    requestMetadata: AuthRequestMetadata,
   ) {
+    yield* requireSecureBrowserTransport(requestMetadata);
     if (
       !ManagedLimits.allowsRemoteClients(managedPolicy) &&
       isRemoteClient(requestMetadata.ipAddress)
@@ -1921,6 +1953,7 @@ export const make = Effect.gen(function* () {
           SqlError: (cause) => Effect.fail(new ServerAuthUserDirectoryError({ cause })),
         }),
       );
+    ownerPresence.markExists();
     return {
       result: {
         session: session.response,
@@ -2049,6 +2082,10 @@ export const make = Effect.gen(function* () {
       Effect.withSpan("EnvironmentAuth.signOut"),
     );
 
+  if (yield* userDirectory.hasOwner().pipe(Effect.orElseSucceed(() => false))) {
+    ownerPresence.markExists();
+  }
+
   yield* revokePairedClientsThePolicyDisallows(managedPolicy, {
     sessions,
     pairingLinks: bootstrapCredentials,
@@ -2100,6 +2137,17 @@ export const make = Effect.gen(function* () {
 
 const isRemoteClient = (ipAddress: string | undefined) =>
   ipAddress !== undefined && !isLocalLoopbackHost(ipAddress);
+
+/**
+ * A browser session cookie is a bearer credential, so it is issued over plain HTTP only to a
+ * client on this machine. Behind a trusted proxy the client and scheme are the ones it
+ * forwarded; an unknown client counts as remote.
+ */
+const requireSecureBrowserTransport = (requestMetadata: AuthRequestMetadata) =>
+  requestMetadata.secureTransport === true ||
+  (requestMetadata.ipAddress !== undefined && isLocalLoopbackHost(requestMetadata.ipAddress))
+    ? Effect.void
+    : Effect.fail(new ServerAuthInsecureTransportError({}));
 
 /** Subjects of sessions and links a pairing link created, keyed by how the client paired. */
 const LINK_PAIRED_SUBJECTS = { link: "one-time-token", connect: "cloud-connect" } as const;

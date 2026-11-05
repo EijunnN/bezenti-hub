@@ -78,6 +78,8 @@ const requestMetadata = {
   os: "macOS",
   browser: "Chrome",
   ipAddress: "192.168.1.23",
+  // Browser sessions reach a LAN client only over HTTPS.
+  secureTransport: true,
 };
 
 const makeDpopKey = () => {

@@ -2,13 +2,13 @@ import * as Option from "effect/Option";
 import { HttpServerRequest } from "effect/http";
 
 /**
- * `HttpServerRequest.toURL` that honors `X-Forwarded-Proto: https`. Effect 4.1
- * stopped reading it, but TLS-terminating proxies in front of the server
- * (Tailscale Serve, tunnels) rely on it for OAuth, DPoP and pairing URLs.
+ * The URL the client asked for, which OAuth, DPoP and pairing URLs depend on. Served requests
+ * carry the scheme the client-connection middleware took from a trusted proxy; a request built
+ * without it, as in a test, falls back to `X-Forwarded-Proto`.
  */
 export const requestUrl = (request: HttpServerRequest.HttpServerRequest): Option.Option<URL> =>
   HttpServerRequest.toURL(
-    request.headers["x-forwarded-proto"] === "https" && request.protocol !== "https"
+    request.protocol === undefined && request.headers["x-forwarded-proto"] === "https"
       ? request.modify({ protocol: "https" })
       : request,
   );

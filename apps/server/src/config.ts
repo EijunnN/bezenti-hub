@@ -10,6 +10,7 @@ import * as Schema from "effect/Schema";
 
 import type { OtlpEndpointSource } from "@t3tools/contracts";
 import { sweepStalePendingAttachments } from "./attachmentStore.ts";
+import type { TrustedProxies } from "./auth/clientConnection.ts";
 import {
   DEFAULT_SIGNAL_EXPORT,
   nodeProcessRuntimeAttributes,
@@ -92,6 +93,10 @@ export class ServerConfig extends Context.Service<
     readonly devUrl: URL | undefined;
     readonly devAuthToken?: Redacted.Redacted<string> | undefined;
     readonly devAllowedOrigins: ReadonlyArray<string>;
+    /** Peers whose forwarding headers name the client; loopback when unset. */
+    readonly trustedProxies?: TrustedProxies | undefined;
+    /** The origin the Hub is published on (T3CODE_PUBLIC_URL); passkeys are bound to it. */
+    readonly publicUrl?: URL | undefined;
     readonly noBrowser: boolean;
     readonly startupPresentation: StartupPresentation;
     readonly desktopBootstrapToken: string | undefined;

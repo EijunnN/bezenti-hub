@@ -1,0 +1,103 @@
+# Publish the Hub on your domain
+
+Put the Hub at an address such as `https://hub.example.com` so the people you
+invite can sign in from anywhere, without Tailscale or T3 Connect. A reverse
+proxy on the same machine serves HTTPS and forwards to T3 Code, which keeps
+listening only on this machine.
+
+Create the Owner account first, on this machine. Until the Installation has an
+Owner, a service listening on the local network refuses public addresses; once
+it has one, it accepts any address, because every request then needs someone
+signed in.
+
+## Before you start
+
+- A machine that stays on, with T3 Code running as a
+  [background service](./background-service.md) or under `t3 serve`.
+- A domain name whose DNS record points at that machine, and ports 80 and 443
+  open to it.
+- [Caddy](https://caddyserver.com), or nginx with a TLS certificate.
+
+## Configure T3 Code
+
+Set these in the environment that starts the server. For the background
+service, add them to
+[`service.env`](./background-service.md#configure-the-service-environment) and
+restart it:
+
+```sh
+T3CODE_PUBLIC_URL=https://hub.example.com
+T3CODE_TRUSTED_PROXIES=loopback
+```
+
+- `T3CODE_PUBLIC_URL` is the address people open. Passkeys are registered on
+  that address and only work there, so set it before anyone registers one, and
+  sign in through it rather than through `localhost` or a LAN address.
+- `T3CODE_TRUSTED_PROXIES` lists the proxies allowed to tell T3 Code who the
+  client is: `loopback` for a proxy on the same machine, or IP addresses and
+  CIDR ranges such as `10.0.0.0/8` for one elsewhere, separated by commas.
+  `loopback` is the default; setting a list replaces it, so keep `loopback`
+  in it if Tailscale Serve or T3 Connect also run on the machine. `none` trusts
+  no proxy.
+
+T3 Code reads the client's address and whether it used HTTPS from
+`X-Forwarded-For` and `X-Forwarded-Proto` (or `Forwarded`), but only when the
+request comes from a trusted proxy. From anyone else those headers are ignored.
+The client's address is what sign-in back-off counts against and what
+**Settings → Access → Your sessions** shows, so with a proxy T3 Code does not
+trust, every visitor looks like the proxy.
+
+## Caddy
+
+Caddy gets and renews the certificate on its own. A complete `Caddyfile`:
+
+```caddyfile
+hub.example.com {
+	reverse_proxy 127.0.0.1:3773
+}
+```
+
+Replace `3773` with the port T3 Code listens on (`t3 status` shows it). Caddy
+sends `X-Forwarded-For` and `X-Forwarded-Proto` and keeps the `Host` header, and
+WebSocket connections pass through without extra settings.
+
+## nginx
+
+nginx needs the headers and the WebSocket upgrade spelled out:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:3773;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 1h;
+}
+```
+
+Put it in a `server` block that listens on 443 with your certificate.
+
+## Sign in over HTTPS
+
+The Hub only signs a browser in over HTTPS, or over plain HTTP from the machine
+it runs on. Opening `http://hub.example.com` or a LAN address from another
+device and signing in is refused. Session cookies sent over HTTPS are marked
+`Secure`.
+
+## If something does not work
+
+- **Passkey sign-in says to open the Installation's own address.** The page's
+  address does not match `T3CODE_PUBLIC_URL`. Open the public address.
+- **Passkeys registered before you set the public URL stopped working.** They
+  belong to the address they were registered on. Sign in with a recovery code
+  and register a new passkey, or have the Owner run `t3 auth owner-reset
+  --base-url https://hub.example.com`.
+- **Sign-in is refused as insecure.** The proxy is not sending
+  `X-Forwarded-Proto: https`, or its address is not in
+  `T3CODE_TRUSTED_PROXIES`.
+- **Everyone is locked out after one person's failed attempts.** T3 Code does
+  not trust the proxy, so it counts every attempt against the proxy's address.
+  Add the proxy to `T3CODE_TRUSTED_PROXIES`.
