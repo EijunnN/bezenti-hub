@@ -38,6 +38,18 @@ import {
   ServerAuthSessionMethod,
 } from "./auth.ts";
 import {
+  AuthOwnerBootstrapRequest,
+  AuthOwnerBootstrapResult,
+  AuthOwnerBootstrapStatus,
+  AuthOwnerBootstrapStatusRequest,
+  AuthOwnerRegistrationRequest,
+  AuthPasskeyRegistrationCeremony,
+  AuthPasskeySignInCeremony,
+  AuthPasskeySignInRequest,
+  AuthRecoveryCodeSignInRequest,
+  AuthSignOutResult,
+} from "./userAccounts.ts";
+import {
   ExecutionEnvironmentDescriptor,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
@@ -45,6 +57,7 @@ import {
 import {
   DpopFailureReason,
   AuthSessionId,
+  UserId,
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
@@ -93,6 +106,7 @@ export const EnvironmentRequestInvalidReason = Schema.Literals([
   "invalid_command",
   "invalid_history_cursor",
   "thread_transcript_too_large",
+  "invalid_origin",
 ]);
 export type EnvironmentRequestInvalidReason = typeof EnvironmentRequestInvalidReason.Type;
 
@@ -334,6 +348,16 @@ const EnvironmentSessionCreationErrors = [
   EnvironmentAuthInvalidError,
   EnvironmentInternalError,
 ] as const;
+const EnvironmentUserSignInErrors = [
+  EnvironmentRequestInvalidError,
+  EnvironmentAuthInvalidError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentOwnerBootstrapErrors = [
+  ...EnvironmentUserSignInErrors,
+  // The Installation already has an Owner.
+  EnvironmentHttpConflictError,
+] as const;
 const EnvironmentTokenExchangeErrors = [
   EnvironmentRequestInvalidError,
   EnvironmentAuthInvalidError,
@@ -376,6 +400,7 @@ const EnvironmentProjectMutationErrors = [
 export interface EnvironmentSessionPrincipalShape {
   readonly sessionId: AuthSessionId;
   readonly subject: string;
+  readonly userId?: UserId;
   readonly method: ServerAuthSessionMethod;
   readonly scopes: ReadonlySet<AuthEnvironmentScope>;
   readonly proofKeyThumbprint?: string;
@@ -601,6 +626,53 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       success: AuthOtherClientSessionsRevokeResult,
       error: EnvironmentScopedOperationErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("ownerBootstrapStatus", "/api/auth/owner/status", {
+      payload: AuthOwnerBootstrapStatusRequest,
+      success: AuthOwnerBootstrapStatus,
+      error: [EnvironmentInternalError],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("ownerRegistration", "/api/auth/owner/registration", {
+      payload: AuthOwnerRegistrationRequest,
+      success: AuthPasskeyRegistrationCeremony,
+      error: EnvironmentOwnerBootstrapErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("ownerBootstrap", "/api/auth/owner", {
+      payload: AuthOwnerBootstrapRequest,
+      success: AuthOwnerBootstrapResult,
+      error: EnvironmentOwnerBootstrapErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("passkeyChallenge", "/api/auth/passkey/challenge", {
+      success: AuthPasskeySignInCeremony,
+      error: EnvironmentUserSignInErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("passkeySignIn", "/api/auth/passkey/sign-in", {
+      payload: AuthPasskeySignInRequest,
+      success: AuthBrowserSessionResult,
+      error: EnvironmentUserSignInErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("recoveryCodeSignIn", "/api/auth/recovery-code/sign-in", {
+      payload: AuthRecoveryCodeSignInRequest,
+      success: AuthBrowserSessionResult,
+      error: EnvironmentUserSignInErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("signOut", "/api/auth/sign-out", {
+      success: AuthSignOutResult,
+      error: [EnvironmentInternalError],
+    }),
   ) {}
 
 class EnvironmentMcpOAuthHttpApi extends HttpApiGroup.make("mcpOAuth")

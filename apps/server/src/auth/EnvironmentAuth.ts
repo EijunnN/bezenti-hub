@@ -19,7 +19,15 @@ import {
   type ServerAuthSessionMethod,
   type AuthWebSocketTicketResult,
   type AuthWebSocketTicketUse,
+  type AuthOwnerBootstrapRequest,
+  type AuthOwnerBootstrapResult,
+  type AuthOwnerBootstrapStatus,
+  type AuthPasskeyRegistrationCeremony,
+  type AuthPasskeySignInCeremony,
+  type AuthPasskeySignInRequest,
+  type AuthUser,
   DpopFailureReason,
+  type UserId,
   type DpopFailureReason as DpopFailureReasonType,
   mcpClientScopes,
 } from "@t3tools/contracts";
@@ -42,6 +50,7 @@ import * as EnvironmentAuthPolicy from "./EnvironmentAuthPolicy.ts";
 import * as PairingGrantStore from "./PairingGrantStore.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import * as SessionStore from "./SessionStore.ts";
+import * as UserDirectory from "./UserDirectory.ts";
 import { REUSABLE_DEV_SESSION_EXPIRES_AT, resolveReusableDevAuth } from "./ReusableDevAuth.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
 import { DESKTOP_RENDERER_ORIGINS } from "../httpCors.ts";
@@ -51,6 +60,8 @@ import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import { requestUrl } from "../requestUrl.ts";
 
 const DEFAULT_SESSION_SUBJECT = "cli-issued-session";
+/** Browser sessions a User signed in to with an account credential rather than a pairing link. */
+const USER_SIGN_IN_SUBJECT = "user-sign-in";
 export const INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT = "administrative-bootstrap";
 
 export interface IssuedPairingLink {
@@ -88,6 +99,7 @@ export interface McpClientSession {
 export interface AuthenticatedSession {
   readonly sessionId: AuthSessionId;
   readonly subject: string;
+  readonly userId?: UserId;
   readonly method: ServerAuthSessionMethod;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly proofKeyThumbprint?: string;
@@ -334,7 +346,19 @@ export class ServerAuthCloudMintJwtSigningError extends Schema.TaggedError<Serve
   }
 }
 
+export class ServerAuthUserDirectoryError extends Schema.TaggedError<ServerAuthUserDirectoryError>()(
+  "ServerAuthUserDirectoryError",
+  {
+    ...serverAuthInternalErrorContext,
+  },
+) {
+  override get message(): string {
+    return "Failed to read or write user accounts.";
+  }
+}
+
 export const ServerAuthInternalError = Schema.Union([
+  ServerAuthUserDirectoryError,
   ServerAuthBootstrapCredentialValidationError,
   ServerAuthSessionCredentialValidationError,
   ServerAuthAuthenticatedSessionIssueError,
@@ -438,6 +462,24 @@ export class ServerAuthMcpApprovalCodeError extends Schema.TaggedError<ServerAut
       : this.reason === "not_a_pairing_code"
         ? "That is not a one-time pairing code."
         : "That pairing code is unknown, expired, or already used.";
+  }
+}
+
+export class ServerAuthOwnerAlreadyClaimedError extends Schema.TaggedError<ServerAuthOwnerAlreadyClaimedError>()(
+  "ServerAuthOwnerAlreadyClaimedError",
+  {},
+) {
+  override get message(): string {
+    return "This Installation already has an Owner.";
+  }
+}
+
+export class ServerAuthInvalidOriginError extends Schema.TaggedError<ServerAuthInvalidOriginError>()(
+  "ServerAuthInvalidOriginError",
+  {},
+) {
+  override get message(): string {
+    return "Passkeys need a request from the app's own origin.";
   }
 }
 
@@ -567,8 +609,61 @@ export class EnvironmentAuth extends Context.Service<
     readonly authenticateBrowserSession: (
       request: HttpServerRequest.HttpServerRequest,
     ) => Effect.Effect<AuthenticatedSession, ServerAuthCredentialError | ServerAuthInternalError>;
+    readonly getOwnerBootstrapStatus: (
+      credential: string,
+    ) => Effect.Effect<AuthOwnerBootstrapStatus, ServerAuthInternalError>;
+    readonly beginOwnerBootstrap: (
+      request: HttpServerRequest.HttpServerRequest,
+      input: { readonly credential: string; readonly displayName: string },
+    ) => Effect.Effect<
+      AuthPasskeyRegistrationCeremony,
+      | ServerAuthOwnerAlreadyClaimedError
+      | ServerAuthInvalidOriginError
+      | ServerAuthInvalidCredentialError
+      | ServerAuthInternalError
+    >;
+    /** Creates the Owner, spends the administrative bootstrap link and signs this browser in. */
+    readonly completeOwnerBootstrap: (
+      request: HttpServerRequest.HttpServerRequest,
+      input: AuthOwnerBootstrapRequest,
+      requestMetadata: AuthClientMetadata,
+    ) => Effect.Effect<
+      { readonly result: AuthOwnerBootstrapResult; readonly sessionToken: string },
+      | ServerAuthOwnerAlreadyClaimedError
+      | ServerAuthInvalidOriginError
+      | ServerAuthInvalidCredentialError
+      | ServerAuthInternalError
+    >;
+    readonly beginPasskeySignIn: (
+      request: HttpServerRequest.HttpServerRequest,
+    ) => Effect.Effect<AuthPasskeySignInCeremony, ServerAuthInvalidOriginError>;
+    readonly completePasskeySignIn: (
+      request: HttpServerRequest.HttpServerRequest,
+      input: AuthPasskeySignInRequest,
+      requestMetadata: AuthClientMetadata,
+    ) => Effect.Effect<
+      UserBrowserSession,
+      ServerAuthInvalidOriginError | ServerAuthInvalidCredentialError | ServerAuthInternalError
+    >;
+    readonly signInWithRecoveryCode: (
+      request: HttpServerRequest.HttpServerRequest,
+      code: string,
+      requestMetadata: AuthClientMetadata,
+    ) => Effect.Effect<
+      UserBrowserSession,
+      ServerAuthInvalidCredentialError | ServerAuthInternalError
+    >;
+    /** Revokes the request's browser session; false when it carried none. */
+    readonly signOut: (
+      request: HttpServerRequest.HttpServerRequest,
+    ) => Effect.Effect<boolean, ServerAuthInternalError>;
   }
 >()("t3/auth/EnvironmentAuth") {}
+
+export interface UserBrowserSession {
+  readonly response: AuthBrowserSessionResult;
+  readonly sessionToken: string;
+}
 
 type BootstrapExchangeResult = {
   readonly response: AuthBrowserSessionResult;
@@ -713,6 +808,7 @@ export const make = Effect.gen(function* () {
   const policy = yield* EnvironmentAuthPolicy.EnvironmentAuthPolicy;
   const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
   const sessions = yield* SessionStore.SessionStore;
+  const userDirectory = yield* UserDirectory.UserDirectory;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const digest = yield* Digest.Digest;
   const descriptor = yield* policy.getDescriptor();
@@ -741,6 +837,7 @@ export const make = Effect.gen(function* () {
       Effect.map((session) => ({
         sessionId: session.sessionId,
         subject: session.subject,
+        ...(session.userId ? { userId: session.userId } : {}),
         method: session.method,
         scopes: session.scopes,
         ...(session.proofKeyThumbprint ? { proofKeyThumbprint: session.proofKeyThumbprint } : {}),
@@ -833,6 +930,7 @@ export const make = Effect.gen(function* () {
             ...authScopeResponse(session.scopes),
             sessionMethod: session.method,
             ...(session.expiresAt ? { expiresAt: DateTime.toUtc(session.expiresAt) } : {}),
+            ...(session.userId ? { userId: session.userId } : {}),
           }) satisfies AuthSessionState,
       ),
       Effect.catchIf(isServerAuthCredentialError, () =>
@@ -1282,6 +1380,7 @@ export const make = Effect.gen(function* () {
           return {
             sessionId: session.sessionId,
             subject: session.subject,
+            ...(session.userId ? { userId: session.userId } : {}),
             method: session.method,
             scopes: session.scopes,
             ...(session.proofKeyThumbprint
@@ -1376,6 +1475,201 @@ export const make = Effect.gen(function* () {
       Effect.withSpan("EnvironmentAuth.consumeMcpApprovalCode"),
     );
 
+  const userDirectoryFailure = (cause: UserDirectory.UserDirectoryStorageError) =>
+    new ServerAuthUserDirectoryError({ cause });
+
+  // A passkey is bound to the page's origin, so only an origin the cookie rules accept may use one.
+  const resolvePasskeyOrigin = (request: HttpServerRequest.HttpServerRequest) => {
+    const origin = request.headers.origin;
+    if (origin === undefined || !isBrowserOriginAllowed(request, trustedBrowserOrigins)) {
+      return Effect.fail(new ServerAuthInvalidOriginError({}));
+    }
+    try {
+      const url = new URL(origin);
+      return url.protocol === "https:" || url.protocol === "http:"
+        ? Effect.succeed(url.origin)
+        : Effect.fail(new ServerAuthInvalidOriginError({}));
+    } catch {
+      return Effect.fail(new ServerAuthInvalidOriginError({}));
+    }
+  };
+
+  const issueUserBrowserSession = Effect.fn("EnvironmentAuth.issueUserBrowserSession")(function* (
+    request: HttpServerRequest.HttpServerRequest,
+    user: AuthUser,
+    requestMetadata: AuthClientMetadata,
+  ) {
+    const previousCredential = selectRequestCredential(
+      request,
+      sessions.cookieName,
+      sessions.legacyCookieName,
+    );
+    const previousSession =
+      previousCredential === undefined || !isBrowserCookieCredential(previousCredential.source)
+        ? undefined
+        : yield* sessions.verify(previousCredential.token).pipe(
+            Effect.catchIf(SessionStore.isSessionCredentialInvalidError, () => Effect.void),
+            Effect.mapError((cause) => new ServerAuthSessionCredentialValidationError({ cause })),
+          );
+    const session = yield* sessions
+      .issue({
+        method: "browser-session-cookie",
+        subject: USER_SIGN_IN_SUBJECT,
+        userId: user.id,
+        scopes: AuthStandardClientScopes,
+        ...(previousSession?.method === "browser-session-cookie"
+          ? { replaceSessionId: previousSession.sessionId }
+          : {}),
+        client: requestMetadata,
+      })
+      .pipe(Effect.mapError((cause) => new ServerAuthAuthenticatedSessionIssueError({ cause })));
+    return {
+      response: {
+        authenticated: true,
+        ...authScopeResponse(session.scopes),
+        sessionMethod: session.method,
+        expiresAt: DateTime.toUtc(session.expiresAt),
+      },
+      sessionToken: session.token,
+    } satisfies UserBrowserSession;
+  });
+
+  const isAdministrativeBootstrapLink = (credential: string) =>
+    bootstrapCredentials.peekSubject(credential).pipe(
+      Effect.map(
+        (subject) => Option.getOrUndefined(subject) === INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT,
+      ),
+      Effect.mapError((cause) => new ServerAuthBootstrapCredentialValidationError({ cause })),
+    );
+
+  const requireAdministrativeBootstrapLink = (credential: string) =>
+    isAdministrativeBootstrapLink(credential).pipe(
+      Effect.filterOrFail(
+        (matches) => matches,
+        () =>
+          new ServerAuthInvalidCredentialError({
+            diagnostic: "Only the administrative bootstrap link can create the Owner.",
+          }),
+      ),
+    );
+
+  const getOwnerBootstrapStatus: EnvironmentAuth["Service"]["getOwnerBootstrapStatus"] = Effect.fn(
+    "EnvironmentAuth.getOwnerBootstrapStatus",
+  )(function* (credential) {
+    if (!(yield* isAdministrativeBootstrapLink(credential))) {
+      return { status: "not-applicable" } as const;
+    }
+    const hasOwner = yield* userDirectory.hasOwner().pipe(Effect.mapError(userDirectoryFailure));
+    return { status: hasOwner ? "claimed" : "available" } as const;
+  });
+
+  const ownerCreationFailures = <A, R>(
+    effect: Effect.Effect<
+      A,
+      UserDirectory.OwnerAlreadyClaimedError | UserDirectory.UserDirectoryStorageError,
+      R
+    >,
+  ) =>
+    effect.pipe(
+      Effect.mapError((cause) =>
+        cause._tag === "OwnerAlreadyClaimedError"
+          ? new ServerAuthOwnerAlreadyClaimedError({})
+          : userDirectoryFailure(cause),
+      ),
+    );
+
+  const beginOwnerBootstrap: EnvironmentAuth["Service"]["beginOwnerBootstrap"] = Effect.fn(
+    "EnvironmentAuth.beginOwnerBootstrap",
+  )(function* (request, input) {
+    const origin = yield* resolvePasskeyOrigin(request);
+    yield* requireAdministrativeBootstrapLink(input.credential);
+    return yield* userDirectory
+      .startOwnerRegistration({ displayName: input.displayName, origin })
+      .pipe(ownerCreationFailures);
+  });
+
+  const passkeyRejected = (cause: UserDirectory.PasskeyRejectedError) =>
+    new ServerAuthInvalidCredentialError({ diagnostic: cause.message, cause });
+
+  const completeOwnerBootstrap: EnvironmentAuth["Service"]["completeOwnerBootstrap"] = Effect.fn(
+    "EnvironmentAuth.completeOwnerBootstrap",
+  )(function* (request, input, requestMetadata) {
+    const origin = yield* resolvePasskeyOrigin(request);
+    if (yield* userDirectory.hasOwner().pipe(Effect.mapError(userDirectoryFailure))) {
+      return yield* new ServerAuthOwnerAlreadyClaimedError({});
+    }
+    yield* requireAdministrativeBootstrapLink(input.credential);
+    const pending = yield* userDirectory
+      .verifyOwnerRegistration({
+        ceremonyId: input.ceremonyId,
+        origin,
+        response: input.response,
+      })
+      .pipe(Effect.mapError(passkeyRejected));
+    yield* bootstrapCredentials
+      .consume(input.credential)
+      .pipe(Effect.mapError(toBootstrapExchangeError));
+    const created = yield* userDirectory.createOwner(pending).pipe(ownerCreationFailures);
+    const session = yield* issueUserBrowserSession(request, created.user, requestMetadata);
+    return {
+      result: {
+        session: session.response,
+        user: created.user,
+        recoveryCodes: created.recoveryCodes,
+      },
+      sessionToken: session.sessionToken,
+    };
+  });
+
+  const beginPasskeySignIn: EnvironmentAuth["Service"]["beginPasskeySignIn"] = Effect.fn(
+    "EnvironmentAuth.beginPasskeySignIn",
+  )(function* (request) {
+    const origin = yield* resolvePasskeyOrigin(request);
+    return yield* userDirectory.startPasskeySignIn({ origin });
+  });
+
+  const completePasskeySignIn: EnvironmentAuth["Service"]["completePasskeySignIn"] = Effect.fn(
+    "EnvironmentAuth.completePasskeySignIn",
+  )(function* (request, input, requestMetadata) {
+    const origin = yield* resolvePasskeyOrigin(request);
+    const user = yield* userDirectory
+      .finishPasskeySignIn({ ceremonyId: input.ceremonyId, origin, response: input.response })
+      .pipe(
+        Effect.catchTags({
+          PasskeyRejectedError: (cause) => Effect.fail(passkeyRejected(cause)),
+          UserDirectoryStorageError: (cause) => Effect.fail(userDirectoryFailure(cause)),
+        }),
+      );
+    return yield* issueUserBrowserSession(request, user, requestMetadata);
+  });
+
+  const signInWithRecoveryCode: EnvironmentAuth["Service"]["signInWithRecoveryCode"] = Effect.fn(
+    "EnvironmentAuth.signInWithRecoveryCode",
+  )(function* (request, code, requestMetadata) {
+    const user = yield* userDirectory.redeemRecoveryCode(code).pipe(
+      Effect.catchTags({
+        RecoveryCodeRejectedError: (cause) =>
+          Effect.fail(new ServerAuthInvalidCredentialError({ diagnostic: cause.message })),
+        UserDirectoryStorageError: (cause) => Effect.fail(userDirectoryFailure(cause)),
+      }),
+    );
+    return yield* issueUserBrowserSession(request, user, requestMetadata);
+  });
+
+  const signOut: EnvironmentAuth["Service"]["signOut"] = (request) =>
+    authenticateBrowserSession(request).pipe(
+      Effect.flatMap((session) =>
+        // The reusable dev session outlives restarts; signing out of it only drops the cookie.
+        session.subject === "reusable-dev-token"
+          ? Effect.succeed(true)
+          : sessions
+              .revoke(session.sessionId)
+              .pipe(Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause }))),
+      ),
+      Effect.catchIf(isServerAuthCredentialError, () => Effect.succeed(false)),
+      Effect.withSpan("EnvironmentAuth.signOut"),
+    );
+
   yield* revokePairedClientsThePolicyDisallows(managedPolicy, {
     sessions,
     pairingLinks: bootstrapCredentials,
@@ -1407,6 +1701,13 @@ export const make = Effect.gen(function* () {
     issueMcpClientSession,
     consumeMcpApprovalCode,
     authenticateBrowserSession,
+    getOwnerBootstrapStatus,
+    beginOwnerBootstrap,
+    completeOwnerBootstrap,
+    beginPasskeySignIn,
+    completePasskeySignIn,
+    signInWithRecoveryCode,
+    signOut,
   });
 });
 
@@ -1456,6 +1757,7 @@ const revokePairedClientsThePolicyDisallows = Effect.fn(
 });
 
 export const layer = Layer.effect(EnvironmentAuth, make).pipe(
+  Layer.provideMerge(UserDirectory.layer),
   Layer.provideMerge(PairingGrantStore.layer),
   Layer.provideMerge(SessionStore.layer),
   Layer.provideMerge(EnvironmentAuthPolicy.layer),

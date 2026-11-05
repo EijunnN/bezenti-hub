@@ -8,6 +8,7 @@ import {
   AuthWebSocketTicketUse,
   RuntimeMode,
   type ServerAuthSessionMethod,
+  UserId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -55,6 +56,8 @@ export interface VerifiedSession {
   readonly client: AuthClientMetadata;
   readonly expiresAt?: DateTime.DateTime;
   readonly subject: string;
+  /** Read from the session row, so a User can be detached without reissuing tokens. */
+  readonly userId?: UserId;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly proofKeyThumbprint?: string;
   readonly runtimeModeCeiling?: RuntimeMode;
@@ -376,6 +379,7 @@ export class SessionStore extends Context.Service<
     readonly issue: (input?: {
       readonly ttl?: Duration.Duration;
       readonly subject?: string;
+      readonly userId?: UserId;
       readonly method?: ServerAuthSessionMethod;
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
       readonly client?: AuthClientMetadata;
@@ -439,6 +443,7 @@ const SessionClaims = Schema.Struct({
   rtc: Schema.optionalKey(RuntimeMode),
   /** Signed, so a client cannot shed its peer link's limits. */
   plk: Schema.optionalKey(Schema.Literal(1)),
+  uid: Schema.optionalKey(UserId),
   iat: Schema.Number,
   exp: Schema.Number,
 });
@@ -519,6 +524,7 @@ const make = Effect.gen(function* () {
       .createIfAbsent({
         sessionId: devAuth.sessionId,
         subject: "reusable-dev-token",
+        userId: null,
         scopes: AuthStandardClientScopes,
         method: "browser-session-cookie",
         client: {
@@ -662,6 +668,7 @@ const make = Effect.gen(function* () {
         ...(input?.proofKeyThumbprint ? { jkt: input.proofKeyThumbprint } : {}),
         ...(input?.runtimeModeCeiling ? { rtc: input.runtimeModeCeiling } : {}),
         ...(input?.peerLink === true ? { plk: 1 as const } : {}),
+        ...(input?.userId ? { uid: input.userId } : {}),
         iat: issuedAt.epochMilliseconds,
         exp: expiresAt.epochMilliseconds,
       };
@@ -685,6 +692,7 @@ const make = Effect.gen(function* () {
       const sessionRecord = {
         sessionId,
         subject: claims.sub,
+        userId: claims.uid ?? null,
         scopes: claims.scopes,
         method: claims.method,
         client: {
@@ -784,6 +792,7 @@ const make = Effect.gen(function* () {
           client: toClientMetadata(row.value.client),
           expiresAt: row.value.expiresAt,
           subject: row.value.subject,
+          ...(row.value.userId ? { userId: row.value.userId } : {}),
           scopes: row.value.scopes,
         } satisfies VerifiedSession;
       }
@@ -840,6 +849,7 @@ const make = Effect.gen(function* () {
         client: toClientMetadata(row.value.client),
         expiresAt: expiresAt.value,
         subject: claims.sub,
+        ...(row.value.userId ? { userId: row.value.userId } : {}),
         scopes: row.value.scopes,
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
         ...(claims.rtc ? { runtimeModeCeiling: claims.rtc } : {}),
@@ -952,6 +962,7 @@ const make = Effect.gen(function* () {
       client: toClientMetadata(row.value.client),
       expiresAt: row.value.expiresAt,
       subject: row.value.subject,
+      ...(row.value.userId ? { userId: row.value.userId } : {}),
       scopes: row.value.scopes,
       ...(claims.aud ? { audience: claims.aud } : {}),
       ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),

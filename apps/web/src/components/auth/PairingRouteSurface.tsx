@@ -3,17 +3,21 @@ import type { AuthSessionState } from "@t3tools/contracts";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import React, { startTransition, useEffect, useEffectEvent, useRef, useState } from "react";
 
+import { Link } from "@tanstack/react-router";
+
 import { connectPairing } from "../../connection/onboarding";
 import {
   peekPairingTokenFromUrl,
   stripPairingTokenFromUrl,
   submitServerAuthCredential,
 } from "../../environments/primary";
+import { fetchOwnerBootstrapStatus } from "../../environments/primary/userAccounts";
 import { readHostedPairingRequest } from "../../hostedPairing";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { StandalonePage, StandalonePageHeader } from "../ui/standalone-page";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { OwnerAlreadyClaimedSurface, OwnerSetupSurface } from "./OwnerSetupSurface";
 
 export function PairingPendingSurface() {
   return (
@@ -39,6 +43,10 @@ export function PairingRouteSurface({
   const [credential, setCredential] = useState(autoPairToken ?? "");
   const [errorMessage, setErrorMessage] = useState(initialErrorMessage ?? "");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // The administrative bootstrap link creates the Owner on a fresh Installation instead of pairing.
+  const [ownerSetup, setOwnerSetup] = useState<"checking" | "available" | "claimed" | null>(
+    autoPairToken ? "checking" : null,
+  );
   const autoSubmitAttemptedRef = useRef(false);
 
   const submitCredential = async (nextCredential: string) => {
@@ -67,8 +75,14 @@ export function PairingRouteSurface({
     await submitCredential(credential);
   };
 
-  const autoSubmit = useEffectEvent((token: string) => {
-    void submitCredential(token);
+  const autoSubmit = useEffectEvent(async (token: string) => {
+    const status = await fetchOwnerBootstrapStatus(token).catch(() => "not-applicable" as const);
+    if (status === "not-applicable") {
+      setOwnerSetup(null);
+      await submitCredential(token);
+      return;
+    }
+    setOwnerSetup(status);
   });
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- strips the pairing token from the URL and submits it once when the route carries one
@@ -79,8 +93,14 @@ export function PairingRouteSurface({
 
     autoSubmitAttemptedRef.current = true;
     stripPairingTokenFromUrl();
-    autoSubmit(autoPairToken);
+    void autoSubmit(autoPairToken);
   }, [autoPairToken]);
+
+  if (ownerSetup === "checking") return <PairingPendingSurface />;
+  if (ownerSetup === "claimed") return <OwnerAlreadyClaimedSurface />;
+  if (ownerSetup === "available" && autoPairToken) {
+    return <OwnerSetupSurface credential={autoPairToken} onFinished={onAuthenticated} />;
+  }
 
   return (
     <StandalonePage>
@@ -125,6 +145,9 @@ export function PairingRouteSurface({
             variant="outline"
           >
             Reload app
+          </Button>
+          <Button size="sm" variant="ghost" render={<Link to="/sign-in" />}>
+            Sign in with an account
           </Button>
         </div>
       </form>

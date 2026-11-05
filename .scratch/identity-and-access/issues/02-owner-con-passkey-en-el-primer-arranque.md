@@ -4,12 +4,14 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
 
 Spec: ../spec.md
 
-- [ ] Con Installation nueva, la URL de bootstrap crea exactamente un Owner y después responde que ya no es válida.
-- [ ] El Owner registra una passkey y recibe códigos de recuperación (guardados con hash, de un solo uso).
-- [ ] Página de inicio de sesión web con passkey (WebAuthn); test en la frontera del servidor con un autenticador de prueba.
-- [ ] La sesión emitida lleva `userId`, leído de la fila al verificar.
-- [ ] Migraciones nuevas desde la 080, registradas y cubiertas por los tests de migraciones.
+- [x] Con Installation nueva, la URL de bootstrap crea exactamente un Owner y después responde que ya no es válida.
+- [x] El Owner registra una passkey y recibe códigos de recuperación (guardados con hash, de un solo uso).
+- [x] Página de inicio de sesión web con passkey (WebAuthn); test en la frontera del servidor con un autenticador de prueba.
+- [x] La sesión emitida lleva `userId`, leído de la fila al verificar.
+- [x] Migraciones nuevas desde la 080, registradas y cubiertas por los tests de migraciones.
+
+Notas: el inicio de sesión con código de recuperación también quedó hecho aquí (el test lo pedía); el ticket 03 solo debe añadir contraseña, TOTP y reset. Con un Owner existente, el enlace de bootstrap ya no crea cuentas y la web manda a `/sign-in`, pero el intercambio de token (`/oauth/token`, móvil/CLI) sigue emparejando sin `userId` hasta el ticket 04.

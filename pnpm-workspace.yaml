@@ -57,6 +57,8 @@ catalog:
   "@noble/hashes": 1.8.0
   "@pierre/diffs": 1.6.1
   "@pierre/highlights": 0.2.0
+  "@simplewebauthn/browser": 14.0.0
+  "@simplewebauthn/server": 14.0.3
   "@tailwindcss/node": 4.3.3
   "@tailwindcss/oxide": 4.3.3
   "@tailwindcss/vite": 4.3.3
@@ -126,6 +128,8 @@ overrides:
   "@expo/fingerprint": 0.21.5
   app-builder-lib: 26.16.1
   expo-modules-core: 58.0.22
+  # asn1-schema keeps decorator schemas per copy; one older copy breaks passkey signature checks.
+  "@simplewebauthn/server>@peculiar/asn1-schema": 2.11.1
   # Keep jsdom's optional peer consistent so Vite+ has one test-runner instance.
   "@exodus/bytes>@noble/hashes": "1.8.0"
   # Earlier React Navigation declarations create a circular type alias in TypeScript 7.

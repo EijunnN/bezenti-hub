@@ -231,6 +231,10 @@ export class PairingGrantStore extends Context.Service<
         readonly requiredScopes?: ReadonlyArray<AuthEnvironmentScope>;
       },
     ) => Effect.Effect<BootstrapGrant, BootstrapCredentialError>;
+    /** The subject of an unspent stored link, without spending it. */
+    readonly peekSubject: (
+      credential: string,
+    ) => Effect.Effect<Option.Option<string>, BootstrapCredentialInternalError>;
   }
 >()("t3/auth/PairingGrantStore") {}
 
@@ -618,7 +622,26 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const peekSubject: PairingGrantStore["Service"]["peekSubject"] = Effect.fn(
+    "PairingGrantStore.peekSubject",
+  )(function* (credential) {
+    const now = yield* DateTime.now;
+    const link = yield* pairingLinks
+      .getByCredential({
+        credential: PAIRING_TOKEN_PATTERN.test(credential) ? credential.toUpperCase() : credential,
+      })
+      .pipe(Effect.mapError((cause) => new BootstrapCredentialLookupError({ cause })));
+    return Option.filter(
+      link,
+      (row) =>
+        row.consumedAt === null &&
+        row.revokedAt === null &&
+        DateTime.isGreaterThan(row.expiresAt, now),
+    ).pipe(Option.map((row) => row.subject));
+  });
+
   return PairingGrantStore.of({
+    peekSubject,
     issueOneTimeToken,
     listActive,
     get streamChanges() {

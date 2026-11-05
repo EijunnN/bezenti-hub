@@ -3,6 +3,7 @@ import * as HttpApiSchema from "effect/http-api/HttpApiSchema";
 
 import {
   AuthSessionId,
+  UserId,
   ForwardCompatibleArray,
   ClientSurface,
   ClientWebDeployment,
@@ -397,6 +398,8 @@ export const AuthSessionState = Schema.Struct({
   permissions: authScopeResponseFields.permissions,
   sessionMethod: Schema.optionalKey(ServerAuthSessionMethod),
   expiresAt: Schema.optionalKey(Schema.DateTimeUtc),
+  /** The User this session belongs to; sessions from pairing links have none. */
+  userId: Schema.optionalKey(UserId),
 });
 export type AuthSessionState = typeof AuthSessionState.Type;
 

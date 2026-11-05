@@ -12,6 +12,7 @@ import {
   AuthEnvironmentScopes,
   AuthSessionId,
   ServerAuthSessionMethod,
+  UserId,
 } from "@t3tools/contracts";
 
 import {
@@ -34,6 +35,7 @@ export type AuthSessionClientMetadataRecord = typeof AuthSessionClientMetadataRe
 export const AuthSessionRecord = Schema.Struct({
   sessionId: AuthSessionId,
   subject: Schema.String,
+  userId: Schema.NullOr(UserId),
   scopes: AuthEnvironmentScopes,
   method: ServerAuthSessionMethod,
   client: AuthSessionClientMetadataRecord,
@@ -47,6 +49,7 @@ export type AuthSessionRecord = typeof AuthSessionRecord.Type;
 export const CreateAuthSessionInput = Schema.Struct({
   sessionId: AuthSessionId,
   subject: Schema.String,
+  userId: Schema.NullOr(UserId),
   scopes: AuthEnvironmentScopes,
   method: ServerAuthSessionMethod,
   client: AuthSessionClientMetadataRecord,
@@ -125,6 +128,7 @@ export class AuthSessionRepository extends Context.Service<
 const AuthSessionDbRow = Schema.Struct({
   sessionId: AuthSessionId,
   subject: Schema.String,
+  userId: Schema.NullOr(UserId),
   scopes: Schema.fromJsonString(AuthEnvironmentScopes),
   method: ServerAuthSessionMethod,
   clientLabel: Schema.NullOr(Schema.String),
@@ -142,6 +146,7 @@ const AuthSessionDbRow = Schema.Struct({
 const AuthSessionRawDbRow = Schema.Struct({
   sessionId: Schema.String,
   subject: Schema.Unknown,
+  userId: Schema.Unknown,
   scopes: Schema.Unknown,
   method: Schema.Unknown,
   clientLabel: Schema.Unknown,
@@ -162,6 +167,7 @@ function toAuthSessionRecord(row: typeof AuthSessionDbRow.Type): AuthSessionReco
   return {
     sessionId: row.sessionId,
     subject: row.subject,
+    userId: row.userId,
     scopes: row.scopes,
     method: row.method,
     client: {
@@ -206,6 +212,7 @@ export const make = Effect.gen(function* () {
         INSERT INTO auth_sessions (
           session_id,
           subject,
+          user_id,
           scopes,
           method,
           client_label,
@@ -221,6 +228,7 @@ export const make = Effect.gen(function* () {
         VALUES (
           ${input.sessionId},
           ${input.subject},
+          ${input.userId},
           ${JSON.stringify(input.scopes)},
           ${input.method},
           ${input.client.label},
@@ -247,6 +255,7 @@ export const make = Effect.gen(function* () {
         SELECT
           session_id AS "sessionId",
           subject AS "subject",
+          user_id AS "userId",
           scopes AS "scopes",
           method AS "method",
           client_label AS "clientLabel",
@@ -291,6 +300,7 @@ export const make = Effect.gen(function* () {
         SELECT
           session_id AS "sessionId",
           subject AS "subject",
+          user_id AS "userId",
           scopes AS "scopes",
           method AS "method",
           client_label AS "clientLabel",

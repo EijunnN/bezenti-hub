@@ -38,6 +38,7 @@ import { ManagedByOrganization } from "../ManagedPolicy";
 import { LocalEnvironmentSetting } from "./LocalEnvironmentSetting";
 import { searchableSetting } from "./settingsSearch";
 import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
+import { AccountSettingsSection } from "./AccountSettingsSection";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { LinkedEnvironmentsSettings } from "./LinkedEnvironmentsSettings";
 import { usePeerLinkHosts } from "~/state/peerLinks";
@@ -1489,7 +1490,14 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
     </>
   );
 
-  if (showsAccess) return <SettingsPageContainer>{primarySettings}</SettingsPageContainer>;
+  if (showsAccess) {
+    return (
+      <SettingsPageContainer>
+        <AccountSettingsSection />
+        {primarySettings}
+      </SettingsPageContainer>
+    );
+  }
 
   return (
     <SettingsPageContainer>

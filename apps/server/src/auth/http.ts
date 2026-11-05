@@ -17,6 +17,7 @@ import {
   EnvironmentScopeRequiredError,
   EnvironmentAuthenticatedAuth,
   EnvironmentAuthenticatedPrincipal,
+  EnvironmentHttpConflictError,
 } from "@t3tools/contracts";
 import type { AuthEnvironmentScope, DpopFailureReason } from "@t3tools/contracts";
 import { parseOAuthScope } from "@t3tools/shared/oauthScope";
@@ -214,6 +215,59 @@ const appendSessionCookie = (cookieName: string, token: string, expiresAt: DateT
       HttpEffect.appendPreResponseHandler((_request, response) =>
         Effect.succeed(HttpServerResponse.mergeCookies(response, cookies)),
       ),
+    ),
+  );
+
+const expireSessionCookie = (cookieName: string) =>
+  Effect.fromResult(
+    Cookies.expireCookie(Cookies.empty, cookieName, { httpOnly: true, path: "/", sameSite: "lax" }),
+  ).pipe(
+    Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")),
+    Effect.flatMap((cookies) =>
+      HttpEffect.appendPreResponseHandler((_request, response) =>
+        Effect.succeed(HttpServerResponse.mergeCookies(response, cookies)),
+      ),
+    ),
+  );
+
+const failUserSignIn = <A, R>(
+  effect: Effect.Effect<
+    A,
+    | EnvironmentAuth.ServerAuthInvalidOriginError
+    | EnvironmentAuth.ServerAuthInvalidCredentialError
+    | EnvironmentAuth.ServerAuthInternalError,
+    R
+  >,
+) =>
+  effect.pipe(
+    Effect.catchTags({
+      ServerAuthInvalidOriginError: () => failEnvironmentInvalidRequest("invalid_origin"),
+      ServerAuthInvalidCredentialError: () => failEnvironmentAuthInvalid("invalid_credential"),
+    }),
+    Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+      failEnvironmentInternal("browser_session_issuance_failed", error),
+    ),
+  );
+
+const failOwnerBootstrap = <A, R>(
+  effect: Effect.Effect<
+    A,
+    | EnvironmentAuth.ServerAuthOwnerAlreadyClaimedError
+    | EnvironmentAuth.ServerAuthInvalidOriginError
+    | EnvironmentAuth.ServerAuthInvalidCredentialError
+    | EnvironmentAuth.ServerAuthInternalError,
+    R
+  >,
+) =>
+  effect.pipe(
+    Effect.catchTags({
+      ServerAuthOwnerAlreadyClaimedError: (error) =>
+        Effect.fail(new EnvironmentHttpConflictError({ message: error.message })),
+      ServerAuthInvalidOriginError: () => failEnvironmentInvalidRequest("invalid_origin"),
+      ServerAuthInvalidCredentialError: () => failEnvironmentAuthInvalid("invalid_credential"),
+    }),
+    Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+      failEnvironmentInternal("browser_session_issuance_failed", error),
     ),
   );
 
@@ -500,6 +554,94 @@ export const layer = HttpApiBuilder.group(
             ServerAuthForbiddenOperationError: () =>
               failEnvironmentOperationForbidden("current_session_revoke_not_allowed"),
           }),
+          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+            failEnvironmentInternal("client_session_revoke_failed", error),
+          ),
+        ),
+      )
+      .handle(
+        "ownerBootstrapStatus",
+        Effect.fn("environment.auth.ownerBootstrapStatus")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            return yield* serverAuth.getOwnerBootstrapStatus(args.payload.credential);
+          },
+          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+            failEnvironmentInternal("bootstrap_validation_failed", error),
+          ),
+        ),
+      )
+      .handle(
+        "ownerRegistration",
+        Effect.fn("environment.auth.ownerRegistration")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          return yield* serverAuth
+            .beginOwnerBootstrap(request, args.payload)
+            .pipe(failOwnerBootstrap);
+        }),
+      )
+      .handle(
+        "ownerBootstrap",
+        Effect.fn("environment.auth.ownerBootstrap")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const { result, sessionToken } = yield* serverAuth
+            .completeOwnerBootstrap(request, args.payload, deriveAuthClientMetadata({ request }))
+            .pipe(failOwnerBootstrap);
+          yield* appendSessionCookie(sessions.cookieName, sessionToken, result.session.expiresAt);
+          yield* appendCredentialResponseHeaders;
+          return result;
+        }),
+      )
+      .handle(
+        "passkeyChallenge",
+        Effect.fn("environment.auth.passkeyChallenge")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          return yield* serverAuth.beginPasskeySignIn(request).pipe(failUserSignIn);
+        }),
+      )
+      .handle(
+        "passkeySignIn",
+        Effect.fn("environment.auth.passkeySignIn")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const { response, sessionToken } = yield* serverAuth
+            .completePasskeySignIn(request, args.payload, deriveAuthClientMetadata({ request }))
+            .pipe(failUserSignIn);
+          yield* appendSessionCookie(sessions.cookieName, sessionToken, response.expiresAt);
+          yield* appendCredentialResponseHeaders;
+          return response;
+        }),
+      )
+      .handle(
+        "recoveryCodeSignIn",
+        Effect.fn("environment.auth.recoveryCodeSignIn")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const { response, sessionToken } = yield* serverAuth
+            .signInWithRecoveryCode(
+              request,
+              args.payload.code,
+              deriveAuthClientMetadata({ request }),
+            )
+            .pipe(failUserSignIn);
+          yield* appendSessionCookie(sessions.cookieName, sessionToken, response.expiresAt);
+          yield* appendCredentialResponseHeaders;
+          return response;
+        }),
+      )
+      .handle(
+        "signOut",
+        Effect.fn("environment.auth.signOut")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            const signedOut = yield* serverAuth.signOut(request);
+            yield* expireSessionCookie(sessions.cookieName);
+            return { signedOut };
+          },
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
             failEnvironmentInternal("client_session_revoke_failed", error),
           ),

@@ -1,8 +1,10 @@
 # Environment authentication
 
-The environment issues its own sessions and enforces their capabilities. Cloud
-identity and relay credentials belong to a separate trust boundary, described in
-[T3 Connect](./t3-connect.md). A relay token is never an environment login.
+The environment issues its own sessions and enforces their capabilities. A
+session comes from a pairing grant or from a User signing in to a local account.
+Cloud identity and relay credentials belong to a separate trust boundary,
+described in [T3 Connect](./t3-connect.md). A relay token is never an
+environment login.
 
 ## Authority survives transport changes
 
@@ -26,6 +28,24 @@ Browser cookies, bearer tokens, and DPoP tokens adapt the same scoped session
 model. DPoP binds a token to a client's proof key; an invalid proof must fail
 rather than fall back to bearer authentication. The OAuth token-exchange
 vocabulary gives these grants a familiar meaning.
+
+### User accounts
+
+A session's `subject` names how it was obtained and security checks match its
+literals, so the User travels separately: the `auth_sessions` row's `user_id`,
+mirrored in the signed `uid` claim. Verification reads the row, so detaching a
+User never needs a reissued token. Sessions from pairing links have no User.
+
+The administrative bootstrap link creates the Owner exactly once
+([UserDirectory](../../apps/server/src/auth/UserDirectory.ts)); the passkey is
+verified before the link is spent, so a cancelled registration does not burn
+it. Once an Owner exists that link refuses Owner creation and the web app sends
+its visitor to sign in, though other clients can still exchange it to pair.
+A passkey is bound to the host name the browser used when it was registered
+(the WebAuthn relying party ID, taken from the request's `Origin`), so moving
+the Installation to another domain strands existing passkeys; recovery codes
+are the way back in. They are random enough that a plain SHA-256 is stored,
+and each is spent atomically on use.
 
 ### Guest links are not sessions
 

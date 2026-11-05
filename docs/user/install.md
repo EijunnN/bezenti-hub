@@ -197,6 +197,18 @@ instance can have its own environment variables, such as API keys or a custom
 base URL. Mark secret values as sensitive; after saving, T3 Code does not display
 their original values.
 
+### Create the Owner account
+
+The first time a new server starts, the pairing URL it prints or opens asks you
+to create the Owner account: enter your name, register a passkey, and save the
+recovery codes. They are shown only once, and each one signs you in once if you
+lose your passkey. After that the URL no longer creates accounts.
+
+To sign in from another browser, open the server's address and choose **Sign in
+with an account**, or go to `/sign-in`. A passkey works only on the address you
+registered it on, so create the account from the address you plan to keep
+using. Sign out from **Settings → Access**.
+
 For provider-specific setup and accounts, see [Codex](./providers-codex.md),
 [Claude](./providers-claude.md), [OpenCode](./providers-opencode.md),
 [Antigravity](./providers-antigravity.md), [Kiro](./providers-kiro.md),
