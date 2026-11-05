@@ -300,6 +300,7 @@ export type ClientOs = typeof ClientOs.Type;
 export const ClientWebDeployment = Schema.Literals(["hosted", "server"]);
 export type ClientWebDeployment = typeof ClientWebDeployment.Type;
 
+/** `relay` is retained for sessions recorded over T3 Connect, which this build no longer offers. */
 export const ClientConnectionMethod = Schema.Literals(["direct", "ssh", "relay", "unknown"]);
 export type ClientConnectionMethod = typeof ClientConnectionMethod.Type;
 

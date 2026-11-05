@@ -4,10 +4,10 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** done
 
 Plan: ../plan.md
 
-- [ ] El código y los paquetes de Connect, relay y marketing ya no existen.
-- [ ] Las conexiones LAN, Tailscale y SSH siguen pasando sus tests.
-- [ ] Docs de Connect eliminadas o reescritas.
+- [x] El código y los paquetes de Connect, relay y marketing ya no existen.
+- [x] Las conexiones LAN, Tailscale y SSH siguen pasando sus tests.
+- [x] Docs de Connect eliminadas o reescritas.

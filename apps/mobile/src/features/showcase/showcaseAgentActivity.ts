@@ -87,7 +87,7 @@ function showcaseAgentAlert(activity: AgentActivityProps) {
   };
 }
 
-/** Matches the relay's androidActivityData FCM map for native rendering. */
+/** Matches the androidActivityData map the native Android activity renders. */
 export function showcaseAndroidActivityData(
   activity: AgentActivityProps,
   now: number,

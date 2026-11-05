@@ -222,7 +222,7 @@ and runs in headless Chromium with the React Compiler on, like the app. There is
 
 TypeScript workspaces typecheck with `effect-tsgo tsrs --noEmit` from `@effect/tsgo`: the
 [tsrs](https://github.com/oxc-project/tsrs) checker with Effect diagnostics, quick fixes, and
-refactors built in. Only `apps/marketing` installs `typescript`, for Astro. VS Code's TypeScript 7
+refactors built in. VS Code's TypeScript 7
 extension starts the same checker through `.vscode/tsdk/tsgo` (`js/ts.tsdk.path`), a POSIX
 script, so on Windows open the workspace through WSL.
 
@@ -341,5 +341,5 @@ passed as `--wsl-runtime`; see the
 ### Signing and passkeys
 
 Add `--signed` after configuring the platform credentials in the
-[release runbook](./release.md). macOS passkeys need a signed, provisioned app; follow the
-[Connect setup](./connect-setup.md#desktop-passkeys) for local signing and renderer HMR.
+[release runbook](./release.md). In-app browser passkeys on macOS need a signed, provisioned app
+(`T3CODE_APPLE_TEAM_ID` and `T3CODE_MACOS_PROVISIONING_PROFILE`, see `.env.example`).

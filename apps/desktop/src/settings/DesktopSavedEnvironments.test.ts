@@ -189,6 +189,39 @@ describe("DesktopSavedEnvironments", () => {
     ),
   );
 
+  it.effect("skips records an older client saved for T3 Connect", () =>
+    withSavedEnvironments(
+      Effect.gen(function* () {
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const savedEnvironments = yield* DesktopSavedEnvironments.DesktopSavedEnvironments;
+        yield* fileSystem.makeDirectory(environment.stateDir, { recursive: true });
+        const encoded = yield* encodeSavedEnvironmentRegistryDocumentProbe({
+          version: 1,
+          records: [
+            {
+              environmentId: "environment-relay",
+              label: "Linked through T3 Connect",
+              httpBaseUrl: "https://abc123.connect.example.test/",
+              wsBaseUrl: "wss://abc123.connect.example.test/",
+              createdAt: "2026-04-09T00:00:00.000Z",
+              lastConnectedAt: null,
+              relayManaged: { relayUrl: "https://relay.example.test" },
+            },
+            savedRegistryRecord,
+          ],
+        });
+        yield* fileSystem.writeFileString(
+          environment.savedEnvironmentRegistryPath,
+          `${encoded}
+`,
+        );
+
+        assert.deepEqual(yield* savedEnvironments.getRegistry, [savedRegistryRecord]);
+      }),
+    ),
+  );
+
   it.effect("reads encrypted saved environment secrets when encryption is available", () =>
     withSavedEnvironments(
       Effect.gen(function* () {

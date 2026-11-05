@@ -1,6 +1,7 @@
 import {
   EnvironmentId,
-  type RelayClientInstallProgressEvent,
+  type ChatGptHandoffState,
+  ProviderInstanceId,
   type ServerLifecycleStreamEvent,
   WS_METHODS,
 } from "@t3tools/contracts";
@@ -35,14 +36,8 @@ const TARGET = new PrimaryConnectionTarget({
   wsBaseUrl: "wss://environment.example.test",
 });
 
-const INSTALL_CHECKING: RelayClientInstallProgressEvent = {
-  type: "progress",
-  stage: "checking",
-};
-const INSTALL_DOWNLOADING: RelayClientInstallProgressEvent = {
-  type: "progress",
-  stage: "downloading",
-};
+const STEP_ONE = { phase: "auth", state: { step: "one" } } as unknown as ChatGptHandoffState;
+const STEP_TWO = { phase: "auth", state: { step: "two" } } as unknown as ChatGptHandoffState;
 
 function session(client: WsRpcProtocolClient): RpcSession.RpcSession {
   return {
@@ -82,18 +77,24 @@ const makeHarness = Effect.fn("TestEnvironmentRpc.makeHarness")(function* () {
 describe("environment RPC", () => {
   it.effect("binds finite streaming commands to one active session", () =>
     Effect.gen(function* () {
-      const firstEvents = yield* Queue.unbounded<RelayClientInstallProgressEvent>();
-      const secondEvents = yield* Queue.unbounded<RelayClientInstallProgressEvent>();
+      const firstEvents = yield* Queue.unbounded<ChatGptHandoffState>();
+      const secondEvents = yield* Queue.unbounded<ChatGptHandoffState>();
       const firstClient = {
-        [WS_METHODS.cloudInstallRelayClient]: () => Stream.fromQueue(firstEvents),
+        [WS_METHODS.chatGptHandoffSubscribe]: () => Stream.fromQueue(firstEvents),
       } as unknown as WsRpcProtocolClient;
       const secondClient = {
-        [WS_METHODS.cloudInstallRelayClient]: () => Stream.fromQueue(secondEvents),
+        [WS_METHODS.chatGptHandoffSubscribe]: () => Stream.fromQueue(secondEvents),
       } as unknown as WsRpcProtocolClient;
       const { activeSession, supervisor } = yield* makeHarness();
 
       yield* SubscriptionRef.set(activeSession, Option.some(session(firstClient)));
-      const resultFiber = yield* runStream(WS_METHODS.cloudInstallRelayClient, {}).pipe(
+      const resultFiber = yield* runStream(WS_METHODS.chatGptHandoffSubscribe, {
+        instanceId: ProviderInstanceId.make("codex"),
+        environmentId: EnvironmentId.make("environment-1"),
+        attemptId: "attempt-1",
+        returnUrl: "https://example.test/",
+        profile: null,
+      }).pipe(
         Stream.take(2),
         Stream.runCollect,
         Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
@@ -101,12 +102,12 @@ describe("environment RPC", () => {
       );
       yield* Effect.yieldNow;
 
-      yield* Queue.offer(firstEvents, INSTALL_CHECKING);
+      yield* Queue.offer(firstEvents, STEP_ONE);
       yield* SubscriptionRef.set(activeSession, Option.some(session(secondClient)));
-      yield* Queue.offer(secondEvents, INSTALL_DOWNLOADING);
-      yield* Queue.offer(firstEvents, INSTALL_DOWNLOADING);
+      yield* Queue.offer(secondEvents, STEP_TWO);
+      yield* Queue.offer(firstEvents, STEP_TWO);
 
-      expect(yield* Fiber.join(resultFiber)).toEqual([INSTALL_CHECKING, INSTALL_DOWNLOADING]);
+      expect(yield* Fiber.join(resultFiber)).toEqual([STEP_ONE, STEP_TWO]);
     }),
   );
 
