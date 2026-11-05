@@ -28,7 +28,11 @@ and `t3 up --help` lists every flag.
 
 For a server in a terminal, run `t3 serve --lan`. Either way, T3 Code then
 accepts connections from your local network and tailnet, so a pairing code is
-all that keeps other devices on them out.
+all that keeps other devices on them out. Once the Installation has an Owner it
+accepts any address, since every request then needs someone signed in.
+Devices on your local network and tailnet can sign in and pair over plain HTTP;
+from anywhere else it takes HTTPS, such as a
+[domain behind a reverse proxy](./public-hub.md).
 
 If a server is already running, generate a fresh link without restarting it:
 

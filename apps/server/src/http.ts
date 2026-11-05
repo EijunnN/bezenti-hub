@@ -39,6 +39,8 @@ import {
   validateAttachmentUploadToken,
 } from "./assets/AttachmentUpload.ts";
 import * as BrowserTraceCollector from "./observability/BrowserTraceCollector.ts";
+import { layerClientAdmission } from "./auth/clientAdmission.ts";
+import { DEFAULT_TRUSTED_PROXIES } from "./auth/clientConnection.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import {
   annotateEnvironmentRequest,
@@ -248,6 +250,12 @@ export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
   }
   return yield* HttpServerResponse.file(asset.path, { status, offset, bytesToRead, headers });
 });
+
+export const layerClientConnection = Layer.unwrap(
+  Effect.map(ServerConfig.ServerConfig, (config) =>
+    layerClientAdmission(config.trustedProxies ?? DEFAULT_TRUSTED_PROXIES),
+  ),
+);
 
 export const layerHttpCompression = HttpRouter.middleware(HttpMiddleware.compression(), {
   global: true,

@@ -1,4 +1,5 @@
 import * as NetService from "@t3tools/shared/Net";
+import { isLocalLoopbackHost } from "@t3tools/shared/hostClassification";
 import {
   OtlpHeadersFromString,
   OtlpProtocol,
@@ -15,6 +16,7 @@ import * as LogLevel from "effect/LogLevel";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Redacted from "effect/Redacted";
+import * as Result from "effect/Result";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
@@ -22,6 +24,7 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 import { Argument, Flag } from "effect/cli";
 import * as CliError from "effect/cli/CliError";
 
+import { parseTrustedProxies } from "../auth/clientConnection.ts";
 import { readBootstrapEnvelope } from "../bootstrap.ts";
 import { resolveServiceLauncherMode } from "../cloud/serviceLauncherClient.ts";
 import * as ServerConfig from "../config.ts";
@@ -194,6 +197,32 @@ const DevAuthTokenConfig = Config.Redacted("T3CODE_DEV_AUTH_TOKEN").pipe(
   Config.map(Option.getOrUndefined),
 );
 
+const invalidConfig = (message: string) =>
+  new Config.ConfigError(new Schema.SchemaError(new SchemaIssue.InvalidValue({ message })));
+
+// Read once at startup; see docs/user/public-hub.md.
+const TrustedProxiesConfig = Config.String("T3CODE_TRUSTED_PROXIES").pipe(
+  Config.mapEffect((value) => {
+    const parsed = parseTrustedProxies(value);
+    return Result.isSuccess(parsed)
+      ? Effect.succeed(parsed.success)
+      : Effect.fail(invalidConfig(`T3CODE_TRUSTED_PROXIES: ${parsed.failure}`));
+  }),
+  Config.option,
+  Config.map(Option.getOrUndefined),
+);
+
+// Passkeys are bound to this origin, so it is the only one a passkey ceremony accepts.
+const PublicUrlConfig = Config.URL("T3CODE_PUBLIC_URL").pipe(
+  Config.mapEffect((url) =>
+    url.protocol === "https:" || (url.protocol === "http:" && isLocalLoopbackHost(url.hostname))
+      ? Effect.succeed(new URL(url.origin))
+      : Effect.fail(invalidConfig("T3CODE_PUBLIC_URL must be an https:// address.")),
+  ),
+  Config.option,
+  Config.map(Option.getOrUndefined),
+);
+
 export interface CliServerFlags {
   readonly mode: Option.Option<ServerConfig.RuntimeMode>;
   readonly port: Option.Option<number>;
@@ -330,6 +359,8 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
   );
   const devAuthToken =
     mode === "web" && devUrl !== undefined ? yield* DevAuthTokenConfig : undefined;
+  const trustedProxies = yield* TrustedProxiesConfig;
+  const publicUrl = yield* PublicUrlConfig;
   const explicitBaseDir = resolveOptionPrecedence(
     normalizedFlags.baseDir,
     Option.fromUndefinedOr(env.t3Home),
@@ -507,6 +538,8 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     staticDir,
     devUrl,
     ...(devAuthToken === undefined ? {} : { devAuthToken }),
+    ...(trustedProxies === undefined ? {} : { trustedProxies }),
+    ...(publicUrl === undefined ? {} : { publicUrl }),
     devAllowedOrigins: env.devAllowedOrigins,
     noBrowser,
     startupPresentation,

@@ -75,7 +75,10 @@ endpoint never confirms that one existed. Signed-out visits go to `/sign-in` onc
 on a fresh Installation.
 A passkey is bound to the host name the browser used when it was registered
 (the WebAuthn relying party ID, taken from the request's `Origin`), so moving
-the Installation to another domain strands existing passkeys. Recovery codes
+the Installation to another domain strands existing passkeys. With
+`T3CODE_PUBLIC_URL` set, that origin is the only one a passkey ceremony
+accepts, and it passes the origin check even when a proxy rewrites `Host`, so a
+passkey cannot be registered on another name for the same server. Recovery codes
 and Owner reset links are the way back in. Both are random enough that a plain
 SHA-256 is stored, and each is spent atomically on use. A reset link comes from
 `t3 auth owner-reset`, which writes to the database directly, so it works with
@@ -193,7 +196,8 @@ Any account with TOTP gets the code step: the password step answers
 `/api/auth/password/totp`. That answer comes whether or not the password was
 right (a wrong one gets a challenge no code passes), so it never confirms a
 guessed password on its own. Failed passwords, codes and step-up proofs count
-per account and per client address. After five failures each further one locks
+per account and per client address, which behind a trusted proxy is the
+forwarded one. After five failures each further one locks
 the key for twice as long, from 30 seconds up to 15 minutes. The counters live in
 memory, so a restart clears them.
 
@@ -253,10 +257,10 @@ above its ceiling. Inside MCP the credential sets the limits and tool
 parameters only pick targets; see
 [threadAccess](../../apps/server/src/mcp/threadAccess.ts).
 
-Issuer and resource URLs come from the request's Host and
-`X-Forwarded-Proto`, so one server answers over loopback, Tailscale Serve and a
-reverse proxy. A proxy that rewrites Host or drops the protocol header
-breaks sign-in.
+Issuer and resource URLs come from the request's Host and the scheme a trusted
+proxy reported (see [the client behind a proxy](./remote.md#the-client-behind-a-proxy)),
+so one server answers over loopback, Tailscale Serve and a reverse proxy. A
+proxy that rewrites Host or drops the protocol header breaks sign-in.
 
 Bearer and DPoP clients obtain short-lived WebSocket tickets through authenticated
 HTTP so long-lived tokens stay out of socket URLs. A ticket names the route it

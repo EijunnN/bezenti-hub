@@ -988,7 +988,7 @@ it.effect("accepts case-insensitive MCP bearer schemes and diagnoses rejected cr
         label: "MCP header test",
         access: "read-only",
         peerLink: false,
-        client: { deviceType: "bot" },
+        client: { deviceType: "bot", ipAddress: "127.0.0.1" },
       });
       yield* HttpRouter.serve(
         McpHttpServer.layerMcpTransport(Layer.empty).pipe(

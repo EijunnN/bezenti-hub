@@ -3,6 +3,7 @@ import type * as NodeOS from "node:os";
 import { describe, expect, it } from "@effect/vitest";
 
 import {
+  acceptsHubConnection,
   acceptsPrivateNetworkConnection,
   resolveHeadlessConnectionString,
 } from "./startupAccess.ts";
@@ -71,5 +72,23 @@ describe("acceptsPrivateNetworkConnection", () => {
     expect(accepts("203.0.113.7", "192.168.1.31")).toBe(false);
     expect(accepts("169.254.10.1", "169.254.10.2")).toBe(false);
     expect(accepts(undefined, "192.168.1.31")).toBe(false);
+  });
+});
+
+describe("acceptsHubConnection", () => {
+  const publicPeer = { localAddress: "172.31.4.10", remoteAddress: "203.0.113.7" };
+
+  it("keeps a fresh Installation to private peers until it has an Owner", () => {
+    expect(acceptsHubConnection(publicPeer, { ownerExists: false })).toBe(false);
+    expect(
+      acceptsHubConnection(
+        { localAddress: "192.168.1.20", remoteAddress: "192.168.1.31" },
+        { ownerExists: false },
+      ),
+    ).toBe(true);
+  });
+
+  it("accepts any peer once the Owner exists, since every request then needs a User session", () => {
+    expect(acceptsHubConnection(publicPeer, { ownerExists: true })).toBe(true);
   });
 });

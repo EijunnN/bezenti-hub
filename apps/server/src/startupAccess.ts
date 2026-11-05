@@ -71,6 +71,16 @@ export const acceptsPrivateNetworkConnection = (socket: {
     (address) => address !== undefined && isPrivateNetworkAddress(address),
   );
 
+/**
+ * The private-network listener's rule for a public Hub: a fresh Installation stays on private
+ * networks until its Owner exists, then accepts any peer, because every request then needs a
+ * User session.
+ */
+export const acceptsHubConnection = (
+  socket: Parameters<typeof acceptsPrivateNetworkConnection>[0],
+  installation: { readonly ownerExists: boolean },
+): boolean => installation.ownerExists || acceptsPrivateNetworkConnection(socket);
+
 export const loopbackUrlHostForAddress = (address: NetAddress.InetAddress): string =>
   address._tag === "InetAddressV6" && NetAddress.isLoopback(address.address)
     ? "[::1]"

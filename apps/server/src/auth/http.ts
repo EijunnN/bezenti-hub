@@ -214,28 +214,41 @@ const appendCookies = (cookies: ReturnType<typeof Cookies.set>) =>
     ),
   );
 
+/** Session cookies are `Secure` whenever the client reached the server over HTTPS. */
+const sessionCookieAttributes = HttpServerRequest.HttpServerRequest.pipe(
+  Effect.map((request) =>
+    request.protocol === "https"
+      ? { ...SESSION_COOKIE_ATTRIBUTES, secure: true }
+      : SESSION_COOKIE_ATTRIBUTES,
+  ),
+);
+
 export const appendSessionCookie = (
   cookieName: string,
   token: string,
   expiresAt: DateTime.DateTime,
 ) =>
-  appendCookies(
-    Cookies.set(Cookies.empty, cookieName, token, {
-      ...SESSION_COOKIE_ATTRIBUTES,
-      expires: DateTime.toDate(expiresAt),
-    }),
+  Effect.flatMap(sessionCookieAttributes, (attributes) =>
+    appendCookies(
+      Cookies.set(Cookies.empty, cookieName, token, {
+        ...attributes,
+        expires: DateTime.toDate(expiresAt),
+      }),
+    ),
   );
 
 const expireSessionCookies = (cookieNames: ReadonlyArray<string>) =>
-  Effect.forEach(
-    cookieNames,
-    (cookieName) =>
-      appendCookies(Cookies.expireCookie(Cookies.empty, cookieName, SESSION_COOKIE_ATTRIBUTES)),
-    { discard: true },
+  Effect.flatMap(sessionCookieAttributes, (attributes) =>
+    Effect.forEach(
+      cookieNames,
+      (cookieName) => appendCookies(Cookies.expireCookie(Cookies.empty, cookieName, attributes)),
+      { discard: true },
+    ),
   );
 
 const userSignInFailures = {
   ServerAuthInvalidOriginError: () => failEnvironmentInvalidRequest("invalid_origin"),
+  ServerAuthInsecureTransportError: () => failEnvironmentInvalidRequest("insecure_transport"),
   ServerAuthInvalidCredentialError: () => failEnvironmentAuthInvalid("invalid_credential"),
 };
 
@@ -247,6 +260,7 @@ const failUserSignIn = <A, R>(
     A,
     | EnvironmentAuth.ServerAuthInvalidOriginError
     | EnvironmentAuth.ServerAuthInvalidCredentialError
+    | EnvironmentAuth.ServerAuthInsecureTransportError
     | EnvironmentAuth.ServerAuthInternalError,
     R
   >,
@@ -262,6 +276,7 @@ const failOwnerBootstrap = <A, R>(
     | EnvironmentAuth.ServerAuthOwnerAlreadyClaimedError
     | EnvironmentAuth.ServerAuthInvalidOriginError
     | EnvironmentAuth.ServerAuthInvalidCredentialError
+    | EnvironmentAuth.ServerAuthInsecureTransportError
     | EnvironmentAuth.ServerAuthInternalError,
     R
   >,
@@ -376,6 +391,8 @@ export const layer = HttpApiBuilder.group(
               Effect.catchTags({
                 ServerAuthInvalidCredentialError:
                   userSignInFailures.ServerAuthInvalidCredentialError,
+                ServerAuthInsecureTransportError:
+                  userSignInFailures.ServerAuthInsecureTransportError,
                 SecondFactorMissingError: (error) =>
                   Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
                 SignInThrottledError: failThrottled,
@@ -404,6 +421,8 @@ export const layer = HttpApiBuilder.group(
               Effect.catchTags({
                 ServerAuthInvalidCredentialError:
                   userSignInFailures.ServerAuthInvalidCredentialError,
+                ServerAuthInsecureTransportError:
+                  userSignInFailures.ServerAuthInsecureTransportError,
                 SignInThrottledError: failThrottled,
               }),
               Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, failUserSignInInternal),
@@ -554,21 +573,16 @@ export const layer = HttpApiBuilder.group(
                 : undefined,
             );
             const cookieName = result.cookieName ?? sessions.cookieName;
+            const attributes = yield* sessionCookieAttributes;
             const selectedCookie = yield* Effect.fromResult(
               Cookies.set(Cookies.empty, cookieName, result.sessionToken, {
+                ...attributes,
                 expires: DateTime.toDate(result.response.expiresAt),
-                httpOnly: true,
-                path: "/",
-                sameSite: "lax",
               }),
             ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")));
             const sessionCookies = result.expireNormalCookie
               ? yield* Effect.fromResult(
-                  Cookies.expireCookie(selectedCookie, sessions.cookieName, {
-                    httpOnly: true,
-                    path: "/",
-                    sameSite: "lax",
-                  }),
+                  Cookies.expireCookie(selectedCookie, sessions.cookieName, attributes),
                 ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")))
               : selectedCookie;
 
@@ -578,6 +592,9 @@ export const layer = HttpApiBuilder.group(
             yield* appendCredentialResponseHeaders;
             return result.response;
           },
+          Effect.catchTags({
+            ServerAuthInsecureTransportError: userSignInFailures.ServerAuthInsecureTransportError,
+          }),
           Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
             failEnvironmentAuthInvalid(
               EnvironmentAuth.serverAuthCredentialReason(error),
@@ -642,6 +659,9 @@ export const layer = HttpApiBuilder.group(
               EnvironmentAuth.serverAuthDpopFailureReason(error),
             ),
           ),
+          Effect.catchTags({
+            ServerAuthInsecureTransportError: userSignInFailures.ServerAuthInsecureTransportError,
+          }),
           Effect.catchIf(EnvironmentAuth.isServerAuthInvalidRequestError, (error) =>
             failEnvironmentInvalidRequest(EnvironmentAuth.serverAuthInvalidRequestReason(error)),
           ),

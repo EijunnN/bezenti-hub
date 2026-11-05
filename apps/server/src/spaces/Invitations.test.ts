@@ -42,8 +42,8 @@ const invite = Effect.fn(function* (
   return created;
 });
 
-const preview = (server: Server, token: string) =>
-  server.request("/api/invitations/preview", { body: { token } });
+const preview = (server: Server, token: string, headers?: Record<string, string>) =>
+  server.request("/api/invitations/preview", { body: { token }, ...(headers ? { headers } : {}) });
 
 const acceptWithPassword = (
   server: Server,
@@ -355,15 +355,19 @@ it.effect("backs off repeated failed accepts of one link", () =>
   }),
 );
 
-it.effect("does not let guesses from an unknown client lock out other invitees", () =>
+it.effect("does not let one client behind the proxy lock out invitees elsewhere", () =>
   Effect.gen(function* () {
     const { server, owner, acmeId } = yield* ownerWithOrganization();
     const token = (yield* invite(server, owner, acmeId)).body.token as string;
 
-    // Behind a proxy no client address is known; guesses there must not share one bucket.
-    for (let failure = 0; failure < 6; failure += 1) {
-      expect((yield* preview(server, `guess-${failure}`)).body).toEqual({ status: "invalid" });
+    // Behind a proxy every request comes from its address; guesses count per forwarded client.
+    const guesser = { "x-forwarded-for": "198.51.100.7" };
+    for (let failure = 0; failure < 5; failure += 1) {
+      expect((yield* preview(server, `guess-${failure}`, guesser)).body).toEqual({
+        status: "invalid",
+      });
     }
+    expect((yield* preview(server, token, guesser)).status).toBe(429);
     expect((yield* preview(server, token)).body).toMatchObject({ status: "valid" });
     expect((yield* acceptWithPassword(server, token)).status).toBe(200);
   }),

@@ -142,7 +142,12 @@ export const layer = HttpApiBuilder.group(
           const { result, sessionToken } = yield* invitations
             .accept(request, args.payload, deriveAuthClientMetadata({ request }))
             .pipe(
-              Effect.catchTags({ ...passkeyFailures, ServerAuthInvalidCredentialError: forbidden }),
+              Effect.catchTags({
+                ...passkeyFailures,
+                ServerAuthInvalidCredentialError: forbidden,
+                ServerAuthInsecureTransportError: () =>
+                  failEnvironmentInvalidRequest("insecure_transport"),
+              }),
               Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
                 failEnvironmentInternal("browser_session_issuance_failed", error),
               ),

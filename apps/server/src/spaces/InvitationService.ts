@@ -6,7 +6,6 @@
 import {
   type AcceptInvitationRequest,
   type AcceptInvitationResult,
-  type AuthClientMetadata,
   type AuthPasskeyRegistrationCeremony,
   type AuthTotpEnrollment,
   type CreatedInvitation,
@@ -37,6 +36,7 @@ import * as SqlSchema from "effect/sql/SqlSchema";
 import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import { makeSignInThrottle } from "../auth/signInThrottle.ts";
+import type { AuthRequestMetadata } from "../auth/utils.ts";
 import * as UserDirectory from "../auth/UserDirectory.ts";
 import * as SpaceDirectory from "./SpaceDirectory.ts";
 
@@ -129,12 +129,13 @@ export class InvitationService extends Context.Service<
     readonly accept: (
       request: HttpServerRequest.HttpServerRequest,
       input: AcceptInvitationRequest,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
     ) => Effect.Effect<
       { readonly result: AcceptInvitationResult; readonly sessionToken: string },
       | RedeemError
       | EnvironmentAuth.ServerAuthInvalidOriginError
       | EnvironmentAuth.ServerAuthInvalidCredentialError
+      | EnvironmentAuth.ServerAuthInsecureTransportError
       | EnvironmentAuth.ServerAuthInternalError
     >;
     /** Adds the Invitation's Organization to the signed-in User. */
@@ -480,7 +481,7 @@ const make = Effect.gen(function* () {
   const acceptLive = Effect.fnUntraced(function* (
     request: HttpServerRequest.HttpServerRequest,
     input: AcceptInvitationRequest,
-    requestMetadata: AuthClientMetadata,
+    requestMetadata: AuthRequestMetadata,
     { tokenHash, invitation, keys }: LiveLink,
   ) {
     let pending: UserDirectory.PendingInvitee;

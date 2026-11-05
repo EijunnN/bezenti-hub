@@ -61,6 +61,9 @@ import * as SessionStore from "./SessionStore.ts";
 import * as UserDirectory from "./UserDirectory.ts";
 import { REUSABLE_DEV_SESSION_EXPIRES_AT, resolveReusableDevAuth } from "./ReusableDevAuth.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
+import { OwnerPresence } from "./OwnerPresence.ts";
+import type { AuthRequestMetadata } from "./utils.ts";
+import { headerList, isLoopbackClientAddress, isPrivateClientAddress } from "./clientConnection.ts";
 import { DESKTOP_RENDERER_ORIGINS } from "../httpCors.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ManagedLimits from "../policy/managedLimits.ts";
@@ -400,6 +403,15 @@ export class ServerAuthInvalidOriginError extends Schema.TaggedError<ServerAuthI
   }
 }
 
+export class ServerAuthInsecureTransportError extends Schema.TaggedError<ServerAuthInsecureTransportError>()(
+  "ServerAuthInsecureTransportError",
+  {},
+) {
+  override get message(): string {
+    return "Sign in over HTTPS. Browser sessions travel over plain HTTP only on this machine.";
+  }
+}
+
 export class ServerAuthForbiddenOperationError extends Schema.TaggedError<ServerAuthForbiddenOperationError>()(
   "ServerAuthForbiddenOperationError",
   {},
@@ -434,7 +446,7 @@ export class EnvironmentAuth extends Context.Service<
     ) => Effect.Effect<AuthSessionState, ServerAuthInternalError>;
     readonly createBrowserSession: (
       credential: string,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
       previousSessionToken?: string,
     ) => Effect.Effect<
       {
@@ -443,18 +455,21 @@ export class EnvironmentAuth extends Context.Service<
         readonly cookieName?: string;
         readonly expireNormalCookie?: boolean;
       },
-      ServerAuthInvalidCredentialError | ServerAuthInternalError
+      ServerAuthInvalidCredentialError | ServerAuthInsecureTransportError | ServerAuthInternalError
     >;
     readonly exchangeBootstrapCredentialForAccessToken: (
       credential: string,
       requestedScopes: ReadonlyArray<AuthEnvironmentScope> | undefined,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
       input?: {
         readonly proofKeyThumbprint?: string;
       },
     ) => Effect.Effect<
       AuthAccessTokenResult,
-      ServerAuthInvalidCredentialError | ServerAuthInvalidRequestError | ServerAuthInternalError
+      | ServerAuthInvalidCredentialError
+      | ServerAuthInvalidRequestError
+      | ServerAuthInsecureTransportError
+      | ServerAuthInternalError
     >;
     readonly createPairingLink: (input?: {
       readonly ttl?: Duration.Duration;
@@ -546,14 +561,14 @@ export class EnvironmentAuth extends Context.Service<
       readonly label: string;
       readonly access: AuthMcpClientAccess;
       readonly peerLink: boolean;
-      readonly client: AuthClientMetadata;
+      readonly client: AuthRequestMetadata;
     }) => Effect.Effect<
       {
         readonly sessionId: AuthSessionId;
         readonly token: string;
         readonly expiresAt: DateTime.DateTime;
       },
-      ServerAuthInternalError
+      ServerAuthInsecureTransportError | ServerAuthInternalError
     >;
     /** Spends a code covering all granted scopes. Rejects desktop grants and leaves refused proof-bound codes unspent. */
     readonly consumeMcpApprovalCode: (
@@ -580,12 +595,13 @@ export class EnvironmentAuth extends Context.Service<
     readonly completeOwnerBootstrap: (
       request: HttpServerRequest.HttpServerRequest,
       input: AuthOwnerBootstrapRequest,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
     ) => Effect.Effect<
       { readonly result: AuthOwnerBootstrapResult; readonly sessionToken: string },
       | ServerAuthOwnerAlreadyClaimedError
       | ServerAuthInvalidOriginError
       | ServerAuthInvalidCredentialError
+      | ServerAuthInsecureTransportError
       | ServerAuthInternalError
     >;
     readonly beginPasskeySignIn: (
@@ -594,27 +610,31 @@ export class EnvironmentAuth extends Context.Service<
     readonly completePasskeySignIn: (
       request: HttpServerRequest.HttpServerRequest,
       input: AuthPasskeySignInRequest,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
     ) => Effect.Effect<
       UserBrowserSession,
-      ServerAuthInvalidOriginError | ServerAuthInvalidCredentialError | ServerAuthInternalError
+      | ServerAuthInvalidOriginError
+      | ServerAuthInvalidCredentialError
+      | ServerAuthInsecureTransportError
+      | ServerAuthInternalError
     >;
     readonly signInWithRecoveryCode: (
       request: HttpServerRequest.HttpServerRequest,
       code: string,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
     ) => Effect.Effect<
       UserBrowserSession,
-      ServerAuthInvalidCredentialError | ServerAuthInternalError
+      ServerAuthInvalidCredentialError | ServerAuthInsecureTransportError | ServerAuthInternalError
     >;
     /** Signs in, or answers that the account also needs a TOTP code with the password. */
     readonly signInWithPassword: (
       request: HttpServerRequest.HttpServerRequest,
       input: AuthPasswordSignInRequest,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
     ) => Effect.Effect<
       UserBrowserSession | { readonly response: AuthSecondFactorRequired },
       | ServerAuthInvalidCredentialError
+      | ServerAuthInsecureTransportError
       | UserDirectory.SecondFactorMissingError
       | UserDirectory.SignInThrottledError
       | ServerAuthInternalError
@@ -623,10 +643,11 @@ export class EnvironmentAuth extends Context.Service<
     readonly signInWithTotp: (
       request: HttpServerRequest.HttpServerRequest,
       input: AuthTotpSignInRequest,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
     ) => Effect.Effect<
       UserBrowserSession,
       | ServerAuthInvalidCredentialError
+      | ServerAuthInsecureTransportError
       | UserDirectory.SignInThrottledError
       | ServerAuthInternalError
     >;
@@ -641,10 +662,13 @@ export class EnvironmentAuth extends Context.Service<
     readonly redeemResetLink: (
       request: HttpServerRequest.HttpServerRequest,
       input: AuthResetLinkRedeemRequest,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
     ) => Effect.Effect<
       UserBrowserSession,
-      ServerAuthInvalidOriginError | ServerAuthInvalidCredentialError | ServerAuthInternalError
+      | ServerAuthInvalidOriginError
+      | ServerAuthInvalidCredentialError
+      | ServerAuthInsecureTransportError
+      | ServerAuthInternalError
     >;
     /** The page origin a passkey ceremony from this request is bound to. */
     readonly passkeyOrigin: (
@@ -657,10 +681,10 @@ export class EnvironmentAuth extends Context.Service<
     readonly startUserBrowserSession: (
       request: HttpServerRequest.HttpServerRequest,
       user: AuthUser,
-      requestMetadata: AuthClientMetadata,
+      requestMetadata: AuthRequestMetadata,
     ) => Effect.Effect<
       UserBrowserSession,
-      ServerAuthInvalidCredentialError | ServerAuthInternalError
+      ServerAuthInvalidCredentialError | ServerAuthInsecureTransportError | ServerAuthInternalError
     >;
     /** For the Hub's shell (`t3 auth owner-reset`), when the Owner has lost every passkey. */
     readonly issueOwnerResetLink: UserDirectory.UserDirectory["Service"]["issueOwnerResetLink"];
@@ -786,13 +810,9 @@ type RequestCredentialSource = NonNullable<ReturnType<typeof selectRequestCreden
 export const isBrowserCookieCredential = (source: RequestCredentialSource | "dev-cookie") =>
   source === "cookie" || source === "legacy-cookie" || source === "dev-cookie";
 
-function firstHeaderValue(value: string | undefined): string | undefined {
-  const first = value?.split(",")[0]?.trim().toLowerCase();
-  return first && first.length > 0 ? first : undefined;
-}
-
 // Missing Origin allows same-origin reads and non-browser clients; otherwise require
-// same-origin Sec-Fetch-Site, this server's host (including X-Forwarded-Host), or a trusted app origin.
+// same-origin Sec-Fetch-Site, this server's host, or a trusted app origin. A trusted proxy's
+// X-Forwarded-Host has already replaced Host (clientConnection); from anyone else it is ignored.
 function isBrowserOriginAllowed(
   request: HttpServerRequest.HttpServerRequest,
   trustedOrigins: ReadonlySet<string>,
@@ -808,10 +828,7 @@ function isBrowserOriginAllowed(
     return false;
   }
   if (originHost === "") return false;
-  return (
-    originHost === firstHeaderValue(request.headers.host) ||
-    originHost === firstHeaderValue(request.headers["x-forwarded-host"])
-  );
+  return originHost === headerList(request.headers.host)[0]?.toLowerCase();
 }
 
 /** @public */
@@ -827,6 +844,21 @@ export const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const managedPolicy = yield* ManagedPolicy.ManagedPolicy;
   const devAuth = resolveReusableDevAuth(config);
+  const ownerPresence = yield* OwnerPresence;
+  const publicOrigin = config.publicUrl?.origin;
+
+  /**
+   * Session cookies and tokens are bearer credentials, so they cross plain HTTP only to this
+   * machine and, unless the Hub is published on a public URL, to the LAN and tailnet that
+   * `t3 up --lan` serves. A public or unknown client needs HTTPS. Behind a trusted proxy the
+   * client and scheme are the ones it forwarded.
+   */
+  const requireSecureTransport = (requestMetadata: AuthRequestMetadata) =>
+    requestMetadata.secureTransport === true ||
+    isLoopbackClientAddress(requestMetadata.ipAddress) ||
+    (publicOrigin === undefined && isPrivateClientAddress(requestMetadata.ipAddress))
+      ? Effect.void
+      : Effect.fail(new ServerAuthInsecureTransportError({}));
 
   // A session with no User of its own (the Hub's shell, the startup link, the desktop, MCP
   // clients until they pick a User) belongs to the Owner. Before an Owner exists it has none.
@@ -898,6 +930,7 @@ export const make = Effect.gen(function* () {
 
   // Cookies span ports; reject cookie-authenticated requests and sockets from other same-site origins.
   const trustedBrowserOrigins = new Set<string>([
+    ...(publicOrigin ? [publicOrigin] : []),
     ...(config.devUrl ? [config.devUrl.origin] : []),
     ...DESKTOP_RENDERER_ORIGINS,
     ...config.devAllowedOrigins,
@@ -1016,6 +1049,7 @@ export const make = Effect.gen(function* () {
         Effect.withSpan("EnvironmentAuth.createBrowserSession"),
       );
     }
+    yield* requireSecureTransport(requestMetadata);
     const previousSession =
       previousSessionToken === undefined
         ? undefined
@@ -1102,10 +1136,13 @@ export const make = Effect.gen(function* () {
 
   const exchangeBootstrapCredentialForAccessToken: EnvironmentAuth["Service"]["exchangeBootstrapCredentialForAccessToken"] =
     (credential, requestedScopes, requestMetadata, input) => {
-      return resolveBootstrapGrant(credential, {
-        ...input,
-        ...(requestedScopes !== undefined ? { requestedScopes } : {}),
-      }).pipe(
+      return requireSecureTransport(requestMetadata).pipe(
+        Effect.andThen(
+          resolveBootstrapGrant(credential, {
+            ...input,
+            ...(requestedScopes !== undefined ? { requestedScopes } : {}),
+          }),
+        ),
         Effect.flatMap((grant) =>
           Effect.gen(function* () {
             const grantedScopes =
@@ -1605,7 +1642,8 @@ export const make = Effect.gen(function* () {
 
   // Acts as the Owner until outside agents sign in as a chosen User.
   const issueMcpClientSession: EnvironmentAuth["Service"]["issueMcpClientSession"] = (input) =>
-    sessionUser(undefined).pipe(
+    requireSecureTransport(input.client).pipe(
+      Effect.andThen(sessionUser(undefined)),
       Effect.flatMap((owner) =>
         sessions.issue({
           subject: MCP_CLIENT_SUBJECT,
@@ -1672,6 +1710,13 @@ export const make = Effect.gen(function* () {
     }
     try {
       const url = new URL(origin);
+      // A published Hub binds every passkey to its public origin, so none is stranded on
+      // another name for the same server, such as a LAN address or localhost.
+      if (publicOrigin !== undefined) {
+        return url.origin === publicOrigin
+          ? Effect.succeed(url.origin)
+          : Effect.fail(new ServerAuthInvalidOriginError({}));
+      }
       return url.protocol === "https:" || url.protocol === "http:"
         ? Effect.succeed(url.origin)
         : Effect.fail(new ServerAuthInvalidOriginError({}));
@@ -1683,11 +1728,12 @@ export const make = Effect.gen(function* () {
   const issueUserBrowserSession = Effect.fn("EnvironmentAuth.issueUserBrowserSession")(function* (
     request: HttpServerRequest.HttpServerRequest,
     user: AuthUser,
-    requestMetadata: AuthClientMetadata,
+    requestMetadata: AuthRequestMetadata,
   ) {
+    yield* requireSecureTransport(requestMetadata);
     if (
       !ManagedLimits.allowsRemoteClients(managedPolicy) &&
-      isRemoteClient(requestMetadata.ipAddress)
+      !isLoopbackClientAddress(requestMetadata.ipAddress)
     ) {
       return yield* new ServerAuthInvalidCredentialError({
         diagnostic: "The managed policy allows account sign-in only on this machine.",
@@ -1831,6 +1877,7 @@ export const make = Effect.gen(function* () {
           SqlError: (cause) => Effect.fail(new ServerAuthUserDirectoryError({ cause })),
         }),
       );
+    ownerPresence.markExists();
     return {
       result: {
         session: session.response,
@@ -1958,6 +2005,18 @@ export const make = Effect.gen(function* () {
       Effect.catchIf(isServerAuthCredentialError, () => Effect.succeed(false)),
       Effect.withSpan("EnvironmentAuth.signOut"),
     );
+
+  const ownerAtStartup = yield* userDirectory
+    .hasOwner()
+    .pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning(
+          "Could not read whether the Installation has an Owner; public clients are re-checked on arrival.",
+          { cause },
+        ).pipe(Effect.as(false)),
+      ),
+    );
+  if (ownerAtStartup) ownerPresence.markExists();
 
   yield* revokePairedClientsThePolicyDisallows(managedPolicy, {
     sessions,

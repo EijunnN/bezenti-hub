@@ -24,6 +24,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
+import { layerTestPeer } from "./clientConnection.testkit.ts";
 import * as AuthHttp from "./http.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 
@@ -53,6 +54,7 @@ const layerEnvironmentAuth = EnvironmentAuth.layer.pipe(
 const layerRoutes = HttpApiBuilder.layer(AuthTestApi).pipe(
   Layer.provide(AuthHttp.layer),
   Layer.provide(AuthHttp.layerAuthenticatedAuth),
+  Layer.provide(layerTestPeer),
   Layer.provideMerge(layerEnvironmentAuth),
   Layer.provide(layerConfig),
   Layer.provideMerge(

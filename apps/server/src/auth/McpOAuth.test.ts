@@ -28,6 +28,7 @@ import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as McpOAuth from "./McpOAuth.ts";
 import * as McpOAuthHttp from "./mcpOAuthHttp.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
+import { layerTestPeer } from "./clientConnection.testkit.ts";
 import * as AuthHttp from "./http.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 
@@ -57,6 +58,7 @@ const makeLayerRoutes = (capture: (auth: EnvironmentAuth.EnvironmentAuth["Servic
         ),
       ),
       Layer.provide(AuthHttp.layerAuthenticatedAuth),
+      Layer.provide(layerTestPeer),
     ),
   ).pipe(
     Layer.provideMerge(layerEnvironmentAuth),
@@ -79,7 +81,13 @@ const challenge = "DeB41nTVkPwpbbYecrnqtVq7VXLezustdHAK4SWt13c";
 const at = (path: string, init?: RequestInit) =>
   new Request(`http://127.0.0.1${path}`, {
     ...init,
-    headers: { host: "box.example.ts.net", "x-forwarded-proto": "https", ...init?.headers },
+    // Tailscale Serve: a loopback proxy naming the tailnet client and its scheme.
+    headers: {
+      host: "box.example.ts.net",
+      "x-forwarded-for": "100.101.102.103",
+      "x-forwarded-proto": "https",
+      ...init?.headers,
+    },
   });
 const form = (body: Record<string, string>) => ({
   method: "POST",
@@ -439,7 +447,7 @@ it.live(
           .exchangeBootstrapCredentialForAccessToken(
             bound.credential,
             undefined,
-            { deviceType: "mobile" },
+            { deviceType: "mobile", ipAddress: "127.0.0.1" },
             { proofKeyThumbprint: "device-key-thumbprint" },
           )
           .pipe(

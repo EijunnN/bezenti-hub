@@ -35,9 +35,12 @@ A new service answers only on this machine. Other devices reach it once you
 choose the local network in `t3 up` (or run `t3 up --lan`, which sets
 `T3CODE_LAN=true` in `service.env`). It then listens on your local network and
 Tailscale addresses, so the desktop and mobile apps on the same network connect
-directly. It still does not answer on public addresses. Anyone on the same
-network can reach the port, so a pairing code is all that keeps them out. The
-hosted web app at app.t3.codes needs an HTTPS address such as
+directly. It does not answer on public addresses until the Installation has an
+Owner; after that every request needs someone signed in, so it answers on any
+address. To publish it on your own domain, see
+[Publish the Hub](./public-hub.md). Anyone on the same network can reach the
+port, so a pairing code is all that keeps them out. The hosted web app at
+app.t3.codes needs an HTTPS address such as
 [Tailscale HTTPS](./remote-access.md#tailscale-https), because browsers block
 plain HTTP from an HTTPS page.
 

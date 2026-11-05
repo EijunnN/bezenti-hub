@@ -53,6 +53,12 @@ function toUserSignInError(cause: unknown, rejectedMessage: string): UserSignInE
         cause,
       });
     }
+    if (cause._tag === "EnvironmentRequestInvalidError" && cause.reason === "insecure_transport") {
+      return new UserSignInError({
+        message: "Open this Installation over HTTPS to sign in from this device.",
+        cause,
+      });
+    }
   }
   if (
     cause instanceof WebAuthnError ||
