@@ -1,5 +1,6 @@
 export {
   createServerPairingCredential,
+  pairRouteRedirect,
   peekPairingTokenFromUrl,
   PrimaryEnvironmentPairingCredentialRejectedError,
   PrimaryEnvironmentRequestError,

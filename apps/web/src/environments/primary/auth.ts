@@ -501,6 +501,23 @@ export function signedOutRoute(state: {
     : "/pair";
 }
 
+/** Where /pair sends a signed-out visitor instead of rendering, if anywhere. */
+export function pairRouteRedirect(state: {
+  readonly status: string;
+  readonly ownerExists?: boolean;
+  readonly errorMessage?: string;
+}): "/sign-in" | null {
+  // With an Owner, an account is the way in; this page only spends links it was opened with.
+  // The page strips the token before checking it, so a visit that brought one stays here.
+  const openedWithLink = explicitPairingRequested || peekPairingTokenFromUrl() !== null;
+  return state.status === "requires-auth" &&
+    state.ownerExists === true &&
+    !state.errorMessage &&
+    !openedWithLink
+    ? "/sign-in"
+    : null;
+}
+
 export function __resetServerAuthBootstrapForTests() {
   bootstrapPromise = null;
   resolvedAuthenticatedGateState = null;

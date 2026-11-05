@@ -440,4 +440,18 @@ describe("resolveInitialServerAuthGateState", () => {
       expect(signedOutRoute(await resolveInitialServerAuthGateState())).toBe(path);
     },
   );
+
+  it("keeps /pair for a link it was opened with after the page strips the token", async () => {
+    await installAuthApi({
+      session: () => ({ ...unauthenticatedSession(LOOPBACK_AUTH), ownerExists: true }),
+    });
+    installTestBrowser("http://localhost/pair#token=spent-token");
+    const { resolveInitialServerAuthGateState, pairRouteRedirect, stripPairingTokenFromUrl } =
+      await import("./environments/primary/auth");
+
+    expect(pairRouteRedirect(await resolveInitialServerAuthGateState())).toBeNull();
+    // The page strips the token before asking the server about it; the router then reloads.
+    stripPairingTokenFromUrl();
+    expect(pairRouteRedirect(await resolveInitialServerAuthGateState())).toBeNull();
+  });
 });

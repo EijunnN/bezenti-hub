@@ -5,7 +5,7 @@ import {
   PairingPendingSurface,
   PairingRouteSurface,
 } from "../components/auth/PairingRouteSurface";
-import { peekPairingTokenFromUrl } from "../environments/primary";
+import { pairRouteRedirect } from "../environments/primary";
 
 export const Route = createFileRoute("/pair")({
   beforeLoad: async ({ context }) => {
@@ -23,10 +23,8 @@ export const Route = createFileRoute("/pair")({
     ) {
       throw redirect({ to: "/", replace: true });
     }
-    // With an Owner, an account is the way in; this page only spends links it was opened with.
-    if (authGateState.ownerExists && !authGateState.errorMessage && !peekPairingTokenFromUrl()) {
-      throw redirect({ to: "/sign-in", replace: true });
-    }
+    const signInInstead = pairRouteRedirect(authGateState);
+    if (signInInstead) throw redirect({ to: signInInstead, replace: true });
     return {
       authGateState,
     };
