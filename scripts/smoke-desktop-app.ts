@@ -46,7 +46,6 @@ try {
       XDG_CONFIG_HOME: NodePath.join(home, ".config"),
       XDG_DATA_HOME: NodePath.join(home, ".local/share"),
       T3CODE_HOME: t3Home,
-      T3CODE_TELEMETRY_ENABLED: "false",
     },
     timeout: STEP_TIMEOUT_MS,
   });

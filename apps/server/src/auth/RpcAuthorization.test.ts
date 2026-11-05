@@ -95,7 +95,7 @@ it("requires operate permission for tool updates even alongside a read-only chec
 });
 
 const scopeAuthorization = (scopes: ReadonlyArray<AuthEnvironmentScope>) =>
-  RpcAuthorization.layer().pipe(
+  RpcAuthorization.layer.pipe(
     Layer.provide(
       CurrentPrincipal.layer({
         sessionId: AuthSessionId.make("rpc-authorization-test"),

@@ -10,6 +10,8 @@ import { macosProfile, windowsAdmx } from "./policyTemplates.ts";
 it("gives every registry value the Windows reader accepts a Group Policy control", () => {
   const admx = windowsAdmx();
   for (const name of Object.keys(WINDOWS_POLICY_VALUES)) {
+    // Read only so policies written before ADR 0007 still load; it no longer has a control.
+    if (name === "Telemetry") continue;
     assert.include(admx, `valueName="${name}"`);
   }
   for (const key of Object.keys(WINDOWS_POLICY_LISTS)) {

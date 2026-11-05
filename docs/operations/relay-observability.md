@@ -168,7 +168,9 @@ usual cause.
 
 ## Mobile crashes and errors
 
-The mobile app reports through [`expo-observe`](https://docs.expo.dev/eas/observe/). Its
+This fork's mobile app no longer sends crash reports or traces
+([ADR 0007](../adr/0007-no-upstream-services.md)). The relay side below stays until the relay is
+removed. Upstream, the mobile app reports through [`expo-observe`](https://docs.expo.dev/eas/observe/). Its
 `endpointUrl` points at the relay (`/v1/mobile/observe`, set in `apps/mobile/app.config.ts` from
 `T3CODE_RELAY_URL`), because Observe cannot send auth headers and prefixes every path with the EAS
 project id. The relay forwards each request to Axiom with its own token: logs (JavaScript errors,

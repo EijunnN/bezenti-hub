@@ -724,7 +724,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "privacy-policy",
     title: "Privacy policy",
     to: "/settings/about",
-    searchTerms: ["telemetry analytics usage data tracking legal opt out"],
+    searchTerms: ["privacy data legal"],
   },
   {
     id: "telemetry-export",
