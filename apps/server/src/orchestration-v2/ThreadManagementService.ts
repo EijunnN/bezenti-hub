@@ -40,6 +40,7 @@ import {
   type ScheduledTaskId,
   ThreadId,
   type TurnItemId,
+  type UserId,
 } from "@t3tools/contracts";
 import { delegatedTaskProgress } from "@t3tools/provider-core/server/subagentProjection";
 import { threadTranscriptHeader } from "@t3tools/shared/threadTranscript";
@@ -66,12 +67,15 @@ import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimi
 import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
 
 export interface ThreadManagementProvenance {
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
+  /** The session's User; a new Thread is theirs whatever the client sent. */
+  readonly ownerUserId?: UserId;
 }
 
 export function withCreationProvenance(
@@ -80,15 +84,24 @@ export function withCreationProvenance(
 ): OrchestrationV2Command {
   switch (command.type) {
     case "thread.create": {
-      // Only the server stamps a link's origin, so a client cannot set one.
-      const { linkOrigin: _linkOrigin, delegatedFrom: _delegatedFrom, ...rest } = command;
+      // Only the server stamps a link's origin or a Thread's owner, so a client cannot set one.
+      const {
+        linkOrigin: _linkOrigin,
+        delegatedFrom: _delegatedFrom,
+        ownerUserId: _ownerUserId,
+        ...rest
+      } = command;
       return { ...rest, ...provenance };
     }
     case "message.dispatch":
     case "thread.fork":
     case "thread.merge_back":
     case "delegated_task.request":
-      return { ...command, ...provenance };
+      return {
+        ...command,
+        createdBy: provenance.createdBy,
+        creationSource: provenance.creationSource,
+      };
     default:
       return command;
   }
@@ -367,6 +380,7 @@ export interface ThreadManagementServiceShape {
   readonly ensureLegacyTranscript: (
     threadId: ThreadId,
   ) => Effect.Effect<void, LegacyV1ThreadImporter.LegacyV1ThreadImportError>;
+  /** A new Thread is claimed for its Space here, so every caller is checked and stamped. */
   readonly dispatch: (
     command: OrchestrationV2ServerCommand,
   ) => Effect.Effect<
@@ -568,7 +582,9 @@ const FORCE_STOP_REASON = "Force stopped by user";
 const FORCE_STOP_RELEASE_WAIT = "10 seconds";
 const isForceStopThreadError = Schema.is(OrchestrationV2ForceStopThreadError);
 
-const make = Effect.gen(function* () {
+const makeWith = Effect.fn("ThreadManagementService.make")(function* (
+  spaces: Option.Option<SpaceDirectory.SpaceDirectory["Service"]>,
+) {
   const threadDispatch = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
@@ -748,10 +764,40 @@ const make = Effect.gen(function* () {
     }
   };
 
+  // `ownerUserId` on a thread.create is the session's User, put there by the transport.
+  const claimThreadSpace = (
+    command: OrchestrationV2ServerCommand,
+  ): Effect.Effect<OrchestrationV2ServerCommand, Orchestrator.OrchestratorCommandRejectedError> => {
+    if (command.type !== "thread.create" || Option.isNone(spaces)) return Effect.succeed(command);
+    const { spaceId, ownerUserId, ...rest } = command;
+    return spaces.value
+      .claimCreation({
+        action: "thread.create",
+        actorUserId: ownerUserId,
+        spaceId,
+        projectId: command.projectId,
+      })
+      .pipe(
+        Effect.map((stamp) => (stamp === undefined ? rest : { ...rest, ...stamp })),
+        Effect.mapError(
+          (cause) =>
+            new Orchestrator.OrchestratorCommandRejectedError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause,
+            }),
+        ),
+      );
+  };
+
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
-    ensureCommandTranscripts(command).pipe(
-      Effect.andThen(assertDispatchTargetEnabled(command)),
-      Effect.andThen(orchestrator.dispatch(command)),
+    claimThreadSpace(command).pipe(
+      Effect.flatMap((claimed) =>
+        ensureCommandTranscripts(claimed).pipe(
+          Effect.andThen(assertDispatchTargetEnabled(claimed)),
+          Effect.andThen(orchestrator.dispatch(claimed)),
+        ),
+      ),
     );
 
   const getProjectThreadRecords: ThreadManagementServiceShape["getProjectThreadRecords"] = (
@@ -1570,6 +1616,7 @@ const layerLegacyV1ThreadImporterNoop = Layer.succeed(
   }),
 );
 
+/** Without Spaces: Threads are not claimed. Tests only; the server uses `layerWithLegacyImporter`. */
 export const layer: Layer.Layer<
   ThreadManagementService,
   never,
@@ -1577,7 +1624,7 @@ export const layer: Layer.Layer<
   | ProviderSessionManager.ProviderSessionManagerV2
   | ServerSettings.ServerSettingsService
   | CommandReceiptStore.CommandReceiptStoreV2
-> = Layer.effect(ThreadManagementService, make).pipe(
+> = Layer.effect(ThreadManagementService, makeWith(Option.none())).pipe(
   Layer.provide(layerLegacyV1ThreadImporterNoop),
   Layer.provide(ThreadCommandExecutor.layer),
 );
@@ -1590,4 +1637,10 @@ export const layerWithLegacyImporter: Layer.Layer<
   | ProviderSessionManager.ProviderSessionManagerV2
   | ServerSettings.ServerSettingsService
   | CommandReceiptStore.CommandReceiptStoreV2
-> = Layer.effect(ThreadManagementService, make).pipe(Layer.provide(ThreadCommandExecutor.layer));
+  | SpaceDirectory.SpaceDirectory
+> = Layer.effect(
+  ThreadManagementService,
+  Effect.gen(function* () {
+    return yield* makeWith(Option.some(yield* SpaceDirectory.SpaceDirectory));
+  }),
+).pipe(Layer.provide(ThreadCommandExecutor.layer));

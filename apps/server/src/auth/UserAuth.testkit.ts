@@ -29,6 +29,7 @@ import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as ProjectHttp from "../project/http.ts";
+import * as ProjectService from "../project/ProjectService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -135,6 +136,7 @@ export const serveAuthHttp = Effect.gen(function* () {
     environmentAuth,
     request,
     sessions: Context.get(services, SessionStore.SessionStore),
+    projects: Context.get(services, ProjectService.ProjectService),
     sql: Context.get(services, SqlClient.SqlClient),
   };
 });

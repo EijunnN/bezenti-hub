@@ -1280,7 +1280,6 @@ export const layerWsRpc = (
       const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
       const projectStore = yield* ProjectStore.ProjectStoreV2;
       const projectService = yield* ProjectService.ProjectService;
-      const spaces = yield* SpaceDirectory.SpaceDirectory;
       const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
       const scratchThreadPromotion = yield* ScratchThreadPromotion.ScratchThreadPromotion;
       const eventLoopMonitor = yield* EventLoopMonitor.EventLoopMonitor;
@@ -1871,12 +1870,12 @@ export const layerWsRpc = (
       );
 
       const mutateProject = Effect.fn("ws.projects.mutate")(function* (mutation: ProjectMutation) {
-        const stamp = yield* SpaceDirectory.stampProjectMutation(
-          spaces,
-          principal.userId,
+        return yield* mutateProjectWithClone(
+          projectService,
+          projectCloneTracker,
           mutation,
+          principal.userId,
         );
-        return yield* mutateProjectWithClone(projectService, projectCloneTracker, mutation, stamp);
       });
 
       const handlers = ServerWsRpcGroup.of({
@@ -1903,23 +1902,24 @@ export const layerWsRpc = (
                 .enqueueCommand(
                   (command.type === "prepared-run.retry"
                     ? threadLaunch.retryPreparation(command)
-                    : SpaceDirectory.stampThreadCommand(spaces, principal.userId, command).pipe(
-                        Effect.flatMap((stamped) =>
-                          ThreadMessageIntake.dispatchCommand(
-                            ThreadManagementService.withCreationProvenance(stamped, {
-                              createdBy: "user",
-                              creationSource:
-                                "creationSource" in command ? command.creationSource : "web",
-                            }),
-                          ),
-                        ),
+                    : ThreadMessageIntake.dispatchCommand(
+                        ThreadManagementService.withCreationProvenance(command, {
+                          createdBy: "user",
+                          creationSource:
+                            "creationSource" in command ? command.creationSource : "web",
+                          ...(principal.userId === undefined
+                            ? {}
+                            : { ownerUserId: principal.userId }),
+                        }),
                       )
                   ).pipe(Effect.provide(intakeContext)),
                 )
                 .pipe(
                   Effect.map((result) => ({ sequence: result.sequence })),
                   Effect.mapError((cause) => {
-                    const detail = userFacingDispatchErrorMessage(cause);
+                    const detail =
+                      SpaceDirectory.spaceRefusalMessage(cause) ??
+                      userFacingDispatchErrorMessage(cause);
                     return new OrchestrationV2DispatchCommandError({
                       commandId: command.commandId,
                       commandType: command.type,
@@ -2055,44 +2055,40 @@ export const layerWsRpc = (
             Effect.andThen(
               startup
                 .enqueueCommand(
-                  SpaceDirectory.stampThreadLaunch(spaces, principal.userId, input).pipe(
-                    Effect.flatMap((stamp) =>
-                      ThreadMessageIntake.launchThread({
-                        commandId: input.commandId,
-                        ...(stamp === undefined ? {} : { stamp }),
-                        ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
-                        ...(input.reuseExistingThread === undefined
-                          ? {}
-                          : { reuseExistingThread: input.reuseExistingThread }),
-                        projectId: input.projectId,
-                        title: input.title,
-                        ...(input.generateTitle === undefined
-                          ? {}
-                          : { generateTitle: input.generateTitle }),
-                        modelSelection: input.modelSelection,
-                        runtimeMode: input.runtimeMode,
-                        interactionMode: input.interactionMode,
-                        workspaceStrategy: input.workspaceStrategy,
-                        ...(input.initialMessage === undefined
-                          ? {}
-                          : {
-                              initialMessage: {
-                                ...(input.initialMessage.messageId === undefined
-                                  ? {}
-                                  : { messageId: input.initialMessage.messageId }),
-                                text: input.initialMessage.text,
-                                attachments: input.initialMessage.attachments,
-                                ...(input.initialMessage.context === undefined
-                                  ? {}
-                                  : { context: input.initialMessage.context }),
-                              },
-                            }),
-                        createdBy: "user",
-                        creationSource: input.creationSource ?? "web",
-                      }),
-                    ),
-                    Effect.provide(intakeContext),
-                  ),
+                  ThreadMessageIntake.launchThread({
+                    commandId: input.commandId,
+                    ...(principal.userId === undefined ? {} : { ownerUserId: principal.userId }),
+                    ...(input.spaceId === undefined ? {} : { spaceId: input.spaceId }),
+                    ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+                    ...(input.reuseExistingThread === undefined
+                      ? {}
+                      : { reuseExistingThread: input.reuseExistingThread }),
+                    projectId: input.projectId,
+                    title: input.title,
+                    ...(input.generateTitle === undefined
+                      ? {}
+                      : { generateTitle: input.generateTitle }),
+                    modelSelection: input.modelSelection,
+                    runtimeMode: input.runtimeMode,
+                    interactionMode: input.interactionMode,
+                    workspaceStrategy: input.workspaceStrategy,
+                    ...(input.initialMessage === undefined
+                      ? {}
+                      : {
+                          initialMessage: {
+                            ...(input.initialMessage.messageId === undefined
+                              ? {}
+                              : { messageId: input.initialMessage.messageId }),
+                            text: input.initialMessage.text,
+                            attachments: input.initialMessage.attachments,
+                            ...(input.initialMessage.context === undefined
+                              ? {}
+                              : { context: input.initialMessage.context }),
+                          },
+                        }),
+                    createdBy: "user",
+                    creationSource: input.creationSource ?? "web",
+                  }).pipe(Effect.provide(intakeContext)),
                 )
                 .pipe(
                   Effect.map((result) => ({
@@ -2100,27 +2096,6 @@ export const layerWsRpc = (
                     projection: projectThreadProjectionForWire(result.projection),
                   })),
                   Effect.catchTags({
-                    SpaceAccessDeniedError: (cause) =>
-                      new OrchestrationV2ThreadLaunchError({
-                        commandId: input.commandId,
-                        projectId: input.projectId,
-                        message: cause.message,
-                        cause,
-                      }),
-                    SpaceNotFoundError: (cause) =>
-                      new OrchestrationV2ThreadLaunchError({
-                        commandId: input.commandId,
-                        projectId: input.projectId,
-                        message: cause.message,
-                        cause,
-                      }),
-                    SpaceDirectoryStorageError: (cause) =>
-                      new OrchestrationV2ThreadLaunchError({
-                        commandId: input.commandId,
-                        projectId: input.projectId,
-                        message: "Failed to launch thread",
-                        cause,
-                      }),
                     AttachmentClaimError: (cause) =>
                       new OrchestrationV2ThreadLaunchError({
                         commandId: input.commandId,
@@ -2132,7 +2107,8 @@ export const layerWsRpc = (
                       new OrchestrationV2ThreadLaunchError({
                         commandId: input.commandId,
                         projectId: input.projectId,
-                        message: "Failed to launch thread",
+                        message:
+                          SpaceDirectory.spaceRefusalMessage(cause) ?? "Failed to launch thread",
                         cause,
                       }),
                     ServerRuntimeStartupError: (cause) =>

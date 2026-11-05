@@ -1,7 +1,8 @@
 /**
  * Who may do what in which Space. Pure: callers load the principal and the
  * resource, this decides. Each rule of the Role table is one case here and one
- * row in AccessPolicy.test.ts.
+ * row in AccessPolicy.test.ts. The Owner is allowed everything except creating
+ * in an archived or frozen Space.
  */
 import type {
   InstallationPermission,
@@ -23,6 +24,9 @@ export interface SpaceResource {
   readonly id: SpaceId;
   readonly kind: SpaceKind;
   readonly personalOwnerUserId: UserId | null;
+  readonly archived: boolean;
+  /** A removed User's Personal space, handed to the Owner. */
+  readonly frozen: boolean;
 }
 
 /** Actions that concern the Installation as a whole rather than one Space. */
@@ -39,6 +43,8 @@ export type DenyReason =
   | "role-not-allowed"
   | "not-your-personal-space"
   | "missing-installation-permission"
+  | "space-archived"
+  | "space-frozen"
   | "wrong-resource";
 
 export type Decision =
@@ -73,10 +79,15 @@ const inOrganization = (
 };
 
 export const decide = (principal: Principal, action: Action, resource: Resource): Decision => {
+  const creates = action !== "space.view" && action !== "organization.create";
+  if (creates && isSpace(resource)) {
+    if (resource.archived) return deny("space-archived");
+    if (resource.frozen) return deny("space-frozen");
+  }
   if (principal.isOwner) return allow;
   if (action === "organization.create") return deny("owner-only");
   if (!isSpace(resource)) return deny("wrong-resource");
-  const creates = action !== "space.view";
+  if (resource.archived) return deny("space-archived");
   if (resource.kind === "personal") return inPersonalSpace(principal, resource, creates);
   switch (action) {
     case "space.view":

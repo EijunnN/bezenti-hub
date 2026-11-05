@@ -1,7 +1,5 @@
 import {
   type ProjectId,
-  type OrchestrationV2Command,
-  type ProjectMutation,
   SpaceId,
   type SpaceDirectoryView,
   SpaceKind,
@@ -56,26 +54,65 @@ export class SpaceNotFoundError extends Schema.TaggedError<SpaceNotFoundError>()
   }
 }
 
+const isAccessDenied = Schema.is(SpaceAccessDeniedError);
+const isNotFound = Schema.is(SpaceNotFoundError);
+
+/** The refusal to show a user when a create failed because of its Space, however it was wrapped. */
+export const spaceRefusalMessage = (cause: unknown): string | undefined => {
+  let current = cause;
+  for (let depth = 0; current !== undefined && depth < 8; depth += 1) {
+    if (isAccessDenied(current) || isNotFound(current)) return current.message;
+    current =
+      typeof current === "object" && current !== null
+        ? (current as { readonly cause?: unknown }).cause
+        : undefined;
+  }
+  return undefined;
+};
+
+export type SpaceClaimError =
+  | SpaceAccessDeniedError
+  | SpaceNotFoundError
+  | SpaceDirectoryStorageError;
+
 /** The Space a new Project or Thread belongs to and the User who owns it. */
 export interface CreationStamp {
   readonly spaceId: SpaceId;
   readonly ownerUserId: UserId;
 }
 
+export interface CreationClaim {
+  readonly action: "project.create" | "thread.create";
+  /**
+   * The User creating it, taken from their session, never from a client payload. Callers with no
+   * User of their own yet (MCP tools, scheduled tasks, the CLI) leave it out and act as the Owner.
+   */
+  readonly actorUserId?: UserId | undefined;
+  /** The client's current Space. */
+  readonly spaceId?: SpaceId | undefined;
+  /** A Thread's Project, whose Space wins over the requested one. */
+  readonly projectId?: ProjectId | undefined;
+}
+
+// Created with the User by a trigger (migration 085).
+const personalSpaceIdOf = (userId: UserId) => SpaceId.make(`personal:${userId}`);
+
 const SpaceRow = Schema.Struct({
   spaceId: SpaceId,
   kind: SpaceKind,
   name: Schema.String,
   personalOwnerUserId: Schema.NullOr(UserId),
+  archived: Schema.BooleanFromBit,
+  frozen: Schema.BooleanFromBit,
 });
 type SpaceRow = typeof SpaceRow.Type;
-
-const PERSONAL_SPACE_NAME = "Personal";
 
 const toResource = (row: SpaceRow): AccessPolicy.SpaceResource => ({
   id: row.spaceId,
   kind: row.kind,
   personalOwnerUserId: row.personalOwnerUserId,
+  archived: row.archived,
+  frozen: row.frozen,
 });
 
 export class SpaceDirectory extends Context.Service<
@@ -94,22 +131,18 @@ export class SpaceDirectory extends Context.Service<
       name: string,
     ) => Effect.Effect<SpaceSummary, SpaceAccessDeniedError | SpaceDirectoryStorageError>;
     /**
-     * Where a new Project or Thread created by `userId` belongs. A Thread joins its
-     * Project's Space; otherwise the requested Space, or the User's Personal space.
+     * Where a new Project or Thread belongs, once the policy allows it. A Thread joins its
+     * Project's Space (the Owner's Personal space for a Project from before Spaces); otherwise
+     * the requested Space, or the creator's Personal space. None before the Owner exists.
      */
     readonly claimCreation: (
-      userId: UserId,
-      input: {
-        readonly action: "project.create" | "thread.create";
-        readonly spaceId?: SpaceId | undefined;
-        readonly projectId?: ProjectId | undefined;
-      },
-    ) => Effect.Effect<
-      CreationStamp,
-      SpaceAccessDeniedError | SpaceNotFoundError | SpaceDirectoryStorageError
-    >;
+      claim: CreationClaim,
+    ) => Effect.Effect<CreationStamp | undefined, SpaceClaimError>;
   }
 >()("t3/spaces/SpaceDirectory") {}
+
+const SPACE_COLUMNS = `space_id AS "spaceId", kind, name, personal_owner_user_id AS "personalOwnerUserId",
+  archived_at IS NOT NULL AS "archived", frozen_at IS NOT NULL AS "frozen"`;
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -119,31 +152,35 @@ const make = Effect.gen(function* () {
   const findSpace = SqlSchema.findOneOption({
     Request: SpaceId,
     Result: SpaceRow,
-    execute: (spaceId) => sql`
-      SELECT space_id AS "spaceId", kind, name, personal_owner_user_id AS "personalOwnerUserId"
-      FROM spaces WHERE space_id = ${spaceId}
-    `,
+    execute: (spaceId) =>
+      sql`SELECT ${sql.literal(SPACE_COLUMNS)} FROM spaces WHERE space_id = ${spaceId}`,
   });
   const listOrganizations = SqlSchema.findAll({
     Request: Schema.Void,
     Result: SpaceRow,
     execute: () => sql`
-      SELECT space_id AS "spaceId", kind, name, personal_owner_user_id AS "personalOwnerUserId"
-      FROM spaces WHERE kind = 'organization' AND archived_at IS NULL
+      SELECT ${sql.literal(SPACE_COLUMNS)} FROM spaces WHERE kind = 'organization'
       ORDER BY created_at ASC, space_id ASC
     `,
   });
-  const listMemberships = SqlSchema.findAll({
+  // The User row and their memberships in one read.
+  const findPrincipalRows = SqlSchema.findAll({
     Request: UserId,
-    Result: Schema.Struct({ spaceId: SpaceId, role: SpaceRole }),
+    Result: Schema.Struct({
+      isOwner: Schema.BooleanFromBit,
+      spaceId: Schema.NullOr(SpaceId),
+      role: Schema.NullOr(SpaceRole),
+    }),
     execute: (userId) => sql`
-      SELECT space_id AS "spaceId", role FROM space_memberships WHERE user_id = ${userId}
+      SELECT users.is_owner AS "isOwner", m.space_id AS "spaceId", m.role AS role
+      FROM users LEFT JOIN space_memberships AS m ON m.user_id = users.user_id
+      WHERE users.user_id = ${userId}
     `,
   });
-  const findIsOwner = SqlSchema.findOneOption({
-    Request: UserId,
-    Result: Schema.Struct({ isOwner: Schema.BooleanFromBit }),
-    execute: (userId) => sql`SELECT is_owner AS "isOwner" FROM users WHERE user_id = ${userId}`,
+  const findOwnerId = SqlSchema.findOneOption({
+    Request: Schema.Void,
+    Result: Schema.Struct({ userId: UserId }),
+    execute: () => sql`SELECT user_id AS "userId" FROM users WHERE is_owner = 1`,
   });
   const findProjectSpace = SqlSchema.findOneOption({
     Request: Schema.String,
@@ -153,61 +190,64 @@ const make = Effect.gen(function* () {
     `,
   });
 
-  // Created on first use, so every User has one without UserDirectory knowing about Spaces.
-  const ensurePersonalSpace = Effect.fn("SpaceDirectory.ensurePersonalSpace")(function* (
-    userId: UserId,
-  ) {
-    const spaceId = SpaceId.make(`personal:${userId}`);
-    const now = DateTime.formatIso(yield* DateTime.now);
-    yield* sql`
-      INSERT INTO spaces (space_id, kind, name, personal_owner_user_id, created_at)
-      VALUES (${spaceId}, 'personal', ${PERSONAL_SPACE_NAME}, ${userId}, ${now})
-      ON CONFLICT DO NOTHING
-    `.pipe(Effect.mapError(storageError));
-    return spaceId;
-  });
-
   const principalOf = Effect.fn("SpaceDirectory.principalOf")(function* (userId: UserId) {
-    const owner = yield* findIsOwner(userId);
-    const memberships = yield* listMemberships(userId);
+    const rows = yield* findPrincipalRows(userId);
+    const roles = new Map<SpaceId, SpaceRole>();
+    for (const row of rows)
+      if (row.spaceId !== null && row.role !== null) roles.set(row.spaceId, row.role);
     return {
       userId,
-      isOwner: owner._tag === "Some" && owner.value.isOwner,
+      isOwner: rows[0]?.isOwner ?? false,
       // The Owner cannot grant Installation permissions yet, so non-Owners hold none.
       installationPermissions: new Set(),
-      roles: new Map(memberships.map((row) => [row.spaceId, row.role])),
+      roles,
     } satisfies AccessPolicy.Principal;
   }, Effect.mapError(storageError));
 
+  const allows = (
+    principal: AccessPolicy.Principal,
+    action: AccessPolicy.Action,
+    resource: AccessPolicy.Resource,
+  ) => AccessPolicy.isAllowed(AccessPolicy.decide(principal, action, resource));
+
   const view = Effect.fn("SpaceDirectory.view")(function* (userId: UserId) {
-    const personalSpaceId = yield* ensurePersonalSpace(userId);
-    const principal = yield* principalOf(userId);
-    const organizations = (yield* listOrganizations().pipe(Effect.mapError(storageError))).filter(
-      (row) =>
-        AccessPolicy.isAllowed(AccessPolicy.decide(principal, "space.view", toResource(row))),
+    const personalSpaceId = personalSpaceIdOf(userId);
+    const [principal, organizations] = yield* Effect.all(
+      [principalOf(userId), listOrganizations().pipe(Effect.mapError(storageError))],
+      { concurrency: "unbounded" },
     );
+    const personal: AccessPolicy.SpaceResource = {
+      id: personalSpaceId,
+      kind: "personal",
+      personalOwnerUserId: userId,
+      archived: false,
+      frozen: false,
+    };
     const spaces: Array<SpaceSummary> = [
       {
         id: personalSpaceId,
         kind: "personal",
-        name: PERSONAL_SPACE_NAME,
+        name: "Personal",
         role: null,
         isOwn: true,
+        canCreateThreads: allows(principal, "thread.create", personal),
       },
-      ...organizations.map((row) => ({
-        id: row.spaceId,
-        kind: row.kind,
-        name: row.name,
-        role: principal.roles.get(row.spaceId) ?? null,
-        isOwn: false,
-      })),
+      ...organizations
+        .filter((row) => allows(principal, "space.view", toResource(row)))
+        .map((row) => ({
+          id: row.spaceId,
+          kind: row.kind,
+          name: row.name,
+          role: principal.roles.get(row.spaceId) ?? null,
+          isOwn: false,
+          canCreateThreads: allows(principal, "thread.create", toResource(row)),
+        })),
     ];
     return {
+      userId,
       spaces,
       personalSpaceId,
-      canCreateOrganization: AccessPolicy.isAllowed(
-        AccessPolicy.decide(principal, "organization.create", AccessPolicy.installation),
-      ),
+      canCreateOrganization: allows(principal, "organization.create", AccessPolicy.installation),
     } satisfies SpaceDirectoryView;
   });
 
@@ -240,82 +280,42 @@ const make = Effect.gen(function* () {
       name,
       role: null,
       isOwn: false,
+      canCreateThreads: true,
     } satisfies SpaceSummary;
   });
 
-  const claimCreation = Effect.fn("SpaceDirectory.claimCreation")(function* (
-    userId: UserId,
-    input: {
-      readonly action: "project.create" | "thread.create";
-      readonly spaceId?: SpaceId | undefined;
-      readonly projectId?: ProjectId | undefined;
-    },
-  ) {
+  const ownerId = findOwnerId().pipe(
+    Effect.map(Option.map((row) => row.userId)),
+    Effect.mapError(storageError),
+  );
+
+  const claimCreation = Effect.fn("SpaceDirectory.claimCreation")(function* (claim: CreationClaim) {
+    const actor = claim.actorUserId ?? Option.getOrUndefined(yield* ownerId);
+    if (actor === undefined) return undefined;
     const project =
-      input.projectId === undefined
+      claim.projectId === undefined
         ? Option.none()
-        : yield* findProjectSpace(input.projectId).pipe(Effect.mapError(storageError));
-    const projectSpace = Option.getOrUndefined(project)?.spaceId ?? undefined;
-    const spaceId = projectSpace ?? input.spaceId ?? (yield* ensurePersonalSpace(userId));
-    const space = yield* findSpace(spaceId).pipe(Effect.mapError(storageError));
-    if (space._tag === "None") return yield* new SpaceNotFoundError({ spaceId });
-    const principal = yield* principalOf(userId);
-    yield* requireAllowed(principal, input.action, toResource(space.value));
-    return { spaceId, ownerUserId: userId } satisfies CreationStamp;
+        : yield* findProjectSpace(claim.projectId).pipe(Effect.mapError(storageError));
+    let spaceId: SpaceId | undefined;
+    if (Option.isSome(project)) {
+      // A Project from before Spaces belongs to the Owner's Personal space.
+      const legacyOwner =
+        project.value.spaceId === null ? Option.getOrUndefined(yield* ownerId) : undefined;
+      spaceId =
+        project.value.spaceId ??
+        (legacyOwner === undefined ? undefined : personalSpaceIdOf(legacyOwner));
+    }
+    spaceId ??= claim.spaceId ?? personalSpaceIdOf(actor);
+    const [space, principal] = yield* Effect.all(
+      [findSpace(spaceId).pipe(Effect.mapError(storageError)), principalOf(actor)],
+      { concurrency: "unbounded" },
+    );
+    if (Option.isNone(space)) return yield* new SpaceNotFoundError({ spaceId });
+    yield* requireAllowed(principal, claim.action, toResource(space.value));
+    return { spaceId, ownerUserId: actor } satisfies CreationStamp;
   });
 
   return SpaceDirectory.of({ principalOf, view, createOrganization, claimCreation });
 });
 
 export const layer = Layer.effect(SpaceDirectory, make);
-
-/**
- * A client's thread.create with the server's stamp in place of any Space or owner it
- * sent. Sessions without a User exist only before the Owner does; their Threads stay unstamped.
- */
-export const stampThreadCommand = Effect.fn("SpaceDirectory.stampThreadCommand")(function* (
-  spaces: SpaceDirectory["Service"],
-  userId: UserId | undefined,
-  command: OrchestrationV2Command,
-) {
-  if (command.type !== "thread.create") return command;
-  const { spaceId, ownerUserId: _forged, ...rest } = command;
-  if (userId === undefined) return rest;
-  const stamp = yield* spaces.claimCreation(userId, {
-    action: "thread.create",
-    spaceId,
-    projectId: command.projectId,
-  });
-  return { ...rest, ...stamp };
-});
-
-/** The stamp a Project mutation carries; only creation by a signed-in User has one. */
-export const stampProjectMutation = Effect.fn("SpaceDirectory.stampProjectMutation")(function* (
-  spaces: SpaceDirectory["Service"],
-  userId: UserId | undefined,
-  mutation: ProjectMutation,
-) {
-  if (mutation.type !== "project.create" || userId === undefined) return undefined;
-  return yield* spaces.claimCreation(userId, {
-    action: "project.create",
-    spaceId: mutation.spaceId,
-  });
-});
-
-/** The stamp a launched Thread carries; reusing an existing Thread keeps its own. */
-export const stampThreadLaunch = Effect.fn("SpaceDirectory.stampThreadLaunch")(function* (
-  spaces: SpaceDirectory["Service"],
-  userId: UserId | undefined,
-  input: {
-    readonly reuseExistingThread?: boolean | undefined;
-    readonly spaceId?: SpaceId | undefined;
-    readonly projectId: ProjectId;
-  },
-) {
-  if (input.reuseExistingThread === true || userId === undefined) return undefined;
-  return yield* spaces.claimCreation(userId, {
-    action: "thread.create",
-    spaceId: input.spaceId,
-    projectId: input.projectId,
-  });
-});

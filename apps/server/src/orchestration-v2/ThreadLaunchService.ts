@@ -1,4 +1,3 @@
-import type { CreationStamp } from "../spaces/SpaceDirectory.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
@@ -20,7 +19,9 @@ import {
   type RunId,
   type RuntimeMode,
   type ScheduledTaskId,
+  type SpaceId,
   ThreadId,
+  type UserId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -101,7 +102,9 @@ export interface ThreadLaunchInput {
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
   /** Set by the server from the creator's session, never from the client. */
-  readonly stamp?: CreationStamp;
+  readonly ownerUserId?: UserId;
+  /** The client's current Space. */
+  readonly spaceId?: SpaceId;
   /** The linked environment this launch is for, if one asked for it. */
   readonly linkOrigin?: OrchestrationV2LinkOrigin;
   /** The parent there, when that environment's agent delegated this as a task. */
@@ -948,7 +951,8 @@ const make = Effect.gen(function* () {
                   ? {}
                   : { importedNativeThread: input.importedNativeThread }),
                 ...(input.linkOrigin === undefined ? {} : { linkOrigin: input.linkOrigin }),
-                ...input.stamp,
+                ...(input.ownerUserId === undefined ? {} : { ownerUserId: input.ownerUserId }),
+                ...(input.spaceId === undefined ? {} : { spaceId: input.spaceId }),
                 ...(input.delegatedFrom === undefined
                   ? {}
                   : { delegatedFrom: input.delegatedFrom }),

@@ -518,6 +518,10 @@
     "./spaces/current-space": {
       "types": "./src/spaces/currentSpace.ts",
       "default": "./src/spaces/currentSpace.ts"
+    },
+    "./spaces/space-directory": {
+      "types": "./src/spaces/spaceDirectory.ts",
+      "default": "./src/spaces/spaceDirectory.ts"
     }
   },
   "scripts": {

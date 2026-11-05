@@ -1,3 +1,4 @@
+import { CommandId, ProjectId } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
@@ -90,5 +91,23 @@ it.effect(
       });
       // The policy is asked on this path: a Guest cannot create Projects.
       expect((yield* createProject(linus, "guest-project", { spaceId: acmeId })).status).toBe(403);
+    }),
+);
+
+it.effect(
+  "stamps a Project created with no User of its own (MCP tools, the CLI) as the Owner's",
+  () =>
+    Effect.gen(function* () {
+      const server = yield* serveAuthHttp;
+      const { created } = yield* bootstrapOwner(server, yield* makeAuthenticator());
+      const ownerId = (created.body.user as { id: string }).id;
+
+      const project = yield* server.projects.create({
+        commandId: CommandId.make("create-cli"),
+        projectId: ProjectId.make("cli"),
+        title: "cli",
+        workspaceRoot: "/work/cli",
+      });
+      expect(project).toMatchObject({ spaceId: `personal:${ownerId}`, ownerUserId: ownerId });
     }),
 );

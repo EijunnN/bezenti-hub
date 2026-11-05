@@ -97,20 +97,28 @@ is the Role table; a new rule is a new row there, not a check at a call site.
 [SpaceDirectory](../../apps/server/src/spaces/SpaceDirectory.ts) loads the
 principal (Owner or not, Roles, Installation permissions) for it.
 
-The server stamps `spaceId` and `ownerUserId` when a Project or Thread is
-created, from the client's current Space and the session's User; a client's
-`ownerUserId` is dropped. A Thread joins its Project's Space when the Project
-has one, so only Threads in unstamped Projects (such as No project) take the
-current Space. Clients send their current Space only to the environment it came
-from, since another environment knows none of its ids. Sessions without a User
-exist only before the Owner does, and what they create stays unstamped.
+A new Project or Thread is claimed for its Space inside the service every caller
+goes through, `ProjectService.create` and `ThreadManagementService.dispatch`, so
+the web client, launches, MCP tools, scheduled tasks and the CLI are all checked
+and stamped with `spaceId` and `ownerUserId`. Transports only pass the session's
+User (a client's `ownerUserId` is replaced); callers with no User of their own yet
+act as the Owner, as their sessions do. A Thread joins its Project's Space, and a
+Project from before Spaces counts as the Owner's Personal space, so a client's
+requested Space applies only to new Projects and to Threads in unknown Projects.
+Clients send their current Space only to the environment it came from. Archived
+Organizations and frozen Personal spaces take nothing new, even from the Owner.
 
 Rows from before Spaces keep `NULL` in both columns and count as the Owner's
 Personal space; the migration cannot backfill them because the Owner may not
-exist yet. A Personal space row is created on first use with the id
-`personal:<userId>`, so neither UserDirectory nor Invitations need to know about
-Spaces. Creating in a Personal space needs the `personalSpace.create`
-Installation permission, which only the Owner holds until the Owner can grant it.
+exist yet. A trigger on `users` creates each User's Personal space
+(`personal:<userId>`) with the row, so no account path has to remember it.
+Creating in a Personal space needs the `personalSpace.create` Installation
+permission, which only the Owner holds until the Owner can grant it.
+
+Spaces are read and Organizations created over HTTP (`/api/spaces`), beside the
+account endpoints, rather than as guarded WS commands: creating an Organization
+depends on who the User is, not on a session scope, so clients show controls from
+the server's `canCreateOrganization` and `canCreateThreads` answers.
 
 ### Sign-in rules
 

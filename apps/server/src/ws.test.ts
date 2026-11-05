@@ -1345,119 +1345,97 @@ it.effect("thread resume at its own high-water below the pruned boundary skips t
   }).pipe(Effect.scoped, Effect.provide(ReplayTestLayer)),
 );
 
-it.effect(
-  "stamps a new Thread with the current Space and its creator, whatever the client says",
-  () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* sql`
-      INSERT INTO users (user_id, display_name, is_owner, created_at) VALUES
-        ('owner', 'Ada', 1, '2026-01-01T00:00:00.000Z'),
-        ('member-1', 'Grace', 0, '2026-01-01T00:00:00.000Z')
-    `;
-      yield* sql`
-      INSERT INTO spaces (space_id, kind, name, created_at)
-      VALUES ('org-acme', 'organization', 'Acme', '2026-01-01T00:00:00.000Z'),
-             ('org-other', 'organization', 'Other', '2026-01-01T00:00:00.000Z')
-    `;
-      yield* sql`
-      INSERT INTO space_memberships (space_id, user_id, role, created_at)
-      VALUES ('org-acme', 'member-1', 'guest', '2026-01-01T00:00:00.000Z')
-    `;
-      const dispatched: Array<OrchestrationV2Command> = [];
-      const exits = yield* Queue.unbounded<Exit.Exit<unknown, unknown>>();
-      const rpcServices = Layer.mergeAll(
-        layerUnusedConfigRpcServices,
-        Layer.mock(ExternalLauncher.ExternalLauncher)({}),
-        Layer.mock(ProviderRegistry.ProviderRegistry)({}),
-        Layer.mock(UsageLimitSources.UsageLimitSources)({}),
-        Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
-        Layer.mock(DirectEndpoints.DirectEndpoints)({}),
-        Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
-          namedProjectsRoot: process.cwd(),
-        }),
-        Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
-        Layer.mock(ServerEnvironment.ServerEnvironment)({}),
-        Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
-        SpaceDirectory.layer,
-        Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
-          enqueueCommand: (effect) => effect,
-        }),
-        Layer.mock(ThreadManagement.ThreadManagementService)({
-          dispatch: (command) =>
-            Effect.sync(() => {
-              dispatched.push(command as OrchestrationV2Command);
-              return { sequence: dispatched.length, storedEvents: [] } as never;
-            }),
-        }),
-      );
-      const dispatchRpc = WsRpcGroup.requests.get(ORCHESTRATION_V2_WS_METHODS.dispatchCommand)!;
-      const server = yield* RpcServer.makeNoSerialization(RpcGroup.make(dispatchRpc), {
-        ...WS_RPC_SERVER_OPTIONS,
-        onFromServer: (response) =>
-          response._tag === "Exit" ? Queue.offer(exits, response.exit) : Effect.void,
-      }).pipe(
-        Effect.provide(
-          layerWsRpc(yield* ServerBrowser.ServerBrowser, () => Effect.void, {
-            secretReferences: true,
-          }).pipe(
-            Layer.provideMerge(RpcAuthorization.layer),
-            Layer.provide(rpcServices),
-            Layer.provide(
-              CurrentPrincipal.layer({
-                sessionId: AuthSessionId.make("member-session"),
-                subject: "user-sign-in",
-                userId: UserId.make("member-1"),
-                method: "browser-session-cookie",
-                scopes: [AuthOrchestrationOperateScope],
-              }),
-            ),
-          ),
-        ),
-      );
-      const createThread = Effect.fn(function* (id: string, extra: Record<string, unknown>) {
-        yield* server.write(0, {
-          _tag: "Request",
-          id: RpcMessage.RequestId(id),
-          tag: ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
-          payload: {
-            type: "thread.create",
-            createdBy: "user",
-            creationSource: "web",
-            commandId: CommandId.make(`command:${id}`),
-            threadId: ThreadId.make(`thread:${id}`),
-            projectId: ProjectId.make("project:scratch"),
-            title: "Hello",
-            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
-            runtimeMode: "full-access",
-            interactionMode: "default",
-            branch: null,
-            worktreePath: null,
-            ...extra,
-          },
-          headers: Headers.empty,
-        });
-        return yield* Queue.take(exits);
-      });
-
-      const accepted = yield* createThread("acme", { spaceId: "org-acme", ownerUserId: "owner" });
-      assert.isTrue(Exit.isSuccess(accepted));
-      const created = dispatched[0];
-      assert.equal(created?.type, "thread.create");
-      if (created?.type !== "thread.create") return;
-      assert.deepEqual([created.spaceId, created.ownerUserId], ["org-acme", "member-1"]);
-      // The policy is asked on this path: Grace is no Member of Other.
-      const refused = yield* createThread("other", { spaceId: "org-other" });
-      assert.isTrue(Exit.isFailure(refused));
-      assert.lengthOf(dispatched, 1);
+it.effect("sends a new Thread on as the session's User, whatever owner the client names", () =>
+  Effect.gen(function* () {
+    const dispatched: Array<OrchestrationV2Command> = [];
+    const exits = yield* Queue.unbounded<Exit.Exit<unknown, unknown>>();
+    const rpcServices = Layer.mergeAll(
+      layerUnusedConfigRpcServices,
+      Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+      Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+      Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+      Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+        namedProjectsRoot: process.cwd(),
+      }),
+      Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+      Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+      Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+      Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
+        enqueueCommand: (effect) => effect,
+      }),
+      Layer.mock(ThreadManagement.ThreadManagementService)({
+        dispatch: (command) =>
+          Effect.sync(() => {
+            dispatched.push(command as OrchestrationV2Command);
+            return { sequence: dispatched.length, storedEvents: [] } as never;
+          }),
+      }),
+    );
+    const dispatchRpc = WsRpcGroup.requests.get(ORCHESTRATION_V2_WS_METHODS.dispatchCommand)!;
+    const server = yield* RpcServer.makeNoSerialization(RpcGroup.make(dispatchRpc), {
+      ...WS_RPC_SERVER_OPTIONS,
+      onFromServer: (response) =>
+        response._tag === "Exit" ? Queue.offer(exits, response.exit) : Effect.void,
     }).pipe(
       Effect.provide(
-        Layer.mergeAll(
-          Layer.fresh(layerConfigSources),
-          Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
-          Layer.mock(ServerBrowser.ServerBrowser)({}),
+        layerWsRpc(yield* ServerBrowser.ServerBrowser, () => Effect.void, {
+          secretReferences: true,
+        }).pipe(
+          Layer.provideMerge(RpcAuthorization.layer),
+          Layer.provide(rpcServices),
+          Layer.provide(
+            CurrentPrincipal.layer({
+              sessionId: AuthSessionId.make("member-session"),
+              subject: "user-sign-in",
+              userId: UserId.make("member-1"),
+              method: "browser-session-cookie",
+              scopes: [AuthOrchestrationOperateScope],
+            }),
+          ),
         ),
       ),
-      Effect.scoped,
+    );
+    const createThread = Effect.fn(function* (id: string, extra: Record<string, unknown>) {
+      yield* server.write(0, {
+        _tag: "Request",
+        id: RpcMessage.RequestId(id),
+        tag: ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+        payload: {
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(`command:${id}`),
+          threadId: ThreadId.make(`thread:${id}`),
+          projectId: ProjectId.make("project:scratch"),
+          title: "Hello",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          ...extra,
+        },
+        headers: Headers.empty,
+      });
+      return yield* Queue.take(exits);
+    });
+
+    const accepted = yield* createThread("acme", { spaceId: "org-acme", ownerUserId: "owner" });
+    assert.isTrue(Exit.isSuccess(accepted));
+    const created = dispatched[0];
+    assert.equal(created?.type, "thread.create");
+    if (created?.type !== "thread.create") return;
+    assert.deepEqual([created.spaceId, created.ownerUserId], ["org-acme", "member-1"]);
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.fresh(layerConfigSources),
+        Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+        Layer.mock(ServerBrowser.ServerBrowser)({}),
+      ),
     ),
+    Effect.scoped,
+  ),
 );

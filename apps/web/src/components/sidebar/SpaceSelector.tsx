@@ -1,6 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { SpaceId } from "@t3tools/contracts";
-import { BuildingIcon, ChevronsUpDownIcon, PlusIcon, UserIcon } from "lucide-react";
+import { BuildingIcon, ChevronsUpDownIcon, PlusIcon, RefreshCwIcon, UserIcon } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
 import { primaryEnvironmentIdAtom } from "../../state/primaryEnvironment";
@@ -40,20 +40,40 @@ export function SpaceSelector() {
   const environmentId = useAtomValue(primaryEnvironmentIdAtom);
   const view = useCurrentSpace((state) => state.view);
   const currentSpaceId = useCurrentSpace((state) => state.currentSpaceId);
+  const loadFailed = useCurrentSpace((state) => state.loadFailed);
   const [creating, setCreating] = useState(false);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the signed-in User's Spaces from the server
   useEffect(() => {
     if (environmentId !== null) void loadSpaces(environmentId);
   }, [environmentId]);
+  const reload = () => {
+    if (environmentId !== null) void loadSpaces(environmentId);
+  };
 
-  if (view === null) return null;
+  if (view === null) {
+    if (!loadFailed) return null;
+    return (
+      <SidebarMenu>
+        <SidebarMenuItem>
+          <SidebarMenuButton onClick={reload}>
+            <RefreshCwIcon />
+            <span className="min-w-0 flex-1 truncate">Couldn't load Spaces. Retry</span>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+      </SidebarMenu>
+    );
+  }
   const current = view.spaces.find((space) => space.id === currentSpaceId) ?? view.spaces[0];
   const CurrentIcon = current?.kind === "organization" ? BuildingIcon : UserIcon;
 
   return (
     <SidebarMenu>
       <SidebarMenuItem>
-        <Menu>
+        <Menu
+          onOpenChange={(open) => {
+            if (open) reload();
+          }}
+        >
           <MenuTrigger render={<SidebarMenuButton aria-label="Switch Space" />}>
             <CurrentIcon />
             <span className="min-w-0 flex-1 truncate">{current?.name ?? "Personal"}</span>
@@ -73,6 +93,15 @@ export function SpaceSelector() {
                 ))}
               </MenuRadioGroup>
             </MenuGroup>
+            {loadFailed ? (
+              <>
+                <MenuSeparator />
+                <MenuItem onClick={reload}>
+                  <RefreshCwIcon />
+                  Couldn't refresh Spaces. Retry
+                </MenuItem>
+              </>
+            ) : null}
             {view.canCreateOrganization ? (
               <>
                 <MenuSeparator />

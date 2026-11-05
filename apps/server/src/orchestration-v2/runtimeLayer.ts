@@ -56,6 +56,7 @@ import * as ThreadForkService from "./ThreadForkService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 
 export const layerEventInfrastructure = Layer.mergeAll(
   OrchestrationEventStore.layer,
@@ -99,6 +100,7 @@ export const layerProjectService = ProjectService.layer.pipe(
       layerEventSink,
       IdAllocator.layer,
       layerLegacyV1ThreadImporterProvided,
+      SpaceDirectory.layer,
     ),
   ),
 );
@@ -254,6 +256,7 @@ const layerThreadManagementProvided = ThreadManagementService.layerWithLegacyImp
       layerLegacyV1ThreadImporterProvided,
       layerCommandReceiptStoreProvided,
       layerProviderSessionManagerProvided,
+      SpaceDirectory.layer,
     ),
   ),
 );

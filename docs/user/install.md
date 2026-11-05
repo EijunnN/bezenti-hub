@@ -253,7 +253,7 @@ For provider-specific setup and accounts, see [Codex](./providers-codex.md),
 Every project and thread belongs to a Space: your Personal space or an
 organization. Pick the current Space from the selector at the bottom of the
 sidebar; new projects and threads go there, and a thread started in a project
-joins that project's Space. The Owner creates organizations from the same
+joins that project's Space. Each person's choice is remembered in their browser. The Owner creates organizations from the same
 selector with **Create organization**. The Owner can see every Personal space.
 
 ## Next steps

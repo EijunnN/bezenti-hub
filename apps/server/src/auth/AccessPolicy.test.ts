@@ -10,11 +10,16 @@ const organization: AccessPolicy.SpaceResource = {
   id: ORG,
   kind: "organization",
   personalOwnerUserId: null,
+  archived: false,
+  frozen: false,
 };
+const archivedOrganization = { ...organization, archived: true };
 const personalOf = (userId: string): AccessPolicy.SpaceResource => ({
   id: SpaceId.make(`personal-${userId}`),
   kind: "personal",
   personalOwnerUserId: UserId.make(userId),
+  archived: false,
+  frozen: false,
 });
 
 const principal = (
@@ -136,6 +141,43 @@ const rows: ReadonlyArray<
     "thread.create",
     personalOf("ada"),
     deny("not-your-personal-space"),
+  ],
+
+  // Archived Organizations and frozen Personal spaces take nothing new, not even from the Owner.
+  [
+    "Members no longer see an archived Organization",
+    member,
+    "space.view",
+    archivedOrganization,
+    deny("space-archived"),
+  ],
+  [
+    "the Owner still sees an archived Organization",
+    owner,
+    "space.view",
+    archivedOrganization,
+    allow,
+  ],
+  [
+    "nobody creates Threads in an archived Organization",
+    owner,
+    "thread.create",
+    archivedOrganization,
+    deny("space-archived"),
+  ],
+  [
+    "nobody creates Projects in an archived Organization",
+    admin,
+    "project.create",
+    archivedOrganization,
+    deny("space-archived"),
+  ],
+  [
+    "nobody creates in a frozen Personal space",
+    owner,
+    "thread.create",
+    { ...personalOf("grace"), frozen: true },
+    deny("space-frozen"),
   ],
 ];
 

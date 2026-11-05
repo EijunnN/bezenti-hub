@@ -6,7 +6,9 @@ import {
   type ProjectCreatePayload,
   type ProjectUpdatePayload,
   type ProjectSnapshot,
+  type SpaceId,
   type ThreadId,
+  type UserId,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
@@ -34,13 +36,15 @@ import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
-import type { CreationStamp } from "../spaces/SpaceDirectory.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
   readonly commandId: CommandId;
   readonly projectId: ProjectId;
-  /** Set by the server from the creator's session, never from the client. */
-  readonly stamp?: CreationStamp;
+  /** The creating User from their session; MCP tools and the CLI leave it out and act as the Owner. */
+  readonly actorUserId?: UserId;
+  /** The client's current Space. */
+  readonly spaceId?: SpaceId;
 }
 
 export interface ProjectUpdateInput extends ProjectUpdatePayload {
@@ -109,6 +113,7 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
 }
 
 export type ProjectServiceError =
+  | SpaceDirectory.SpaceClaimError
   | ProjectNotFoundError
   | ProjectConflictError
   | ProjectNotEmptyError
@@ -158,6 +163,7 @@ export class ProjectService extends Context.Service<
 export const make = Effect.gen(function* () {
   const projects = yield* ProjectStore.ProjectStoreV2;
   const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+  const spaces = yield* SpaceDirectory.SpaceDirectory;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
   const threadProjections = yield* ProjectionStore.ProjectionStoreV2;
   const eventSink = yield* EventSink.EventSinkV2;
@@ -345,6 +351,12 @@ export const make = Effect.gen(function* () {
 
   const create: ProjectService["Service"]["create"] = Effect.fn("ProjectService.create")(
     function* (input) {
+      // Before touching the workspace, which may create its folder.
+      const stamp = yield* spaces.claimCreation({
+        action: "project.create",
+        actorUserId: input.actorUserId,
+        spaceId: input.spaceId,
+      });
       const workspaceRoot = yield* normalizeWorkspaceRoot({
         projectId: input.projectId,
         workspaceRoot: input.workspaceRoot,
@@ -357,7 +369,7 @@ export const make = Effect.gen(function* () {
         title: input.title,
         workspaceRoot,
         ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
-        ...input.stamp,
+        ...stamp,
       });
       yield* projectEnrichment.invalidate([workspaceRoot]);
       return yield* readCommitted(input.projectId);

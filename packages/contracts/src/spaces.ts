@@ -1,6 +1,6 @@
 import * as Schema from "effect/Schema";
 
-import { SpaceId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { SpaceId, TrimmedNonEmptyString, UserId } from "./baseSchemas.ts";
 
 export const SpaceKind = Schema.Literals(["organization", "personal"]);
 export type SpaceKind = typeof SpaceKind.Type;
@@ -25,10 +25,14 @@ export const SpaceSummary = Schema.Struct({
   role: Schema.NullOr(SpaceRole),
   /** True for the viewer's own Personal space. */
   isOwn: Schema.Boolean,
+  /** Whether the viewer may start Threads here. */
+  canCreateThreads: Schema.Boolean,
 });
 export type SpaceSummary = typeof SpaceSummary.Type;
 
 export const SpaceDirectoryView = Schema.Struct({
+  /** The viewer, so a client can keep one current Space per User. */
+  userId: UserId,
   spaces: Schema.Array(SpaceSummary),
   personalSpaceId: SpaceId,
   canCreateOrganization: Schema.Boolean,

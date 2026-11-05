@@ -36,6 +36,7 @@ import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
 import * as ProjectService from "./ProjectService.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 
 const layerWorkspacePaths = Layer.succeed(WorkspacePaths.WorkspacePaths, {
   normalizeWorkspaceRoot: (workspaceRoot) => Effect.succeed(workspaceRoot.replace(/\/$/, "")),
@@ -198,6 +199,7 @@ const layerProjectServiceDependencies = Layer.mergeAll(
   ProjectionStore.layer,
   IdAllocator.layer,
   ThreadCommandExecutor.layer,
+  SpaceDirectory.layer,
 ).pipe(
   Layer.provideMerge(LegacyV1ThreadImporter.layer.pipe(Layer.provide(RuntimeLayer.layerEventSink))),
   Layer.provideMerge(ProjectEnrichmentService.layer),
@@ -547,8 +549,14 @@ it.layer(layerTest)("ProjectService", (it) => {
         workspaceRoot: "/work/delete-retry",
       });
       const input = { commandId: CommandId.make("command:delete-retry:delete"), projectId };
-      const deleted = yield* service.delete(input);
-      assert.deepEqual(yield* service.delete(input), deleted);
+      // Repository identity and favicon resolve in the background and may land between the two.
+      const { repositoryIdentity: _r, faviconPath: _f, ...deleted } = yield* service.delete(input);
+      const {
+        repositoryIdentity: _rr,
+        faviconPath: _ff,
+        ...retried
+      } = yield* service.delete(input);
+      assert.deepEqual(retried, deleted);
       const events = yield* sql<{ readonly command_id: string }>`
         SELECT command_id FROM orchestration_events
         WHERE stream_id = ${projectId} AND event_type = 'project.deleted'

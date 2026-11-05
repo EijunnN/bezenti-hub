@@ -18,15 +18,18 @@ import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as ProjectCloneTracker from "./ProjectCloneTracker.ts";
 import * as ProjectService from "./ProjectService.ts";
 import { mutateProjectWithClone } from "./ProjectMutation.ts";
-import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 
 const failProjectMutation = Effect.fn("environment.projects.failMutation")(function* (
   cause: ProjectService.ProjectServiceError | ServerRuntimeStartup.ServerRuntimeStartupError,
 ) {
+  if (cause._tag === "SpaceAccessDeniedError") {
+    return yield* new EnvironmentHttpForbiddenError({ message: cause.message });
+  }
   if (
     cause._tag === "ProjectNotFoundError" ||
     cause._tag === "ProjectConflictError" ||
-    cause._tag === "ProjectNotEmptyError"
+    cause._tag === "ProjectNotEmptyError" ||
+    cause._tag === "SpaceNotFoundError"
   ) {
     return yield* failEnvironmentInvalidRequest("invalid_command");
   }
@@ -40,7 +43,6 @@ export const layer = HttpApiBuilder.group(
     const projects = yield* ProjectService.ProjectService;
     const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
     const projectClones = yield* ProjectCloneTracker.ProjectCloneTracker;
-    const spaces = yield* SpaceDirectory.SpaceDirectory;
 
     return handlers
       .handle(
@@ -61,20 +63,12 @@ export const layer = HttpApiBuilder.group(
             yield* requireEnvironmentScope(scope);
           }
           const principal = yield* EnvironmentAuthenticatedPrincipal;
-          const stamp = yield* SpaceDirectory.stampProjectMutation(
-            spaces,
-            principal.userId,
+          const operation = mutateProjectWithClone(
+            projects,
+            projectClones,
             args.payload,
-          ).pipe(
-            Effect.catchTags({
-              SpaceAccessDeniedError: (error) =>
-                Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
-              SpaceNotFoundError: () => failEnvironmentInvalidRequest("invalid_command"),
-              SpaceDirectoryStorageError: (cause) =>
-                failEnvironmentInternal("project_mutation_failed", cause),
-            }),
+            principal.userId,
           );
-          const operation = mutateProjectWithClone(projects, projectClones, args.payload, stamp);
           return yield* startup.enqueueCommand(operation).pipe(Effect.catch(failProjectMutation));
         }),
       );

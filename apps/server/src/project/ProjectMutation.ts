@@ -1,16 +1,15 @@
-import { type ProjectMutation } from "@t3tools/contracts";
+import { type ProjectMutation, type UserId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
 import { type ProjectCloneTracker } from "./ProjectCloneTracker.ts";
 import { type ProjectService } from "./ProjectService.ts";
-import type { CreationStamp } from "../spaces/SpaceDirectory.ts";
 
 type ProjectMutations = Pick<ProjectService["Service"], "create" | "delete" | "update">;
 
 export const projectMutationOperation = Effect.fn("projectMutationOperation")(function* (
   projects: ProjectMutations,
   mutation: ProjectMutation,
-  stamp?: CreationStamp,
+  actorUserId?: UserId,
 ) {
   switch (mutation.type) {
     case "project.create":
@@ -26,7 +25,8 @@ export const projectMutationOperation = Effect.fn("projectMutationOperation")(fu
           ? {}
           : { defaultModelSelection: mutation.defaultModelSelection }),
         ...(mutation.scripts === undefined ? {} : { scripts: mutation.scripts }),
-        ...(stamp === undefined ? {} : { stamp }),
+        ...(mutation.spaceId === undefined ? {} : { spaceId: mutation.spaceId }),
+        ...(actorUserId === undefined ? {} : { actorUserId }),
       });
 
     case "project.update":
@@ -63,10 +63,10 @@ export const mutateProjectWithClone = Effect.fn("mutateProjectWithClone")(functi
   projects: ProjectMutations,
   clones: Pick<ProjectCloneTracker["Service"], "discard">,
   mutation: ProjectMutation,
-  stamp?: CreationStamp,
+  actorUserId?: UserId,
 ) {
   if (mutation.type !== "project.delete")
-    return yield* projectMutationOperation(projects, mutation, stamp);
+    return yield* projectMutationOperation(projects, mutation, actorUserId);
   return yield* projectMutationOperation(projects, mutation).pipe(
     Effect.tap(() => clones.discard(mutation.projectId)),
     Effect.uninterruptible,
