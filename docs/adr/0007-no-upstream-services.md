@@ -1,0 +1,3 @@
+# No dependency on pingdotgg's hosted services
+
+Upstream T3 Code sends product usage events to `ingest.t3.codes` (forwarded to PostHog) and relay traces to Axiom, updates servers and desktop apps from pingdotgg's npm and GitHub releases, and offers T3 Connect, a relay on pingdotgg's cloud with Clerk accounts. This fork is a private, self-hosted Installation for one Owner and their team (ADR 0001) reached on the Owner's own domain (ADR 0003), so it sends nothing to pingdotgg, never installs an upstream release over itself, and drops T3 Connect, its relay infrastructure and the marketing site. All providers and the web, desktop and mobile apps stay.
