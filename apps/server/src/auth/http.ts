@@ -510,8 +510,9 @@ export const layer = HttpApiBuilder.group(
               sessions.cookieName,
               sessions.legacyCookieName,
             );
+            // Re-sent on every check so a sliding session keeps its cookie as long as its row.
             if (
-              credential?.source === "legacy-cookie" &&
+              (credential?.source === "cookie" || credential?.source === "legacy-cookie") &&
               result.authenticated &&
               result.sessionMethod === "browser-session-cookie" &&
               result.expiresAt
@@ -688,7 +689,7 @@ export const layer = HttpApiBuilder.group(
                 return yield* failEnvironmentScopeRequired(delegatedScope);
               }
             }
-            return yield* serverAuth.issuePairingCredential(args.payload);
+            return yield* serverAuth.issuePairingCredential(args.payload, session.userId);
           },
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
             failEnvironmentInternal("pairing_credential_issuance_failed", error),
@@ -719,15 +720,14 @@ export const layer = HttpApiBuilder.group(
           function* (args) {
             yield* annotateEnvironmentRequest(args.endpoint.name);
             const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
-            const revoked = yield* serverAuth.revokeClientSession(
-              session.sessionId,
-              args.payload.sessionId,
-            );
+            const revoked = yield* serverAuth.revokeClientSession(session, args.payload.sessionId);
             return { revoked };
           },
           Effect.catchTags({
             ServerAuthForbiddenOperationError: () =>
               failEnvironmentOperationForbidden("current_session_revoke_not_allowed"),
+            ServerAuthNotYourSessionError: (error) =>
+              Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
           }),
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
             failEnvironmentInternal("client_session_revoke_failed", error),
@@ -832,7 +832,7 @@ export const layer = HttpApiBuilder.group(
           function* (args) {
             yield* annotateEnvironmentRequest(args.endpoint.name);
             const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
-            const revokedCount = yield* serverAuth.revokeOtherClientSessions(session.sessionId);
+            const revokedCount = yield* serverAuth.revokeOtherClientSessions(session);
             return { revokedCount };
           },
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>

@@ -4,11 +4,16 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** done
 
 Spec: ../spec.md
 
-- [ ] Expiración deslizante de 30 días, probada con `TestClock`.
-- [ ] «Tus sesiones» en ajustes lista y revoca las sesiones propias; el Owner revoca cualquiera.
-- [ ] Revocar una sesión cierra sus conexiones abiertas.
-- [ ] Con un Owner existente, ningún camino emite una sesión sin `userId`; la UI ya no ofrece pairing por código.
+- [x] Expiración deslizante de 30 días, probada con `TestClock`.
+- [x] «Tus sesiones» en ajustes lista y revoca las sesiones propias; el Owner revoca cualquiera.
+- [x] Revocar una sesión cierra sus conexiones abiertas.
+- [x] Con un Owner existente, ningún camino emite una sesión sin `userId`; la UI ya no ofrece pairing por código.
+
+Notas de implementación:
+
+- Los enlaces de pairing no desaparecen: llevan el User que los crea y el dispositivo entra como ese User. Lo que sale de la shell del Hub, el enlace de arranque, el desktop y los clientes MCP queda a nombre del Owner (los MCP eligen User en el 13). Un trigger en `auth_sessions` rechaza sesiones sin User cuando ya hay Owner.
+- Sin Owner, una visita sin sesión sigue yendo a `/pair`; con Owner va a `/sign-in`. «Tus sesiones» es la sección de Settings → Access que antes se llamaba «Authorized clients».

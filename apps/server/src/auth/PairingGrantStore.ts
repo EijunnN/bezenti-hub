@@ -3,6 +3,7 @@ import {
   type AuthEnvironmentScope,
   type AuthPairingLink,
   type ServerAuthBootstrapMethod,
+  type UserId,
 } from "@t3tools/contracts";
 import {
   DESKTOP_BOOTSTRAP_TOKEN_WINDOW_MS,
@@ -30,6 +31,8 @@ export interface BootstrapGrant {
   readonly subject: string;
   readonly label?: string;
   readonly proofKeyThumbprint?: string;
+  /** The User who created the link; a link from the Hub's shell has none. */
+  readonly userId?: UserId;
   readonly expiresAt: DateTime.DateTime;
 }
 
@@ -214,6 +217,7 @@ export class PairingGrantStore extends Context.Service<
       readonly subject?: string;
       readonly label?: string;
       readonly proofKeyThumbprint?: string;
+      readonly userId?: UserId;
       readonly purpose?: "startup";
     }) => Effect.Effect<IssuedBootstrapCredential, BootstrapCredentialInternalError>;
     readonly listActive: () => Effect.Effect<
@@ -231,10 +235,13 @@ export class PairingGrantStore extends Context.Service<
         readonly requiredScopes?: ReadonlyArray<AuthEnvironmentScope>;
       },
     ) => Effect.Effect<BootstrapGrant, BootstrapCredentialError>;
-    /** The subject of an unspent stored link, without spending it. */
-    readonly peekSubject: (
+    /** A stored link's subject and whether it can still be spent, without spending it. */
+    readonly inspect: (
       credential: string,
-    ) => Effect.Effect<Option.Option<string>, BootstrapCredentialInternalError>;
+    ) => Effect.Effect<
+      Option.Option<{ readonly subject: string; readonly spendable: boolean }>,
+      BootstrapCredentialInternalError
+    >;
   }
 >()("t3/auth/PairingGrantStore") {}
 
@@ -346,24 +353,15 @@ const make = Effect.gen(function* () {
       const now = yield* DateTime.now;
       const rows = yield* pairingLinks.listActive({ now });
 
-      return rows.map((row) =>
-        row.label
-          ? ({
-              id: row.id,
-              scopes: row.scopes,
-              subject: row.subject,
-              label: row.label,
-              createdAt: row.createdAt,
-              expiresAt: row.expiresAt,
-            } satisfies AuthPairingLink)
-          : ({
-              id: row.id,
-              scopes: row.scopes,
-              subject: row.subject,
-              createdAt: row.createdAt,
-              expiresAt: row.expiresAt,
-            } satisfies AuthPairingLink),
-      );
+      return rows.map((row): AuthPairingLink => ({
+        id: row.id,
+        scopes: row.scopes,
+        subject: row.subject,
+        ...(row.label ? { label: row.label } : {}),
+        ...(row.userId ? { userId: row.userId } : {}),
+        createdAt: row.createdAt,
+        expiresAt: row.expiresAt,
+      }));
     },
     Effect.mapError((cause) => new ActivePairingLinksLoadError({ cause })),
   );
@@ -419,6 +417,7 @@ const make = Effect.gen(function* () {
         subject,
         label: input?.label ?? null,
         proofKeyThumbprint: input?.proofKeyThumbprint ?? null,
+        userId: input?.userId ?? null,
         createdAt: now,
         expiresAt: expiresAt,
       })
@@ -438,6 +437,7 @@ const make = Effect.gen(function* () {
       scopes: input?.scopes ?? AuthStandardClientScopes,
       subject: input?.subject ?? "one-time-token",
       ...(input?.label ? { label: input.label } : {}),
+      ...(input?.userId ? { userId: input.userId } : {}),
       createdAt: now,
       expiresAt,
     });
@@ -579,6 +579,7 @@ const make = Effect.gen(function* () {
           ...(consumed.value.proofKeyThumbprint
             ? { proofKeyThumbprint: consumed.value.proofKeyThumbprint }
             : {}),
+          ...(consumed.value.userId ? { userId: consumed.value.userId } : {}),
           expiresAt: consumed.value.expiresAt,
         } satisfies BootstrapGrant;
       }
@@ -622,26 +623,28 @@ const make = Effect.gen(function* () {
     },
   );
 
-  const peekSubject: PairingGrantStore["Service"]["peekSubject"] = Effect.fn(
-    "PairingGrantStore.peekSubject",
-  )(function* (credential) {
-    const now = yield* DateTime.now;
-    const link = yield* pairingLinks
-      .getByCredential({
-        credential: PAIRING_TOKEN_PATTERN.test(credential) ? credential.toUpperCase() : credential,
-      })
-      .pipe(Effect.mapError((cause) => new BootstrapCredentialLookupError({ cause })));
-    return Option.filter(
-      link,
-      (row) =>
-        row.consumedAt === null &&
-        row.revokedAt === null &&
-        DateTime.isGreaterThan(row.expiresAt, now),
-    ).pipe(Option.map((row) => row.subject));
-  });
+  const inspect: PairingGrantStore["Service"]["inspect"] = Effect.fn("PairingGrantStore.inspect")(
+    function* (credential) {
+      const now = yield* DateTime.now;
+      const link = yield* pairingLinks
+        .getByCredential({
+          credential: PAIRING_TOKEN_PATTERN.test(credential)
+            ? credential.toUpperCase()
+            : credential,
+        })
+        .pipe(Effect.mapError((cause) => new BootstrapCredentialLookupError({ cause })));
+      return Option.map(link, (row) => ({
+        subject: row.subject,
+        spendable:
+          row.consumedAt === null &&
+          row.revokedAt === null &&
+          DateTime.isGreaterThan(row.expiresAt, now),
+      }));
+    },
+  );
 
   return PairingGrantStore.of({
-    peekSubject,
+    inspect,
     issueOneTimeToken,
     listActive,
     get streamChanges() {

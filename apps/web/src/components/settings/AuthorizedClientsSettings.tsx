@@ -538,6 +538,11 @@ const ConnectedClientListRow = memo(function ConnectedClientListRow({
                 This device
               </span>
             ) : null}
+            {clientSession.userDisplayName ? (
+              <span className="text-3xs text-muted-foreground/80 rounded-md border border-border/50 bg-muted/50 px-1 py-0.5">
+                {clientSession.userDisplayName}
+              </span>
+            ) : null}
           </div>
           <p className="text-xs text-muted-foreground">
             {deviceInfoBits.length > 0 ? (
@@ -672,10 +677,10 @@ export const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHead
         ) : null}
         <DialogPopup className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Create pairing link</DialogTitle>
+            <DialogTitle>Add a device</DialogTitle>
             <DialogDescription>
-              Generate a one-time link that another device can use to pair with this backend as an
-              authorized client.
+              A one-time link or QR code that signs another device in as you. Signing in with your
+              account works too; this only saves typing.
             </DialogDescription>
           </DialogHeader>
           <DialogPanel>

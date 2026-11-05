@@ -269,6 +269,8 @@ export const AuthPairingLink = Schema.Struct({
   ...authScopeResponseFields,
   subject: TrimmedNonEmptyString,
   label: Schema.optionalKey(TrimmedNonEmptyString),
+  /** The User a device paired with this link signs in as. */
+  userId: Schema.optionalKey(UserId),
   createdAt: Schema.DateTimeUtc,
   expiresAt: Schema.DateTimeUtc,
 });
@@ -290,6 +292,9 @@ export const AuthClientSession = Schema.Struct({
   ...authScopeResponseFields,
   method: ServerAuthSessionMethod,
   client: AuthClientMetadata,
+  userId: Schema.optionalKey(UserId),
+  /** Present when the viewer may see another User's sessions, so it can tell them apart. */
+  userDisplayName: Schema.optionalKey(TrimmedNonEmptyString),
   issuedAt: Schema.DateTimeUtc,
   expiresAt: Schema.DateTimeUtc,
   lastConnectedAt: Schema.NullOr(Schema.DateTimeUtc),
@@ -398,8 +403,10 @@ export const AuthSessionState = Schema.Struct({
   permissions: authScopeResponseFields.permissions,
   sessionMethod: Schema.optionalKey(ServerAuthSessionMethod),
   expiresAt: Schema.optionalKey(Schema.DateTimeUtc),
-  /** The User this session belongs to; sessions from pairing links have none. */
+  /** The User this session belongs to; none only before the Installation has an Owner. */
   userId: Schema.optionalKey(UserId),
+  /** Once an Owner exists, signing in with an account is the way in; pairing links are optional. */
+  ownerExists: Schema.optionalKey(Schema.Boolean),
 });
 export type AuthSessionState = typeof AuthSessionState.Type;
 

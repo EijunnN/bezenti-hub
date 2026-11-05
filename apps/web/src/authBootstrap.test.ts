@@ -413,4 +413,21 @@ describe("resolveInitialServerAuthGateState", () => {
     expect(testWindow.location.hash).toBe("#token=reset-token");
     expect(peekPairingTokenFromUrl()).toBe("reset-token");
   });
+
+  it.each([
+    { ownerExists: true, path: "/sign-in" },
+    { ownerExists: false, path: "/pair" },
+  ])(
+    "sends a signed-out visit to $path when ownerExists is $ownerExists",
+    async ({ ownerExists, path }) => {
+      await installAuthApi({
+        session: () => ({ ...unauthenticatedSession(LOOPBACK_AUTH), ownerExists }),
+      });
+      installTestBrowser("http://localhost/");
+      const { resolveInitialServerAuthGateState, signedOutRoute } =
+        await import("./environments/primary/auth");
+
+      expect(signedOutRoute(await resolveInitialServerAuthGateState())).toBe(path);
+    },
+  );
 });

@@ -260,7 +260,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
         expect(firstSession.subject).toBe("reusable-dev-token-child");
         expect(secondSession.subject).toBe("reusable-dev-token-child");
         expect((yield* sessions.verify(token)).subject).toBe("reusable-dev-token");
-        const before = yield* serverAuth.listClientSessions(firstSession.sessionId);
+        const before = yield* serverAuth.listClientSessions(firstSession);
         const denied = yield* serverAuth
           .exchangeBootstrapCredentialForAccessToken(token, ["review:write"], requestMetadata)
           .pipe(Effect.flip);
@@ -269,7 +269,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
           .exchangeBootstrapCredentialForAccessToken(token, [], requestMetadata)
           .pipe(Effect.flip);
         expect(empty._tag).toBe("ServerAuthScopeNotGrantedError");
-        expect(yield* serverAuth.listClientSessions(firstSession.sessionId)).toEqual(before);
+        expect(yield* serverAuth.listClientSessions(firstSession)).toEqual(before);
       }).pipe(
         Effect.provide(
           layerEnvironmentAuth({
@@ -575,15 +575,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
           const clientSession = yield* serverAuth.authenticateHttpRequest(
             makeCookieRequest(sessions.cookieName, clientExchange.sessionToken),
           );
-          const clientsBeforeRevoke = yield* serverAuth.listClientSessions(
-            administrativeSession.sessionId,
-          );
-          const revokedCount = yield* serverAuth.revokeOtherClientSessions(
-            administrativeSession.sessionId,
-          );
-          const clientsAfterRevoke = yield* serverAuth.listClientSessions(
-            administrativeSession.sessionId,
-          );
+          const clientsBeforeRevoke = yield* serverAuth.listClientSessions(administrativeSession);
+          const revokedCount = yield* serverAuth.revokeOtherClientSessions(administrativeSession);
+          const clientsAfterRevoke = yield* serverAuth.listClientSessions(administrativeSession);
 
           expect(listedPairingLinks.map((entry) => entry.id)).toContain(pairingCredential.id);
           expect(listedPairingLinks.find((entry) => entry.id === pairingCredential.id)?.label).toBe(

@@ -201,12 +201,13 @@ their original values.
 The first time a new server starts, the pairing URL it prints or opens asks you
 to create the Owner account: enter your name, register a passkey, and save the
 recovery codes. They are shown only once, and each one signs you in once if you
-lose your passkey. After that the URL no longer creates accounts.
+lose your passkey. After that the URL no longer creates accounts, and opening it
+again says it was already used.
 
-To sign in from another browser, open the server's address and choose **Sign in
-with an account**, or go to `/sign-in`. A passkey works only on the address you
-registered it on, so create the account from the address you plan to keep
-using. Sign out from **Settings → Access**.
+Once the Owner exists, opening the server's address in any signed-out browser
+goes straight to sign-in; no pairing link or code is needed. A passkey works
+only on the address you registered it on, so create the account from the address
+you plan to keep using. Sign out from **Settings → Access**.
 
 For devices without passkeys, add a password under **Settings → Access → Your
 account**. You choose a sign-in name there too. The Owner must first set up an
@@ -216,6 +217,18 @@ Adding, changing or removing a password or authenticator app asks you to
 confirm it's you with your passkey or current password, and signs out your
 other devices. After repeated wrong passwords or codes, sign-in pauses for a
 while before you can try again.
+
+### Your sessions
+
+A sign-in lasts 30 days and renews each time you use it, so a device you use
+regularly stays signed in. **Settings → Access → Your sessions** lists your
+browsers, devices and outside agents; revoke any of them there and its open
+connections close at once. The Owner sees and can revoke every User's sessions.
+
+**Create link** in the same section is an optional shortcut: it makes a
+one-time link or QR code that signs another device in as you. A link or
+session created from the server's shell (`t3 pair`, `t3 auth session issue`)
+belongs to the Owner.
 
 If you lose every passkey and recovery code, run this in the server's shell:
 

@@ -41,6 +41,7 @@ export const AuthSessionRecord = Schema.Struct({
   client: AuthSessionClientMetadataRecord,
   issuedAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.DateTimeUtcFromString,
+  sliding: Schema.Boolean,
   lastConnectedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   revokedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
 });
@@ -55,6 +56,8 @@ export const CreateAuthSessionInput = Schema.Struct({
   client: AuthSessionClientMetadataRecord,
   issuedAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.DateTimeUtcFromString,
+  /** Each use moves expiresAt to the session lifetime from now. */
+  sliding: Schema.optionalKey(Schema.Boolean),
 });
 export type CreateAuthSessionInput = typeof CreateAuthSessionInput.Type;
 
@@ -89,6 +92,13 @@ export const RevokeOtherAuthSessionsInput = Schema.Struct({
 });
 export type RevokeOtherAuthSessionsInput = typeof RevokeOtherAuthSessionsInput.Type;
 
+export const RenewAuthSessionInput = Schema.Struct({
+  sessionId: AuthSessionId,
+  expiresAt: Schema.DateTimeUtcFromString,
+  now: Schema.DateTimeUtcFromString,
+});
+export type RenewAuthSessionInput = typeof RenewAuthSessionInput.Type;
+
 export const SetAuthSessionLastConnectedAtInput = Schema.Struct({
   sessionId: AuthSessionId,
   lastConnectedAt: Schema.DateTimeUtcFromString,
@@ -122,6 +132,10 @@ export class AuthSessionRepository extends Context.Service<
     readonly setLastConnectedAt: (
       input: SetAuthSessionLastConnectedAtInput,
     ) => Effect.Effect<void, AuthSessionRepositoryError>;
+    /** Moves a live sliding session's expiry; false when it is gone, revoked or already expired. */
+    readonly renew: (
+      input: RenewAuthSessionInput,
+    ) => Effect.Effect<boolean, AuthSessionRepositoryError>;
   }
 >()("t3/persistence/AuthSessions/AuthSessionRepository") {}
 
@@ -139,6 +153,7 @@ const AuthSessionDbRow = Schema.Struct({
   clientBrowser: Schema.NullOr(Schema.String),
   issuedAt: Schema.DateTimeUtcFromString,
   expiresAt: Schema.DateTimeUtcFromString,
+  sliding: Schema.BooleanFromBit,
   lastConnectedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
   revokedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
 });
@@ -157,6 +172,7 @@ const AuthSessionRawDbRow = Schema.Struct({
   clientBrowser: Schema.Unknown,
   issuedAt: Schema.Unknown,
   expiresAt: Schema.Unknown,
+  sliding: Schema.Unknown,
   lastConnectedAt: Schema.Unknown,
   revokedAt: Schema.Unknown,
 });
@@ -180,6 +196,7 @@ function toAuthSessionRecord(row: typeof AuthSessionDbRow.Type): AuthSessionReco
     },
     issuedAt: row.issuedAt,
     expiresAt: row.expiresAt,
+    sliding: row.sliding,
     lastConnectedAt: row.lastConnectedAt,
     revokedAt: row.revokedAt,
   };
@@ -223,6 +240,7 @@ export const make = Effect.gen(function* () {
           client_browser,
           issued_at,
           expires_at,
+          sliding,
           revoked_at
         )
         VALUES (
@@ -239,6 +257,7 @@ export const make = Effect.gen(function* () {
           ${input.client.browser},
           ${input.issuedAt},
           ${input.expiresAt},
+          ${input.sliding === true ? 1 : 0},
           NULL
         )
         ${ignoreExisting ? sql`ON CONFLICT(session_id) DO NOTHING` : sql``}
@@ -266,6 +285,7 @@ export const make = Effect.gen(function* () {
           client_browser AS "clientBrowser",
           issued_at AS "issuedAt",
           expires_at AS "expiresAt",
+          sliding AS "sliding",
           last_connected_at AS "lastConnectedAt",
           revoked_at AS "revokedAt"
         FROM auth_sessions
@@ -311,6 +331,7 @@ export const make = Effect.gen(function* () {
           client_browser AS "clientBrowser",
           issued_at AS "issuedAt",
           expires_at AS "expiresAt",
+          sliding AS "sliding",
           last_connected_at AS "lastConnectedAt",
           revoked_at AS "revokedAt"
         FROM auth_sessions
@@ -328,6 +349,22 @@ export const make = Effect.gen(function* () {
         SET last_connected_at = ${lastConnectedAt}
         WHERE session_id = ${sessionId}
           AND revoked_at IS NULL
+      `,
+  });
+
+  const renewSessionRows = SqlSchema.findAll({
+    Request: RenewAuthSessionInput,
+    Result: Schema.Struct({ sessionId: AuthSessionId }),
+    execute: ({ sessionId, expiresAt, now }) =>
+      sql`
+        UPDATE auth_sessions
+        SET expires_at = ${expiresAt}
+        WHERE session_id = ${sessionId}
+          AND sliding = 1
+          AND revoked_at IS NULL
+          AND expires_at > ${now}
+          AND expires_at < ${expiresAt}
+        RETURNING session_id AS "sessionId"
       `,
   });
 
@@ -490,7 +527,20 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+  const renew: AuthSessionRepository["Service"]["renew"] = (input) =>
+    renewSessionRows(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "AuthSessionRepository.renew:query",
+          "AuthSessionRepository.renew:encodeRequest",
+          { sessionId: input.sessionId },
+        ),
+      ),
+      Effect.map((rows) => rows.length > 0),
+    );
+
   return {
+    renew,
     create,
     createReplacingActive,
     createIfAbsent,

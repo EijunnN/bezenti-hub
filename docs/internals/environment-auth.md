@@ -34,13 +34,40 @@ vocabulary gives these grants a familiar meaning.
 A session's `subject` names how it was obtained and security checks match its
 literals, so the User travels separately: the `auth_sessions` row's `user_id`,
 mirrored in the signed `uid` claim. Verification reads the row, so detaching a
-User never needs a reissued token. Sessions from pairing links have no User.
+User never needs a reissued token.
+
+Once an Owner exists every session belongs to a User. A pairing link carries
+the User who created it, and a device that redeems it signs in as that User.
+Paths with no User of their own (the Hub's shell, the startup link, the desktop
+bootstrap, the reusable dev token, MCP clients until they choose a User) bind to
+the Owner in [EnvironmentAuth](../../apps/server/src/auth/EnvironmentAuth.ts).
+The binding is explicit at each caller rather than a default in
+[SessionStore](../../apps/server/src/auth/SessionStore.ts): a future path that
+forgot its User would otherwise silently act as the Owner. Instead an
+`auth_sessions` trigger refuses a row without a User once an Owner exists, so
+such a path fails closed. Creating the Owner hands it every earlier session,
+since before then only the machine's operator could pair.
+
+Sessions issued without a fixed lifetime slide: the row's `expires_at`, not the
+signed `exp`, is the deadline, and each use moves it to 30 days ahead, written at
+most once an hour. An open socket counts as use. Short-lived DPoP tokens and
+other explicit lifetimes keep their `exp`. The browser cookie's expiry is
+re-sent on every `/api/auth/session` check, so it follows the row.
+
+Each User sees and revokes their own sessions and links; the Owner (or anyone
+before an Owner exists) sees everyone's. The access stream filters live changes
+per viewer with the same rule as the snapshot.
 
 The administrative bootstrap link creates the Owner exactly once
 ([UserDirectory](../../apps/server/src/auth/UserDirectory.ts)); the passkey is
 verified before the link is spent, so a cancelled registration does not burn
 it. Once an Owner exists that link refuses Owner creation and the web app sends
-its visitor to sign in, though other clients can still exchange it to pair.
+its visitor to sign in, though other clients can still exchange it to pair as
+the Owner. A spent, revoked or expired stored link reports `spent` from the
+owner-status endpoint, so the web app says the link was used rather than
+calling it invalid. Signed-out visits go to `/sign-in` once an Owner exists
+(the session state reports `ownerExists`); the pairing-code form only appears
+on a fresh Installation.
 A passkey is bound to the host name the browser used when it was registered
 (the WebAuthn relying party ID, taken from the request's `Origin`), so moving
 the Installation to another domain strands existing passkeys. Recovery codes

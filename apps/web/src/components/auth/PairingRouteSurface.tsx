@@ -51,7 +51,7 @@ export function PairingRouteSurface({
   // The administrative bootstrap link creates the Owner on a fresh Installation instead of pairing.
   const [ownerSetup, setOwnerSetup] = useState<
     | { readonly status: "checking" }
-    | { readonly status: "available" | "claimed"; readonly credential: string }
+    | { readonly status: "available" | "claimed" | "spent"; readonly credential: string }
     | null
   >(autoPairToken ? { status: "checking" } : null);
   const autoSubmitAttemptedRef = useRef(false);
@@ -122,6 +122,7 @@ export function PairingRouteSurface({
 
   if (ownerSetup?.status === "checking") return <PairingPendingSurface />;
   if (ownerSetup?.status === "claimed") return <OwnerAlreadyClaimedSurface />;
+  if (ownerSetup?.status === "spent") return <LinkAlreadyUsedSurface />;
   if (ownerSetup?.status === "available") {
     const { credential: bootstrapCredential } = ownerSetup;
     return canRegisterPasskeys() ? (
@@ -187,6 +188,22 @@ export function PairingRouteSurface({
 
       <div className="mt-6 rounded-lg border border-border/70 bg-background/55 px-3 py-3 text-xs leading-relaxed text-muted-foreground">
         {describeSupportedMethods(auth.bootstrapMethods)}
+      </div>
+    </StandalonePage>
+  );
+}
+
+function LinkAlreadyUsedSurface() {
+  return (
+    <StandalonePage>
+      <StandalonePageHeader
+        title="This link was already used"
+        description="Each link works once. Sign in with your account instead, or ask for a new link."
+      />
+      <div className="mt-6">
+        <Button size="sm" render={<Link to="/sign-in" replace />}>
+          Sign in
+        </Button>
       </div>
     </StandalonePage>
   );

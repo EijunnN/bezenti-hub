@@ -199,6 +199,8 @@ const make = Effect.gen(function* () {
             ${input.createdAt}
           )
         `;
+      // Sessions paired before the Owner existed were the operator's, and the operator is the Owner.
+      yield* sql`UPDATE auth_sessions SET user_id = ${input.userId} WHERE user_id IS NULL`;
       yield* Effect.forEach(
         input.recoveryCodeHashes,
         (codeHash) => sql`

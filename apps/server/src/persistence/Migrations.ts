@@ -86,6 +86,7 @@ import Migration0079 from "./Migrations/079_DelegatedRecoveryIndexes.ts";
 import Migration0080 from "./Migrations/080_Users.ts";
 import Migration0081 from "./Migrations/081_AuthSessionUserId.ts";
 import Migration0082 from "./Migrations/082_UserPasswordsTotpAndResetLinks.ts";
+import Migration0083 from "./Migrations/083_UserBoundSessions.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -171,6 +172,7 @@ const migrationEntries = [
   [80, "Users", Migration0080],
   [81, "AuthSessionUserId", Migration0081],
   [82, "UserPasswordsTotpAndResetLinks", Migration0082],
+  [83, "UserBoundSessions", Migration0083],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

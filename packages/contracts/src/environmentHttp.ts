@@ -412,6 +412,8 @@ const EnvironmentPairingCredentialErrors = [
 const EnvironmentSessionRevokeErrors = [
   EnvironmentScopeRequiredError,
   EnvironmentOperationForbiddenError,
+  // Another User's session, which only the Owner may revoke.
+  EnvironmentHttpForbiddenError,
   EnvironmentInternalError,
 ] as const;
 const EnvironmentProjectSnapshotErrors = [

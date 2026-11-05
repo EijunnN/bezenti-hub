@@ -120,6 +120,9 @@ export interface ServerClientSessionRecord {
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly method: ServerAuthSessionMethod;
   readonly client: AuthClientMetadata;
+  readonly userId?: string;
+  /** Set when the viewer is the Owner looking at another User's session. */
+  readonly userDisplayName?: string;
   readonly issuedAt: string;
   readonly expiresAt: string;
   readonly lastConnectedAt: string | null;
@@ -132,6 +135,8 @@ type ServerAuthGateState =
   | {
       status: "requires-auth";
       auth: AuthSessionState["auth"];
+      /** Once an Owner exists, signed-out visitors sign in instead of pairing. */
+      ownerExists?: boolean;
       errorMessage?: string;
     };
 
@@ -314,6 +319,7 @@ async function bootstrapServerAuth(urlCredential: string | null): Promise<Server
     return {
       status: "requires-auth",
       auth: currentSession.auth,
+      ...(currentSession.ownerExists ? { ownerExists: true } : {}),
     };
   }
 
@@ -325,6 +331,7 @@ async function bootstrapServerAuth(urlCredential: string | null): Promise<Server
     return {
       status: "requires-auth",
       auth: currentSession.auth,
+      ...(currentSession.ownerExists ? { ownerExists: true } : {}),
       errorMessage: error instanceof Error ? error.message : "Authentication failed.",
     };
   }
@@ -436,7 +443,11 @@ export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGat
   }
   if (explicitPairingRequested) {
     const currentSession = await fetchSessionState();
-    return { status: "requires-auth", auth: currentSession.auth };
+    return {
+      status: "requires-auth",
+      auth: currentSession.auth,
+      ...(currentSession.ownerExists ? { ownerExists: true } : {}),
+    };
   }
 
   const urlCredential = ownsUrlToken(window.location.pathname) ? null : takePairingTokenFromUrl();
@@ -474,6 +485,11 @@ export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGat
         bootstrapPromise = null;
       }
     });
+}
+
+/** Where a signed-out visit goes: sign-in once the Hub has an Owner, pairing before that. */
+export function signedOutRoute(state: { readonly status: string; readonly ownerExists?: boolean }) {
+  return state.status === "requires-auth" && state.ownerExists === true ? "/sign-in" : "/pair";
 }
 
 export function __resetServerAuthBootstrapForTests() {

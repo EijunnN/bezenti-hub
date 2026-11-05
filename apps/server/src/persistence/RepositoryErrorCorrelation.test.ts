@@ -163,6 +163,7 @@ describe("persistence error correlation", () => {
           credential,
           method: "one-time-token",
           scopes,
+          userId: null,
           subject,
           label: null,
           proofKeyThumbprint: null,

@@ -1728,8 +1728,8 @@ export const layerWsRpc = (
       });
       const loadAuthAccessSnapshot = () =>
         Effect.all({
-          pairingLinks: serverAuth.listPairingLinks(),
-          clientSessions: serverAuth.listClientSessions(currentSessionId),
+          pairingLinks: serverAuth.listPairingLinks({ viewer: principal }),
+          clientSessions: serverAuth.listClientSessions(principal),
         }).pipe(
           Effect.mapError(
             (error) =>
@@ -3233,15 +3233,28 @@ export const layerWsRpc = (
                 PairingGrantStore.BootstrapCredentialChange | SessionStore.SessionCredentialChange
               > = Stream.merge(bootstrapCredentials.streamChanges, sessions.streamChanges);
 
-              const liveEvents: Stream.Stream<AuthAccessStreamEvent> = accessChanges.pipe(
-                Stream.mapEffect((change) =>
-                  Ref.updateAndGet(revisionRef, (revision) => revision + 1).pipe(
-                    Effect.map((revision) =>
-                      toAuthAccessStreamEvent(change, revision, currentSessionId),
+              const liveEvents: Stream.Stream<AuthAccessStreamEvent, AuthAccessStreamError> =
+                accessChanges.pipe(
+                  // Each User sees their own sessions and links; the Owner sees everyone's.
+                  Stream.mapEffect((change) =>
+                    serverAuth
+                      .viewAccessChange(principal, change)
+                      .pipe(
+                        Effect.mapError(
+                          (error) => new AuthAccessStreamError({ message: error.message }),
+                        ),
+                      ),
+                  ),
+                  Stream.filter(Option.isSome),
+                  Stream.map((change) => change.value),
+                  Stream.mapEffect((change) =>
+                    Ref.updateAndGet(revisionRef, (revision) => revision + 1).pipe(
+                      Effect.map((revision) =>
+                        toAuthAccessStreamEvent(change, revision, currentSessionId),
+                      ),
                     ),
                   ),
-                ),
-              );
+                );
 
               return Stream.concat(
                 rpcInitialItems([

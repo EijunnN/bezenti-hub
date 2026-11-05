@@ -364,10 +364,12 @@ fails with that reason.
 
 ## Manage or revoke access
 
-On the host, **Settings → Sharing & access** lets authorized administrators create
-pairing links and revoke client sessions. Revoking an unused link prevents new
-pairings; revoke a device's session to remove its existing access. Command-line
-management is available through `t3 auth --help`.
+On the host, **Settings → Access → Your sessions** lists your own sessions and
+pairing links; the Owner sees every User's. Revoking an unused link prevents new
+pairings; revoking a session removes that device's access and closes its open
+connections. A device paired with a link signs in as the User who created the
+link, and a link from `t3 pair` belongs to the Owner. Command-line management is
+available through `t3 auth --help`.
 
 A session with an open connection stays listed after its access credential
 expires.

@@ -25,6 +25,7 @@ import * as Option from "effect/Option";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as AuthSessions from "../persistence/AuthSessions.ts";
+import * as Users from "../persistence/Users.ts";
 import * as PayloadSigner from "./PayloadSigner.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import {
@@ -377,6 +378,7 @@ export class SessionStore extends Context.Service<
     readonly cookieName: string;
     readonly legacyCookieName: string | undefined;
     readonly issue: (input?: {
+      /** A fixed lifetime; without one the session lasts 30 days from its last use. */
       readonly ttl?: Duration.Duration;
       readonly subject?: string;
       readonly userId?: UserId;
@@ -435,6 +437,8 @@ export class SessionStore extends Context.Service<
 
 const SIGNING_SECRET_NAME = "server-signing-key";
 const DEFAULT_SESSION_TTL = Duration.days(30);
+// A sliding session is written back at most this often, not on every request.
+const SLIDING_RENEWAL_INTERVAL = Duration.hours(1);
 const DEFAULT_WEBSOCKET_TOKEN_TTL = Duration.minutes(5);
 
 const SessionClaims = Schema.Struct({
@@ -505,6 +509,7 @@ const make = Effect.gen(function* () {
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironmentIdentity;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const authSessions = yield* AuthSessions.AuthSessionRepository;
+  const users = yield* Users.UserRepository;
   const signer = yield* PayloadSigner.fromSecret(
     yield* secretStore.getOrCreateRandom(SIGNING_SECRET_NAME, 32),
   );
@@ -525,11 +530,18 @@ const make = Effect.gen(function* () {
   const legacyCookieName = resolveLegacySessionCookieName(cookieInput);
   const devAuth = resolveReusableDevAuth(serverConfig);
   if (devAuth) {
+    const owner = yield* users
+      .getOwner()
+      .pipe(
+        Effect.mapError(
+          (cause) => new SessionCredentialIssueError({ sessionId: devAuth.sessionId, cause }),
+        ),
+      );
     yield* authSessions
       .createIfAbsent({
         sessionId: devAuth.sessionId,
         subject: "reusable-dev-token",
-        userId: null,
+        userId: Option.isSome(owner) ? owner.value.userId : null,
         scopes: AuthStandardClientScopes,
         method: "browser-session-cookie",
         client: {
@@ -583,6 +595,7 @@ const make = Effect.gen(function* () {
         scopes: row.value.scopes,
         method: row.value.method,
         client: toClientMetadata(row.value.client),
+        ...(row.value.userId ? { userId: row.value.userId } : {}),
         issuedAt: row.value.issuedAt,
         expiresAt: row.value.expiresAt,
         lastConnectedAt: row.value.lastConnectedAt,
@@ -651,6 +664,18 @@ const make = Effect.gen(function* () {
       Effect.withSpan("SessionStore.markDisconnected"),
     );
 
+  /** Moves a sliding session's deadline to a full lifetime from now; returns the deadline in force. */
+  const renewSliding = (row: AuthSessions.AuthSessionRecord, now: DateTime.Utc) => {
+    const renewed = DateTime.add(now, { milliseconds: Duration.toMillis(DEFAULT_SESSION_TTL) });
+    const due =
+      renewed.epochMilliseconds - row.expiresAt.epochMilliseconds >=
+      Duration.toMillis(SLIDING_RENEWAL_INTERVAL);
+    if (!due) return Effect.succeed(row.expiresAt);
+    return authSessions
+      .renew({ sessionId: row.sessionId, expiresAt: renewed, now })
+      .pipe(Effect.map((moved) => (moved ? renewed : row.expiresAt)));
+  };
+
   const encodeClaims = Schema.encodeEffect(Schema.fromJsonString(SessionClaims));
   const issue: SessionStore["Service"]["issue"] = Effect.fn("SessionStore.issue")(
     function* (input) {
@@ -710,6 +735,7 @@ const make = Effect.gen(function* () {
         },
         issuedAt,
         expiresAt,
+        sliding: input?.ttl === undefined,
       } satisfies AuthSessions.CreateAuthSessionInput;
       const replacedSessionIds = yield* (
         input?.replaceSessionId !== undefined || input?.replaceActiveForSubjectAndMethod
@@ -743,6 +769,7 @@ const make = Effect.gen(function* () {
           scopes: claims.scopes,
           method: claims.method,
           client,
+          ...(claims.uid ? { userId: claims.uid } : {}),
           issuedAt,
           expiresAt,
           lastConnectedAt: null,
@@ -815,18 +842,11 @@ const make = Effect.gen(function* () {
       );
 
       const observedAt = yield* DateTime.now;
-      const expiresAt = DateTime.make(claims.exp);
-      if (Option.isNone(expiresAt)) {
+      const claimedExpiry = DateTime.make(claims.exp);
+      if (Option.isNone(claimedExpiry)) {
         return yield* new InvalidSessionExpirationClaimError({
           sessionId: claims.sid,
           expirationClaim: claims.exp,
-        });
-      }
-      if (claims.exp <= observedAt.epochMilliseconds) {
-        return yield* new SessionTokenExpiredError({
-          sessionId: claims.sid,
-          expiresAt: expiresAt.value,
-          observedAt,
         });
       }
 
@@ -846,13 +866,29 @@ const make = Effect.gen(function* () {
           revokedAt: row.value.revokedAt,
         });
       }
+      // A sliding session outlives its signed exp, so its row holds the deadline.
+      const expiresAt = row.value.sliding ? row.value.expiresAt : claimedExpiry.value;
+      if (expiresAt.epochMilliseconds <= observedAt.epochMilliseconds) {
+        return yield* new SessionTokenExpiredError({
+          sessionId: claims.sid,
+          expiresAt,
+          observedAt,
+        });
+      }
+      const renewedExpiry = row.value.sliding
+        ? yield* renewSliding(row.value, observedAt).pipe(
+            Effect.mapError(
+              (cause) => new SessionCredentialVerificationError({ sessionId: claims.sid, cause }),
+            ),
+          )
+        : expiresAt;
 
       return {
         sessionId: claims.sid,
         token,
         method: claims.method,
         client: toClientMetadata(row.value.client),
-        expiresAt: expiresAt.value,
+        expiresAt: renewedExpiry,
         subject: claims.sub,
         ...(row.value.userId ? { userId: row.value.userId } : {}),
         scopes: row.value.scopes,
@@ -990,6 +1026,7 @@ const make = Effect.gen(function* () {
           scopes: row.scopes,
           method: row.method,
           client: toClientMetadata(row.client),
+          ...(row.userId ? { userId: row.userId } : {}),
           issuedAt: row.issuedAt,
           expiresAt: row.expiresAt,
           lastConnectedAt: row.lastConnectedAt,
@@ -1100,11 +1137,23 @@ const make = Effect.gen(function* () {
         while (true) {
           const rows = yield* Effect.forEach(chain, readRow);
           if (rows.some((row) => Option.isNone(row) || row.value.revokedAt !== null)) return;
+          const latest = rows.at(-1);
+          if (latest !== undefined && Option.isSome(latest)) current = latest.value;
           const now = yield* DateTime.now;
           const remaining = current.expiresAt.epochMilliseconds - now.epochMilliseconds;
           if (remaining > 0) {
             yield* Effect.raceFirst(nextRemoval, Effect.sleep(Duration.millis(remaining)));
             continue;
+          }
+          // An open socket is use, so it keeps a sliding session alive.
+          if (current.sliding) {
+            const renewed = yield* renewSliding(current, now).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new SessionCredentialVerificationError({ sessionId: current.sessionId, cause }),
+              ),
+            );
+            if (renewed.epochMilliseconds > now.epochMilliseconds) continue;
           }
           const successorId =
             proofKeyThumbprint === undefined
@@ -1147,4 +1196,7 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(SessionStore, make).pipe(Layer.provideMerge(AuthSessions.layer));
+export const layer = Layer.effect(SessionStore, make).pipe(
+  Layer.provideMerge(AuthSessions.layer),
+  Layer.provideMerge(Users.layer),
+);

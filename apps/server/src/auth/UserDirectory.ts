@@ -240,6 +240,11 @@ export class UserDirectory extends Context.Service<
   UserDirectory,
   {
     readonly hasOwner: () => Effect.Effect<boolean, UserDirectoryStorageError>;
+    /** The User a session with no User of its own belongs to once the Installation has one. */
+    readonly ownerId: () => Effect.Effect<Option.Option<UserId>, UserDirectoryStorageError>;
+    readonly findUser: (
+      userId: UserId,
+    ) => Effect.Effect<Option.Option<AuthUser>, UserDirectoryStorageError>;
     readonly startOwnerRegistration: (input: {
       readonly displayName: string;
       readonly origin: string;
@@ -1110,6 +1115,12 @@ const make = Effect.gen(function* () {
   return UserDirectory.of({
     hasOwner: Effect.fn("UserDirectory.hasOwner")(function () {
       return users.hasOwner().pipe(storage);
+    }),
+    ownerId: Effect.fn("UserDirectory.ownerId")(function () {
+      return users.getOwner().pipe(Effect.map(Option.map((owner) => owner.userId)), storage);
+    }),
+    findUser: Effect.fn("UserDirectory.findUser")(function (userId: UserId) {
+      return users.getById(userId).pipe(Effect.map(Option.map(toAuthUser)), storage);
     }),
     startOwnerRegistration,
     verifyOwnerRegistration,
