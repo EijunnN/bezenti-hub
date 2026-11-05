@@ -522,6 +522,10 @@
     "./spaces/space-directory": {
       "types": "./src/spaces/spaceDirectory.ts",
       "default": "./src/spaces/spaceDirectory.ts"
+    },
+    "./spaces/invitations": {
+      "types": "./src/spaces/invitations.ts",
+      "default": "./src/spaces/invitations.ts"
     }
   },
   "scripts": {

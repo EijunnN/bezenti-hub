@@ -4,11 +4,11 @@
 
 **Blocked by:** 03, 05
 
-**Status:** ready-for-agent
+**Status:** done
 
 Spec: ../spec.md
 
-- [ ] Crear, listar y revocar Invitations (Owner).
-- [ ] Página de aceptación con el aviso de visibilidad del Personal space.
-- [ ] Aceptar crea el User o enlaza uno existente; un User puede estar en varias Organizations.
-- [ ] Caducidad, uso único y revocación probados en la frontera del servidor con `TestClock`.
+- [x] Crear, listar y revocar Invitations (Owner).
+- [x] Página de aceptación con el aviso de visibilidad del Personal space.
+- [x] Aceptar crea el User o enlaza uno existente; un User puede estar en varias Organizations.
+- [x] Caducidad, uso único y revocación probados en la frontera del servidor con `TestClock`.

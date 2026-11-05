@@ -396,23 +396,26 @@ describe("resolveInitialServerAuthGateState", () => {
     expect(testApi.calls.browserSession).toEqual([{ credential: "rejected-token" }]);
   });
 
-  it("leaves an Owner reset link's token for the reset page instead of pairing with it", async () => {
-    const testApi = await installAuthApi({
-      session: () => unauthenticatedSession(LOOPBACK_AUTH),
-      browserSession: () => Effect.succeed(browserSession(["orchestration:read"])),
-    });
-    const testWindow = installTestBrowser("http://localhost/reset#token=reset-token");
-    const { resolveInitialServerAuthGateState, peekPairingTokenFromUrl } =
-      await import("./environments/primary/auth");
+  it.each(["reset", "invite"])(
+    "leaves a /%s link's token for its page instead of pairing with it",
+    async (page) => {
+      const testApi = await installAuthApi({
+        session: () => unauthenticatedSession(LOOPBACK_AUTH),
+        browserSession: () => Effect.succeed(browserSession(["orchestration:read"])),
+      });
+      const testWindow = installTestBrowser(`http://localhost/${page}#token=reset-token`);
+      const { resolveInitialServerAuthGateState, peekPairingTokenFromUrl } =
+        await import("./environments/primary/auth");
 
-    await expect(resolveInitialServerAuthGateState()).resolves.toEqual({
-      status: "requires-auth",
-      auth: LOOPBACK_AUTH,
-    });
-    expect(testApi.calls.browserSession).toEqual([]);
-    expect(testWindow.location.hash).toBe("#token=reset-token");
-    expect(peekPairingTokenFromUrl()).toBe("reset-token");
-  });
+      await expect(resolveInitialServerAuthGateState()).resolves.toEqual({
+        status: "requires-auth",
+        auth: LOOPBACK_AUTH,
+      });
+      expect(testApi.calls.browserSession).toEqual([]);
+      expect(testWindow.location.hash).toBe("#token=reset-token");
+      expect(peekPairingTokenFromUrl()).toBe("reset-token");
+    },
+  );
 
   it.each([
     { ownerExists: true, url: "http://localhost/", path: "/sign-in" },

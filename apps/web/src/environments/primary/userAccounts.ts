@@ -1,4 +1,5 @@
 import {
+  type AcceptInvitationResult,
   type AuthAccount,
   type AuthOwnerBootstrapResult,
   type AuthOwnerBootstrapStatus,
@@ -7,6 +8,8 @@ import {
   type AuthReauth,
   type AuthResetLinkStatus,
   type AuthTotpEnrollment,
+  type InvitationPreview,
+  type JoinInvitationResult,
   EnvironmentHttpCommonError,
   EnvironmentHttpConflictError,
   EnvironmentHttpForbiddenError,
@@ -277,4 +280,45 @@ export async function signInWithRecoveryCode(code: string): Promise<void> {
 
 export async function signOut(): Promise<void> {
   await request((client) => client.auth.signOut({}));
+}
+
+export function fetchInvitationPreview(token: string): Promise<InvitationPreview> {
+  return request((client) => client.invitations.preview({ payload: { token } }));
+}
+
+/** An authenticator app for an invitee who picks a password; Admins need one. */
+export function startInvitationTotpEnrollment(token: string): Promise<AuthTotpEnrollment> {
+  return request((client) => client.invitations.totpEnrollment({ payload: { token } }));
+}
+
+/** Creates the User with a password (and TOTP code), spends the Invitation and signs in. */
+export function acceptInvitationWithPassword(input: {
+  readonly token: string;
+  readonly displayName: string;
+  readonly loginName: string;
+  readonly password: string;
+  readonly totp?: { readonly enrollmentId: string; readonly code: string };
+}): Promise<AcceptInvitationResult> {
+  return request((client) =>
+    client.invitations.accept({ payload: { method: "password", ...input } }),
+  );
+}
+
+/** Creates the User with a new passkey, spends the Invitation and signs in. */
+export async function acceptInvitationWithPasskey(input: {
+  readonly token: string;
+  readonly displayName: string;
+}): Promise<AcceptInvitationResult> {
+  const ceremony = await request((client) => client.invitations.registration({ payload: input }));
+  const response = await registerPasskey(ceremony);
+  return request((client) =>
+    client.invitations.accept({
+      payload: { token: input.token, method: "passkey", ceremonyId: ceremony.ceremonyId, response },
+    }),
+  );
+}
+
+/** Adds the Invitation's Organization to the signed-in User. */
+export function joinInvitation(token: string): Promise<JoinInvitationResult> {
+  return request((client) => client.invitations.join({ headers: {}, payload: { token } }));
 }

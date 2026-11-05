@@ -27,6 +27,8 @@ export const SpaceSummary = Schema.Struct({
   isOwn: Schema.Boolean,
   /** Whether the viewer may start Threads here. */
   canCreateThreads: Schema.Boolean,
+  /** Whether the viewer may invite people here and see and revoke its Invitations. */
+  canInvite: Schema.Boolean,
 });
 export type SpaceSummary = typeof SpaceSummary.Type;
 

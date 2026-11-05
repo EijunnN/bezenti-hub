@@ -1,6 +1,13 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { SpaceId } from "@t3tools/contracts";
-import { BuildingIcon, ChevronsUpDownIcon, PlusIcon, RefreshCwIcon, UserIcon } from "lucide-react";
+import {
+  BuildingIcon,
+  ChevronsUpDownIcon,
+  PlusIcon,
+  RefreshCwIcon,
+  UserIcon,
+  UserPlusIcon,
+} from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
 import { primaryEnvironmentIdAtom } from "../../state/primaryEnvironment";
@@ -21,6 +28,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
+import { InvitationsDialog } from "./InvitationsDialog";
 import { Label } from "../ui/label";
 import {
   Menu,
@@ -42,6 +50,7 @@ export function SpaceSelector() {
   const currentSpaceId = useCurrentSpace((state) => state.currentSpaceId);
   const loadFailed = useCurrentSpace((state) => state.loadFailed);
   const [creating, setCreating] = useState(false);
+  const [inviting, setInviting] = useState(false);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the signed-in User's Spaces from the server
   useEffect(() => {
     if (environmentId !== null) void loadSpaces(environmentId);
@@ -102,6 +111,15 @@ export function SpaceSelector() {
                 </MenuItem>
               </>
             ) : null}
+            {current?.canInvite ? (
+              <>
+                <MenuSeparator />
+                <MenuItem onClick={() => setInviting(true)}>
+                  <UserPlusIcon />
+                  Invite people
+                </MenuItem>
+              </>
+            ) : null}
             {view.canCreateOrganization ? (
               <>
                 <MenuSeparator />
@@ -114,6 +132,9 @@ export function SpaceSelector() {
           </MenuPopup>
         </Menu>
         {creating ? <CreateOrganizationDialog onClose={() => setCreating(false)} /> : null}
+        {inviting && current?.canInvite ? (
+          <InvitationsDialog space={current} onClose={() => setInviting(false)} />
+        ) : null}
       </SidebarMenuItem>
     </SidebarMenu>
   );

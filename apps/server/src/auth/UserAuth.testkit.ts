@@ -24,6 +24,8 @@ import * as SessionStore from "./SessionStore.ts";
 import * as AuthHttp from "./http.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as SpacesHttp from "../spaces/http.ts";
+import * as InvitationService from "../spaces/InvitationService.ts";
+import * as InvitationsHttp from "../spaces/invitationsHttp.ts";
 import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
@@ -38,6 +40,7 @@ import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 class AuthTestApi extends HttpApi.make("environment")
   .add(EnvironmentHttpApi.groups.auth)
   .add(EnvironmentHttpApi.groups.spaces)
+  .add(EnvironmentHttpApi.groups.invitations)
   .add(EnvironmentHttpApi.groups.projects) {}
 
 const ORIGIN = "http://127.0.0.1";
@@ -74,8 +77,9 @@ const layerProjects = RuntimeLayer.layerProjectService.pipe(
 );
 
 const layerServices = Layer.mergeAll(
-  EnvironmentAuth.layer,
-  SpaceDirectory.layer,
+  InvitationService.layer.pipe(
+    Layer.provideMerge(Layer.merge(EnvironmentAuth.layer, SpaceDirectory.layer)),
+  ),
   layerProjects,
 ).pipe(
   Layer.provide(ManagedPolicy.layerTest()),
@@ -91,6 +95,7 @@ export const serveAuthHttp = Effect.gen(function* () {
   const routes = HttpApiBuilder.layer(AuthTestApi).pipe(
     Layer.provide(AuthHttp.layer),
     Layer.provide(SpacesHttp.layer),
+    Layer.provide(InvitationsHttp.layer),
     Layer.provide(ProjectHttp.layer),
     Layer.provide(AuthHttp.layerAuthenticatedAuth),
     Layer.provide(Layer.succeedContext(services)),
@@ -317,7 +322,7 @@ export const isSignedIn = Effect.fn(function* (server: Server, cookie: string | 
   return session.body.authenticated === true;
 });
 
-/** A User other than the Owner, signed in in one browser; Invitations will create these. */
+/** A User other than the Owner, signed in in one browser, without going through an Invitation. */
 export const addMember = Effect.fn(function* (
   server: Server,
   member: { readonly id: string; readonly displayName: string } = {
@@ -337,7 +342,7 @@ export const addMember = Effect.fn(function* (
   return `${server.sessions.cookieName}=${memberSession.token}`;
 });
 
-/** Makes a User a Member of an Organization; Invitations (ticket 06) will do this. */
+/** Makes a User a Member of an Organization directly, for tests not about Invitations. */
 export const joinOrganization = Effect.fn(function* (
   server: Server,
   spaceId: string,
@@ -349,3 +354,25 @@ export const joinOrganization = Effect.fn(function* (
     VALUES (${spaceId}, ${userId}, ${role}, '2026-01-01T00:00:00.000Z')
   `;
 });
+
+// An authenticator app, written from RFC 6238 independently of the server's code.
+export const totpCode = (base32Secret: string, nowMillis: number) =>
+  Effect.promise(async () => {
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let bits = "";
+    for (const char of base32Secret) bits += alphabet.indexOf(char).toString(2).padStart(5, "0");
+    const keyBytes = Uint8Array.from(bits.match(/.{8}/g) ?? [], (byte) => Number.parseInt(byte, 2));
+    const key = await crypto.subtle.importKey(
+      "raw",
+      keyBytes,
+      { name: "HMAC", hash: "SHA-1" },
+      false,
+      ["sign"],
+    );
+    const counter = new Uint8Array(8);
+    new DataView(counter.buffer).setBigUint64(0, BigInt(Math.floor(nowMillis / 30_000)));
+    const tag = new DataView(await crypto.subtle.sign("HMAC", key, counter));
+
+    const offset = tag.getUint8(tag.byteLength - 1) & 0x0f;
+    return String((tag.getUint32(offset) & 0x7fff_ffff) % 1_000_000).padStart(6, "0");
+  });

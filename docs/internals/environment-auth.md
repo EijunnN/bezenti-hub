@@ -118,17 +118,44 @@ permission, which only the Owner holds until the Owner can grant it.
 Spaces are read and Organizations created over HTTP (`/api/spaces`), beside the
 account endpoints, rather than as guarded WS commands: creating an Organization
 depends on who the User is, not on a session scope, so clients show controls from
-the server's `canCreateOrganization` and `canCreateThreads` answers.
+the server's `canCreateOrganization`, `canCreateThreads` and `canInvite` answers.
+
+### Invitations
+
+People join an Organization only through an Invitation
+([InvitationService](../../apps/server/src/spaces/InvitationService.ts)), which
+carries the Role and is created, listed and revoked over HTTP
+(`/api/spaces/:spaceId/invitations`, `/api/invitations/revoke`). The policy's
+`invitation.create` and `invitation.manage` actions allow only the Owner for now,
+only in an Organization (nothing is shared from a Personal space), and creating
+needs a live one. The link is `<origin>/invite#token=…`; the token is 32 random
+bytes shown once, and only its SHA-256 is stored, so looking it up leaks nothing
+through timing. The web app's startup pairing leaves `#token=` alone on `/invite`,
+as on `/reset`.
+
+The invitee's endpoints (`/api/invitations/preview`, `registration`,
+`totp-enrollment`, `accept`) need no session. An unknown, expired (7 days),
+revoked, used or archived-Organization link answers the same `invalid` preview
+and the same refusal, and each such miss counts toward the per-client back-off
+of password sign-in. Accepting verifies the passkey, or hashes the password and
+checks the TOTP code, first; then one transaction creates the User, spends the
+Invitation with a conditional `UPDATE` (so of two racing accepts one wins),
+adds the membership and issues the browser session. A refusal inside it, such as
+a taken sign-in name, leaves the link unspent. A signed-in User accepts through
+`/api/invitations/join`, which adds the Organization to their User instead; it
+refuses the Owner, an existing Member, and an Admin Invitation for an account
+that signs in with a password alone.
 
 ### Sign-in rules
 
 Which accounts may use a password without a second factor is one function,
-`passwordRequiresTotp` in UserDirectory, and today it is true only for the Owner.
-The spec gives Admins the same rule once Roles exist, so extend that function
-rather than checking `isOwner` at call sites. It applies three times: setting a
-password needs TOTP enrolled first, removing TOTP needs the password gone first,
-and password sign-in refuses an account the rule covers when it has no TOTP. The
-last check catches an account whose rule changed after it set a password.
+`passwordRequiresTotp` in UserDirectory: true for the Owner and for an Admin of
+any Organization. Extend that function rather than checking roles at call sites.
+It applies three times: setting a password needs TOTP enrolled first, removing
+TOTP needs the password gone first, and password sign-in refuses an account the
+rule covers when it has no TOTP. The last check catches an account whose rule
+changed after it set a password. An Admin Invitation therefore takes a passkey,
+or a password together with a TOTP enrollment confirmed in the same accept.
 
 Any account with TOTP gets the code step: the password step answers
 `secondFactor: "totp"` with a short-lived challenge id, and the code goes to

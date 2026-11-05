@@ -33,6 +33,8 @@ const DENIED_ACTION_LABELS: Record<string, string> = {
   "thread.create": "create Threads",
   "project.create": "create Projects",
   "organization.create": "create Organizations",
+  "invitation.create": "invite people",
+  "invitation.manage": "manage Invitations",
 };
 
 export class SpaceAccessDeniedError extends Schema.TaggedError<SpaceAccessDeniedError>()(
@@ -138,6 +140,21 @@ export class SpaceDirectory extends Context.Service<
     readonly claimCreation: (
       claim: CreationClaim,
     ) => Effect.Effect<CreationStamp | undefined, SpaceClaimError>;
+    /** The Space, once the policy allows the User the action there. */
+    readonly authorize: (
+      userId: UserId,
+      action: AccessPolicy.Action,
+      spaceId: SpaceId,
+    ) => Effect.Effect<{ readonly id: SpaceId; readonly name: string }, SpaceClaimError>;
+    /**
+     * Makes the User a Member of the Organization with the Role; false when they already are one.
+     * Run it in the caller's transaction (accepting an Invitation).
+     */
+    readonly addMembership: (input: {
+      readonly spaceId: SpaceId;
+      readonly userId: UserId;
+      readonly role: SpaceRole;
+    }) => Effect.Effect<boolean, SpaceDirectoryStorageError>;
   }
 >()("t3/spaces/SpaceDirectory") {}
 
@@ -231,6 +248,7 @@ const make = Effect.gen(function* () {
         role: null,
         isOwn: true,
         canCreateThreads: allows(principal, "thread.create", personal),
+        canInvite: false,
       },
       ...organizations
         .filter((row) => allows(principal, "space.view", toResource(row)))
@@ -241,6 +259,7 @@ const make = Effect.gen(function* () {
           role: principal.roles.get(row.spaceId) ?? null,
           isOwn: false,
           canCreateThreads: allows(principal, "thread.create", toResource(row)),
+          canInvite: allows(principal, "invitation.create", toResource(row)),
         })),
     ];
     return {
@@ -281,6 +300,7 @@ const make = Effect.gen(function* () {
       role: null,
       isOwn: false,
       canCreateThreads: true,
+      canInvite: true,
     } satisfies SpaceSummary;
   });
 
@@ -315,7 +335,43 @@ const make = Effect.gen(function* () {
     return { spaceId, ownerUserId: actor } satisfies CreationStamp;
   });
 
-  return SpaceDirectory.of({ principalOf, view, createOrganization, claimCreation });
+  const authorize = Effect.fn("SpaceDirectory.authorize")(function* (
+    userId: UserId,
+    action: AccessPolicy.Action,
+    spaceId: SpaceId,
+  ) {
+    const [space, principal] = yield* Effect.all(
+      [findSpace(spaceId).pipe(Effect.mapError(storageError)), principalOf(userId)],
+      { concurrency: "unbounded" },
+    );
+    if (Option.isNone(space)) return yield* new SpaceNotFoundError({ spaceId });
+    yield* requireAllowed(principal, action, toResource(space.value));
+    return { id: space.value.spaceId, name: space.value.name };
+  });
+
+  const addMembership = Effect.fn("SpaceDirectory.addMembership")(function* (input: {
+    readonly spaceId: SpaceId;
+    readonly userId: UserId;
+    readonly role: SpaceRole;
+  }) {
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const inserted = yield* sql<{ readonly userId: string }>`
+      INSERT INTO space_memberships (space_id, user_id, role, created_at)
+      VALUES (${input.spaceId}, ${input.userId}, ${input.role}, ${now})
+      ON CONFLICT (space_id, user_id) DO NOTHING
+      RETURNING user_id AS "userId"
+    `.pipe(Effect.mapError(storageError));
+    return inserted.length > 0;
+  });
+
+  return SpaceDirectory.of({
+    principalOf,
+    view,
+    createOrganization,
+    claimCreation,
+    authorize,
+    addMembership,
+  });
 });
 
 export const layer = Layer.effect(SpaceDirectory, make);

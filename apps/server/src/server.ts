@@ -203,6 +203,8 @@ import * as OrchestrationHttp from "./orchestration-v2/http.ts";
 import * as ProjectHttp from "./project/http.ts";
 import * as SpaceDirectory from "./spaces/SpaceDirectory.ts";
 import * as SpacesHttp from "./spaces/http.ts";
+import * as InvitationService from "./spaces/InvitationService.ts";
+import * as InvitationsHttp from "./spaces/invitationsHttp.ts";
 import * as NetService from "@t3tools/shared/Net";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import {
@@ -516,7 +518,8 @@ const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
 
 const layerServerEnvironment = ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer));
 
-const layerAuth = Layer.merge(EnvironmentAuth.layer, SpaceDirectory.layer).pipe(
+const layerAuth = InvitationService.layer.pipe(
+  Layer.provideMerge(Layer.merge(EnvironmentAuth.layer, SpaceDirectory.layer)),
   Layer.provideMerge(layerPersistence),
   Layer.provide(layerServerEnvironment),
   Layer.provide(ServerSecretStore.layer),
@@ -755,6 +758,7 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provide(PullRequestHttp.layer),
       Layer.provide(ProjectHttp.layer),
       Layer.provide(SpacesHttp.layer),
+      Layer.provide(InvitationsHttp.layer),
       Layer.provide(ServerHttp.layerServerEnvironmentHttpApi),
       Layer.provide(WebhookRoute.layer.pipe(Layer.provide(RelayDeliveryProof.layer))),
       Layer.provide(AuthHttp.layerAuthenticatedAuth),

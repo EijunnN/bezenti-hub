@@ -172,10 +172,24 @@ export interface AccountActor {
 }
 
 /**
- * Accounts that may use a password only together with TOTP. Today that is the Owner; Admins join
- * when Roles exist (see the sign-in rules in docs/internals/environment-auth.md).
+ * Accounts that may use a password only together with TOTP: the Owner and every Admin (see the
+ * sign-in rules in docs/internals/environment-auth.md).
  */
-const passwordRequiresTotp = (user: Pick<Users.UserRecord, "isOwner">): boolean => user.isOwner;
+const passwordRequiresTotp = (
+  user: Pick<Users.UserRecord, "isOwner">,
+  credentials: Pick<Users.UserCredentials, "isAdmin">,
+): boolean => user.isOwner || credentials.isAdmin;
+
+/** A User an Invitation creates, verified and hashed but not stored yet. */
+export interface PendingInvitee {
+  readonly userId: UserId;
+  readonly displayName: string;
+  /** The Invitation it was prepared for; only that one can create it. */
+  readonly tokenHash: string;
+  readonly passkey: Users.CreateOwnerInput["passkey"] | null;
+  readonly password: { readonly loginName: string; readonly passwordHash: string } | null;
+  readonly totpSecretCiphertext: string | null;
+}
 
 interface Ceremony {
   readonly challenge: string;
@@ -189,6 +203,7 @@ interface OwnerRegistrationCeremony extends Ceremony {
   readonly displayName: string;
 }
 
+/** Started from a reset link or an Invitation: bound to the token it came from. */
 interface ResetRegistrationCeremony extends OwnerRegistrationCeremony {
   readonly tokenHash: string;
 }
@@ -341,6 +356,39 @@ export class UserDirectory extends Context.Service<
       readonly origin: string;
       readonly response: AuthPasskeyRegistrationResponse;
     }) => Effect.Effect<PendingResetPasskey, PasskeyRejectedError>;
+    /** A passkey registration for a new User an Invitation (by its token hash) creates. */
+    readonly startInviteeRegistration: (input: {
+      readonly displayName: string;
+      readonly origin: string;
+      readonly tokenHash: string;
+    }) => Effect.Effect<AuthPasskeyRegistrationCeremony>;
+    readonly verifyInviteeRegistration: (input: {
+      readonly ceremonyId: string;
+      readonly origin: string;
+      readonly response: AuthPasskeyRegistrationResponse;
+    }) => Effect.Effect<PendingInvitee, PasskeyRejectedError>;
+    /** A TOTP secret for an invitee, held until the accept that confirms it with a code. */
+    readonly startInviteeTotpEnrollment: (input: {
+      readonly tokenHash: string;
+      readonly label: string;
+    }) => Effect.Effect<AuthTotpEnrollment, UserDirectoryStorageError>;
+    /** Hashes the password and checks the TOTP code, outside the transaction that stores them. */
+    readonly prepareInviteePassword: (input: {
+      readonly tokenHash: string;
+      readonly displayName: string;
+      readonly loginName: string;
+      readonly password: string;
+      readonly totp: { readonly enrollmentId: string; readonly code: string } | undefined;
+    }) => Effect.Effect<
+      PendingInvitee,
+      AccountChangeRefusedError | LoginNameTakenError | UserDirectoryStorageError
+    >;
+    /** Stores a prepared invitee; run it in the transaction that spends the Invitation. */
+    readonly createInvitedUser: (
+      pending: PendingInvitee,
+    ) => Effect.Effect<AuthUser, LoginNameTakenError | UserDirectoryStorageError>;
+    /** Whether the User signs in with more than a password: a passkey or TOTP. */
+    readonly hasStrongSignIn: (userId: UserId) => Effect.Effect<boolean, UserDirectoryStorageError>;
     /**
      * Spends the link, replaces every passkey with the new one and ends the User's sessions; run
      * it in the transaction that issues the new session.
@@ -411,6 +459,13 @@ const make = Effect.gen(function* () {
   const resetRegistrations = makeCeremonyStore<ResetRegistrationCeremony>(
     MAX_PENDING_OWNER_REGISTRATIONS,
   );
+  // Each needs a live Invitation; the bound keeps a flood of them from growing memory.
+  const inviteeRegistrations = makeCeremonyStore<ResetRegistrationCeremony>(MAX_PENDING_SIGN_INS);
+  const inviteeTotpEnrollments = makeExpiringStore<{
+    readonly tokenHash: string;
+    readonly secret: Uint8Array;
+    readonly expiresAt: DateTime.DateTime;
+  }>(MAX_PENDING_TOTP);
   const totpEnrollments = makeExpiringStore<{
     readonly userId: UserId;
     readonly secret: Uint8Array;
@@ -733,7 +788,7 @@ const make = Effect.gen(function* () {
       hasPasskey: credentials.hasPasskey,
       hasPassword: credentials.passwordHash !== null,
       totpEnrolled: credentials.totpSecretCiphertext !== null,
-      passwordRequiresTotp: passwordRequiresTotp(user),
+      passwordRequiresTotp: passwordRequiresTotp(user, credentials),
     } satisfies AuthAccount;
   });
 
@@ -821,7 +876,7 @@ const make = Effect.gen(function* () {
   )(function* (actor, input) {
     const user = yield* requireAccount(actor.userId);
     const credentials = yield* users.getCredentials(actor.userId).pipe(storage);
-    if (passwordRequiresTotp(user) && credentials.totpSecretCiphertext === null) {
+    if (passwordRequiresTotp(user, credentials) && credentials.totpSecretCiphertext === null) {
       return yield* new AccountChangeRefusedError({
         reason: "Set up an authenticator app first: this account needs a code with its password.",
       });
@@ -864,7 +919,7 @@ const make = Effect.gen(function* () {
       const user = yield* requireAccount(actor.userId);
       yield* requireStepUp(actor, user, reauth);
       const credentials = yield* users.getCredentials(actor.userId).pipe(storage);
-      if (passwordRequiresTotp(user) && credentials.passwordHash !== null) {
+      if (passwordRequiresTotp(user, credentials) && credentials.passwordHash !== null) {
         return yield* new AccountChangeRefusedError({
           reason: "Remove your password first: this account cannot use a password without a code.",
         });
@@ -972,8 +1027,8 @@ const make = Effect.gen(function* () {
       );
       return { _tag: "totp-required", challengeId } as const;
     }
-    // A rule change (a Role, later) can leave a password-only account that now needs TOTP.
-    if (!canSignIn || passwordRequiresTotp(user)) {
+    // A rule change (becoming an Admin) can leave a password-only account that now needs TOTP.
+    if (!canSignIn || credentials === undefined || passwordRequiresTotp(user, credentials)) {
       yield* recordFailure(keys);
       return yield* new PasswordRejectedError({});
     }
@@ -1126,7 +1181,126 @@ const make = Effect.gen(function* () {
     return toAuthUser(user.value);
   });
 
+  const startInviteeRegistration: UserDirectory["Service"]["startInviteeRegistration"] = Effect.fn(
+    "UserDirectory.startInviteeRegistration",
+  )(function* ({ displayName, origin, tokenHash }) {
+    const userId = UserId.make(yield* random.uuidV4());
+    const challenge = yield* randomBase64Url(32);
+    const rpId = new URL(origin).hostname;
+    const ceremonyId = yield* random.uuidV4();
+    const now = yield* DateTime.now;
+    yield* inviteeRegistrations.put(
+      ceremonyId,
+      { challenge, origin, rpId, expiresAt: ceremonyExpiry(now), userId, displayName, tokenHash },
+      now,
+    );
+    return registrationCeremony({ ceremonyId, challenge, rpId, userId, displayName });
+  });
+
+  const verifyInviteeRegistration: UserDirectory["Service"]["verifyInviteeRegistration"] =
+    Effect.fn("UserDirectory.verifyInviteeRegistration")(function* (input) {
+      const { ceremony, passkey } = yield* verifyRegistration(inviteeRegistrations, input);
+      return {
+        userId: ceremony.userId,
+        displayName: ceremony.displayName,
+        tokenHash: ceremony.tokenHash,
+        passkey,
+        password: null,
+        totpSecretCiphertext: null,
+      } satisfies PendingInvitee;
+    });
+
+  const startInviteeTotpEnrollment: UserDirectory["Service"]["startInviteeTotpEnrollment"] =
+    Effect.fn("UserDirectory.startInviteeTotpEnrollment")(function* ({ tokenHash, label }) {
+      const secret = yield* AccountCredentials.generateTotpSecret.pipe(withCrypto);
+      const enrollmentId = yield* random.uuidV4();
+      const now = yield* DateTime.now;
+      yield* inviteeTotpEnrollments.put(
+        enrollmentId,
+        {
+          tokenHash,
+          secret,
+          expiresAt: DateTime.add(now, { milliseconds: Duration.toMillis(TOTP_ENROLLMENT_TTL) }),
+        },
+        now,
+      );
+      return { enrollmentId, ...AccountCredentials.totpEnrollment(secret, label) };
+    });
+
+  const prepareInviteePassword: UserDirectory["Service"]["prepareInviteePassword"] = Effect.fn(
+    "UserDirectory.prepareInviteePassword",
+  )(function* (input) {
+    const loginName = normalizeLoginName(input.loginName);
+    if (Option.isSome(yield* users.getByLoginName(loginName).pipe(storage))) {
+      return yield* new LoginNameTakenError({});
+    }
+    const userId = UserId.make(yield* random.uuidV4());
+    let totpSecretCiphertext: string | null = null;
+    if (input.totp !== undefined) {
+      const now = yield* DateTime.now;
+      const pending = yield* inviteeTotpEnrollments.get(input.totp.enrollmentId, now);
+      if (pending === undefined || pending.tokenHash !== input.tokenHash) {
+        return yield* new AccountChangeRefusedError({
+          reason: "This authenticator setup expired. Start it again to get a new code.",
+        });
+      }
+      const step = yield* AccountCredentials.matchTotpStep(
+        pending.secret,
+        input.totp.code,
+        DateTime.toEpochMillis(now),
+      ).pipe(withCrypto);
+      if (step === undefined) {
+        return yield* new AccountChangeRefusedError({
+          reason: "That code did not match. Check the time on your device and try again.",
+        });
+      }
+      totpSecretCiphertext = yield* credentialKey.pipe(
+        Effect.flatMap((key) => AccountCredentials.seal(key, pending.secret, userId)),
+        withCrypto,
+        storage,
+      );
+    }
+    return {
+      userId,
+      displayName: input.displayName,
+      tokenHash: input.tokenHash,
+      passkey: null,
+      password: { loginName, passwordHash: yield* hashPassword(input.password) },
+      totpSecretCiphertext,
+    } satisfies PendingInvitee;
+  });
+
+  const createInvitedUser: UserDirectory["Service"]["createInvitedUser"] = Effect.fn(
+    "UserDirectory.createInvitedUser",
+  )(function* (pending) {
+    const created = yield* users
+      .createUser({
+        userId: pending.userId,
+        displayName: pending.displayName,
+        createdAt: yield* DateTime.now,
+        passkey: pending.passkey,
+        password: pending.password,
+        totpSecretCiphertext: pending.totpSecretCiphertext,
+      })
+      .pipe(storage);
+    if (!created) return yield* new LoginNameTakenError({});
+    return { id: pending.userId, displayName: pending.displayName, isOwner: false };
+  });
+
+  const hasStrongSignIn: UserDirectory["Service"]["hasStrongSignIn"] = Effect.fn(
+    "UserDirectory.hasStrongSignIn",
+  )(function* (userId) {
+    const credentials = yield* users.getCredentials(userId).pipe(storage);
+    return credentials.hasPasskey || credentials.totpSecretCiphertext !== null;
+  });
+
   return UserDirectory.of({
+    startInviteeRegistration,
+    verifyInviteeRegistration,
+    startInviteeTotpEnrollment,
+    prepareInviteePassword,
+    createInvitedUser,
+    hasStrongSignIn,
     hasOwner: Effect.fn("UserDirectory.hasOwner")(function () {
       return users.hasOwner().pipe(storage);
     }),

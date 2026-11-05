@@ -256,6 +256,22 @@ sidebar; new projects and threads go there, and a thread started in a project
 joins that project's Space. Each person's choice is remembered in their browser. The Owner creates organizations from the same
 selector with **Create organization**. The Owner can see every Personal space.
 
+### Invite people
+
+To add someone to an organization, switch to it in the Space selector, choose
+**Invite people**, pick a Role (Member, Guest or Admin) and press **Create invite
+link**. Copy the link and send it over any chat app: it is shown only once, works
+once and expires after 7 days. The same dialog lists every invitation with its
+status (pending, accepted, expired or revoked) and has **Revoke** for pending ones.
+
+Opening the link shows the organization, the Role and who invited you, and tells
+you that the Owner can see your Personal space. Enter your name and create your
+account with a passkey, or with a sign-in name and password. An Admin who picks a
+password also sets up an authenticator app on the same page. You land signed in,
+in that organization. If you are already signed in, **Accept invitation** adds
+the organization to your account instead. The mobile app cannot accept
+invitations yet; open the link in a browser.
+
 ## Next steps
 
 - [Working with threads](./thread-sidebar.md): start tasks and organize parallel work.

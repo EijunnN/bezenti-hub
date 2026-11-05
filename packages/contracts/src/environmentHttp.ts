@@ -62,6 +62,19 @@ import {
 } from "./userAccounts.ts";
 import { CreateOrganizationRequest, SpaceDirectoryView, SpaceSummary } from "./spaces.ts";
 import {
+  AcceptInvitationRequest,
+  AcceptInvitationResult,
+  CreatedInvitation,
+  CreateInvitationRequest,
+  InvitationList,
+  InvitationPreview,
+  InvitationRegistrationRequest,
+  InvitationSummary,
+  InvitationTokenRequest,
+  JoinInvitationResult,
+  RevokeInvitationRequest,
+} from "./invitations.ts";
+import {
   ExecutionEnvironmentDescriptor,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
@@ -69,6 +82,7 @@ import {
 import {
   DpopFailureReason,
   AuthSessionId,
+  SpaceId,
   UserId,
   ThreadId,
   TrimmedNonEmptyString,
@@ -151,6 +165,7 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "orchestration_thread_bounded_snapshot_failed",
   "orchestration_thread_history_failed",
   "spaces_failed",
+  "invitations_failed",
   "internal_error",
 ]);
 export type EnvironmentInternalErrorReason = typeof EnvironmentInternalErrorReason.Type;
@@ -943,6 +958,87 @@ class EnvironmentSpacesHttpApi extends HttpApiGroup.make("spaces")
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
+const EnvironmentInvitationManageErrors = [
+  // The session has no User, or the policy refuses the change.
+  EnvironmentHttpForbiddenError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentInvitationRedeemErrors = [
+  // The link is unknown, expired, revoked, used or into an archived Organization.
+  EnvironmentHttpForbiddenError,
+  // The sign-in name belongs to another User, or the User is already a Member.
+  EnvironmentHttpConflictError,
+  // Too many failed attempts from this client.
+  EnvironmentRateLimitedError,
+  EnvironmentRequestInvalidError,
+  EnvironmentInternalError,
+] as const;
+const InvitationSpaceParams = Schema.Struct({ spaceId: SpaceId });
+
+class EnvironmentInvitationsHttpApi extends HttpApiGroup.make("invitations")
+  .add(
+    HttpApiEndpoint.get("list", "/api/spaces/:spaceId/invitations", {
+      headers: OptionalBearerHeaders,
+      params: InvitationSpaceParams,
+      success: InvitationList,
+      error: EnvironmentInvitationManageErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("create", "/api/spaces/:spaceId/invitations", {
+      headers: OptionalBearerHeaders,
+      params: InvitationSpaceParams,
+      payload: CreateInvitationRequest,
+      success: CreatedInvitation,
+      error: EnvironmentInvitationManageErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("revoke", "/api/invitations/revoke", {
+      headers: OptionalBearerHeaders,
+      payload: RevokeInvitationRequest,
+      success: InvitationSummary,
+      error: EnvironmentInvitationManageErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  // The rest are for the invitee, who usually has no session yet.
+  .add(
+    HttpApiEndpoint.post("preview", "/api/invitations/preview", {
+      payload: InvitationTokenRequest,
+      success: InvitationPreview,
+      error: [EnvironmentRateLimitedError, EnvironmentInternalError],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("registration", "/api/invitations/registration", {
+      payload: InvitationRegistrationRequest,
+      success: AuthPasskeyRegistrationCeremony,
+      error: EnvironmentInvitationRedeemErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("totpEnrollment", "/api/invitations/totp-enrollment", {
+      payload: InvitationTokenRequest,
+      success: AuthTotpEnrollment,
+      error: EnvironmentInvitationRedeemErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("accept", "/api/invitations/accept", {
+      payload: AcceptInvitationRequest,
+      success: AcceptInvitationResult,
+      error: EnvironmentInvitationRedeemErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("join", "/api/invitations/join", {
+      headers: OptionalBearerHeaders,
+      payload: InvitationTokenRequest,
+      success: JoinInvitationResult,
+      error: EnvironmentInvitationRedeemErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  ) {}
+
 class EnvironmentProjectsHttpApi extends HttpApiGroup.make("projects")
   .add(
     HttpApiEndpoint.get("snapshot", "/api/projects", {
@@ -1064,5 +1160,6 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentPullRequestsHttpApi)
   .add(EnvironmentProjectsHttpApi)
   .add(EnvironmentSpacesHttpApi)
+  .add(EnvironmentInvitationsHttpApi)
   .add(EnvironmentConnectHttpApi)
   .add(EnvironmentWebhooksHttpApi) {}

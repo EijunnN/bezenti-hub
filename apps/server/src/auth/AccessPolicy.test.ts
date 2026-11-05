@@ -179,6 +179,40 @@ const rows: ReadonlyArray<
     { ...personalOf("grace"), frozen: true },
     deny("space-frozen"),
   ],
+
+  // Invitations: only the Owner invites, and only into a live Organization (ticket 09 adds Admins).
+  ["Owner invites to an Organization", owner, "invitation.create", organization, allow],
+  ["Admin cannot invite yet", admin, "invitation.create", organization, deny("owner-only")],
+  ["Member cannot invite", member, "invitation.create", organization, deny("owner-only")],
+  ["Guest cannot invite", guest, "invitation.create", organization, deny("owner-only")],
+  [
+    "nobody invites into a Personal space, not even the Owner",
+    owner,
+    "invitation.create",
+    personalOf("grace"),
+    deny("wrong-resource"),
+  ],
+  [
+    "nobody invites into an archived Organization",
+    owner,
+    "invitation.create",
+    archivedOrganization,
+    deny("space-archived"),
+  ],
+  [
+    "the Owner lists and revokes Invitations, even of an archived Organization",
+    owner,
+    "invitation.manage",
+    archivedOrganization,
+    allow,
+  ],
+  [
+    "Admin cannot list or revoke Invitations yet",
+    admin,
+    "invitation.manage",
+    organization,
+    deny("owner-only"),
+  ],
 ];
 
 describe("AccessPolicy.decide", () => {

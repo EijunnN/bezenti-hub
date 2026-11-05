@@ -45,8 +45,9 @@ const CREDENTIAL_RESPONSE_HEADERS = {
   pragma: "no-cache",
 } as const;
 
-const appendCredentialResponseHeaders = HttpEffect.appendPreResponseHandler((_request, response) =>
-  Effect.succeed(HttpServerResponse.setHeaders(response, CREDENTIAL_RESPONSE_HEADERS)),
+export const appendCredentialResponseHeaders = HttpEffect.appendPreResponseHandler(
+  (_request, response) =>
+    Effect.succeed(HttpServerResponse.setHeaders(response, CREDENTIAL_RESPONSE_HEADERS)),
 );
 
 const appendDpopChallengeHeader = HttpEffect.appendPreResponseHandler((_request, response) =>
@@ -213,7 +214,11 @@ const appendCookies = (cookies: ReturnType<typeof Cookies.set>) =>
     ),
   );
 
-const appendSessionCookie = (cookieName: string, token: string, expiresAt: DateTime.DateTime) =>
+export const appendSessionCookie = (
+  cookieName: string,
+  token: string,
+  expiresAt: DateTime.DateTime,
+) =>
   appendCookies(
     Cookies.set(Cookies.empty, cookieName, token, {
       ...SESSION_COOKIE_ATTRIBUTES,

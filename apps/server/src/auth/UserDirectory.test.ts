@@ -10,11 +10,13 @@ import {
   type CreationOptions,
   finishOwnerRegistration,
   isSignedIn,
+  joinOrganization,
   makeAuthenticator,
   passkeyReauth,
   type RequestOptions,
   serveAuthHttp,
   startOwnerRegistration,
+  totpCode,
 } from "./UserAuth.testkit.ts";
 
 it.effect("bootstraps exactly one Owner whose session carries its user id", () =>
@@ -166,28 +168,6 @@ it.effect("keeps a pending Owner registration while sign-in challenges flood in"
   }),
 );
 
-// An authenticator app, written from RFC 6238 independently of the server's code.
-const totpCode = (base32Secret: string, nowMillis: number) =>
-  Effect.promise(async () => {
-    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-    let bits = "";
-    for (const char of base32Secret) bits += alphabet.indexOf(char).toString(2).padStart(5, "0");
-    const keyBytes = Uint8Array.from(bits.match(/.{8}/g) ?? [], (byte) => Number.parseInt(byte, 2));
-    const key = await crypto.subtle.importKey(
-      "raw",
-      keyBytes,
-      { name: "HMAC", hash: "SHA-1" },
-      false,
-      ["sign"],
-    );
-    const counter = new Uint8Array(8);
-    new DataView(counter.buffer).setBigUint64(0, BigInt(Math.floor(nowMillis / 30_000)));
-    const tag = new DataView(await crypto.subtle.sign("HMAC", key, counter));
-
-    const offset = tag.getUint8(tag.byteLength - 1) & 0x0f;
-    return String((tag.getUint32(offset) & 0x7fff_ffff) % 1_000_000).padStart(6, "0");
-  });
-
 const passwordReauth = (password: string, totpCode?: string) => ({
   method: "password",
   password,
@@ -245,6 +225,27 @@ it.effect("lets a Member sign in with a password alone", () =>
       cookie,
     });
     expect(removal.status).toBe(403);
+  }),
+);
+
+it.effect("refuses a password alone for an Admin, as for the Owner", () =>
+  Effect.gen(function* () {
+    const server = yield* serveAuthHttp;
+    const cookie = yield* addMember(server);
+    yield* server.request("/api/auth/account/password", {
+      body: { loginName: "grace", password: "correct horse battery" },
+      cookie,
+    });
+    yield* server.sql`INSERT INTO spaces (space_id, kind, name, created_at)
+      VALUES ('org-acme', 'organization', 'Acme', '2026-01-01T00:00:00.000Z')`;
+    yield* joinOrganization(server, "org-acme", "member-1", "admin");
+
+    const signIn = yield* server.request("/api/auth/password/sign-in", {
+      body: { loginName: "grace", password: "correct horse battery" },
+    });
+    expect(signIn.status).toBe(401);
+    const account = yield* server.request("/api/auth/account", { cookie });
+    expect(account.body).toMatchObject({ passwordRequiresTotp: true });
   }),
 );
 

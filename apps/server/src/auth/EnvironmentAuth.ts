@@ -735,6 +735,22 @@ export class EnvironmentAuth extends Context.Service<
       UserBrowserSession,
       ServerAuthInvalidOriginError | ServerAuthInvalidCredentialError | ServerAuthInternalError
     >;
+    /** The page origin a passkey ceremony from this request is bound to. */
+    readonly passkeyOrigin: (
+      request: HttpServerRequest.HttpServerRequest,
+    ) => Effect.Effect<string, ServerAuthInvalidOriginError>;
+    /**
+     * Signs this browser in as a User whose identity the caller already proved (an Invitation
+     * that just created them); runs inside the caller's transaction.
+     */
+    readonly startUserBrowserSession: (
+      request: HttpServerRequest.HttpServerRequest,
+      user: AuthUser,
+      requestMetadata: AuthClientMetadata,
+    ) => Effect.Effect<
+      UserBrowserSession,
+      ServerAuthInvalidCredentialError | ServerAuthInternalError
+    >;
     /** For the Hub's shell (`t3 auth owner-reset`), when the Owner has lost every passkey. */
     readonly issueOwnerResetLink: UserDirectory.UserDirectory["Service"]["issueOwnerResetLink"];
     /** Revokes the request's browser session; false when it carried none it may end. */
@@ -2074,6 +2090,8 @@ export const make = Effect.gen(function* () {
     signInWithTotp,
     beginResetLinkRegistration,
     redeemResetLink,
+    passkeyOrigin: resolvePasskeyOrigin,
+    startUserBrowserSession: issueUserBrowserSession,
     issueOwnerResetLink: userDirectory.issueOwnerResetLink,
     signOut,
   });

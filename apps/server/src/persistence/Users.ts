@@ -57,6 +57,8 @@ const ConsumeRecoveryCodeInput = Schema.Struct({
 
 export const UserCredentials = Schema.Struct({
   hasPasskey: Schema.BooleanFromBit,
+  /** An Admin of some Organization, who like the Owner needs more than a password. */
+  isAdmin: Schema.BooleanFromBit,
   passwordHash: Schema.NullOr(Schema.String),
   totpSecretCiphertext: Schema.NullOr(Schema.String),
 });
@@ -92,6 +94,16 @@ const ResetLinkLookup = Schema.Struct({
   now: Schema.DateTimeUtcFromString,
 });
 
+export const CreateUserInput = Schema.Struct({
+  userId: UserId,
+  displayName: Schema.String,
+  createdAt: Schema.DateTimeUtcFromString,
+  passkey: Schema.NullOr(Schema.Struct(PasskeyFields)),
+  password: Schema.NullOr(Schema.Struct({ loginName: Schema.String, passwordHash: Schema.String })),
+  totpSecretCiphertext: Schema.NullOr(Schema.String),
+});
+export type CreateUserInput = typeof CreateUserInput.Type;
+
 const AddPasskeyInput = Schema.Struct({
   userId: UserId,
   passkey: Schema.Struct(PasskeyFields),
@@ -104,6 +116,11 @@ export class UserRepository extends Context.Service<
     readonly hasOwner: () => Effect.Effect<boolean, UserRepositoryError>;
     /** Creates the Owner with its first passkey and recovery codes; false when one exists. */
     readonly createOwner: (input: CreateOwnerInput) => Effect.Effect<boolean, UserRepositoryError>;
+    /**
+     * Creates a User who is not the Owner with their first credentials; false when the login name
+     * is taken. Run it in the caller's transaction.
+     */
+    readonly createUser: (input: CreateUserInput) => Effect.Effect<boolean, UserRepositoryError>;
     readonly getById: (
       userId: UserId,
     ) => Effect.Effect<Option.Option<UserRecord>, UserRepositoryError>;
@@ -215,6 +232,47 @@ const make = Effect.gen(function* () {
     }),
   });
 
+  const insertUser = SqlSchema.void({
+    Request: CreateUserInput,
+    execute: Effect.fn("UserRepository.insertUser")(function* (input) {
+      yield* sql`
+        INSERT INTO users (user_id, display_name, login_name, is_owner, created_at)
+        VALUES (
+          ${input.userId}, ${input.displayName}, ${input.password?.loginName ?? null}, 0, ${input.createdAt}
+        )
+      `;
+      if (input.passkey !== null) {
+        yield* sql`
+          INSERT INTO user_passkeys (
+            credential_id, user_id, public_key, sign_count, transports, rp_id, created_at
+          )
+          VALUES (
+            ${input.passkey.credentialId},
+            ${input.userId},
+            ${input.passkey.publicKey},
+            ${input.passkey.signCount},
+            ${input.passkey.transports},
+            ${input.passkey.rpId},
+            ${input.createdAt}
+          )
+        `;
+      }
+      if (input.password !== null) {
+        yield* sql`
+          INSERT INTO user_passwords (user_id, password_hash, updated_at)
+          VALUES (${input.userId}, ${input.password.passwordHash}, ${input.createdAt})
+        `;
+      }
+      if (input.totpSecretCiphertext !== null) {
+        // The enrollment code proved the app works; it was no sign-in, so no step is spent.
+        yield* sql`
+          INSERT INTO user_totp (user_id, secret_ciphertext, enrolled_at, last_used_step)
+          VALUES (${input.userId}, ${input.totpSecretCiphertext}, ${input.createdAt}, -1)
+        `;
+      }
+    }),
+  });
+
   const userColumns = sql.literal(`
     user_id AS "userId",
     display_name AS "displayName",
@@ -255,6 +313,9 @@ const make = Effect.gen(function* () {
     execute: (userId) => sql`
       SELECT
         EXISTS (SELECT 1 FROM user_passkeys WHERE user_id = ${userId}) AS "hasPasskey",
+        EXISTS (
+          SELECT 1 FROM space_memberships WHERE user_id = ${userId} AND role = 'admin'
+        ) AS "isAdmin",
         (SELECT password_hash FROM user_passwords WHERE user_id = ${userId}) AS "passwordHash",
         (SELECT secret_ciphertext FROM user_totp WHERE user_id = ${userId}) AS "totpSecretCiphertext"
     `,
@@ -426,6 +487,17 @@ const make = Effect.gen(function* () {
           ),
           Effect.mapError(toUserRepositoryError("UserRepository.createOwner")),
         );
+    }),
+    createUser: Effect.fn("UserRepository.createUser")(function (input) {
+      return insertUser(input).pipe(
+        Effect.as(true),
+        // Another User already signs in with this login name.
+        Effect.catchIf(
+          (error) => !Schema.isSchemaError(error) && error.reason._tag === "UniqueViolation",
+          () => Effect.succeed(false),
+        ),
+        Effect.mapError(toUserRepositoryError("UserRepository.createUser")),
+      );
     }),
     getById: Effect.fn("UserRepository.getById")(function (userId) {
       return findUserById(userId).pipe(

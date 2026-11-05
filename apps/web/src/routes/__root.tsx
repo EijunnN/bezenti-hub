@@ -159,6 +159,7 @@ function RootRouteBranch() {
     pathname === "/pair" ||
     pathname === "/sign-in" ||
     pathname === "/reset" ||
+    pathname === "/invite" ||
     pathname === "/connect" ||
     pathname === "/connect-agent"
   ) {

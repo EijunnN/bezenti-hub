@@ -431,8 +431,10 @@ export async function revokeOtherServerClientSessions(): Promise<number> {
   }
 }
 
-/** Pages whose `#token=` is not a pairing credential: an Owner reset link carries its own. */
-const ownsUrlToken = (pathname: string) => pathname.replace(/\/+$/, "") === "/reset";
+/** Pages whose `#token=` is not a pairing credential: Owner reset links and Invitations. */
+const PAGES_WITH_THEIR_OWN_TOKEN = new Set(["/reset", "/invite"]);
+const ownsUrlToken = (pathname: string) =>
+  PAGES_WITH_THEIR_OWN_TOKEN.has(pathname.replace(/\/+$/, ""));
 
 export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGateState> {
   // Preserve explicit grant replacement across the auth-gate reload triggered by token removal.

@@ -7,6 +7,7 @@ export * from "./acpRegistry.ts";
 export * from "./auth.ts";
 export * from "./userAccounts.ts";
 export * from "./spaces.ts";
+export * from "./invitations.ts";
 export * from "./environment.ts";
 export * from "./environmentHttp.ts";
 export * from "./relayClient.ts";

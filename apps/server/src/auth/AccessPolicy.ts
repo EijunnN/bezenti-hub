@@ -35,7 +35,29 @@ export type InstallationResource = typeof installation;
 
 export type Resource = SpaceResource | InstallationResource;
 
-export type Action = "space.view" | "thread.create" | "project.create" | "organization.create";
+export type Action =
+  | "space.view"
+  | "thread.create"
+  | "project.create"
+  | "organization.create"
+  /** Create an Invitation into an Organization. */
+  | "invitation.create"
+  /** List and revoke an Organization's Invitations. */
+  | "invitation.manage";
+
+/** Actions that read or manage rather than add something to the Space. */
+const NON_CREATING: ReadonlySet<Action> = new Set([
+  "space.view",
+  "organization.create",
+  "invitation.manage",
+]);
+
+/** Owner-only actions; ticket 09 lets Admins invite Members and Guests. */
+const OWNER_ONLY: ReadonlySet<Action> = new Set([
+  "organization.create",
+  "invitation.create",
+  "invitation.manage",
+]);
 
 export type DenyReason =
   | "owner-only"
@@ -79,13 +101,20 @@ const inOrganization = (
 };
 
 export const decide = (principal: Principal, action: Action, resource: Resource): Decision => {
-  const creates = action !== "space.view" && action !== "organization.create";
+  const creates = !NON_CREATING.has(action);
+  // Nothing is shared from a Personal space directly, so nobody is invited into one.
+  if (
+    (action === "invitation.create" || action === "invitation.manage") &&
+    (!isSpace(resource) || resource.kind !== "organization")
+  ) {
+    return deny("wrong-resource");
+  }
   if (creates && isSpace(resource)) {
     if (resource.archived) return deny("space-archived");
     if (resource.frozen) return deny("space-frozen");
   }
   if (principal.isOwner) return allow;
-  if (action === "organization.create") return deny("owner-only");
+  if (OWNER_ONLY.has(action)) return deny("owner-only");
   if (!isSpace(resource)) return deny("wrong-resource");
   if (resource.archived) return deny("space-archived");
   if (resource.kind === "personal") return inPersonalSpace(principal, resource, creates);
@@ -95,6 +124,10 @@ export const decide = (principal: Principal, action: Action, resource: Resource)
       return inOrganization(principal, resource);
     case "project.create":
       return inOrganization(principal, resource, ROLES_THAT_CREATE_PROJECTS);
+    case "organization.create":
+    case "invitation.create":
+    case "invitation.manage":
+      return deny("owner-only");
   }
 };
 

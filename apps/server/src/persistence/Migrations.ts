@@ -89,6 +89,7 @@ import Migration0082 from "./Migrations/082_UserPasswordsTotpAndResetLinks.ts";
 import Migration0083 from "./Migrations/083_UserBoundSessions.ts";
 import Migration0084 from "./Migrations/084_Spaces.ts";
 import Migration0085 from "./Migrations/085_PersonalSpaceWithUser.ts";
+import Migration0086 from "./Migrations/086_SpaceInvitations.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -177,6 +178,7 @@ const migrationEntries = [
   [83, "UserBoundSessions", Migration0083],
   [84, "Spaces", Migration0084],
   [85, "PersonalSpaceWithUser", Migration0085],
+  [86, "SpaceInvitations", Migration0086],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
