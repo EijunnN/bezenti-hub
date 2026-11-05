@@ -424,6 +424,9 @@ export async function revokeOtherServerClientSessions(): Promise<number> {
   }
 }
 
+/** Pages whose `#token=` is not a pairing credential: an Owner reset link carries its own. */
+const ownsUrlToken = (pathname: string) => pathname.replace(/\/+$/, "") === "/reset";
+
 export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGateState> {
   // Preserve explicit grant replacement across the auth-gate reload triggered by token removal.
   if (window.location.pathname.replace(/\/+$/, "") !== "/pair") {
@@ -436,7 +439,7 @@ export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGat
     return { status: "requires-auth", auth: currentSession.auth };
   }
 
-  const urlCredential = takePairingTokenFromUrl();
+  const urlCredential = ownsUrlToken(window.location.pathname) ? null : takePairingTokenFromUrl();
   const previousPromise = bootstrapPromise;
   if (urlCredential) {
     resolvedAuthenticatedGateState = null;
