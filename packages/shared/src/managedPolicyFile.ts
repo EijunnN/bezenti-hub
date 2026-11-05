@@ -110,6 +110,7 @@ export const WINDOWS_POLICY_VALUES = {
   SupportUrl: { type: "string", path: ["supportUrl"] },
   Settings: { type: "json", path: ["settings"] },
   MaxRuntimeMode: { type: "string", path: ["limits", "maxRuntimeMode"] },
+  // Ignored since ADR 0007 (no T3 Connect); still read so older Group Policy values load.
   Connect: { type: "boolean", path: ["limits", "connect"] },
   WebhookTasks: { type: "boolean", path: ["limits", "webhookTasks"] },
   // Ignored since ADR 0007; still read so older Group Policy values load.

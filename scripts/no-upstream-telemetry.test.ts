@@ -5,8 +5,7 @@ import * as NodeURL from "node:url";
 import { describe, expect, it } from "vite-plus/test";
 
 // ADR 0007: no client, server, build, or release step sends usage events or traces to
-// pingdotgg's services. infra/ and apps/marketing are pingdotgg's own hosted services,
-// removed separately.
+// pingdotgg's services. T3 Connect's relay (infra/relay) and the marketing site are gone.
 const UPSTREAM_TELEMETRY =
   /ingest\.t3\.codes|T3CODE_POSTHOG_|api\.axiom\.co|X-Axiom-Dataset|from "expo-observe"|"expo-observe":|RELAY_CLIENT_OTLP|relay-client-tracing/i;
 const REPO_ROOT = NodePath.resolve(NodeURL.fileURLToPath(import.meta.url), "../..");

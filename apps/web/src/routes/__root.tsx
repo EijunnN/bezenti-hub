@@ -22,8 +22,6 @@ import { AddProjectToMachineDialogHost } from "../components/AddProjectToMachine
 import { ConfirmDialogHost } from "../components/ConfirmDialogHost";
 import { DevReplayHost } from "../components/DevReplayHost";
 import { FirstRunGate } from "../components/onboarding/FirstRunGate";
-import { ConnectOnboardingDialog } from "../components/cloud/ConnectOnboardingDialog";
-import { RelayClientInstallDialog } from "../components/cloud/RelayClientInstallDialog";
 import { SshPasswordPromptDialog } from "../components/desktop/SshPasswordPromptDialog";
 import { SnapShotCoordinator } from "../components/desktop/SnapShotCoordinator";
 import { DesktopAppActivationCoordinator } from "../components/desktop/DesktopAppActivationCoordinator";
@@ -160,7 +158,6 @@ function RootRouteBranch() {
     pathname === "/sign-in" ||
     pathname === "/reset" ||
     pathname === "/invite" ||
-    pathname === "/connect" ||
     pathname === "/connect-agent"
   ) {
     return <Outlet />;
@@ -209,8 +206,6 @@ function RootRouteBranch() {
           <DesktopWebLinkCoordinator />
         ) : null}
         {isElectron ? <RunningThreadKeepAlive /> : null}
-        <RelayClientInstallDialog />
-        <ConnectOnboardingDialog />
         <SshPasswordPromptDialog />
         <SnapShotCoordinator />
         <ReopenClosedViewShortcut />

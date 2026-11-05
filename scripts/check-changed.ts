@@ -172,8 +172,7 @@ export const comparisonBase = Effect.fn("checkChanged.comparisonBase")(function*
   return closest;
 });
 
-// CI's lint and knip also read Astro components' frontmatter.
-const CODE = /\.(?:[cm]?[jt]sx?|astro)$/;
+const CODE = /\.[cm]?[jt]sx?$/;
 const TEST = /\.test\.[cm]?[jt]sx?$/;
 // CI runs the .github/scripts tests with `node --test`; vitest passes a failing node:test file.
 const NODE_TEST = /^\.github[/\\]scripts[/\\]/;
@@ -200,12 +199,6 @@ const override = Effect.fn("checkChanged.override")(function* (
   }
   return value;
 });
-
-// Tests that read a doc; a changed doc has no test beside it to select them.
-export const docReaderTests = (files: ReadonlyArray<string>) =>
-  files.includes("docs/user/t3-connect-troubleshooting.md")
-    ? ["apps/server/src/cloud/ConnectReachability.test.ts"]
-    : [];
 
 const checkChanged = Effect.fn("checkChanged")(function* (input: {
   readonly ref: Option.Option<string>;
@@ -274,7 +267,6 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
       "--exclude-standard",
       "--",
       ":(glob)**/.generated/**",
-      ":(glob)**/.astro/**",
       ":(glob)**/*.d.ts",
       ":(glob)**/.env*",
       ":(exclude,glob)**/node_modules/**",
@@ -326,7 +318,6 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
       if (entry.startsWith(prefix) && TEST.test(entry)) tests.add(path.join(dir, entry));
     }
   }
-  for (const test of docReaderTests(files)) tests.add(test);
   // It reads files other than the ones beside it, so no changed file selects it.
   if (affected.includes("t3")) tests.add("apps/server/src/provider/AgentContextBudget.test.ts");
   const { vitestTests, nodeTests } = splitTests(tests);

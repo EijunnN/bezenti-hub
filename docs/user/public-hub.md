@@ -1,7 +1,7 @@
 # Publish the Hub on your domain
 
 Put the Hub at an address such as `https://hub.example.com` so the people you
-invite can sign in from anywhere, without Tailscale or T3 Connect. A reverse
+invite can sign in from anywhere, without Tailscale. A reverse
 proxy on the same machine serves HTTPS and forwards to T3 Code, which keeps
 listening only on this machine.
 
@@ -37,7 +37,7 @@ T3CODE_TRUSTED_PROXIES=loopback
   client is: `loopback` for a proxy on the same machine, or IP addresses and
   CIDR ranges such as `10.0.0.0/8` for one elsewhere, separated by commas.
   `loopback` is the default; setting a list replaces it, so keep `loopback`
-  in it if Tailscale Serve or T3 Connect also run on the machine. `none` trusts
+  in it if Tailscale Serve also runs on the machine. `none` trusts
   no proxy.
 
 T3 Code reads the client's address and whether it used HTTPS from

@@ -214,11 +214,6 @@ import {
   PullRequestUpdateInput,
 } from "./pullRequest.ts";
 import {
-  RelayClientInstallFailedError,
-  RelayClientInstallProgressEventSchema,
-  RelayClientStatusSchema,
-} from "./relayClient.ts";
-import {
   ORCHESTRATION_V2_WS_METHODS,
   OrchestrationGetWorkflowScriptError,
   OrchestrationV2GetNativeChildWorkError,
@@ -536,9 +531,6 @@ export const WS_METHODS = {
   guestShareCreate: "guestShare.create",
   scheduledTasksListWebhookDeliveries: "scheduledTasks.listWebhookDeliveries",
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
-
-  cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
-  cloudInstallRelayClient: "cloud.installRelayClient",
 
   pullRequestsList: "pullRequests.list",
   pullRequestsListStats: "pullRequests.listStats",
@@ -937,19 +929,6 @@ const WsServerSignalProcessRpc = Rpc.make(WS_METHODS.serverSignalProcess, {
   payload: ServerSignalProcessInput,
   success: ServerSignalProcessResult,
   error: EnvironmentAuthorizationError,
-});
-
-const WsCloudGetRelayClientStatusRpc = Rpc.make(WS_METHODS.cloudGetRelayClientStatus, {
-  payload: Schema.Struct({}),
-  success: RelayClientStatusSchema,
-  error: EnvironmentAuthorizationError,
-});
-
-const WsCloudInstallRelayClientRpc = Rpc.make(WS_METHODS.cloudInstallRelayClient, {
-  payload: Schema.Struct({}),
-  success: RelayClientInstallProgressEventSchema,
-  error: Schema.Union([RelayClientInstallFailedError, EnvironmentAuthorizationError]),
-  stream: true,
 });
 
 const WsServerReportClientActivityRpc = Rpc.make(WS_METHODS.serverReportClientActivity, {
@@ -2013,8 +1992,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
   WsServerReportClientActivityRpc,
-  WsCloudGetRelayClientStatusRpc,
-  WsCloudInstallRelayClientRpc,
   WsPullRequestsListRpc,
   WsPullRequestsListStatsRpc,
   WsPullRequestsFilterOptionsRpc,

@@ -8,7 +8,7 @@ import * as NetAddress from "effect/net/NetAddress";
 
 /**
  * Which direct peers may tell the server who the client is. `loopback` covers the proxies that
- * reach the server on this machine: Tailscale Serve, the T3 Connect tunnel, a local Caddy or nginx.
+ * reach the server on this machine: Tailscale Serve, a local Caddy or nginx.
  */
 export interface TrustedProxies {
   readonly loopback: boolean;

@@ -101,10 +101,6 @@
       // reports an entire component module when nothing imports it.
       "ignoreIssues": { "src/components/ui/*.tsx": ["exports", "nsExports", "duplicates"] },
     },
-    "apps/marketing": {
-      // `astro check` runs from the typecheck task in vite.config.ts, which knip does not read.
-      "ignoreDependencies": ["@astrojs/check"],
-    },
     "apps/mobile": {
       // Expo loads plugins and the fingerprint config by string; Metro embeds the browser entry in the native WebView.
       "entry": [
@@ -139,10 +135,6 @@
         "src/nativeRunHook.js",
         "src/preload.mjs",
       ],
-    },
-    "infra/relay": {
-      // Alchemy loads src/worker.ts as the Worker entry and reads its default export.
-      "entry": ["alchemy.run.ts!", "src/persistence/schema.ts!", "src/worker.ts!"],
     },
     "packages/*": {
       // These workspace packages are private to this monorepo.
