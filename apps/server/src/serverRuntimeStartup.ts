@@ -637,6 +637,9 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
     yield* runStartupPhase("auxiliary-roots.parked", options?.awaitAuxiliaryParked ?? Effect.void);
 
     const updateOutcome = yield* launcher.prepareTrial;
+    if (updateOutcome !== undefined) {
+      yield* Effect.logInfo("Service launcher update outcome", updateOutcome);
+    }
 
     yield* Effect.logDebug("startup phase: publishing welcome event", {
       environmentId: environment.environmentId,
@@ -670,7 +673,6 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
         payload: {
           at: DateTime.formatIso(yield* DateTime.now),
           environment,
-          ...(updateOutcome === undefined ? {} : { updateOutcome }),
         },
       }),
     );

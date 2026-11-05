@@ -80,7 +80,10 @@ function commandArgs(command: ChildProcess.Command): ReadonlyArray<string> {
   return command._tag === "StandardCommand" ? command.args.map(String) : [];
 }
 
-const ARCHIVE = { archiveVersion: "1.2.3-preview.20260911.4" } as const;
+const ARCHIVE = {
+  archiveVersion: "1.2.3-preview.20260911.4",
+  releaseBaseUrl: "https://releases.example.com/t3/",
+} as const;
 
 describe("ssh tunnel scripts", () => {
   it("rejects archive versions that are not a single exact version segment", () => {
@@ -93,7 +96,7 @@ describe("ssh tunnel scripts", () => {
       "v1.2.3",
     ]) {
       assert.throws(
-        () => SshTunnel.buildRemoteT3RunnerScript({ archiveVersion }),
+        () => SshTunnel.buildRemoteT3RunnerScript({ ...ARCHIVE, archiveVersion }),
         SshTunnel.SshInvalidArchiveVersionError,
         undefined,
         archiveVersion,
@@ -103,6 +106,16 @@ describe("ssh tunnel scripts", () => {
       SshTunnel.buildRemoteT3RunnerScript(ARCHIVE),
       "T3_ARCHIVE_VERSION='1.2.3-preview.20260911.4'",
     );
+  });
+
+  it("downloads an archive only from a configured release source, never upstream", () => {
+    assert.throws(
+      () => SshTunnel.buildRemoteT3RunnerScript({ archiveVersion: ARCHIVE.archiveVersion }),
+      SshTunnel.SshMissingReleaseSourceError,
+    );
+    const script = SshTunnel.buildRemoteT3RunnerScript(ARCHIVE);
+    assert.include(script, "T3_RELEASE_BASE_URL='https://releases.example.com/t3'");
+    assert.notInclude(script, "pingdotgg");
   });
 
   it.effect("accepts launch JSON after remote shell startup noise", () => {

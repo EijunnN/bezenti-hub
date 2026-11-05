@@ -1,4 +1,3 @@
-import type { ServerSelfUpdateOutcome } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -12,6 +11,7 @@ import {
   SERVICE_LAUNCHER_CONTEXT_ENV,
   type ServiceLauncherChildMessage,
   type ServiceLauncherParentMessage,
+  type ServiceUpdateOutcome,
 } from "./serviceProtocol.ts";
 
 export class ServiceLauncherClientError extends Schema.TaggedError<ServiceLauncherClientError>()(
@@ -43,18 +43,6 @@ export class ServiceLauncherClientError extends Schema.TaggedError<ServiceLaunch
       case "timeout":
         return "The service launcher did not respond within 30 seconds.";
     }
-  }
-}
-
-export class ServiceLauncherRejectedError extends Schema.TaggedError<ServiceLauncherRejectedError>()(
-  "ServiceLauncherRejectedError",
-  {
-    targetVersion: Schema.String,
-    reason: Schema.String,
-  },
-) {
-  override get message(): string {
-    return this.reason;
   }
 }
 
@@ -97,12 +85,8 @@ export class ServiceLauncherClient extends Context.Service<
   ServiceLauncherClient,
   {
     readonly managed: boolean;
-    readonly requestUpdate: (input: {
-      readonly targetVersion: string;
-      readonly dbPath: string;
-    }) => Effect.Effect<string, ServiceLauncherClientError | ServiceLauncherRejectedError>;
     readonly prepareTrial: Effect.Effect<
-      ServerSelfUpdateOutcome | undefined,
+      ServiceUpdateOutcome | undefined,
       ServiceLauncherClientError
     >;
   }
@@ -194,25 +178,6 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
       }),
     );
 
-  const requestUpdate = (input: { readonly targetVersion: string; readonly dbPath: string }) =>
-    exchange(
-      { type: "request-update", ...input },
-      (reply) => reply.type === "update-accepted" || reply.type === "update-rejected",
-    ).pipe(
-      Effect.flatMap((reply) =>
-        reply.type === "update-accepted"
-          ? Effect.succeed(reply.updateId)
-          : reply.type === "update-rejected"
-            ? Effect.fail(
-                new ServiceLauncherRejectedError({
-                  targetVersion: input.targetVersion,
-                  reason: reply.reason,
-                }),
-              )
-            : Effect.die("service launcher returned an impossible update response"),
-      ),
-    );
-
   const pending = context?.update?.status === "pending" ? context.update : undefined;
   const outcome =
     context?.update === undefined || context.update.status === "pending"
@@ -240,7 +205,6 @@ export const make = Effect.fn("cloud.service_launcher_client.make")(function* (o
 
   return ServiceLauncherClient.of({
     managed,
-    requestUpdate,
     prepareTrial,
   });
 });

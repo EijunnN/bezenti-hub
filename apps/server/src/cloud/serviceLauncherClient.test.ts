@@ -79,47 +79,6 @@ it.effect("waits for the launcher to durably commit the trial update ID", () =>
   }),
 );
 
-it.effect("returns the launcher-generated ID only after update acceptance", () =>
-  Effect.gen(function* () {
-    const host = new FakeLauncherProcess({
-      protocol: SERVICE_LAUNCHER_PROTOCOL,
-      childVersion: "1.0.0",
-    });
-    const client = yield* makeClient(host, "1.0.0");
-    const requested = yield* Effect.forkChild(
-      client.requestUpdate({ targetVersion: "1.1.0", dbPath: "/tmp/state.sqlite" }),
-      { startImmediately: true },
-    );
-    yield* Effect.yieldNow;
-    host.emit({
-      type: "update-accepted",
-      updateId: "launcher-id",
-    });
-    expect(yield* Fiber.join(requested)).toBe("launcher-id");
-  }),
-);
-
-it.effect("preserves a launcher rejection as a distinct error", () =>
-  Effect.gen(function* () {
-    const host = new FakeLauncherProcess({
-      protocol: SERVICE_LAUNCHER_PROTOCOL,
-      childVersion: "1.0.0",
-    });
-    const client = yield* makeClient(host, "1.0.0");
-    const requested = yield* Effect.forkChild(
-      client.requestUpdate({ targetVersion: "1.1.0", dbPath: "/tmp/state.sqlite" }),
-      { startImmediately: true },
-    );
-    yield* Effect.yieldNow;
-    host.emit({ type: "update-rejected", reason: "requires local update" });
-    expect(yield* Fiber.join(requested).pipe(Effect.flip)).toMatchObject({
-      _tag: "ServiceLauncherRejectedError",
-      targetVersion: "1.1.0",
-      reason: "requires local update",
-    });
-  }),
-);
-
 it.effect("rejects contradictory trial context instead of leaving activation closed", () =>
   Effect.gen(function* () {
     const host = new FakeLauncherProcess({
@@ -145,10 +104,8 @@ it.effect("ignores launcher context inherited without an IPC channel", () =>
       false,
     );
     const client = yield* makeClient(host, "1.1.0");
-    const error = yield* client
-      .requestUpdate({ targetVersion: "1.2.0", dbPath: "/tmp/state.sqlite" })
-      .pipe(Effect.flip);
-    expect(error).toMatchObject({ _tag: "ServiceLauncherClientError", operation: "unmanaged" });
+    expect(client.managed).toBe(false);
+    expect(yield* client.prepareTrial).toBeUndefined();
     expect(host.sent).toEqual([]);
   }),
 );

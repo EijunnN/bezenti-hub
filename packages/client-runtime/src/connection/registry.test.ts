@@ -68,7 +68,6 @@ import * as ConnectionWakeups from "./wakeups.ts";
 import { watchDiscoveredCompatibility } from "./layer.ts";
 import * as RelayEnvironmentDiscovery from "../relay/discovery.ts";
 import type { RelayEnvironmentStatusResponse } from "@t3tools/contracts/relay";
-import { runDesktopCommitWithReconnectObserver } from "../state/server.ts";
 import { v2ShellSnapshot } from "../state/orchestrationV2TestFixtures.ts";
 
 const TARGET = new PrimaryConnectionTarget({
@@ -548,33 +547,6 @@ function awaitConnectionState(
 }
 
 describe("EnvironmentRegistry", () => {
-  it.effect("replays connected state when arming a desktop commit observer", () =>
-    Effect.gen(function* () {
-      const harness = yield* makeHarness([TARGET]);
-
-      yield* Effect.gen(function* () {
-        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-        yield* registry.start;
-        yield* awaitConnectionState(
-          registry,
-          TARGET.environmentId,
-          (state) => state.phase === "connected",
-        );
-
-        const commits = yield* Ref.make(0);
-        const result = yield* runDesktopCommitWithReconnectObserver(
-          registry.stateChanges(TARGET.environmentId),
-          Ref.update(commits, (count) => count + 1).pipe(
-            Effect.andThen(Effect.fail("commit refused")),
-          ),
-        ).pipe(Effect.flip, Effect.timeout("1 second"));
-
-        expect(result).toBe("commit refused");
-        expect(yield* Ref.get(commits)).toBe(1);
-      }).pipe(Effect.provide(harness.layer), Effect.scoped);
-    }),
-  );
-
   it.effect("does not acquire a session after the registry scope has already closed", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness([TARGET]);
@@ -1052,7 +1024,6 @@ describe("EnvironmentRegistry", () => {
       const error = new ConnectionBlockedError({
         reason: "unsupported",
         detail: "Update the server to use this client.",
-        serverUpdateRequired: true,
       });
       const relay = new RelayConnectionTarget({
         environmentId,
@@ -1088,7 +1059,6 @@ describe("EnvironmentRegistry", () => {
           target: relayFirst ? relay : BEARER_TARGET,
           enabled: true,
           unsupportedReason: error.message,
-          serverUpdateRequired: true,
         });
         expect(yield* Ref.get(attempts)).toBe(1);
 
@@ -1097,7 +1067,6 @@ describe("EnvironmentRegistry", () => {
         const retrying = (yield* SubscriptionRef.get(registry.entries)).get(environmentId);
         expect(retrying?.enabled).toBe(true);
         expect(retrying?.unsupportedReason).toBeUndefined();
-        expect(retrying?.serverUpdateRequired).toBeUndefined();
         expect((yield* Ref.get(harness.storedDisabled)).has(environmentId)).toBe(false);
 
         yield* Deferred.succeed(retryResult, compatible ? undefined : error);
@@ -1113,7 +1082,6 @@ describe("EnvironmentRegistry", () => {
           expect((yield* SubscriptionRef.get(registry.entries)).get(environmentId)).toMatchObject({
             enabled: true,
             unsupportedReason: error.message,
-            serverUpdateRequired: true,
           });
           expect((yield* Ref.get(harness.storedDisabled)).has(environmentId)).toBe(false);
           expect(yield* Ref.get(harness.sessions)).toHaveLength(0);

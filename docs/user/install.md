@@ -31,7 +31,6 @@ line to add. Set `T3CODE_CHANNEL=nightly` to install the nightly train, or
 | Start the server without a browser               | `t3 serve`                                                              |
 | Use it from your other devices                   | `t3 up` ([details](./remote-access.md))                                 |
 | Keep it running in the background (macOS, Linux) | `t3 service install` ([details](./background-service.md))               |
-| Move to the newest release                       | `t3 update`                                                             |
 | Reclaim database space                           | `t3 doctor` ([details](./background-service.md#reclaim-database-space)) |
 | Remove it again                                  | `t3 uninstall`                                                          |
 
@@ -58,8 +57,8 @@ cd t3code && vp i && vp run build:desktop
 node apps/server/dist/bin.mjs
 ```
 
-`t3 update` and the background service do not apply to a server run this way;
-update it with `git pull` and a rebuild.
+The background service does not apply to a server run this way; update it
+with `git pull` and a rebuild.
 
 ## Desktop app
 
@@ -75,9 +74,8 @@ or use a package manager:
 | Arch Linux nightly | `yay -S t3code-nightly-bin`                                  |
 | Nix                | `nix profile add github:NixOS/nixpkgs/nixos-unstable#t3code` |
 
-The `.deb` updates itself like the other desktop builds. It asks for your
-password to install each update. If your desktop has no password prompt, the
-update fails. Download the new `.deb` and install it the same way.
+The desktop app does not update itself. To update, install the new build the
+same way; see [Updating T3 Code](./updating.md).
 
 ### Nix (nixpkgs)
 
@@ -99,7 +97,7 @@ Apply the change with `sudo nixos-rebuild switch`. For Home Manager, add
 Update a profile installation with `nix profile upgrade t3code`. For NixOS or
 Home Manager, update your configuration's nixpkgs input or channel and rebuild.
 Nix manages both the desktop app and the bundled
-`t3` command; use Nix to update them instead of the in-app updater or `t3 update`.
+`t3` command; use Nix to update them.
 
 ### The `t3` command
 

@@ -1,11 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { AcpRegistryUrlAuthAction } from "./acpRegistry.ts";
-import {
-  type EnvironmentMachineKind,
-  ExecutionEnvironmentDescriptor,
-  ServerSelfUpdateMethod,
-} from "./environment.ts";
+import { type EnvironmentMachineKind, ExecutionEnvironmentDescriptor } from "./environment.ts";
 import { AuthClientPresentationMetadata, ServerAuthDescriptor } from "./auth.ts";
 import {
   ForwardCompatibleArray,
@@ -29,7 +25,6 @@ import { RuntimeMode } from "./providerPolicy.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerProviderUsageLimits, UsageLimitSourceSnapshots } from "./providerUsageLimits.ts";
 import { ServerSettings } from "./settings.ts";
-import { DesktopUpdateChannelSchema } from "./ipc.ts";
 
 const KeybindingsMalformedConfigIssue = Schema.Struct({
   kind: Schema.Literal("keybindings.malformed-config"),
@@ -792,19 +787,9 @@ export const ServerConfigStreamEvent = Schema.Union([
 ]);
 export type ServerConfigStreamEvent = typeof ServerConfigStreamEvent.Type;
 
-export const ServerSelfUpdateOutcome = Schema.Struct({
-  id: TrimmedNonEmptyString,
-  fromVersion: TrimmedNonEmptyString,
-  targetVersion: TrimmedNonEmptyString,
-  status: Schema.Literals(["committed", "rolled-back", "failed"]),
-  reason: Schema.optionalKey(TrimmedNonEmptyString),
-});
-export type ServerSelfUpdateOutcome = typeof ServerSelfUpdateOutcome.Type;
-
 export const ServerLifecycleReadyPayload = Schema.Struct({
   at: IsoDateTime,
   environment: ExecutionEnvironmentDescriptor,
-  updateOutcome: Schema.optionalKey(ServerSelfUpdateOutcome),
 });
 export type ServerLifecycleReadyPayload = typeof ServerLifecycleReadyPayload.Type;
 
@@ -881,78 +866,5 @@ export class ServerProviderUpdateError extends Schema.TaggedError<ServerProvider
 ) {
   override get message(): string {
     return `Provider update failed for ${this.provider}: ${this.reason}`;
-  }
-}
-
-export const ServerNpmReleaseInput = Schema.Struct({
-  spec: Schema.String.check(
-    Schema.isMaxLength(64),
-    Schema.isPattern(/^(?:latest|nightly|\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/),
-  ),
-});
-export type ServerNpmReleaseInput = typeof ServerNpmReleaseInput.Type;
-
-export const ServerNpmRelease = Schema.Struct({
-  version: Schema.String,
-  databaseMigration: Schema.optionalKey(Schema.Int),
-});
-export type ServerNpmRelease = typeof ServerNpmRelease.Type;
-
-export class ServerNpmReleaseError extends Schema.TaggedError<ServerNpmReleaseError>()(
-  "ServerNpmReleaseError",
-  { reason: Schema.String },
-) {
-  override get message(): string {
-    return `Could not check the configured npm registry: ${this.reason}`;
-  }
-}
-
-export const ServerSelfUpdateInput = Schema.Struct({
-  /** Exact npm version, never a dist-tag, so server and client agree on the request. */
-  targetVersion: TrimmedNonEmptyString,
-  /** Desktop-managed hosts move their app to this update track first. Sent only for a track switch. */
-  channel: Schema.optionalKey(DesktopUpdateChannelSchema),
-  /** The target release's highest migration; the host refuses to leave Nightly without it. */
-  targetDatabaseMigration: Schema.optionalKey(Schema.Int),
-});
-export type ServerSelfUpdateInput = typeof ServerSelfUpdateInput.Type;
-
-export const ServerSelfUpdateResult = Schema.Struct({
-  targetVersion: TrimmedNonEmptyString,
-  method: ServerSelfUpdateMethod,
-  updateId: Schema.optionalKey(TrimmedNonEmptyString),
-  desktopUpdateToken: Schema.optionalKey(TrimmedNonEmptyString),
-});
-export type ServerSelfUpdateResult = typeof ServerSelfUpdateResult.Type;
-
-export const DesktopUpdateCommitInput = Schema.Struct({
-  requestId: TrimmedNonEmptyString,
-});
-export type DesktopUpdateCommitInput = typeof DesktopUpdateCommitInput.Type;
-
-export const ServerSelfUpdateProgressStage = Schema.Literals(["downloading", "installing"]);
-export type ServerSelfUpdateProgressStage = typeof ServerSelfUpdateProgressStage.Type;
-
-export const ServerSelfUpdateProgressEvent = Schema.Union([
-  Schema.Struct({
-    type: Schema.Literal("progress"),
-    stage: ServerSelfUpdateProgressStage,
-  }),
-  Schema.Struct({
-    type: Schema.Literal("complete"),
-    result: ServerSelfUpdateResult,
-  }),
-]);
-export type ServerSelfUpdateProgressEvent = typeof ServerSelfUpdateProgressEvent.Type;
-
-export class ServerSelfUpdateError extends Schema.TaggedError<ServerSelfUpdateError>()(
-  "ServerSelfUpdateError",
-  {
-    reason: TrimmedNonEmptyString,
-    cause: Schema.optional(Schema.Defect()),
-  },
-) {
-  override get message(): string {
-    return `Server update failed: ${this.reason}`;
   }
 }

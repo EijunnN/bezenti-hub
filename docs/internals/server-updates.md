@@ -1,17 +1,26 @@
 # Server updates
 
+This fork never checks for or installs releases (ADR 0007). Nothing offers an
+update: there is no npm or GitHub lookup, no `t3 update`, no update RPCs, and no
+desktop auto-updater. What remains is the host-side machinery a future
+self-hosted release channel would drive.
+
+## Release source
+
+[`cliReleaseSource`](../../packages/shared/src/cliRelease.ts) is the one place a
+release channel plugs in. It reads `T3CODE_RELEASE_BASE_URL` and returns nothing
+when it is unset; upstream is never a fallback. Pinned runtime installs
+(`t3 service install`) and the SSH runner download archives only from it. A
+future update flow should resolve releases through the same source rather than
+reintroduce a default URL.
+
+## Service launcher
+
 A [stable launcher](../../apps/server/src/serviceLauncher.ts) owns the runtime
 selected by systemd or launchd. It is the only runtime writer of durable service
-state. Server children request updates over inherited IPC; they never rewrite
-their service definition or select their own replacement. Local service commands
-may replace the launcher and state while the service is stopped. Foreground CLI
-processes do not self-update.
-
-Exact-version installs keep restarts independent of npm cache eviction or a moving
-release tag. Installation and preflight happen in staging before publishing an
-immutable runtime. Preflight checks the launcher protocol because a target that
-needs new rollback guarantees cannot safely run under an older launcher. Upgrading
-that launcher requires a local service update.
+state. It still speaks the `request-update` protocol and recovers updates left
+pending by an older install, but no server in this fork sends that request.
+Foreground CLI processes do not self-update.
 
 ## Commit boundary
 
@@ -34,7 +43,6 @@ The prepared deadline is long because migrations can scale with the database
 and block the trial's main thread, so it cannot report progress. A missed
 deadline restores the snapshot, and the retry pays the same cost again. A
 crashed trial is caught when it exits; the deadline bounds only a stuck one.
-Client update waits must outlast the deadline, or a slow update shows as failed.
 
 ## Database rollback
 
@@ -48,20 +56,6 @@ Rollback stops the trial before restoring. A durable restore marker makes an
 interrupted restore finish before either version boots. Keep the snapshot until
 commit, or until both restoration and the terminal rollback state are durable.
 Attachments and other files outside SQLite are outside this rollback boundary.
-
-## Client acknowledgement
-
-An accepted update is still pending. Clients correlate the launcher's update ID
-with the ready event after reconnecting, then check the outcome and target version.
-A reconnect alone cannot distinguish successful replacement from rollback. Older
-servers without an update ID retain version-only correlation.
-
-Desktop updates have a separate two-phase handoff because installing the app stops
-its bundled backend. Preparation returns a token while the connection is alive;
-the client commits that token only after receiving it. Otherwise backend shutdown
-could lose the only successful RPC result. The client must then observe the
-prepared version after reconnecting. If installation fails, desktop restarts the
-stopped backends and replays the failure for the same token.
 
 ## Recovering interrupted threads
 

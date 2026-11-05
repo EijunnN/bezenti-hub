@@ -1,6 +1,5 @@
 import { SessionPermissions } from "./SessionPermissions";
 import { ChevronRightIcon, EllipsisIcon } from "lucide-react";
-import { useAtomValue } from "@effect/atom-react";
 import { useState } from "react";
 import {
   AuthAccessReadScope,
@@ -30,7 +29,6 @@ import {
   applyWslEnableSelection,
   isWslSettingsRowVisible,
   missingTailscaleEndpointDescription,
-  resolveLocalVersionStatusLabel,
   resolveTailscaleServeBaseUrl,
 } from "./ConnectionsSettings.logic";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
@@ -82,11 +80,7 @@ import {
 } from "~/environments/primary";
 import { isDesktopLocalConnectionTarget } from "~/connection/desktopLocal";
 import { useUiStateStore } from "~/uiStateStore";
-import {
-  resolveServerConfigVersionMismatch,
-  resolveServerSelfUpdateCapability,
-  supportsDesktopAppUpdate,
-} from "~/versionSkew";
+import { resolveServerConfigVersionMismatch } from "~/versionSkew";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 import { RemoveT3ConnectEnvironmentDialog } from "../clerk/RemoveT3ConnectEnvironmentDialog";
 import { authEnvironment } from "~/state/auth";
@@ -98,7 +92,6 @@ import {
   refreshDesktopNetworkAccessState,
 } from "~/state/desktopNetworkAccess";
 import { desktopWslStateAtom, refreshDesktopWslState } from "~/state/desktopWslState";
-import { useDesktopUpdateState } from "~/state/desktopUpdate";
 import {
   type EnvironmentPresentation,
   useEnvironments,
@@ -106,14 +99,6 @@ import {
 } from "~/state/environments";
 import { requestConfirmDialog } from "~/confirmDialog";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { environmentIdsKey } from "~/state/environmentAtomList";
-import { environmentUpdateStatesAtom, serverEnvironment } from "~/state/server";
-import {
-  ServerUpdateAction,
-  ServerUpdateProgress,
-  ServerUpdatesAction,
-  type ServerUpdateTarget,
-} from "../ServerUpdateAction";
 import {
   sortDesktopPairingLinks,
   summarizeAuthorizedClients,
@@ -145,16 +130,6 @@ const EMPTY_ADVERTISED_ENDPOINTS: ReadonlyArray<AdvertisedEndpoint> = [];
 const BACKEND_VALUE_DEFAULT_WSL = "backend:default-wsl";
 const BACKEND_VALUE_WSL_OFF = "backend:wsl-off";
 
-// Subscribes on its own so desktop download progress does not re-render the page.
-function LocalVersionStatusLabel() {
-  const updateState = useDesktopUpdateState();
-  return (
-    <span className="text-xs text-muted-foreground">
-      {resolveLocalVersionStatusLabel(updateState)}
-    </span>
-  );
-}
-
 /** Environments lists the machines this app connects to; access covers who may reach this one. */
 export function ConnectionsSettings({ view }: { readonly view: "environments" | "access" }) {
   const desktopBridge = window.desktopBridge;
@@ -176,43 +151,6 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
   );
   const listedEnvironments = savedEnvironments.filter(
     (environment) => !isDesktopLocalConnectionTarget(environment.entry.target),
-  );
-  const savedUpdateStates = useAtomValue(
-    environmentUpdateStatesAtom(
-      environmentIdsKey(savedEnvironments.map(({ environmentId }) => environmentId)),
-    ),
-  );
-  const savedServerUpdateStates = savedEnvironments.map((environment, index) => ({
-    environment,
-    updateStatus: savedUpdateStates[index]!.status,
-  }));
-  const savedServerUpdateTargets = savedServerUpdateStates.flatMap(
-    ({ environment, updateStatus }): ServerUpdateTarget[] => {
-      const mismatch = resolveServerConfigVersionMismatch(environment.serverConfig);
-      const selfUpdate = resolveServerSelfUpdateCapability(environment.serverConfig);
-      const desktopAppUpdate = supportsDesktopAppUpdate(environment.serverConfig);
-      if (
-        !mismatch ||
-        updateStatus === "running" ||
-        !environment.entry.enabled ||
-        environment.connection.phase !== "connected" ||
-        isDesktopLocalConnectionTarget(environment.entry.target) ||
-        selfUpdate === null ||
-        (selfUpdate === "desktop-managed" && !desktopAppUpdate)
-      ) {
-        return [];
-      }
-      return [
-        {
-          environmentId: environment.environmentId,
-          serverLabel: environment.label,
-          selfUpdate,
-          installation: environment.serverConfig?.environment.capabilities.serverInstallation,
-          desktopAppUpdate,
-          targetVersion: mismatch.clientVersion,
-        },
-      ];
-    },
   );
   const loadBalancingEnvironments = [
     ...(primaryEnvironment ? [primaryEnvironment] : []),
@@ -277,9 +215,6 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
   // Turning remote access off stays possible; only the way in is managed.
   const remoteClientsDenial = managedCapabilityDenial(primaryManagedPolicy, "remoteClients");
   const primaryVersionMismatch = resolveServerConfigVersionMismatch(primaryServerConfig);
-  const primaryServerUpdateState = useAtomValue(
-    serverEnvironment.updateStateAtom(primaryEnvironmentId),
-  );
   const [isAdvertisedEndpointListExpanded, setIsAdvertisedEndpointListExpanded] = useState(false);
   const defaultAdvertisedEndpointKey = useUiStateStore(
     (state) => state.defaultAdvertisedEndpointKey,
@@ -1088,41 +1023,18 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
               <SettingsRow
                 title="Version"
                 description={
-                  primaryServerUpdateState.status !== "idle" ? (
-                    <ServerUpdateProgress state={primaryServerUpdateState} />
-                  ) : (
-                    [
-                      primaryServerConfig?.environment.serverVersion ?? null,
-                      primaryEnvironment?.displayUrl ?? null,
-                    ]
-                      .filter((value): value is string => value !== null)
-                      .join(" · ") || "Loading…"
-                  )
+                  [
+                    primaryServerConfig?.environment.serverVersion ?? null,
+                    primaryEnvironment?.displayUrl ?? null,
+                  ]
+                    .filter((value): value is string => value !== null)
+                    .join(" · ") || "Loading…"
                 }
                 control={
-                  primaryVersionMismatch &&
-                  primaryEnvironmentId !== null &&
-                  primaryServerUpdateState.status !== "running" ? (
-                    <ServerUpdateAction
-                      size="sm"
-                      environmentId={primaryEnvironmentId}
-                      serverLabel={
-                        primaryEnvironment ? `${primaryEnvironment.label} server` : "server"
-                      }
-                      selfUpdate={resolveServerSelfUpdateCapability(primaryServerConfig)}
-                      installation={
-                        primaryServerConfig?.environment.capabilities.serverInstallation
-                      }
-                      desktopAppUpdate={supportsDesktopAppUpdate(primaryServerConfig)}
-                      targetVersion={primaryVersionMismatch.clientVersion}
-                      label={
-                        primaryServerUpdateState.status === "failed"
-                          ? "Retry update"
-                          : `Update to ${primaryVersionMismatch.clientVersion}`
-                      }
-                    />
-                  ) : primaryServerUpdateState.status === "idle" && primaryServerConfig ? (
-                    <LocalVersionStatusLabel />
+                  primaryVersionMismatch ? (
+                    <span className="text-xs text-muted-foreground">
+                      Older than this app ({primaryVersionMismatch.clientVersion})
+                    </span>
                   ) : undefined
                 }
               />
@@ -1511,9 +1423,6 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
         title="Environments"
         headerAction={
           <div className="flex items-center gap-1">
-            {savedServerUpdateTargets.length > 0 ? (
-              <ServerUpdatesAction targets={savedServerUpdateTargets} variant="ghost-muted" />
-            ) : null}
             <AddEnvironmentDialog
               open={addBackendDialogOpen}
               routeTarget={routeTarget}

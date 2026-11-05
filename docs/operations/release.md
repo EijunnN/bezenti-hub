@@ -34,7 +34,7 @@ the version.
 - Builds six desktop artifacts in parallel for both channels, each as its own job (`desktop_<platform>_<arch>`, one call of `release-desktop.yml`), gated only on the bundle. macOS and Linux targets build on hardware of their own architecture. Both Windows targets build and sign (with jsign) on a Linux runner, which packages faster than Windows runners, and a Windows job of the target's architecture (`windows-2025` or `windows-11-arm`, the `verify_runner`) runs the packaged natives and the CLI archive. The Windows jobs embed the same-arch Linux CLI archive as the WSL runtime and wait for that artifact partway through, not for the whole Linux job:
   - macOS `arm64` DMG
   - macOS `x64` DMG
-  - Linux `x64` and `arm64` AppImage and `.deb`, from one electron-builder run. The `.deb` updates in the app through electron-updater, which installs it with `dpkg`.
+  - Linux `x64` and `arm64` AppImage and `.deb`, from one electron-builder run.
   - Windows `x64` and `arm64` NSIS installer
 - Opens the packaged Linux x64 AppImage (under Xvfb) and macOS arm64 DMG against a seeded database and opens a thread (`scripts/smoke-desktop-app.ts`). A build whose backend or bundle cannot start fails here, so nothing is published. The database in `scripts/fixtures/desktop-launch` is an old snapshot on purpose: the packaged server must migrate it forward, as it does for upgrading users. Do not regenerate it on schema changes.
 - Publishes one GitHub Release with all produced files.
@@ -426,20 +426,17 @@ One-time Vercel dashboard setup:
 - Publishes the `t3` npm launcher to the `nightly` npm dist-tag using the same nightly version.
 - Does not commit version bumps back to `main`.
 
-## Server self-update release invariant
+## Release ordering
 
-Connected servers update to the client's exact version, not to an npm dist-tag. Servers that update
-themselves download that version's CLI archive from the GitHub Release; servers run through npm are
-handed a `t3@<version>` command to run. Every released client version must therefore have its
-release archives, and then its npm launcher, available before users can receive that client.
+Built clients never update themselves or connected servers (ADR 0007), so release order matters
+only for people installing by hand: a version's CLI archives, and then its npm launcher, should be
+available before its client.
 
 The workflow enforces this ordering:
 
 1. `release` publishes the GitHub Release with the CLI archives and `SHA256SUMS`. Every channel
-   uploads to a draft and publishes only after all assets are attached, so a new version in the
-   desktop update feed already has its archives. **Update everything** relies on this to update
-   background-service hosts before npm has the version. Rerunning `release` after publication
-   replaces assets in a public release, so service updates can fail until the upload finishes.
+   uploads to a draft and publishes only after all assets are attached. Rerunning `release` after
+   publication replaces assets in a public release.
 2. `publish_cli` publishes the `t3@<version>` launcher, which downloads from that release, on every
    channel.
 3. `deploy_web` depends on both before moving the hosted channel to the new client.
@@ -448,42 +445,7 @@ The workflow enforces this ordering:
    hostname. That hostname is behind Vercel SSO, so users only get the client through the
    custom domains.
 
-Desktop auto-update reads the GitHub Release directly, so a desktop client can see the new version
-a few minutes before `t3@<version>` is on npm. Only the copied manual command for npm-run servers
-depends on npm, and it works once `publish_cli` finishes.
-
-Preserve these dependencies when changing the release graph. Publishing a client first would leave
-the **Update server** action targeting a package version that does not exist yet.
-
-For a release smoke test, confirm `npm view t3@<version> version` returns the expected version, then
-connect the new client to a server on the previous version and verify that the update action
-reconnects to the matching server. When the release adds database migrations, verify that the
-remote update applies them and reconnects. A failed trial must restore the database snapshot and
-restart the previous server. If the installed launcher does not support the target protocol,
-verify that the update stops before restart and run `npx t3@<version> service update` once on the
-server machine. Also test the manual or desktop-managed guidance when those environments are
-available.
-
-## Desktop auto-update notes
-
-- Updater runtime: `apps/desktop/src/updates/DesktopUpdates.ts`.
-- `electron-updater` adapter: `apps/desktop/src/electron/ElectronUpdater.ts`.
-- `apps/desktop/src/main.ts` only wires the updater layers into the desktop runtime.
-- Update UX:
-  - Background checks run on startup delay + interval.
-  - No automatic download or install.
-  - The desktop UI shows a rocket update button when an update is available; click once to download, click again after download to restart/install.
-- Provider: GitHub Releases (`provider: github`) configured at build time.
-- Repository slug source:
-  - `T3CODE_DESKTOP_UPDATE_REPOSITORY` (format `owner/repo`), if set.
-  - otherwise `GITHUB_REPOSITORY` from GitHub Actions.
-- Required release assets for updater:
-  - platform installers (`.exe`, `.dmg`, `.AppImage`, `.deb`, plus macOS `.zip` for Squirrel.Mac update payloads)
-  - channel metadata: `latest*.yml` for stable releases, `nightly*.yml` for nightly releases
-  - `*.blockmap` files (used for differential downloads)
-- macOS metadata note:
-  - `electron-updater` reads `latest-mac.yml` on stable and `nightly-mac.yml` on nightly, for both Intel and Apple Silicon.
-  - The workflow merges the per-arch mac manifests into one channel-specific mac manifest before publishing the GitHub Release.
+Preserve these dependencies when changing the release graph.
 
 ### Windows payload topology and update validation
 

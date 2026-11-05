@@ -22,13 +22,11 @@ import { sharedServerCommandFlags } from "./cli/config.ts";
 import { projectCommand } from "./cli/project.ts";
 import { threadCommand } from "./cli/thread.ts";
 import { runDefaultServerCommand, serveCommand, startCommand } from "./cli/server.ts";
-import { updateCommand } from "./cli/update.ts";
 import { uninstallCommand } from "./cli/uninstall.ts";
 import { serviceLauncherCommand } from "./cli/serviceLauncher.ts";
 import { claudeHistoryCommand } from "./cli/claudeHistory.ts";
 import { sshHelperCommand } from "./cli/sshHelper.ts";
 import { serviceCommand } from "./cli/service.ts";
-import { servicePreflightCommand } from "./cli/servicePreflight.ts";
 import { themeCommand } from "./cli/theme.ts";
 import { traceCommand } from "./cli/trace.ts";
 import { triageCommand } from "./cli/triage.ts";
@@ -87,13 +85,10 @@ export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
       upCommand,
       statusCommand,
       serviceCommand,
-      updateCommand,
       uninstallCommand,
       serviceLauncherCommand,
       claudeHistoryCommand,
       sshHelperCommand,
-
-      servicePreflightCommand,
       themeCommand,
       traceCommand,
       doctorCommand,

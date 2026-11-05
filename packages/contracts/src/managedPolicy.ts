@@ -41,8 +41,8 @@ export const ManagedProviderLimits = Schema.Struct({
 export type ManagedProviderLimits = typeof ManagedProviderLimits.Type;
 
 /**
- * How T3 Code updates itself. `auto` is the default: it checks, and installs only when a user
- * asks. `off` never checks, for machines that get T3 Code through MDM.
+ * How T3 Code updates itself. This build never checks for or installs releases (ADR 0007), so
+ * every mode is already met; the key still decodes so existing policy files keep loading.
  */
 export const ManagedUpdatesMode = Schema.Literals(["auto", "off"]);
 export type ManagedUpdatesMode = typeof ManagedUpdatesMode.Type;
@@ -55,7 +55,7 @@ const HttpsUrl = TrimmedNonEmptyString.check(
 
 export const ManagedUpdatesPolicy = Schema.Struct({
   mode: ManagedUpdatesMode,
-  /** A generic electron-updater feed the desktop app updates from instead of GitHub. */
+  /** Ignored: this build has no updater to point at a feed. */
   feedUrl: Schema.optionalKey(HttpsUrl),
   /** `false` makes the nightly channel unavailable. */
   allowNightly: Schema.optionalKey(Schema.Boolean),
@@ -110,7 +110,7 @@ export const ManagedPolicySummaryLimits = Schema.Struct({
       ),
     }),
   ),
-  /** No `feedUrl`: it can carry a token, and only the desktop app, which reads the file, uses it. */
+  /** No `feedUrl`: it can carry a token. */
   updates: Schema.optionalKey(ManagedUpdatesPolicy.mapFields(Struct.omit(["feedUrl"]))),
 });
 export type ManagedPolicySummaryLimits = typeof ManagedPolicySummaryLimits.Type;
@@ -140,16 +140,6 @@ export const ManagedPolicySummary = Schema.Struct({
   limits: Schema.optionalKey(ManagedPolicySummaryLimits),
 });
 export type ManagedPolicySummary = typeof ManagedPolicySummary.Type;
-
-/** The message every surface shows when the policy stops an update. */
-export function managedUpdatesMessage(organization: string): string {
-  return `${organization} manages T3 Code updates.`;
-}
-
-/** The message when the policy allows only stable releases. */
-export function managedNightlyDeniedMessage(organization: string): string {
-  return `${managedUpdatesMessage(organization)} Only stable releases can be installed.`;
-}
 
 /** Whether `path` is locked itself, sits inside a locked setting, or contains one. */
 export function isManagedSettingPath(
@@ -234,11 +224,4 @@ export function isManagedDriverAllowed(
 ): boolean {
   const allowed = summary?.limits?.providers?.allowedDrivers;
   return allowed === undefined || allowed.includes(driver);
-}
-
-/** Why updates are unavailable on an environment with `summary`, or undefined when allowed. */
-export function managedUpdatesDenial(summary: ManagedPolicySummary | undefined) {
-  return summary?.limits?.updates?.mode === "off"
-    ? managedUpdatesMessage(summary.organization)
-    : undefined;
 }

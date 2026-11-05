@@ -58,7 +58,6 @@ function layerPairingHttp(
     readonly failDescriptor?: boolean;
     readonly failExchange?: boolean;
     readonly protocolVersion?: number;
-    readonly selfUpdate?: boolean;
     readonly grantScopes?: ReadonlyArray<AuthEnvironmentScope>;
     readonly exchangeGate?: { readonly reached: () => void; readonly release: Promise<void> };
   },
@@ -85,10 +84,7 @@ function layerPairingHttp(
           },
           serverVersion: "0.0.0-test",
           orchestrationProtocolVersion: options?.protocolVersion ?? ORCHESTRATION_PROTOCOL_VERSION,
-          capabilities: {
-            repositoryIdentity: true,
-            ...(options?.selfUpdate === true ? { serverSelfUpdate: "boot-service" } : {}),
-          },
+          capabilities: { repositoryIdentity: true },
         }),
       );
     }
@@ -371,46 +367,6 @@ describe("connection onboarding", () => {
     }).pipe(Effect.provide(layerPairingOnboarding())),
   );
 
-  it.effect(
-    "re-pairs an outdated self-updatable environment so its connection can be rechecked",
-    () =>
-      Effect.gen(function* () {
-        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
-        const onboarding = yield* Onboarding.ConnectionOnboarding;
-        yield* registerSwitchedOffEnvironment;
-        yield* registry.setCompatibility(
-          PAIRED_ENVIRONMENT_ID,
-          new ConnectionBlockedError({
-            reason: "unsupported",
-            detail: "The saved server needs an update.",
-            serverUpdateRequired: true,
-          }),
-        );
-        expect(
-          (yield* SubscriptionRef.get(registry.entries)).get(PAIRED_ENVIRONMENT_ID),
-        ).toMatchObject({
-          enabled: false,
-          serverUpdateRequired: true,
-        });
-
-        const environmentId = yield* onboarding.registerPairing(PAIRING_INPUT);
-
-        expect(environmentId).toBe(PAIRED_ENVIRONMENT_ID);
-        const entry = (yield* SubscriptionRef.get(registry.entries)).get(environmentId);
-        expect(entry?.enabled).toBe(true);
-        expect(entry?.unsupportedReason).toBeUndefined();
-        expect(entry?.serverUpdateRequired).toBeUndefined();
-        expect(entry?.profile).toEqual(Option.some(PAIRED_PROFILE));
-      }).pipe(
-        Effect.provide(
-          layerPairingOnboarding({
-            protocolVersion: ORCHESTRATION_PROTOCOL_VERSION - 1,
-            selfUpdate: true,
-          }),
-        ),
-      ),
-  );
-
   it.effect.each([
     {
       kind: "primary",
@@ -536,7 +492,7 @@ describe("connection onboarding", () => {
     }),
   );
 
-  it.effect("refuses an outdated server that cannot update itself", () =>
+  it.effect("refuses an outdated server", () =>
     Effect.gen(function* () {
       const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
       const error = yield* preparePairingRegistration({
@@ -549,7 +505,6 @@ describe("connection onboarding", () => {
         Effect.flip,
       );
       expect(error).toMatchObject({ reason: "unsupported" });
-      expect(error).not.toHaveProperty("serverUpdateRequired");
       expect(calls.map((call) => call.url)).toEqual([
         "https://remote.example.test/.well-known/t3/environment",
       ]);

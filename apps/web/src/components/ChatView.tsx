@@ -383,7 +383,7 @@ import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplat
 const EMPTY_FEEDBACK_SUBMISSIONS: ReadonlyArray<CodexFeedbackSubmission> = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
 const EMPTY_TURN_ITEMS: ThreadStructure["turnItems"] = [];
-const EMPTY_AUTO_UPDATE_ENVIRONMENTS: ReadonlyArray<EnvironmentPresentation> = [];
+const EMPTY_AUTO_BALANCED_ENVIRONMENTS: ReadonlyArray<EnvironmentPresentation> = [];
 const EMPTY_COMPOSER_BANNER_ITEMS: ReadonlyArray<ComposerBannerStackItem> = [];
 
 const EMPTY_PENDING_FILE_SURFACE_IDS: ReadonlySet<string> = new Set();
@@ -1266,21 +1266,18 @@ export default function ChatView(props: ChatViewProps) {
     (!draftThread?.branch || draftThread.environmentSelection === "auto") &&
     !draftThread?.worktreePath,
   );
-  const autoUpdateEnvironments = automaticEnvironment
+  const autoBalancedEnvironments = automaticEnvironment
     ? logicalProjectEnvironments.flatMap(({ environmentId }) => {
         const environment = environmentById.get(environmentId);
         return environment ? [environment] : [];
       })
-    : EMPTY_AUTO_UPDATE_ENVIRONMENTS;
+    : EMPTY_AUTO_BALANCED_ENVIRONMENTS;
   const systemComposerBannerItems = useSystemComposerBanners({
     activeEnvironment,
     activeEnvironmentUnavailable,
     activeEnvironmentUnavailableState,
-    activeThreadEnvironmentId: activeThread?.environmentId ?? null,
-    serverConfig,
-    hasMultipleRegisteredEnvironments: environments.length > 1,
     automaticEnvironment,
-    autoUpdateEnvironments,
+    autoBalancedEnvironments,
   });
   const providerInstanceEntries = providerInstanceEntriesFor(
     providerStatuses,

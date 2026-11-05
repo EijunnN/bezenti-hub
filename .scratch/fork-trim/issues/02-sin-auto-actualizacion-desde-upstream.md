@@ -4,10 +4,10 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 Plan: ../plan.md
 
-- [ ] No hay comprobación ni instalación de versiones de upstream en servidor ni desktop.
-- [ ] La UI no ofrece actualizar a una versión de upstream.
-- [ ] `docs/user/updating.md` reescrito.
+- [x] No hay comprobación ni instalación de versiones de upstream en servidor ni desktop.
+- [x] La UI no ofrece actualizar a una versión de upstream.
+- [x] `docs/user/updating.md` reescrito.

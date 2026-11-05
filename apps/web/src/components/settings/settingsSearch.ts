@@ -698,7 +698,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "app-version",
     title: "Version",
     to: "/settings/about",
-    searchTerms: ["about check for updates download install upgrade release"],
+    searchTerms: ["about release build"],
   },
   {
     id: "update-track",

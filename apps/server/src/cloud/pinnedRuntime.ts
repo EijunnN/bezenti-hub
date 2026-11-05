@@ -9,7 +9,7 @@ import * as Schema from "effect/Schema";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
-import { HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import {
   CLI_RELEASE_CHECKSUMS_FILE,
@@ -18,11 +18,13 @@ import {
   cliArchiveTarCommand,
   cliReleaseAssetUrl,
   type CliArchivePlatformKey,
+  type CliReleaseSource,
   parseChecksums,
 } from "@t3tools/shared/cliRelease";
 
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
+import packageJson from "../../package.json" with { type: "json" };
 import * as ProcessRunner from "../processRunner.ts";
 import { isExactServiceVersion, parseServiceState, SERVICE_STATE_FILE } from "./serviceProtocol.ts";
 
@@ -81,18 +83,6 @@ export class PinnedRuntimeInstallError extends Schema.TaggedError<PinnedRuntimeI
   }
 }
 
-export class PinnedRuntimePreflightBlockedError extends Schema.TaggedError<PinnedRuntimePreflightBlockedError>()(
-  "PinnedRuntimePreflightBlockedError",
-  {
-    version: Schema.String,
-    reason: Schema.String,
-  },
-) {
-  override get message(): string {
-    return this.reason;
-  }
-}
-
 export type PinnedRuntimeProgress =
   | { readonly stage: "download"; readonly received: number; readonly total: number | undefined }
   | { readonly stage: "verify" | "extract" | "validate" | "cached" };
@@ -105,15 +95,12 @@ interface PinnedRuntimeInstallInput {
   readonly fs: FileSystem.FileSystem;
   readonly path: Path.Path;
   readonly runner: ProcessRunner.ProcessRunner["Service"];
-  readonly validate: (
-    paths: PinnedRuntimePaths,
-  ) => Effect.Effect<void, PinnedRuntimeInstallError | PinnedRuntimePreflightBlockedError>;
+  readonly validate: (paths: PinnedRuntimePaths) => Effect.Effect<void, PinnedRuntimeInstallError>;
   readonly platform: NodeJS.Platform;
   readonly arch: string;
   readonly httpClient: HttpClient.HttpClient;
-  readonly releaseBaseUrl?: string | undefined;
-  /** Reuse a cached runtime only while the release source still lists it, as a policy mirror does. */
-  readonly requirePublishedRelease?: boolean;
+  /** Without one, only an already installed runtime is used: upstream is never a fallback. */
+  readonly releaseSource: CliReleaseSource | undefined;
   readonly onProgress?: (progress: PinnedRuntimeProgress) => void;
 }
 
@@ -171,6 +158,7 @@ const fetchReleaseAsset = Effect.fn("cloud.pinned_runtime.fetch_release_asset")(
 
 const installFromArchive = Effect.fn("cloud.pinned_runtime.install_archive")(function* (
   input: PinnedRuntimeInstallInput,
+  source: CliReleaseSource,
   stagingDir: string,
 ) {
   const { fs, path } = input;
@@ -182,10 +170,10 @@ const installFromArchive = Effect.fn("cloud.pinned_runtime.install_archive")(fun
   }
   const httpClient = input.httpClient;
   input.onProgress?.({ stage: "download", received: 0, total: undefined });
-  const { fileName, expected } = yield* publishedArchive(input, platformKey);
+  const { fileName, expected } = yield* publishedArchive(input, source, platformKey);
   const archive = yield* fetchReleaseAsset(
     httpClient,
-    cliReleaseAssetUrl(input.version, fileName, input.releaseBaseUrl),
+    cliReleaseAssetUrl(source, input.version, fileName),
     "downloading the t3 release archive",
     input.onProgress,
   );
@@ -237,6 +225,7 @@ const installFromArchive = Effect.fn("cloud.pinned_runtime.install_archive")(fun
 /** The release's archive for this machine and its checksum; fails when the release lists none. */
 const publishedArchive = Effect.fn("cloud.pinned_runtime.published_archive")(function* (
   input: PinnedRuntimeInstallInput,
+  source: CliReleaseSource,
   platformKey: CliArchivePlatformKey,
 ) {
   const fileName = cliArchiveFileName(input.version, platformKey);
@@ -244,7 +233,7 @@ const publishedArchive = Effect.fn("cloud.pinned_runtime.published_archive")(fun
     new TextDecoder().decode(
       yield* fetchReleaseAsset(
         input.httpClient,
-        cliReleaseAssetUrl(input.version, CLI_RELEASE_CHECKSUMS_FILE, input.releaseBaseUrl),
+        cliReleaseAssetUrl(source, input.version, CLI_RELEASE_CHECKSUMS_FILE),
         "downloading the t3 release checksums",
       ),
     ),
@@ -257,16 +246,6 @@ const publishedArchive = Effect.fn("cloud.pinned_runtime.published_archive")(fun
   }
   return { fileName, expected };
 });
-
-const isPinnedRuntimeInstallError = Schema.is(PinnedRuntimeInstallError);
-
-/** Whether an install failed because the release source does not publish the version for this machine. */
-export const isUnpublishedRelease = (error: unknown): error is PinnedRuntimeInstallError =>
-  isPinnedRuntimeInstallError(error) &&
-  (error.step.startsWith("finding ") ||
-    (error.step.startsWith("downloading the t3 release") &&
-      HttpClientError.isHttpClientError(error.cause) &&
-      error.cause.response?.status === 404));
 
 const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(function* (
   input: PinnedRuntimeInstallInput,
@@ -285,18 +264,15 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
   const alreadyPinned =
     entryExists && Option.isSome(sentinel) && sentinel.value.trim() === input.version;
   if (alreadyPinned) {
-    if (input.requirePublishedRelease === true) {
-      const platformKey = cliArchivePlatformKey(input.platform, input.arch);
-      if (platformKey === undefined) {
-        return yield* new PinnedRuntimeInstallError({
-          step: `selecting a t3 release archive for ${input.platform}-${input.arch}`,
-        });
-      }
-      yield* publishedArchive(input, platformKey);
-    }
     input.onProgress?.({ stage: "cached" });
     yield* input.validate(paths);
     return paths;
+  }
+  const source = input.releaseSource;
+  if (source === undefined) {
+    return yield* new PinnedRuntimeInstallError({
+      step: `downloading t3@${input.version}: no release source is configured (set T3CODE_RELEASE_BASE_URL)`,
+    });
   }
   if (versionDirExists) {
     yield* fs.remove(paths.versionDir, { recursive: true, force: true }).pipe(
@@ -341,7 +317,7 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
   };
 
   return yield* Effect.gen(function* () {
-    yield* installFromArchive(input, stagingDir);
+    yield* installFromArchive(input, source, stagingDir);
 
     input.onProgress?.({ stage: "validate" });
     yield* input.validate(stagingPaths);
@@ -421,27 +397,6 @@ export function launcherOwnsVersionsDir(
   const relative = path.relative(versionsDir, path.resolve(candidate));
   return relative.length > 0 && !relative.startsWith("..") && !path.isAbsolute(relative);
 }
-
-/**
- * `t3 update` repoints the launcher it was started through, which may be on neither PATH nor the
- * default bin dir. Unrecorded, the next prune would remove the runtime it now points at.
- */
-export const recordPinnedRuntimeLauncher = Effect.fn("cloud.pinned_runtime.record_launcher")(
-  function* (input: { readonly baseDir: string; readonly launcher: string }) {
-    const fs = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const launchersFile = path.join(
-      input.baseDir,
-      PINNED_RUNTIME_DIR,
-      PINNED_RUNTIME_LAUNCHERS_FILE,
-    );
-    // Prune may run in another process, such as the service, whose working directory differs.
-    const launcher = path.resolve(input.launcher);
-    const recorded = yield* fs.readFileString(launchersFile).pipe(Effect.orElseSucceed(() => ""));
-    if (recorded.split(/\r?\n/).includes(launcher)) return;
-    yield* fs.writeFileString(launchersFile, launcherRecords([launcher]), { flag: "a" });
-  },
-);
 
 /** The executable a `t3.cmd` shim written by the install script or `t3 update` runs. */
 export const windowsShimTarget = (contents: string) => /^"([^"]+)"/m.exec(contents)?.[1];
@@ -677,3 +632,31 @@ export const prunePinnedRuntimes = Effect.fn("cloud.pinned_runtime.prune")(funct
   }
   return removed;
 });
+
+/**
+ * A server starting from the runtime its launcher settled on means runtimes left by earlier
+ * installs can go. The boot service says so through its IPC context. The SSH launcher and the
+ * install script's `t3` start this home's pinned runtime directly, without one.
+ */
+export const pruneRuntimesOnStart = Effect.fn("cloud.pinned_runtime.prune_on_start")(
+  function* (input: { readonly baseDir: string; readonly managed: boolean }) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const platform = yield* HostProcess.Platform;
+    const executablePath = yield* HostProcess.ExecutablePath;
+    const { entryPath } = pinnedRuntimePaths(path, input.baseDir, packageJson.version, platform);
+    // The executable path is resolved, so it names the real path of a symlinked T3 home.
+    const realEntryPath = yield* fs.realPath(entryPath).pipe(Effect.orElseSucceed(() => entryPath));
+    if (!input.managed && executablePath !== entryPath && executablePath !== realEntryPath) {
+      return [];
+    }
+    const removed = yield* prunePinnedRuntimes({
+      baseDir: input.baseDir,
+      keep: [packageJson.version],
+    });
+    if (removed.length > 0) {
+      yield* Effect.logInfo("Removed unused t3 runtimes.", { versions: removed });
+    }
+    return removed;
+  },
+);

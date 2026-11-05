@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { cliArchiveTarCommand, newestCliReleaseVersion, parseChecksums } from "./cliRelease.ts";
+import {
+  cliArchiveTarCommand,
+  cliReleaseAssetUrl,
+  cliReleaseSource,
+  parseChecksums,
+} from "./cliRelease.ts";
 
 describe("cliRelease", () => {
   it("parses sha256sum output including binary-mode markers", () => {
@@ -25,18 +30,15 @@ describe("cliRelease", () => {
     expect(cliArchiveTarCommand("win32", {})).toBe("C:\\Windows\\System32\\tar.exe");
   });
 
-  it("picks the newest non-draft release on the requested channel", () => {
-    const releases = [
-      { tag_name: "v1.2.4-preview.20260912.9", draft: true },
-      { tag_name: "v1.2.4-preview.20260912.8" },
-      { tag_name: "v1.2.4-nightly.20260912.7" },
-      { tag_name: "desktop-preview" },
-      { tag_name: "v1.2.3" },
-      { tag_name: "v1.2.3-nightly.20260911.2" },
-    ];
-    expect(newestCliReleaseVersion(releases, "preview")).toBe("1.2.4-preview.20260912.8");
-    expect(newestCliReleaseVersion(releases, "nightly")).toBe("1.2.4-nightly.20260912.7");
-    expect(newestCliReleaseVersion(releases, "stable")).toBe("1.2.3");
-    expect(newestCliReleaseVersion([{ tag_name: "v1.2.3" }], "preview")).toBeUndefined();
+  it("has no release source unless one is configured, never upstream's", () => {
+    expect(cliReleaseSource({})).toBeUndefined();
+    expect(cliReleaseSource({ T3CODE_RELEASE_BASE_URL: "  " })).toBeUndefined();
+    const source = cliReleaseSource({
+      T3CODE_RELEASE_BASE_URL: " https://releases.example.com/t3/?token=abc ",
+    });
+    expect(source).toEqual({ baseUrl: "https://releases.example.com/t3/?token=abc" });
+    expect(cliReleaseAssetUrl(source!, "1.2.3", "SHA256SUMS")).toBe(
+      "https://releases.example.com/t3/v1.2.3/SHA256SUMS?token=abc",
+    );
   });
 });

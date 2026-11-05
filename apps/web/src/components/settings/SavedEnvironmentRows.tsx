@@ -5,7 +5,6 @@ import {
   EllipsisIcon,
   RouteIcon,
 } from "lucide-react";
-import { useAtomValue } from "@effect/atom-react";
 import { useEffect, useEffectEvent, useState } from "react";
 import {
   AuthRelayWriteScope,
@@ -42,11 +41,7 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { Button, InlineButton } from "../ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
-import {
-  resolveServerConfigVersionMismatch,
-  resolveServerSelfUpdateCapability,
-  supportsDesktopAppUpdate,
-} from "~/versionSkew";
+import { resolveServerConfigVersionMismatch } from "~/versionSkew";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 import { isElectron } from "~/env";
 import { useCloudLinkController } from "~/cloud/useCloudLinkController";
@@ -60,15 +55,8 @@ import {
   useRelayEnvironmentDiscovery,
   usePrimaryEnvironmentId,
 } from "~/state/environments";
-import { APP_VERSION } from "~/branding";
 import { usePrimaryManagedPolicy } from "~/state/managedPolicy";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { serverEnvironment } from "~/state/server";
-import {
-  OutdatedServerUpdateAction,
-  ServerUpdateAction,
-  ServerUpdateProgress,
-} from "../ServerUpdateAction";
 import { CloudEnvironmentConnectRows } from "../cloud/CloudEnvironmentConnectList";
 import { useT3ConnectAuthPrompt } from "../clerk/useT3ConnectAuthPrompt";
 
@@ -170,9 +158,6 @@ export function SavedBackendListRow({
     },
   });
   const versionMismatch = resolveServerConfigVersionMismatch(environment.serverConfig);
-  const serverUpdateState = useAtomValue(serverEnvironment.updateStateAtom(environmentId));
-  const resumingServerUpdate =
-    serverUpdateState.status === "running" && serverUpdateState.stage === "resuming";
   const status = savedBackendStatus(environment);
   const serverVersion = environment.serverConfig?.environment.serverVersion ?? null;
   // Discovery empties its map on every refresh, so hold the last descriptor
@@ -200,7 +185,7 @@ export function SavedBackendListRow({
     state: connectionState,
     relayOnly,
   } = useConnectionDiagnosis(environment);
-  const diagnosis = resumingServerUpdate ? null : currentDiagnosis;
+  const diagnosis = currentDiagnosis;
   const prepared = usePreparedConnection(environmentId);
   const connectedTarget = isConnected && prepared._tag === "Some" ? prepared.value.target : null;
   const mcpUrl = environmentMcpUrl({
@@ -216,17 +201,11 @@ export function SavedBackendListRow({
   const subtitleText = [
     environmentTransportLabel(environment, connectedTarget),
     // The headline below names the failure in full.
-    diagnosis ? null : resumingServerUpdate ? "Restarting" : status.text,
+    diagnosis ? null : status.text,
     enabled && versionMismatch ? serverVersion : null,
   ]
     .filter((value): value is string => value !== null)
     .join(" · ");
-
-  const showUpdateAction =
-    enabled &&
-    isConnected &&
-    versionMismatch !== null &&
-    (serverUpdateState.status === "idle" || serverUpdateState.status === "failed");
 
   const statusTooltip = `${
     unsupported
@@ -236,7 +215,7 @@ export function SavedBackendListRow({
         : "Switched off"
   }${
     versionMismatch
-      ? `\nUpdate available: ${versionMismatch.serverVersion} → ${versionMismatch.clientVersion}`
+      ? `\nOlder than this app: ${versionMismatch.serverVersion} → ${versionMismatch.clientVersion}`
       : ""
   }`;
 
@@ -256,11 +235,7 @@ export function SavedBackendListRow({
                 <span
                   className={cn(
                     "min-w-0 truncate",
-                    enabled &&
-                      status.tone === "error" &&
-                      !resumingServerUpdate &&
-                      !diagnosis &&
-                      "text-destructive",
+                    enabled && status.tone === "error" && !diagnosis && "text-destructive",
                   )}
                 />
               }
@@ -321,11 +296,6 @@ export function SavedBackendListRow({
               onToggle={() => setDiagnosisOpen((open) => !open)}
             />
           ) : null}
-          {serverUpdateState.status !== "idle" ? (
-            <div className="mt-1 max-w-md">
-              <ServerUpdateProgress state={serverUpdateState} />
-            </div>
-          ) : null}
         </>
       }
       detail={
@@ -359,29 +329,6 @@ export function SavedBackendListRow({
         </>
       }
     >
-      {unsupported &&
-      environment.entry.serverUpdateRequired === true &&
-      serverUpdateState.status !== "running" ? (
-        <OutdatedServerUpdateAction
-          environmentId={environmentId}
-          serverLabel={`${environment.label} server`}
-          fromVersion={lastDescriptor?.serverVersion}
-          targetVersion={APP_VERSION}
-          label={serverUpdateState.status === "failed" ? "Retry update" : "Update"}
-        />
-      ) : null}
-      {showUpdateAction ? (
-        <ServerUpdateAction
-          environmentId={environmentId}
-          serverLabel={`${environment.label} server`}
-          selfUpdate={resolveServerSelfUpdateCapability(environment.serverConfig)}
-          installation={environment.serverConfig?.environment.capabilities.serverInstallation}
-          desktopAppUpdate={supportsDesktopAppUpdate(environment.serverConfig)}
-          targetVersion={versionMismatch.clientVersion}
-          label={serverUpdateState.status === "failed" ? "Retry update" : "Update"}
-          appearance="icon"
-        />
-      ) : null}
       <Tooltip>
         <TooltipTrigger
           render={

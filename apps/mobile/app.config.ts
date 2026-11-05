@@ -240,11 +240,10 @@ const config: ExpoConfig = {
   orientation: "portrait",
   icon: variant.assets.appIcon,
   userInterfaceStyle: "automatic",
+  // Never fetch over-the-air bundles: the only feed was upstream's EAS project (ADR 0007).
   updates: {
-    enabled: repoEnv.T3CODE_MOBILE_UPDATES_ENABLED !== "0",
-    url: "https://u.expo.dev/d763fcb8-d37c-41ea-a773-b54a0ab4a454",
-    checkAutomatically: "ON_LOAD",
-    fallbackToCacheTimeout: 0,
+    enabled: false,
+    checkAutomatically: "NEVER",
   },
   ios: {
     icon: variant.assets.iosIcon,

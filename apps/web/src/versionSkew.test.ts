@@ -1,5 +1,4 @@
 import { EnvironmentId } from "@t3tools/contracts";
-import type { ServerUpdateState } from "@t3tools/client-runtime/state/server";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const branding = vi.hoisted(() => ({ APP_VERSION: "0.0.34" }));
@@ -8,11 +7,8 @@ vi.mock("./branding", () => branding);
 import { APP_VERSION } from "./branding";
 import {
   buildVersionMismatchDismissalKey,
-  dismissServerUpdateFailure,
   dismissVersionMismatch,
-  isServerUpdateFailureDismissed,
   isVersionMismatchDismissed,
-  manualServerUpdateCommand,
   resolveVersionMismatch,
 } from "./versionSkew";
 
@@ -20,36 +16,8 @@ const MISMATCH_HINT =
   "Version mismatch. Try syncing the client and server to the same T3 Code version.";
 
 describe("versionSkew", () => {
-  it("updates only the proven npm prefix and safely quotes its path", () => {
-    expect(manualServerUpdateCommand("0.0.45", { kind: "npm-global", prefix: "/opt/node" })).toBe(
-      "npm install --global --prefix '/opt/node' t3@0.0.45",
-    );
-    expect(
-      manualServerUpdateCommand("0.0.45", { kind: "npm-global", prefix: "/opt/maria's node" }),
-    ).toBe("npm install --global --prefix '/opt/maria'\\''s node' t3@0.0.45");
-  });
   beforeEach(() => {
     branding.APP_VERSION = "0.0.34";
-  });
-
-  it("dismisses only the current failed attempt without clearing its retry state", () => {
-    const failure = {
-      status: "failed",
-      stage: "downloading",
-      fromVersion: "0.0.33",
-      targetVersion: "0.0.34",
-      message: "Download failed.",
-    } as const satisfies ServerUpdateState;
-    const retryFailure = { ...failure };
-    const otherEnvironmentFailure = { ...failure };
-
-    dismissServerUpdateFailure(failure);
-
-    expect(isServerUpdateFailureDismissed(failure)).toBe(true);
-    expect(failure.status).toBe("failed");
-    expect(failure.message).toBe("Download failed.");
-    expect(isServerUpdateFailureDismissed(retryFailure)).toBe(false);
-    expect(isServerUpdateFailureDismissed(otherEnvironmentFailure)).toBe(false);
   });
 
   it("returns a mismatch when the server is behind the client", () => {
