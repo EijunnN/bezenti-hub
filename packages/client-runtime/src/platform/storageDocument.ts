@@ -36,7 +36,15 @@ const StoredConnectionTargets = Schema.Array(
   ),
 );
 
-export const ConnectionCatalogDocument = Schema.Struct({
+// Learned routes reached through T3 Connect were saved as bearer profiles that relied on the
+// Connect account instead of a stored credential. They are dropped on read with their routes and
+// any credential, so the environment does not keep a route that can never authorize.
+const RetiredConnectProfile = Schema.TaggedStruct("BearerConnectionProfile", {
+  connectionId: Schema.String,
+  authorization: Schema.Literal("t3-connect"),
+});
+
+const CatalogDocumentFields = {
   schemaVersion: Schema.Literal(1),
   targets: StoredConnectionTargets,
   profiles: Schema.Array(ConnectionProfile),
@@ -47,7 +55,47 @@ export const ConnectionCatalogDocument = Schema.Struct({
   disabledEnvironmentIds: Schema.Array(EnvironmentId).pipe(
     Schema.withDecodingDefaultKey(Effect.succeed([])),
   ),
+};
+
+const CatalogDocument = Schema.Struct(CatalogDocumentFields);
+
+const isRetiredConnectProfile = (
+  profile: ConnectionProfile | typeof RetiredConnectProfile.Type,
+): profile is typeof RetiredConnectProfile.Type => "authorization" in profile;
+
+const StoredCatalogDocument = Schema.Struct({
+  ...CatalogDocumentFields,
+  profiles: Schema.Array(Schema.Union([RetiredConnectProfile, ConnectionProfile])),
 });
+type StoredCatalogDocument = typeof StoredCatalogDocument.Type;
+type CatalogDocument = typeof CatalogDocument.Type;
+
+export const ConnectionCatalogDocument = StoredCatalogDocument.pipe(
+  Schema.decodeTo(
+    Schema.toType(CatalogDocument),
+    SchemaTransformation.transform<CatalogDocument, StoredCatalogDocument>({
+      decode: (document): CatalogDocument => {
+        const retired = new Set(
+          document.profiles.filter(isRetiredConnectProfile).map((profile) => profile.connectionId),
+        );
+        return {
+          ...document,
+          targets: document.targets.filter((target) => {
+            const connectionId = "connectionId" in target ? target.connectionId : null;
+            return connectionId === null || !retired.has(connectionId);
+          }),
+          profiles: document.profiles.filter(
+            (profile): profile is ConnectionProfile => !isRetiredConnectProfile(profile),
+          ),
+          credentials: document.credentials.filter(
+            (credential) => !retired.has(credential.connectionId),
+          ),
+        };
+      },
+      encode: (document): StoredCatalogDocument => document,
+    }),
+  ),
+);
 export type ConnectionCatalogDocument = typeof ConnectionCatalogDocument.Type;
 
 export const EMPTY_CONNECTION_CATALOG_DOCUMENT: ConnectionCatalogDocument = Object.freeze({

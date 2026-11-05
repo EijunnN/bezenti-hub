@@ -232,6 +232,45 @@ describe("ConnectionCatalogDocument", () => {
     expect(decoded.targets).toEqual([BEARER_TARGET]);
   });
 
+  it("drops learned routes that relied on T3 Connect", () => {
+    const connectTarget = {
+      _tag: "BearerConnectionTarget",
+      environmentId: ENVIRONMENT_ID,
+      label: "Remote (LAN)",
+      connectionId: "learned-connect",
+    };
+    const decoded = decodeCatalogDocument({
+      schemaVersion: 1,
+      targets: [connectTarget, { ...BEARER_TARGET, _tag: "BearerConnectionTarget" }],
+      profiles: [
+        {
+          _tag: "BearerConnectionProfile",
+          connectionId: "learned-connect",
+          environmentId: ENVIRONMENT_ID,
+          label: "Remote (LAN)",
+          httpBaseUrl: "http://192.168.1.20:3773",
+          wsBaseUrl: "ws://192.168.1.20:3773",
+          learned: true,
+          authorization: "t3-connect",
+        },
+        { ...BEARER_PROFILE, _tag: "BearerConnectionProfile" },
+      ],
+      credentials: [
+        {
+          connectionId: BEARER_TARGET.connectionId,
+          credential: { _tag: "BearerConnectionCredential", token: BEARER_CREDENTIAL.token },
+        },
+      ],
+      disabledEnvironmentIds: [],
+    });
+
+    expect(decoded.targets).toEqual([BEARER_TARGET]);
+    expect(decoded.profiles).toEqual([BEARER_PROFILE]);
+    expect(decoded.credentials).toEqual([
+      { connectionId: BEARER_TARGET.connectionId, credential: BEARER_CREDENTIAL },
+    ]);
+  });
+
   it("switches a saved environment off and back on without touching its records", () => {
     const registered = registerConnectionInCatalog(
       EMPTY_CONNECTION_CATALOG_DOCUMENT,

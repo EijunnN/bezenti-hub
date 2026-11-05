@@ -21,6 +21,7 @@ interface PersistedSavedEnvironmentStorageRecord extends Omit<
 > {
   readonly desktopSsh?: PersistedSavedEnvironmentDesktopSsh;
   readonly encryptedBearerToken?: string;
+  readonly relayManaged?: unknown;
 }
 
 interface SavedEnvironmentRegistryDocument {
@@ -48,6 +49,8 @@ const PersistedSavedEnvironmentStorageRecordSchema = Schema.Struct({
   createdAt: Schema.String,
   lastConnectedAt: Schema.NullOr(Schema.String),
   desktopSsh: Schema.optionalKey(DesktopSshTargetSchema),
+  /** Written by T3 Connect, which this build no longer has. Such records are skipped on read. */
+  relayManaged: Schema.optionalKey(Schema.Unknown),
   encryptedBearerToken: Schema.optionalKey(Schema.String),
 });
 
@@ -229,7 +232,9 @@ export const make = Effect.gen(function* () {
   return DesktopSavedEnvironments.of({
     getRegistry: readRegistryDocument(fileSystem, environment.savedEnvironmentRegistryPath).pipe(
       Effect.map((document) =>
-        document.records.map((record) => toPersistedSavedEnvironmentRecord(record)),
+        document.records
+          .filter((record) => record.relayManaged === undefined)
+          .map((record) => toPersistedSavedEnvironmentRecord(record)),
       ),
       Effect.withSpan("desktop.savedEnvironments.getRegistry"),
     ),

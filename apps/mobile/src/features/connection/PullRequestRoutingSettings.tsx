@@ -51,6 +51,7 @@ export function PullRequestRoutingSettings() {
           const selected = pullRequestRoutingPermissionFor(entry, permissions);
           const disabled =
             !catalog.isReady || saving || pullRequestRoutingConnectionKey(entry) === null;
+          const displayUrl = connectionCatalogDisplayUrl(entry);
           return (
             <View key={environmentId}>
               <Pressable
@@ -64,9 +65,9 @@ export function PullRequestRoutingSettings() {
                   <Text className="text-base font-t3-bold text-foreground">
                     {entry.target.label}
                   </Text>
-                  {connectionCatalogDisplayUrl(entry) ? (
+                  {displayUrl ? (
                     <Text className="text-xs text-foreground-muted" numberOfLines={1}>
-                      {connectionCatalogDisplayUrl(entry)}
+                      {displayUrl}
                     </Text>
                   ) : null}
                 </View>
