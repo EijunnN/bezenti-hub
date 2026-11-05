@@ -2,6 +2,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EnvironmentHttpApi,
+  EnvironmentId,
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION,
   UserId,
@@ -29,6 +30,8 @@ import * as OwnerPresence from "./OwnerPresence.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import * as SessionStore from "./SessionStore.ts";
 import * as AuthHttp from "./http.ts";
+import * as McpOAuth from "./McpOAuth.ts";
+import * as McpOAuthHttp from "./mcpOAuthHttp.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as SpacesHttp from "../spaces/http.ts";
@@ -59,7 +62,8 @@ class AuthTestApi extends HttpApi.make("environment")
   .add(EnvironmentHttpApi.groups.invitations)
   .add(EnvironmentHttpApi.groups.projects)
   .add(EnvironmentHttpApi.groups.orchestration)
-  .add(EnvironmentHttpApi.groups.pullRequests) {}
+  .add(EnvironmentHttpApi.groups.pullRequests)
+  .add(EnvironmentHttpApi.groups.mcpOAuth) {}
 
 const ORIGIN = "http://127.0.0.1";
 const RP_ID = "127.0.0.1";
@@ -135,9 +139,19 @@ const layerPullRequests = Layer.mock(PullRequestService.PullRequestService)({
 const makeLayerServices = (config: { readonly publicUrl?: URL }) =>
   Layer.mergeAll(
     layerPullRequests,
-    Layer.merge(InvitationService.layer, SpaceVisibility.layer).pipe(
-      Layer.provideMerge(Layer.merge(EnvironmentAuth.layer, SpaceDirectory.layer)),
-    ),
+    // Outside MCP clients: OAuth approval and the bearer check /mcp runs.
+    Layer.mergeAll(
+      InvitationService.layer,
+      SpaceVisibility.layer,
+      Layer.merge(McpOAuth.layer, McpOAuth.layerMcpClientAuthenticator).pipe(
+        Layer.provide(ServerSettings.layerTest()),
+        Layer.provide(
+          Layer.mock(ServerEnvironment.ServerEnvironment)({
+            getEnvironmentId: Effect.succeed(EnvironmentId.make("environment-test")),
+          }),
+        ),
+      ),
+    ).pipe(Layer.provideMerge(Layer.merge(EnvironmentAuth.layer, SpaceDirectory.layer))),
     layerProjects,
     layerThreads,
   ).pipe(
@@ -165,6 +179,7 @@ export const serveAuthHttpWith = Effect.fn(function* (config: { readonly publicU
     Layer.provide(ProjectHttp.layer),
     Layer.provide(OrchestrationHttp.layer),
     Layer.provide(PullRequestHttp.layer),
+    Layer.provide(McpOAuthHttp.layer),
     Layer.provide(AuthHttp.layerAuthenticatedAuth),
     Layer.provide(layerTestPeer),
     Layer.provide(Layer.succeedContext(services)),
@@ -186,23 +201,27 @@ export const serveAuthHttpWith = Effect.fn(function* (config: { readonly publicU
       /** The direct peer's address; loopback when omitted. */
       peer?: string;
       headers?: Record<string, string>;
+      /** An `application/x-www-form-urlencoded` body, as OAuth token requests send. */
+      form?: Record<string, string>;
     },
   ) =>
     Effect.promise(async () => {
       const response = await handler(
         new Request(`${ORIGIN}${path}`, {
-          method: init?.body === undefined ? "GET" : "POST",
+          method: init?.body === undefined && init?.form === undefined ? "GET" : "POST",
           headers: {
             [ORCHESTRATION_PROTOCOL_HEADER]: String(ORCHESTRATION_PROTOCOL_VERSION),
             origin: ORIGIN,
             host: RP_ID,
-            "content-type": "application/json",
+            "content-type":
+              init?.form === undefined ? "application/json" : "application/x-www-form-urlencoded",
             ...(init?.cookie ? { cookie: init.cookie } : {}),
             ...(init?.authorization ? { authorization: init.authorization } : {}),
             ...(init?.peer ? { [TEST_PEER_HEADER]: init.peer } : {}),
             ...init?.headers,
           },
           ...(init?.body === undefined ? {} : { body: encodeJson(init.body) }),
+          ...(init?.form === undefined ? {} : { body: new URLSearchParams(init.form).toString() }),
         }),
         requestContext,
       );

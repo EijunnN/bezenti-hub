@@ -128,6 +128,7 @@ export const layer = HttpApiBuilder.group(
               ? {}
               : {
                   csrfToken: session.csrfToken,
+                  ...(session.displayName === undefined ? {} : { signedInAs: session.displayName }),
                   oneClickAccess: AuthMcpClientAccess.literals.filter((access) =>
                     mcpClientScopes(access).every((scope) => session.scopes.includes(scope)),
                   ),

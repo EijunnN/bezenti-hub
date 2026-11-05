@@ -2858,6 +2858,8 @@ const make = Effect.gen(function* () {
                   interactionMode,
                   branch: parent.thread.branch,
                   worktreePath: parent.thread.worktreePath,
+                  // A child belongs to the User the parent's agent acts as.
+                  ...(scope.userId === undefined ? {} : { ownerUserId: scope.userId }),
                   ...(parent.thread.linkOrigin === undefined
                     ? {}
                     : { linkOrigin: parent.thread.linkOrigin }),

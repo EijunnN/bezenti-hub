@@ -131,8 +131,9 @@ export interface McpInvocationScope {
   readonly thread: McpThreadCaller | undefined;
   readonly client: McpClientCaller | undefined;
   /**
-   * The User the caller reads as. None reads as the Owner, as every caller does until agents
-   * act as the User who started their turn.
+   * The User the caller acts as: an agent's Thread owner, or the User who approved an outside
+   * client. Reads, creations and `mcpPrincipal` follow it. None only before an Owner exists (or
+   * for a Thread with no owner), which reads as the Owner.
    */
   readonly userId?: UserId;
   /** False while the Linked environments beta is off here; `/mcp` reads it per request. */

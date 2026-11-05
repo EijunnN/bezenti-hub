@@ -281,6 +281,10 @@ export class UserDirectory extends Context.Service<
     readonly findActiveUser: (
       userId: UserId,
     ) => Effect.Effect<Option.Option<AuthUser>, UserDirectoryStorageError>;
+    /** The active User with this sign-in name or id, for the Hub's shell (`t3 ... --user`). */
+    readonly findActiveUserByName: (
+      loginNameOrId: string,
+    ) => Effect.Effect<Option.Option<AuthUser>, UserDirectoryStorageError>;
     readonly startOwnerRegistration: (input: {
       readonly displayName: string;
       readonly origin: string;
@@ -1350,6 +1354,16 @@ const make = Effect.gen(function* () {
     }),
     findActiveUser: Effect.fn("UserDirectory.findActiveUser")(function (userId: UserId) {
       return activeUser(userId).pipe(Effect.map(Option.map(toAuthUser)));
+    }),
+    findActiveUserByName: Effect.fn("UserDirectory.findActiveUserByName")(function* (
+      loginNameOrId: string,
+    ) {
+      if (loginNameOrId.trim().length === 0) return Option.none<AuthUser>();
+      const byName = yield* users.getByLoginName(normalizeLoginName(loginNameOrId)).pipe(storage);
+      const userId = Option.isSome(byName)
+        ? byName.value.userId
+        : UserId.make(loginNameOrId.trim());
+      return yield* activeUser(userId).pipe(Effect.map(Option.map(toAuthUser)));
     }),
     startOwnerRegistration,
     verifyOwnerRegistration,

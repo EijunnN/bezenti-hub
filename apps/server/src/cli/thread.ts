@@ -31,6 +31,10 @@ import * as ServerConfig from "../config.ts";
 import { mcpToolSession, type McpToolSession } from "../mcp/AcpMcpStdioBridge.ts";
 import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
+import { resolveCliUser, userFlag } from "./userFlag.ts";
+
+// The short-lived MCP session acts as --user, like an outside agent that User approved.
+const threadFlags = { ...projectLocationFlags, user: userFlag };
 
 /**
  * Short enough that a run which stops to ask the user something is noticed
@@ -203,7 +207,7 @@ export type ThreadTools = ReturnType<typeof makeThreadTools>;
  * outside agent does, and revokes that session when the command ends.
  */
 const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E, R>(
-  flags: { readonly baseDir: Option.Option<string> },
+  flags: { readonly baseDir: Option.Option<string>; readonly user: Option.Option<string> },
   run: (tools: ThreadTools) => Effect.Effect<A, E, R>,
 ) {
   const logLevel = yield* GlobalFlag.LogLevel;
@@ -215,11 +219,13 @@ const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E,
     }
     const origin = runtimeState.value.origin;
     const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
+    const userId = yield* resolveCliUser(flags.user);
     const issued = yield* Effect.acquireRelease(
       environmentAuth.issueMcpClientSession({
         label: "t3 thread cli",
-        // The CLI runs as the machine's owner. New threads still start at
-        // the project's default mode, never at this ceiling by default.
+        ...(userId === undefined ? {} : { userId }),
+        // Only the Hub's shell runs it. New threads still start at the
+        // project's default mode, never at this ceiling by default.
         access: "full-access",
         peerLink: false,
         client: { deviceType: "bot" },
@@ -560,7 +566,7 @@ const decodeThreadId = (value: string) =>
   );
 
 const threadListCommand = Command.make("list", {
-  ...projectLocationFlags,
+  ...threadFlags,
   project: Flag.String("project").pipe(
     Flag.withDescription("Project id or a path inside the project. Defaults to this directory."),
     Flag.withDefault("."),
@@ -596,7 +602,7 @@ const threadListCommand = Command.make("list", {
 );
 
 const threadStartCommand = Command.make("start", {
-  ...projectLocationFlags,
+  ...threadFlags,
   project: Argument.String("project").pipe(
     Argument.withDescription("Project id or a path inside the project, such as ."),
   ),
@@ -675,7 +681,7 @@ const threadStartCommand = Command.make("start", {
 );
 
 const threadSendCommand = Command.make("send", {
-  ...projectLocationFlags,
+  ...threadFlags,
   thread: threadArgument,
   message: messageArgument,
   wait: waitFlag,
@@ -709,7 +715,7 @@ const threadSendCommand = Command.make("send", {
 );
 
 const threadShowCommand = Command.make("show", {
-  ...projectLocationFlags,
+  ...threadFlags,
   thread: threadArgument,
   messages: Flag.Int("messages").pipe(
     Flag.withDescription("How many of the latest messages to print."),

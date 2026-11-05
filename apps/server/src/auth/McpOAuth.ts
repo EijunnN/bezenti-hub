@@ -16,6 +16,7 @@ import {
   MCP_PEER_LINK_SOFTWARE_ID,
   mcpClientScopes,
   type RuntimeMode,
+  type UserId,
 } from "@t3tools/contracts";
 import { DEFAULT_HOSTED_APP_URL } from "@t3tools/shared/hostedApp";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
@@ -39,6 +40,7 @@ import type * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as PayloadSigner from "./PayloadSigner.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
+import * as UserDirectory from "./UserDirectory.ts";
 import {
   base64UrlDecodeUtf8,
   base64UrlEncode,
@@ -189,7 +191,18 @@ interface PendingCode {
   readonly codeChallenge: string;
   readonly resource: string;
   readonly access: AuthMcpClientAccess;
+  /** Who approved it, and so whom the issued client acts as. */
+  readonly userId: UserId | undefined;
   readonly expiresAtMs: number;
+}
+
+/** The signed-in User approving on the consent page; the client will act as them. */
+export interface ApprovingSession {
+  readonly csrfToken: string;
+  readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly userId: UserId | undefined;
+  /** Shown on the consent page, so the person sees which account approves. */
+  readonly displayName: string | undefined;
 }
 
 export type ApprovalDecision = Exclude<AuthMcpApprovalDecision, { readonly _tag: "deny" }>;
@@ -208,10 +221,7 @@ export class McpOAuth extends Context.Service<
     readonly approvingBrowserSession: (
       request: HttpServerRequest.HttpServerRequest,
       authorization: AuthorizationRequest,
-    ) => Effect.Effect<
-      | { readonly csrfToken: string; readonly scopes: ReadonlyArray<AuthEnvironmentScope> }
-      | undefined
-    >;
+    ) => Effect.Effect<ApprovingSession | undefined>;
     readonly approve: (input: {
       readonly request: HttpServerRequest.HttpServerRequest;
       readonly authorization: AuthorizationRequest;
@@ -253,6 +263,7 @@ export const redirectForError = (error: McpOAuthRedirectError, issuer: string) =
 
 const make = Effect.gen(function* () {
   const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
+  const userDirectory = yield* UserDirectory.UserDirectory;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const random = yield* SecureRandom.SecureRandom;
   const digester = yield* Digest.Digest;
@@ -414,8 +425,18 @@ const make = Effect.gen(function* () {
         // Approving manages access, and a session may only hand out scopes it holds.
         session.scopes.includes(AuthAccessWriteScope) &&
         session.scopes.includes(AuthOrchestrationReadScope)
-          ? csrfToken(session.sessionId, authorization).pipe(
-              Effect.map((token) => ({ csrfToken: token, scopes: session.scopes })),
+          ? Effect.all([
+              csrfToken(session.sessionId, authorization),
+              session.userId === undefined
+                ? Effect.succeedNone
+                : userDirectory.findUser(session.userId),
+            ]).pipe(
+              Effect.map(([token, user]): ApprovingSession => ({
+                csrfToken: token,
+                scopes: session.scopes,
+                userId: session.userId,
+                displayName: Option.getOrUndefined(user)?.displayName,
+              })),
             )
           : Effect.undefined,
       ),
@@ -425,6 +446,7 @@ const make = Effect.gen(function* () {
   const mintCode = Effect.fn("McpOAuth.mintCode")(function* (
     authorization: AuthorizationRequest,
     access: AuthMcpClientAccess,
+    userId: UserId | undefined,
   ) {
     const now = yield* Clock.currentTimeMillis;
     const code = Buffer.from(yield* random.randomBytes(32)).toString("base64url");
@@ -438,6 +460,7 @@ const make = Effect.gen(function* () {
         codeChallenge: authorization.codeChallenge,
         resource: authorization.resource,
         access,
+        userId,
         expiresAtMs: now + AUTHORIZATION_CODE_TTL_MS,
       });
       return next;
@@ -447,20 +470,25 @@ const make = Effect.gen(function* () {
 
   const approve: McpOAuth["Service"]["approve"] = Effect.fn("McpOAuth.approve")(function* (input) {
     const { decision } = input;
+    // The client acts as whoever approved it: the signed-in User, or the User a code was issued to.
+    let approver: UserId | undefined;
     if (decision._tag === "pairing-code") {
-      yield* environmentAuth.consumeMcpApprovalCode(decision.code, decision.access).pipe(
-        Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (cause) =>
-          Effect.logError("MCP approval code check failed.", { cause }).pipe(
-            Effect.andThen(
-              Effect.fail(
-                new McpOAuthPageError({
-                  description: "The code could not be checked. Try again.",
-                }),
+      const granted = yield* environmentAuth
+        .consumeMcpApprovalCode(decision.code, decision.access)
+        .pipe(
+          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (cause) =>
+            Effect.logError("MCP approval code check failed.", { cause }).pipe(
+              Effect.andThen(
+                Effect.fail(
+                  new McpOAuthPageError({
+                    description: "The code could not be checked. Try again.",
+                  }),
+                ),
               ),
             ),
           ),
-        ),
-      );
+        );
+      approver = granted.userId;
     } else {
       const session = yield* approvingBrowserSession(input.request, input.authorization);
       if (
@@ -472,8 +500,9 @@ const make = Effect.gen(function* () {
           description: "Your session cannot approve this request. Enter a pairing code instead.",
         });
       }
+      approver = session.userId;
     }
-    const code = yield* mintCode(input.authorization, decision.access);
+    const code = yield* mintCode(input.authorization, decision.access, approver);
     yield* Effect.logInfo("Approved an MCP client sign-in.", {
       client: input.authorization.client.name,
       access: decision.access,
@@ -537,6 +566,7 @@ const make = Effect.gen(function* () {
           label: pending.clientName,
           access: pending.access,
           peerLink: pending.peerLink,
+          ...(pending.userId === undefined ? {} : { userId: pending.userId }),
           client: deriveAuthClientMetadata({ request }),
         })
         .pipe(
@@ -598,6 +628,8 @@ export const layerMcpClientAuthenticator = Layer.effect(
                   environmentId,
                   requestNamespace: `client:${client.sessionId}`,
                   thread: undefined,
+                  // It reads and creates as the User who approved it, never as the Owner.
+                  ...(client.userId === undefined ? {} : { userId: client.userId }),
                   client: {
                     sessionId: client.sessionId,
                     label: client.label,

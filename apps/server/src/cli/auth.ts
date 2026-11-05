@@ -8,6 +8,7 @@ import * as Schema from "effect/Schema";
 import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import type * as UserDirectory from "../auth/UserDirectory.ts";
 
 import {
   formatIssuedOwnerResetLink,
@@ -18,6 +19,7 @@ import {
 } from "../cliAuthFormat.ts";
 import * as ServerConfig from "../config.ts";
 import { authScopesFlag } from "./authScopes.ts";
+import { resolveCliUser, userFlag } from "./userFlag.ts";
 import {
   authLocationFlags,
   type CliAuthLocationFlags,
@@ -27,7 +29,9 @@ import {
 
 const runWithEnvironmentAuth = Effect.fn("auth.runWithEnvironmentAuth")(function* <A, E>(
   flags: CliAuthLocationFlags,
-  run: (environmentAuth: EnvironmentAuth.EnvironmentAuth["Service"]) => Effect.Effect<A, E>,
+  run: (
+    environmentAuth: EnvironmentAuth.EnvironmentAuth["Service"],
+  ) => Effect.Effect<A, E, UserDirectory.UserDirectory>,
   options?: {
     readonly quietLogs?: boolean;
   },
@@ -93,18 +97,23 @@ const pairingCreateCommand = Command.make("create", {
   scopes: authScopesFlag(AuthStandardClientScopes),
   ttl: ttlFlag,
   label: labelFlag,
+  user: userFlag,
   baseUrl: baseUrlFlag,
   json: jsonFlag,
 }).pipe(
-  Command.withDescription("Issue a new client pairing token."),
+  Command.withDescription(
+    "Issue a new client pairing token. The device that pairs signs in as --user.",
+  ),
   Command.withHandler((flags) =>
     runWithEnvironmentAuth(
       flags,
       (environmentAuth) =>
         Effect.gen(function* () {
+          const userId = yield* resolveCliUser(flags.user);
           const issued = yield* environmentAuth.createPairingLink({
             scopes: flags.scopes,
             subject: "one-time-token",
+            ...(userId === undefined ? {} : { userId }),
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
             ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
           });
@@ -173,17 +182,22 @@ const sessionIssueCommand = Command.make("issue", {
   ttl: ttlFlag,
   label: labelFlag,
   subject: subjectFlag,
+  user: userFlag,
   tokenOnly: tokenOnlyFlag,
   json: jsonFlag,
 }).pipe(
-  Command.withDescription("Issue a scoped bearer access token for headless or remote clients."),
+  Command.withDescription(
+    "Issue a scoped bearer access token for headless or remote clients. It acts as --user.",
+  ),
   Command.withHandler((flags) =>
     runWithEnvironmentAuth(
       flags,
       (environmentAuth) =>
         Effect.gen(function* () {
+          const userId = yield* resolveCliUser(flags.user);
           const issued = yield* environmentAuth.issueSession({
             scopes: flags.scopes,
+            ...(userId === undefined ? {} : { userId }),
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
             ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
             ...(Option.isSome(flags.subject) ? { subject: flags.subject.value } : {}),

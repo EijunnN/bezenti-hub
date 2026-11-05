@@ -42,7 +42,7 @@ import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 export interface ProjectCreateInput extends ProjectCreatePayload {
   readonly commandId: CommandId;
   readonly projectId: ProjectId;
-  /** The creating User from their session; MCP tools and the CLI leave it out and act as the Owner. */
+  /** The creating User (their session, or an MCP caller's scope); `t3 project` leaves it out for the Owner. */
   readonly actorUserId?: UserId;
   /** The client's current Space. */
   readonly spaceId?: SpaceId;

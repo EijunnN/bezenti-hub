@@ -104,6 +104,8 @@ export interface McpClientSession {
   readonly access: AuthMcpClientAccess;
   /** Another T3 Code environment's link, whose work here stays within it. */
   readonly peerLink: boolean;
+  /** The User who approved the client; it acts as them. None only before an Owner exists. */
+  readonly userId?: UserId;
 }
 
 export interface AuthenticatedSession {
@@ -503,12 +505,14 @@ export class EnvironmentAuth extends Context.Service<
       id: string,
       viewer?: AccessViewer,
     ) => Effect.Effect<boolean, ServerAuthNotYourSessionError | ServerAuthInternalError>;
+    /** For the Hub's shell (`t3 auth session issue`); the token acts as `userId`, else the Owner. */
     readonly issueSession: (input?: {
       readonly ttl?: Duration.Duration;
       readonly subject?: string;
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
       readonly label?: string;
-    }) => Effect.Effect<IssuedBearerSession, ServerAuthInternalError>;
+      readonly userId?: UserId;
+    }) => Effect.Effect<IssuedBearerSession, ServerAuthCredentialError | ServerAuthInternalError>;
     readonly listSessions: () => Effect.Effect<
       ReadonlyArray<AuthClientSession>,
       ServerAuthInternalError
@@ -557,8 +561,10 @@ export class EnvironmentAuth extends Context.Service<
     readonly authenticateMcpClient: (
       request: HttpServerRequest.HttpServerRequest,
     ) => Effect.Effect<McpClientSession, ServerAuthCredentialError | ServerAuthInternalError>;
+    /** The client acts as `userId` (the User who approved it); the Hub's shell may leave it out for the Owner. */
     readonly issueMcpClientSession: (input: {
       readonly label: string;
+      readonly userId?: UserId;
       readonly access: AuthMcpClientAccess;
       readonly peerLink: boolean;
       readonly client: AuthRequestMetadata;
@@ -568,13 +574,17 @@ export class EnvironmentAuth extends Context.Service<
         readonly token: string;
         readonly expiresAt: DateTime.DateTime;
       },
-      ServerAuthInsecureTransportError | ServerAuthInternalError
+      ServerAuthInsecureTransportError | ServerAuthCredentialError | ServerAuthInternalError
     >;
     /** Spends a code covering all granted scopes. Rejects desktop grants and leaves refused proof-bound codes unspent. */
+    /** Answers the User the code was issued to (its creator, or the Owner), whom the client acts as. */
     readonly consumeMcpApprovalCode: (
       code: string,
       access: AuthMcpClientAccess,
-    ) => Effect.Effect<void, ServerAuthMcpApprovalCodeError | ServerAuthInternalError>;
+    ) => Effect.Effect<
+      { readonly userId?: UserId },
+      ServerAuthMcpApprovalCodeError | ServerAuthInternalError
+    >;
     readonly authenticateBrowserSession: (
       request: HttpServerRequest.HttpServerRequest,
     ) => Effect.Effect<AuthenticatedSession, ServerAuthCredentialError | ServerAuthInternalError>;
@@ -1129,6 +1139,7 @@ export const make = Effect.gen(function* () {
             method: "reusable-dev-token",
             scopes: session.scopes,
             subject: "reusable-dev-token-child",
+            ...(session.userId ? { userId: session.userId } : {}),
           }) satisfies ResolvedBootstrapGrant,
       ),
     );
@@ -1284,7 +1295,7 @@ export const make = Effect.gen(function* () {
   });
 
   const issueSession: EnvironmentAuth["Service"]["issueSession"] = (input) =>
-    sessionUser(undefined).pipe(
+    sessionUser(input?.userId).pipe(
       Effect.flatMap((owner) =>
         sessions.issue({
           subject: input?.subject ?? DEFAULT_SESSION_SUBJECT,
@@ -1311,7 +1322,8 @@ export const make = Effect.gen(function* () {
           }) satisfies IssuedBearerSession,
       ),
       Effect.mapError((cause) =>
-        cause._tag === "ServerAuthUserDirectoryError"
+        cause._tag === "ServerAuthUserDirectoryError" ||
+        cause._tag === "ServerAuthInvalidCredentialError"
           ? cause
           : new ServerAuthSessionTokenIssueError({ cause }),
       ),
@@ -1629,6 +1641,7 @@ export const make = Effect.gen(function* () {
                 ? (session.runtimeModeCeiling ?? "approval-required")
                 : "read-only",
               peerLink: session.peerLink === true,
+              ...(session.userId ? { userId: session.userId } : {}),
             } satisfies McpClientSession)
           : Effect.fail(
               new ServerAuthInvalidCredentialError({
@@ -1640,10 +1653,11 @@ export const make = Effect.gen(function* () {
     );
   };
 
-  // Acts as the Owner until outside agents sign in as a chosen User.
+  // Acts as the User who approved it. Only the Hub's shell (`t3 thread`) leaves the User out,
+  // and then it is the Owner, as every userless issuance is.
   const issueMcpClientSession: EnvironmentAuth["Service"]["issueMcpClientSession"] = (input) =>
     requireSecureTransport(input.client).pipe(
-      Effect.andThen(sessionUser(undefined)),
+      Effect.andThen(sessionUser(input.userId)),
       Effect.flatMap((owner) =>
         sessions.issue({
           subject: MCP_CLIENT_SUBJECT,
@@ -1660,7 +1674,11 @@ export const make = Effect.gen(function* () {
         token: issued.token,
         expiresAt: issued.expiresAt,
       })),
-      Effect.mapError((cause) => new ServerAuthSessionTokenIssueError({ cause })),
+      Effect.mapError((cause) =>
+        cause._tag === "ServerAuthInvalidCredentialError"
+          ? cause
+          : new ServerAuthSessionTokenIssueError({ cause }),
+      ),
       Effect.withSpan("EnvironmentAuth.issueMcpClientSession"),
     );
 
@@ -1694,7 +1712,12 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((grant) =>
         grant.method !== "one-time-token" && grant.method !== "reusable-dev-token"
           ? Effect.fail(new ServerAuthMcpApprovalCodeError({ reason: "not_a_pairing_code" }))
-          : Effect.void,
+          : sessionUser(grant.userId).pipe(
+              Effect.catchTags({
+                ServerAuthInvalidCredentialError: () =>
+                  Effect.fail(new ServerAuthMcpApprovalCodeError({ reason: "unknown_or_used" })),
+              }),
+            ),
       ),
       Effect.withSpan("EnvironmentAuth.consumeMcpApprovalCode"),
     );

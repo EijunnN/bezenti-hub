@@ -37,7 +37,11 @@ import { ProjectToolkit } from "./tools.ts";
 const isAboveCeilingError = Schema.is(OrchestratorRuntimeModeAboveCeilingError);
 
 function projectFailure(error: Project.ProjectServiceError) {
-  if (error._tag === "ProjectOperationError") return unavailable();
+  if (error._tag === "ProjectOperationError" || error._tag === "SpaceDirectoryStorageError")
+    return unavailable();
+  // The caller's User may not create there; say so, as the app does.
+  if (error._tag === "SpaceAccessDeniedError" || error._tag === "SpaceNotFoundError")
+    return new OrchestratorMcpFailure({ code: "invalid_request", message: error.message });
   const message =
     error._tag === "ProjectNotFoundError"
       ? "The project was not found."
@@ -246,6 +250,8 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
               }),
           createdBy: "agent",
           creationSource: "mcp",
+          // The caller's User owns it and must be allowed to create in the Project's Space.
+          ...(scope.userId === undefined ? {} : { ownerUserId: scope.userId }),
           ...(linkOrigin === undefined ? {} : { linkOrigin }),
           // Kept only alongside linkOrigin: thread.create drops it otherwise.
           ...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
@@ -315,6 +321,8 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
     ({ workspaceRoot, ...input }) =>
       Effect.gen(function* () {
         const projects = yield* Project.ProjectService;
+        // Claimed as the caller's User, like a Project created from their session.
+        const { userId: actorUserId } = yield* McpInvocationContext.McpInvocationContext;
         if (workspaceRoot === undefined) {
           // Only updates record model defaults; reject defaults that creation would silently drop.
           if (
@@ -328,15 +336,20 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 "A project started from its title takes only a title; set scripts or defaultModelSelection afterwards with t3_project_update.",
             });
           const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
-          const created = yield* folders.createNamedProject({ name: input.title }).pipe(
-            Effect.mapError(
-              (error) =>
-                new OrchestratorMcpFailure({
-                  code: "orchestration_error",
-                  message: error.message,
-                }),
-            ),
-          );
+          const created = yield* folders
+            .createNamedProject({
+              name: input.title,
+              ...(actorUserId === undefined ? {} : { actorUserId }),
+            })
+            .pipe(
+              Effect.mapError(
+                (error) =>
+                  new OrchestratorMcpFailure({
+                    code: "orchestration_error",
+                    message: error.message,
+                  }),
+              ),
+            );
           const project = yield* projects
             .getById(created.projectId)
             .pipe(
@@ -352,7 +365,13 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         }
         const commandId = yield* newCommandId();
         return yield* projects
-          .create({ ...input, workspaceRoot, commandId, projectId: ProjectId.make(commandId) })
+          .create({
+            ...input,
+            workspaceRoot,
+            commandId,
+            projectId: ProjectId.make(commandId),
+            ...(actorUserId === undefined ? {} : { actorUserId }),
+          })
           .pipe(Effect.mapError(projectFailure));
       }),
     // Linked work may bring the repository it works in; an existing
