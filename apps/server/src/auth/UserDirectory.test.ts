@@ -404,20 +404,52 @@ const totpCode = (base32Secret: string, nowMillis: number) =>
     return String((tag.getUint32(offset) & 0x7fff_ffff) % 1_000_000).padStart(6, "0");
   });
 
+type Server = Effect.Success<typeof serveAuthHttp>;
+type Authenticator = Effect.Success<ReturnType<typeof makeAuthenticator>>;
+
+const passkeyReauth = Effect.fn(function* (server: Server, authenticator: Authenticator) {
+  const challenge = yield* server.request("/api/auth/passkey/challenge", { body: {} });
+  const response = yield* Effect.promise(() =>
+    authenticator.get(challenge.body.options as RequestOptions),
+  );
+  return { method: "passkey", ceremonyId: challenge.body.ceremonyId, response };
+});
+
+const isSignedIn = Effect.fn(function* (server: Server, cookie: string | undefined) {
+  const session = yield* server.request("/api/auth/session", { cookie: cookie ?? "" });
+  return session.body.authenticated === true;
+});
+
+const addMember = Effect.fn(function* (server: Server) {
+  yield* server.sql`
+    INSERT INTO users (user_id, display_name, is_owner, created_at)
+    VALUES ('member-1', 'Grace Hopper', 0, '2026-01-01T00:00:00.000Z')
+  `;
+  const memberSession = yield* server.sessions.issue({
+    method: "browser-session-cookie",
+    subject: EnvironmentAuth.USER_SIGN_IN_SUBJECT,
+    userId: UserId.make("member-1"),
+  });
+  return `${server.sessions.cookieName}=${memberSession.token}`;
+});
+
+const passwordReauth = (password: string, totpCode?: string) => ({
+  method: "password",
+  password,
+  ...(totpCode === undefined ? {} : { totpCode }),
+});
+
 it.effect("lets a Member sign in with a password alone", () =>
   Effect.gen(function* () {
     const server = yield* serveAuthHttp;
-    yield* server.sql`
-      INSERT INTO users (user_id, display_name, is_owner, created_at)
-      VALUES ('member-1', 'Grace Hopper', 0, '2026-01-01T00:00:00.000Z')
-    `;
-    const memberSession = yield* server.sessions.issue({
-      method: "browser-session-cookie",
-      subject: EnvironmentAuth.USER_SIGN_IN_SUBJECT,
-      userId: UserId.make("member-1"),
-    });
-    const cookie = `${server.sessions.cookieName}=${memberSession.token}`;
+    const cookie = yield* addMember(server);
 
+    const tooLong = yield* server.request("/api/auth/password/sign-in", {
+      body: { loginName: "g".repeat(65), password: "correct horse battery" },
+    });
+    expect(tooLong.status).toBe(400);
+
+    // An account with no credential yet has nothing to step up with.
     const set = yield* server.request("/api/auth/account/password", {
       body: { loginName: "Grace", password: "correct horse battery" },
       cookie,
@@ -435,79 +467,218 @@ it.effect("lets a Member sign in with a password alone", () =>
     const session = yield* server.request("/api/auth/session", { cookie: signedIn.cookie ?? "" });
     expect(session.body).toMatchObject({ authenticated: true, userId: "member-1" });
 
-    const changeWithoutCurrent = yield* server.request("/api/auth/account/password", {
+    const withoutStepUp = yield* server.request("/api/auth/account/password", {
       body: { loginName: "grace", password: "another horse battery" },
       cookie,
     });
-    expect(changeWithoutCurrent.status).toBe(403);
+    expect(withoutStepUp.status).toBe(403);
+    const changed = yield* server.request("/api/auth/account/password", {
+      body: {
+        loginName: "grace",
+        password: "another horse battery",
+        reauth: passwordReauth("correct horse battery"),
+      },
+      cookie,
+    });
+    expect(changed.status).toBe(200);
+    expect(yield* isSignedIn(server, cookie)).toBe(true);
+    expect(yield* isSignedIn(server, signedIn.cookie)).toBe(false);
+
+    // Without a passkey, the password is this account's only way in.
+    const removal = yield* server.request("/api/auth/account/password/remove", {
+      body: { reauth: passwordReauth("another horse battery") },
+      cookie,
+    });
+    expect(removal.status).toBe(403);
+  }),
+);
+
+it.effect("backs off password sign-in after repeated failures", () =>
+  Effect.gen(function* () {
+    const server = yield* serveAuthHttp;
+    const cookie = yield* addMember(server);
+    yield* server.request("/api/auth/account/password", {
+      body: { loginName: "grace", password: "correct horse battery" },
+      cookie,
+    });
+    const attempt = (password: string) =>
+      server.request("/api/auth/password/sign-in", { body: { loginName: "grace", password } });
+
+    for (let failure = 0; failure < 5; failure += 1) {
+      expect((yield* attempt("wrong horse battery")).status).toBe(401);
+    }
+    expect((yield* attempt("correct horse battery")).status).toBe(429);
+    yield* TestClock.adjust("31 seconds");
+    expect((yield* attempt("correct horse battery")).status).toBe(200);
   }),
 );
 
 it.effect("requires the Owner's password to come with a TOTP code", () =>
   Effect.gen(function* () {
     const server = yield* serveAuthHttp;
-    const { created } = yield* bootstrapOwner(server, yield* makeAuthenticator());
+    const authenticator = yield* makeAuthenticator();
+    const { created } = yield* bootstrapOwner(server, authenticator);
     const cookie = created.cookie ?? "";
     const ownerId = (created.body.user as { id: string }).id;
     const password = { loginName: "ada", password: "analytical engine" };
 
-    const refused = yield* server.request("/api/auth/account/password", { body: password, cookie });
+    const refused = yield* server.request("/api/auth/account/password", {
+      body: { ...password, reauth: yield* passkeyReauth(server, authenticator) },
+      cookie,
+    });
     expect(refused.status).toBe(403);
 
+    // Two tabs start an enrollment; the first one confirms with the code it showed.
     const enrollment = yield* server.request("/api/auth/account/totp/enrollment", {
       body: {},
       cookie,
     });
+    yield* server.request("/api/auth/account/totp/enrollment", { body: {}, cookie });
+    const { enrollmentId } = enrollment.body as { enrollmentId: string };
     const secret = enrollment.body.secret as string;
     expect(enrollment.body.otpauthUri).toContain(`secret=${secret}`);
     const now = yield* Clock.currentTimeMillis;
+    const nextStepCode = yield* totpCode(secret, now + 30_000);
+
+    const withoutStepUp = yield* server.request("/api/auth/account/totp", {
+      body: { enrollmentId, code: nextStepCode },
+      cookie,
+    });
+    expect(withoutStepUp.status).toBe(403);
     const wrongEnrollmentCode = yield* server.request("/api/auth/account/totp", {
-      body: { code: yield* totpCode(secret, now + 5 * 60_000) },
+      body: {
+        enrollmentId,
+        code: yield* totpCode(secret, now + 5 * 60_000),
+        reauth: yield* passkeyReauth(server, authenticator),
+      },
       cookie,
     });
     expect(wrongEnrollmentCode.status).toBe(403);
     const unenrolled = yield* server.request("/api/auth/account", { cookie });
     expect(unenrolled.body).toMatchObject({ totpEnrolled: false, passwordRequiresTotp: true });
+    // A code from the next step, which clock drift allows.
     const confirmed = yield* server.request("/api/auth/account/totp", {
-      body: { code: yield* totpCode(secret, now) },
+      body: {
+        enrollmentId,
+        code: nextStepCode,
+        reauth: yield* passkeyReauth(server, authenticator),
+      },
       cookie,
     });
     expect(confirmed.body).toMatchObject({ totpEnrolled: true });
 
-    const set = yield* server.request("/api/auth/account/password", { body: password, cookie });
+    const set = yield* server.request("/api/auth/account/password", {
+      body: { ...password, reauth: yield* passkeyReauth(server, authenticator) },
+      cookie,
+    });
     expect(set.body).toMatchObject({ hasPassword: true, totpEnrolled: true });
 
-    const firstStep = yield* server.request("/api/auth/password/sign-in", { body: password });
-    expect(firstStep.body).toEqual({ authenticated: false, secondFactor: "totp" });
-    expect(firstStep.cookie).toBeUndefined();
+    // A wrong password still gets a code step, so the answer does not confirm the password.
+    const wrongPassword = yield* server.request("/api/auth/password/sign-in", {
+      body: { ...password, password: "difference engine" },
+    });
+    expect(wrongPassword.body).toMatchObject({ authenticated: false, secondFactor: "totp" });
+    const decoy = yield* server.request("/api/auth/password/totp", {
+      body: {
+        challengeId: wrongPassword.body.challengeId,
+        code: yield* totpCode(secret, yield* Clock.currentTimeMillis),
+      },
+    });
+    expect(decoy.status).toBe(401);
 
-    yield* TestClock.adjust("1 minute");
-    const later = yield* Clock.currentTimeMillis;
-    const wrongCode = yield* server.request("/api/auth/password/sign-in", {
-      body: { ...password, totpCode: yield* totpCode(secret, later + 10 * 60_000) },
+    // Right after enrollment, a code from the current step signs in.
+    const firstStep = yield* server.request("/api/auth/password/sign-in", { body: password });
+    expect(firstStep.body).toMatchObject({ authenticated: false, secondFactor: "totp" });
+    expect(firstStep.cookie).toBeUndefined();
+    const challengeId = firstStep.body.challengeId;
+    const wrongCode = yield* server.request("/api/auth/password/totp", {
+      body: { challengeId, code: yield* totpCode(secret, now + 10 * 60_000) },
     });
     expect(wrongCode.status).toBe(401);
-    const code = yield* totpCode(secret, later);
-    const signedIn = yield* server.request("/api/auth/password/sign-in", {
-      body: { ...password, totpCode: code },
+    const code = yield* totpCode(secret, yield* Clock.currentTimeMillis);
+    const signedIn = yield* server.request("/api/auth/password/totp", {
+      body: { challengeId, code },
     });
     const session = yield* server.request("/api/auth/session", { cookie: signedIn.cookie ?? "" });
     expect(session.body).toMatchObject({ authenticated: true, userId: ownerId });
 
-    const replayed = yield* server.request("/api/auth/password/sign-in", {
-      body: { ...password, totpCode: code },
+    const again = yield* server.request("/api/auth/password/sign-in", { body: password });
+    const replayed = yield* server.request("/api/auth/password/totp", {
+      body: { challengeId: again.body.challengeId, code },
     });
     expect(replayed.status).toBe(401);
+
+    // Removing TOTP first would leave the Owner a password it may not use alone.
+    const removeTotpFirst = yield* server.request("/api/auth/account/totp/remove", {
+      body: { reauth: yield* passkeyReauth(server, authenticator) },
+      cookie,
+    });
+    expect(removeTotpFirst.status).toBe(403);
+    const removePassword = yield* server.request("/api/auth/account/password/remove", {
+      body: { reauth: yield* passkeyReauth(server, authenticator) },
+      cookie,
+    });
+    expect(removePassword.body).toMatchObject({ hasPassword: false });
+    const removeTotp = yield* server.request("/api/auth/account/totp/remove", {
+      body: { reauth: yield* passkeyReauth(server, authenticator) },
+      cookie,
+    });
+    expect(removeTotp.body).toMatchObject({ totpEnrolled: false });
+  }),
+);
+
+it.effect("counts wrong TOTP codes toward the sign-in back-off", () =>
+  Effect.gen(function* () {
+    const server = yield* serveAuthHttp;
+    const authenticator = yield* makeAuthenticator();
+    const { created } = yield* bootstrapOwner(server, authenticator);
+    const cookie = created.cookie ?? "";
+    const enrollment = yield* server.request("/api/auth/account/totp/enrollment", {
+      body: {},
+      cookie,
+    });
+    const secret = enrollment.body.secret as string;
+    const now = yield* Clock.currentTimeMillis;
+    yield* server.request("/api/auth/account/totp", {
+      body: {
+        enrollmentId: enrollment.body.enrollmentId,
+        code: yield* totpCode(secret, now),
+        reauth: yield* passkeyReauth(server, authenticator),
+      },
+      cookie,
+    });
+    const password = { loginName: "ada", password: "analytical engine" };
+    yield* server.request("/api/auth/account/password", {
+      body: { ...password, reauth: yield* passkeyReauth(server, authenticator) },
+      cookie,
+    });
+
+    const firstStep = yield* server.request("/api/auth/password/sign-in", { body: password });
+    const challengeId = firstStep.body.challengeId;
+    for (let failure = 0; failure < 5; failure += 1) {
+      const wrong = yield* server.request("/api/auth/password/totp", {
+        body: { challengeId, code: yield* totpCode(secret, now + 10 * 60_000) },
+      });
+      expect(wrong.status).toBe(401);
+    }
+    const locked = yield* server.request("/api/auth/password/sign-in", { body: password });
+    expect(locked.status).toBe(429);
   }),
 );
 
 it.effect("lets the Owner register a new passkey once from a reset link that expires", () =>
   Effect.gen(function* () {
     const server = yield* serveAuthHttp;
-    const { created } = yield* bootstrapOwner(server, yield* makeAuthenticator());
+    const lostAuthenticator = yield* makeAuthenticator();
+    const { created } = yield* bootstrapOwner(server, lostAuthenticator);
     const ownerId = (created.body.user as { id: string }).id;
     // What `t3 auth owner-reset` calls.
+    const { token: superseded } = yield* server.environmentAuth.issueOwnerResetLink();
     const { token } = yield* server.environmentAuth.issueOwnerResetLink();
+    const supersededStatus = yield* server.request("/api/auth/reset/status", {
+      body: { token: superseded },
+    });
+    expect(supersededStatus.body).toEqual({ status: "invalid" });
 
     const status = yield* server.request("/api/auth/reset/status", { body: { token } });
     expect(status.body).toEqual({ status: "valid", displayName: "Ada Lovelace" });
@@ -521,20 +692,42 @@ it.effect("lets the Owner register a new passkey once from a reset link that exp
     });
     const session = yield* server.request("/api/auth/session", { cookie: redeemed.cookie ?? "" });
     expect(session.body).toMatchObject({ authenticated: true, userId: ownerId });
+    expect(yield* isSignedIn(server, created.cookie)).toBe(false);
 
-    const challenge = yield* server.request("/api/auth/passkey/challenge", { body: {} });
-    const assertion = yield* Effect.promise(() =>
-      newAuthenticator.get(challenge.body.options as RequestOptions),
-    );
-    const signedIn = yield* server.request("/api/auth/passkey/sign-in", {
-      body: { ceremonyId: challenge.body.ceremonyId, response: assertion },
+    const signIn = Effect.fn(function* (authenticator: Authenticator) {
+      const challenge = yield* server.request("/api/auth/passkey/challenge", { body: {} });
+      const assertion = yield* Effect.promise(() =>
+        authenticator.get(challenge.body.options as RequestOptions),
+      );
+      return yield* server.request("/api/auth/passkey/sign-in", {
+        body: { ceremonyId: challenge.body.ceremonyId, response: assertion },
+      });
     });
-    expect(signedIn.status).toBe(200);
+    expect((yield* signIn(newAuthenticator)).status).toBe(200);
+    expect((yield* signIn(lostAuthenticator)).status).toBe(401);
 
     const spent = yield* server.request("/api/auth/reset/status", { body: { token } });
     expect(spent.body).toEqual({ status: "invalid" });
     const reused = yield* server.request("/api/auth/reset/registration", { body: { token } });
     expect(reused.status).toBe(401);
+
+    // A registration started from one link cannot be finished with another.
+    const first = yield* server.environmentAuth.issueOwnerResetLink();
+    const firstCeremony = yield* server.request("/api/auth/reset/registration", {
+      body: { token: first.token },
+    });
+    const second = yield* server.environmentAuth.issueOwnerResetLink();
+    const crossingAuthenticator = yield* makeAuthenticator();
+    const crossed = yield* server.request("/api/auth/reset", {
+      body: {
+        token: second.token,
+        ceremonyId: firstCeremony.body.ceremonyId,
+        response: yield* Effect.promise(() =>
+          crossingAuthenticator.create(firstCeremony.body.options as CreationOptions),
+        ),
+      },
+    });
+    expect(crossed.status).toBe(401);
 
     const expiring = yield* server.environmentAuth.issueOwnerResetLink();
     yield* TestClock.adjust("59 minutes");

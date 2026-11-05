@@ -134,9 +134,12 @@ export const AuthLoginName = TrimmedString.check(Schema.isPattern(/^[A-Za-z0-9][
 
 export const AuthPassword = Schema.String.check(Schema.isMinLength(8), Schema.isMaxLength(256));
 
+export const AuthTotpCode = Schema.String.check(Schema.isPattern(/^\d{6}$/));
+
 export const AuthAccount = Schema.Struct({
   user: AuthUser,
   loginName: Schema.NullOr(Schema.String),
+  hasPasskey: Schema.Boolean,
   hasPassword: Schema.Boolean,
   totpEnrolled: Schema.Boolean,
   /** This account may sign in with a password only together with a TOTP code. */
@@ -144,37 +147,65 @@ export const AuthAccount = Schema.Struct({
 });
 export type AuthAccount = typeof AuthAccount.Type;
 
+/**
+ * Proof, in the same request, that the person changing credentials can sign in now: the current
+ * password (and TOTP code when enrolled), or a fresh assertion from one of the account's passkeys
+ * (its challenge comes from `/api/auth/passkey/challenge`).
+ */
+export const AuthReauth = Schema.Union([
+  Schema.Struct({
+    method: Schema.Literal("password"),
+    password: Schema.String.check(Schema.isMaxLength(256)),
+    totpCode: Schema.optionalKey(AuthTotpCode),
+  }),
+  Schema.Struct({
+    method: Schema.Literal("passkey"),
+    ceremonyId: TrimmedNonEmptyString,
+    response: AuthPasskeyAuthenticationResponse,
+  }),
+]);
+export type AuthReauth = typeof AuthReauth.Type;
+
 export const AuthSetPasswordRequest = Schema.Struct({
   loginName: AuthLoginName,
   password: AuthPassword,
-  /** Required when the account already has a password. */
-  currentPassword: Schema.optionalKey(Schema.String),
+  /** Required unless the account has no way to sign in yet. */
+  reauth: Schema.optionalKey(AuthReauth),
 });
 export type AuthSetPasswordRequest = typeof AuthSetPasswordRequest.Type;
 
 export const AuthTotpEnrollment = Schema.Struct({
+  enrollmentId: TrimmedNonEmptyString,
   /** Base32, for authenticator apps that cannot scan the QR code. */
   secret: TrimmedNonEmptyString,
   otpauthUri: TrimmedNonEmptyString,
 });
 export type AuthTotpEnrollment = typeof AuthTotpEnrollment.Type;
 
-export const AuthTotpCode = Schema.String.check(Schema.isPattern(/^\d{6}$/));
-
-export const AuthTotpConfirmRequest = Schema.Struct({ code: AuthTotpCode });
+export const AuthTotpConfirmRequest = Schema.Struct({
+  enrollmentId: TrimmedNonEmptyString,
+  code: AuthTotpCode,
+  reauth: Schema.optionalKey(AuthReauth),
+});
 export type AuthTotpConfirmRequest = typeof AuthTotpConfirmRequest.Type;
 
+export const AuthCredentialRemovalRequest = Schema.Struct({ reauth: AuthReauth });
+export type AuthCredentialRemovalRequest = typeof AuthCredentialRemovalRequest.Type;
+
 export const AuthPasswordSignInRequest = Schema.Struct({
-  loginName: Schema.String,
-  password: Schema.String,
-  totpCode: Schema.optionalKey(AuthTotpCode),
+  loginName: Schema.String.check(Schema.isMaxLength(64)),
+  password: Schema.String.check(Schema.isMaxLength(256)),
 });
 export type AuthPasswordSignInRequest = typeof AuthPasswordSignInRequest.Type;
 
-/** The password was right but the account also needs a TOTP code; send both again. */
+/**
+ * The account also needs a TOTP code: send it with `challengeId` to `/api/auth/password/totp`.
+ * Accounts with TOTP get this answer whether or not the password was right.
+ */
 export const AuthSecondFactorRequired = Schema.Struct({
   authenticated: Schema.Literal(false),
   secondFactor: Schema.Literal("totp"),
+  challengeId: TrimmedNonEmptyString,
 });
 export type AuthSecondFactorRequired = typeof AuthSecondFactorRequired.Type;
 
@@ -183,6 +214,12 @@ export const AuthPasswordSignInResult = Schema.Union([
   AuthSecondFactorRequired,
 ]);
 export type AuthPasswordSignInResult = typeof AuthPasswordSignInResult.Type;
+
+export const AuthTotpSignInRequest = Schema.Struct({
+  challengeId: TrimmedNonEmptyString,
+  code: AuthTotpCode,
+});
+export type AuthTotpSignInRequest = typeof AuthTotpSignInRequest.Type;
 
 export const AuthResetLinkRequest = Schema.Struct({ token: TrimmedNonEmptyString });
 export type AuthResetLinkRequest = typeof AuthResetLinkRequest.Type;

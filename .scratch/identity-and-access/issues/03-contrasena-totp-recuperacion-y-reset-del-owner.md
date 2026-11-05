@@ -18,5 +18,5 @@ Notas:
 
 - La regla «contraseña solo con TOTP» es `passwordRequiresTotp(user)` en `UserDirectory.ts`; hoy cubre al Owner y la 09 debe extenderla a los Admins.
 - Comando: `t3 auth owner-reset [--base-url <url del Hub>] [--json]`; enlace `/reset#token=…`, válido 1 hora.
-- Sin límite de intentos para contraseña ni TOTP; queda pendiente (junto con la 15, Hub expuesto a internet).
-- No hay forma de quitar la contraseña o el TOTP (solo cambiar o reemplazar).
+- Intentos fallidos de contraseña, TOTP y step-up cuentan por cuenta y por IP (en memoria; un reinicio los olvida).
+- Cambiar o quitar contraseña/TOTP exige step-up (passkey o contraseña+código) y cierra las demás sesiones; el reset del Owner borra los passkeys antiguos y cierra todas sus sesiones.

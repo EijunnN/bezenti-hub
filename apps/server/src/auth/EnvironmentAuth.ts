@@ -28,6 +28,7 @@ import {
   type AuthPasswordSignInRequest,
   type AuthResetLinkRedeemRequest,
   type AuthSecondFactorRequired,
+  type AuthTotpSignInRequest,
   type AuthUser,
   DpopFailureReason,
   type UserId,
@@ -664,7 +665,20 @@ export class EnvironmentAuth extends Context.Service<
       requestMetadata: AuthClientMetadata,
     ) => Effect.Effect<
       UserBrowserSession | { readonly response: AuthSecondFactorRequired },
-      ServerAuthInvalidCredentialError | ServerAuthInternalError
+      | ServerAuthInvalidCredentialError
+      | UserDirectory.SignInThrottledError
+      | ServerAuthInternalError
+    >;
+    /** The code step of a password sign-in that answered `secondFactor: "totp"`. */
+    readonly signInWithTotp: (
+      request: HttpServerRequest.HttpServerRequest,
+      input: AuthTotpSignInRequest,
+      requestMetadata: AuthClientMetadata,
+    ) => Effect.Effect<
+      UserBrowserSession,
+      | ServerAuthInvalidCredentialError
+      | UserDirectory.SignInThrottledError
+      | ServerAuthInternalError
     >;
     readonly beginResetLinkRegistration: (
       request: HttpServerRequest.HttpServerRequest,
@@ -1709,20 +1723,34 @@ export const make = Effect.gen(function* () {
     return yield* issueUserBrowserSession(request, user, requestMetadata);
   });
 
+  const passwordFailures = {
+    PasswordRejectedError: (cause: UserDirectory.PasswordRejectedError) =>
+      Effect.fail(new ServerAuthInvalidCredentialError({ diagnostic: cause.message })),
+    UserDirectoryStorageError: (cause: UserDirectory.UserDirectoryStorageError) =>
+      Effect.fail(userDirectoryFailure(cause)),
+  };
+
   const signInWithPassword: EnvironmentAuth["Service"]["signInWithPassword"] = Effect.fn(
     "EnvironmentAuth.signInWithPassword",
   )(function* (request, input, requestMetadata) {
-    const checked = yield* userDirectory.checkPassword(input).pipe(
-      Effect.catchTags({
-        PasswordRejectedError: (cause) =>
-          Effect.fail(new ServerAuthInvalidCredentialError({ diagnostic: cause.message })),
-        UserDirectoryStorageError: (cause) => Effect.fail(userDirectoryFailure(cause)),
-      }),
-    );
+    const checked = yield* userDirectory
+      .checkPassword(input, requestMetadata.ipAddress)
+      .pipe(Effect.catchTags(passwordFailures));
     if (checked._tag === "totp-required") {
-      return { response: { authenticated: false, secondFactor: "totp" } } as const;
+      return {
+        response: { authenticated: false, secondFactor: "totp", challengeId: checked.challengeId },
+      } as const;
     }
     return yield* issueUserBrowserSession(request, checked.user, requestMetadata);
+  });
+
+  const signInWithTotp: EnvironmentAuth["Service"]["signInWithTotp"] = Effect.fn(
+    "EnvironmentAuth.signInWithTotp",
+  )(function* (request, input, requestMetadata) {
+    const user = yield* userDirectory
+      .checkTotp(input, requestMetadata.ipAddress)
+      .pipe(Effect.catchTags(passwordFailures));
+    return yield* issueUserBrowserSession(request, user, requestMetadata);
   });
 
   const resetLinkFailures = {
@@ -1816,6 +1844,7 @@ export const make = Effect.gen(function* () {
     completePasskeySignIn,
     signInWithRecoveryCode,
     signInWithPassword,
+    signInWithTotp,
     beginResetLinkRegistration,
     redeemResetLink,
     issueOwnerResetLink: userDirectory.issueOwnerResetLink,

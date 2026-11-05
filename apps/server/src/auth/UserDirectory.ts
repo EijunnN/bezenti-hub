@@ -1,13 +1,17 @@
 import {
   type AuthAccount,
+  type AuthSessionId,
   type AuthPasskeyAuthenticationResponse,
   type AuthPasskeyRegistrationCeremony,
   type AuthPasskeyRegistrationResponse,
   type AuthPasskeySignInCeremony,
   type AuthPasswordSignInRequest,
+  type AuthReauth,
   type AuthResetLinkStatus,
   type AuthSetPasswordRequest,
+  type AuthTotpConfirmRequest,
   type AuthTotpEnrollment,
+  type AuthTotpSignInRequest,
   type AuthUser,
   UserId,
 } from "@t3tools/contracts";
@@ -24,10 +28,13 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 
 import * as Users from "../persistence/Users.ts";
 import * as AccountCredentials from "./AccountCredentials.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
+import * as SessionStore from "./SessionStore.ts";
+import { makeSignInThrottle } from "./signInThrottle.ts";
 
 const CEREMONY_TTL = Duration.minutes(5);
 // Sign-in challenges are unauthenticated, so they get their own bounded store; an Owner
@@ -35,6 +42,8 @@ const CEREMONY_TTL = Duration.minutes(5);
 const MAX_PENDING_SIGN_INS = 1_000;
 const MAX_PENDING_OWNER_REGISTRATIONS = 16;
 const TOTP_ENROLLMENT_TTL = Duration.minutes(10);
+const MAX_PENDING_TOTP = 1_000;
+const MAX_TOTP_ATTEMPTS = 5;
 const RESET_LINK_TTL = Duration.hours(1);
 const CREDENTIAL_KEY_SECRET_NAME = "user-credential-key";
 const RECOVERY_CODE_COUNT = 10;
@@ -114,6 +123,18 @@ export class NoOwnerError extends Schema.TaggedError<NoOwnerError>()("NoOwnerErr
   }
 }
 
+export class SignInThrottledError extends Schema.TaggedError<SignInThrottledError>()(
+  "SignInThrottledError",
+  { retryAfterSeconds: Schema.Number },
+) {
+  override get message(): string {
+    return `Too many failed attempts. Try again in ${formatWait(this.retryAfterSeconds)}.`;
+  }
+}
+
+const formatWait = (seconds: number) =>
+  seconds < 90 ? `${seconds} seconds` : `${Math.ceil(seconds / 60)} minutes`;
+
 export class UserDirectoryStorageError extends Schema.TaggedError<UserDirectoryStorageError>()(
   "UserDirectoryStorageError",
   { cause: Schema.Defect() },
@@ -130,15 +151,24 @@ export interface PendingOwner {
   readonly passkey: Users.CreateOwnerInput["passkey"];
 }
 
-/** A verified passkey registration for an existing User, not yet stored. */
-export interface PendingPasskey {
+/** A verified passkey registration from a reset link, not yet stored. */
+export interface PendingResetPasskey {
   readonly userId: UserId;
   readonly passkey: Users.CreateOwnerInput["passkey"];
+  /** The link the registration started from; only that link can finish it. */
+  readonly tokenHash: string;
 }
 
 export type PasswordCheck =
   | { readonly _tag: "verified"; readonly user: AuthUser }
-  | { readonly _tag: "totp-required" };
+  | { readonly _tag: "totp-required"; readonly challengeId: string };
+
+/** A signed-in User changing their own credentials, from one session and page origin. */
+export interface AccountActor {
+  readonly userId: UserId;
+  readonly sessionId: AuthSessionId;
+  readonly origin: string;
+}
 
 /**
  * Accounts that may use a password only together with TOTP. Today that is the Owner; Admins join
@@ -158,31 +188,51 @@ interface OwnerRegistrationCeremony extends Ceremony {
   readonly displayName: string;
 }
 
+interface ResetRegistrationCeremony extends OwnerRegistrationCeremony {
+  readonly tokenHash: string;
+}
+
 /**
- * Pending WebAuthn ceremonies, single use. Every entry has the same TTL, so insertion order is
- * expiry order and pruning stops at the first live entry.
+ * Short-lived pending entries keyed by a random id. Every entry in one store has the same TTL, so
+ * insertion order is expiry order and pruning stops at the first live entry.
  */
-const makeCeremonyStore = <C extends Ceremony>(capacity: number) => {
-  const entries = new Map<string, C>();
+const makeExpiringStore = <V extends { readonly expiresAt: DateTime.DateTime }>(
+  capacity: number,
+) => {
+  const entries = new Map<string, V>();
   return {
-    put: (ceremonyId: string, ceremony: C, now: DateTime.DateTime) =>
+    put: (id: string, value: V, now: DateTime.DateTime) =>
       Effect.sync(() => {
-        for (const [id, entry] of entries) {
+        for (const [key, entry] of entries) {
           if (entries.size < capacity && DateTime.isGreaterThan(entry.expiresAt, now)) break;
-          entries.delete(id);
+          entries.delete(key);
         }
-        entries.set(ceremonyId, ceremony);
+        entries.set(id, value);
       }),
-    take: (ceremonyId: string, origin: string, now: DateTime.DateTime) =>
+    get: (id: string, now: DateTime.DateTime) =>
       Effect.sync(() => {
-        const ceremony = entries.get(ceremonyId);
-        entries.delete(ceremonyId);
-        return ceremony !== undefined &&
-          ceremony.origin === origin &&
-          DateTime.isGreaterThan(ceremony.expiresAt, now)
-          ? ceremony
+        const value = entries.get(id);
+        return value !== undefined && DateTime.isGreaterThan(value.expiresAt, now)
+          ? value
           : undefined;
       }),
+    delete: (id: string) =>
+      Effect.sync(() => {
+        entries.delete(id);
+      }),
+  };
+};
+
+/** Pending WebAuthn ceremonies, single use and bound to the origin that started them. */
+const makeCeremonyStore = <C extends Ceremony>(capacity: number) => {
+  const store = makeExpiringStore<C>(capacity);
+  return {
+    put: store.put,
+    take: (ceremonyId: string, origin: string, now: DateTime.DateTime) =>
+      store.get(ceremonyId, now).pipe(
+        Effect.tap(() => store.delete(ceremonyId)),
+        Effect.map((ceremony) => (ceremony?.origin === origin ? ceremony : undefined)),
+      ),
   };
 };
 
@@ -224,23 +274,39 @@ export class UserDirectory extends Context.Service<
       userId: UserId,
     ) => Effect.Effect<AuthAccount, AccountChangeRefusedError | UserDirectoryStorageError>;
     readonly setPassword: (
-      userId: UserId,
+      actor: AccountActor,
       input: AuthSetPasswordRequest,
-    ) => Effect.Effect<
-      AuthAccount,
-      AccountChangeRefusedError | LoginNameTakenError | UserDirectoryStorageError
-    >;
-    /** A new secret held until a code from it confirms the enrollment. */
+    ) => Effect.Effect<AuthAccount, AccountChangeError | LoginNameTakenError>;
+    readonly removePassword: (
+      actor: AccountActor,
+      reauth: AuthReauth,
+    ) => Effect.Effect<AuthAccount, AccountChangeError>;
+    /** A new secret, held under the returned id until a code from it confirms the enrollment. */
     readonly startTotpEnrollment: (
       userId: UserId,
     ) => Effect.Effect<AuthTotpEnrollment, AccountChangeRefusedError | UserDirectoryStorageError>;
     readonly confirmTotpEnrollment: (
-      userId: UserId,
-      code: string,
-    ) => Effect.Effect<AuthAccount, AccountChangeRefusedError | UserDirectoryStorageError>;
+      actor: AccountActor,
+      input: AuthTotpConfirmRequest,
+    ) => Effect.Effect<AuthAccount, AccountChangeError>;
+    readonly removeTotp: (
+      actor: AccountActor,
+      reauth: AuthReauth,
+    ) => Effect.Effect<AuthAccount, AccountChangeError>;
     readonly checkPassword: (
       input: AuthPasswordSignInRequest,
-    ) => Effect.Effect<PasswordCheck, PasswordRejectedError | UserDirectoryStorageError>;
+      clientIp: string | undefined,
+    ) => Effect.Effect<
+      PasswordCheck,
+      PasswordRejectedError | SignInThrottledError | UserDirectoryStorageError
+    >;
+    readonly checkTotp: (
+      input: AuthTotpSignInRequest,
+      clientIp: string | undefined,
+    ) => Effect.Effect<
+      AuthUser,
+      PasswordRejectedError | SignInThrottledError | UserDirectoryStorageError
+    >;
     /** A single-use link that lets the Owner register a new passkey; the token is shown once. */
     readonly issueOwnerResetLink: () => Effect.Effect<
       { readonly token: string; readonly expiresAt: DateTime.Utc; readonly user: AuthUser },
@@ -260,14 +326,22 @@ export class UserDirectory extends Context.Service<
       readonly ceremonyId: string;
       readonly origin: string;
       readonly response: AuthPasskeyRegistrationResponse;
-    }) => Effect.Effect<PendingPasskey, PasskeyRejectedError>;
-    /** Spends the link and stores the passkey; run it in the transaction that issues the session. */
+    }) => Effect.Effect<PendingResetPasskey, PasskeyRejectedError>;
+    /**
+     * Spends the link, replaces every passkey with the new one and ends the User's sessions; run
+     * it in the transaction that issues the new session.
+     */
     readonly redeemResetLink: (input: {
       readonly token: string;
-      readonly pending: PendingPasskey;
+      readonly pending: PendingResetPasskey;
     }) => Effect.Effect<AuthUser, ResetLinkRejectedError | UserDirectoryStorageError>;
   }
 >()("t3/auth/UserDirectory") {}
+
+type AccountChangeError =
+  | AccountChangeRefusedError
+  | SignInThrottledError
+  | UserDirectoryStorageError;
 
 const registrationCeremony = (input: {
   readonly ceremonyId: string;
@@ -320,10 +394,24 @@ const make = Effect.gen(function* () {
   );
   const signIns = makeCeremonyStore<Ceremony>(MAX_PENDING_SIGN_INS);
   // Gated by a live reset link, so the Owner-registration bound is plenty.
-  const resetRegistrations = makeCeremonyStore<OwnerRegistrationCeremony>(
+  const resetRegistrations = makeCeremonyStore<ResetRegistrationCeremony>(
     MAX_PENDING_OWNER_REGISTRATIONS,
   );
-  const pendingTotp = new Map<UserId, { secret: Uint8Array; expiresAt: DateTime.DateTime }>();
+  const totpEnrollments = makeExpiringStore<{
+    readonly userId: UserId;
+    readonly secret: Uint8Array;
+    readonly expiresAt: DateTime.DateTime;
+  }>(MAX_PENDING_TOTP);
+  const totpChallenges = makeExpiringStore<{
+    readonly userId: UserId;
+    /** False for a decoy challenge after a wrong password: no code will pass it. */
+    readonly passwordOk: boolean;
+    readonly clientIp: string | undefined;
+    attempts: number;
+    readonly expiresAt: DateTime.DateTime;
+  }>(MAX_PENDING_TOTP);
+  const throttle = makeSignInThrottle();
+  const sessions = yield* SessionStore.SessionStore;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const cryptoContext = yield* Effect.context<Mac.Mac | Aead.Aead | SecureRandom.SecureRandom>();
   const withCrypto = Effect.provide(cryptoContext);
@@ -372,8 +460,10 @@ const make = Effect.gen(function* () {
     return registrationCeremony({ ceremonyId, challenge, rpId, userId, displayName });
   });
 
-  const verifyRegistration = Effect.fn("UserDirectory.verifyRegistration")(function* (
-    store: ReturnType<typeof makeCeremonyStore<OwnerRegistrationCeremony>>,
+  const verifyRegistration = Effect.fn("UserDirectory.verifyRegistration")(function* <
+    C extends OwnerRegistrationCeremony,
+  >(
+    store: ReturnType<typeof makeCeremonyStore<C>>,
     input: {
       readonly ceremonyId: string;
       readonly origin: string;
@@ -565,7 +655,49 @@ const make = Effect.gen(function* () {
     return toAuthUser(user.value);
   });
 
-  const credentialKey = secretStore.getOrCreateRandom(CREDENTIAL_KEY_SECRET_NAME, 32).pipe(storage);
+  let cachedCredentialKey: Uint8Array | undefined;
+  const credentialKey = Effect.suspend(() =>
+    cachedCredentialKey !== undefined
+      ? Effect.succeed(cachedCredentialKey)
+      : secretStore.getOrCreateRandom(CREDENTIAL_KEY_SECRET_NAME, 32).pipe(
+          storage,
+          Effect.tap((key) =>
+            Effect.sync(() => {
+              cachedCredentialKey = key;
+            }),
+          ),
+        ),
+  );
+
+  // argon2id holds the event loop for tens of milliseconds and 19 MiB per run, so unauthenticated
+  // sign-ins queue for a permit instead of piling up.
+  const hashing = yield* Semaphore.make(2);
+  const hashPassword = (password: string) =>
+    hashing.withPermits(1)(AccountCredentials.hashPassword(password).pipe(withCrypto));
+  const verifyPassword = (password: string, hash: string) =>
+    hashing.withPermits(1)(AccountCredentials.verifyPassword(password, hash));
+  // Unknown names still pay for one hash, so timing does not reveal which names exist.
+  const decoyPasswordHash = yield* Effect.cached(hashPassword("decoy password"));
+
+  const nowMillis = DateTime.now.pipe(Effect.map(DateTime.toEpochMillis));
+  const accountKey = (userId: UserId) => `user:${userId}`;
+  const throttleKeys = (userId: UserId | undefined, clientIp: string | undefined) => [
+    ...(userId === undefined ? [] : [accountKey(userId)]),
+    ...(clientIp === undefined ? [] : [`ip:${clientIp}`]),
+  ];
+  const requireNotThrottled = Effect.fn("UserDirectory.requireNotThrottled")(function* (
+    keys: ReadonlyArray<string>,
+  ) {
+    const now = yield* nowMillis;
+    const lockedUntil = throttle.lockedUntil(keys, now);
+    if (lockedUntil !== undefined) {
+      return yield* new SignInThrottledError({
+        retryAfterSeconds: Math.ceil((lockedUntil - now) / 1000),
+      });
+    }
+  });
+  const recordFailure = (keys: ReadonlyArray<string>) =>
+    nowMillis.pipe(Effect.map((now) => throttle.recordFailure(keys, now)));
 
   const requireAccount = (userId: UserId) =>
     activeUser(userId).pipe(
@@ -583,6 +715,7 @@ const make = Effect.gen(function* () {
     return {
       user: toAuthUser(user),
       loginName: user.loginName,
+      hasPasskey: credentials.hasPasskey,
       hasPassword: credentials.passwordHash !== null,
       totpEnrolled: credentials.totpSecretCiphertext !== null,
       passwordRequiresTotp: passwordRequiresTotp(user),
@@ -595,29 +728,91 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const openTotpSecret = (userId: UserId, ciphertext: string) =>
+    credentialKey.pipe(
+      Effect.flatMap((key) => AccountCredentials.open(key, ciphertext, userId)),
+      withCrypto,
+      storage,
+    );
+
+  /** A code from the User's enrolled secret whose step was not used yet; records the step. */
+  const acceptTotpCode = Effect.fn("UserDirectory.acceptTotpCode")(function* (
+    userId: UserId,
+    ciphertext: string,
+    code: string,
+  ) {
+    const secret = yield* openTotpSecret(userId, ciphertext);
+    const step = yield* AccountCredentials.matchTotpStep(secret, code, yield* nowMillis).pipe(
+      withCrypto,
+    );
+    return step !== undefined && (yield* users.recordTotpStep({ userId, step }).pipe(storage));
+  });
+
+  const stepUpRefused = new AccountChangeRefusedError({
+    reason: "Confirming it's you failed: check your password, code or passkey.",
+  });
+
+  /**
+   * Credential changes need proof in the same request that the person can sign in now, so a
+   * stolen session cannot install its own password or authenticator. An account with no way to
+   * sign in yet has nothing to prove.
+   */
+  const requireStepUp = Effect.fn("UserDirectory.requireStepUp")(function* (
+    actor: AccountActor,
+    user: Users.UserRecord,
+    reauth: AuthReauth | undefined,
+  ) {
+    const credentials = yield* users.getCredentials(user.userId).pipe(storage);
+    if (!credentials.hasPasskey && credentials.passwordHash === null) return;
+    const keys = [accountKey(user.userId)];
+    yield* requireNotThrottled(keys);
+    const verified =
+      reauth === undefined
+        ? false
+        : reauth.method === "passkey"
+          ? yield* finishPasskeySignIn({
+              ceremonyId: reauth.ceremonyId,
+              origin: actor.origin,
+              response: reauth.response,
+            }).pipe(
+              Effect.map((signedIn) => signedIn.id === user.userId),
+              Effect.catchTags({ PasskeyRejectedError: () => Effect.succeed(false) }),
+            )
+          : credentials.passwordHash !== null &&
+            (yield* verifyPassword(reauth.password, credentials.passwordHash)) &&
+            (credentials.totpSecretCiphertext === null ||
+              (reauth.totpCode !== undefined &&
+                (yield* acceptTotpCode(
+                  user.userId,
+                  credentials.totpSecretCiphertext,
+                  reauth.totpCode,
+                ))));
+    if (!verified) {
+      if (reauth !== undefined) yield* recordFailure(keys);
+      return yield* stepUpRefused;
+    }
+    throttle.reset(keys);
+  });
+
+  // A credential change ends every other session, which may belong to whoever took the old one.
+  const signOutOtherSessions = (actor: AccountActor) =>
+    sessions.revokeAllForUser(actor.userId, { except: actor.sessionId }).pipe(storage);
+
   const setPassword: UserDirectory["Service"]["setPassword"] = Effect.fn(
     "UserDirectory.setPassword",
-  )(function* (userId, input) {
-    const user = yield* requireAccount(userId);
-    const credentials = yield* users.getCredentials(userId).pipe(storage);
+  )(function* (actor, input) {
+    const user = yield* requireAccount(actor.userId);
+    const credentials = yield* users.getCredentials(actor.userId).pipe(storage);
     if (passwordRequiresTotp(user) && credentials.totpSecretCiphertext === null) {
       return yield* new AccountChangeRefusedError({
         reason: "Set up an authenticator app first: this account needs a code with its password.",
       });
     }
-    if (
-      credentials.passwordHash !== null &&
-      !(yield* AccountCredentials.verifyPassword(
-        input.currentPassword ?? "",
-        credentials.passwordHash,
-      ))
-    ) {
-      return yield* new AccountChangeRefusedError({ reason: "Your current password is wrong." });
-    }
-    const passwordHash = yield* AccountCredentials.hashPassword(input.password).pipe(withCrypto);
+    yield* requireStepUp(actor, user, input.reauth);
+    const passwordHash = yield* hashPassword(input.password);
     const saved = yield* users
       .setPassword({
-        userId,
+        userId: actor.userId,
         loginName: normalizeLoginName(input.loginName),
         passwordHash,
         updatedAt: yield* DateTime.now,
@@ -626,37 +821,84 @@ const make = Effect.gen(function* () {
     if (!saved) {
       return yield* new LoginNameTakenError({});
     }
-    return yield* accountOf(yield* requireAccount(userId));
+    yield* signOutOtherSessions(actor);
+    return yield* accountOf(yield* requireAccount(actor.userId));
   });
+
+  const removePassword: UserDirectory["Service"]["removePassword"] = Effect.fn(
+    "UserDirectory.removePassword",
+  )(function* (actor, reauth) {
+    const user = yield* requireAccount(actor.userId);
+    yield* requireStepUp(actor, user, reauth);
+    const credentials = yield* users.getCredentials(actor.userId).pipe(storage);
+    if (!credentials.hasPasskey) {
+      return yield* new AccountChangeRefusedError({
+        reason: "Your password is your only way to sign in. Add a passkey before removing it.",
+      });
+    }
+    yield* users.removePassword(actor.userId).pipe(storage);
+    yield* signOutOtherSessions(actor);
+    return yield* accountOf(user);
+  });
+
+  const removeTotp: UserDirectory["Service"]["removeTotp"] = Effect.fn("UserDirectory.removeTotp")(
+    function* (actor, reauth) {
+      const user = yield* requireAccount(actor.userId);
+      yield* requireStepUp(actor, user, reauth);
+      const credentials = yield* users.getCredentials(actor.userId).pipe(storage);
+      if (passwordRequiresTotp(user) && credentials.passwordHash !== null) {
+        return yield* new AccountChangeRefusedError({
+          reason: "Remove your password first: this account cannot use a password without a code.",
+        });
+      }
+      if (!credentials.hasPasskey && credentials.passwordHash === null) {
+        return yield* new AccountChangeRefusedError({
+          reason: "Your authenticator app is part of your only way to sign in.",
+        });
+      }
+      yield* users.removeTotp(actor.userId).pipe(storage);
+      yield* signOutOtherSessions(actor);
+      return yield* accountOf(user);
+    },
+  );
 
   const startTotpEnrollment: UserDirectory["Service"]["startTotpEnrollment"] = Effect.fn(
     "UserDirectory.startTotpEnrollment",
   )(function* (userId) {
     const user = yield* requireAccount(userId);
     const secret = yield* AccountCredentials.generateTotpSecret.pipe(withCrypto);
+    const enrollmentId = yield* random.uuidV4();
     const now = yield* DateTime.now;
-    pendingTotp.set(userId, {
-      secret,
-      expiresAt: DateTime.add(now, { milliseconds: Duration.toMillis(TOTP_ENROLLMENT_TTL) }),
-    });
-    return AccountCredentials.totpEnrollment(secret, user.loginName ?? user.displayName);
+    yield* totpEnrollments.put(
+      enrollmentId,
+      {
+        userId,
+        secret,
+        expiresAt: DateTime.add(now, { milliseconds: Duration.toMillis(TOTP_ENROLLMENT_TTL) }),
+      },
+      now,
+    );
+    return {
+      enrollmentId,
+      ...AccountCredentials.totpEnrollment(secret, user.loginName ?? user.displayName),
+    };
   });
 
   const confirmTotpEnrollment: UserDirectory["Service"]["confirmTotpEnrollment"] = Effect.fn(
     "UserDirectory.confirmTotpEnrollment",
-  )(function* (userId, code) {
-    const user = yield* requireAccount(userId);
+  )(function* (actor, input) {
+    const user = yield* requireAccount(actor.userId);
     const now = yield* DateTime.now;
-    const pending = pendingTotp.get(userId);
-    if (pending === undefined || !DateTime.isGreaterThan(pending.expiresAt, now)) {
-      pendingTotp.delete(userId);
+    const pending = yield* totpEnrollments.get(input.enrollmentId, now);
+    if (pending === undefined || pending.userId !== actor.userId) {
       return yield* new AccountChangeRefusedError({
         reason: "This setup expired. Start again to get a new code.",
       });
     }
+    yield* requireStepUp(actor, user, input.reauth);
     const step = yield* AccountCredentials.matchTotpStep(
       pending.secret,
-      code,
+      input.code,
       DateTime.toEpochMillis(now),
     ).pipe(withCrypto);
     if (step === undefined) {
@@ -665,66 +907,91 @@ const make = Effect.gen(function* () {
       });
     }
     const secretCiphertext = yield* credentialKey.pipe(
-      Effect.flatMap((key) => AccountCredentials.seal(key, pending.secret, userId)),
+      Effect.flatMap((key) => AccountCredentials.seal(key, pending.secret, actor.userId)),
       withCrypto,
       storage,
     );
-    yield* users.setTotp({ userId, secretCiphertext, step, enrolledAt: now }).pipe(storage);
-    pendingTotp.delete(userId);
+    // The enrollment code proves the app works; it is not a sign-in, so no step is spent.
+    yield* users
+      .setTotp({ userId: actor.userId, secretCiphertext, step: -1, enrolledAt: now })
+      .pipe(storage);
+    yield* totpEnrollments.delete(input.enrollmentId);
+    yield* signOutOtherSessions(actor);
     return yield* accountOf(user);
   });
 
-  // Unknown names still pay for one hash, so timing does not reveal which names exist.
-  const decoyPasswordHash = yield* Effect.cached(
-    AccountCredentials.hashPassword("decoy password").pipe(withCrypto),
-  );
-
   const checkPassword: UserDirectory["Service"]["checkPassword"] = Effect.fn(
     "UserDirectory.checkPassword",
-  )(function* (input) {
+  )(function* (input, clientIp) {
     const found = yield* users.getByLoginName(normalizeLoginName(input.loginName)).pipe(storage);
-    const credentials = Option.isSome(found)
-      ? yield* users.getCredentials(found.value.userId).pipe(storage)
-      : undefined;
+    const user = Option.getOrUndefined(found);
+    // Unknown names count only against the client, so they cannot evict real accounts' counters.
+    const keys = throttleKeys(user?.userId, clientIp);
+    yield* requireNotThrottled(keys);
+    const credentials =
+      user === undefined ? undefined : yield* users.getCredentials(user.userId).pipe(storage);
     const hash = credentials?.passwordHash ?? (yield* decoyPasswordHash);
-    const passwordMatches = yield* AccountCredentials.verifyPassword(input.password, hash);
-    if (
-      Option.isNone(found) ||
-      credentials?.passwordHash == null ||
-      !passwordMatches ||
-      found.value.disabledAt !== null ||
-      found.value.removedAt !== null
-    ) {
+    const passwordMatches =
+      (yield* verifyPassword(input.password, hash)) && credentials?.passwordHash != null;
+    const canSignIn =
+      user !== undefined && user.disabledAt === null && user.removedAt === null && passwordMatches;
+    const totpCiphertext = credentials?.totpSecretCiphertext ?? null;
+    if (user !== undefined && totpCiphertext !== null) {
+      // The code step comes whether or not the password was right, so this answer alone never
+      // confirms a guessed password; a wrong one fails, and counts, at the code step.
+      const challengeId = yield* random.uuidV4();
+      const now = yield* DateTime.now;
+      yield* totpChallenges.put(
+        challengeId,
+        {
+          userId: user.userId,
+          passwordOk: canSignIn,
+          clientIp,
+          attempts: 0,
+          expiresAt: ceremonyExpiry(now),
+        },
+        now,
+      );
+      return { _tag: "totp-required", challengeId } as const;
+    }
+    // A rule change (a Role, later) can leave a password-only account that now needs TOTP.
+    if (!canSignIn || passwordRequiresTotp(user)) {
+      yield* recordFailure(keys);
       return yield* new PasswordRejectedError({});
     }
-    const user = found.value;
-    const totpSecretCiphertext = credentials.totpSecretCiphertext;
-    if (totpSecretCiphertext === null) {
-      // A rule change (a Role, later) can leave a password-only account that now needs TOTP.
-      if (passwordRequiresTotp(user)) return yield* new PasswordRejectedError({});
-      return { _tag: "verified", user: toAuthUser(user) } as const;
-    }
-    if (input.totpCode === undefined) {
-      return { _tag: "totp-required" } as const;
-    }
-    const secret = yield* credentialKey.pipe(
-      Effect.flatMap((key) => AccountCredentials.open(key, totpSecretCiphertext, user.userId)),
-      withCrypto,
-      storage,
-    );
-    const step = yield* AccountCredentials.matchTotpStep(
-      secret,
-      input.totpCode,
-      DateTime.toEpochMillis(yield* DateTime.now),
-    ).pipe(withCrypto);
-    if (
-      step === undefined ||
-      !(yield* users.recordTotpStep({ userId: user.userId, step }).pipe(storage))
-    ) {
-      return yield* new PasswordRejectedError({});
-    }
+    throttle.reset(keys);
     return { _tag: "verified", user: toAuthUser(user) } as const;
   });
+
+  const checkTotp: UserDirectory["Service"]["checkTotp"] = Effect.fn("UserDirectory.checkTotp")(
+    function* (input, clientIp) {
+      const now = yield* DateTime.now;
+      const challenge = yield* totpChallenges.get(input.challengeId, now);
+      if (challenge === undefined) {
+        return yield* new PasswordRejectedError({});
+      }
+      const keys = throttleKeys(challenge.userId, clientIp ?? challenge.clientIp);
+      yield* requireNotThrottled(keys);
+      challenge.attempts += 1;
+      if (challenge.attempts >= MAX_TOTP_ATTEMPTS) {
+        yield* totpChallenges.delete(input.challengeId);
+      }
+      const credentials = yield* users.getCredentials(challenge.userId).pipe(storage);
+      const user = yield* activeUser(challenge.userId);
+      const accepted =
+        challenge.passwordOk &&
+        Option.isSome(user) &&
+        credentials.totpSecretCiphertext !== null &&
+        (yield* acceptTotpCode(challenge.userId, credentials.totpSecretCiphertext, input.code));
+      if (!accepted || Option.isNone(user)) {
+        yield* recordFailure(keys);
+        return yield* new PasswordRejectedError({});
+      }
+      yield* totpChallenges.delete(input.challengeId);
+      throttle.reset(keys);
+      return toAuthUser(user.value);
+    },
+  );
 
   const hashResetToken = (token: string) =>
     digest.digestHex(Digest.sha256, new TextEncoder().encode(token));
@@ -737,10 +1004,12 @@ const make = Effect.gen(function* () {
       return yield* new NoOwnerError({});
     }
     const token = yield* randomBase64Url(32);
-    const now = yield* DateTime.now;
+    const now = DateTime.toUtc(yield* DateTime.now);
     const expiresAt = DateTime.toUtc(
       DateTime.add(now, { milliseconds: Duration.toMillis(RESET_LINK_TTL) }),
     );
+    // Only the newest link works, so an older one left in a terminal's history is harmless.
+    yield* users.expireResetLinks({ userId: owner.value.userId, now }).pipe(storage);
     yield* users
       .createResetLink({
         linkId: yield* random.uuidV4(),
@@ -785,7 +1054,15 @@ const make = Effect.gen(function* () {
     const { userId, displayName } = user.value;
     yield* resetRegistrations.put(
       ceremonyId,
-      { challenge, origin, rpId, expiresAt: ceremonyExpiry(now), userId, displayName },
+      {
+        challenge,
+        origin,
+        rpId,
+        expiresAt: ceremonyExpiry(now),
+        userId,
+        displayName,
+        tokenHash: yield* hashResetToken(token),
+      },
       now,
     );
     return registrationCeremony({ ceremonyId, challenge, rpId, userId, displayName });
@@ -795,16 +1072,22 @@ const make = Effect.gen(function* () {
     "UserDirectory.verifyResetRegistration",
   )(function* (input) {
     const { ceremony, passkey } = yield* verifyRegistration(resetRegistrations, input);
-    return { userId: ceremony.userId, passkey } satisfies PendingPasskey;
+    return {
+      userId: ceremony.userId,
+      passkey,
+      tokenHash: ceremony.tokenHash,
+    } satisfies PendingResetPasskey;
   });
 
   const redeemResetLink: UserDirectory["Service"]["redeemResetLink"] = Effect.fn(
     "UserDirectory.redeemResetLink",
   )(function* ({ token, pending }) {
+    const tokenHash = yield* hashResetToken(token);
+    if (tokenHash !== pending.tokenHash) {
+      return yield* new ResetLinkRejectedError({});
+    }
     const now = yield* DateTime.now;
-    const userId = yield* users
-      .consumeResetLink({ tokenHash: yield* hashResetToken(token), now })
-      .pipe(storage);
+    const userId = yield* users.consumeResetLink({ tokenHash, now }).pipe(storage);
     if (Option.isNone(userId) || userId.value !== pending.userId) {
       return yield* new ResetLinkRejectedError({});
     }
@@ -812,9 +1095,15 @@ const make = Effect.gen(function* () {
     if (Option.isNone(user)) {
       return yield* new ResetLinkRejectedError({});
     }
+    // A reset means the old passkeys are lost or stolen: they stop working, and so does every
+    // session they opened.
     yield* users
       .addPasskey({ userId: userId.value, passkey: pending.passkey, createdAt: now })
       .pipe(storage);
+    yield* users
+      .removePasskeysExcept({ userId: userId.value, credentialId: pending.passkey.credentialId })
+      .pipe(storage);
+    yield* sessions.revokeAllForUser(userId.value).pipe(storage);
     return toAuthUser(user.value);
   });
 
@@ -830,9 +1119,12 @@ const make = Effect.gen(function* () {
     redeemRecoveryCode,
     getAccount,
     setPassword,
+    removePassword,
     startTotpEnrollment,
     confirmTotpEnrollment,
+    removeTotp,
     checkPassword,
+    checkTotp,
     issueOwnerResetLink,
     getResetLinkStatus,
     startResetRegistration,

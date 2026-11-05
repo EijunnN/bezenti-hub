@@ -39,6 +39,7 @@ import {
 } from "./auth.ts";
 import {
   AuthAccount,
+  AuthCredentialRemovalRequest,
   AuthOwnerBootstrapRequest,
   AuthOwnerBootstrapResult,
   AuthOwnerBootstrapStatus,
@@ -57,6 +58,7 @@ import {
   AuthSignOutResult,
   AuthTotpConfirmRequest,
   AuthTotpEnrollment,
+  AuthTotpSignInRequest,
 } from "./userAccounts.ts";
 import {
   ExecutionEnvironmentDescriptor,
@@ -339,6 +341,20 @@ export class EnvironmentHttpConflictError extends Schema.TaggedError<Environment
   }
 }
 
+/** Too many failed sign-in attempts for this account or client; retry after the delay. */
+export class EnvironmentRateLimitedError extends Schema.TaggedError<EnvironmentRateLimitedError>()(
+  "EnvironmentRateLimitedError",
+  {
+    message: Schema.String,
+    retryAfterSeconds: Schema.Number,
+  },
+  { httpApiStatus: 429 },
+) {
+  [HttpServerRespondable.symbol]() {
+    return HttpServerResponse.schemaJson(EnvironmentRateLimitedError)(this, { status: 429 });
+  }
+}
+
 export class EnvironmentCloudEndpointUnavailableError extends Schema.TaggedError<EnvironmentCloudEndpointUnavailableError>()(
   "EnvironmentCloudEndpointUnavailableError",
   {
@@ -367,9 +383,15 @@ const EnvironmentOwnerBootstrapErrors = [
   // The Installation already has an Owner.
   EnvironmentHttpConflictError,
 ] as const;
+const EnvironmentPasswordSignInErrors = [
+  ...EnvironmentUserSignInErrors,
+  EnvironmentRateLimitedError,
+] as const;
 const EnvironmentAccountErrors = [
-  // The session has no User, or the account's rules refuse the change.
+  // The session has no User, the step-up proof failed, or the account's rules refuse the change.
   EnvironmentHttpForbiddenError,
+  // Failed step-up proofs count toward the same back-off as sign-in.
+  EnvironmentRateLimitedError,
   EnvironmentInternalError,
 ] as const;
 const EnvironmentTokenExchangeErrors = [
@@ -692,7 +714,14 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
     HttpApiEndpoint.post("passwordSignIn", "/api/auth/password/sign-in", {
       payload: AuthPasswordSignInRequest,
       success: AuthPasswordSignInResult,
-      error: EnvironmentUserSignInErrors,
+      error: EnvironmentPasswordSignInErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("totpSignIn", "/api/auth/password/totp", {
+      payload: AuthTotpSignInRequest,
+      success: AuthBrowserSessionResult,
+      error: EnvironmentPasswordSignInErrors,
     }),
   )
   .add(
@@ -709,6 +738,22 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       success: AuthAccount,
       // The login name belongs to another User.
       error: [...EnvironmentAccountErrors, EnvironmentHttpConflictError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("removePassword", "/api/auth/account/password/remove", {
+      headers: OptionalBearerHeaders,
+      payload: AuthCredentialRemovalRequest,
+      success: AuthAccount,
+      error: EnvironmentAccountErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("removeTotp", "/api/auth/account/totp/remove", {
+      headers: OptionalBearerHeaders,
+      payload: AuthCredentialRemovalRequest,
+      success: AuthAccount,
+      error: EnvironmentAccountErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(

@@ -47,29 +47,46 @@ the Installation to another domain strands existing passkeys. Recovery codes
 and Owner reset links are the way back in. Both are random enough that a plain
 SHA-256 is stored, and each is spent atomically on use. A reset link comes from
 `t3 auth owner-reset`, which writes to the database directly, so it works with
-the server stopped. It lasts one hour, and spending it, storing the new passkey
-and issuing the session happen in one transaction.
+the server stopped. It lasts one hour, and issuing one ends the earlier ones. A
+registration started from a link can only be finished with that link. A reset
+assumes the old passkeys are lost or stolen, so in one transaction it spends the
+link, replaces every passkey with the new one, revokes the Owner's sessions and
+issues a new one.
 
 ### Sign-in rules
 
 Which accounts may use a password without a second factor is one function,
 `passwordRequiresTotp` in UserDirectory, and today it is true only for the Owner.
 The spec gives Admins the same rule once Roles exist, so extend that function
-rather than checking `isOwner` at call sites. It applies twice: setting a
-password needs TOTP enrolled first, and password sign-in refuses an account the
-rule covers when it has no TOTP. That second check catches an account whose rule
-changed after it set a password. Any account with TOTP enrolled must give a code
-with its password. The first step answers `secondFactor: "totp"` without issuing
-a session, and the client sends the password again with the code. No half-signed
-state is kept between the two steps.
+rather than checking `isOwner` at call sites. It applies three times: setting a
+password needs TOTP enrolled first, removing TOTP needs the password gone first,
+and password sign-in refuses an account the rule covers when it has no TOTP. The
+last check catches an account whose rule changed after it set a password.
+
+Any account with TOTP gets the code step: the password step answers
+`secondFactor: "totp"` with a short-lived challenge id, and the code goes to
+`/api/auth/password/totp`. That answer comes whether or not the password was
+right (a wrong one gets a challenge no code passes), so it never confirms a
+guessed password on its own. Failed passwords, codes and step-up proofs count
+per account and per client address. After five failures each further one locks
+the key for twice as long, from 30 seconds up to 15 minutes. The counters live in
+memory, so a restart clears them.
+
+A stolen session must not be able to install a lasting way in. Setting,
+changing or removing a password and confirming or removing TOTP therefore need
+a step-up proof in the same request: a fresh passkey assertion, or the current
+password plus a code when TOTP is enrolled. Only an account with no credential
+yet is exempt. Each such change revokes the User's other sessions, and a removal
+that would leave no way to sign in is refused.
 
 Passwords are argon2id (19 MiB, two passes) via `hash-wasm`, which is
 WebAssembly. A native addon would need a build per platform staged into the
 desktop and CLI artifacts, and `node:crypto.argon2` needs Node 24.7, newer than
-the server's supported floor. TOTP secrets are sealed with AES-256-GCM under
-the `user-credential-key` server secret, with the User id as associated data.
-Each code's 30-second step is recorded, so a code works once. Password and TOTP
-attempts are not rate limited yet.
+the server's supported floor. Hashing holds the event loop for tens of
+milliseconds, so at most two run at once. TOTP secrets are sealed with
+AES-256-GCM under the `user-credential-key` server secret, with the User id as
+associated data. Each sign-in code's 30-second step is recorded, so a code works
+once. An enrollment code is not recorded, since it only proves the app works.
 
 ### Guest links are not sessions
 

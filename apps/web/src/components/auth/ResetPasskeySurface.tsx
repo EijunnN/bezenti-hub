@@ -85,7 +85,7 @@ export function ResetPasskeySurface({ onFinished }: { onFinished: () => void }) 
     <StandalonePage>
       <StandalonePageHeader
         title={`Register a new passkey for ${link.displayName}`}
-        description="Your old passkeys keep working. This link works once."
+        description="Your old passkeys stop working and every device signed in to this account is signed out. This link works once."
       />
       <div className="mt-6 space-y-4">
         {canRegisterPasskeys() ? (

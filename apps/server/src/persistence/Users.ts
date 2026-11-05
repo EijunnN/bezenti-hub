@@ -1,5 +1,6 @@
 import * as Context from "effect/Context";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import type * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -55,6 +56,7 @@ const ConsumeRecoveryCodeInput = Schema.Struct({
 });
 
 export const UserCredentials = Schema.Struct({
+  hasPasskey: Schema.BooleanFromBit,
   passwordHash: Schema.NullOr(Schema.String),
   totpSecretCiphertext: Schema.NullOr(Schema.String),
 });
@@ -142,6 +144,18 @@ export class UserRepository extends Context.Service<
     readonly consumeResetLink: (
       input: typeof ResetLinkLookup.Type,
     ) => Effect.Effect<Option.Option<UserId>, UserRepositoryError>;
+    readonly removePassword: (userId: UserId) => Effect.Effect<void, UserRepositoryError>;
+    readonly removeTotp: (userId: UserId) => Effect.Effect<void, UserRepositoryError>;
+    /** Drops every passkey of a User but one, after an Owner reset. */
+    readonly removePasskeysExcept: (input: {
+      readonly userId: UserId;
+      readonly credentialId: string;
+    }) => Effect.Effect<void, UserRepositoryError>;
+    /** Ends a User's live reset links, so only the newest one works. */
+    readonly expireResetLinks: (input: {
+      readonly userId: UserId;
+      readonly now: DateTime.Utc;
+    }) => Effect.Effect<void, UserRepositoryError>;
     readonly addPasskey: (
       input: typeof AddPasskeyInput.Type,
     ) => Effect.Effect<void, UserRepositoryError>;
@@ -229,6 +243,7 @@ const make = Effect.gen(function* () {
     Result: UserCredentials,
     execute: (userId) => sql`
       SELECT
+        EXISTS (SELECT 1 FROM user_passkeys WHERE user_id = ${userId}) AS "hasPasskey",
         (SELECT password_hash FROM user_passwords WHERE user_id = ${userId}) AS "passwordHash",
         (SELECT secret_ciphertext FROM user_totp WHERE user_id = ${userId}) AS "totpSecretCiphertext"
     `,
@@ -307,6 +322,15 @@ const make = Effect.gen(function* () {
       SET used_at = ${now}
       WHERE token_hash = ${tokenHash} AND used_at IS NULL AND expires_at > ${now}
       RETURNING user_id AS "userId"
+    `,
+  });
+
+  const expireLiveResetLinks = SqlSchema.void({
+    Request: Schema.Struct({ userId: UserId, now: Schema.DateTimeUtcFromString }),
+    execute: ({ userId, now }) => sql`
+      UPDATE user_reset_links
+      SET expires_at = ${now}
+      WHERE user_id = ${userId} AND used_at IS NULL AND expires_at > ${now}
     `,
   });
 
@@ -471,6 +495,34 @@ const make = Effect.gen(function* () {
       return useResetLink(input).pipe(
         Effect.map(Option.map((row) => row.userId)),
         Effect.mapError(toUserRepositoryError("UserRepository.consumeResetLink")),
+      );
+    }),
+    removePassword: Effect.fn("UserRepository.removePassword")(function (userId) {
+      return sql`DELETE FROM user_passwords WHERE user_id = ${userId}`.pipe(
+        Effect.asVoid,
+        Effect.mapError(toUserRepositoryError("UserRepository.removePassword")),
+      );
+    }),
+    removeTotp: Effect.fn("UserRepository.removeTotp")(function (userId) {
+      return sql`DELETE FROM user_totp WHERE user_id = ${userId}`.pipe(
+        Effect.asVoid,
+        Effect.mapError(toUserRepositoryError("UserRepository.removeTotp")),
+      );
+    }),
+    removePasskeysExcept: Effect.fn("UserRepository.removePasskeysExcept")(function ({
+      userId,
+      credentialId,
+    }) {
+      return sql`
+        DELETE FROM user_passkeys WHERE user_id = ${userId} AND credential_id != ${credentialId}
+      `.pipe(
+        Effect.asVoid,
+        Effect.mapError(toUserRepositoryError("UserRepository.removePasskeysExcept")),
+      );
+    }),
+    expireResetLinks: Effect.fn("UserRepository.expireResetLinks")(function ({ userId, now }) {
+      return expireLiveResetLinks({ userId, now }).pipe(
+        Effect.mapError(toUserRepositoryError("UserRepository.expireResetLinks")),
       );
     }),
     addPasskey: Effect.fn("UserRepository.addPasskey")(function (input) {

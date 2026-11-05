@@ -423,6 +423,11 @@ export class SessionStore extends Context.Service<
     readonly revokeAllExcept: (
       sessionId: AuthSessionId,
     ) => Effect.Effect<number, SessionCredentialInternalError>;
+    /** Revokes every active session of a User, optionally keeping one (the caller's own). */
+    readonly revokeAllForUser: (
+      userId: UserId,
+      options?: { readonly except?: AuthSessionId },
+    ) => Effect.Effect<number, SessionCredentialInternalError>;
     readonly markConnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
     readonly markDisconnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
   }
@@ -1050,6 +1055,19 @@ const make = Effect.gen(function* () {
     return revokedSessionIds.length;
   });
 
+  const revokeAllForUser: SessionStore["Service"]["revokeAllForUser"] = Effect.fn(
+    "SessionStore.revokeAllForUser",
+  )(function* (userId, options) {
+    const rows = yield* authSessions
+      .listActive({ now: yield* DateTime.now })
+      .pipe(Effect.mapError((cause) => new ActiveSessionsListError({ cause })));
+    const sessionIds = rows
+      .filter((row) => row.userId === userId && row.sessionId !== options?.except)
+      .map((row) => row.sessionId);
+    const revoked = yield* Effect.forEach(sessionIds, revoke);
+    return revoked.filter(Boolean).length;
+  });
+
   const awaitInvalidation = Effect.fn(function* (
     sessionId: AuthSessionId,
     proofKeyThumbprint?: string,
@@ -1123,6 +1141,7 @@ const make = Effect.gen(function* () {
     },
     revoke,
     revokeAllExcept,
+    revokeAllForUser,
     markConnected,
     markDisconnected,
   });

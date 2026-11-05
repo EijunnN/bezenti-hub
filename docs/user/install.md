@@ -213,6 +213,10 @@ For devices without passkeys, add a password under **Settings → Access → You
 account**. You choose a sign-in name there too. The Owner must first set up an
 authenticator app (1Password, Google Authenticator and similar) in the same
 section, and then signs in with the password plus the app's six-digit code.
+Adding, changing or removing a password or authenticator app asks you to
+confirm it's you with your passkey or current password, and signs out your
+other devices. After repeated wrong passwords or codes, sign-in pauses for a
+while before you can try again.
 
 If you lose every passkey and recovery code, run this in the server's shell:
 
@@ -221,8 +225,9 @@ t3 auth owner-reset --base-url https://hub.example.com
 ```
 
 It prints a link that lets you register a new passkey. The link works once and
-expires after an hour. Open it on the address you sign in on, since a passkey
-works only there. Anyone holding the link can take over the Owner account, so
+expires after an hour, and running the command again cancels the previous link.
+Your old passkeys stop working and every signed-in device is signed out. Open
+the link on the address you sign in on, since a passkey works only there. Anyone holding the link can take over the Owner account, so
 don't share it.
 
 For provider-specific setup and accounts, see [Codex](./providers-codex.md),

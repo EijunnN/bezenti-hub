@@ -18,6 +18,7 @@ import {
   EnvironmentAuthenticatedAuth,
   EnvironmentAuthenticatedPrincipal,
   EnvironmentHttpConflictError,
+  EnvironmentRateLimitedError,
 } from "@t3tools/contracts";
 import type { AuthEnvironmentScope, DpopFailureReason } from "@t3tools/contracts";
 import { parseOAuthScope } from "@t3tools/shared/oauthScope";
@@ -272,30 +273,47 @@ const failOwnerBootstrap = <A, R>(
   );
 
 /** The signed-in User managing their own account; pairing-link sessions have none. */
-const requireSessionUser = Effect.gen(function* () {
+const requireAccountActor = Effect.gen(function* () {
   const principal = yield* EnvironmentAuthenticatedPrincipal;
   if (principal.userId === undefined) {
     return yield* new EnvironmentHttpForbiddenError({
       message: "Sign in with an account to manage it.",
     });
   }
-  return principal.userId;
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  // A passkey step-up must match the origin its challenge was issued to, which was checked then.
+  return {
+    userId: principal.userId,
+    sessionId: principal.sessionId,
+    origin: request.headers.origin ?? "",
+  } satisfies UserDirectory.AccountActor;
 });
+
+const failThrottled = (error: UserDirectory.SignInThrottledError) =>
+  Effect.fail(
+    new EnvironmentRateLimitedError({
+      message: error.message,
+      retryAfterSeconds: error.retryAfterSeconds,
+    }),
+  );
+
+const accountChangeFailures = {
+  SignInThrottledError: failThrottled,
+  AccountChangeRefusedError: (error: UserDirectory.AccountChangeRefusedError) =>
+    Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+  UserDirectoryStorageError: (error: UserDirectory.UserDirectoryStorageError) =>
+    failEnvironmentInternal("internal_error", error),
+};
 
 const failAccountChange = <A, R>(
   effect: Effect.Effect<
     A,
-    UserDirectory.AccountChangeRefusedError | UserDirectory.UserDirectoryStorageError,
+    | UserDirectory.AccountChangeRefusedError
+    | UserDirectory.SignInThrottledError
+    | UserDirectory.UserDirectoryStorageError,
     R
   >,
-) =>
-  effect.pipe(
-    Effect.catchTags({
-      AccountChangeRefusedError: (error) =>
-        Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
-      UserDirectoryStorageError: (error) => failEnvironmentInternal("internal_error", error),
-    }),
-  );
+) => effect.pipe(Effect.catchTags(accountChangeFailures));
 
 export const requireEnvironmentScope = Effect.fn("environment.auth.requireScope")(function* (
   scope: AuthEnvironmentScope,
@@ -356,7 +374,14 @@ export const layer = HttpApiBuilder.group(
           const request = yield* HttpServerRequest.HttpServerRequest;
           const result = yield* serverAuth
             .signInWithPassword(request, args.payload, deriveAuthClientMetadata({ request }))
-            .pipe(failUserSignIn);
+            .pipe(
+              Effect.catchTags({
+                ServerAuthInvalidCredentialError:
+                  userSignInFailures.ServerAuthInvalidCredentialError,
+                SignInThrottledError: failThrottled,
+              }),
+              Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, failUserSignInInternal),
+            );
           yield* appendCredentialResponseHeaders;
           if ("sessionToken" in result) {
             yield* appendSessionCookie(
@@ -369,26 +394,53 @@ export const layer = HttpApiBuilder.group(
         }),
       )
       .handle(
+        "totpSignIn",
+        Effect.fn("environment.auth.totpSignIn")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const { response, sessionToken } = yield* serverAuth
+            .signInWithTotp(request, args.payload, deriveAuthClientMetadata({ request }))
+            .pipe(
+              Effect.catchTags({
+                ServerAuthInvalidCredentialError:
+                  userSignInFailures.ServerAuthInvalidCredentialError,
+                SignInThrottledError: failThrottled,
+              }),
+              Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, failUserSignInInternal),
+            );
+          yield* appendSessionCookie(sessions.cookieName, sessionToken, response.expiresAt);
+          yield* appendCredentialResponseHeaders;
+          return response;
+        }),
+      )
+      .handle(
         "account",
         Effect.fn("environment.auth.account")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          return yield* userDirectory.getAccount(yield* requireSessionUser).pipe(failAccountChange);
+          const actor = yield* requireAccountActor;
+          return yield* userDirectory.getAccount(actor.userId).pipe(failAccountChange);
         }),
       )
       .handle(
         "setPassword",
         Effect.fn("environment.auth.setPassword")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          return yield* userDirectory.setPassword(yield* requireSessionUser, args.payload).pipe(
+          return yield* userDirectory.setPassword(yield* requireAccountActor, args.payload).pipe(
             Effect.catchTags({
+              ...accountChangeFailures,
               LoginNameTakenError: (error) =>
                 Effect.fail(new EnvironmentHttpConflictError({ message: error.message })),
-              AccountChangeRefusedError: (error) =>
-                Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
-              UserDirectoryStorageError: (error) =>
-                failEnvironmentInternal("internal_error", error),
             }),
           );
+        }),
+      )
+      .handle(
+        "removePassword",
+        Effect.fn("environment.auth.removePassword")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          return yield* userDirectory
+            .removePassword(yield* requireAccountActor, args.payload.reauth)
+            .pipe(failAccountChange);
         }),
       )
       .handle(
@@ -396,9 +448,8 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.auth.startTotpEnrollment")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* appendCredentialResponseHeaders;
-          return yield* userDirectory
-            .startTotpEnrollment(yield* requireSessionUser)
-            .pipe(failAccountChange);
+          const actor = yield* requireAccountActor;
+          return yield* userDirectory.startTotpEnrollment(actor.userId).pipe(failAccountChange);
         }),
       )
       .handle(
@@ -406,7 +457,16 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.auth.confirmTotpEnrollment")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           return yield* userDirectory
-            .confirmTotpEnrollment(yield* requireSessionUser, args.payload.code)
+            .confirmTotpEnrollment(yield* requireAccountActor, args.payload)
+            .pipe(failAccountChange);
+        }),
+      )
+      .handle(
+        "removeTotp",
+        Effect.fn("environment.auth.removeTotp")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          return yield* userDirectory
+            .removeTotp(yield* requireAccountActor, args.payload.reauth)
             .pipe(failAccountChange);
         }),
       )

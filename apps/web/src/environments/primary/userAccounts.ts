@@ -3,12 +3,14 @@ import {
   type AuthOwnerBootstrapResult,
   type AuthOwnerBootstrapStatus,
   type AuthPasskeyRegistrationCeremony,
+  type AuthPasskeySignInCeremony,
+  type AuthReauth,
   type AuthResetLinkStatus,
-  type AuthSetPasswordRequest,
   type AuthTotpEnrollment,
   EnvironmentHttpCommonError,
   EnvironmentHttpConflictError,
   EnvironmentHttpForbiddenError,
+  EnvironmentRateLimitedError,
 } from "@t3tools/contracts";
 import { startAuthentication, startRegistration, WebAuthnError } from "@simplewebauthn/browser";
 import type * as Context from "effect/Context";
@@ -27,10 +29,15 @@ const isUserSignInError = Schema.is(UserSignInError);
 const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
 const isEnvironmentHttpConflictError = Schema.is(EnvironmentHttpConflictError);
 const isEnvironmentHttpForbiddenError = Schema.is(EnvironmentHttpForbiddenError);
+const isEnvironmentRateLimitedError = Schema.is(EnvironmentRateLimitedError);
 
 function toUserSignInError(cause: unknown, rejectedMessage: string): UserSignInError {
   if (isUserSignInError(cause)) return cause;
-  if (isEnvironmentHttpConflictError(cause) || isEnvironmentHttpForbiddenError(cause)) {
+  if (
+    isEnvironmentHttpConflictError(cause) ||
+    isEnvironmentHttpForbiddenError(cause) ||
+    isEnvironmentRateLimitedError(cause)
+  ) {
     return new UserSignInError({ message: cause.message, cause });
   }
   if (isEnvironmentHttpCommonError(cause)) {
@@ -130,64 +137,133 @@ export async function resetPasskey(token: string): Promise<void> {
   );
 }
 
-/** "totp-required" when the password was right but the account also needs a code. */
+/** Signed in, or the TOTP challenge to answer with `signInWithTotp`. */
 export async function signInWithPassword(input: {
   readonly loginName: string;
   readonly password: string;
-  readonly totpCode?: string;
-}): Promise<"signed-in" | "totp-required"> {
+}): Promise<{ readonly totpChallengeId: string } | "signed-in"> {
   const result = await request(
     (client) => client.auth.passwordSignIn({ payload: input }),
-    input.totpCode === undefined
-      ? "That sign-in name or password is not right."
-      : "That code is not right, or it was already used. Wait for the next one.",
+    "That sign-in name or password is not right.",
   );
-  return result.authenticated ? "signed-in" : "totp-required";
+  return result.authenticated ? "signed-in" : { totpChallengeId: result.challengeId };
+}
+
+export async function signInWithTotp(input: {
+  readonly challengeId: string;
+  readonly code: string;
+}): Promise<void> {
+  await request(
+    (client) => client.auth.totpSignIn({ payload: input }),
+    "That password or code is not right, or the code was already used. Start again.",
+  );
 }
 
 export function fetchAccount(): Promise<AuthAccount> {
   return request((client) => client.auth.account({ headers: {} }));
 }
 
-export function setAccountPassword(payload: AuthSetPasswordRequest): Promise<AuthAccount> {
-  return request((client) => client.auth.setPassword({ headers: {}, payload }));
+/** Proof for a credential change: the current password (and code), or a passkey tap. */
+export type StepUp =
+  | { readonly method: "password"; readonly password: string; readonly totpCode?: string }
+  | { readonly method: "passkey" }
+  | { readonly method: "none" };
+
+const STEP_UP_REJECTED = "Confirming it's you failed: check your password, code or passkey.";
+
+async function toReauth(stepUp: StepUp): Promise<AuthReauth | undefined> {
+  if (stepUp.method === "none") return undefined;
+  if (stepUp.method === "password") return stepUp;
+  const ceremony = await request((client) => client.auth.passkeyChallenge({}));
+  return { method: "passkey", ceremonyId: ceremony.ceremonyId, response: await assert(ceremony) };
+}
+
+export async function setAccountPassword(input: {
+  readonly loginName: string;
+  readonly password: string;
+  readonly stepUp: StepUp;
+}): Promise<AuthAccount> {
+  const reauth = await toReauth(input.stepUp);
+  return request(
+    (client) =>
+      client.auth.setPassword({
+        headers: {},
+        payload: {
+          loginName: input.loginName,
+          password: input.password,
+          ...(reauth ? { reauth } : {}),
+        },
+      }),
+    STEP_UP_REJECTED,
+  );
 }
 
 export function startTotpEnrollment(): Promise<AuthTotpEnrollment> {
   return request((client) => client.auth.startTotpEnrollment({ headers: {} }));
 }
 
-export function confirmTotpEnrollment(code: string): Promise<AuthAccount> {
-  return request((client) => client.auth.confirmTotpEnrollment({ headers: {}, payload: { code } }));
+export async function confirmTotpEnrollment(input: {
+  readonly enrollmentId: string;
+  readonly code: string;
+  readonly stepUp: StepUp;
+}): Promise<AuthAccount> {
+  const reauth = await toReauth(input.stepUp);
+  return request(
+    (client) =>
+      client.auth.confirmTotpEnrollment({
+        headers: {},
+        payload: {
+          enrollmentId: input.enrollmentId,
+          code: input.code,
+          ...(reauth ? { reauth } : {}),
+        },
+      }),
+    STEP_UP_REJECTED,
+  );
 }
 
-export async function signInWithPasskey(): Promise<void> {
-  const ceremony = await request((client) => client.auth.passkeyChallenge({}));
+export async function removeCredential(
+  credential: "password" | "totp",
+  stepUp: StepUp,
+): Promise<AuthAccount> {
+  const reauth = await toReauth(stepUp);
+  if (reauth === undefined) throw new UserSignInError({ message: STEP_UP_REJECTED });
+  return request(
+    (client) =>
+      credential === "password"
+        ? client.auth.removePassword({ headers: {}, payload: { reauth } })
+        : client.auth.removeTotp({ headers: {}, payload: { reauth } }),
+    STEP_UP_REJECTED,
+  );
+}
+
+async function assert(ceremony: AuthPasskeySignInCeremony) {
   const assertion = await startAuthentication({ optionsJSON: ceremony.options }).catch(
     (cause: unknown) => {
       throw toUserSignInError(cause, "");
     },
   );
+  return {
+    id: assertion.id,
+    rawId: assertion.rawId,
+    type: "public-key" as const,
+    response: {
+      clientDataJSON: assertion.response.clientDataJSON,
+      authenticatorData: assertion.response.authenticatorData,
+      signature: assertion.response.signature,
+      ...(assertion.response.userHandle !== undefined
+        ? { userHandle: assertion.response.userHandle }
+        : {}),
+    },
+  };
+}
+
+export async function signInWithPasskey(): Promise<void> {
+  const ceremony = await request((client) => client.auth.passkeyChallenge({}));
+  const response = await assert(ceremony);
   await request(
     (client) =>
-      client.auth.passkeySignIn({
-        payload: {
-          ceremonyId: ceremony.ceremonyId,
-          response: {
-            id: assertion.id,
-            rawId: assertion.rawId,
-            type: "public-key",
-            response: {
-              clientDataJSON: assertion.response.clientDataJSON,
-              authenticatorData: assertion.response.authenticatorData,
-              signature: assertion.response.signature,
-              ...(assertion.response.userHandle !== undefined
-                ? { userHandle: assertion.response.userHandle }
-                : {}),
-            },
-          },
-        },
-      }),
+      client.auth.passkeySignIn({ payload: { ceremonyId: ceremony.ceremonyId, response } }),
     "That passkey is not registered on this Installation.",
   );
 }

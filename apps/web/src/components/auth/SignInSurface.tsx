@@ -4,6 +4,7 @@ import {
   signInWithPasskey,
   signInWithPassword,
   signInWithRecoveryCode,
+  signInWithTotp,
 } from "../../environments/primary/userAccounts";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
@@ -16,13 +17,16 @@ export function SignInSurface({ onSignedIn }: { onSignedIn: () => void }) {
   const [method, setMethod] = useState<Method>("passkey");
   const [loginName, setLoginName] = useState("");
   const [password, setPassword] = useState("");
-  const [needsTotp, setNeedsTotp] = useState(false);
+  const [totpChallengeId, setTotpChallengeId] = useState<string | null>(null);
+  const needsTotp = totpChallengeId !== null;
   const [totpCode, setTotpCode] = useState("");
   const [recoveryCode, setRecoveryCode] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const attempt = async (signIn: () => Promise<"signed-in" | "totp-required" | void>) => {
+  const attempt = async (
+    signIn: () => Promise<{ readonly totpChallengeId: string } | "signed-in" | void>,
+  ) => {
     setIsSubmitting(true);
     setErrorMessage("");
     const outcome = await signIn().then(
@@ -35,10 +39,13 @@ export function SignInSurface({ onSignedIn }: { onSignedIn: () => void }) {
     setIsSubmitting(false);
     if (!outcome.ok) {
       setErrorMessage(outcome.message);
+      // A code step that failed may be spent; the password step starts a new one.
+      setTotpChallengeId(null);
+      setTotpCode("");
       return;
     }
-    if (outcome.result === "totp-required") {
-      setNeedsTotp(true);
+    if (typeof outcome.result === "object") {
+      setTotpChallengeId(outcome.result.totpChallengeId);
       return;
     }
     onSignedIn();
@@ -46,7 +53,7 @@ export function SignInSurface({ onSignedIn }: { onSignedIn: () => void }) {
 
   const choose = (next: Method) => {
     setMethod(next);
-    setNeedsTotp(false);
+    setTotpChallengeId(null);
     setTotpCode("");
     setErrorMessage("");
   };
@@ -71,11 +78,12 @@ export function SignInSurface({ onSignedIn }: { onSignedIn: () => void }) {
             onSubmit={(event) => {
               event.preventDefault();
               void attempt(() =>
-                signInWithPassword({
-                  loginName,
-                  password,
-                  ...(needsTotp ? { totpCode: totpCode.replace(/\s/g, "") } : {}),
-                }),
+                totpChallengeId === null
+                  ? signInWithPassword({ loginName, password })
+                  : signInWithTotp({
+                      challengeId: totpChallengeId,
+                      code: totpCode.replace(/\s/g, ""),
+                    }),
               );
             }}
           >
