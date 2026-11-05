@@ -196,6 +196,7 @@ export const make = Effect.gen(function* () {
     },
     serverVersion: packageJson.version,
     orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
+    ...(serverConfig.publicUrl === undefined ? {} : { publicUrl: serverConfig.publicUrl.origin }),
     capabilities: {
       // Agent activity was published through the T3 Connect relay, which this fork drops.
       agentActivityPublishing: false,

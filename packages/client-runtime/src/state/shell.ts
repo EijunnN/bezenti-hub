@@ -39,6 +39,7 @@ import {
 } from "./shellReducer.ts";
 import { type EnvironmentCatalogState, enabledEnvironmentIds } from "./connections.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
+import { registerEnvironmentHubOrigins } from "../hubOrigins.ts";
 
 export type EnvironmentShellStatus = "empty" | "cached" | "synchronizing" | "live";
 
@@ -562,6 +563,8 @@ export function createEnvironmentServerConfigsAtom(input: {
     for (const environmentId of enabledEnvironmentIds(get(input.catalogValueAtom))) {
       const config = get(input.serverConfigValueAtom(environmentId));
       if (config !== null) {
+        // Copied links point at the Hub's public URL; links to it in messages read as threads.
+        registerEnvironmentHubOrigins({ publicUrl: config.environment.publicUrl });
         next.set(environmentId, config);
       }
     }

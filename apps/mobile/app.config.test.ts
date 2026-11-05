@@ -1,4 +1,3 @@
-import { DEFAULT_HOSTED_APP_URL } from "@t3tools/shared/hostedApp";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 
 import appleAppSiteAssociation from "../web/public/.well-known/apple-app-site-association.json";
@@ -6,16 +5,20 @@ import assetLinks from "../web/public/.well-known/assetlinks.json";
 
 // Keep config parsing independent of local env files and build credentials.
 vi.mock("../../scripts/lib/public-config.ts", () => ({
-  loadRepoEnv: () => ({ APP_VARIANT: process.env.APP_VARIANT }),
+  loadRepoEnv: () => ({
+    APP_VARIANT: process.env.APP_VARIANT,
+    EXPO_PUBLIC_T3CODE_PUBLIC_URL: process.env.EXPO_PUBLIC_T3CODE_PUBLIC_URL,
+  }),
 }));
 
 afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-async function loadConfig(variant: string | undefined) {
+async function loadConfig(variant: string | undefined, publicUrl = "https://hub.example.com") {
   vi.resetModules();
   vi.stubEnv("APP_VARIANT", variant);
+  vi.stubEnv("EXPO_PUBLIC_T3CODE_PUBLIC_URL", publicUrl);
   return (await import("./app.config.ts")).default;
 }
 
@@ -34,8 +37,8 @@ it.each([
   const config = await loadConfig(value);
   expect(config.ios?.bundleIdentifier).toBe(identifier);
   expect(config.android?.package).toBe(identifier);
-  // Copied thread links open this app only while app.t3.codes lists it.
-  const host = new URL(DEFAULT_HOSTED_APP_URL).host;
+  // Copied thread links open this app only while the Hub's domain lists it.
+  const host = "hub.example.com";
   expect(config.ios?.associatedDomains).toContain(`applinks:${host}`);
   expect(appleAppSiteAssociation.applinks.details[0]?.appIDs).toContain(
     `${config.ios?.appleTeamId}.${identifier}`,
@@ -44,4 +47,10 @@ it.each([
     { scheme: "https", host, pathPrefix: "/threads/" },
   ]);
   expect(assetLinks.map((link) => link.target.package_name)).toContain(identifier);
+});
+
+it("claims no link domain without the Hub's public URL", async () => {
+  const config = await loadConfig("production", "");
+  expect(config.ios?.associatedDomains).toEqual([]);
+  expect(config.android?.intentFilters).toEqual([]);
 });

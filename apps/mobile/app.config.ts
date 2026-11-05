@@ -95,6 +95,12 @@ const VARIANT_CONFIG = {
   },
 } as const;
 
+function hubHost(publicUrl: string | undefined): string | null {
+  if (!publicUrl?.trim() || !URL.canParse(publicUrl.trim())) return null;
+  const url = new URL(publicUrl.trim());
+  return url.protocol === "https:" ? url.host : null;
+}
+
 function resolveAppVariant(value: string | undefined): AppVariant {
   switch (value) {
     case "development":
@@ -109,8 +115,9 @@ function resolveAppVariant(value: string | undefined): AppVariant {
 }
 
 const variant = VARIANT_CONFIG[APP_VARIANT];
-// Copied thread links open the app. app.t3.codes/.well-known lists every variant's identifiers.
-const HOSTED_APP_HOST = "app.t3.codes";
+// Copied thread links open the app on the Hub's own domain (ADR 0007), whose web app serves the
+// .well-known files listing every variant's identifiers. Without one, links open in the browser.
+const HUB_HOST = hubHost(process.env.EXPO_PUBLIC_T3CODE_PUBLIC_URL);
 const iosBundleIdentifier = isIosPersonalTeamBuild
   ? personalTeamBundleIdentifier!
   : variant.iosBundleIdentifier;
@@ -243,7 +250,7 @@ const config: ExpoConfig = {
     bundleIdentifier: iosBundleIdentifier,
     // Avoid Personal Team fallback: it cannot sign App Groups, Apple sign-in or push entitlements.
     appleTeamId: "ARK85ZXQ4Z",
-    associatedDomains: [`applinks:${HOSTED_APP_HOST}`],
+    associatedDomains: HUB_HOST === null ? [] : [`applinks:${HUB_HOST}`],
     entitlements: {
       "keychain-access-groups": [`$(AppIdentifierPrefix)${variant.iosBundleIdentifier}`],
     },
@@ -293,14 +300,17 @@ const config: ExpoConfig = {
     predictiveBackGestureEnabled: true,
     // expo-sensors declares this for its pedometer, which the app does not use.
     blockedPermissions: ["android.permission.ACTIVITY_RECOGNITION"],
-    intentFilters: [
-      {
-        action: "VIEW",
-        autoVerify: true,
-        data: [{ scheme: "https", host: HOSTED_APP_HOST, pathPrefix: "/threads/" }],
-        category: ["BROWSABLE", "DEFAULT"],
-      },
-    ],
+    intentFilters:
+      HUB_HOST === null
+        ? []
+        : [
+            {
+              action: "VIEW",
+              autoVerify: true,
+              data: [{ scheme: "https", host: HUB_HOST, pathPrefix: "/threads/" }],
+              category: ["BROWSABLE", "DEFAULT"],
+            },
+          ],
   },
   web: {
     favicon: variant.assets.appIcon,

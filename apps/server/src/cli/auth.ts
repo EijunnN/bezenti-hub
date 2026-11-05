@@ -27,7 +27,10 @@ import {
 
 const runWithEnvironmentAuth = Effect.fn("auth.runWithEnvironmentAuth")(function* <A, E>(
   flags: CliAuthLocationFlags,
-  run: (environmentAuth: EnvironmentAuth.EnvironmentAuth["Service"]) => Effect.Effect<A, E>,
+  run: (
+    environmentAuth: EnvironmentAuth.EnvironmentAuth["Service"],
+    config: ServerConfig.ServerConfig["Service"],
+  ) => Effect.Effect<A, E>,
   options?: {
     readonly quietLogs?: boolean;
   },
@@ -37,7 +40,7 @@ const runWithEnvironmentAuth = Effect.fn("auth.runWithEnvironmentAuth")(function
   const minimumLogLevel = options?.quietLogs ? "Error" : config.logLevel;
   return yield* Effect.gen(function* () {
     const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
-    return yield* run(environmentAuth);
+    return yield* run(environmentAuth, config);
   }).pipe(
     Effect.provide(
       Layer.mergeAll(EnvironmentAuth.layerRuntime).pipe(
@@ -79,9 +82,20 @@ const baseUrlFlagSchema = Schema.URLFromString.pipe(
 
 const baseUrlFlag = Flag.String("base-url").pipe(
   Flag.withSchema(baseUrlFlagSchema),
-  Flag.withDescription("Optional public base URL used to print a ready `/pair#token=...` link."),
+  Flag.withDescription(
+    "Base URL used to print a ready `/pair#token=...` link. Defaults to T3CODE_PUBLIC_URL.",
+  ),
   Flag.optional,
 );
+
+/** `--base-url`, else the Hub's public URL: the links it prints never point anywhere else. */
+const linkBaseUrl = (
+  flag: Option.Option<URL>,
+  config: ServerConfig.ServerConfig["Service"],
+): { readonly baseUrl?: string } => {
+  const baseUrl = Option.isSome(flag) ? flag.value.href : config.publicUrl?.href;
+  return baseUrl === undefined ? {} : { baseUrl };
+};
 
 const tokenOnlyFlag = Flag.Boolean("token-only").pipe(
   Flag.withDescription("Print only the issued bearer token."),
@@ -100,7 +114,7 @@ const pairingCreateCommand = Command.make("create", {
   Command.withHandler((flags) =>
     runWithEnvironmentAuth(
       flags,
-      (environmentAuth) =>
+      (environmentAuth, config) =>
         Effect.gen(function* () {
           const issued = yield* environmentAuth.createPairingLink({
             scopes: flags.scopes,
@@ -110,7 +124,7 @@ const pairingCreateCommand = Command.make("create", {
           });
           const output = formatIssuedPairingCredential(issued, {
             json: flags.json,
-            ...(Option.isSome(flags.baseUrl) ? { baseUrl: flags.baseUrl.value.href } : {}),
+            ...linkBaseUrl(flags.baseUrl, config),
           });
           yield* Console.log(output);
         }),
@@ -254,7 +268,7 @@ const ownerResetCommand = Command.make("owner-reset", {
   baseUrl: Flag.String("base-url").pipe(
     Flag.withSchema(baseUrlFlagSchema),
     Flag.withDescription(
-      "The Hub's public address, used to print a ready `/reset#token=...` link. Passkeys only work on that address.",
+      "The Hub's public address, used to print a ready `/reset#token=...` link. Passkeys only work on that address. Defaults to T3CODE_PUBLIC_URL.",
     ),
     Flag.optional,
   ),
@@ -266,13 +280,13 @@ const ownerResetCommand = Command.make("owner-reset", {
   Command.withHandler((flags) =>
     runWithEnvironmentAuth(
       flags,
-      (environmentAuth) =>
+      (environmentAuth, config) =>
         Effect.gen(function* () {
           const issued = yield* environmentAuth.issueOwnerResetLink();
           yield* Console.log(
             formatIssuedOwnerResetLink(issued, {
               json: flags.json,
-              ...(Option.isSome(flags.baseUrl) ? { baseUrl: flags.baseUrl.value.href } : {}),
+              ...linkBaseUrl(flags.baseUrl, config),
             }),
           );
         }),

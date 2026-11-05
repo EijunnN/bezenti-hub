@@ -63,6 +63,9 @@ vi.mock("./uuid", () => ({ uuidv4: () => `import-${++mocks.sequence}` }));
 
 import { importComposerContextClipboard } from "./composerContextClipboard";
 import { createComposerContextHistory } from "./composerContext";
+import { addHubOrigin } from "@t3tools/shared/threadLinks";
+
+addHubOrigin("https://hub.example.com");
 
 const image = {
   version: 1 as const,
@@ -342,7 +345,7 @@ describe("mobile context clipboard imports", () => {
 
   it("pastes a thread link as a chip only where the destination's agent reads its machine", async () => {
     const text = [
-      "https://app.t3.codes/threads/destination/local-thread",
+      "https://hub.example.com/threads/destination/local-thread",
       "<t3-thread://v2/source/foreign-thread>",
     ].join(" ");
     const result = await importComposerContextClipboard(

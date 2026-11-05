@@ -1,7 +1,9 @@
 import * as Dialog from "../../components/ui/Dialog";
 import { buildNewThreadLink, type LinkedPrompt } from "@t3tools/shared/promptLinks";
+import type { EnvironmentId } from "@t3tools/contracts";
 
 import { tryCopyTextWithHaptic } from "../../lib/copyTextWithHaptic";
+import { readHubLinkOrigin } from "../../state/hubLinks";
 import {
   getComposerDraftSnapshot,
   setComposerDraftText,
@@ -36,8 +38,15 @@ export async function applyLinkedPromptToThreadDraft(
   ]);
 }
 
-export async function copyPromptLink(prompt: string): Promise<void> {
-  if (!(await tryCopyTextWithHaptic(buildNewThreadLink({ prompt }), { target: "prompt link" }))) {
+/** Copies a link that opens `prompt` on the Hub that runs `environmentId`. */
+export async function copyPromptLink(prompt: string, environmentId: EnvironmentId): Promise<void> {
+  const origin = readHubLinkOrigin(environmentId);
+  if (origin === null) {
+    Dialog.alert("Could not copy", "Reconnect to the environment and try again.");
+    return;
+  }
+  const link = buildNewThreadLink({ prompt, origin });
+  if (!(await tryCopyTextWithHaptic(link, { target: "prompt link" }))) {
     Dialog.alert("Could not copy", "Try again.");
   }
 }

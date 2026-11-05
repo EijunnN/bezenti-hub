@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
 
 import {
+  addHubOrigin,
   formatHostedThreadLink,
   formatThreadLink,
   guessThreadLinkRef,
   hostedThreadLink,
+  hubLinkOrigin,
   parseThreadLinkHref,
   relabelThreadLinks,
   threadLinkCandidates,
@@ -18,6 +20,8 @@ const ref = (environmentId: string, threadId = "chat-1") => ({
 });
 const v1 = (threadId: string) => ({ environmentId: null, threadId: ThreadId.make(threadId) });
 const local = EnvironmentId.make("local");
+const HUB = "https://hub.example.com";
+addHubOrigin(HUB);
 const titlesIn =
   (titles: Record<string, Record<string, string>>) =>
   ({ environmentId, threadId }: ScopedThreadRef) =>
@@ -70,7 +74,7 @@ describe("thread links", () => {
   });
 
   it("rejects other links and an empty id", () => {
-    expect(parseThreadLinkHref("https://t3.codes")).toBeNull();
+    expect(parseThreadLinkHref("https://example.com")).toBeNull();
     expect(parseThreadLinkHref("t3-thread://v1/")).toBeNull();
     expect(parseThreadLinkHref("t3-thread://v1/ ")).toBeNull();
     expect(parseThreadLinkHref("t3-thread://v2/env-1")).toBeNull();
@@ -180,30 +184,38 @@ describe("thread links", () => {
 describe("hosted thread links", () => {
   it("escapes every id character a sentence or path could claim, and reads it back", () => {
     const thread = ref("env.1", "thread:delegated/mcp%3A1.");
-    const link = hostedThreadLink(thread);
-    expect(link).toBe("https://app.t3.codes/threads/env%2E1/thread%3Adelegated%2Fmcp%253A1%2E");
+    const link = hostedThreadLink(thread, HUB);
+    expect(link).toBe("https://hub.example.com/threads/env%2E1/thread%3Adelegated%2Fmcp%253A1%2E");
     expect(parseThreadLinkHref(link)).toEqual(thread);
-    expect(hostedThreadLink(thread, "https://preview.t3.codes/")).toMatch(
-      /^https:\/\/preview\.t3\.codes\/threads\//,
+    expect(hostedThreadLink(thread, "https://preview.example.com/")).toMatch(
+      /^https:\/\/preview\.example\.com\/threads\//,
     );
+    // A Hub this client has not met reads as an ordinary link.
+    expect(parseThreadLinkHref(hostedThreadLink(thread, "https://preview.example.com"))).toBeNull();
   });
 
   it("reads only a bare thread path on the hosted app", () => {
-    expect(parseThreadLinkHref("https://app.t3.codes/threads/env-1/thread-1")).toEqual(
+    expect(parseThreadLinkHref("https://hub.example.com/threads/env-1/thread-1")).toEqual(
       ref("env-1", "thread-1"),
     );
-    expect(parseThreadLinkHref("https://app.t3.codes/threads/env-1/thread-1?prompt=go")).toBeNull();
-    expect(parseThreadLinkHref("https://app.t3.codes/threads/env-1/thread-1/extra")).toBeNull();
-    expect(parseThreadLinkHref("https://app.t3.codes/threads/env-1")).toBeNull();
-    expect(parseThreadLinkHref("https://app.t3.codes/env-1/thread-1")).toBeNull();
+    expect(
+      parseThreadLinkHref("https://hub.example.com/threads/env-1/thread-1?prompt=go"),
+    ).toBeNull();
+    expect(parseThreadLinkHref("https://hub.example.com/threads/env-1/thread-1/extra")).toBeNull();
+    expect(parseThreadLinkHref("https://hub.example.com/threads/env-1")).toBeNull();
+    expect(parseThreadLinkHref("https://hub.example.com/env-1/thread-1")).toBeNull();
     expect(parseThreadLinkHref("https://evil.test/threads/env-1/thread-1")).toBeNull();
   });
 
   it("writes a copied link a reader can follow, labeled when it has a title", () => {
-    expect(formatHostedThreadLink(ref("e", "t1"), "Fix [ci]")).toBe(
-      "[Fix ci](https://app.t3.codes/threads/e/t1)",
+    expect(formatHostedThreadLink(ref("e", "t1"), "Fix [ci]", HUB)).toBe(
+      "[Fix ci](https://hub.example.com/threads/e/t1)",
     );
-    expect(formatHostedThreadLink(ref("e", "t1"), " ")).toBe("https://app.t3.codes/threads/e/t1");
+    expect(formatHostedThreadLink(ref("e", "t1"), " ", HUB)).toBe(
+      "https://hub.example.com/threads/e/t1",
+    );
+    // With no Hub origin to point at, the copy is a v2 link.
+    expect(formatHostedThreadLink(ref("e", "t1"), "Fix", null)).toBe("[Fix](t3-thread://v2/e/t1)");
   });
 
   it("titles hosted links in every Markdown form and writes them as v2 links", () => {
@@ -211,11 +223,11 @@ describe("hosted thread links", () => {
     expect(
       relabelThreadLinks(
         [
-          "See https://app.t3.codes/threads/there/t1.",
-          "[old](https://app.t3.codes/threads/there/t1)",
-          "<https://app.t3.codes/threads/there/t1>",
-          "`https://app.t3.codes/threads/there/t1`",
-          "https://app.t3.codes/threads/there/t1?prompt=go",
+          "See https://hub.example.com/threads/there/t1.",
+          "[old](https://hub.example.com/threads/there/t1)",
+          "<https://hub.example.com/threads/there/t1>",
+          "`https://hub.example.com/threads/there/t1`",
+          "https://hub.example.com/threads/there/t1?prompt=go",
         ].join("\n"),
         local,
         title,
@@ -225,15 +237,47 @@ describe("hosted thread links", () => {
         "See [There](t3-thread://v2/there/t1).",
         "[There](t3-thread://v2/there/t1)",
         "[There](t3-thread://v2/there/t1)",
-        "`https://app.t3.codes/threads/there/t1`",
-        "https://app.t3.codes/threads/there/t1?prompt=go",
+        "`https://hub.example.com/threads/there/t1`",
+        "https://hub.example.com/threads/there/t1?prompt=go",
       ].join("\n"),
     );
     expect(
-      relabelThreadLinks("https://app.t3.codes/threads/there/t1", local, () => undefined),
+      relabelThreadLinks("https://hub.example.com/threads/there/t1", local, () => undefined),
     ).toBe("Thread on another machine");
-    expect(threadLinkRefs("Open https://app.t3.codes/threads/there/t%3A1", local)).toEqual([
+    expect(threadLinkRefs("Open https://hub.example.com/threads/there/t%3A1", local)).toEqual([
       ref("there", "t:1"),
     ]);
+  });
+});
+
+describe("hub link origin", () => {
+  it("points at the public URL when the Hub has one", () => {
+    expect(
+      hubLinkOrigin({
+        publicUrl: "https://hub.example.com/",
+        currentOrigin: "http://192.168.1.4:3773",
+      }),
+    ).toBe("https://hub.example.com");
+  });
+
+  it("falls back to the origin the client reached the Hub on", () => {
+    expect(hubLinkOrigin({ currentOrigin: "http://192.168.1.4:3773" })).toBe(
+      "http://192.168.1.4:3773",
+    );
+    expect(hubLinkOrigin({ publicUrl: null, currentOrigin: "http://localhost:3773/x" })).toBe(
+      "http://localhost:3773",
+    );
+  });
+
+  it("has none without an http origin, and never a pingdotgg host", () => {
+    expect(hubLinkOrigin({})).toBeNull();
+    expect(hubLinkOrigin({ publicUrl: "not a url", currentOrigin: "t3code://app" })).toBeNull();
+    for (const origin of [
+      hubLinkOrigin({}),
+      hubLinkOrigin({ currentOrigin: "file:///index.html" }),
+      hubLinkOrigin({ currentOrigin: "http://localhost:3773" }),
+    ]) {
+      expect(origin ?? "").not.toMatch(/t3\.codes/);
+    }
   });
 });

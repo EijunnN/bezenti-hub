@@ -79,6 +79,9 @@ const layerOrchestration = Layer.mergeAll(
 const hostname = Ref.makeUnsafe<string | null>("env.t3.test");
 const layerPublicHubUrl = Layer.succeed(PublicHubUrl, {
   publicHubHost: Effect.map(Ref.get(hostname), Option.fromNullishOr),
+  publicHubOrigin: Effect.map(Ref.get(hostname), (host) =>
+    Option.fromNullishOr(host === null ? null : `https://${host}`),
+  ),
 });
 const layerProviders = Layer.mock(ProviderRegistry.ProviderRegistry)({
   getProviders: Effect.succeed([]),

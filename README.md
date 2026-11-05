@@ -1,6 +1,6 @@
 # T3 Code
 
-T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
+T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), a web app the Hub serves itself ([Publish the Hub](docs/user/public-hub.md)) and an Electron-based desktop app.
 
 Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, Google Antigravity, and fx. If they're set up on your computer, T3 Code can control them.
 
@@ -26,13 +26,13 @@ We wanted something performant, remote-ready, and truly open. If we ever go the 
 ### Command line
 
 ```bash
-curl -fsSL https://t3.codes/install.sh | sh
+T3CODE_VERSION=<version> T3CODE_RELEASE_BASE_URL=<release source> sh scripts/install.sh
 ```
 
 On Windows, in PowerShell:
 
 ```powershell
-irm https://t3.codes/install.ps1 | iex
+$env:T3CODE_VERSION = "<version>"; $env:T3CODE_RELEASE_BASE_URL = "<release source>"; .\scripts\install.ps1
 ```
 
 Then run `t3` to start the server and open the local web app. `t3 service install` keeps it running in the background, and `t3 --help` has the full reference. T3 Code does not update itself; see [Updating T3 Code](./docs/user/updating.md).

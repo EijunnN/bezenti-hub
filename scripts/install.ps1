@@ -2,7 +2,7 @@
 # Needs only PowerShell 5.1+; no Node, npm, or compiler. Upstream's releases are
 # never used (ADR 0007).
 #
-#   irm https://t3.codes/install.ps1 | iex
+#   $env:T3CODE_VERSION = "<version>"; $env:T3CODE_RELEASE_BASE_URL = "<release source>"; .\scripts\install.ps1
 #
 # Environment:
 #   T3CODE_VERSION           exact version to install (required)
