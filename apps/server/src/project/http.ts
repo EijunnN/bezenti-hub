@@ -15,6 +15,7 @@ import {
   requireEnvironmentScope,
 } from "../auth/http.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
+import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as ProjectCloneTracker from "./ProjectCloneTracker.ts";
 import * as ProjectService from "./ProjectService.ts";
 import { mutateProjectWithClone } from "./ProjectMutation.ts";
@@ -43,6 +44,7 @@ export const layer = HttpApiBuilder.group(
     const projects = yield* ProjectService.ProjectService;
     const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
     const projectClones = yield* ProjectCloneTracker.ProjectCloneTracker;
+    const spaceVisibility = yield* SpaceVisibility.SpaceVisibility;
 
     return handlers
       .handle(
@@ -50,9 +52,13 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.projects.snapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationReadScope);
-          return yield* projects.snapshot.pipe(
-            Effect.catch((cause) => failEnvironmentInternal("project_snapshot_failed", cause)),
-          );
+          const principal = yield* EnvironmentAuthenticatedPrincipal;
+          const visibility = yield* spaceVisibility.of(principal.userId);
+          return yield* projects
+            .snapshotFor(visibility)
+            .pipe(
+              Effect.catch((cause) => failEnvironmentInternal("project_snapshot_failed", cause)),
+            );
         }),
       )
       .handle(

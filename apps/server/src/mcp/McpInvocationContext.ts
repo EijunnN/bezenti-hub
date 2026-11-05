@@ -1,6 +1,7 @@
 import {
   type AuthMcpClientAccess,
   type EnvironmentId,
+  type UserId,
   McpCapabilityUnavailableError,
   OrchestratorMcpFailure,
   PreviewAutomationUnavailableError,
@@ -129,6 +130,11 @@ export interface McpInvocationScope {
   readonly requestNamespace: string;
   readonly thread: McpThreadCaller | undefined;
   readonly client: McpClientCaller | undefined;
+  /**
+   * The User the caller reads as. None reads as the Owner, as every caller does until agents
+   * act as the User who started their turn.
+   */
+  readonly userId?: UserId;
   /** False while the Linked environments beta is off here; `/mcp` reads it per request. */
   readonly linkedEnvironments?: boolean;
 }

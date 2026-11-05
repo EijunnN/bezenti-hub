@@ -1,5 +1,6 @@
 import {
   type ServerConfig,
+  type SpaceResourceNotFoundError,
   type ServerConfigStreamEvent,
   WsSubscribeServerConfigRpc,
   WS_METHODS,
@@ -79,6 +80,8 @@ type InitialConfigError = Effect.Error<
 type ProbeError = Effect.Error<ReturnType<WsRpcProtocolClient[typeof WS_METHODS.serverProbe]>>;
 type ServerConfigSubscriptionError =
   | Rpc.ErrorExit<typeof WsSubscribeServerConfigRpc>
+  // Every RPC can carry the authorization middleware's errors.
+  | SpaceResourceNotFoundError
   | RpcClientError.RpcClientError;
 type ServerConfigSubscription = Stream.Stream<
   ServerConfigStreamEvent,
@@ -134,6 +137,8 @@ function mapSessionRpcError(
 ): ConnectionAttemptError {
   switch (error._tag) {
     case "EnvironmentAuthorizationError":
+    // Config RPCs name no Project or Thread, so the middleware never refuses them for one.
+    case "SpaceResourceNotFoundError":
       return new ConnectionBlockedError({
         reason: "permission",
         detail: error.message,

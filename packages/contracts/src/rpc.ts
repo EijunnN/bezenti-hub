@@ -80,6 +80,7 @@ import {
   AuthAccessStreamError,
   AuthAccessStreamEvent,
   EnvironmentAuthorizationError,
+  SpaceResourceNotFoundError,
 } from "./auth.ts";
 import { ClientActivityReportInput } from "./background.ts";
 import {
@@ -1945,9 +1946,10 @@ const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeResourceTel
   stream: true,
 });
 
+/** Checks the session's scope, then that the Project or Thread the call names is visible. */
 export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthorization>()(
   "t3/contracts/RpcScopeAuthorization",
-  { error: EnvironmentAuthorizationError },
+  { error: Schema.Union([EnvironmentAuthorizationError, SpaceResourceNotFoundError]) },
 ) {}
 
 export const WsRpcGroup = RpcGroup.make(

@@ -4,11 +4,11 @@
 
 **Blocked by:** 06
 
-**Status:** ready-for-agent
+**Status:** done
 
 Spec: ../spec.md
 
-- [ ] Un único helper de visibilidad usado por el shell (snapshot y deltas) y por todas las lecturas RPC y HTTP de Projects y Threads.
-- [ ] Test de frontera: dos Users en Organizations distintas no ven el trabajo del otro, ni en snapshot ni en vivo.
-- [ ] Extender los tests de autorización RPC para que toda RPC con alcance de Space esté cubierta por el helper.
-- [ ] El Owner sigue viéndolo todo.
+- [x] Un único helper de visibilidad usado por el shell (snapshot y deltas) y por todas las lecturas RPC y HTTP de Projects y Threads.
+- [x] Test de frontera: dos Users en Organizations distintas no ven el trabajo del otro, ni en snapshot ni en vivo.
+- [x] Extender los tests de autorización RPC para que toda RPC con alcance de Space esté cubierta por el helper.
+- [x] El Owner sigue viéndolo todo.

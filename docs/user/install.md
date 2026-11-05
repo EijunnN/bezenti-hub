@@ -256,6 +256,10 @@ sidebar; new projects and threads go there, and a thread started in a project
 joins that project's Space. Each person's choice is remembered in their browser. The Owner creates organizations from the same
 selector with **Create organization**. The Owner can see every Personal space.
 
+You see the projects and threads of your Personal space and of every
+organization you belong to, whoever created them, and nothing else. Work in an
+archived organization disappears for its members. The Owner sees everything.
+
 ### Invite people
 
 To add someone to an organization, switch to it in the Space selector, choose

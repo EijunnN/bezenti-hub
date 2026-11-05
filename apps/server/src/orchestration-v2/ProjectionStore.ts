@@ -9,6 +9,7 @@ import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
   OrchestrationV2ThreadHistoryPage,
+  SpaceId,
 } from "@t3tools/contracts";
 import {
   latestRootProviderFailure,
@@ -95,6 +96,7 @@ import type * as Statement from "effect/sql/Statement";
 
 import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
+import { threadInSpaces } from "../spaces/SpaceVisibility.ts";
 import {
   isThreadHistoryUserTurn,
   isConversationHistoryItem,
@@ -416,6 +418,8 @@ export interface ShellSnapshotOptions {
   readonly familyOf?: ThreadId;
   readonly worktreePath?: string;
   readonly threadIds?: ReadonlyArray<ThreadId>;
+  /** Only threads in these Spaces (`SpaceVisibility.spaceFilter`); every Space when absent. */
+  readonly spaceIds?: ReadonlyArray<SpaceId> | undefined;
 }
 
 /** What a shell subscriber's trims read from an active thread, without building its shell. */
@@ -431,6 +435,8 @@ export interface OlderSettledThreadsQuery {
   readonly before: OrchestrationV2OlderSettledCursor;
   readonly projectIds?: ReadonlyArray<ProjectId> | undefined;
   readonly limit: number;
+  /** Only threads in these Spaces; every Space when absent. */
+  readonly spaceIds?: ReadonlyArray<SpaceId> | undefined;
 }
 
 export interface OlderSettledThreadsListing {
@@ -514,11 +520,10 @@ export interface ProjectionStoreV2Shape {
   >;
   /** Threads that are not deleted, archived ones included. */
   readonly countThreads: () => Effect.Effect<number, ProjectionStoreV2Error>;
-  /** Every active thread, in shell order. */
-  readonly listActiveShellIndex: () => Effect.Effect<
-    ReadonlyArray<ActiveShellIndexEntry>,
-    ProjectionStoreV2Error
-  >;
+  /** Every active thread, in shell order, of the given Spaces when named. */
+  readonly listActiveShellIndex: (options?: {
+    readonly spaceIds?: ReadonlyArray<SpaceId> | undefined;
+  }) => Effect.Effect<ReadonlyArray<ActiveShellIndexEntry>, ProjectionStoreV2Error>;
   /** Older settled thread ids below a cursor, newest settle first, and per-project counts. */
   readonly listOlderSettledThreads: (
     query: OlderSettledThreadsQuery,
@@ -6133,6 +6138,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         familyOf,
         worktreePath,
         threadIds,
+        spaceIds,
         listedOnly = false,
       }: ShellSnapshotOptions & { readonly listedOnly?: boolean } = {},
     ) =>
@@ -6346,6 +6352,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ? sql``
                 : sql` AND json_extract(t.payload_json, '$.worktreePath') = ${worktreePath}`
             }${threadIds === undefined ? sql`` : sql` AND t.thread_id IN (SELECT value FROM json_each(${encodeIdList(threadIds)}))`}
+              AND ${threadInSpaces(sql, "t", spaceIds)}
             ORDER BY t.updated_at ASC, t.thread_id ASC
           `;
 
@@ -7146,20 +7153,21 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       return rows[0]?.count ?? 0;
     }, Effect.mapError(shellSnapshotReadError));
 
-    const listActiveShellIndex = Effect.fn("ProjectionStore.listActiveShellIndex")(function* () {
-      const rows = yield* sql<{
-        readonly thread_id: string;
-        readonly project_id: string;
-        readonly relationship_to_parent: string | null;
-        readonly parent_thread_id: string | null;
-        readonly root_thread_id: string;
-        readonly side_chat: number | null;
-        readonly settled_override: string | null;
-        readonly settled_at: string | null;
-        readonly pinned_at: string | null;
-        readonly snoozed_until: string | null;
-        readonly may_be_live: number;
-      }>`
+    const listActiveShellIndex = Effect.fn("ProjectionStore.listActiveShellIndex")(
+      function* (options?: { readonly spaceIds?: ReadonlyArray<SpaceId> | undefined }) {
+        const rows = yield* sql<{
+          readonly thread_id: string;
+          readonly project_id: string;
+          readonly relationship_to_parent: string | null;
+          readonly parent_thread_id: string | null;
+          readonly root_thread_id: string;
+          readonly side_chat: number | null;
+          readonly settled_override: string | null;
+          readonly settled_at: string | null;
+          readonly pinned_at: string | null;
+          readonly snoozed_until: string | null;
+          readonly may_be_live: number;
+        }>`
         SELECT
           t.thread_id,
           t.project_id,
@@ -7208,31 +7216,34 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         FROM orchestration_v2_projection_threads t
         WHERE t.deleted_at IS NULL
           AND json_extract(t.payload_json, '$.archivedAt') IS NULL
+          AND ${threadInSpaces(sql, "t", options?.spaceIds)}
         ORDER BY t.updated_at ASC, t.thread_id ASC
       `;
-      return rows.map((row): ActiveShellIndexEntry => ({
-        id: ThreadId.make(row.thread_id),
-        projectId: ProjectId.make(row.project_id),
-        lineage: {
-          parentThreadId:
-            row.parent_thread_id === null ? null : ThreadId.make(row.parent_thread_id),
-          relationshipToParent:
-            row.relationship_to_parent === "fork" || row.relationship_to_parent === "subagent"
-              ? row.relationship_to_parent
+        return rows.map((row): ActiveShellIndexEntry => ({
+          id: ThreadId.make(row.thread_id),
+          projectId: ProjectId.make(row.project_id),
+          lineage: {
+            parentThreadId:
+              row.parent_thread_id === null ? null : ThreadId.make(row.parent_thread_id),
+            relationshipToParent:
+              row.relationship_to_parent === "fork" || row.relationship_to_parent === "subagent"
+                ? row.relationship_to_parent
+                : null,
+            rootThreadId: ThreadId.make(row.root_thread_id),
+            ...(row.side_chat === null ? {} : { sideChat: row.side_chat === 1 }),
+          },
+          settledOverride:
+            row.settled_override === "settled" || row.settled_override === "active"
+              ? row.settled_override
               : null,
-          rootThreadId: ThreadId.make(row.root_thread_id),
-          ...(row.side_chat === null ? {} : { sideChat: row.side_chat === 1 }),
-        },
-        settledOverride:
-          row.settled_override === "settled" || row.settled_override === "active"
-            ? row.settled_override
-            : null,
-        settledAt: row.settled_at === null ? null : DateTime.makeUnsafe(row.settled_at),
-        pinnedAt: row.pinned_at === null ? null : DateTime.makeUnsafe(row.pinned_at),
-        snoozedUntil: row.snoozed_until === null ? null : DateTime.makeUnsafe(row.snoozed_until),
-        mayBeLive: row.may_be_live === 1,
-      }));
-    }, Effect.mapError(shellSnapshotReadError));
+          settledAt: row.settled_at === null ? null : DateTime.makeUnsafe(row.settled_at),
+          pinnedAt: row.pinned_at === null ? null : DateTime.makeUnsafe(row.pinned_at),
+          snoozedUntil: row.snoozed_until === null ? null : DateTime.makeUnsafe(row.snoozed_until),
+          mayBeLive: row.may_be_live === 1,
+        }));
+      },
+      Effect.mapError(shellSnapshotReadError),
+    );
 
     const findGuestShareThreadId = Effect.fn("ProjectionStore.findGuestShareThreadId")(function* (
       shareId: GuestShareId,
@@ -7248,7 +7259,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     const listOlderSettledThreads: ProjectionStoreV2Shape["listOlderSettledThreads"] = Effect.fn(
       "ProjectionStore.listOlderSettledThreads",
-    )(function* ({ before, projectIds, limit }) {
+    )(function* ({ before, projectIds, limit, spaceIds }) {
       // ISO strings in one format, so string order is time order.
       const older = sql`
         SELECT t.thread_id, t.project_id,
@@ -7262,6 +7273,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           AND json_extract(t.payload_json, '$.settledAt') IS NOT NULL${
             projectIds === undefined ? sql`` : sql` AND t.project_id IN ${sql.in(projectIds)}`
           }
+          AND ${threadInSpaces(sql, "t", spaceIds)}
       `;
       const belowCursor =
         before.threadId === undefined

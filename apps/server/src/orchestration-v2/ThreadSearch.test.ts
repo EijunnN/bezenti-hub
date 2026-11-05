@@ -919,6 +919,7 @@ it.layer(layerTest)("ThreadSearch.searchThreadsWithOlderSettledRows", (it) => {
       const run = (request: { readonly titlesOnly?: boolean }) =>
         ThreadSearch.searchThreadsWithOlderSettledRows({
           request: { query: "plover", olderSettledBefore: DateTime.formatIso(at(30)), ...request },
+          spaceIds: undefined,
           search: search.search,
           searchOlderSettled: search.searchOlderSettled,
           sql,
@@ -946,6 +947,7 @@ it.layer(layerTest)("ThreadSearch.searchThreadsWithOlderSettledRows", (it) => {
       assert.isUndefined(
         (yield* ThreadSearch.searchThreadsWithOlderSettledRows({
           request: { query: "plover" },
+          spaceIds: undefined,
           search: search.search,
           searchOlderSettled: search.searchOlderSettled,
           sql,

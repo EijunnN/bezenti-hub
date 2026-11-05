@@ -37,6 +37,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
   readonly commandId: CommandId;
@@ -140,6 +141,10 @@ export class ProjectService extends Context.Service<
       options?: { readonly includeDeleted?: boolean },
     ) => Effect.Effect<Option.Option<Project>, ProjectOperationError>;
     readonly snapshot: Effect.Effect<ProjectSnapshot, ProjectOperationError>;
+    /** The Projects the viewer may see, the others never read past their row. */
+    readonly snapshotFor: (
+      visibility: SpaceVisibility.Visibility,
+    ) => Effect.Effect<ProjectSnapshot, ProjectOperationError>;
     /**
      * A page of active projects in creation order, each with its repository
      * identity resolved, so a caller can match projects by repository.
@@ -147,6 +152,8 @@ export class ProjectService extends Context.Service<
     readonly listPage: (input: {
       readonly cursor: number;
       readonly limit: number;
+      /** Only the Projects this viewer may see; every Project when absent. */
+      readonly visibility?: SpaceVisibility.Visibility;
     }) => Effect.Effect<
       { readonly projects: ReadonlyArray<Project>; readonly nextCursor: number | null },
       ProjectOperationError
@@ -579,18 +586,23 @@ export const make = Effect.gen(function* () {
       Effect.mapError((cause) => new ProjectOperationError({ operation: "list-projects", cause })),
     );
 
-  const snapshot = Effect.gen(function* () {
-    const rows = yield* listRows;
+  const snapshotFor = Effect.fn("ProjectService.snapshotFor")(function* (
+    visibility: SpaceVisibility.Visibility,
+  ) {
+    const rows = (yield* listRows).filter((row) => SpaceVisibility.seesProject(visibility, row));
     const hydrated = yield* Effect.forEach(rows, hydrate, { concurrency: 8 });
     return {
       projects: hydrated,
       updatedAt: DateTime.formatIso(yield* DateTime.now),
     } satisfies ProjectSnapshot;
   });
+  const snapshot = snapshotFor(SpaceVisibility.everything);
 
   const listPage: ProjectService["Service"]["listPage"] = Effect.fn("ProjectService.listPage")(
-    function* ({ cursor, limit }) {
-      const rows = (yield* listRows).filter((project) => project.deletedAt === null);
+    function* ({ cursor, limit, visibility = SpaceVisibility.everything }) {
+      const rows = (yield* listRows).filter(
+        (project) => project.deletedAt === null && SpaceVisibility.seesProject(visibility, project),
+      );
       const projects = yield* Effect.forEach(
         rows.slice(cursor, cursor + limit),
         (row) =>
@@ -617,6 +629,7 @@ export const make = Effect.gen(function* () {
     getById,
     getByWorkspaceRoot,
     snapshot,
+    snapshotFor,
     listPage,
     getShell,
     listShells,

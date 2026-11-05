@@ -29,6 +29,8 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { resolveRuntimeMode } from "../../delegatedTaskModes.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import { visibilityOf } from "../../mcpVisibility.ts";
+import * as SpaceVisibility from "../../../spaces/SpaceVisibility.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
 import { ProjectToolkit } from "./tools.ts";
 
@@ -288,9 +290,10 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   t3_project_list: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const projects = yield* access;
+      const visibility = yield* visibilityOf(yield* McpInvocationContext.McpInvocationContext);
       // Identities are resolved: linked environments find this side's project by repository.
       return yield* projects
-        .listPage({ cursor: input.cursor ?? 0, limit: input.limit ?? 20 })
+        .listPage({ cursor: input.cursor ?? 0, limit: input.limit ?? 20, visibility })
         .pipe(Effect.mapError(unavailable));
     }),
   ),
@@ -298,7 +301,9 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
     Effect.gen(function* () {
       const projects = yield* access;
       const result = yield* projects.getById(input.projectId).pipe(Effect.mapError(unavailable));
-      if (Option.isNone(result))
+      const visibility = yield* visibilityOf(yield* McpInvocationContext.McpInvocationContext);
+      // A Project in a Space the caller cannot see reads as missing.
+      if (Option.isNone(result) || !SpaceVisibility.seesProject(visibility, result.value))
         return yield* new OrchestratorMcpFailure({
           code: "invalid_request",
           message: "The project was not found.",

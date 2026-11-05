@@ -291,6 +291,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
       delete: unused,
       getByWorkspaceRoot: unused,
       snapshot: Effect.succeed({ projects: [project], updatedAt: NOW }),
+      snapshotFor: unused,
       listPage: unused,
       getShell: unused,
       listShells: unused,

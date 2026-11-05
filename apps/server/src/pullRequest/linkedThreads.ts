@@ -5,6 +5,7 @@ import {
 import {
   PullRequestLinkedThreadsResult,
   PullRequestOperationError,
+  type SpaceId,
   type ThreadPullRequestKey,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -12,10 +13,13 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { threadInSpaces } from "../spaces/SpaceVisibility.ts";
+
 const decodeLinkedThreads = Schema.decodeUnknownEffect(PullRequestLinkedThreadsResult);
 
 export const listLinkedPullRequestThreads = Effect.fn("listLinkedPullRequestThreads")(
-  function* (input: ThreadPullRequestKey) {
+  /** `spaceIds`: only Threads in these Spaces (`SpaceVisibility.spaceFilter`). */
+  function* (input: ThreadPullRequestKey, spaceIds?: ReadonlyArray<SpaceId>) {
     const key = normalizeThreadPullRequestKey(input);
     const sql = yield* SqlClient.SqlClient;
     const rows = yield* sql<{
@@ -40,6 +44,7 @@ export const listLinkedPullRequestThreads = Effect.fn("listLinkedPullRequestThre
         AND json_extract(link.value, '$.source') != 'stack-dismissed'
         AND t.deleted_at IS NULL
         AND json_extract(t.payload_json, '$.lineage.sideChat') IS NOT 1
+        AND ${threadInSpaces(sql, "t", spaceIds)}
       ORDER BY "updatedAt" DESC, id ASC
     `.pipe(NodeSqliteClient.readOnly);
     const threads = rows

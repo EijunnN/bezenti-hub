@@ -115,6 +115,40 @@ exist yet. A trigger on `users` creates each User's Personal space
 Creating in a Personal space needs the `personalSpace.create` Installation
 permission, which only the Owner holds until the Owner can grant it.
 
+#### Who sees what
+
+A User sees the Projects and Threads of the Spaces the policy lets them view
+(`space.view`): their own Personal space and every live Organization they belong
+to. The Owner sees everything, every Personal space included; an archived
+Organization disappears for its Members only. A Thread's Space is its own
+`spaceId`, else its Project's, so an unstamped child Thread follows its Project;
+with neither it is the Owner's.
+
+[SpaceVisibility](../../apps/server/src/spaces/SpaceVisibility.ts) is the only
+place this is answered, and every read of Projects or Threads asks it:
+
+- The stores take a `spaceIds` filter (`SpaceVisibility.spaceFilter`) and put
+  `threadInSpaces` in their SQL, so hidden Threads are never read or decoded:
+  the shell snapshot and its index, archived and older settled pages, families,
+  worktrees, search and Pull Request links. Projects are filtered by `spaceId`.
+- The shell stream drops a live delta for a Project or Thread the subscriber
+  cannot see before reading it, so deltas never show what the snapshot hid.
+- RPCs that name one Thread or Project are checked by the RPC authorization
+  middleware from [RpcSpaceAccess](../../apps/server/src/auth/RpcSpaceAccess.ts).
+  It lists every `orchestration.*` RPC and every RPC whose payload names a
+  `threadId`, `projectId` or `projectIds`, as `thread`, `project`, `filtered` or
+  `unscoped` with the reason; `RpcAuthorization.test.ts` fails when one is
+  missing. A hidden Thread and a missing one both fail with
+  `SpaceResourceNotFoundError`, so a refusal is not an existence oracle. HTTP
+  Thread routes answer `thread_not_found` the same way.
+- MCP read tools use the scope's `userId`; a caller with none reads as the Owner.
+
+Each WebSocket connection resolves its viewer once (`CurrentViewer`) and again
+only when `SpaceDirectory.revision` moves, which every Space or Membership write
+bumps, so a new Membership shows on the next read without reconnecting. An open
+shell keeps rows it already sent when a Membership ends; removing Members
+(ticket 09) must close or resubscribe those connections.
+
 Spaces are read and Organizations created over HTTP (`/api/spaces`), beside the
 account endpoints, rather than as guarded WS commands: creating an Organization
 depends on who the User is, not on a session scope, so clients show controls from

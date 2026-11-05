@@ -12,6 +12,8 @@ import { modelSelectionCommandType } from "@t3tools/shared/model";
 
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import { visibilityOf } from "../../mcpVisibility.ts";
+import * as SpaceVisibility from "../../../spaces/SpaceVisibility.ts";
 import {
   dispatchFailure,
   newCommandId,
@@ -128,8 +130,9 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       const { caller } = yield* readCaller();
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const threadSearch = yield* ThreadSearch.ThreadSearch;
+      const spaceIds = SpaceVisibility.spaceFilter(yield* visibilityOf(scope));
       const { matches } = yield* threadSearch
-        .searchThreads({ ...input, projectId: input.projectId ?? caller?.projectId })
+        .searchThreads({ ...input, projectId: input.projectId ?? caller?.projectId, spaceIds })
         .pipe(Effect.mapError(unavailable));
       return {
         matches: matches.map((match) => ({

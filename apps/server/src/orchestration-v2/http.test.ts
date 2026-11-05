@@ -14,6 +14,7 @@ import {
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   ThreadId,
 } from "@t3tools/contracts";
+import { layerSeesEverything } from "../spaces/SpaceVisibility.testkit.ts";
 import { expect, it } from "@effect/vitest";
 import { threadTranscriptHeader } from "@t3tools/shared/threadTranscript";
 import * as Effect from "effect/Effect";
@@ -130,6 +131,7 @@ const serveOrchestrationHttp = (allowed: () => boolean) =>
     });
     const routes = HttpApiBuilder.layer(TranscriptTestApi).pipe(
       Layer.provide(OrchestrationHttp.layer),
+      Layer.provide(layerSeesEverything),
       Layer.provide(
         Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
           getEnvironmentId: Effect.succeed(environmentId),

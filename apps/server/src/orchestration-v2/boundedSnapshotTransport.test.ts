@@ -1,4 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
+import { layerSeesEverything } from "../spaces/SpaceVisibility.testkit.ts";
 import {
   AuthOrchestrationReadScope,
   AuthSessionId,
@@ -407,6 +408,7 @@ const withHttp = <A>(use: (get: (path: string) => Promise<Response>) => Promise<
     const context = yield* Effect.context<Layer.Success<typeof TestLayer>>();
     const appLayer = HttpApiBuilder.layer(OrchestrationApi).pipe(
       Layer.provide(OrchestrationHttp.layer),
+      Layer.provide(layerSeesEverything),
       Layer.provide(auth),
       Layer.provide(Layer.succeedContext(context)),
       Layer.provide(NodeHttpPlatform.layer),

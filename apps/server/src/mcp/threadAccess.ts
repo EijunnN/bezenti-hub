@@ -16,6 +16,7 @@ import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import { resolveInteractionMode, resolveRuntimeMode } from "./delegatedTaskModes.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import { visibleShells } from "./mcpVisibility.ts";
 
 /**
  * Threads an agent starts over MCP are `mcp:<uuid>`, and agents often paste the
@@ -37,6 +38,10 @@ export const threadNotFound = Effect.fn("OrchestratorMcpService.threadNotFound")
         : `${message} Did you mean \`${prefixed}\`?`,
   });
 });
+
+/** A Thread in a Space the caller cannot see: the plain not-found answer, with no id hint. */
+export const hiddenThread = (message: string) =>
+  new OrchestratorMcpFailure({ code: "thread_not_found", message });
 
 export const unavailable = () =>
   new OrchestratorMcpFailure({
@@ -187,6 +192,9 @@ export const readThread = Effect.fn("mcp.readThread")(function* <
   const shell = yield* context.threads.getThreadShell(targetId).pipe(Effect.mapError(unavailable));
   if (shell === null || shell.deletedAt !== null) {
     return yield* threadNotFound(context.threads, targetId, "The thread was not found.");
+  }
+  if ((yield* visibleShells(context.scope, [shell])).length === 0) {
+    return yield* hiddenThread("The thread was not found.");
   }
   const projection = yield* context.threads
     .getProjectThreadRecords({ projectId: shell.projectId, threadId: targetId }, fields, {

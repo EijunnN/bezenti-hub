@@ -123,7 +123,8 @@ import {
   runtimeModeRank,
   taskPrompt,
 } from "./delegatedTaskModes.ts";
-import { isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
+import { hiddenThread, isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
+import { visibleShells } from "./mcpVisibility.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
@@ -1272,6 +1273,9 @@ const make = Effect.gen(function* () {
         threadId,
         `Thread ${threadId} is no longer available.`,
       );
+    }
+    if ((yield* visibleShells(scope, [shell])).length === 0) {
+      return yield* hiddenThread(`Thread ${threadId} is no longer available.`);
     }
     const input = { projectId: shell.projectId, threadId };
     // Transfers are needed only to acknowledge a caller's child-task result.
@@ -2961,6 +2965,7 @@ const make = Effect.gen(function* () {
           Effect.mapError((error) =>
             failure("orchestration_error", `Unable to list threads: ${errorMessage(error)}`),
           ),
+          Effect.flatMap((threads) => visibleShells(scope, threads)),
         );
       const nowMs = yield* Clock.currentTimeMillis;
       // An empty list is no filter: clients that fill every optional field send `[]`.

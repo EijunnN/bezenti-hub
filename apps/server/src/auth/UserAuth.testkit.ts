@@ -1,6 +1,11 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { EnvironmentHttpApi, UserId } from "@t3tools/contracts";
+import {
+  EnvironmentHttpApi,
+  ORCHESTRATION_PROTOCOL_HEADER,
+  ORCHESTRATION_PROTOCOL_VERSION,
+  UserId,
+} from "@t3tools/contracts";
 import { expect } from "@effect/vitest";
 import { isoCBOR } from "@simplewebauthn/server/helpers";
 import * as Context from "effect/Context";
@@ -23,10 +28,17 @@ import * as ServerSecretStore from "./ServerSecretStore.ts";
 import * as SessionStore from "./SessionStore.ts";
 import * as AuthHttp from "./http.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as SpacesHttp from "../spaces/http.ts";
 import * as InvitationService from "../spaces/InvitationService.ts";
 import * as InvitationsHttp from "../spaces/invitationsHttp.ts";
 import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
+import * as EventSink from "../orchestration-v2/EventSink.ts";
+import * as OrchestrationHttp from "../orchestration-v2/http.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
@@ -41,7 +53,8 @@ class AuthTestApi extends HttpApi.make("environment")
   .add(EnvironmentHttpApi.groups.auth)
   .add(EnvironmentHttpApi.groups.spaces)
   .add(EnvironmentHttpApi.groups.invitations)
-  .add(EnvironmentHttpApi.groups.projects) {}
+  .add(EnvironmentHttpApi.groups.projects)
+  .add(EnvironmentHttpApi.groups.orchestration) {}
 
 const ORIGIN = "http://127.0.0.1";
 const RP_ID = "127.0.0.1";
@@ -76,16 +89,50 @@ const layerProjects = RuntimeLayer.layerProjectService.pipe(
   ),
 );
 
+// Real Thread reads over the same database. Threads are written with `eventSink`; the
+// orchestrator, which would run their turns, is not under test.
+const layerThreadReads = Layer.effect(
+  ThreadManagementService.ThreadManagementService,
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    return {
+      readShellSnapshot: store.readShellSnapshot,
+      getShellSnapshot: store.getShellSnapshot,
+      listActiveShellIndex: store.listActiveShellIndex,
+      listOlderSettledThreads: store.listOlderSettledThreads,
+      listActiveSubagentThreadIds: store.listActiveSubagentThreadIds,
+      getThreadShell: store.getThreadShell,
+      getThreadSnapshot: store.getThreadSnapshot,
+      getThreadSnapshotWindow: store.getThreadSnapshotWindow,
+      ensureLegacyTranscript: () => Effect.void,
+    } as unknown as ThreadManagementService.ThreadManagementService["Service"];
+  }),
+);
+const layerThreads = Layer.mergeAll(
+  layerThreadReads,
+  RuntimeLayer.layerEventSink,
+  ThreadSearch.layer,
+).pipe(
+  Layer.provideMerge(
+    Layer.mergeAll(
+      RuntimeLayer.layerEventInfrastructure,
+      ProjectionStore.layer,
+      ProjectStore.layer,
+    ),
+  ),
+);
+
 const layerServices = Layer.mergeAll(
-  InvitationService.layer.pipe(
+  Layer.merge(InvitationService.layer, SpaceVisibility.layer).pipe(
     Layer.provideMerge(Layer.merge(EnvironmentAuth.layer, SpaceDirectory.layer)),
   ),
   layerProjects,
+  layerThreads,
 ).pipe(
   Layer.provide(ManagedPolicy.layerTest()),
   Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provideMerge(ServerSecretStore.layer),
-  Layer.provide(ServerEnvironment.layerIdentity),
+  Layer.provideMerge(ServerEnvironment.layerIdentity),
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-owner-test-" })),
   Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
@@ -97,6 +144,7 @@ export const serveAuthHttp = Effect.gen(function* () {
     Layer.provide(SpacesHttp.layer),
     Layer.provide(InvitationsHttp.layer),
     Layer.provide(ProjectHttp.layer),
+    Layer.provide(OrchestrationHttp.layer),
     Layer.provide(AuthHttp.layerAuthenticatedAuth),
     Layer.provide(Layer.succeedContext(services)),
     Layer.provide(HttpPlatform.layer),
@@ -117,6 +165,7 @@ export const serveAuthHttp = Effect.gen(function* () {
         new Request(`${ORIGIN}${path}`, {
           method: init?.body === undefined ? "GET" : "POST",
           headers: {
+            [ORCHESTRATION_PROTOCOL_HEADER]: String(ORCHESTRATION_PROTOCOL_VERSION),
             origin: ORIGIN,
             host: RP_ID,
             "content-type": "application/json",
@@ -142,7 +191,9 @@ export const serveAuthHttp = Effect.gen(function* () {
     request,
     sessions: Context.get(services, SessionStore.SessionStore),
     projects: Context.get(services, ProjectService.ProjectService),
+    eventSink: Context.get(services, EventSink.EventSinkV2),
     sql: Context.get(services, SqlClient.SqlClient),
+    services,
   };
 });
 

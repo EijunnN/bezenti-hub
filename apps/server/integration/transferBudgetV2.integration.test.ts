@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - Measures real local HTTP/WebSocket sockets.
+import { layerSeesEverything } from "../src/spaces/SpaceVisibility.testkit.ts";
 import * as NodeHttp from "node:http";
 import * as NodeUtil from "node:util";
 import { assert, it } from "@effect/vitest";
@@ -194,7 +195,11 @@ const layerRoutes = Layer.mergeAll(
     Layer.provide(layerHandlers),
     Layer.provide(RpcSerialization.layerJson),
   ),
-).pipe(Layer.provide(ServerHttp.layerHttpCompression), Layer.provide(NodeHttpPlatform.layer));
+).pipe(
+  Layer.provide(layerSeesEverything),
+  Layer.provide(ServerHttp.layerHttpCompression),
+  Layer.provide(NodeHttpPlatform.layer),
+);
 
 function difference(
   after: { wireBytes: number; decodedBytes: number; messages: number },

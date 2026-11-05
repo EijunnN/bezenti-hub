@@ -353,6 +353,15 @@ export class EnvironmentAuthorizationError extends Schema.TaggedError<Environmen
   },
 ) {}
 
+/**
+ * A Project or Thread that does not exist or that the session may not see. The two look alike
+ * on purpose, so a refusal says nothing about what exists in other Spaces.
+ */
+export class SpaceResourceNotFoundError extends Schema.TaggedError<SpaceResourceNotFoundError>()(
+  "SpaceResourceNotFoundError",
+  { message: Schema.String },
+) {}
+
 export const AuthAccessStreamClientUpsertedEvent = Schema.Struct({
   version: Schema.Literal(1),
   revision: Schema.Number,

@@ -166,6 +166,7 @@ import {
   type ActiveShellIndexEntry,
   type OlderSettledThreadsQuery,
   type ShellSnapshotOptions,
+  type ProjectionStoreV2Shape,
 } from "./ProjectionStore.ts";
 import { ProviderAdapterRegistryV2 } from "./ProviderAdapterRegistry.ts";
 import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
@@ -458,10 +459,9 @@ export interface OrchestratorV2Shape {
     OrchestratorV2Error
   >;
   readonly countThreads: () => Effect.Effect<number, OrchestratorV2Error>;
-  readonly listActiveShellIndex: () => Effect.Effect<
-    ReadonlyArray<ActiveShellIndexEntry>,
-    OrchestratorV2Error
-  >;
+  readonly listActiveShellIndex: (
+    options?: Parameters<ProjectionStoreV2Shape["listActiveShellIndex"]>[0],
+  ) => Effect.Effect<ReadonlyArray<ActiveShellIndexEntry>, OrchestratorV2Error>;
   readonly listOlderSettledThreads: (
     query: OlderSettledThreadsQuery,
   ) => Effect.Effect<OlderSettledThreadsListing, OrchestratorV2Error>;
@@ -14220,8 +14220,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     countThreads: Effect.fn("OrchestratorV2.countThreads")(function () {
       return projectionStore.countThreads().pipe(Effect.mapError(shellProjectionError));
     }),
-    listActiveShellIndex: Effect.fn("OrchestratorV2.listActiveShellIndex")(function () {
-      return projectionStore.listActiveShellIndex().pipe(Effect.mapError(shellProjectionError));
+    listActiveShellIndex: Effect.fn("OrchestratorV2.listActiveShellIndex")(function (options) {
+      return projectionStore
+        .listActiveShellIndex(options)
+        .pipe(Effect.mapError(shellProjectionError));
     }),
     listOlderSettledThreads: Effect.fn("OrchestratorV2.listOlderSettledThreads")(function (query) {
       return projectionStore

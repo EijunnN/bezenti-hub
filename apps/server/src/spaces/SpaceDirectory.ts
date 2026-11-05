@@ -13,6 +13,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
@@ -155,6 +156,18 @@ export class SpaceDirectory extends Context.Service<
       readonly userId: UserId;
       readonly role: SpaceRole;
     }) => Effect.Effect<boolean, SpaceDirectoryStorageError>;
+    /**
+     * The Spaces whose content the User may see (the policy's `space.view`), or "all" for the
+     * Owner. Read on the writer connection, so a change committed before the call is seen.
+     */
+    readonly viewableSpaces: (
+      userId: UserId,
+    ) => Effect.Effect<"all" | ReadonlyArray<SpaceId>, SpaceDirectoryStorageError>;
+    /**
+     * Grows whenever a Space or a Membership changes, so a cached `viewableSpaces` answer can
+     * tell it is stale. Every such write goes through this service.
+     */
+    readonly revision: Effect.Effect<number>;
   }
 >()("t3/spaces/SpaceDirectory") {}
 
@@ -165,12 +178,20 @@ const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const random = yield* SecureRandom.SecureRandom;
   const storageError = (cause: unknown) => new SpaceDirectoryStorageError({ cause });
+  const revision = yield* Ref.make(0);
+  // Bumped before the write commits; a reader that sees the new number then waits on the writer.
+  const changed = Ref.update(revision, (current) => current + 1);
 
   const findSpace = SqlSchema.findOneOption({
     Request: SpaceId,
     Result: SpaceRow,
     execute: (spaceId) =>
       sql`SELECT ${sql.literal(SPACE_COLUMNS)} FROM spaces WHERE space_id = ${spaceId}`,
+  });
+  const listSpaces = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: SpaceRow,
+    execute: () => sql`SELECT ${sql.literal(SPACE_COLUMNS)} FROM spaces`,
   });
   const listOrganizations = SqlSchema.findAll({
     Request: Schema.Void,
@@ -270,6 +291,15 @@ const make = Effect.gen(function* () {
     } satisfies SpaceDirectoryView;
   });
 
+  const viewableSpaces = Effect.fn("SpaceDirectory.viewableSpaces")(function* (userId: UserId) {
+    const principal = yield* principalOf(userId);
+    if (principal.isOwner) return "all" as const;
+    const spaces = yield* listSpaces().pipe(Effect.mapError(storageError));
+    return spaces
+      .filter((row) => allows(principal, "space.view", toResource(row)))
+      .map((row) => row.spaceId);
+  });
+
   const requireAllowed = (
     principal: AccessPolicy.Principal,
     action: AccessPolicy.Action,
@@ -289,6 +319,7 @@ const make = Effect.gen(function* () {
     yield* requireAllowed(principal, "organization.create", AccessPolicy.installation);
     const spaceId = SpaceId.make(yield* random.uuidV4().pipe(Effect.mapError(storageError)));
     const now = DateTime.formatIso(yield* DateTime.now);
+    yield* changed;
     yield* sql`
       INSERT INTO spaces (space_id, kind, name, created_at)
       VALUES (${spaceId}, 'organization', ${name}, ${now})
@@ -355,6 +386,7 @@ const make = Effect.gen(function* () {
     readonly role: SpaceRole;
   }) {
     const now = DateTime.formatIso(yield* DateTime.now);
+    yield* changed;
     const inserted = yield* sql<{ readonly userId: string }>`
       INSERT INTO space_memberships (space_id, user_id, role, created_at)
       VALUES (${input.spaceId}, ${input.userId}, ${input.role}, ${now})
@@ -371,6 +403,8 @@ const make = Effect.gen(function* () {
     claimCreation,
     authorize,
     addMembership,
+    viewableSpaces,
+    revision: Ref.get(revision),
   });
 });
 

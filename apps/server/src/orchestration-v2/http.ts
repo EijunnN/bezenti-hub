@@ -1,7 +1,9 @@
 import {
   AuthOrchestrationReadScope,
+  EnvironmentAuthenticatedPrincipal,
   EnvironmentHttpApi,
   type OrchestrationProjectShell,
+  type ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
@@ -20,6 +22,7 @@ import {
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
+import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import {
   buildBoundedThreadProjection,
   decodeThreadHistoryCursor,
@@ -56,6 +59,23 @@ export const layer = HttpApiBuilder.group(
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
     const projectStore = yield* ProjectStore.ProjectStoreV2;
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+    const spaceVisibility = yield* SpaceVisibility.SpaceVisibility;
+
+    // Per request: what this session's User may see.
+    const requestVisibility = Effect.gen(function* () {
+      const principal = yield* EnvironmentAuthenticatedPrincipal;
+      return yield* spaceVisibility.of(principal.userId);
+    });
+
+    // A Thread the session may not see answers exactly like a missing one.
+    const requireVisibleThread = Effect.fn("http.orchestration.requireVisibleThread")(function* (
+      threadId: ThreadId,
+    ) {
+      const visibility = yield* requestVisibility;
+      if (visibility.all) return;
+      const visible = yield* spaceVisibility.visibleThreadIds(visibility, [threadId]);
+      if (!visible.has(threadId)) return yield* failEnvironmentNotFound("thread_not_found");
+    });
 
     const enrichProjectShells = Effect.fn("http.orchestration.enrichProjectShells")(
       (projects: ReadonlyArray<OrchestrationProjectShell>) =>
@@ -78,15 +98,24 @@ export const layer = HttpApiBuilder.group(
         readonly omitIdleSubagents: boolean;
         readonly omitOlderSettled: boolean;
       }) {
+        const visibility = yield* requestVisibility;
+        const spaceIds = SpaceVisibility.spaceFilter(visibility);
         const { snapshot } = yield* loadSubscriberShellSnapshot({
           sql,
-          listShellIndex: threadManagement.listActiveShellIndex(),
+          listShellIndex: threadManagement.listActiveShellIndex({ spaceIds }),
           readThreads: (threadIds) =>
             threadManagement.readShellSnapshot({
               location: "active",
+              spaceIds,
               ...(threadIds === undefined ? {} : { threadIds }),
             }),
-          listProjects: projectStore.listShells(),
+          listProjects: projectStore
+            .listShells()
+            .pipe(
+              Effect.map((projects) =>
+                projects.filter((project) => SpaceVisibility.seesProject(visibility, project)),
+              ),
+            ),
           latestSequence: applicationEvents.latestApplicationSequence,
           options,
         });
@@ -102,6 +131,7 @@ export const layer = HttpApiBuilder.group(
         | "orchestration_thread_bounded_snapshot_failed"
         | "orchestration_thread_history_failed",
     ) {
+      yield* requireVisibleThread(threadId);
       return yield* threadManagement.getThreadSnapshot(threadId).pipe(
         Effect.map((snapshot) => ({
           ...snapshot,
@@ -129,6 +159,7 @@ export const layer = HttpApiBuilder.group(
         >[1]["anchorThreadId"],
         deferWork = false,
       ) {
+        yield* requireVisibleThread(threadId);
         return yield* threadManagement
           .getThreadSnapshotWindow(threadId, {
             rowLimit: THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
@@ -193,6 +224,7 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.orchestration.threadTranscript")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          yield* requireVisibleThread(args.params.threadId);
           return yield* threadManagement.getThreadTranscript(args.params.threadId).pipe(
             Effect.provideService(ServerEnvironment.ServerEnvironmentIdentity, environment),
             Effect.catch(
@@ -252,6 +284,7 @@ export const layer = HttpApiBuilder.group(
               return yield* failEnvironmentInvalidRequest("invalid_history_cursor");
             return yield* failEnvironmentInternal("orchestration_thread_history_failed", cause);
           }
+          yield* requireVisibleThread(args.params.threadId);
           return yield* threadManagement
             .getThreadHistoryPage(
               args.params.threadId,

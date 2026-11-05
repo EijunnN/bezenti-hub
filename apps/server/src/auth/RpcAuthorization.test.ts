@@ -32,6 +32,23 @@ import {
 } from "./RpcAuthorization.ts";
 import * as CurrentPrincipal from "./CurrentPrincipal.ts";
 import * as RpcAuthorization from "./RpcAuthorization.ts";
+import { RPC_SPACE_ACCESS, spaceAccessForRpcMethod } from "./RpcSpaceAccess.ts";
+import type * as SchemaAST from "effect/SchemaAST";
+import { layerSeesEverything } from "../spaces/SpaceVisibility.testkit.ts";
+
+/** The top-level field names a payload schema can carry, across its union members. */
+const payloadFields = (ast: SchemaAST.AST): ReadonlySet<string> => {
+  switch (ast._tag) {
+    case "Objects":
+      return new Set(ast.propertySignatures.map((property) => String(property.name)));
+    case "Union":
+      return new Set(ast.types.flatMap((member) => [...payloadFields(member)]));
+    case "Suspend":
+      return payloadFields(ast.thunk());
+    default:
+      return new Set();
+  }
+};
 
 describe("RPC authorization scopes", () => {
   it("declares exactly one scope for every RPC in the server group", () => {
@@ -71,6 +88,26 @@ describe("RPC authorization scopes", () => {
     }
   });
 
+  it("routes every RPC that reaches Projects or Threads through the visibility rule", () => {
+    // A new read RPC that names a Thread or Project, or any orchestration RPC, must say here how
+    // it keeps to what the session may see.
+    const named = [...WsRpcGroup.requests.entries()].flatMap(([tag, rpc]) => {
+      const fields = payloadFields(rpc.payloadSchema.ast);
+      return tag.startsWith("orchestration.") ||
+        ["threadId", "projectId", "projectIds"].some((field) => fields.has(field))
+        ? [tag]
+        : [];
+    });
+    expect(named.filter((tag) => spaceAccessForRpcMethod(tag) === undefined)).toEqual([]);
+    for (const [tag, access] of Object.entries(RPC_SPACE_ACCESS)) {
+      const fields = payloadFields(WsRpcGroup.requests.get(tag as never)!.payloadSchema.ast);
+      if (access === "thread") expect([tag, fields.has("threadId")]).toEqual([tag, true]);
+      if (access === "project") {
+        expect([tag, fields.has("projectId") || fields.has("projectIds")]).toEqual([tag, true]);
+      }
+    }
+  });
+
   it("rejects unknown RPC method names", () => {
     for (const method of ["server.notRegistered", "toString", "constructor"]) {
       expect(() => requiredScopeForRpcMethod(method)).toThrow(
@@ -96,6 +133,7 @@ it("requires operate permission for tool updates even alongside a read-only chec
 
 const scopeAuthorization = (scopes: ReadonlyArray<AuthEnvironmentScope>) =>
   RpcAuthorization.layer.pipe(
+    Layer.provide(layerSeesEverything),
     Layer.provide(
       CurrentPrincipal.layer({
         sessionId: AuthSessionId.make("rpc-authorization-test"),

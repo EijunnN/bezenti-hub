@@ -12,6 +12,7 @@ import {
   type OrchestrationV2SearchThreadsResult,
   type OrchestrationV2ThreadShellSnapshot,
   ProjectId,
+  type SpaceId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -35,6 +36,7 @@ import {
 import { threadSearchPullRequests } from "@t3tools/shared/threadPullRequests";
 import { indexedMessageCondition, nonPlaceholderMessageCondition } from "./messageSearchIndex.ts";
 import { loadOlderSettledThreadsPage } from "./ShellStream.ts";
+import { threadInSpaces } from "../spaces/SpaceVisibility.ts";
 
 // When the user last wrote in the thread aliased `threads`, as the clients
 // rank recency; agent notices in the user role do not count.
@@ -62,6 +64,7 @@ export class ThreadSearchError extends Schema.TaggedError<ThreadSearchError>()(
 
 // Token lists bind as JSON arrays, so any number of them is one parameter.
 const TokenList = Schema.fromJsonString(Schema.Array(Schema.String));
+const SpaceIds = Schema.optional(Schema.Array(Schema.String));
 const SearchRequest = Schema.Struct({
   /** The FTS5 query, or null to scan messages instead. */
   match: Schema.NullOr(Schema.String),
@@ -70,6 +73,8 @@ const SearchRequest = Schema.Struct({
   projectId: Schema.NullOr(ProjectId),
   /** Threads the caller already lists, left out before the hit limit. */
   excludedThreadIds: TokenList,
+  /** Only threads in these Spaces, before the hit limit; every Space when absent. */
+  spaceIds: SpaceIds,
 });
 const SearchRow = Schema.Struct({
   messageRowid: Schema.Number,
@@ -160,7 +165,7 @@ export function buildSearchSnippet(text: string, matchStart: number): string {
 // The scan folds ASCII case only, so accent variants and non-ASCII case variants may not match.
 export const messageHitsQuery = (
   sql: SqlClient.SqlClient,
-  { match, substrings, projectId, excludedThreadIds }: typeof SearchRequest.Encoded,
+  { match, substrings, projectId, excludedThreadIds, spaceIds }: typeof SearchRequest.Encoded,
 ) => sql`
     WITH eligible AS MATERIALIZED (
       SELECT threads.thread_id, threads.project_id
@@ -175,6 +180,7 @@ export const messageHitsQuery = (
         AND json_extract(threads.payload_json, '$.lineage.relationshipToParent')
           IS NOT 'subagent'
         AND json_extract(threads.payload_json, '$.lineage.sideChat') IS NOT 1
+        AND ${threadInSpaces(sql, "threads", spaceIds)}
     )
     ${
       match === null
@@ -237,6 +243,11 @@ const TitleCandidateRow = Schema.Struct({
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
 });
 
+/** Only threads in these Spaces (`SpaceVisibility.spaceFilter`); every Space when absent. */
+export interface SpaceScope {
+  readonly spaceIds?: ReadonlyArray<SpaceId> | undefined;
+}
+
 export interface ThreadSearchHit {
   readonly threadId: ThreadId;
   readonly projectId: ProjectId;
@@ -251,28 +262,32 @@ export class ThreadSearch extends Context.Service<
   {
     /** Message text matches, for clients that rank their own thread list. */
     readonly search: (
-      input: OrchestrationSearchThreadsInput,
+      input: OrchestrationSearchThreadsInput & SpaceScope,
     ) => Effect.Effect<OrchestrationSearchThreadsResult, ThreadSearchError>;
     /**
      * Title, branch, pull request, and project matches ranked as the command
      * palette ranks them, then message matches for the remaining threads.
      */
     readonly searchThreads: (
-      input: OrchestrationSearchThreadsInput & { readonly projectId?: ProjectId | undefined },
+      input: OrchestrationSearchThreadsInput & {
+        readonly projectId?: ProjectId | undefined;
+      } & SpaceScope,
     ) => Effect.Effect<{ readonly matches: ReadonlyArray<ThreadSearchHit> }, ThreadSearchError>;
     /**
      * The settled threads before `before` that clients omitting older settled threads should
      * receive for a query: the best title, branch, pull request and project matches, ranked as
      * the palette ranks them, then the older ones among `messageThreadIds`, in their order.
      */
-    readonly searchOlderSettled: (input: {
-      readonly query: string;
-      readonly before: string;
-      readonly projectIds?: ReadonlyArray<ProjectId> | undefined;
-      /** The caller's name for this environment, which its palette also matches. */
-      readonly environmentLabel?: string | undefined;
-      readonly messageThreadIds: ReadonlyArray<ThreadId>;
-    }) => Effect.Effect<ReadonlyArray<ThreadId>, ThreadSearchError>;
+    readonly searchOlderSettled: (
+      input: {
+        readonly query: string;
+        readonly before: string;
+        readonly projectIds?: ReadonlyArray<ProjectId> | undefined;
+        /** The caller's name for this environment, which its palette also matches. */
+        readonly environmentLabel?: string | undefined;
+        readonly messageThreadIds: ReadonlyArray<ThreadId>;
+      } & SpaceScope,
+    ) => Effect.Effect<ReadonlyArray<ThreadId>, ThreadSearchError>;
   }
 >()("t3/orchestration-v2/ThreadSearch") {}
 
@@ -318,9 +333,9 @@ export const make = Effect.gen(function* () {
   });
 
   const titleCandidates = SqlSchema.findAll({
-    Request: Schema.Struct({ projectId: Schema.NullOr(ProjectId) }),
+    Request: Schema.Struct({ projectId: Schema.NullOr(ProjectId), spaceIds: SpaceIds }),
     Result: TitleCandidateRow,
-    execute: ({ projectId }) => sql`
+    execute: ({ projectId, spaceIds }) => sql`
       SELECT
         threads.payload_json AS thread,
         projects.title AS "projectTitle",
@@ -335,6 +350,7 @@ export const make = Effect.gen(function* () {
           IS NOT 'subagent'
         AND json_extract(threads.payload_json, '$.lineage.sideChat') IS NOT 1
         AND (${projectId} IS NULL OR threads.project_id = ${projectId})
+        AND ${threadInSpaces(sql, "threads", spaceIds)}
     `,
   });
 
@@ -342,9 +358,10 @@ export const make = Effect.gen(function* () {
     Request: Schema.Struct({
       before: Schema.String,
       projectIds: Schema.NullOr(TokenList),
+      spaceIds: SpaceIds,
     }),
     Result: OlderSettledTitleRow,
-    execute: ({ before, projectIds }) => sql`
+    execute: ({ before, projectIds, spaceIds }) => sql`
       SELECT
         threads.thread_id AS id,
         json_extract(threads.payload_json, '$.title') AS title,
@@ -369,6 +386,7 @@ export const make = Effect.gen(function* () {
         AND json_extract(threads.payload_json, '$.settledAt') < ${before}
         AND (${projectIds} IS NULL
           OR threads.project_id IN (SELECT value FROM json_each(${projectIds})))
+        AND ${threadInSpaces(sql, "threads", spaceIds)}
     `,
   });
 
@@ -377,9 +395,10 @@ export const make = Effect.gen(function* () {
       before: Schema.String,
       threadIds: TokenList,
       projectIds: Schema.NullOr(TokenList),
+      spaceIds: SpaceIds,
     }),
     Result: Schema.Struct({ id: ThreadId }),
-    execute: ({ before, threadIds, projectIds }) => sql`
+    execute: ({ before, threadIds, projectIds, spaceIds }) => sql`
       SELECT threads.thread_id AS id
       FROM orchestration_v2_projection_threads AS threads
       WHERE threads.thread_id IN (SELECT value FROM json_each(${threadIds}))
@@ -392,6 +411,7 @@ export const make = Effect.gen(function* () {
         AND json_extract(threads.payload_json, '$.settledAt') < ${before}
         AND (${projectIds} IS NULL
           OR threads.project_id IN (SELECT value FROM json_each(${projectIds})))
+        AND ${threadInSpaces(sql, "threads", spaceIds)}
     `,
   });
 
@@ -416,7 +436,7 @@ export const make = Effect.gen(function* () {
       readonly excludedThreadIds?: ReadonlySet<ThreadId>;
       /** Off for an agent's search, which has no use for the user's picks. */
       readonly picks?: boolean;
-    },
+    } & SpaceScope,
   ) {
     // One message per thread: the best word match, then what the user wrote,
     // since that is what they remember asking, then the newest by when it was
@@ -447,6 +467,7 @@ export const make = Effect.gen(function* () {
               ...messageSearch,
               projectId: input.projectId,
               excludedThreadIds: [...(input.excludedThreadIds ?? [])],
+              spaceIds: input.spaceIds,
             });
       }),
     );
@@ -521,7 +542,9 @@ export const make = Effect.gen(function* () {
     const now = DateTime.toEpochMillis(yield* DateTime.now);
     // Agents call this rarely, and a project has hundreds of threads, not
     // millions, so ranking every active thread in memory stays cheap.
-    const candidates = yield* read(titleCandidates({ projectId: input.projectId ?? null }));
+    const candidates = yield* read(
+      titleCandidates({ projectId: input.projectId ?? null, spaceIds: input.spaceIds }),
+    );
     const subjectById = new Map(
       candidates.map((row): [ThreadId, ThreadSearchSubject] => [
         row.thread.id,
@@ -560,6 +583,7 @@ export const make = Effect.gen(function* () {
       projectId: input.projectId ?? null,
       excludedThreadIds: shown,
       picks: false,
+      spaceIds: input.spaceIds,
     });
     const messageHits = matches
       .filter((match) => subjectById.has(match.threadId))
@@ -577,11 +601,11 @@ export const make = Effect.gen(function* () {
 
   const searchOlderSettled: ThreadSearch["Service"]["searchOlderSettled"] = Effect.fn(
     "ThreadSearch.searchOlderSettled",
-  )(function* ({ query, before, projectIds, environmentLabel, messageThreadIds }) {
+  )(function* ({ query, before, projectIds, environmentLabel, messageThreadIds, spaceIds }) {
     const normalizedQuery = foldSearchQuery(query);
     const now = DateTime.toEpochMillis(yield* DateTime.now);
     const candidates = yield* read(
-      olderSettledTitleCandidates({ before, projectIds: projectIds ?? null }),
+      olderSettledTitleCandidates({ before, projectIds: projectIds ?? null, spaceIds }),
     );
     const subjectOf = (row: typeof OlderSettledTitleRow.Type): ThreadSearchSubject => ({
       id: row.id,
@@ -615,6 +639,7 @@ export const make = Effect.gen(function* () {
                 before,
                 threadIds: messageCandidates,
                 projectIds: projectIds ?? null,
+                spaceIds,
               }),
             )).map((row) => row.id),
           );
@@ -637,8 +662,10 @@ export const searchThreadsWithOlderSettledRows = Effect.fn(
   "ThreadSearch.searchThreadsWithOlderSettledRows",
 )(function* <E1, E2, E3, E4, E5>(input: {
   readonly request: OrchestrationV2SearchThreadsInput;
+  /** The viewer's Spaces (`SpaceVisibility.spaceFilter`). */
+  readonly spaceIds: ReadonlyArray<SpaceId> | undefined;
   readonly search: (
-    input: OrchestrationSearchThreadsInput,
+    input: OrchestrationSearchThreadsInput & SpaceScope,
   ) => Effect.Effect<OrchestrationSearchThreadsResult, E1>;
   readonly searchOlderSettled: (
     input: Parameters<ThreadSearch["Service"]["searchOlderSettled"]>[0],
@@ -652,7 +679,9 @@ export const searchThreadsWithOlderSettledRows = Effect.fn(
   const { olderSettledBefore, projectIds, environmentLabel, titlesOnly, ...request } =
     input.request;
   const messages: OrchestrationV2SearchThreadsResult =
-    titlesOnly === true ? { matches: [] } : yield* input.search(request);
+    titlesOnly === true
+      ? { matches: [] }
+      : yield* input.search({ ...request, spaceIds: input.spaceIds });
   if (olderSettledBefore === undefined) return messages;
   // Ranked before the rows' transaction, so scoring never holds the shared reader.
   const threadIds = yield* input.searchOlderSettled({
@@ -661,6 +690,7 @@ export const searchThreadsWithOlderSettledRows = Effect.fn(
     projectIds,
     environmentLabel,
     messageThreadIds: messages.matches.map((match) => match.threadId),
+    spaceIds: input.spaceIds,
   });
   const older = yield* loadOlderSettledThreadsPage({
     sql: input.sql,

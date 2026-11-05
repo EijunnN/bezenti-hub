@@ -202,6 +202,7 @@ import { acceptsPrivateNetworkConnection, loopbackUrlHostForAddress } from "./st
 import * as OrchestrationHttp from "./orchestration-v2/http.ts";
 import * as ProjectHttp from "./project/http.ts";
 import * as SpaceDirectory from "./spaces/SpaceDirectory.ts";
+import * as SpaceVisibility from "./spaces/SpaceVisibility.ts";
 import * as SpacesHttp from "./spaces/http.ts";
 import * as InvitationService from "./spaces/InvitationService.ts";
 import * as InvitationsHttp from "./spaces/invitationsHttp.ts";
@@ -518,7 +519,7 @@ const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
 
 const layerServerEnvironment = ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer));
 
-const layerAuth = InvitationService.layer.pipe(
+const layerAuth = Layer.merge(InvitationService.layer, SpaceVisibility.layer).pipe(
   Layer.provideMerge(Layer.merge(EnvironmentAuth.layer, SpaceDirectory.layer)),
   Layer.provideMerge(layerPersistence),
   Layer.provide(layerServerEnvironment),

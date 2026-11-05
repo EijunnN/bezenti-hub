@@ -36,6 +36,9 @@ import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
 import type * as RpcGroup from "effect/rpc/RpcGroup";
 
+import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
+import { guardRpcPayload } from "./RpcSpaceAccess.ts";
+
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 
 export const RPC_REQUIRED_SCOPES = {
@@ -273,11 +276,18 @@ const requiredScopesForRpcCall = (
 export const layer = Layer.effect(RpcScopeAuthorization)(
   Effect.gen(function* () {
     const principal = yield* EnvironmentAuthenticatedPrincipal;
+    const viewer = yield* SpaceVisibility.CurrentViewer;
+    const spaceVisibility = yield* SpaceVisibility.SpaceVisibility;
     const middleware: RpcScopeAuthorization["Service"] = (effect, { rpc, payload }) => {
       const requiredScopes = requiredScopesForRpcCall(rpc._tag, payload);
       const requiredScope = requiredScopes.find((scope) => !principal.scopes.has(scope));
       if (requiredScope !== undefined) return Effect.fail(rpcAuthorizationError(requiredScope));
-      return effect;
+      return viewer.visibility.pipe(
+        Effect.flatMap((visibility) =>
+          guardRpcPayload(rpc._tag, payload, visibility, spaceVisibility),
+        ),
+        Effect.andThen(effect),
+      );
     };
     return middleware;
   }),

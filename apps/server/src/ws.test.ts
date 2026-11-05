@@ -1,9 +1,14 @@
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 import {
   AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  EventId,
+  SpaceId,
+  type OrchestrationV2AppThread,
+  type OrchestrationV2ShellStreamItem,
   AuthSessionId,
   CommandId,
   EnvironmentId,
@@ -140,6 +145,12 @@ import {
 import * as CurrentPrincipal from "./auth/CurrentPrincipal.ts";
 import * as SpaceDirectory from "./spaces/SpaceDirectory.ts";
 import * as RpcAuthorization from "./auth/RpcAuthorization.ts";
+import { layerSeesEverything } from "./spaces/SpaceVisibility.testkit.ts";
+import * as SpaceVisibility from "./spaces/SpaceVisibility.ts";
+import { bootstrapOwner, makeAuthenticator, serveAuthHttp } from "./auth/UserAuth.testkit.ts";
+import { visibleShells } from "./mcp/mcpVisibility.ts";
+import * as RpcTest from "effect/rpc/RpcTest";
+import * as Context from "effect/Context";
 
 const snapshotConfig = (fields: Partial<ServerConfig>) =>
   ({ availableEditors: [], settings: {}, ...fields }) as unknown as ServerConfig;
@@ -246,7 +257,7 @@ it.effect("runs editor, remote open target and direct endpoint discovery side by
   }),
 );
 
-const ReplayTestLayer = OrchestrationEventStore.layer.pipe(
+const ReplayTestLayer = Layer.merge(OrchestrationEventStore.layer, layerSeesEverything).pipe(
   Layer.provideMerge(SqlitePersistence.layerMemory),
 );
 
@@ -751,6 +762,8 @@ const layerConfigSources = Layer.mergeAll(
   ),
   Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
+// Tests not about Spaces read as the Owner.
+const layerOwnerConfigSources = Layer.merge(layerConfigSources, layerSeesEverything);
 
 it.effect.each([
   "pending",
@@ -1001,7 +1014,7 @@ it.effect.each([
     }).pipe(
       Effect.provide(
         Layer.mergeAll(
-          Layer.fresh(layerConfigSources),
+          Layer.fresh(layerOwnerConfigSources),
           Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
           Layer.mock(ServerBrowser.ServerBrowser)({}),
         ),
@@ -1162,7 +1175,7 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
   }).pipe(
     Effect.provide(
       Layer.mergeAll(
-        Layer.fresh(layerConfigSources),
+        Layer.fresh(layerOwnerConfigSources),
         Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
         Layer.mock(ServerBrowser.ServerBrowser)({}),
       ),
@@ -1431,7 +1444,7 @@ it.effect("sends a new Thread on as the session's User, whatever owner the clien
   }).pipe(
     Effect.provide(
       Layer.mergeAll(
-        Layer.fresh(layerConfigSources),
+        Layer.fresh(layerOwnerConfigSources),
         Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
         Layer.mock(ServerBrowser.ServerBrowser)({}),
       ),
@@ -1439,3 +1452,321 @@ it.effect("sends a new Thread on as the session's User, whatever owner the clien
     Effect.scoped,
   ),
 );
+
+describe("Space visibility", () => {
+  const PASSWORD = "correct horse battery";
+  const read = [
+    ORCHESTRATION_V2_WS_METHODS.subscribeShell,
+    ORCHESTRATION_V2_WS_METHODS.getThreadProjection,
+    ORCHESTRATION_V2_WS_METHODS.getWorktreeThreadIds,
+  ] as const;
+  const group = WsRpcGroup.omit(
+    ...[...WsRpcGroup.requests.keys()].filter(
+      (
+        tag,
+      ): tag is Exclude<keyof typeof RpcAuthorization.RPC_REQUIRED_SCOPES, (typeof read)[number]> =>
+        !(read as ReadonlyArray<string>).includes(tag),
+    ),
+  );
+
+  const threadCreated = (input: {
+    readonly id: string;
+    readonly projectId: string;
+    readonly spaceId?: string;
+  }) => {
+    const id = ThreadId.make(input.id);
+    const at = DateTime.makeUnsafe("2026-11-01T00:00:00.000Z");
+    const providerInstanceId = ProviderInstanceId.make("codex");
+    const payload: OrchestrationV2AppThread = {
+      createdBy: "user",
+      creationSource: "web",
+      id,
+      projectId: ProjectId.make(input.projectId),
+      title: input.id,
+      providerInstanceId,
+      modelSelection: { instanceId: providerInstanceId, model: "gpt-5" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: "/wt/shared",
+      activeProviderThreadId: null,
+      ...(input.spaceId === undefined ? {} : { spaceId: SpaceId.make(input.spaceId) }),
+      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: id },
+      forkedFrom: null,
+      createdAt: at,
+      updatedAt: at,
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      lastVisitedAt: null,
+      deletedAt: null,
+    };
+    return {
+      id: EventId.make(`create-${input.id}`),
+      type: "thread.created" as const,
+      threadId: id,
+      providerInstanceId,
+      occurredAt: at,
+      payload,
+    };
+  };
+
+  /** The Owner with Acme (Grace is a Member) and Globex (Linus is a Member), work in each. */
+  const hub = Effect.gen(function* () {
+    const server = yield* serveAuthHttp;
+    const { created } = yield* bootstrapOwner(server, yield* makeAuthenticator());
+    const owner = created.cookie ?? "";
+    const organization = (name: string) =>
+      server
+        .request("/api/spaces/organizations", { body: { name }, cookie: owner })
+        .pipe(Effect.map((response) => response.body.id as string));
+    const acme = yield* organization("Acme");
+    const globex = yield* organization("Globex");
+    const member = Effect.fn(function* (spaceId: string, loginName: string) {
+      const invitation = yield* server.request(`/api/spaces/${spaceId}/invitations`, {
+        body: { role: "member" },
+        cookie: owner,
+      });
+      const accepted = yield* server.request("/api/invitations/accept", {
+        body: {
+          token: invitation.body.token,
+          method: "password",
+          displayName: loginName,
+          loginName,
+          password: PASSWORD,
+        },
+      });
+      const [row] = yield* server.sql<{ userId: string }>`
+        SELECT user_id AS "userId" FROM users WHERE display_name = ${loginName}
+      `;
+      return { cookie: accepted.cookie ?? "", userId: UserId.make(row!.userId) };
+    });
+    const grace = yield* member(acme, "grace");
+    const linus = yield* member(globex, "linus");
+    const project = (id: string, spaceId: string) =>
+      server.request("/api/projects/mutate", {
+        cookie: owner,
+        body: {
+          type: "project.create",
+          commandId: `create-${id}`,
+          projectId: id,
+          title: id,
+          workspaceRoot: `/work/${id}`,
+          spaceId,
+        },
+      });
+    assert.equal((yield* project("acme-app", acme)).status, 200);
+    assert.equal((yield* project("globex-app", globex)).status, 200);
+    // A Project from before Spaces: the Owner's Personal space.
+    yield* server.sql`
+      INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+      VALUES ('legacy-app', 'legacy-app', '/work/legacy', '[]', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+    `;
+    yield* server.eventSink.write({
+      events: [
+        threadCreated({ id: "acme-thread", projectId: "acme-app", spaceId: acme }),
+        // Unstamped (like an agent's child): it follows its Project's Space.
+        threadCreated({ id: "acme-child", projectId: "acme-app" }),
+        threadCreated({ id: "globex-thread", projectId: "globex-app", spaceId: globex }),
+        threadCreated({ id: "legacy-thread", projectId: "legacy-app" }),
+      ],
+    });
+    return { server, owner, acme, globex, grace, linus };
+  });
+
+  // The production RPC layer and authorization middleware for one connection of this User.
+  const connect = Effect.fn(function* (
+    server: Effect.Success<typeof serveAuthHttp>,
+    userId: UserId,
+  ) {
+    const browser = yield* ServerBrowser.ServerBrowser;
+    return yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.merge(
+          layerWsRpc(browser, () => Effect.void, { secretReferences: true }),
+          RpcAuthorization.layer,
+        ).pipe(
+          Layer.provideMerge(SpaceVisibility.layerCurrentViewer),
+          Layer.provideMerge(
+            CurrentPrincipal.layer({
+              sessionId: AuthSessionId.make(`session-${userId}`),
+              subject: "user-sign-in",
+              userId,
+              method: "browser-session-cookie",
+              scopes: [AuthOrchestrationReadScope],
+            }),
+          ),
+          Layer.provide(
+            Layer.mergeAll(
+              layerUnusedConfigRpcServices,
+              Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+              Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+              Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+              Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+              Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+                namedProjectsRoot: process.cwd(),
+              }),
+              Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+              Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+              Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
+              Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({}),
+              // The real Spaces, Projects and Thread reads over the hub's database.
+              Layer.succeedContext(server.services),
+            ),
+          ),
+        ),
+      ),
+    );
+  });
+
+  const shellIds = (snapshot: {
+    readonly projects: ReadonlyArray<{ readonly id: string }>;
+    readonly threads: ReadonlyArray<{ readonly id: string }>;
+  }) => ({
+    projects: snapshot.projects.map((project) => project.id).toSorted(),
+    threads: snapshot.threads.map((thread) => thread.id).toSorted(),
+  });
+
+  // Live: the shell tail batches deltas on a wall-clock window.
+  it.live(
+    "each User sees only their Spaces' work in snapshots, live deltas, RPCs, HTTP and MCP",
+    () =>
+      Effect.gen(function* () {
+        const { server, owner, globex, grace, linus } = yield* hub;
+        const acmeWork = { projects: ["acme-app"], threads: ["acme-child", "acme-thread"] };
+
+        // HTTP: the shell, the project list, and a single Thread.
+        const httpShell = (cookie: string) =>
+          server
+            .request("/api/orchestration/shell", { cookie })
+            .pipe(Effect.map((response) => shellIds(response.body as never)));
+        assert.deepEqual(yield* httpShell(grace.cookie), acmeWork);
+        assert.deepEqual(yield* httpShell(linus.cookie), {
+          projects: ["globex-app"],
+          threads: ["globex-thread"],
+        });
+        assert.deepEqual(yield* httpShell(owner), {
+          projects: ["acme-app", "globex-app", "legacy-app"],
+          threads: ["acme-child", "acme-thread", "globex-thread", "legacy-thread"],
+        });
+        const projects = yield* server.request("/api/projects", { cookie: grace.cookie });
+        assert.deepEqual(
+          (projects.body.projects as ReadonlyArray<{ id: string }>).map((project) => project.id),
+          ["acme-app"],
+        );
+        const hidden = yield* server.request("/api/orchestration/threads/globex-thread", {
+          cookie: grace.cookie,
+        });
+        const missing = yield* server.request("/api/orchestration/threads/no-such-thread", {
+          cookie: grace.cookie,
+        });
+        assert.equal(hidden.status, 404);
+        const { traceId: _hiddenTrace, ...hiddenBody } = hidden.body;
+        const { traceId: _missingTrace, ...missingBody } = missing.body;
+        assert.deepEqual([hidden.status, hiddenBody], [missing.status, missingBody]);
+
+        // WebSocket: the shell snapshot, then live deltas.
+        const client = yield* connect(server, grace.userId);
+        const items = yield* Queue.unbounded<OrchestrationV2ShellStreamItem>();
+        yield* client[ORCHESTRATION_V2_WS_METHODS.subscribeShell]({
+          requestCompletionMarker: true,
+        }).pipe(
+          Stream.runForEach((item) => Queue.offer(items, item)),
+          Effect.forkScoped,
+        );
+        const first = yield* Queue.take(items);
+        assert.equal(first.kind, "snapshot");
+        if (first.kind !== "snapshot") return;
+        assert.deepEqual(shellIds(first.snapshot), acmeWork);
+        // Enrichment refreshes may follow; they name only visible Projects too.
+        for (let item = yield* Queue.take(items); item.kind !== "synchronized";) {
+          if (item.kind === "snapshot") {
+            for (const project of item.snapshot.projects) assert.equal(project.id, "acme-app");
+          }
+          item = yield* Queue.take(items);
+        }
+        // Globex's new Thread comes first in the log; Grace's stream must skip it.
+        yield* server.eventSink.write({
+          events: [
+            threadCreated({ id: "globex-late", projectId: "globex-app", spaceId: globex }),
+            threadCreated({ id: "acme-late", projectId: "acme-app" }),
+          ],
+        });
+        const seen: Array<string> = [];
+        while (!seen.includes("acme-late")) {
+          const item = yield* Queue.take(items);
+          if (item.kind === "thread.updated") seen.push(item.thread.id);
+          if (item.kind === "thread.removed") seen.push(item.threadId);
+          if (item.kind === "project.updated") seen.push(item.project.id);
+        }
+        assert.deepEqual(seen, ["acme-late"]);
+
+        // A single-resource read of a hidden Thread fails exactly like a missing one.
+        const projection = (threadId: string) =>
+          client[ORCHESTRATION_V2_WS_METHODS.getThreadProjection]({
+            threadId: ThreadId.make(threadId),
+          }).pipe(Effect.flip);
+        const hiddenRpc = yield* projection("globex-thread");
+        assert.equal(hiddenRpc._tag, "SpaceResourceNotFoundError");
+        assert.deepEqual(hiddenRpc, yield* projection("no-such-thread"));
+        const worktreeThreads = client[ORCHESTRATION_V2_WS_METHODS.getWorktreeThreadIds]({
+          worktreePath: "/wt/shared",
+        }).pipe(Effect.map(({ threadIds }) => [...threadIds].toSorted()));
+        assert.deepEqual(yield* worktreeThreads, ["acme-child", "acme-late", "acme-thread"]);
+
+        // Joining Globex shows its work on the same connection.
+        yield* Context.get(server.services, SpaceDirectory.SpaceDirectory).addMembership({
+          spaceId: SpaceId.make(globex),
+          userId: grace.userId,
+          role: "member",
+        });
+        assert.deepEqual(yield* worktreeThreads, [
+          "acme-child",
+          "acme-late",
+          "acme-thread",
+          "globex-late",
+          "globex-thread",
+        ]);
+
+        // MCP: a caller with no User reads as the Owner; one acting as Linus reads as Linus.
+        const shells = (yield* Context.get(
+          server.services,
+          ThreadManagement.ThreadManagementService,
+        ).getShellSnapshot()).threads;
+        const mcpRead = (scope: { readonly userId?: UserId }) =>
+          visibleShells(scope, shells).pipe(
+            Effect.map((visible) => visible.map((shell) => shell.id).toSorted()),
+            Effect.provide(Layer.succeedContext(server.services)),
+          );
+        assert.deepEqual(yield* mcpRead({}), [
+          "acme-child",
+          "acme-late",
+          "acme-thread",
+          "globex-late",
+          "globex-thread",
+          "legacy-thread",
+        ]);
+        assert.deepEqual(yield* mcpRead({ userId: linus.userId }), [
+          "globex-late",
+          "globex-thread",
+        ]);
+
+        // An archived Organization disappears for its Members, not for the Owner.
+        yield* server.sql`
+          UPDATE spaces SET archived_at = '2026-11-02T00:00:00.000Z' WHERE space_id = ${globex}
+        `;
+        assert.deepEqual(yield* httpShell(linus.cookie), { projects: [], threads: [] });
+        assert.include((yield* httpShell(owner)).projects, "globex-app");
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.fresh(layerConfigSources),
+            Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+            Layer.mock(ServerBrowser.ServerBrowser)({}),
+          ),
+        ),
+      ),
+  );
+});

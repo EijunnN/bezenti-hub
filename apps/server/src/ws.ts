@@ -226,6 +226,7 @@ import { requiredScopeForDeviceList, rpcAuthorizationError } from "./auth/RpcAut
 import * as RpcAuthorization from "./auth/RpcAuthorization.ts";
 import * as CurrentPrincipal from "./auth/CurrentPrincipal.ts";
 import * as SpaceDirectory from "./spaces/SpaceDirectory.ts";
+import * as SpaceVisibility from "./spaces/SpaceVisibility.ts";
 import { RpcInstrumentation, rpcInstrumentationLayer } from "./observability/RpcInstrumentation.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
@@ -998,6 +999,15 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const projects = yield* ProjectStore.ProjectStoreV2;
     const projectService = yield* ProjectService.ProjectService;
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+    const spaceVisibility = yield* SpaceVisibility.SpaceVisibility;
+    // Read per batch, so a new Membership shows up in later deltas without resubscribing.
+    const { visibility: currentVisibility } = yield* SpaceVisibility.CurrentViewer;
+    const visibleProjects = (all: ReadonlyArray<OrchestrationProjectShell>) =>
+      currentVisibility.pipe(
+        Effect.map((visibility) =>
+          all.filter((project) => SpaceVisibility.seesProject(visibility, project)),
+        ),
+      );
     let subagentThreadIds = new Set<string>();
     const filterSubagentTranscript = (stored: ApplicationStoredEvent) =>
       shouldPublishShellApplicationEvent(stored, subagentThreadIds);
@@ -1005,7 +1015,9 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const enrichmentChanges = yield* projectEnrichment.subscribeChanges;
     const loadProjectMetadataSnapshot = Effect.fn("ws.orchestrationV2.loadProjectMetadataSnapshot")(
       function* (snapshotSequence: number) {
-        const enriched = yield* enrichProjectShells(yield* projects.listShells());
+        const enriched = yield* enrichProjectShells(
+          yield* visibleProjects(yield* projects.listShells()),
+        );
         return {
           snapshot: {
             schemaVersion: ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION,
@@ -1019,15 +1031,17 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       },
     );
     const loadSnapshot = Effect.fn("ws.orchestrationV2.loadShellSnapshot")(function* () {
+      const spaceIds = SpaceVisibility.spaceFilter(yield* currentVisibility);
       const forSubscriber = yield* loadSubscriberShellSnapshot({
         sql,
-        listShellIndex: threadManagement.listActiveShellIndex(),
+        listShellIndex: threadManagement.listActiveShellIndex({ spaceIds }),
         readThreads: (threadIds) =>
           threadManagement.readShellSnapshot({
             location: "active",
+            spaceIds,
             ...(threadIds === undefined ? {} : { threadIds }),
           }),
-        listProjects: projects.listShells(),
+        listProjects: projects.listShells().pipe(Effect.flatMap(visibleProjects)),
         latestSequence: applicationEvents.latestApplicationSequence,
         options: {
           omitIdleSubagents: input.omitIdleSubagents === true,
@@ -1072,7 +1086,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const projectShellItems = Effect.fn("ws.orchestrationV2.projectShellItems")(function* (
       events: ReadonlyArray<ShellApplicationEvent>,
     ) {
-      const coalesced = coalesceShellApplicationEvents(events);
+      const coalesced = yield* visibleShellEvents(coalesceShellApplicationEvents(events));
       const threadIds = coalesced.flatMap((stored) =>
         "aggregateKind" in stored ? [] : [stored.event.threadId],
       );
@@ -1109,6 +1123,29 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       );
     });
 
+    // A delta for a Project or Thread this viewer cannot see is dropped before it is read.
+    const visibleShellEvents = Effect.fn("ws.orchestrationV2.visibleShellEvents")(function* (
+      events: ReadonlyArray<ShellApplicationEvent>,
+    ) {
+      const visibility = yield* currentVisibility;
+      if (visibility.all) return events;
+      const [threads, projectIds] = yield* Effect.all([
+        spaceVisibility.visibleThreadIds(
+          visibility,
+          events.flatMap((stored) => ("aggregateKind" in stored ? [] : [stored.event.threadId])),
+        ),
+        spaceVisibility.visibleProjectIds(
+          visibility,
+          events.flatMap((stored) => ("aggregateKind" in stored ? [stored.aggregateId] : [])),
+        ),
+      ]);
+      return events.filter((stored) =>
+        "aggregateKind" in stored
+          ? projectIds.has(stored.aggregateId)
+          : threads.has(stored.event.threadId),
+      );
+    });
+
     const toShellStream = <E, R>(stream: Stream.Stream<ShellApplicationEvent, E, R>) =>
       stream.pipe(
         Stream.groupedWithin(512, Duration.millis(50)),
@@ -1140,10 +1177,16 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
             ]),
           );
           const snapshotSequence = yield* applicationEvents.latestApplicationSequence;
-          const changedProjects = (yield* projects.listShells()).flatMap((project) =>
-            identities.has(project.workspaceRoot)
-              ? [{ ...project, repositoryIdentity: identities.get(project.workspaceRoot) ?? null }]
-              : [],
+          const changedProjects = (yield* visibleProjects(yield* projects.listShells())).flatMap(
+            (project) =>
+              identities.has(project.workspaceRoot)
+                ? [
+                    {
+                      ...project,
+                      repositoryIdentity: identities.get(project.workspaceRoot) ?? null,
+                    },
+                  ]
+                : [],
           );
           return shellStreamItemFromEnrichmentRefresh({
             snapshot: {
@@ -1267,6 +1310,9 @@ export const layerWsRpc = (
     Effect.gen(function* () {
       const principal = yield* EnvironmentAuthenticatedPrincipal;
       const currentSessionId = principal.sessionId;
+      // What this connection may see; every Project and Thread read below filters by it.
+      const { visibility: currentVisibility } = yield* SpaceVisibility.CurrentViewer;
+      const currentSpaceIds = Effect.map(currentVisibility, SpaceVisibility.spaceFilter);
       const sql = yield* SqlClient.SqlClient;
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
       const intakeContext = yield* Effect.context<
@@ -1822,10 +1868,20 @@ export const layerWsRpc = (
           .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
 
       const getOrchestrationV2ArchivedShellSnapshot = Effect.gen(function* () {
+        const visibility = yield* currentVisibility;
         const { threads, projects, snapshotSequence } = yield* loadShellSnapshotParts({
           sql,
-          readThreads: threadManagement.readShellSnapshot({ location: "archive" }),
-          listProjects: projectStore.listShells(),
+          readThreads: threadManagement.readShellSnapshot({
+            location: "archive",
+            spaceIds: SpaceVisibility.spaceFilter(visibility),
+          }),
+          listProjects: projectStore
+            .listShells()
+            .pipe(
+              Effect.map((all) =>
+                all.filter((project) => SpaceVisibility.seesProject(visibility, project)),
+              ),
+            ),
           latestSequence: applicationEvents.latestApplicationSequence,
         });
         return {
@@ -1855,9 +1911,14 @@ export const layerWsRpc = (
           options: { readonly familyOf: ThreadId } | { readonly worktreePath: string },
           message: string,
         ) {
+          const spaceIds = yield* currentSpaceIds;
           const { threads, snapshotSequence } = yield* loadShellSnapshotParts({
             sql,
-            readThreads: threadManagement.readShellSnapshot({ location: "active", ...options }),
+            readThreads: threadManagement.readShellSnapshot({
+              location: "active",
+              spaceIds,
+              ...options,
+            }),
             listProjects: Effect.succeed([]),
             latestSequence: applicationEvents.latestApplicationSequence,
           }).pipe(
@@ -1978,15 +2039,19 @@ export const layerWsRpc = (
             .searchThreadStream(input)
             .pipe(Stream.mapError((cause) => new OrchestrationV2SearchThreadError({ cause }))),
         [ORCHESTRATION_V2_WS_METHODS.searchThreads]: (input) =>
-          ThreadSearch.searchThreadsWithOlderSettledRows({
-            request: input,
-            search: threadSearch.search,
-            searchOlderSettled: threadSearch.searchOlderSettled,
-            sql,
-            readThreads: (threadIds) =>
-              threadManagement.readShellSnapshot({ location: "active", threadIds }),
-            latestSequence: applicationEvents.latestApplicationSequence,
-          }).pipe(
+          currentSpaceIds.pipe(
+            Effect.flatMap((spaceIds) =>
+              ThreadSearch.searchThreadsWithOlderSettledRows({
+                request: input,
+                spaceIds,
+                search: threadSearch.search,
+                searchOlderSettled: threadSearch.searchOlderSettled,
+                sql,
+                readThreads: (threadIds) =>
+                  threadManagement.readShellSnapshot({ location: "active", threadIds, spaceIds }),
+                latestSequence: applicationEvents.latestApplicationSequence,
+              }),
+            ),
             Effect.mapError(
               (cause) =>
                 new OrchestrationSearchThreadsError({
@@ -2000,13 +2065,16 @@ export const layerWsRpc = (
         [ORCHESTRATION_V2_WS_METHODS.getThreadFamily]: (input) =>
           readOmittableShellRows({ familyOf: input.threadId }, "Failed to load the thread family"),
         [ORCHESTRATION_V2_WS_METHODS.getOlderSettledThreads]: (input) =>
-          loadOlderSettledThreadsPage({
-            sql,
-            listThreads: threadManagement.listOlderSettledThreads(input),
-            readThreads: (threadIds) =>
-              threadManagement.readShellSnapshot({ location: "active", threadIds }),
-            latestSequence: applicationEvents.latestApplicationSequence,
-          }).pipe(
+          currentSpaceIds.pipe(
+            Effect.flatMap((spaceIds) =>
+              loadOlderSettledThreadsPage({
+                sql,
+                listThreads: threadManagement.listOlderSettledThreads({ ...input, spaceIds }),
+                readThreads: (threadIds) =>
+                  threadManagement.readShellSnapshot({ location: "active", threadIds, spaceIds }),
+                latestSequence: applicationEvents.latestApplicationSequence,
+              }),
+            ),
             Effect.mapError(
               (cause) =>
                 new OrchestrationV2GetShellSnapshotError({
@@ -2576,7 +2644,8 @@ export const layerWsRpc = (
             Effect.flatMap((key) =>
               key === null
                 ? Effect.succeed({ threads: [] })
-                : listLinkedPullRequestThreads(key).pipe(
+                : currentSpaceIds.pipe(
+                    Effect.flatMap((spaceIds) => listLinkedPullRequestThreads(key, spaceIds)),
                     Effect.provideService(SqlClient.SqlClient, sql),
                   ),
             ),
@@ -3333,6 +3402,8 @@ export const layer = Layer.unwrap(
           Effect.provide(
             layerWsRpc(serverBrowser, reportProfiles, readSettingsClient(url.value)).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
+              // What the connection may see, resolved once and refreshed on a Membership change.
+              Layer.provideMerge(SpaceVisibility.layerCurrentViewer),
               // One principal per connection, read by the authorization middleware and the handlers.
               Layer.provideMerge(CurrentPrincipal.layer(session)),
               // Handler-context reporters see only request defects, not server-wide defects.
