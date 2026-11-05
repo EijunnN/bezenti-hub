@@ -27,6 +27,15 @@ it.effect("bootstraps exactly one Owner whose session carries its user id", () =
     // Reopening the spent startup URL says so instead of calling it an invalid token.
     const reopened = yield* server.request("/api/auth/owner/status", { body: { credential } });
     expect(reopened.body).toEqual({ status: "spent" });
+    // Only the setup link reports itself; any other credential says nothing about whether it existed.
+    const pairing = yield* server.environmentAuth.createPairingLink();
+    yield* server.request("/api/auth/browser-session", {
+      body: { credential: pairing.credential },
+    });
+    const spentPairing = yield* server.request("/api/auth/owner/status", {
+      body: { credential: pairing.credential },
+    });
+    expect(spentPairing.body).toEqual({ status: "not-applicable" });
     const user = created.body.user as { id: string; displayName: string; isOwner: boolean };
     expect(user).toMatchObject({ displayName: "Ada Lovelace", isOwner: true });
     expect(created.body.recoveryCodes).toHaveLength(10);

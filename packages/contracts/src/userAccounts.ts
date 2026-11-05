@@ -18,7 +18,7 @@ export type AuthOwnerBootstrapStatusRequest = typeof AuthOwnerBootstrapStatusReq
 /**
  * `available`: the credential is the administrative bootstrap link and no Owner exists yet.
  * `claimed`: the credential is the administrative bootstrap link but the Owner already exists.
- * `spent`: a link this server issued that was already used, revoked or expired.
+ * `spent`: the administrative bootstrap link, already used, revoked or expired.
  * `not-applicable`: any other credential, which pairs as before.
  */
 export const AuthOwnerBootstrapStatus = Schema.Struct({

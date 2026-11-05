@@ -1,4 +1,5 @@
 import * as Context from "effect/Context";
+import type * as DateTime from "effect/DateTime";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -107,6 +108,17 @@ export class AuthPairingLinkRepository extends Context.Service<
     readonly getByCredential: (
       input: GetAuthPairingLinkByCredentialInput,
     ) => Effect.Effect<Option.Option<AuthPairingLinkRecord>, AuthPairingLinkRepositoryError>;
+    /** The creator of an unspent link; none when the link is gone, spent or revoked. */
+    readonly getUnspentCreator: (input: {
+      readonly id: string;
+    }) => Effect.Effect<
+      Option.Option<{ readonly userId: UserId | null }>,
+      AuthPairingLinkRepositoryError
+    >;
+    readonly revokeUnspentForUser: (input: {
+      readonly userId: UserId;
+      readonly revokedAt: DateTime.Utc;
+    }) => Effect.Effect<ReadonlyArray<string>, AuthPairingLinkRepositoryError>;
   }
 >()("t3/persistence/AuthPairingLinks/AuthPairingLinkRepository") {}
 
@@ -340,6 +352,51 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+  const findUnspentCreator = SqlSchema.findOneOption({
+    Request: Schema.Struct({ id: Schema.String }),
+    Result: Schema.Struct({ userId: Schema.NullOr(UserId) }),
+    execute: ({ id }) => sql`
+      SELECT user_id AS "userId" FROM auth_pairing_links
+      WHERE id = ${id} AND revoked_at IS NULL AND consumed_at IS NULL
+    `,
+  });
+
+  const revokeUnspentRowsForUser = SqlSchema.findAll({
+    Request: Schema.Struct({ userId: UserId, revokedAt: Schema.DateTimeUtcFromString }),
+    Result: Schema.Struct({ id: Schema.String }),
+    execute: ({ userId, revokedAt }) => sql`
+      UPDATE auth_pairing_links
+      SET revoked_at = ${revokedAt}
+      WHERE user_id = ${userId} AND revoked_at IS NULL AND consumed_at IS NULL
+      RETURNING id AS "id"
+    `,
+  });
+
+  const getUnspentCreator: AuthPairingLinkRepository["Service"]["getUnspentCreator"] = (input) =>
+    findUnspentCreator(input).pipe(
+      NodeSqliteClient.readOnly,
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "AuthPairingLinkRepository.getUnspentCreator:query",
+          "AuthPairingLinkRepository.getUnspentCreator:decodeRow",
+          { pairingLinkId: input.id },
+        ),
+      ),
+    );
+
+  const revokeUnspentForUser: AuthPairingLinkRepository["Service"]["revokeUnspentForUser"] = (
+    input,
+  ) =>
+    revokeUnspentRowsForUser(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "AuthPairingLinkRepository.revokeUnspentForUser:query",
+          "AuthPairingLinkRepository.revokeUnspentForUser:decodeRows",
+        ),
+      ),
+      Effect.map((rows) => rows.map((row) => row.id)),
+    );
+
   const revoke: AuthPairingLinkRepository["Service"]["revoke"] = (input) =>
     revokePairingLinkRow(input).pipe(
       Effect.mapError(
@@ -385,6 +442,8 @@ export const make = Effect.gen(function* () {
     listActive,
     revoke,
     getByCredential,
+    getUnspentCreator,
+    revokeUnspentForUser,
   } satisfies AuthPairingLinkRepository["Service"];
 });
 

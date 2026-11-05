@@ -118,6 +118,9 @@ export class UserRepository extends Context.Service<
       input: typeof ConsumeRecoveryCodeInput.Type,
     ) => Effect.Effect<Option.Option<UserId>, UserRepositoryError>;
     readonly getOwner: () => Effect.Effect<Option.Option<UserRecord>, UserRepositoryError>;
+    readonly getByIds: (
+      userIds: ReadonlyArray<UserId>,
+    ) => Effect.Effect<ReadonlyArray<UserRecord>, UserRepositoryError>;
     readonly getByLoginName: (
       loginName: string,
     ) => Effect.Effect<Option.Option<UserRecord>, UserRepositoryError>;
@@ -226,6 +229,12 @@ const make = Effect.gen(function* () {
     Request: UserId,
     Result: UserRecord,
     execute: (userId) => sql`SELECT ${userColumns} FROM users WHERE user_id = ${userId}`,
+  });
+
+  const findUsersByIds = SqlSchema.findAll({
+    Request: Schema.Array(UserId),
+    Result: UserRecord,
+    execute: (userIds) => sql`SELECT ${userColumns} FROM users WHERE ${sql.in("user_id", userIds)}`,
   });
 
   const findOwnerRecord = SqlSchema.findOneOption({
@@ -422,6 +431,13 @@ const make = Effect.gen(function* () {
       return findUserById(userId).pipe(
         NodeSqliteClient.readOnly,
         Effect.mapError(toUserRepositoryError("UserRepository.getById")),
+      );
+    }),
+    getByIds: Effect.fn("UserRepository.getByIds")(function (userIds) {
+      if (userIds.length === 0) return Effect.succeed([]);
+      return findUsersByIds(userIds).pipe(
+        NodeSqliteClient.readOnly,
+        Effect.mapError(toUserRepositoryError("UserRepository.getByIds")),
       );
     }),
     getPasskey: Effect.fn("UserRepository.getPasskey")(function (credentialId) {

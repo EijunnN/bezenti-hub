@@ -50,6 +50,7 @@ function PairRouteView() {
   return (
     <PairingRouteSurface
       auth={authGateState.auth}
+      ownerExists={authGateState.ownerExists === true}
       onAuthenticated={() => {
         // Recreate the connection so WebSocket and cached scopes use the new pairing cookie.
         router.history.replace("/");

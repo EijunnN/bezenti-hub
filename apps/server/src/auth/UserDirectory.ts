@@ -33,6 +33,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Users from "../persistence/Users.ts";
 import * as AccountCredentials from "./AccountCredentials.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
+import * as PairingGrantStore from "./PairingGrantStore.ts";
 import * as SessionStore from "./SessionStore.ts";
 import { makeSignInThrottle } from "./signInThrottle.ts";
 
@@ -245,6 +246,14 @@ export class UserDirectory extends Context.Service<
     readonly findUser: (
       userId: UserId,
     ) => Effect.Effect<Option.Option<AuthUser>, UserDirectoryStorageError>;
+    /** Display names of the Users that exist among the given ids. */
+    readonly displayNames: (
+      userIds: ReadonlyArray<UserId>,
+    ) => Effect.Effect<ReadonlyMap<UserId, string>, UserDirectoryStorageError>;
+    /** The User unless they were disabled or removed. */
+    readonly findActiveUser: (
+      userId: UserId,
+    ) => Effect.Effect<Option.Option<AuthUser>, UserDirectoryStorageError>;
     readonly startOwnerRegistration: (input: {
       readonly displayName: string;
       readonly origin: string;
@@ -417,6 +426,7 @@ const make = Effect.gen(function* () {
   }>(MAX_PENDING_TOTP);
   const throttle = makeSignInThrottle();
   const sessions = yield* SessionStore.SessionStore;
+  const pairingLinks = yield* PairingGrantStore.PairingGrantStore;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const cryptoContext = yield* Effect.context<Mac.Mac | Aead.Aead | SecureRandom.SecureRandom>();
   const withCrypto = Effect.provide(cryptoContext);
@@ -799,9 +809,12 @@ const make = Effect.gen(function* () {
     throttle.reset(keys);
   });
 
-  // A credential change ends every other session, which may belong to whoever took the old one.
+  // A credential change ends every other session and unspent link, which may belong to whoever
+  // took the old one.
   const signOutOtherSessions = (actor: AccountActor) =>
-    sessions.revokeAllForUser(actor.userId, { except: actor.sessionId }).pipe(storage);
+    sessions
+      .revokeAllForUser(actor.userId, { except: actor.sessionId })
+      .pipe(Effect.andThen(pairingLinks.revokeAllForUser(actor.userId)), storage);
 
   const setPassword: UserDirectory["Service"]["setPassword"] = Effect.fn(
     "UserDirectory.setPassword",
@@ -1109,6 +1122,7 @@ const make = Effect.gen(function* () {
       .removePasskeysExcept({ userId: userId.value, credentialId: pending.passkey.credentialId })
       .pipe(storage);
     yield* sessions.revokeAllForUser(userId.value).pipe(storage);
+    yield* pairingLinks.revokeAllForUser(userId.value).pipe(storage);
     return toAuthUser(user.value);
   });
 
@@ -1121,6 +1135,17 @@ const make = Effect.gen(function* () {
     }),
     findUser: Effect.fn("UserDirectory.findUser")(function (userId: UserId) {
       return users.getById(userId).pipe(Effect.map(Option.map(toAuthUser)), storage);
+    }),
+    displayNames: Effect.fn("UserDirectory.displayNames")(function (
+      userIds: ReadonlyArray<UserId>,
+    ) {
+      return users.getByIds(userIds).pipe(
+        Effect.map((found) => new Map(found.map((user) => [user.userId, user.displayName]))),
+        storage,
+      );
+    }),
+    findActiveUser: Effect.fn("UserDirectory.findActiveUser")(function (userId: UserId) {
+      return activeUser(userId).pipe(Effect.map(Option.map(toAuthUser)));
     }),
     startOwnerRegistration,
     verifyOwnerRegistration,

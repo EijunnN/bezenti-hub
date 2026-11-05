@@ -37,10 +37,13 @@ export function PairingPendingSurface() {
 
 export function PairingRouteSurface({
   auth,
+  ownerExists,
   initialErrorMessage,
   onAuthenticated,
 }: {
   auth: AuthSessionState["auth"];
+  /** With an Owner, a failed link offers sign-in instead of asking for a code. */
+  ownerExists: boolean;
   initialErrorMessage?: string;
   onAuthenticated: () => void;
 }) {
@@ -123,6 +126,14 @@ export function PairingRouteSurface({
   if (ownerSetup?.status === "checking") return <PairingPendingSurface />;
   if (ownerSetup?.status === "claimed") return <OwnerAlreadyClaimedSurface />;
   if (ownerSetup?.status === "spent") return <LinkAlreadyUsedSurface />;
+  // With an Owner this page only spends the link it was opened with; there is no code to type.
+  if (ownerExists) {
+    return isSubmitting ? (
+      <PairingPendingSurface />
+    ) : (
+      <LinkFailedSurface errorMessage={errorMessage} />
+    );
+  }
   if (ownerSetup?.status === "available") {
     const { credential: bootstrapCredential } = ownerSetup;
     return canRegisterPasskeys() ? (
@@ -188,6 +199,27 @@ export function PairingRouteSurface({
 
       <div className="mt-6 rounded-lg border border-border/70 bg-background/55 px-3 py-3 text-xs leading-relaxed text-muted-foreground">
         {describeSupportedMethods(auth.bootstrapMethods)}
+      </div>
+    </StandalonePage>
+  );
+}
+
+function LinkFailedSurface({ errorMessage }: { errorMessage: string }) {
+  return (
+    <StandalonePage>
+      <StandalonePageHeader
+        title="This link did not work"
+        description="Sign in with your account instead, or ask for a new link."
+      />
+      {errorMessage ? (
+        <Alert variant="error" className="mt-5">
+          <AlertDescription>{errorMessage}</AlertDescription>
+        </Alert>
+      ) : null}
+      <div className="mt-6">
+        <Button size="sm" render={<Link to="/sign-in" replace />}>
+          Sign in
+        </Button>
       </div>
     </StandalonePage>
   );

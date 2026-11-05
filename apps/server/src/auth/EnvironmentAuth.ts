@@ -5,6 +5,7 @@ import {
   AuthStandardClientScopes,
   type AuthAccessTokenResult,
   type AuthBrowserSessionResult,
+  type AuthAccessSnapshot,
   type AuthClientMetadata,
   type AuthClientSession,
   type AuthCreatePairingCredentialInput,
@@ -46,6 +47,8 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import type * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -501,12 +504,16 @@ export class ServerAuthNotYourSessionError extends Schema.TaggedError<ServerAuth
   {},
 ) {
   override get message(): string {
-    return "Only the Owner can revoke another User's sessions.";
+    return "Only the Owner can revoke another User's sessions and links.";
   }
 }
 
 /** Whose sessions and links a request may see and revoke. */
 export type AccessViewer = Pick<AuthenticatedSession, "sessionId" | "userId">;
+
+export type AccessChange =
+  | PairingGrantStore.BootstrapCredentialChange
+  | SessionStore.SessionCredentialChange;
 
 export class EnvironmentAuth extends Context.Service<
   EnvironmentAuth,
@@ -565,10 +572,12 @@ export class EnvironmentAuth extends Context.Service<
     >;
     readonly listPairingLinks: (input?: {
       readonly excludeSubjects?: ReadonlyArray<string>;
-      /** Without one, every link: the Hub's shell sees them all. */
-      readonly viewer?: AccessViewer;
     }) => Effect.Effect<ReadonlyArray<AuthPairingLink>, ServerAuthInternalError>;
-    readonly revokePairingLink: (id: string) => Effect.Effect<boolean, ServerAuthInternalError>;
+    /** Without a viewer, any link: the Hub's shell manages them all. */
+    readonly revokePairingLink: (
+      id: string,
+      viewer?: AccessViewer,
+    ) => Effect.Effect<boolean, ServerAuthNotYourSessionError | ServerAuthInternalError>;
     readonly issueSession: (input?: {
       readonly ttl?: Duration.Duration;
       readonly subject?: string;
@@ -586,15 +595,14 @@ export class EnvironmentAuth extends Context.Service<
     readonly listClientSessions: (
       viewer: AccessViewer,
     ) => Effect.Effect<ReadonlyArray<AuthClientSession>, ServerAuthInternalError>;
-    /** A live access change as the viewer may see it, or none when it is someone else's. */
-    readonly viewAccessChange: (
-      viewer: AccessViewer,
-      change: PairingGrantStore.BootstrapCredentialChange | SessionStore.SessionCredentialChange,
-    ) => Effect.Effect<
-      Option.Option<
-        PairingGrantStore.BootstrapCredentialChange | SessionStore.SessionCredentialChange
-      >,
-      ServerAuthInternalError
+    /** The viewer's sessions and links now, then the changes to them and to nothing else. */
+    readonly streamAccess: (viewer: AccessViewer) => Effect.Effect<
+      {
+        readonly snapshot: AuthAccessSnapshot;
+        readonly changes: Stream.Stream<AccessChange, ServerAuthInternalError>;
+      },
+      ServerAuthInternalError,
+      Scope.Scope
     >;
     readonly revokeClientSession: (
       viewer: AccessViewer,
@@ -896,13 +904,25 @@ export const make = Effect.gen(function* () {
   // A session with no User of its own (the Hub's shell, the startup link, the desktop, MCP
   // clients until they pick a User) belongs to the Owner. Before an Owner exists it has none.
   // The auth_sessions trigger refuses a session without a User once an Owner exists.
-  const sessionUser = (userId: UserId | undefined) =>
-    userId !== undefined
-      ? Effect.succeed({ userId })
-      : userDirectory.ownerId().pipe(
-          Effect.map((owner) => (Option.isSome(owner) ? { userId: owner.value } : {})),
-          Effect.mapError((cause) => new ServerAuthUserDirectoryError({ cause })),
-        );
+  const sessionUser = Effect.fn("EnvironmentAuth.sessionUser")(function* (
+    userId: UserId | undefined,
+  ) {
+    if (userId === undefined) {
+      const owner = yield* userDirectory
+        .ownerId()
+        .pipe(Effect.mapError((cause) => new ServerAuthUserDirectoryError({ cause })));
+      return Option.isSome(owner) ? { userId: owner.value } : {};
+    }
+    const user = yield* userDirectory
+      .findActiveUser(userId)
+      .pipe(Effect.mapError((cause) => new ServerAuthUserDirectoryError({ cause })));
+    if (Option.isNone(user)) {
+      return yield* new ServerAuthInvalidCredentialError({
+        diagnostic: "The User who created this link can no longer sign in.",
+      });
+    }
+    return { userId };
+  });
 
   const authenticateToken = (
     token: string,
@@ -1011,9 +1031,15 @@ export const make = Effect.gen(function* () {
   const getSessionState: EnvironmentAuth["Service"]["getSessionState"] = Effect.fn(
     "EnvironmentAuth.getSessionState",
   )(function* (request) {
-    const ownerExists = yield* userDirectory
-      .hasOwner()
-      .pipe(Effect.mapError((cause) => new ServerAuthUserDirectoryError({ cause })));
+    // A session has a User exactly when an Owner exists, so only a signed-out check asks.
+    const ownerExists = userDirectory.hasOwner().pipe(
+      Effect.map((exists) => ({ ownerExists: exists })),
+      Effect.catch((cause) =>
+        Effect.logWarning("Could not read whether the Installation has an Owner.", { cause }).pipe(
+          Effect.as({}),
+        ),
+      ),
+    );
     return yield* authenticateRequest(request).pipe(
       Effect.map((session): AuthSessionState => ({
         authenticated: true,
@@ -1022,14 +1048,16 @@ export const make = Effect.gen(function* () {
         sessionMethod: session.method,
         ...(session.expiresAt ? { expiresAt: DateTime.toUtc(session.expiresAt) } : {}),
         ...(session.userId ? { userId: session.userId } : {}),
-        ownerExists,
+        ownerExists: session.userId !== undefined,
       })),
       Effect.catchIf(isServerAuthCredentialError, () =>
-        Effect.succeed({
-          authenticated: false,
-          auth: descriptor,
-          ownerExists,
-        } satisfies AuthSessionState),
+        ownerExists.pipe(
+          Effect.map((owner): AuthSessionState => ({
+            authenticated: false,
+            auth: descriptor,
+            ...owner,
+          })),
+        ),
       ),
     );
   });
@@ -1255,17 +1283,13 @@ export const make = Effect.gen(function* () {
   });
 
   const listPairingLinks: EnvironmentAuth["Service"]["listPairingLinks"] = (input) =>
-    Effect.all([
-      bootstrapCredentials.listActive(),
-      input?.viewer === undefined ? Effect.succeed(undefined) : accessScopeFor(input.viewer),
-    ]).pipe(
-      Effect.map(([pairingLinks, scope]) => {
+    bootstrapCredentials.listActive().pipe(
+      Effect.map((pairingLinks) => {
         const excludedSubjects = input?.excludeSubjects ?? [
           INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT,
         ];
         return pairingLinks
           .filter((pairingLink) => !excludedSubjects.includes(pairingLink.subject))
-          .filter((pairingLink) => scope === undefined || scope.sees(pairingLink.userId))
           .map((link) => ({ ...link, ...authScopeResponse(link.scopes) }))
           .toSorted(
             (left, right) => right.createdAt.epochMilliseconds - left.createdAt.epochMilliseconds,
@@ -1275,11 +1299,25 @@ export const make = Effect.gen(function* () {
       Effect.withSpan("EnvironmentAuth.listPairingLinks"),
     );
 
-  const revokePairingLink: EnvironmentAuth["Service"]["revokePairingLink"] = (id) =>
-    bootstrapCredentials.revoke(id).pipe(
-      Effect.mapError((cause) => new ServerAuthPairingLinkRevocationError({ cause })),
-      Effect.withSpan("EnvironmentAuth.revokePairingLink"),
-    );
+  const revokePairingLink: EnvironmentAuth["Service"]["revokePairingLink"] = Effect.fn(
+    "EnvironmentAuth.revokePairingLink",
+  )(function* (id, viewer) {
+    if (viewer !== undefined) {
+      const scope = yield* accessScopeFor(viewer);
+      if (!scope.seesEveryone) {
+        const creator = yield* bootstrapCredentials
+          .creatorOf(id)
+          .pipe(Effect.mapError((cause) => new ServerAuthPairingLinkRevocationError({ cause })));
+        if (Option.isNone(creator)) return false;
+        if (!scope.sees(creator.value ?? undefined)) {
+          return yield* new ServerAuthNotYourSessionError({});
+        }
+      }
+    }
+    return yield* bootstrapCredentials
+      .revoke(id)
+      .pipe(Effect.mapError((cause) => new ServerAuthPairingLinkRevocationError({ cause })));
+  });
 
   const issueSession: EnvironmentAuth["Service"]["issueSession"] = (input) =>
     sessionUser(undefined).pipe(
@@ -1330,18 +1368,28 @@ export const make = Effect.gen(function* () {
       }),
     );
 
+  /** Names other Users' sessions for the viewer; `names` caches lookups across calls. */
   const withUserNames = Effect.fn("EnvironmentAuth.withUserNames")(function* (
     viewer: AccessViewer,
     clientSessions: ReadonlyArray<AuthClientSession>,
+    names: Map<UserId, string | undefined> = new Map(),
   ) {
-    const names = new Map<UserId, string | undefined>();
-    for (const clientSession of clientSessions) {
-      const userId = clientSession.userId;
-      if (userId === undefined || userId === viewer.userId || names.has(userId)) continue;
-      const user = yield* userDirectory
-        .findUser(userId)
+    const missing = [
+      ...new Set(
+        clientSessions.flatMap((session) =>
+          session.userId === undefined ||
+          session.userId === viewer.userId ||
+          names.has(session.userId)
+            ? []
+            : [session.userId],
+        ),
+      ),
+    ];
+    if (missing.length > 0) {
+      const found = yield* userDirectory
+        .displayNames(missing)
         .pipe(Effect.mapError((cause) => new ServerAuthUserDirectoryError({ cause })));
-      names.set(userId, Option.isSome(user) ? user.value.displayName : undefined);
+      for (const userId of missing) names.set(userId, found.get(userId));
     }
     return clientSessions.map((clientSession): AuthClientSession => {
       const name = clientSession.userId ? names.get(clientSession.userId) : undefined;
@@ -1425,19 +1473,56 @@ export const make = Effect.gen(function* () {
     return yield* withUserNames(viewer, visible);
   });
 
-  const viewAccessChange: EnvironmentAuth["Service"]["viewAccessChange"] = Effect.fn(
-    "EnvironmentAuth.viewAccessChange",
-  )(function* (viewer, change) {
-    if (change.type === "pairingLinkRemoved" || change.type === "clientRemoved") {
-      return Option.some(change);
-    }
+  const streamAccess: EnvironmentAuth["Service"]["streamAccess"] = Effect.fn(
+    "EnvironmentAuth.streamAccess",
+  )(function* (viewer) {
+    // Resolved once per stream: an Owner created mid-stream adopts this viewer's session anyway.
     const scope = yield* accessScopeFor(viewer);
-    if (change.type === "pairingLinkUpserted") {
-      return scope.sees(change.pairingLink.userId) ? Option.some(change) : Option.none();
-    }
-    if (!scope.sees(change.clientSession.userId)) return Option.none();
-    const [clientSession] = yield* withUserNames(viewer, [change.clientSession]);
-    return clientSession === undefined ? Option.none() : Option.some({ ...change, clientSession });
+    // Subscribed before the snapshot is read, so no change falls between the two.
+    const liveChanges = Stream.merge(
+      yield* bootstrapCredentials.subscribeChanges,
+      yield* sessions.subscribeChanges,
+    );
+    const names = new Map<UserId, string | undefined>();
+    const pairingLinks = (yield* listPairingLinks()).filter((link) => scope.sees(link.userId));
+    const clientSessions = yield* withUserNames(
+      viewer,
+      (yield* listSessions()).filter((session) => scope.sees(session.userId)),
+      names,
+    );
+    // Removals carry only an id, so they pass only for ids this viewer was shown.
+    const shownLinks = new Set(pairingLinks.map((link) => link.id));
+    const shownSessions = new Set(clientSessions.map((session) => session.sessionId));
+    const view = Effect.fn("EnvironmentAuth.viewAccessChange")(function* (change: AccessChange) {
+      switch (change.type) {
+        case "pairingLinkUpserted":
+          if (!scope.sees(change.pairingLink.userId)) return Option.none<AccessChange>();
+          shownLinks.add(change.pairingLink.id);
+          return Option.some<AccessChange>(change);
+        case "pairingLinkRemoved":
+          return shownLinks.delete(change.id)
+            ? Option.some<AccessChange>(change)
+            : Option.none<AccessChange>();
+        case "clientRemoved":
+          return shownSessions.delete(change.sessionId)
+            ? Option.some<AccessChange>(change)
+            : Option.none<AccessChange>();
+        case "clientUpserted": {
+          if (!scope.sees(change.clientSession.userId)) return Option.none<AccessChange>();
+          shownSessions.add(change.clientSession.sessionId);
+          const [clientSession] = yield* withUserNames(viewer, [change.clientSession], names);
+          return clientSession === undefined
+            ? Option.none<AccessChange>()
+            : Option.some<AccessChange>({ ...change, clientSession });
+        }
+      }
+    });
+    const changes = liveChanges.pipe(
+      Stream.mapEffect(view),
+      Stream.filter(Option.isSome),
+      Stream.map((change) => change.value),
+    );
+    return { snapshot: { pairingLinks, clientSessions }, changes };
   });
 
   const revokeClientSession: EnvironmentAuth["Service"]["revokeClientSession"] = Effect.fn(
@@ -1448,11 +1533,11 @@ export const make = Effect.gen(function* () {
     }
     const scope = yield* accessScopeFor(viewer);
     if (!scope.seesEveryone) {
-      const target = (yield* listSessions()).find(
-        (session) => session.sessionId === targetSessionId,
-      );
-      if (target === undefined) return false;
-      if (!scope.sees(target.userId)) return yield* new ServerAuthNotYourSessionError({});
+      const target = yield* sessions
+        .getActive(targetSessionId)
+        .pipe(Effect.mapError((cause) => new ServerAuthSessionsListError({ cause })));
+      if (Option.isNone(target)) return false;
+      if (!scope.sees(target.value.userId)) return yield* new ServerAuthNotYourSessionError({});
     }
     return yield* revokeSession(targetSessionId);
   });
@@ -1749,10 +1834,11 @@ export const make = Effect.gen(function* () {
     "EnvironmentAuth.getOwnerBootstrapStatus",
   )(function* (credential) {
     const link = yield* inspectLink(credential);
-    if (Option.isSome(link) && !link.value.spendable) return { status: "spent" } as const;
-    if (!(yield* isAdministrativeBootstrapLink(credential))) {
+    // Only the setup link describes itself, so this never confirms another credential existed.
+    if (Option.isNone(link) || link.value.subject !== INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT) {
       return { status: "not-applicable" } as const;
     }
+    if (!link.value.spendable) return { status: "spent" } as const;
     const hasOwner = yield* userDirectory.hasOwner().pipe(Effect.mapError(userDirectoryFailure));
     return { status: hasOwner ? "claimed" : "available" } as const;
   });
@@ -1967,7 +2053,7 @@ export const make = Effect.gen(function* () {
     listSessions,
     revokeSession,
     listClientSessions,
-    viewAccessChange,
+    streamAccess,
     revokeClientSession,
     revokeOtherClientSessions,
     authenticateHttpRequest,

@@ -135,6 +135,24 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("SessionStore.lay
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(layerSessionStore(), TestClock.layer()))),
   );
 
+  it.effect("keeps a sliding browser session alive while its socket stays open", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const browser = yield* sessions.issue({ subject: "user-sign-in" });
+      yield* sessions.markConnected(browser.sessionId);
+      const invalidated = yield* Deferred.make<void>();
+      yield* sessions
+        .awaitInvalidation(browser.sessionId)
+        .pipe(
+          Effect.andThen(Deferred.succeed(invalidated, undefined)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+      yield* TestClock.adjust(Duration.days(45));
+      expect(yield* Deferred.isDone(invalidated)).toBe(false);
+      expect((yield* sessions.verify(browser.token)).sessionId).toBe(browser.sessionId);
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(layerSessionStore(), TestClock.layer()))),
+  );
+
   it.effect.each([
     { name: "a renewal for the same key", renewal: {}, closesAtMinute: 119 },
     {

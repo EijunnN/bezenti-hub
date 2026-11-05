@@ -1384,8 +1384,6 @@ export const layerWsRpc = (
         yield* SourceControlRepositoryService.SourceControlRepositoryService;
       const sourceControlSignIn = yield* SourceControlSignIn.SourceControlSignIn;
       const withPullRequestViewer = pullRequests.withRoutingCredential;
-      const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
-      const sessions = yield* SessionStore.SessionStore;
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const triage = yield* TriageService.TriageService;
       const hostResources = yield* HostResources.HostResources;
@@ -1726,19 +1724,6 @@ export const layerWsRpc = (
         yield* providerRegistry.refreshInstance(input.instanceId);
         return { disabled: true } as const;
       });
-      const loadAuthAccessSnapshot = () =>
-        Effect.all({
-          pairingLinks: serverAuth.listPairingLinks({ viewer: principal }),
-          clientSessions: serverAuth.listClientSessions(principal),
-        }).pipe(
-          Effect.mapError(
-            (error) =>
-              new AuthAccessStreamError({
-                message: error.message,
-              }),
-          ),
-        );
-
       const loadServerConfig = Effect.fn("ws.loadServerConfig")(function* (options: {
         readonly usageLimitsCommand: boolean;
         readonly workspaceSnapshotsOnDemand: boolean;
@@ -3227,26 +3212,16 @@ export const layerWsRpc = (
         [WS_METHODS.subscribeAuthAccess]: (_input) =>
           Stream.unwrap(
             Effect.gen(function* () {
-              const initialSnapshot = yield* loadAuthAccessSnapshot();
+              // Each User sees their own sessions and links; the Owner sees everyone's.
+              const access = yield* serverAuth
+                .streamAccess(principal)
+                .pipe(
+                  Effect.mapError((error) => new AuthAccessStreamError({ message: error.message })),
+                );
               const revisionRef = yield* Ref.make(1);
-              const accessChanges: Stream.Stream<
-                PairingGrantStore.BootstrapCredentialChange | SessionStore.SessionCredentialChange
-              > = Stream.merge(bootstrapCredentials.streamChanges, sessions.streamChanges);
-
               const liveEvents: Stream.Stream<AuthAccessStreamEvent, AuthAccessStreamError> =
-                accessChanges.pipe(
-                  // Each User sees their own sessions and links; the Owner sees everyone's.
-                  Stream.mapEffect((change) =>
-                    serverAuth
-                      .viewAccessChange(principal, change)
-                      .pipe(
-                        Effect.mapError(
-                          (error) => new AuthAccessStreamError({ message: error.message }),
-                        ),
-                      ),
-                  ),
-                  Stream.filter(Option.isSome),
-                  Stream.map((change) => change.value),
+                access.changes.pipe(
+                  Stream.mapError((error) => new AuthAccessStreamError({ message: error.message })),
                   Stream.mapEffect((change) =>
                     Ref.updateAndGet(revisionRef, (revision) => revision + 1).pipe(
                       Effect.map((revision) =>
@@ -3262,7 +3237,7 @@ export const layerWsRpc = (
                     version: 1 as const,
                     revision: 1,
                     type: "snapshot" as const,
-                    payload: initialSnapshot,
+                    payload: access.snapshot,
                   },
                 ]),
                 liveEvents,

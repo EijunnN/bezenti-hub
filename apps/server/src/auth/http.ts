@@ -705,10 +705,14 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.auth.revokePairingLink")(
           function* (args) {
             yield* annotateEnvironmentRequest(args.endpoint.name);
-            yield* requireEnvironmentScope(AuthAccessWriteScope);
-            const revoked = yield* serverAuth.revokePairingLink(args.payload.id);
+            const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const revoked = yield* serverAuth.revokePairingLink(args.payload.id, session);
             return { revoked };
           },
+          Effect.catchTags({
+            ServerAuthNotYourSessionError: (error) =>
+              Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+          }),
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
             failEnvironmentInternal("pairing_link_revoke_failed", error),
           ),

@@ -412,7 +412,7 @@ const EnvironmentPairingCredentialErrors = [
 const EnvironmentSessionRevokeErrors = [
   EnvironmentScopeRequiredError,
   EnvironmentOperationForbiddenError,
-  // Another User's session, which only the Owner may revoke.
+  // Another User's session or link, which only the Owner may revoke.
   EnvironmentHttpForbiddenError,
   EnvironmentInternalError,
 ] as const;
@@ -647,7 +647,7 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       headers: OptionalBearerHeaders,
       payload: AuthRevokePairingLinkInput,
       success: AuthPairingLinkRevokeResult,
-      error: EnvironmentScopedOperationErrors,
+      error: EnvironmentSessionRevokeErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(

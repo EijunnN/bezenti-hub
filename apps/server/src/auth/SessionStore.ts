@@ -18,6 +18,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
+import type * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
@@ -378,7 +379,7 @@ export class SessionStore extends Context.Service<
     readonly cookieName: string;
     readonly legacyCookieName: string | undefined;
     readonly issue: (input?: {
-      /** A fixed lifetime; without one the session lasts 30 days from its last use. */
+      /** A fixed lifetime; without one a browser session lasts 30 days from its last use. */
       readonly ttl?: Duration.Duration;
       readonly subject?: string;
       readonly userId?: UserId;
@@ -413,7 +414,16 @@ export class SessionStore extends Context.Service<
       ReadonlyArray<AuthClientSession>,
       SessionCredentialInternalError
     >;
+    readonly getActive: (
+      sessionId: AuthSessionId,
+    ) => Effect.Effect<Option.Option<AuthClientSession>, SessionCredentialInternalError>;
     readonly streamChanges: Stream.Stream<SessionCredentialChange>;
+    /** Changes from the moment this runs, so a snapshot read afterwards misses none. */
+    readonly subscribeChanges: Effect.Effect<
+      Stream.Stream<SessionCredentialChange>,
+      never,
+      Scope.Scope
+    >;
     /** Completes when a live socket's session is revoked or expires without a renewal for its DPoP key. */
     readonly awaitInvalidation: (
       sessionId: AuthSessionId,
@@ -735,7 +745,8 @@ const make = Effect.gen(function* () {
         },
         issuedAt,
         expiresAt,
-        sliding: input?.ttl === undefined,
+        // A person signs in again; tokens held by agents and scripts keep a fixed lifetime.
+        sliding: input?.ttl === undefined && claims.method === "browser-session-cookie",
       } satisfies AuthSessions.CreateAuthSessionInput;
       const replacedSessionIds = yield* (
         input?.replaceSessionId !== undefined || input?.replaceActiveForSubjectAndMethod
@@ -1140,20 +1151,28 @@ const make = Effect.gen(function* () {
           const latest = rows.at(-1);
           if (latest !== undefined && Option.isSome(latest)) current = latest.value;
           const now = yield* DateTime.now;
-          const remaining = current.expiresAt.epochMilliseconds - now.epochMilliseconds;
-          if (remaining > 0) {
-            yield* Effect.raceFirst(nextRemoval, Effect.sleep(Duration.millis(remaining)));
-            continue;
-          }
-          // An open socket is use, so it keeps a sliding session alive.
+          // An open socket is use: a sliding session renews an interval before its deadline.
           if (current.sliding) {
+            const untilRenewal =
+              current.expiresAt.epochMilliseconds -
+              Duration.toMillis(SLIDING_RENEWAL_INTERVAL) -
+              now.epochMilliseconds;
+            if (untilRenewal > 0) {
+              yield* Effect.raceFirst(nextRemoval, Effect.sleep(Duration.millis(untilRenewal)));
+              continue;
+            }
             const renewed = yield* renewSliding(current, now).pipe(
               Effect.mapError(
                 (cause) =>
                   new SessionCredentialVerificationError({ sessionId: current.sessionId, cause }),
               ),
             );
-            if (renewed.epochMilliseconds > now.epochMilliseconds) continue;
+            if (renewed.epochMilliseconds > current.expiresAt.epochMilliseconds) continue;
+          }
+          const remaining = current.expiresAt.epochMilliseconds - now.epochMilliseconds;
+          if (remaining > 0) {
+            yield* Effect.raceFirst(nextRemoval, Effect.sleep(Duration.millis(remaining)));
+            continue;
           }
           const successorId =
             proofKeyThumbprint === undefined
@@ -1184,10 +1203,16 @@ const make = Effect.gen(function* () {
     issueWebSocketToken,
     verifyWebSocketToken,
     listActive,
+    getActive: Effect.fn("SessionStore.getActive")(function (sessionId: AuthSessionId) {
+      return loadActiveSession(sessionId).pipe(
+        Effect.mapError((cause) => new ActiveSessionsListError({ cause })),
+      );
+    }),
     awaitInvalidation,
     get streamChanges() {
       return Stream.fromPubSub(changesPubSub);
     },
+    subscribeChanges: PubSub.subscribe(changesPubSub).pipe(Effect.map(Stream.fromSubscription)),
     revoke,
     revokeAllExcept,
     revokeAllForUser,

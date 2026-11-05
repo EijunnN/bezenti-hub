@@ -19,6 +19,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
+import type * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
@@ -225,7 +226,21 @@ export class PairingGrantStore extends Context.Service<
       BootstrapCredentialInternalError
     >;
     readonly streamChanges: Stream.Stream<BootstrapCredentialChange>;
+    /** Changes from the moment this runs, so a snapshot read afterwards misses none. */
+    readonly subscribeChanges: Effect.Effect<
+      Stream.Stream<BootstrapCredentialChange>,
+      never,
+      Scope.Scope
+    >;
     readonly revoke: (id: string) => Effect.Effect<boolean, BootstrapCredentialInternalError>;
+    /** Who created an unspent link: none when it is gone or spent, null for the Hub's shell. */
+    readonly creatorOf: (
+      id: string,
+    ) => Effect.Effect<Option.Option<UserId | null>, BootstrapCredentialInternalError>;
+    /** Ends a User's unspent links, for when their credentials or access change. */
+    readonly revokeAllForUser: (
+      userId: UserId,
+    ) => Effect.Effect<number, BootstrapCredentialInternalError>;
     readonly consume: (
       credential: string,
       input?: {
@@ -643,13 +658,39 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const creatorOf: PairingGrantStore["Service"]["creatorOf"] = Effect.fn(
+    "PairingGrantStore.creatorOf",
+  )(
+    function* (id) {
+      const link = yield* pairingLinks.getUnspentCreator({ id });
+      return Option.map(link, (row) => row.userId);
+    },
+    Effect.mapError((cause) => new BootstrapCredentialLookupError({ cause })),
+  );
+
+  const revokeAllForUser: PairingGrantStore["Service"]["revokeAllForUser"] = Effect.fn(
+    "PairingGrantStore.revokeAllForUser",
+  )(function* (userId) {
+    const revokedAt = yield* DateTime.now;
+    const ids = yield* pairingLinks
+      .revokeUnspentForUser({ userId, revokedAt })
+      .pipe(
+        Effect.mapError((cause) => new PairingLinkRevokeError({ pairingLinkId: userId, cause })),
+      );
+    yield* Effect.forEach(ids, emitRemoved, { discard: true });
+    return ids.length;
+  });
+
   return PairingGrantStore.of({
     inspect,
+    creatorOf,
+    revokeAllForUser,
     issueOneTimeToken,
     listActive,
     get streamChanges() {
       return Stream.fromPubSub(changesPubSub);
     },
+    subscribeChanges: PubSub.subscribe(changesPubSub).pipe(Effect.map(Stream.fromSubscription)),
     revoke,
     consume,
   });

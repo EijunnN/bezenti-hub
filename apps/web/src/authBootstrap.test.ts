@@ -415,15 +415,25 @@ describe("resolveInitialServerAuthGateState", () => {
   });
 
   it.each([
-    { ownerExists: true, path: "/sign-in" },
-    { ownerExists: false, path: "/pair" },
+    { ownerExists: true, url: "http://localhost/", path: "/sign-in" },
+    { ownerExists: false, url: "http://localhost/", path: "/pair" },
+    // A rejected link goes where its error is shown, which offers sign-in.
+    { ownerExists: true, url: "http://localhost/#token=used-token", path: "/pair" },
   ])(
-    "sends a signed-out visit to $path when ownerExists is $ownerExists",
-    async ({ ownerExists, path }) => {
+    "sends a signed-out visit to $url to $path when ownerExists is $ownerExists",
+    async ({ ownerExists, url, path }) => {
       await installAuthApi({
         session: () => ({ ...unauthenticatedSession(LOOPBACK_AUTH), ownerExists }),
+        browserSession: () =>
+          Effect.fail(
+            new EnvironmentAuthInvalidError({
+              code: "auth_invalid",
+              reason: "invalid_credential",
+              traceId: "trace-used-link",
+            }),
+          ),
       });
-      installTestBrowser("http://localhost/");
+      installTestBrowser(url);
       const { resolveInitialServerAuthGateState, signedOutRoute } =
         await import("./environments/primary/auth");
 

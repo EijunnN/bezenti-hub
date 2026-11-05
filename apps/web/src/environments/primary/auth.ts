@@ -487,9 +487,18 @@ export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGat
     });
 }
 
-/** Where a signed-out visit goes: sign-in once the Hub has an Owner, pairing before that. */
-export function signedOutRoute(state: { readonly status: string; readonly ownerExists?: boolean }) {
-  return state.status === "requires-auth" && state.ownerExists === true ? "/sign-in" : "/pair";
+/**
+ * Where a signed-out visit goes: sign-in once the Hub has an Owner, pairing before that. A link
+ * that failed goes to the pairing page, which shows why and offers sign-in.
+ */
+export function signedOutRoute(state: {
+  readonly status: string;
+  readonly ownerExists?: boolean;
+  readonly errorMessage?: string;
+}) {
+  return state.status === "requires-auth" && state.ownerExists === true && !state.errorMessage
+    ? "/sign-in"
+    : "/pair";
 }
 
 export function __resetServerAuthBootstrapForTests() {

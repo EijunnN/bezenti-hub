@@ -220,8 +220,9 @@ while before you can try again.
 
 ### Your sessions
 
-A sign-in lasts 30 days and renews each time you use it, so a device you use
-regularly stays signed in. **Settings → Access → Your sessions** lists your
+A browser sign-in lasts 30 days and renews each time you use it, so a device
+you use regularly stays signed in. Tokens for apps, outside agents and scripts
+last 30 days from when they were issued. **Settings → Access → Your sessions** lists your
 browsers, devices and outside agents; revoke any of them there and its open
 connections close at once. The Owner sees and can revoke every User's sessions.
 

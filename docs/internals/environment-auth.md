@@ -48,24 +48,32 @@ forgot its User would otherwise silently act as the Owner. Instead an
 such a path fails closed. Creating the Owner hands it every earlier session,
 since before then only the machine's operator could pair.
 
-Sessions issued without a fixed lifetime slide: the row's `expires_at`, not the
-signed `exp`, is the deadline, and each use moves it to 30 days ahead, written at
-most once an hour. An open socket counts as use. Short-lived DPoP tokens and
-other explicit lifetimes keep their `exp`. The browser cookie's expiry is
-re-sent on every `/api/auth/session` check, so it follows the row.
+Browser sessions slide: the row's `expires_at`, not the signed `exp`, is the
+deadline, and each use moves it to 30 days ahead, written at most once an hour.
+An open socket renews it an hour before the deadline, since the renewal only
+moves a deadline that has not passed. Bearer, DPoP, MCP and CLI tokens keep the
+fixed lifetime in their `exp`: they are held unattended, so use must not keep a
+leaked one alive. The browser cookie's expiry is re-sent on every
+`/api/auth/session` check, so it follows the row.
 
 Each User sees and revokes their own sessions and links; the Owner (or anyone
-before an Owner exists) sees everyone's. The access stream filters live changes
-per viewer with the same rule as the snapshot.
+before an Owner exists) sees everyone's. The access stream subscribes before
+reading its snapshot and passes a removal only for an id it already showed that
+viewer, since a removal carries nothing else to scope it by. A link is checked
+against its User when redeemed, so a disabled User's links stop working, and a
+credential change or reset revokes the User's unspent links along with their
+other sessions: a link minted with a stolen session must not outlive the change
+that ends that session.
 
 The administrative bootstrap link creates the Owner exactly once
 ([UserDirectory](../../apps/server/src/auth/UserDirectory.ts)); the passkey is
 verified before the link is spent, so a cancelled registration does not burn
 it. Once an Owner exists that link refuses Owner creation and the web app sends
 its visitor to sign in, though other clients can still exchange it to pair as
-the Owner. A spent, revoked or expired stored link reports `spent` from the
-owner-status endpoint, so the web app says the link was used rather than
-calling it invalid. Signed-out visits go to `/sign-in` once an Owner exists
+the Owner. Once used, revoked or expired, that link reports `spent` from the
+owner-status endpoint, so the web app says it was used rather than calling it
+invalid. Every other credential reports `not-applicable`, so the unauthenticated
+endpoint never confirms that one existed. Signed-out visits go to `/sign-in` once an Owner exists
 (the session state reports `ownerExists`); the pairing-code form only appears
 on a fresh Installation.
 A passkey is bound to the host name the browser used when it was registered
