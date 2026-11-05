@@ -22,8 +22,9 @@ irm https://t3.codes/install.ps1 | iex
 
 This installs the `t3` binary to `~/.local/bin`. If your shell reports `command not found`
 afterwards, that directory is not on your `PATH` yet; the installer prints the
-line to add. Set `T3CODE_CHANNEL=nightly` to install the nightly train, or
-`T3CODE_VERSION` to pin an exact version.
+line to add. Set `T3CODE_VERSION` to the exact version to install and
+`T3CODE_RELEASE_BASE_URL` to your release source; see
+[Updating T3 Code](./updating.md#install-a-new-version).
 
 | Task                                             | Command                                                                 |
 | ------------------------------------------------ | ----------------------------------------------------------------------- |

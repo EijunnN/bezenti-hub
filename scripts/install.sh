@@ -1,16 +1,16 @@
 #!/bin/sh
-# Installs the T3 Code CLI from a GitHub Release archive. Needs only sh, tar,
-# sha256sum or shasum, and curl or wget; no Node, npm, or compiler.
+# Installs the T3 Code CLI from this fork's own release source. Needs only sh,
+# tar, sha256sum or shasum, and curl or wget; no Node, npm, or compiler.
+# Upstream's releases are never used (ADR 0007).
 #
 #   curl -fsSL https://t3.codes/install.sh | sh
 #
 # Environment:
-#   T3CODE_CHANNEL           release train to follow: stable, nightly, or preview
-#                            (default: stable; preview is a maintainers' test train)
-#   T3CODE_VERSION           exact version to install (overrides T3CODE_CHANNEL)
+#   T3CODE_VERSION           exact version to install (required)
 #   T3CODE_HOME              T3 home directory (default: ~/.t3)
 #   T3CODE_INSTALL_BIN_DIR   where the `t3` symlink goes (default: ~/.local/bin)
-#   T3CODE_RELEASE_BASE_URL  mirror for releases/download (default: GitHub)
+#   T3CODE_RELEASE_BASE_URL  release source laid out as <url>/v<version>/<file>
+#                            (required to download; may carry a ?query)
 #
 # The archive is unpacked into $T3CODE_HOME/runtime/versions/<version>, the
 # same layout `t3 service install` uses, so the service reuses this download
@@ -18,7 +18,13 @@
 set -eu
 
 repo="pingdotgg/t3code"
-base_url="${T3CODE_RELEASE_BASE_URL:-https://github.com/${repo}/releases/download}"
+# The query, such as a signed mirror token, goes after each file name.
+release_source="${T3CODE_RELEASE_BASE_URL:-}"
+release_query=
+case "$release_source" in
+  *\?*) release_query="?${release_source#*\?}"; release_source="${release_source%%\?*}" ;;
+esac
+while [ "${release_source%/}" != "$release_source" ]; do release_source="${release_source%/}"; done
 t3_home="${T3CODE_HOME:-$HOME/.t3}"
 case "$t3_home" in
   /*) ;;
@@ -153,44 +159,8 @@ else
   fail "sha256sum or shasum is required"
 fi
 
-channel="${T3CODE_CHANNEL:-stable}"
 version="${T3CODE_VERSION:-}"
-if [ -z "$version" ]; then
-  case "$channel" in
-    stable) tag_pattern='v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)' ;;
-    nightly | preview) tag_pattern="v\([0-9][^\"]*-${channel}\.[0-9]*\.[0-9]*\)" ;;
-    *) fail "T3CODE_CHANNEL must be stable, nightly, or preview" ;;
-  esac
-  tmp_index="$(mktemp)"
-  if [ "$channel" = stable ]; then
-    # release.yml marks only plain stable releases latest. This is a github.com
-    # page, so it is not cut off by a page of newer nightlies or the API quota.
-    fetch "https://github.com/${repo}/releases/latest" "$tmp_index" application/json
-    version="$(sed -n "s/.*\"tag_name\": *\"${tag_pattern}\".*/\1/p" "$tmp_index" | head -n 1)"
-  else
-    page=1
-    while [ -z "$version" ] && [ "$page" -le 10 ]; do
-      fetch "https://api.github.com/repos/${repo}/releases?per_page=100&page=${page}" "$tmp_index"
-      version="$(sed -n "s/.*\"tag_name\": *\"${tag_pattern}\".*/\1/p" "$tmp_index" | head -n 1)"
-      grep -q '"tag_name"' "$tmp_index" || break
-      page=$((page + 1))
-    done
-  fi
-  rm -f "$tmp_index"
-  [ -n "$version" ] || fail "could not find a ${channel} release; set T3CODE_VERSION"
-fi
-case "$version" in
-  *-preview.*)
-    printf '%s\n' \
-      "t3 ${version} is a preview build." \
-      "  Preview builds are cut by maintainers from unreleased branches to exercise the release" \
-      "  pipeline. They can be broken, receive no fixes, and are never offered as updates." \
-      "  Set T3CODE_CHANNEL=stable (the default) for a supported build." >&2
-    if [ "$channel" != "preview" ] && [ -z "${T3CODE_VERSION:-}" ]; then
-      fail "refusing a preview build that was not explicitly requested"
-    fi
-    ;;
-esac
+[ -n "$version" ] || fail "set T3CODE_VERSION to the exact version to install"
 
 stem="t3-${version}-${platform}-${arch}"
 archive="${stem}.tar.gz"
@@ -200,6 +170,7 @@ target_dir="${versions_dir}/${version}"
 if [ -f "${target_dir}/.install-complete" ] && [ "$(cat "${target_dir}/.install-complete")" = "$version" ]; then
   step "Version ${version} is already downloaded."
 else
+  [ -n "$release_source" ] || fail "t3 ${version} is not installed and no release source is configured; set T3CODE_RELEASE_BASE_URL"
   mkdir -p "$versions_dir"
   staging="$(mktemp -d "${versions_dir}/.staging-XXXXXX")"
   download_pid=
@@ -211,7 +182,7 @@ else
   printf '  %sInstalling%s T3 Code %s%s%s\n\n' "$muted" "$reset" "$bold" "$version" "$reset" >&2
   step "Downloading..."
   fetch_status=0
-  fetch "${base_url}/v${version}/SHA256SUMS" "${staging}/SHA256SUMS" || fetch_status=$?
+  fetch "${release_source}/v${version}/SHA256SUMS${release_query}" "${staging}/SHA256SUMS" || fetch_status=$?
   if [ "$fetch_status" -eq 44 ]; then
     fail "t3 ${version} has no release archive for ${platform}-${arch}; releases before the self-contained CLI can only be installed with \`npm install -g t3@${version}\`"
   elif [ "$fetch_status" -ne 0 ]; then
@@ -219,7 +190,7 @@ else
   fi
   expected="$(grep " \*\{0,1\}${archive}\$" "${staging}/SHA256SUMS" | cut -d' ' -f1)"
   [ -n "$expected" ] || fail "t3 ${version} has no release archive for ${platform}-${arch}"
-  download "${base_url}/v${version}/${archive}" "${staging}/${archive}"
+  download "${release_source}/v${version}/${archive}${release_query}" "${staging}/${archive}"
 
   step "Verifying the download..."
   actual="$(checksum "${staging}/${archive}")"

@@ -1,23 +1,30 @@
-# Installs the T3 Code CLI from a GitHub Release archive on Windows. Needs
-# only PowerShell 5.1+; no Node, npm, or compiler.
+# Installs the T3 Code CLI on Windows from this fork's own release source.
+# Needs only PowerShell 5.1+; no Node, npm, or compiler. Upstream's releases are
+# never used (ADR 0007).
 #
 #   irm https://t3.codes/install.ps1 | iex
 #
 # Environment:
-#   T3CODE_CHANNEL           release train to follow: stable, nightly, or preview
-#                            (default: stable; preview is a maintainers' test train)
-#   T3CODE_VERSION           exact version to install (overrides T3CODE_CHANNEL)
+#   T3CODE_VERSION           exact version to install (required)
 #   T3CODE_HOME              T3 home directory (default: ~\.t3)
 #   T3CODE_INSTALL_BIN_DIR   where t3.exe is linked (default: ~\.local\bin)
-#   T3CODE_RELEASE_BASE_URL  mirror for releases/download (default: GitHub)
+#   T3CODE_RELEASE_BASE_URL  release source laid out as <url>/v<version>/<file>
+#                            (required to download; may carry a ?query)
 #
 # The archive is unpacked into $T3CODE_HOME\runtime\versions\<version>, the
 # same layout `t3 service install` uses, so the service reuses this download.
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$repo = "pingdotgg/t3code"
-$baseUrl = if ($env:T3CODE_RELEASE_BASE_URL) { $env:T3CODE_RELEASE_BASE_URL.TrimEnd("/") } else { "https://github.com/$repo/releases/download" }
+# The query, such as a signed mirror token, goes after each file name.
+$releaseSource = "$env:T3CODE_RELEASE_BASE_URL".Trim()
+$releaseQuery = ""
+$queryStart = $releaseSource.IndexOf("?")
+if ($queryStart -ge 0) {
+  $releaseQuery = $releaseSource.Substring($queryStart)
+  $releaseSource = $releaseSource.Substring(0, $queryStart)
+}
+$releaseSource = $releaseSource.TrimEnd("/")
 $t3Home = if ($env:T3CODE_HOME) { $env:T3CODE_HOME } else { Join-Path $HOME ".t3" }
 $binDir = if ($env:T3CODE_INSTALL_BIN_DIR) { $env:T3CODE_INSTALL_BIN_DIR } else { Join-Path $HOME ".local\bin" }
 
@@ -124,37 +131,8 @@ $arch = switch ($rawArch) {
   default { Fail "unsupported architecture $rawArch" }
 }
 
-$channel = if ($env:T3CODE_CHANNEL) { $env:T3CODE_CHANNEL } else { "stable" }
 $version = $env:T3CODE_VERSION
-if (-not $version) {
-  $tagPattern = switch ($channel) {
-    "stable" { '^v\d+\.\d+\.\d+$' }
-    "nightly" { '^v\d+\.\d+\.\d+-nightly\.\d+\.\d+$' }
-    "preview" { '^v\d+\.\d+\.\d+-preview\.\d+\.\d+$' }
-    default { Fail "T3CODE_CHANNEL must be stable, nightly, or preview" }
-  }
-  if ($channel -eq "stable") {
-    # release.yml marks only plain stable releases latest. This is a github.com
-    # page, so it is not cut off by a page of newer nightlies or the API quota.
-    $release = Invoke-RestMethod -Uri "https://github.com/$repo/releases/latest" -Headers @{ "User-Agent" = "t3-install"; "Accept" = "application/json" }
-    $tag = ($release | Where-Object { $_.tag_name -match $tagPattern }).tag_name
-  } else {
-    $tag = $null
-    for ($page = 1; -not $tag -and $page -le 10; $page++) {
-      $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=100&page=$page" -Headers @{ "User-Agent" = "t3-install" }
-      $tag = ($releases | Where-Object { -not $_.draft -and $_.tag_name -match $tagPattern } | Select-Object -First 1).tag_name
-      if (-not $releases) { break }
-    }
-  }
-  if (-not $tag) { Fail "could not find a $channel release; set T3CODE_VERSION" }
-  $version = $tag.Substring(1)
-}
-if ($version -match '-preview\.') {
-  Write-Warning "t3 $version is a preview build. Preview builds are cut by maintainers from unreleased branches to exercise the release pipeline. They can be broken, receive no fixes, and are never offered as updates. Set T3CODE_CHANNEL=stable (the default) for a supported build."
-  if ($channel -ne "preview" -and -not $env:T3CODE_VERSION) {
-    Fail "refusing a preview build that was not explicitly requested"
-  }
-}
+if (-not $version) { Fail "set T3CODE_VERSION to the exact version to install" }
 
 $stem = "t3-$version-win32-$arch"
 $archive = "$stem.zip"
@@ -165,6 +143,7 @@ $marker = Join-Path $targetDir ".install-complete"
 if ((Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -eq $version)) {
   Step "Version $version is already downloaded."
 } else {
+  if (-not $releaseSource) { Fail "t3 $version is not installed and no release source is configured; set T3CODE_RELEASE_BASE_URL" }
   New-Item -ItemType Directory -Force -Path $versionsDir | Out-Null
   $staging = Join-Path $versionsDir (".staging-" + [System.IO.Path]::GetRandomFileName())
   New-Item -ItemType Directory -Path $staging | Out-Null
@@ -173,7 +152,7 @@ if ((Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -eq $version)) {
     [Console]::Error.WriteLine("  ${muted}Installing$reset T3 Code $bold$version$reset`n")
     Step "Downloading..."
     try {
-      Fetch "$baseUrl/v$version/SHA256SUMS" (Join-Path $staging "SHA256SUMS")
+      Fetch "$releaseSource/v$version/SHA256SUMS$releaseQuery" (Join-Path $staging "SHA256SUMS")
     } catch {
       $status = $_.Exception.Response.StatusCode.value__
       if ($status -eq 404) {
@@ -181,7 +160,7 @@ if ((Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -eq $version)) {
       }
       throw
     }
-    Fetch "$baseUrl/v$version/$archive" (Join-Path $staging $archive) -progress
+    Fetch "$releaseSource/v$version/$archive$releaseQuery" (Join-Path $staging $archive) -progress
 
     Step "Verifying the download..."
 

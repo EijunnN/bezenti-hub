@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - Runs the generated runner script under a real sh.
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -18,6 +19,10 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as SshAuth from "./auth.ts";
 import { SshCommandError, SshPasswordPromptError } from "./errors.ts";
 import * as SshTunnel from "./tunnel.ts";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 const makeSuccessfulProcess = (stdout: string) => {
   const stdoutStream = Stream.make(new TextEncoder().encode(stdout));
@@ -108,14 +113,49 @@ describe("ssh tunnel scripts", () => {
     );
   });
 
-  it("downloads an archive only from a configured release source, never upstream", () => {
-    assert.throws(
-      () => SshTunnel.buildRemoteT3RunnerScript({ archiveVersion: ARCHIVE.archiveVersion }),
-      SshTunnel.SshMissingReleaseSourceError,
-    );
-    const script = SshTunnel.buildRemoteT3RunnerScript(ARCHIVE);
-    assert.include(script, "T3_RELEASE_BASE_URL='https://releases.example.com/t3'");
-    assert.notInclude(script, "pingdotgg");
+  // Runs the generated runner under a real `sh`, so the shell side of the release source is covered.
+  const runRunner = (script: string, home: string) => {
+    const runner = NodePath.join(home, "run-t3.sh");
+    NodeFS.writeFileSync(runner, script);
+    return NodeChildProcess.spawnSync("sh", [runner, "--version"], {
+      env: { PATH: process.env.PATH ?? "", HOME: home },
+      encoding: "utf8",
+    });
+  };
+
+  it("runs an installed runtime without a release source and downloads only from one", () => {
+    const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-ssh-runner-"));
+    try {
+      const unsourced = SshTunnel.buildRemoteT3RunnerScript({
+        archiveVersion: ARCHIVE.archiveVersion,
+      });
+      assert.notInclude(unsourced, "pingdotgg");
+      const missing = runRunner(unsourced, home);
+      assert.notEqual(missing.status, 0);
+      assert.include(missing.stderr, "no release source");
+
+      const runtime = NodePath.join(home, ".t3/runtime/versions", ARCHIVE.archiveVersion);
+      NodeFS.mkdirSync(runtime, { recursive: true });
+      NodeFS.writeFileSync(NodePath.join(runtime, "t3"), "#!/bin/sh\necho pinned-runtime\n", {
+        mode: 0o755,
+      });
+      NodeFS.writeFileSync(
+        NodePath.join(runtime, ".install-complete"),
+        `${ARCHIVE.archiveVersion}\n`,
+      );
+      const installed = runRunner(unsourced, home);
+      assert.equal(installed.status, 0, installed.stderr);
+      assert.include(installed.stdout, "pinned-runtime");
+    } finally {
+      NodeFS.rmSync(home, { recursive: true, force: true });
+    }
+
+    const signed = SshTunnel.buildRemoteT3RunnerScript({
+      ...ARCHIVE,
+      releaseBaseUrl: "https://releases.example.com/t3/?token=abc",
+    });
+    assert.include(signed, "T3_RELEASE_PREFIX='https://releases.example.com/t3'");
+    assert.include(signed, "T3_RELEASE_QUERY='?token=abc'");
   });
 
   it.effect("accepts launch JSON after remote shell startup noise", () => {

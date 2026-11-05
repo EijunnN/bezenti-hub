@@ -20,7 +20,10 @@ it.layer(NodeServices.layer)("launcher path", (it) => {
       const bare = yield* resolveLauncherPath.pipe(
         Effect.provideService(HostProcess.InvokedAs, "t3"),
         Effect.provideService(HostProcess.Environment, {
-          PATH: `${path.join(root, "missing")}:${path.join(root, "bin")}`,
+          // The host delimiter: a Windows drive letter holds a colon.
+          PATH: [path.join(root, "missing"), path.join(root, "bin")].join(
+            HostProcess.Platform.defaultValue() === "win32" ? ";" : ":",
+          ),
         }),
         Effect.provideService(HostProcess.WorkingDirectory, root),
       );
@@ -38,6 +41,9 @@ it.layer(NodeServices.layer)("launcher path", (it) => {
       assert.equal(bare, launcher);
       assert.equal(relative, launcher);
       assert.equal(absent, undefined);
-    }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
+    }).pipe(
+      Effect.scoped,
+      Effect.provideService(HostProcess.Platform, HostProcess.Platform.defaultValue()),
+    ),
   );
 });

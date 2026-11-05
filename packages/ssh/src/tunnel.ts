@@ -2,6 +2,7 @@ import type {
   DesktopSshEnvironmentBootstrap,
   DesktopSshEnvironmentTarget,
 } from "@t3tools/contracts";
+import { cliReleaseSourceFromUrl, cliReleaseSourceParts } from "@t3tools/shared/cliRelease";
 import { waitForHttpReady as waitForHttpReadyShared } from "@t3tools/shared/httpReadiness";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as NetService from "@t3tools/shared/Net";
@@ -437,7 +438,8 @@ if [ -z "$T3_ARCHIVE_VERSION" ]; then
 fi
 # Self-contained release archive: no Node, npm, or compiler on the remote.
 # Unpacked into the pinned-runtime layout so \`t3 service install\` reuses it.
-T3_RELEASE_BASE_URL=@@T3_RELEASE_BASE_URL@@
+T3_RELEASE_PREFIX=@@T3_RELEASE_PREFIX@@
+T3_RELEASE_QUERY=@@T3_RELEASE_QUERY@@
 T3_RUNTIME_DIR="$HOME/.t3/runtime/versions/$T3_ARCHIVE_VERSION"
 t3_runtime_ready() {
   [ -x "$T3_RUNTIME_DIR/t3" ] && [ "$(cat "$T3_RUNTIME_DIR/.install-complete" 2>/dev/null)" = "$T3_ARCHIVE_VERSION" ]
@@ -474,6 +476,10 @@ if ! t3_runtime_ready; then
   trap 'rm -rf "$T3_LOCK"' EXIT
 fi
 if ! t3_runtime_ready; then
+  if [ -z "$T3_RELEASE_PREFIX" ]; then
+    printf 't3 %s is not installed on this host and no release source is configured to download it. Set T3CODE_RELEASE_BASE_URL, or install it there yourself.\\n' "$T3_ARCHIVE_VERSION" >&2
+    exit 1
+  fi
   case "$(uname -s)" in
     Darwin) T3_PLATFORM="darwin" ;;
     Linux) T3_PLATFORM="linux" ;;
@@ -493,8 +499,8 @@ if ! t3_runtime_ready; then
     else printf 'Remote host needs curl or wget to download %s.\\n' "$T3_ARCHIVE" >&2; exit 1
     fi
   }
-  t3_fetch "$T3_RELEASE_BASE_URL/v$T3_ARCHIVE_VERSION/SHA256SUMS" "$T3_STAGING/SHA256SUMS" @@T3_ARCHIVE_CHECKSUMS_SECONDS@@
-  t3_fetch "$T3_RELEASE_BASE_URL/v$T3_ARCHIVE_VERSION/$T3_ARCHIVE" "$T3_STAGING/$T3_ARCHIVE" @@T3_ARCHIVE_DOWNLOAD_SECONDS@@
+  t3_fetch "$T3_RELEASE_PREFIX/v$T3_ARCHIVE_VERSION/SHA256SUMS$T3_RELEASE_QUERY" "$T3_STAGING/SHA256SUMS" @@T3_ARCHIVE_CHECKSUMS_SECONDS@@
+  t3_fetch "$T3_RELEASE_PREFIX/v$T3_ARCHIVE_VERSION/$T3_ARCHIVE$T3_RELEASE_QUERY" "$T3_STAGING/$T3_ARCHIVE" @@T3_ARCHIVE_DOWNLOAD_SECONDS@@
   T3_EXPECTED="$(grep " \\*\\{0,1\\}$T3_ARCHIVE$" "$T3_STAGING/SHA256SUMS" | cut -d' ' -f1)"
   if command -v sha256sum >/dev/null 2>&1; then
     T3_ACTUAL="$(sha256sum "$T3_STAGING/$T3_ARCHIVE" | cut -d' ' -f1)"
@@ -789,15 +795,6 @@ export class SshMissingRunnerError extends Schema.TaggedError<SshMissingRunnerEr
   }
 }
 
-export class SshMissingReleaseSourceError extends Schema.TaggedError<SshMissingReleaseSourceError>()(
-  "SshMissingReleaseSourceError",
-  {},
-) {
-  override get message(): string {
-    return "Installing t3 on the remote host needs a release source. Set T3CODE_RELEASE_BASE_URL, or install t3 there yourself.";
-  }
-}
-
 export function buildRemoteT3RunnerScript(input?: RemoteT3RunnerOptions): string {
   const nodeScriptPath = input?.nodeScriptPath?.trim() || "";
   const archiveVersion = input?.archiveVersion?.trim() || "";
@@ -807,15 +804,14 @@ export function buildRemoteT3RunnerScript(input?: RemoteT3RunnerOptions): string
   if (archiveVersion !== "" && !EXACT_ARCHIVE_VERSION.test(archiveVersion)) {
     throw new SshInvalidArchiveVersionError({ archiveVersion });
   }
-  const releaseBaseUrl = input?.releaseBaseUrl?.trim().replace(/\/+$/u, "") || "";
-  if (archiveVersion !== "" && releaseBaseUrl === "") {
-    throw new SshMissingReleaseSourceError();
-  }
+  const source = cliReleaseSourceFromUrl(input?.releaseBaseUrl ?? undefined);
+  const release = source === undefined ? { prefix: "", query: "" } : cliReleaseSourceParts(source);
   return stripTrailingNewlines(
     applyScriptPlaceholders(REMOTE_RUNNER_SCRIPT, {
       T3_NODE_SCRIPT_PATH: shellSingleQuote(nodeScriptPath),
       T3_ARCHIVE_VERSION: shellSingleQuote(archiveVersion),
-      T3_RELEASE_BASE_URL: shellSingleQuote(releaseBaseUrl),
+      T3_RELEASE_PREFIX: shellSingleQuote(release.prefix),
+      T3_RELEASE_QUERY: shellSingleQuote(release.query),
       T3_ARCHIVE_LOCK_WAIT_SECONDS: String(REMOTE_ARCHIVE_LOCK_WAIT_SECONDS),
       T3_ARCHIVE_DOWNLOAD_SECONDS: String(REMOTE_ARCHIVE_DOWNLOAD_SECONDS),
       T3_ARCHIVE_CHECKSUMS_SECONDS: String(REMOTE_ARCHIVE_CHECKSUMS_SECONDS),

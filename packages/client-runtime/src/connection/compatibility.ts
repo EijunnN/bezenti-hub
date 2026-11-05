@@ -23,6 +23,7 @@ export function orchestrationProtocolCompatibilityError(
       })
     : new ConnectionBlockedError({
         reason: "unsupported",
+        hop: "server",
         detail: `This client requires a newer server. Update T3 Code on ${descriptor.label} to connect.`,
       });
 }

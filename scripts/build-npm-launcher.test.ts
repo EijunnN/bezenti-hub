@@ -74,9 +74,10 @@ exit 7
   const requests: Array<string> = [];
   const server = NodeHttp.createServer((request, response) => {
     requests.push(request.url ?? "");
-    if (request.url === `/v${VERSION}/SHA256SUMS`) {
+    // A signed source keeps its query on every file.
+    if (request.url === `/t3/v${VERSION}/SHA256SUMS?token=abc`) {
       response.end(`${checksum}  ${archiveName}\n`);
-    } else if (request.url === `/v${VERSION}/${archiveName}`) {
+    } else if (request.url === `/t3/v${VERSION}/${archiveName}?token=abc`) {
       response.writeHead(200, { "Content-Length": archive.length }).end(archive);
     } else {
       response.writeHead(404).end();
@@ -94,7 +95,7 @@ exit 7
   const address = server.address();
   if (address === null || typeof address === "string") return yield* Effect.die("no TCP address");
   return {
-    baseUrl: `http://127.0.0.1:${address.port}`,
+    baseUrl: `http://127.0.0.1:${address.port}/t3/?token=abc`,
     requests,
     corruptChecksum: () => {
       checksum = "0".repeat(64);
@@ -142,6 +143,17 @@ it.layer(NodeServices.layer)("build-npm-launcher", (it) => {
           T3CODE_RELEASE_BASE_URL: release.baseUrl,
         };
         const launcher = path.join(packageDir, "bin/t3.mjs");
+        const unsourced = yield* run(process.execPath, [launcher, "--version"], {
+          cwd: root,
+          env: {
+            ...env,
+            T3CODE_HOME: path.join(root, "unsourced-home"),
+            T3CODE_RELEASE_BASE_URL: "",
+          },
+        });
+        assert.notEqual(unsourced.exitCode, 0);
+        assert.include(unsourced.stderr, "no release source is configured");
+        assert.deepStrictEqual(release.requests, []);
         const first = yield* run(process.execPath, [launcher, "serve", "a b"], {
           cwd: root,
           env,

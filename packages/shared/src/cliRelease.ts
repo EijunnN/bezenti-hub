@@ -12,11 +12,21 @@ export interface CliReleaseSource {
   readonly baseUrl: string;
 }
 
-export function cliReleaseSource(
-  env: Readonly<Record<string, string | undefined>>,
-): CliReleaseSource | undefined {
-  const baseUrl = env[CLI_RELEASE_SOURCE_ENV]?.trim();
-  return baseUrl ? { baseUrl } : undefined;
+export function cliReleaseSourceFromUrl(baseUrl: string | undefined): CliReleaseSource | undefined {
+  const trimmed = baseUrl?.trim();
+  return trimmed ? { baseUrl: trimmed } : undefined;
+}
+
+/** Assets live at `${prefix}/v<version>/<file>${query}`, for builders that cannot run this module. */
+export function cliReleaseSourceParts(source: CliReleaseSource): {
+  readonly prefix: string;
+  readonly query: string;
+} {
+  const url = new URL(source.baseUrl);
+  const query = url.search;
+  url.search = "";
+  url.hash = "";
+  return { prefix: url.toString().replace(/\/+$/, ""), query };
 }
 
 /** A file of release `version` from `source`, keeping the source's query. */
@@ -25,10 +35,8 @@ export function cliReleaseAssetUrl(
   version: string,
   fileName: string,
 ): string {
-  const url = new URL(source.baseUrl);
-  const base = url.pathname.replace(/\/+$/, "");
-  url.pathname = `${base}/${encodeURIComponent(`v${version}`)}/${encodeURIComponent(fileName)}`;
-  return url.toString();
+  const { prefix, query } = cliReleaseSourceParts(source);
+  return `${prefix}/${encodeURIComponent(`v${version}`)}/${encodeURIComponent(fileName)}${query}`;
 }
 
 // Keep archive keys aligned with the Linux matrix, Windows ARM64 build, and cli_archive rows in release.yml.

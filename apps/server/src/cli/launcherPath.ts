@@ -29,7 +29,7 @@ export const resolveLauncherPath = Effect.gen(function* () {
 });
 
 /** Windows executables see their own path, so find the installer shim by matching t3.cmd targets on PATH. */
-export const findWindowsShim = Effect.fn("cli.update.find_windows_shim")(function* (
+export const findWindowsShim = Effect.fn("cli.launcher.find_windows_shim")(function* (
   executablePath: string,
 ) {
   const fs = yield* FileSystem.FileSystem;

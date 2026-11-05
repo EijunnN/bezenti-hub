@@ -22,13 +22,15 @@ Install the new build yourself on each machine, the same way you installed it:
 - **Mobile app:** install the new build. The app does not download updates in
   the background.
 
-`t3 service install` and connecting the desktop app to a machine over SSH both
-need the `t3` release archive for their version. They download it only from the
+`t3 service install`, the install scripts, the `t3` npm package, and connecting
+the desktop app to a machine over SSH all need the `t3` release archive for
+their version. They download it only from the
 release source set in `T3CODE_RELEASE_BASE_URL`, laid out like a GitHub release
 download: `<url>/v<version>/SHA256SUMS` and the `t3-<version>-<platform>`
-archives beside it. Without that setting, `t3 service install` works only for a
-version already unpacked in T3 home, SSH connections fail with a message, and
-nothing is downloaded.
+archives beside it. A query on the URL, such as a signed token, is kept on
+every file. Without that setting they work only for a version already unpacked
+in T3 home (the install script unpacks it there), fail with a message
+otherwise, and download nothing.
 
 Update the machines that run your servers along with the apps you use. Saved
 threads, settings, and project files are kept.

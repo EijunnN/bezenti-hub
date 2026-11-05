@@ -1,9 +1,15 @@
 import {
+  EnvironmentId,
+  ORCHESTRATION_PROTOCOL_VERSION,
+  type ExecutionEnvironmentDescriptor,
+} from "@t3tools/contracts";
+import {
   RelayEnvironmentEndpointUnavailableError,
   type RelayProtectedError,
 } from "@t3tools/contracts/relay";
 import { describe, expect, it } from "@effect/vitest";
 
+import { orchestrationProtocolCompatibilityError } from "./compatibility.ts";
 import { presentConnectionDiagnosis } from "./diagnosis.ts";
 import { mapManagedRelayError, mapRemoteEnvironmentError } from "./errors.ts";
 import {
@@ -53,6 +59,26 @@ const results = (state: SupervisorConnectionState, via?: "relay" | "direct") =>
   diagnose(state, via)?.hops.map((hop) => `${hop.hop}:${hop.result}`);
 
 describe("presentConnectionDiagnosis", () => {
+  it("names a host that runs an older T3 Code, without offering to update it", () => {
+    const descriptor = (orchestrationProtocolVersion: number): ExecutionEnvironmentDescriptor => ({
+      environmentId: EnvironmentId.make("environment-remote"),
+      label: "Mac mini",
+      platform: { os: "darwin", arch: "arm64" },
+      serverVersion: "9.0.0",
+      orchestrationProtocolVersion,
+      capabilities: { repositoryIdentity: true },
+    });
+    const older = orchestrationProtocolCompatibilityError(
+      descriptor(ORCHESTRATION_PROTOCOL_VERSION - 1),
+    );
+    const newer = orchestrationProtocolCompatibilityError(
+      descriptor(ORCHESTRATION_PROTOCOL_VERSION + 1),
+    );
+    if (older === null || newer === null) throw new Error("expected both to be blocked");
+    expect(diagnose(backoff(older))?.headline).toBe("Mac mini runs an older T3 Code");
+    expect(diagnose(backoff(newer))?.headline).not.toBe("Mac mini runs an older T3 Code");
+  });
+
   it("tells a working tunnel apart from T3 Code not answering", () => {
     expect(diagnose(backoff(unavailable("origin_unreachable")))?.headline).toBe(
       "Tunnel works, but T3 Code on Mac mini did not answer",

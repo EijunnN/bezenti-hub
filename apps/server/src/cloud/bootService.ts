@@ -12,7 +12,7 @@ import * as Path from "effect/Path";
 import { HttpClient } from "effect/http";
 import * as Schema from "effect/Schema";
 
-import { CLI_RELEASE_SOURCE_ENV, cliReleaseSource } from "@t3tools/shared/cliRelease";
+import { CLI_RELEASE_SOURCE_ENV, cliReleaseSourceFromUrl } from "@t3tools/shared/cliRelease";
 
 import * as ProcessRunner from "../processRunner.ts";
 import {
@@ -575,11 +575,9 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
   const arch = yield* HostProcess.Architecture;
   const uid = yield* HostProcess.UserId;
   const httpClient = yield* HttpClient.HttpClient;
-  const releaseSource = cliReleaseSource({
-    [CLI_RELEASE_SOURCE_ENV]: Option.getOrUndefined(
-      yield* Config.String(CLI_RELEASE_SOURCE_ENV).pipe(Config.option),
-    ),
-  });
+  const releaseSource = cliReleaseSourceFromUrl(
+    Option.getOrUndefined(yield* Config.String(CLI_RELEASE_SOURCE_ENV).pipe(Config.option)),
+  );
   const homeDir = yield* Config.String("HOME").pipe(Config.withDefault(""));
   const xdgConfigHome = yield* Config.String("XDG_CONFIG_HOME").pipe(Config.withDefault(""));
   const installerPath = yield* Config.String("PATH").pipe(Config.withDefault(""));

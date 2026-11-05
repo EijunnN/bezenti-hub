@@ -46,7 +46,13 @@ export interface ConnectionDiagnosisInput {
 
 interface Located {
   readonly hop: ConnectionHop;
-  readonly cause: ConnectionFailureCause | "offline" | "released" | "session_pending" | null;
+  readonly cause:
+    | ConnectionFailureCause
+    | "offline"
+    | "outdated"
+    | "released"
+    | "session_pending"
+    | null;
   /** The failure named no hop, so the hops before this one were never probed. */
   readonly guessed?: true;
 }
@@ -60,6 +66,13 @@ function locate(input: ConnectionDiagnosisInput): Located | null {
   const failure = input.state.lastFailure;
   if (input.state.network === "offline" || input.state.phase === "offline") {
     return { hop: "device", cause: "offline" };
+  }
+  if (
+    failure?._tag === "ConnectionBlockedError" &&
+    failure.reason === "unsupported" &&
+    failure.hop === "server"
+  ) {
+    return { hop: "server", cause: "outdated" };
   }
   if (failure?.reason === "session-pending") {
     return { hop: "device", cause: "session_pending" };
@@ -92,6 +105,8 @@ function headline(host: string, located: Located, failure: ConnectionAttemptErro
       return "This device is offline";
     case "session_pending":
       return "This device is still loading its T3 Connect sign-in";
+    case "outdated":
+      return `${host} runs an older T3 Code`;
     case "clock_skew":
       return "This device's clock is off";
     case "not_linked":
@@ -152,6 +167,8 @@ function steps(host: string, located: Located, failure: ConnectionAttemptError |
         "Wait a moment. T3 Code retries on its own.",
         "If it keeps waiting, reload or restart T3 Code on this device.",
       ];
+    case "outdated":
+      return [`Install the version this app uses on ${host}, then reconnect.`];
     case "clock_skew":
       return [`Turn on automatic date and time on this device and on ${host}, then retry.`];
     case "not_linked":
@@ -225,6 +242,8 @@ function helpSection(
   switch (located.cause) {
     case "offline":
       return "this-device-cant-reach-t3-connect";
+    case "outdated":
+      return "the-host-runs-an-older-t3-code";
     case "clock_skew":
       return "the-clock-is-off";
     case "session_pending":

@@ -14,13 +14,14 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Config from "effect/Config";
 import * as Option from "effect/Option";
 
 import * as Electron from "electron";
 
 import * as NetService from "@t3tools/shared/Net";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { cliReleaseSource } from "@t3tools/shared/cliRelease";
+import { CLI_RELEASE_SOURCE_ENV } from "@t3tools/shared/cliRelease";
 import type { RemoteT3RunnerOptions } from "@t3tools/ssh/tunnel";
 import serverPackageJson from "../../server/package.json" with { type: "json" };
 
@@ -106,6 +107,7 @@ const layerDesktopEnvironment = Layer.unwrap(
 
 const resolveDesktopSshCliRunner = (
   environment: DesktopEnvironment.DesktopEnvironment["Service"],
+  releaseBaseUrl: string | undefined,
 ): RemoteT3RunnerOptions => {
   const devRemoteEntryPath = Option.getOrUndefined(environment.devRemoteT3ServerEntryPath);
   if (environment.isDevelopment && devRemoteEntryPath !== undefined) {
@@ -116,15 +118,18 @@ const resolveDesktopSshCliRunner = (
   }
   return {
     archiveVersion: environment.appVersion,
-    releaseBaseUrl: cliReleaseSource(process.env)?.baseUrl ?? null,
+    releaseBaseUrl: releaseBaseUrl ?? null,
   };
 };
 
 const layerDesktopSshEnvironment = Layer.unwrap(
   Effect.gen(function* () {
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
+    const releaseBaseUrl = yield* Config.String(CLI_RELEASE_SOURCE_ENV).pipe(Config.option);
     return DesktopSshEnvironment.layer({
-      resolveCliRunner: Effect.succeed(resolveDesktopSshCliRunner(environment)),
+      resolveCliRunner: Effect.succeed(
+        resolveDesktopSshCliRunner(environment, Option.getOrUndefined(releaseBaseUrl)),
+      ),
     });
   }),
 );

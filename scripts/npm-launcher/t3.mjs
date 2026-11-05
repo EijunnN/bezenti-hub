@@ -63,10 +63,21 @@ async function download(url, file) {
 
 async function install(dir, key) {
   const archive = `t3-${version}-${key}.${process.platform === "win32" ? "zip" : "tar.gz"}`;
-  const base = (
-    process.env.T3CODE_RELEASE_BASE_URL || "https://github.com/pingdotgg/t3code/releases/download"
-  ).replace(/\/+$/, "");
-  const sums = await (await get(`${base}/v${version}/SHA256SUMS`)).text();
+  // Upstream's releases are never a fallback (ADR 0007). Mirrors cliReleaseAssetUrl in @t3tools/shared.
+  const source = process.env.T3CODE_RELEASE_BASE_URL?.trim();
+  if (!source) {
+    throw new Error(
+      `t3 ${version} is not installed and no release source is configured; set T3CODE_RELEASE_BASE_URL`,
+    );
+  }
+  const sourceUrl = new URL(source);
+  const query = sourceUrl.search;
+  sourceUrl.search = "";
+  sourceUrl.hash = "";
+  const prefix = sourceUrl.toString().replace(/\/+$/, "");
+  const assetUrl = (file) =>
+    `${prefix}/v${encodeURIComponent(version)}/${encodeURIComponent(file)}${query}`;
+  const sums = await (await get(assetUrl("SHA256SUMS"))).text();
   const expected = /^([0-9a-f]{64})\s+\*?(.+)$/im;
   const line = sums
     .split(/\r?\n/)
@@ -79,7 +90,7 @@ async function install(dir, key) {
   const staging = fs.mkdtempSync(`${dir}.staging-`);
   try {
     const file = path.join(staging, archive);
-    if ((await download(`${base}/v${version}/${archive}`, file)) !== line[1].toLowerCase()) {
+    if ((await download(assetUrl(archive), file)) !== line[1].toLowerCase()) {
       throw new Error(`checksum mismatch for ${archive}`);
     }
     // Windows' own tar.exe reads zip; a Git-for-Windows tar on PATH cannot.

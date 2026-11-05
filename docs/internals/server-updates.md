@@ -7,20 +7,31 @@ self-hosted release channel would drive.
 
 ## Release source
 
-[`cliReleaseSource`](../../packages/shared/src/cliRelease.ts) is the one place a
-release channel plugs in. It reads `T3CODE_RELEASE_BASE_URL` and returns nothing
-when it is unset; upstream is never a fallback. Pinned runtime installs
-(`t3 service install`) and the SSH runner download archives only from it. A
-future update flow should resolve releases through the same source rather than
-reintroduce a default URL.
+[`cliReleaseSourceFromUrl`](../../packages/shared/src/cliRelease.ts) is the one
+place a release channel plugs in. Callers pass it `T3CODE_RELEASE_BASE_URL`, and
+it returns nothing when that is unset; upstream is never a fallback. Pinned
+runtime installs (`t3 service install`), the SSH runner, the install scripts,
+and the npm launcher download archives only from it, and only when the version
+is not already unpacked. Builders that cannot import the module (shell scripts,
+the npm launcher) mirror `cliReleaseSourceParts`: the query goes after each file
+name. A future update flow should resolve releases through the same source
+rather than reintroduce a default URL.
+
+`t3 service install` cannot seed a runtime from the running executable: a
+release archive carries native modules beside `t3`, so copying the executable
+alone would publish a broken runtime.
 
 ## Service launcher
 
 A [stable launcher](../../apps/server/src/serviceLauncher.ts) owns the runtime
 selected by systemd or launchd. It is the only runtime writer of durable service
-state. It still speaks the `request-update` protocol and recovers updates left
-pending by an older install, but no server in this fork sends that request.
-Foreground CLI processes do not self-update.
+state. Launchers survive updates and are replaced only by a local
+`t3 service install`, so the launcher keeps protocol 3, including the
+`request-update` handoff, even though no server in this fork sends that
+request: a future release channel can then update services installed today
+without a protocol bump and a local reinstall on every host. It also still
+recovers updates left pending by an older install. Foreground CLI processes do
+not self-update.
 
 ## Commit boundary
 
