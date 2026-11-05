@@ -250,11 +250,13 @@ export class PairingGrantStore extends Context.Service<
         readonly requiredScopes?: ReadonlyArray<AuthEnvironmentScope>;
       },
     ) => Effect.Effect<BootstrapGrant, BootstrapCredentialError>;
-    /** A stored link's subject and whether it can still be spent, without spending it. */
-    readonly inspect: (
-      credential: string,
-    ) => Effect.Effect<
-      Option.Option<{ readonly subject: string; readonly spendable: boolean }>,
+    /** A stored link's subject, User and whether it can still be spent, without spending it. */
+    readonly inspect: (credential: string) => Effect.Effect<
+      Option.Option<{
+        readonly subject: string;
+        readonly spendable: boolean;
+        readonly userId: UserId | undefined;
+      }>,
       BootstrapCredentialInternalError
     >;
   }
@@ -650,6 +652,7 @@ const make = Effect.gen(function* () {
         .pipe(Effect.mapError((cause) => new BootstrapCredentialLookupError({ cause })));
       return Option.map(link, (row) => ({
         subject: row.subject,
+        userId: row.userId ?? undefined,
         spendable:
           row.consumedAt === null &&
           row.revokedAt === null &&

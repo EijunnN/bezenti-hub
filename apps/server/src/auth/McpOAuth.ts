@@ -201,8 +201,6 @@ export interface ApprovingSession {
   readonly csrfToken: string;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly userId: UserId | undefined;
-  /** Shown on the consent page, so the person sees which account approves. */
-  readonly displayName: string | undefined;
 }
 
 export type ApprovalDecision = Exclude<AuthMcpApprovalDecision, { readonly _tag: "deny" }>;
@@ -222,6 +220,13 @@ export class McpOAuth extends Context.Service<
       request: HttpServerRequest.HttpServerRequest,
       authorization: AuthorizationRequest,
     ) => Effect.Effect<ApprovingSession | undefined>;
+    /**
+     * The name of the User this browser is signed in as, whether or not the session may approve,
+     * so the page can say who approves or why it cannot. None when signed out or unreadable.
+     */
+    readonly signedInName: (
+      request: HttpServerRequest.HttpServerRequest,
+    ) => Effect.Effect<string | undefined>;
     readonly approve: (input: {
       readonly request: HttpServerRequest.HttpServerRequest;
       readonly authorization: AuthorizationRequest;
@@ -425,21 +430,34 @@ const make = Effect.gen(function* () {
         // Approving manages access, and a session may only hand out scopes it holds.
         session.scopes.includes(AuthAccessWriteScope) &&
         session.scopes.includes(AuthOrchestrationReadScope)
-          ? Effect.all([
-              csrfToken(session.sessionId, authorization),
-              session.userId === undefined
-                ? Effect.succeedNone
-                : userDirectory.findUser(session.userId),
-            ]).pipe(
-              Effect.map(([token, user]): ApprovingSession => ({
+          ? csrfToken(session.sessionId, authorization).pipe(
+              Effect.map((token): ApprovingSession => ({
                 csrfToken: token,
                 scopes: session.scopes,
                 userId: session.userId,
-                displayName: Option.getOrUndefined(user)?.displayName,
               })),
             )
           : Effect.undefined,
       ),
+      Effect.orElseSucceed(() => undefined),
+    );
+
+  const signedInUser = (request: HttpServerRequest.HttpServerRequest) =>
+    environmentAuth.authenticateBrowserSession(request).pipe(
+      Effect.map((session) => session.userId),
+      Effect.orElseSucceed(() => undefined),
+    );
+
+  const signedInName: McpOAuth["Service"]["signedInName"] = (request) =>
+    signedInUser(request).pipe(
+      Effect.flatMap((userId) =>
+        userId === undefined
+          ? Effect.undefined
+          : userDirectory
+              .findUser(userId)
+              .pipe(Effect.map((user) => Option.getOrUndefined(user)?.displayName)),
+      ),
+      // Only a label: a failed read leaves it out rather than refusing the page.
       Effect.orElseSucceed(() => undefined),
     );
 
@@ -473,8 +491,11 @@ const make = Effect.gen(function* () {
     // The client acts as whoever approved it: the signed-in User, or the User a code was issued to.
     let approver: UserId | undefined;
     if (decision._tag === "pairing-code") {
+      // A signed-in browser approves as its User, so a code may only be that User's.
       const granted = yield* environmentAuth
-        .consumeMcpApprovalCode(decision.code, decision.access)
+        .consumeMcpApprovalCode(decision.code, decision.access, {
+          asUser: yield* signedInUser(input.request),
+        })
         .pipe(
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (cause) =>
             Effect.logError("MCP approval code check failed.", { cause }).pipe(
@@ -501,6 +522,14 @@ const make = Effect.gen(function* () {
         });
       }
       approver = session.userId;
+    }
+    // Once an Owner exists every approver is a User; never fall back to the Owner silently.
+    if (approver === undefined) {
+      const hasOwner = yield* userDirectory.hasOwner().pipe(Effect.orElseSucceed(() => true));
+      if (hasOwner)
+        return yield* new McpOAuthPageError({
+          description: "This approval names no account. Sign in and try again.",
+        });
     }
     const code = yield* mintCode(input.authorization, decision.access, approver);
     yield* Effect.logInfo("Approved an MCP client sign-in.", {
@@ -597,6 +626,7 @@ const make = Effect.gen(function* () {
     register,
     validateAuthorization,
     approvingBrowserSession,
+    signedInName,
     approve,
     deny,
     exchangeCode,

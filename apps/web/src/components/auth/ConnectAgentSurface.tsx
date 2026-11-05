@@ -174,10 +174,20 @@ export function ConnectAgentSurface() {
         // The page reloads with the same request, now as the signed-in User.
         onSignedIn={() => window.location.reload()}
         description={
-          <>
-            Sign in to connect {details.clientName}. It will act as you, with your access on{" "}
-            <span className="font-medium text-foreground">{details.environmentHost}</span>.
-          </>
+          details.signedInAs === undefined ? (
+            <>
+              Sign in to connect {details.clientName}. It will act as you, with your access on{" "}
+              <span className="font-medium text-foreground">{details.environmentHost}</span>.
+            </>
+          ) : (
+            // A narrowed session (such as one paired for a single task) cannot hand out access.
+            <>
+              You are signed in as{" "}
+              <span className="font-medium text-foreground">{details.signedInAs}</span>, but this
+              session cannot approve agents. Sign in again with your account, or use a pairing code
+              you created.
+            </>
+          )
         }
         footer={
           <Button size="sm" variant="outline" onClick={() => setUsePairingCode(true)}>
@@ -273,9 +283,18 @@ export function ConnectAgentSurface() {
               value={pairingCode}
             />
             <p className="text-xs text-muted-foreground">
-              Create one in Settings → Sharing & access, or run{" "}
-              <code>t3 auth pairing create --user &lt;sign-in name&gt;</code> on the Hub. The agent
-              acts as the person the code was created for.
+              {details.signedInAs === undefined ? (
+                <>
+                  Create one in Settings → Sharing & access, or run{" "}
+                  <code>t3 auth pairing create --user &lt;sign-in name&gt;</code> on the Hub. The
+                  agent acts as the person the code was created for.
+                </>
+              ) : (
+                <>
+                  Use a code you created in Settings → Sharing & access. This browser is signed in
+                  as {details.signedInAs}, so a code from another account is refused.
+                </>
+              )}
             </p>
           </div>
         )}

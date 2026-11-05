@@ -132,7 +132,8 @@ export interface McpInvocationScope {
   readonly client: McpClientCaller | undefined;
   /**
    * The User the caller acts as: an agent's Thread owner, or the User who approved an outside
-   * client. Reads, creations and `mcpPrincipal` follow it. None only before an Owner exists (or
+   * client. Reads and creations follow it, and `SpaceDirectory.principalOf` gives the same
+   * principal WS and HTTP authorize by. None only before an Owner exists (or
    * for a Thread with no owner), which reads as the Owner.
    */
   readonly userId?: UserId;

@@ -156,8 +156,10 @@ place this is answered, and every read of Projects or Threads asks it:
   one once an Owner exists: an agent in a Thread reads as the Thread's owner, an
   outside client as the User who approved it. A caller with none reads as
   everything, which only happens before an Owner exists.
-  `mcpVisibility.mcpPrincipal` loads the same principal WS and HTTP use
-  (Owner or not, Roles, Installation permissions) from `SpaceDirectory`.
+  The scope's `userId` is the same field WS and HTTP principals carry, so
+  `SpaceDirectory.principalOf` gives services the same principal (Owner or not,
+  Roles, Installation permissions). MCP project updates and deletes treat a
+  Project the User cannot see as missing; Role write rules come with ticket 08.
 
 Each WebSocket connection resolves its viewer once (`CurrentViewer`) and again
 only when `SpaceDirectory.revision` moves, which every Space or Membership write
@@ -270,7 +272,12 @@ client off with the rest of their sessions. A signed-out consent page shows the
 sign-in form in place and reloads the same request once signed in, so there is
 no return URL to redirect through; the approval details name the User
 (`signedInAs`). The CSRF token is bound to the approving session, client,
-redirect and PKCE challenge, so it cannot approve for another sign-in. The token
+redirect and PKCE challenge, so it cannot approve for another sign-in. A
+pairing code is checked before it is spent: its User must still sign in and, in a
+signed-in browser, be that browser's User, so the page's "acting as" is always
+true. Once an Owner exists an approval that names no User is refused rather than
+given to the Owner; sessions from before the Owner are adopted by it when it is
+created, so no MCP session stays userless. The token
 stays a plain bearer: DPoP binding of MCP clients is unchanged.
 
 The user grants either read-only access or a runtime-mode ceiling, not a

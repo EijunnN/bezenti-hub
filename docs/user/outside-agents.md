@@ -47,7 +47,8 @@ Hub, the page asks you to **Sign in** first, then shows the request again. The
 page says which account approves (“acting as …”): the agent acts as that User.
 To approve from a browser that is not yours, choose **Use a pairing code
 instead** and enter a code from **Settings → Sharing & access**; the agent then
-acts as whoever created the code. On the Hub, `t3 auth pairing create --user
+acts as whoever created the code. A browser signed in as you only accepts a
+code you created, so it never approves as someone else. On the Hub, `t3 auth pairing create --user
 <sign-in name>` creates one for that User, and without `--user` for the Owner.
 
 Then choose what the agent may do:

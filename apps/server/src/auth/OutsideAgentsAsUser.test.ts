@@ -21,10 +21,11 @@ import { resolveCliUser } from "../cli/userFlag.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as McpToolAccess from "../mcp/McpToolAccess.ts";
-import { mcpPrincipal, visibleShells } from "../mcp/mcpVisibility.ts";
+import { visibleShells } from "../mcp/mcpVisibility.ts";
 import * as ProjectHandlers from "../mcp/toolkits/project/handlers.ts";
 import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import {
@@ -192,7 +193,9 @@ const mcpScope = (server: Server, token: string) =>
   );
 
 /** Runs one of the project tools as the MCP caller `scope`. */
-const callProjectTool = <Name extends "t3_project_list" | "t3_project_create">(
+const callProjectTool = <
+  Name extends "t3_project_list" | "t3_project_create" | "t3_project_update" | "t3_project_delete",
+>(
   server: Server,
   scope: McpInvocationContext.McpInvocationScope,
   name: Name,
@@ -226,9 +229,11 @@ it.live("an MCP client Grace approves reads and creates as Grace, not as the Own
     const scope = yield* mcpScope(server, token);
     assert.isDefined(scope);
     assert.equal(scope!.userId, grace.userId);
-    const principal = yield* mcpPrincipal(scope!).pipe(
-      Effect.provide(Layer.succeedContext(server.services)),
-    );
+    // The same principal WS and HTTP authorize by, loaded from the scope's User.
+    const principal = yield* Context.get(
+      server.services,
+      SpaceDirectory.SpaceDirectory,
+    ).principalOf(scope!.userId!);
     assert.equal(principal?.isOwner, false);
     assert.deepEqual([...(principal?.roles ?? new Map())], [[SpaceId.make(acme), "member"]]);
 
@@ -264,6 +269,20 @@ it.live("an MCP client Grace approves reads and creates as Grace, not as the Own
       SELECT COUNT(*) AS count FROM projection_projects WHERE workspace_root = '/work/side'
     `;
     assert.equal(rows[0]?.count, 0);
+
+    // A Project in a Space Grace cannot see cannot be changed or deleted: it reads as missing.
+    for (const [tool, params] of [
+      ["t3_project_update", { projectId: "globex-app", title: "Renamed" }],
+      ["t3_project_delete", { projectId: "globex-app", force: true }],
+    ] as const) {
+      const hidden = yield* callProjectTool(server, scope!, tool, params as never);
+      assert.isTrue(hidden.isFailure, tool);
+      assert.include(JSON.stringify(hidden.result), "The project was not found.");
+    }
+    const globex = yield* server.sql<{ title: string; deletedAt: string | null }>`
+      SELECT title, deleted_at AS "deletedAt" FROM projection_projects WHERE project_id = 'globex-app'
+    `;
+    assert.deepEqual(globex, [{ title: "globex-app", deletedAt: null }]);
   }),
 );
 
@@ -389,4 +408,92 @@ it.live(
       assert.equal(refused._tag, "ServerAuthInvalidCredentialError");
       assert.isTrue(EnvironmentAuth.isServerAuthCredentialError(refused));
     }),
+);
+
+it.live(
+  "a signed-in User cannot approve with someone else's code, and a disabled creator's code stays unspent",
+  () =>
+    Effect.gen(function* () {
+      const { server, grace } = yield* hub;
+      const registered = yield* server.request("/oauth/mcp/register", {
+        body: { client_name: "Claude Code", redirect_uris: [REDIRECT] },
+      });
+      const authorization = {
+        response_type: "code",
+        client_id: registered.body.client_id as string,
+        redirect_uri: REDIRECT,
+        code_challenge: CHALLENGE,
+        code_challenge_method: "S256",
+      };
+      const approveWith = (code: string, cookie?: string) =>
+        server.request("/oauth/mcp/decision", {
+          ...(cookie === undefined ? {} : { cookie }),
+          body: { authorization, decision: { _tag: "pairing-code", access: "read-only", code } },
+        });
+      const spendable = (code: string) =>
+        server.sql<{ spent: number }>`
+        SELECT consumed_at IS NOT NULL AS spent FROM auth_pairing_links WHERE credential = ${code}
+      `.pipe(Effect.map((rows) => rows[0]?.spent === 0));
+
+      // The Owner's code pasted into Grace's signed-in browser would act as the Owner.
+      const ownerCode = (yield* server.environmentAuth.createPairingLink()).credential;
+      const refused = yield* approveWith(ownerCode, grace.cookie);
+      assert.equal(refused.status, 400);
+      assert.include(refused.body.message as string, "another account");
+      assert.isTrue(yield* spendable(ownerCode));
+
+      // A code whose creator can no longer sign in is refused before it is spent.
+      const graceCode = (yield* server.request("/api/auth/pairing-token", {
+        body: { label: "Claude Code" },
+        cookie: grace.cookie,
+      })).body.credential as string;
+      yield* server.sql`UPDATE users SET disabled_at = '2026-11-02T00:00:00.000Z' WHERE user_id = ${grace.userId}`;
+      const inactive = yield* approveWith(graceCode);
+      assert.equal(inactive.status, 400);
+      assert.include(inactive.body.message as string, "can no longer sign in");
+      assert.isTrue(yield* spendable(graceCode));
+    }),
+);
+
+it.live("a signed-in session that cannot approve is named, so the page can say why", () =>
+  Effect.gen(function* () {
+    const { server, grace } = yield* hub;
+    const narrow = yield* server.sessions.issue({
+      method: "browser-session-cookie",
+      subject: EnvironmentAuth.USER_SIGN_IN_SUBJECT,
+      userId: grace.userId,
+      scopes: ["orchestration:read"],
+    });
+    const registered = yield* server.request("/oauth/mcp/register", {
+      body: { client_name: "Claude Code", redirect_uris: [REDIRECT] },
+    });
+    const details = yield* server.request("/oauth/mcp/approval", {
+      cookie: `${server.sessions.cookieName}=${narrow.token}`,
+      body: {
+        response_type: "code",
+        client_id: registered.body.client_id as string,
+        redirect_uri: REDIRECT,
+        code_challenge: CHALLENGE,
+        code_challenge_method: "S256",
+      },
+    });
+    assert.isUndefined(details.body.csrfToken);
+    assert.equal(details.body.signedInAs, "grace");
+  }),
+);
+
+it.live("an MCP client approved before the Owner existed becomes the Owner's", () =>
+  Effect.gen(function* () {
+    const server = yield* serveAuthHttp;
+    const early = yield* server.environmentAuth.issueMcpClientSession({
+      label: "Claude Code",
+      access: "read-only",
+      peerLink: false,
+      client: { deviceType: "bot", ipAddress: "127.0.0.1" },
+    });
+    assert.isUndefined((yield* mcpScope(server, early.token))?.userId);
+    const { created } = yield* bootstrapOwner(server, yield* makeAuthenticator());
+    const ownerId = (created.body.user as { id: string }).id;
+    assert.equal((yield* mcpScope(server, early.token))?.userId, ownerId);
+  }),
 );

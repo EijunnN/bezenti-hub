@@ -376,9 +376,21 @@ export const serverAuthInvalidRequestReason = (
 
 export class ServerAuthMcpApprovalCodeError extends Schema.TaggedError<ServerAuthMcpApprovalCodeError>()(
   "ServerAuthMcpApprovalCodeError",
-  { reason: Schema.Literals(["unknown_or_used", "not_a_pairing_code", "insufficient_scope"]) },
+  {
+    reason: Schema.Literals([
+      "unknown_or_used",
+      "not_a_pairing_code",
+      "insufficient_scope",
+      "other_user",
+      "inactive_user",
+    ]),
+  },
 ) {
   override get message(): string {
+    if (this.reason === "other_user")
+      return "That pairing code belongs to another account, and this browser is signed in as you. Approve as yourself, or use a code you created. It has not been used.";
+    if (this.reason === "inactive_user")
+      return "The person who created that pairing code can no longer sign in. It has not been used.";
     return this.reason === "insufficient_scope"
       ? "That pairing code cannot grant this access. It has not been used, so choose an access level it grants, or create a code with the standard scopes."
       : this.reason === "not_a_pairing_code"
@@ -577,10 +589,15 @@ export class EnvironmentAuth extends Context.Service<
       ServerAuthInsecureTransportError | ServerAuthCredentialError | ServerAuthInternalError
     >;
     /** Spends a code covering all granted scopes. Rejects desktop grants and leaves refused proof-bound codes unspent. */
-    /** Answers the User the code was issued to (its creator, or the Owner), whom the client acts as. */
+    /**
+     * Answers the User the code was issued to (its creator, or the Owner), whom the client acts
+     * as. A code whose User cannot sign in, or is not `asUser` (the browser's signed-in User),
+     * is refused before it is spent.
+     */
     readonly consumeMcpApprovalCode: (
       code: string,
       access: AuthMcpClientAccess,
+      options?: { readonly asUser?: UserId | undefined },
     ) => Effect.Effect<
       { readonly userId?: UserId },
       ServerAuthMcpApprovalCodeError | ServerAuthInternalError
@@ -1698,29 +1715,39 @@ export const make = Effect.gen(function* () {
     );
   };
 
-  const consumeMcpApprovalCode: EnvironmentAuth["Service"]["consumeMcpApprovalCode"] = (
-    code,
-    access,
-  ) =>
-    resolveBootstrapGrant(code.trim(), { requiredScopes: mcpClientScopes(access) }).pipe(
+  const consumeMcpApprovalCode: EnvironmentAuth["Service"]["consumeMcpApprovalCode"] = Effect.fn(
+    "EnvironmentAuth.consumeMcpApprovalCode",
+  )(function* (code, access, options) {
+    const credential = code.trim();
+    const approverOf = (userId: UserId | undefined) =>
+      sessionUser(userId).pipe(
+        Effect.catchTags({
+          ServerAuthInvalidCredentialError: () =>
+            Effect.fail(new ServerAuthMcpApprovalCodeError({ reason: "inactive_user" })),
+        }),
+        Effect.filterOrFail(
+          (approver) => options?.asUser === undefined || approver.userId === options.asUser,
+          () => new ServerAuthMcpApprovalCodeError({ reason: "other_user" }),
+        ),
+      );
+    // Check whom a stored code acts as before spending it, so a refusal leaves it usable.
+    const link = yield* inspectLink(credential);
+    if (Option.isSome(link) && link.value.spendable) yield* approverOf(link.value.userId);
+    const grant = yield* resolveBootstrapGrant(credential, {
+      requiredScopes: mcpClientScopes(access),
+    }).pipe(
       Effect.catchTags({
         ServerAuthInvalidCredentialError: () =>
           Effect.fail(new ServerAuthMcpApprovalCodeError({ reason: "unknown_or_used" })),
         ServerAuthScopeNotGrantedError: () =>
           Effect.fail(new ServerAuthMcpApprovalCodeError({ reason: "insufficient_scope" })),
       }),
-      Effect.flatMap((grant) =>
-        grant.method !== "one-time-token" && grant.method !== "reusable-dev-token"
-          ? Effect.fail(new ServerAuthMcpApprovalCodeError({ reason: "not_a_pairing_code" }))
-          : sessionUser(grant.userId).pipe(
-              Effect.catchTags({
-                ServerAuthInvalidCredentialError: () =>
-                  Effect.fail(new ServerAuthMcpApprovalCodeError({ reason: "unknown_or_used" })),
-              }),
-            ),
-      ),
-      Effect.withSpan("EnvironmentAuth.consumeMcpApprovalCode"),
     );
+    if (grant.method !== "one-time-token" && grant.method !== "reusable-dev-token") {
+      return yield* new ServerAuthMcpApprovalCodeError({ reason: "not_a_pairing_code" });
+    }
+    return yield* approverOf(grant.userId);
+  });
 
   const userDirectoryFailure = (cause: UserDirectory.UserDirectoryStorageError) =>
     new ServerAuthUserDirectoryError({ cause });

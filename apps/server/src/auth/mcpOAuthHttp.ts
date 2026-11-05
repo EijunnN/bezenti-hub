@@ -115,7 +115,10 @@ export const layer = HttpApiBuilder.group(
           const resolved = yield* forwardedAuthorization(oauth, payload);
           if ("redirectTo" in resolved) return resolved;
           const urls = yield* requestUrls;
-          const session = yield* oauth.approvingBrowserSession(request, resolved);
+          const [session, signedInAs] = yield* Effect.all(
+            [oauth.approvingBrowserSession(request, resolved), oauth.signedInName(request)],
+            { concurrency: "unbounded" },
+          );
           yield* noStore;
           return {
             clientName: resolved.client.name,
@@ -124,11 +127,11 @@ export const layer = HttpApiBuilder.group(
             ...(oauth.runtimeModeCeiling === undefined
               ? {}
               : { runtimeModeCeiling: oauth.runtimeModeCeiling }),
+            ...(signedInAs === undefined ? {} : { signedInAs }),
             ...(session === undefined
               ? {}
               : {
                   csrfToken: session.csrfToken,
-                  ...(session.displayName === undefined ? {} : { signedInAs: session.displayName }),
                   oneClickAccess: AuthMcpClientAccess.literals.filter((access) =>
                     mcpClientScopes(access).every((scope) => session.scopes.includes(scope)),
                   ),

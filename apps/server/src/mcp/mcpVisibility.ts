@@ -1,8 +1,7 @@
-import type { OrchestrationV2ThreadShell } from "@t3tools/contracts";
+import type { OrchestrationV2ThreadShell, ProjectId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
-import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 
@@ -38,15 +37,12 @@ export const visibleShells = Effect.fn("mcp.visibleShells")(function* <
   return shells.filter((shell) => visible.has(shell.id));
 });
 
-/**
- * The caller's principal, the same one WS and HTTP callers are authorized by: their User, whether
- * they are the Owner, their Roles and Installation permissions. An agent in a Thread reads as the
- * Thread's owner and an outside client as the User who approved it. Undefined only for a caller
- * with no User, which happens before an Owner exists; such a caller reads as everything.
- */
-export const mcpPrincipal = Effect.fn("mcp.principal")(function* (
+/** Whether the caller may see the Project; a hidden one is answered like a missing one. */
+export const seesProjectId = Effect.fn("mcp.seesProjectId")(function* (
   scope: Pick<McpInvocationScope, "userId">,
+  projectId: ProjectId,
 ) {
-  if (scope.userId === undefined) return undefined;
-  return yield* (yield* SpaceDirectory.SpaceDirectory).principalOf(scope.userId);
+  const visibility = yield* visibilityOf(scope);
+  if (visibility.all) return true;
+  return (yield* (yield* service).visibleProjectIds(visibility, [projectId])).has(projectId);
 });

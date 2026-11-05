@@ -526,7 +526,7 @@ export const AuthMcpApprovalDetails = Schema.Struct({
   redirectHost: Schema.String,
   environmentHost: Schema.String,
   csrfToken: Schema.optionalKey(Schema.String),
-  /** The signed-in User approving, whom the client will act as. Absent without `csrfToken`. */
+  /** The User this browser is signed in as. With `csrfToken` the client acts as them; without, the session cannot approve. */
   signedInAs: Schema.optionalKey(Schema.String),
   /** Only scopes held by this session qualify; others need a pairing code. Absent with `csrfToken`. */
   oneClickAccess: Schema.optionalKey(Schema.Array(AuthMcpClientAccess)),

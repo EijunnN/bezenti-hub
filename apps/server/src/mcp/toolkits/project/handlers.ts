@@ -29,7 +29,8 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { resolveRuntimeMode } from "../../delegatedTaskModes.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
-import { visibilityOf } from "../../mcpVisibility.ts";
+import { seesProjectId, visibilityOf } from "../../mcpVisibility.ts";
+import { spaceRefusalMessage } from "../../../spaces/SpaceDirectory.ts";
 import * as SpaceVisibility from "../../../spaces/SpaceVisibility.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
 import { ProjectToolkit } from "./tools.ts";
@@ -50,6 +51,22 @@ function projectFailure(error: Project.ProjectServiceError) {
         : "The project is not empty; force=true is required to delete it.";
   return new OrchestratorMcpFailure({ code: "invalid_request", message });
 }
+
+/**
+ * Changing a Project the caller's User cannot see fails exactly like changing a missing one, as
+ * POST /api/projects/mutate does. Role write rules (who in a visible Space may update or delete)
+ * are not here: ticket 08 (.scratch/identity-and-access/issues/08-reglas-de-role-al-escribir.md)
+ * puts them in the service with AccessPolicy, and MCP gets them from there.
+ */
+const requireVisibleProject = Effect.fn("mcp.requireVisibleProject")(function* (
+  projectId: ProjectId,
+) {
+  if (!(yield* seesProjectId(yield* McpInvocationContext.McpInvocationContext, projectId)))
+    return yield* new OrchestratorMcpFailure({
+      code: "invalid_request",
+      message: "The project was not found.",
+    });
+});
 
 /** Require project worktrees so launches cannot target arbitrary host directories. */
 const assertProjectWorktree = Effect.fn("mcp.assertProjectWorktree")(function* (
@@ -269,6 +286,10 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 message: error.message,
               });
             }
+            // The caller's User may not create in the Project's Space; say so, as the app does.
+            const refusal = spaceRefusalMessage(error);
+            if (refusal !== undefined)
+              return new OrchestratorMcpFailure({ code: "invalid_request", message: refusal });
             // The administrator's ceiling refuses the mode; say so rather than "unavailable".
             if (error._tag === "ThreadLaunchError" && isAboveCeilingError(error.cause)) {
               return new OrchestratorMcpFailure({
@@ -380,6 +401,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   ),
   t3_project_update: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
+      yield* requireVisibleProject(input.projectId);
       const projects = yield* Project.ProjectService;
       return yield* projects
         .update({ ...input, commandId: yield* newCommandId() })
@@ -388,6 +410,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   ),
   t3_project_delete: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
+      yield* requireVisibleProject(input.projectId);
       const projects = yield* Project.ProjectService;
       const clones = yield* ProjectCloneTracker.ProjectCloneTracker;
       return yield* mutateProjectWithClone(projects, clones, {
