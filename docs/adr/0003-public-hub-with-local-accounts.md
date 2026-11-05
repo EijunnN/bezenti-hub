@@ -1,0 +1,3 @@
+# The Hub is public over HTTPS and owns its own accounts
+
+Upstream T3 Code only accepts loopback, private-network or tailnet peers and has no user accounts. Our Hub is published on the Owner's own domain over HTTPS so invited Members and Guests can reach it without installing Tailscale, and it authenticates people with local accounts (passkey first, password as fallback) instead of an external identity provider such as Clerk or OAuth, keeping the Installation self-contained. People sign in only to the Hub; other Environments trust the Hub's signed proof of identity, following the T3 Connect mint pattern, and never authenticate users themselves.
