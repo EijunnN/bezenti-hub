@@ -25,6 +25,7 @@ import {
   ORCHESTRATION_V2_WS_METHODS,
   AuthTerminalReadScope,
   type AuthEnvironmentScope,
+  EnvironmentAuthenticatedPrincipal,
   EnvironmentAuthorizationError,
   RpcScopeAuthorization,
   WS_METHODS,
@@ -278,18 +279,21 @@ const requiredScopesForRpcCall = (
  * RPC, that is when the stream completes. Every RPC passes through here, so it
  * is the one place to observe requests without wrapping each handler.
  */
-export const layer = (
-  scopes: ReadonlyArray<AuthEnvironmentScope>,
-  onAuthorized?: (method: string, payload: unknown) => Effect.Effect<void>,
-) =>
-  Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {
-    const requiredScopes = requiredScopesForRpcCall(rpc._tag, payload);
-    const requiredScope = requiredScopes.find((scope) => !scopes.includes(scope));
-    if (requiredScope !== undefined) return Effect.fail(rpcAuthorizationError(requiredScope));
-    return onAuthorized === undefined
-      ? effect
-      : Effect.tap(effect, () => onAuthorized(rpc._tag, payload));
-  });
+export const layer = (onAuthorized?: (method: string, payload: unknown) => Effect.Effect<void>) =>
+  Layer.effect(RpcScopeAuthorization)(
+    Effect.gen(function* () {
+      const principal = yield* EnvironmentAuthenticatedPrincipal;
+      const middleware: RpcScopeAuthorization["Service"] = (effect, { rpc, payload }) => {
+        const requiredScopes = requiredScopesForRpcCall(rpc._tag, payload);
+        const requiredScope = requiredScopes.find((scope) => !principal.scopes.has(scope));
+        if (requiredScope !== undefined) return Effect.fail(rpcAuthorizationError(requiredScope));
+        return onAuthorized === undefined
+          ? effect
+          : Effect.tap(effect, () => onAuthorized(rpc._tag, payload));
+      };
+      return middleware;
+    }),
+  );
 
 /** Retrying can install or restart tools even though ordinary listing is readable. */
 export const requiredScopeForDeviceList = (input: DeviceListInput): AuthEnvironmentScope =>

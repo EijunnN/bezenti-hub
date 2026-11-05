@@ -31,6 +31,7 @@ import * as HttpEffect from "effect/http/HttpEffect";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
+import * as CurrentPrincipal from "./CurrentPrincipal.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as SessionStore from "./SessionStore.ts";
 import { traceAuthenticatedRelayRequest, traceRelayRequest } from "../cloud/traceRelayRequest.ts";
@@ -247,10 +248,10 @@ export const layerAuthenticatedAuth = Layer.effect(
         );
         const endTime = yield* Clock.currentTimeNanos;
         const handler = httpEffect.pipe(
-          Effect.provideService(EnvironmentAuthenticatedPrincipal, {
-            ...session,
-            scopes: new Set(session.scopes),
-          }),
+          Effect.provideService(
+            EnvironmentAuthenticatedPrincipal,
+            CurrentPrincipal.fromSession(session),
+          ),
         );
         return yield* session.subject === "cloud-connect"
           ? traceAuthenticatedRelayRequest(handler, { startTime, endTime })

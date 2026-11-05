@@ -92,6 +92,7 @@ import {
   ChatAttachmentId,
   PersistChatAttachmentsError,
   RpcClientId,
+  EnvironmentAuthenticatedPrincipal,
   EnvironmentAuthorizationError,
   type ProjectId,
   type ProviderDriverKind,
@@ -231,6 +232,7 @@ import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { requiredScopeForDeviceList, rpcAuthorizationError } from "./auth/RpcAuthorization.ts";
 import * as RpcAuthorization from "./auth/RpcAuthorization.ts";
+import * as CurrentPrincipal from "./auth/CurrentPrincipal.ts";
 import { RpcInstrumentation, rpcInstrumentationLayer } from "./observability/RpcInstrumentation.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
@@ -1344,7 +1346,6 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
 );
 
 export const layerWsRpc = (
-  currentSession: EnvironmentAuth.AuthenticatedSession,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
   reportProfiles: ServerBrowser.ProfileReporter,
@@ -1352,7 +1353,8 @@ export const layerWsRpc = (
 ) =>
   Layer.effectContext(
     Effect.gen(function* () {
-      const currentSessionId = currentSession.sessionId;
+      const principal = yield* EnvironmentAuthenticatedPrincipal;
+      const currentSessionId = principal.sessionId;
       const sql = yield* SqlClient.SqlClient;
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
       const intakeContext = yield* Effect.context<
@@ -1502,7 +1504,7 @@ export const layerWsRpc = (
       const relayClient = yield* RelayClient.RelayClient;
       // Webhook URLs start agents; expose them only to operate-scoped sessions while keeping tasks readable.
       const withVisibleWebhookUrls = (result: ScheduledTaskListResult): ScheduledTaskListResult =>
-        currentSession.scopes.includes(AuthOrchestrationOperateScope)
+        principal.scopes.has(AuthOrchestrationOperateScope)
           ? result
           : {
               tasks: result.tasks.map(({ webhook: _webhook, ...task }) => task),
@@ -1511,7 +1513,7 @@ export const layerWsRpc = (
         requiredScope: AuthEnvironmentScope,
         effect: Effect.Effect<A, E, R>,
       ): Effect.Effect<A, E | EnvironmentAuthorizationError, R> =>
-        currentSession.scopes.includes(requiredScope)
+        principal.scopes.has(requiredScope)
           ? effect
           : Effect.fail(rpcAuthorizationError(requiredScope));
 
@@ -3463,7 +3465,7 @@ export const layer = Layer.unwrap(
             Effect.provideService(RpcServer.Protocol, withTerminalOutputWindow(protocol)),
             Effect.provide(
               Layer.merge(
-                RpcAuthorization.layer(session.scopes, (method, payload) => {
+                RpcAuthorization.layer((method, payload) => {
                   // Anonymous product signal: the feature and its enum variant,
                   // credited to the connecting client's surface only.
                   const usage = featureUsage(method, payload);
@@ -3487,13 +3489,14 @@ export const layer = Layer.unwrap(
         }).pipe(
           Effect.provide(
             layerWsRpc(
-              session,
               clientAnalyticsProps,
               serverBrowser,
               reportProfiles,
               readSettingsClient(url.value),
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
+              // One principal per connection, read by the authorization middleware and the handlers.
+              Layer.provideMerge(CurrentPrincipal.layer(session)),
               // Handler-context reporters see only request defects, not server-wide defects.
               Layer.provide(DefectReporter.layer),
               Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),

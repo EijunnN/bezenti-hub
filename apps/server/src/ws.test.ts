@@ -134,6 +134,7 @@ import {
   WS_RPC_SERVER_OPTIONS,
   withLateConfigDiscovery,
 } from "./ws.ts";
+import * as CurrentPrincipal from "./auth/CurrentPrincipal.ts";
 
 const snapshotConfig = (fields: Partial<ServerConfig>) =>
   ({ availableEditors: [], settings: {}, ...fields }) as unknown as ServerConfig;
@@ -877,18 +878,19 @@ it.effect.each([
         },
       ).pipe(
         Effect.provide(
-          layerWsRpc(
-            {
-              sessionId: AuthSessionId.make("config-test"),
-              subject: "config-test",
-              method: "browser-session-cookie",
-              scopes: [],
-            },
-            {},
-            yield* ServerBrowser.ServerBrowser,
-            () => Effect.void,
-            { secretReferences: true },
-          ).pipe(Layer.provide(configRpcServices)),
+          layerWsRpc({}, yield* ServerBrowser.ServerBrowser, () => Effect.void, {
+            secretReferences: true,
+          }).pipe(
+            Layer.provide(configRpcServices),
+            Layer.provide(
+              CurrentPrincipal.layer({
+                sessionId: AuthSessionId.make("config-test"),
+                subject: "config-test",
+                method: "browser-session-cookie",
+                scopes: [],
+              }),
+            ),
+          ),
         ),
       );
       const requestId = RpcMessage.RequestId("config");
@@ -1097,18 +1099,19 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
       },
     ).pipe(
       Effect.provide(
-        layerWsRpc(
-          {
-            sessionId: AuthSessionId.make("config-test"),
-            subject: "config-test",
-            method: "browser-session-cookie",
-            scopes: [],
-          },
-          {},
-          yield* ServerBrowser.ServerBrowser,
-          () => Effect.void,
-          { secretReferences: true },
-        ).pipe(Layer.provide(configRpcServices)),
+        layerWsRpc({}, yield* ServerBrowser.ServerBrowser, () => Effect.void, {
+          secretReferences: true,
+        }).pipe(
+          Layer.provide(configRpcServices),
+          Layer.provide(
+            CurrentPrincipal.layer({
+              sessionId: AuthSessionId.make("config-test"),
+              subject: "config-test",
+              method: "browser-session-cookie",
+              scopes: [],
+            }),
+          ),
+        ),
       ),
     );
     const configRequest = RpcMessage.RequestId("config");

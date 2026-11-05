@@ -1,4 +1,6 @@
 import {
+  AuthSessionId,
+  type AuthEnvironmentScope,
   AuthEnvironmentMaintainScope,
   AuthDiagnosticsReadScope,
   AuthFilesystemReadScope,
@@ -28,6 +30,7 @@ import {
   requiredScopeForRpcMethod,
   requiredScopeForDeviceList,
 } from "./RpcAuthorization.ts";
+import * as CurrentPrincipal from "./CurrentPrincipal.ts";
 import * as RpcAuthorization from "./RpcAuthorization.ts";
 
 describe("RPC authorization scopes", () => {
@@ -91,6 +94,18 @@ it("requires operate permission for tool updates even alongside a read-only chec
   expect(requiredScopeForDeviceList({ updateTool: "hub" })).toBe(AuthOrchestrationOperateScope);
 });
 
+const scopeAuthorization = (scopes: ReadonlyArray<AuthEnvironmentScope>) =>
+  RpcAuthorization.layer().pipe(
+    Layer.provide(
+      CurrentPrincipal.layer({
+        sessionId: AuthSessionId.make("rpc-authorization-test"),
+        subject: "rpc-authorization-test",
+        method: "browser-session-cookie",
+        scopes,
+      }),
+    ),
+  );
+
 describe("RPC scope middleware", () => {
   const tested = [WS_METHODS.serverProbe, WS_METHODS.serverRetryResourceTelemetry] as const;
   const group = WsRpcGroup.omit(
@@ -116,7 +131,7 @@ describe("RPC scope middleware", () => {
             group.toLayerHandler(WS_METHODS.serverRetryResourceTelemetry, () =>
               Effect.sync(() => handled.push("retry")).pipe(Effect.andThen(Effect.never)),
             ),
-            RpcAuthorization.layer(scopes),
+            scopeAuthorization(scopes),
           ),
         ),
       );
@@ -159,7 +174,7 @@ describe("settings mutation authorization", () => {
                 return DEFAULT_SERVER_SETTINGS;
               }),
             ),
-            RpcAuthorization.layer([AuthProvidersManageScope]),
+            scopeAuthorization([AuthProvidersManageScope]),
           ),
         ),
       );
@@ -208,7 +223,7 @@ describe("settings mutation authorization", () => {
                 return DEFAULT_SERVER_SETTINGS;
               }),
             ),
-            RpcAuthorization.layer([AuthSettingsWriteScope]),
+            scopeAuthorization([AuthSettingsWriteScope]),
           ),
         ),
       );
@@ -249,7 +264,7 @@ it.effect("requires task permission before attaching a prepared worktree to a th
               handled = true;
             }).pipe(Effect.andThen(Effect.never)),
           ),
-          RpcAuthorization.layer([AuthSourceControlWriteScope]),
+          scopeAuthorization([AuthSourceControlWriteScope]),
         ),
       ),
     );
@@ -284,9 +299,7 @@ describe("thread context authorization", () => {
           Stream.fromEffect(Effect.sync(() => handled.push(actionId))).pipe(Stream.drain),
         );
         const client = yield* RpcTest.makeClient(group).pipe(
-          Effect.provide(
-            Layer.merge(handler, RpcAuthorization.layer([AuthSourceControlWriteScope])),
-          ),
+          Effect.provide(Layer.merge(handler, scopeAuthorization([AuthSourceControlWriteScope]))),
         );
         const input = { actionId: "without-thread", cwd: "/repo", action };
         const withThread = { ...input, actionId: "with-thread", threadId: ThreadId.make("thread") };
@@ -306,7 +319,7 @@ describe("thread context authorization", () => {
           Effect.provide(
             Layer.merge(
               handler,
-              RpcAuthorization.layer([AuthSourceControlWriteScope, AuthOrchestrationReadScope]),
+              scopeAuthorization([AuthSourceControlWriteScope, AuthOrchestrationReadScope]),
             ),
           ),
         );
@@ -338,7 +351,7 @@ it.effect("separates host file URLs from readable attachment URLs", () =>
               return { relativeUrl: "/api/assets/file", expiresAt: 1 };
             }),
           ),
-          RpcAuthorization.layer([AuthOrchestrationReadScope]),
+          scopeAuthorization([AuthOrchestrationReadScope]),
         ),
       ),
     );
@@ -391,7 +404,7 @@ it.effect("denies manual cleanup before the handler without settings permission"
               };
             }),
           ),
-          RpcAuthorization.layer([AuthOrchestrationReadScope]),
+          scopeAuthorization([AuthOrchestrationReadScope]),
         ),
       ),
     );
