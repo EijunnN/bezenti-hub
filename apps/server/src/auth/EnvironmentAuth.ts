@@ -63,6 +63,7 @@ import { REUSABLE_DEV_SESSION_EXPIRES_AT, resolveReusableDevAuth } from "./Reusa
 import { verifyRequestDpopProof } from "./dpop.ts";
 import { OwnerPresence } from "./OwnerPresence.ts";
 import type { AuthRequestMetadata } from "./utils.ts";
+import { headerList, isLoopbackClientAddress, isPrivateClientAddress } from "./clientConnection.ts";
 import { DESKTOP_RENDERER_ORIGINS } from "../httpCors.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ManagedLimits from "../policy/managedLimits.ts";
@@ -555,7 +556,10 @@ export class EnvironmentAuth extends Context.Service<
       },
     ) => Effect.Effect<
       AuthAccessTokenResult,
-      ServerAuthInvalidCredentialError | ServerAuthInvalidRequestError | ServerAuthInternalError
+      | ServerAuthInvalidCredentialError
+      | ServerAuthInvalidRequestError
+      | ServerAuthInsecureTransportError
+      | ServerAuthInternalError
     >;
     readonly createPairingLink: (input?: {
       readonly ttl?: Duration.Duration;
@@ -647,14 +651,14 @@ export class EnvironmentAuth extends Context.Service<
       readonly label: string;
       readonly access: AuthMcpClientAccess;
       readonly peerLink: boolean;
-      readonly client: AuthClientMetadata;
+      readonly client: AuthRequestMetadata;
     }) => Effect.Effect<
       {
         readonly sessionId: AuthSessionId;
         readonly token: string;
         readonly expiresAt: DateTime.DateTime;
       },
-      ServerAuthInternalError
+      ServerAuthInsecureTransportError | ServerAuthInternalError
     >;
     /** Spends a code covering all granted scopes. Rejects desktop grants and leaves refused proof-bound codes unspent. */
     readonly consumeMcpApprovalCode: (
@@ -896,13 +900,9 @@ type RequestCredentialSource = NonNullable<ReturnType<typeof selectRequestCreden
 export const isBrowserCookieCredential = (source: RequestCredentialSource | "dev-cookie") =>
   source === "cookie" || source === "legacy-cookie" || source === "dev-cookie";
 
-function firstHeaderValue(value: string | undefined): string | undefined {
-  const first = value?.split(",")[0]?.trim().toLowerCase();
-  return first && first.length > 0 ? first : undefined;
-}
-
 // Missing Origin allows same-origin reads and non-browser clients; otherwise require
-// same-origin Sec-Fetch-Site, this server's host (including X-Forwarded-Host), or a trusted app origin.
+// same-origin Sec-Fetch-Site, this server's host, or a trusted app origin. A trusted proxy's
+// X-Forwarded-Host has already replaced Host (clientConnection); from anyone else it is ignored.
 function isBrowserOriginAllowed(
   request: HttpServerRequest.HttpServerRequest,
   trustedOrigins: ReadonlySet<string>,
@@ -918,10 +918,7 @@ function isBrowserOriginAllowed(
     return false;
   }
   if (originHost === "") return false;
-  return (
-    originHost === firstHeaderValue(request.headers.host) ||
-    originHost === firstHeaderValue(request.headers["x-forwarded-host"])
-  );
+  return originHost === headerList(request.headers.host)[0]?.toLowerCase();
 }
 
 /** @public */
@@ -939,6 +936,19 @@ export const make = Effect.gen(function* () {
   const devAuth = resolveReusableDevAuth(config);
   const ownerPresence = yield* OwnerPresence;
   const publicOrigin = config.publicUrl?.origin;
+
+  /**
+   * Session cookies and tokens are bearer credentials, so they cross plain HTTP only to this
+   * machine and, unless the Hub is published on a public URL, to the LAN and tailnet that
+   * `t3 up --lan` serves. A public or unknown client needs HTTPS. Behind a trusted proxy the
+   * client and scheme are the ones it forwarded.
+   */
+  const requireSecureTransport = (requestMetadata: AuthRequestMetadata) =>
+    requestMetadata.secureTransport === true ||
+    isLoopbackClientAddress(requestMetadata.ipAddress) ||
+    (publicOrigin === undefined && isPrivateClientAddress(requestMetadata.ipAddress))
+      ? Effect.void
+      : Effect.fail(new ServerAuthInsecureTransportError({}));
 
   // A session with no User of its own (the Hub's shell, the startup link, the desktop, MCP
   // clients until they pick a User) belongs to the Owner. Before an Owner exists it has none.
@@ -1129,7 +1139,7 @@ export const make = Effect.gen(function* () {
         Effect.withSpan("EnvironmentAuth.createBrowserSession"),
       );
     }
-    yield* requireSecureBrowserTransport(requestMetadata);
+    yield* requireSecureTransport(requestMetadata);
     const previousSession =
       previousSessionToken === undefined
         ? undefined
@@ -1216,10 +1226,13 @@ export const make = Effect.gen(function* () {
 
   const exchangeBootstrapCredentialForAccessToken: EnvironmentAuth["Service"]["exchangeBootstrapCredentialForAccessToken"] =
     (credential, requestedScopes, requestMetadata, input) => {
-      return resolveBootstrapGrant(credential, {
-        ...input,
-        ...(requestedScopes !== undefined ? { requestedScopes } : {}),
-      }).pipe(
+      return requireSecureTransport(requestMetadata).pipe(
+        Effect.andThen(
+          resolveBootstrapGrant(credential, {
+            ...input,
+            ...(requestedScopes !== undefined ? { requestedScopes } : {}),
+          }),
+        ),
         Effect.flatMap((grant) =>
           Effect.gen(function* () {
             const grantedScopes =
@@ -1719,7 +1732,8 @@ export const make = Effect.gen(function* () {
 
   // Acts as the Owner until outside agents sign in as a chosen User.
   const issueMcpClientSession: EnvironmentAuth["Service"]["issueMcpClientSession"] = (input) =>
-    sessionUser(undefined).pipe(
+    requireSecureTransport(input.client).pipe(
+      Effect.andThen(sessionUser(undefined)),
       Effect.flatMap((owner) =>
         sessions.issue({
           subject: MCP_CLIENT_SUBJECT,
@@ -1806,10 +1820,10 @@ export const make = Effect.gen(function* () {
     user: AuthUser,
     requestMetadata: AuthRequestMetadata,
   ) {
-    yield* requireSecureBrowserTransport(requestMetadata);
+    yield* requireSecureTransport(requestMetadata);
     if (
       !ManagedLimits.allowsRemoteClients(managedPolicy) &&
-      isRemoteClient(requestMetadata.ipAddress)
+      !isLoopbackClientAddress(requestMetadata.ipAddress)
     ) {
       return yield* new ServerAuthInvalidCredentialError({
         diagnostic: "The managed policy allows account sign-in only on this machine.",
@@ -2082,9 +2096,17 @@ export const make = Effect.gen(function* () {
       Effect.withSpan("EnvironmentAuth.signOut"),
     );
 
-  if (yield* userDirectory.hasOwner().pipe(Effect.orElseSucceed(() => false))) {
-    ownerPresence.markExists();
-  }
+  const ownerAtStartup = yield* userDirectory
+    .hasOwner()
+    .pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning(
+          "Could not read whether the Installation has an Owner; public clients are re-checked on arrival.",
+          { cause },
+        ).pipe(Effect.as(false)),
+      ),
+    );
+  if (ownerAtStartup) ownerPresence.markExists();
 
   yield* revokePairedClientsThePolicyDisallows(managedPolicy, {
     sessions,
@@ -2137,17 +2159,6 @@ export const make = Effect.gen(function* () {
 
 const isRemoteClient = (ipAddress: string | undefined) =>
   ipAddress !== undefined && !isLocalLoopbackHost(ipAddress);
-
-/**
- * A browser session cookie is a bearer credential, so it is issued over plain HTTP only to a
- * client on this machine. Behind a trusted proxy the client and scheme are the ones it
- * forwarded; an unknown client counts as remote.
- */
-const requireSecureBrowserTransport = (requestMetadata: AuthRequestMetadata) =>
-  requestMetadata.secureTransport === true ||
-  (requestMetadata.ipAddress !== undefined && isLocalLoopbackHost(requestMetadata.ipAddress))
-    ? Effect.void
-    : Effect.fail(new ServerAuthInsecureTransportError({}));
 
 /** Subjects of sessions and links a pairing link created, keyed by how the client paired. */
 const LINK_PAIRED_SUBJECTS = { link: "one-time-token", connect: "cloud-connect" } as const;

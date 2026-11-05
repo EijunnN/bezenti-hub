@@ -36,6 +36,7 @@ import * as AgentAwarenessRelay from "../relay/AgentAwarenessRelay.ts";
 import * as CliTokenManager from "./CliTokenManager.ts";
 import * as CloudLink from "./CloudLink.ts";
 import * as ConnectHttp from "./http.ts";
+import { layerTestPeer } from "../auth/clientConnection.testkit.ts";
 import * as ConnectReachability from "./ConnectReachability.ts";
 import * as ManagedEndpointRuntime from "./ManagedEndpointRuntime.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
@@ -78,6 +79,7 @@ const layerConfig = Layer.effect(
 const layerLinkProofRoutes = HttpApiBuilder.layer(LinkProofTestApi).pipe(
   Layer.provide([AuthHttp.layer, ConnectHttp.layer]),
   Layer.provide(AuthHttp.layerAuthenticatedAuth),
+  Layer.provide(layerTestPeer),
   Layer.provide(CloudLink.layer),
   Layer.provide(EnvironmentKeys.layer),
   Layer.provide(
@@ -244,12 +246,12 @@ describe("link proof over a non-loopback desktop transport", () => {
     {
       name: "forwarded host",
       origin: proofRequest.origin,
-      headers: { "x-forwarded-host": "127.0.0.1:3773" },
+      headers: { "x-forwarded-for": "127.0.0.1", "x-forwarded-host": "127.0.0.1:3773" },
     },
     {
       name: "forwarded protocol",
       origin: proofRequest.origin,
-      headers: { "x-forwarded-proto": "http" },
+      headers: { "x-forwarded-for": "127.0.0.1", "x-forwarded-proto": "http" },
     },
   ])("rejects $name even for desktop bootstrap", ({ origin, headers }) =>
     Effect.gen(function* () {

@@ -14,7 +14,9 @@ import {
 
 const PASSWORD = "correct horse battery";
 
+/** A published Hub: the Owner exists, and Grace signs in with a password alone. */
 const withPasswordMember = Effect.fn(function* (server: Server) {
+  yield* bootstrapOwner(server, yield* makeAuthenticator());
   const cookie = yield* addMember(server);
   const set = yield* server.request("/api/auth/account/password", {
     body: { loginName: "grace", password: PASSWORD },
@@ -87,6 +89,7 @@ it.effect("issues a Secure session cookie to a client a trusted proxy forwards o
 it.effect("backs off each forwarded client on its own, not the proxy's address", () =>
   Effect.gen(function* () {
     const server = yield* serveAuthHttp;
+    yield* bootstrapOwner(server, yield* makeAuthenticator());
     const from = (client: string) => ({
       peer: "127.0.0.1",
       headers: { "x-forwarded-for": client, "x-forwarded-proto": "https" },
@@ -124,7 +127,8 @@ it.effect("binds passkeys to the public URL the Hub is published on", () =>
         // The proxy forwards to the loopback address, so Host no longer names the Hub.
         host: "127.0.0.1:3773",
         origin: "https://hub.example.com",
-        "x-forwarded-for": "198.51.100.7",
+        // A LAN client: before the Owner exists the Hub admits only private ones.
+        "x-forwarded-for": "192.168.1.40",
         "x-forwarded-proto": "https",
       },
     };
@@ -139,5 +143,108 @@ it.effect("binds passkeys to the public URL the Hub is published on", () =>
     const local = yield* server.request("/api/auth/passkey/challenge", { body: {} });
     expect(local.status).toBe(400);
     expect(local.body).toMatchObject({ reason: "invalid_origin" });
+  }),
+);
+
+const LAN_PEER = "192.168.1.31";
+const metadata = (ipAddress: string | undefined) => ({
+  deviceType: "desktop" as const,
+  ...(ipAddress === undefined ? {} : { ipAddress }),
+});
+
+it.effect("keeps a fresh Installation closed to public clients a proxy forwards", () =>
+  Effect.gen(function* () {
+    const server = yield* serveAuthHttp;
+    const via = (client: string) => ({ headers: { "x-forwarded-for": client } });
+
+    expect((yield* server.request("/api/auth/session", via("203.0.113.5"))).status).toBe(403);
+    // A proxy that cannot name the client does not make it local.
+    const unnamed = { headers: { "x-forwarded-proto": "https" } };
+    expect((yield* server.request("/api/auth/session", unnamed)).status).toBe(403);
+    expect((yield* server.request("/api/auth/session", via(LAN_PEER))).status).toBe(200);
+    expect((yield* server.request("/api/auth/session")).status).toBe(200);
+
+    yield* bootstrapOwner(server, yield* makeAuthenticator());
+    expect((yield* server.request("/api/auth/session", via("203.0.113.5"))).status).toBe(200);
+  }),
+);
+
+it.effect("re-reads whether the Owner exists when the startup read missed it", () =>
+  Effect.gen(function* () {
+    const server = yield* serveAuthHttp;
+    yield* server.sql`
+      INSERT INTO users (user_id, display_name, is_owner, created_at)
+      VALUES ('owner-1', 'Ada Lovelace', 1, '2026-01-01T00:00:00.000Z')
+    `;
+    const presence = Context.get(server.services, OwnerPresence);
+    expect(presence.exists()).toBe(false);
+    const response = yield* server.request("/api/auth/session", {
+      headers: { "x-forwarded-for": "203.0.113.5" },
+    });
+    expect(response.status).toBe(200);
+    expect(presence.exists()).toBe(true);
+  }),
+);
+
+it.effect("signs LAN and tailnet browsers in over plain HTTP, but not public ones", () =>
+  Effect.gen(function* () {
+    const server = yield* serveAuthHttp;
+    yield* withPasswordMember(server);
+    expect((yield* signIn(server, { peer: LAN_PEER })).status).toBe(200);
+    expect((yield* signIn(server, { peer: "100.90.1.2" })).status).toBe(200);
+    expect((yield* signIn(server, { peer: "203.0.113.5" })).status).toBe(400);
+  }),
+);
+
+it.effect("signs only this machine in over plain HTTP once the Hub has a public URL", () =>
+  Effect.gen(function* () {
+    const server = yield* serveAuthHttpWith({ publicUrl: new URL("https://hub.example.com") });
+    const exchange = (ipAddress: string) =>
+      Effect.gen(function* () {
+        const { credential } = yield* server.environmentAuth.issuePairingCredential();
+        return yield* server.environmentAuth
+          .exchangeBootstrapCredentialForAccessToken(credential, undefined, metadata(ipAddress))
+          .pipe(Effect.result);
+      });
+    expect((yield* exchange(LAN_PEER))._tag).toBe("Failure");
+    expect((yield* exchange("127.0.0.1"))._tag).toBe("Success");
+  }),
+);
+
+it.effect("exchanges a pairing credential over plain HTTP only off the public internet", () =>
+  Effect.gen(function* () {
+    const server = yield* serveAuthHttp;
+    yield* bootstrapOwner(server, yield* makeAuthenticator());
+    const exchange = (ipAddress: string | undefined) =>
+      Effect.gen(function* () {
+        const { credential } = yield* server.environmentAuth.issuePairingCredential();
+        return yield* server.environmentAuth
+          .exchangeBootstrapCredentialForAccessToken(credential, undefined, metadata(ipAddress))
+          .pipe(Effect.result);
+      });
+    expect((yield* exchange("203.0.113.5"))._tag).toBe("Failure");
+    expect((yield* exchange(undefined))._tag).toBe("Failure");
+    expect((yield* exchange(LAN_PEER))._tag).toBe("Success");
+    expect((yield* exchange("127.0.0.1"))._tag).toBe("Success");
+  }),
+);
+
+it.effect("believes X-Forwarded-Host only from a trusted proxy", () =>
+  Effect.gen(function* () {
+    const server = yield* serveAuthHttp;
+    yield* bootstrapOwner(server, yield* makeAuthenticator());
+    const headers = {
+      host: "127.0.0.1:3773",
+      origin: "http://hub.example.com",
+      "x-forwarded-host": "hub.example.com",
+    };
+    const spoofed = yield* server.request("/api/auth/passkey/challenge", {
+      body: {},
+      peer: LAN_PEER,
+      headers,
+    });
+    expect(spoofed.status).toBe(400);
+    const proxied = yield* server.request("/api/auth/passkey/challenge", { body: {}, headers });
+    expect(proxied.status).toBe(200);
   }),
 );

@@ -10,6 +10,8 @@ import * as NodeNet from "node:net";
 import { normalizeHostname } from "@t3tools/shared/hostClassification";
 import * as Mac from "effect/crypto/Mac";
 import * as Option from "effect/Option";
+
+import { normalizeClientAddress } from "./clientConnection.ts";
 import * as Base64Url from "effect/encoding/Base64Url";
 import * as Result from "effect/Result";
 
@@ -99,14 +101,6 @@ function normalizeNonEmptyString(value: string | null | undefined): string | und
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function normalizeIpAddress(value: string | null | undefined): string | undefined {
-  const normalized = normalizeNonEmptyString(value);
-  if (!normalized) {
-    return undefined;
-  }
-  return normalized.startsWith("::ffff:") ? normalized.slice("::ffff:".length) : normalized;
-}
-
 function inferDeviceType(userAgent: string | undefined): AuthClientMetadataDeviceType {
   if (!userAgent) {
     return "unknown";
@@ -161,21 +155,6 @@ export interface AuthRequestMetadata extends AuthClientMetadata {
   readonly secureTransport?: boolean;
 }
 
-function readRemoteAddressFromSource(source: unknown): string | undefined {
-  if (!source || typeof source !== "object") {
-    return undefined;
-  }
-
-  const candidate = source as {
-    readonly remoteAddress?: string | null;
-    readonly socket?: {
-      readonly remoteAddress?: string | null;
-    };
-  };
-
-  return normalizeIpAddress(candidate.socket?.remoteAddress ?? candidate.remoteAddress);
-}
-
 /**
  * Reads the client from the request the client-connection middleware resolved, so the address is
  * the one a trusted proxy forwarded, not the proxy's.
@@ -185,11 +164,7 @@ export function deriveAuthClientMetadata(input: {
   readonly presented?: AuthClientPresentationMetadata;
 }): AuthRequestMetadata {
   const userAgent = normalizeNonEmptyString(input.request.headers["user-agent"]);
-  const resolvedAddress = input.request.remoteAddress;
-  const ipAddress =
-    resolvedAddress !== undefined && Option.isSome(resolvedAddress)
-      ? normalizeIpAddress(resolvedAddress.value)
-      : readRemoteAddressFromSource(input.request.source);
+  const ipAddress = normalizeClientAddress(Option.getOrUndefined(input.request.remoteAddress));
   const os = input.presented?.os ?? inferOs(userAgent);
   const browser = inferBrowser(userAgent);
   return {

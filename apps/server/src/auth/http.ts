@@ -659,6 +659,9 @@ export const layer = HttpApiBuilder.group(
               EnvironmentAuth.serverAuthDpopFailureReason(error),
             ),
           ),
+          Effect.catchTags({
+            ServerAuthInsecureTransportError: userSignInFailures.ServerAuthInsecureTransportError,
+          }),
           Effect.catchIf(EnvironmentAuth.isServerAuthInvalidRequestError, (error) =>
             failEnvironmentInvalidRequest(EnvironmentAuth.serverAuthInvalidRequestReason(error)),
           ),

@@ -634,10 +634,16 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
           );
 
         yield* upgrade({ origin: "http://192.168.1.50:3773" });
-        yield* upgrade({
-          origin: "https://box.tail1234.ts.net",
-          "x-forwarded-host": "box.tail1234.ts.net",
-        });
+        // Tailscale Serve: the client-connection middleware put its X-Forwarded-Host in Host.
+        yield* upgrade({ origin: "https://box.tail1234.ts.net", host: "box.tail1234.ts.net" });
+        // The raw header, which any LAN peer can send, is not this server's host.
+        const forwardedOnly = yield* Effect.flip(
+          upgrade({
+            origin: "https://box.tail1234.ts.net",
+            "x-forwarded-host": "box.tail1234.ts.net",
+          }),
+        );
+        expect(forwardedOnly._tag).toBe("ServerAuthInvalidCredentialError");
         yield* upgrade({ origin: "t3code://app" });
         yield* upgrade({ origin: "http://localhost:5733" });
         yield* upgrade({});

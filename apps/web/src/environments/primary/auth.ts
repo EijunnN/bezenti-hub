@@ -80,6 +80,15 @@ export class PrimaryEnvironmentPairingCredentialRejectedError extends Schema.Tag
   }
 }
 
+export class PrimaryEnvironmentInsecureTransportError extends Schema.TaggedError<PrimaryEnvironmentInsecureTransportError>()(
+  "PrimaryEnvironmentInsecureTransportError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "Open this Installation over HTTPS to pair this browser.";
+  }
+}
+
 export class PrimaryEnvironmentAuthSessionTimeoutError extends Schema.TaggedError<PrimaryEnvironmentAuthSessionTimeoutError>()(
   "PrimaryEnvironmentAuthSessionTimeoutError",
   {
@@ -237,6 +246,13 @@ async function exchangeBootstrapCredential(credential: string): Promise<AuthBrow
           providedLength: credential.length,
           cause: error,
         });
+      }
+      if (
+        isEnvironmentHttpCommonError(error) &&
+        error._tag === "EnvironmentRequestInvalidError" &&
+        error.reason === "insecure_transport"
+      ) {
+        throw new PrimaryEnvironmentInsecureTransportError({ cause: error });
       }
       throw PrimaryEnvironmentRequestError.fromCause({
         operation: "exchange-bootstrap-credential",

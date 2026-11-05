@@ -66,8 +66,11 @@ the filter accepts any peer
 runs before any request, so it reads a synchronous flag
 ([OwnerPresence](../../apps/server/src/auth/OwnerPresence.ts)) that
 EnvironmentAuth sets at startup and when the Owner is created. It is not a
-firewall: T3 Connect and Tailscale Serve reach the server over loopback by
-design, and a proxy that rewrites the source address looks private. One listener
+firewall: T3 Connect, Tailscale Serve and a local reverse proxy reach the server
+over loopback. So the same rule runs again per request on the resolved client
+([clientAdmission](../../apps/server/src/auth/clientAdmission.ts)), whatever the
+listener, and that check re-reads the directory while the flag is off, so a
+failed startup read does not keep a published Hub closed. One listener
 per address would miss a DHCP change, and the wildcard keeps the reported
 addresses current.
 
@@ -76,21 +79,25 @@ addresses current.
 Every route, WebSocket upgrades included, sees the request as the client made
 it: a global middleware
 ([clientConnection](../../apps/server/src/auth/clientConnection.ts)) replaces
-the request's address and scheme with the ones a trusted proxy forwarded
+the request's address, scheme and Host with the ones a trusted proxy forwarded
 (`T3CODE_TRUSTED_PROXIES`, loopback by default, since Tailscale Serve, the
 T3 Connect tunnel and a local Caddy all connect from there). Forwarding headers
 from any other peer are ignored, and `X-Forwarded-For` is walked from the right
 so an address a client writes into it is never chosen. Per-client rules (sign-in
 and Invitation back-off, session metadata, the managed policy's remote-client
-limit, the plain-HTTP refusal below, `Secure` cookies) read only that resolved
-request, never the headers. Without a trusted proxy every client behind one
-shares the proxy's address and its back-off bucket.
+limit, the plain-HTTP refusal below, `Secure` cookies, the browser-origin check)
+read only that resolved request, never the headers. A trusted proxy that forwards
+a request without a usable client address (`for=unknown`, an obfuscated name, a
+scheme alone) leaves the client unknown, and unknown counts as public, never as
+the proxy's loopback. Without a trusted proxy every client behind one shares the
+proxy's address and its back-off bucket.
 
-A browser session cookie is a bearer credential, so
-[EnvironmentAuth](../../apps/server/src/auth/EnvironmentAuth.ts) refuses to
-issue one, by account sign-in or by pairing link, over plain HTTP unless the
-client is on loopback. Bearer and DPoP clients are unaffected: they pair over
-plain LAN HTTP as before.
+Browser session cookies and access tokens are bearer credentials, so
+[EnvironmentAuth](../../apps/server/src/auth/EnvironmentAuth.ts) issues them
+(account sign-in, pairing links, token exchange, MCP clients) over plain HTTP
+only to loopback, LAN and tailnet clients, keeping `t3 up --lan` pairing. A
+public or unknown client needs HTTPS, and with `T3CODE_PUBLIC_URL` set only
+loopback may use plain HTTP.
 
 Pull request routing trust covers the whole route list. Adding or changing a route
 revokes it; reordering does not, because the same addresses remain trusted.

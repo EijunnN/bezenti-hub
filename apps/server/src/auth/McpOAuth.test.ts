@@ -81,7 +81,13 @@ const challenge = "DeB41nTVkPwpbbYecrnqtVq7VXLezustdHAK4SWt13c";
 const at = (path: string, init?: RequestInit) =>
   new Request(`http://127.0.0.1${path}`, {
     ...init,
-    headers: { host: "box.example.ts.net", "x-forwarded-proto": "https", ...init?.headers },
+    // Tailscale Serve: a loopback proxy naming the tailnet client and its scheme.
+    headers: {
+      host: "box.example.ts.net",
+      "x-forwarded-for": "100.101.102.103",
+      "x-forwarded-proto": "https",
+      ...init?.headers,
+    },
   });
 const form = (body: Record<string, string>) => ({
   method: "POST",
@@ -441,7 +447,7 @@ it.live(
           .exchangeBootstrapCredentialForAccessToken(
             bound.credential,
             undefined,
-            { deviceType: "mobile" },
+            { deviceType: "mobile", ipAddress: "127.0.0.1" },
             { proofKeyThumbprint: "device-key-thumbprint" },
           )
           .pipe(

@@ -39,7 +39,8 @@ import {
   validateAttachmentUploadToken,
 } from "./assets/AttachmentUpload.ts";
 import * as BrowserTraceCollector from "./observability/BrowserTraceCollector.ts";
-import { DEFAULT_TRUSTED_PROXIES, withClientConnection } from "./auth/clientConnection.ts";
+import { layerClientAdmission } from "./auth/clientAdmission.ts";
+import { DEFAULT_TRUSTED_PROXIES } from "./auth/clientConnection.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import {
   annotateEnvironmentRequest,
@@ -250,22 +251,10 @@ export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
   return yield* HttpServerResponse.file(asset.path, { status, offset, bytesToRead, headers });
 });
 
-/**
- * Every route, the WebSocket upgrades included, sees the request as the client made it: the
- * client address and scheme a trusted proxy forwarded, and the socket peer otherwise.
- */
 export const layerClientConnection = Layer.unwrap(
-  Effect.gen(function* () {
-    const config = yield* ServerConfig.ServerConfig;
-    const trustedProxies = config.trustedProxies ?? DEFAULT_TRUSTED_PROXIES;
-    return HttpRouter.middleware(
-      (httpApp) =>
-        Effect.updateService(httpApp, HttpServerRequest.HttpServerRequest, (request) =>
-          withClientConnection(request, trustedProxies),
-        ),
-      { global: true },
-    );
-  }),
+  Effect.map(ServerConfig.ServerConfig, (config) =>
+    layerClientAdmission(config.trustedProxies ?? DEFAULT_TRUSTED_PROXIES),
+  ),
 );
 
 export const layerHttpCompression = HttpRouter.middleware(HttpMiddleware.compression(), {

@@ -5,10 +5,10 @@ invite can sign in from anywhere, without Tailscale or T3 Connect. A reverse
 proxy on the same machine serves HTTPS and forwards to T3 Code, which keeps
 listening only on this machine.
 
-Create the Owner account first, on this machine. Until the Installation has an
-Owner, a service listening on the local network refuses public addresses; once
-it has one, it accepts any address, because every request then needs someone
-signed in.
+Create the Owner account first, from this machine or your local network. Until
+the Installation has an Owner it refuses clients from public addresses, including
+those your proxy forwards; once it has one, it accepts any address, because every
+request then needs someone signed in.
 
 ## Before you start
 
@@ -82,10 +82,11 @@ Put it in a `server` block that listens on 443 with your certificate.
 
 ## Sign in over HTTPS
 
-The Hub only signs a browser in over HTTPS, or over plain HTTP from the machine
-it runs on. Opening `http://hub.example.com` or a LAN address from another
-device and signing in is refused. Session cookies sent over HTTPS are marked
-`Secure`.
+Signing in or pairing over plain HTTP works only from this machine, your local
+network and your tailnet; from a public address it takes HTTPS. Once
+`T3CODE_PUBLIC_URL` is set, only this machine may use plain HTTP. A proxy that
+forwards a request without naming the client counts as a public client. Session
+cookies sent over HTTPS are marked `Secure`.
 
 ## If something does not work
 

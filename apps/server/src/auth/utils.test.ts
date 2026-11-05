@@ -1,3 +1,4 @@
+import * as Option from "effect/Option";
 import { describe, expect, it } from "vite-plus/test";
 
 import { deriveAuthClientMetadata, resolveSessionCookieName } from "./utils.ts";
@@ -10,9 +11,7 @@ describe("deriveAuthClientMetadata", () => {
           "user-agent":
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) t3code/0.0.15 Chrome/136.0.7103.93 Electron/36.3.2 Safari/537.36",
         },
-        source: {
-          remoteAddress: "::ffff:127.0.0.1",
-        },
+        remoteAddress: Option.some("::ffff:127.0.0.1"),
       } as never,
     });
 
@@ -47,7 +46,7 @@ describe("deriveAuthClientMetadata", () => {
     ],
   ])("labels %s by its own browser token", (_name, userAgent, browser) => {
     const metadata = deriveAuthClientMetadata({
-      request: { headers: { "user-agent": userAgent }, source: {} } as never,
+      request: { headers: { "user-agent": userAgent }, remoteAddress: Option.none() } as never,
     });
 
     expect(metadata.browser).toBe(browser);
@@ -60,9 +59,7 @@ describe("deriveAuthClientMetadata", () => {
           "user-agent":
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/136.0.7103.93 Electron/36.3.2 Safari/537.36",
         },
-        source: {
-          remoteAddress: "::ffff:192.168.213.72",
-        },
+        remoteAddress: Option.some("::ffff:192.168.213.72"),
       } as never,
       presented: {
         label: "T3 Code Mobile",
