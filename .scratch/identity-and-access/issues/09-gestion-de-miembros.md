@@ -12,3 +12,4 @@ Spec: ../spec.md
 - [ ] Salir y expulsar conservan el contenido en la Organization.
 - [ ] Ascender a Admin exige passkey o TOTP en el siguiente inicio de sesión.
 - [ ] Enlaces de reset para Members y Guests, de un solo uso y con caducidad.
+- [ ] Un Member o Guest recién invitado no ve el asistente de bienvenida del Owner («Connect your computers», «Add a computer»): su primera pantalla es su Organization. (Visto en la prueba real del ticket 07.)
