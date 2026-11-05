@@ -1024,6 +1024,11 @@ export type SystemSettingsPane = typeof SystemSettingsPaneSchema.Type;
 
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
+  /**
+   * Always false. Web bundles older than this shell still call it while loading, so it stays
+   * until those bundles are gone; nothing reads it now.
+   */
+  getRelayTelemetryEnabled: () => false;
   getPathForFile: (file: File) => string;
   getClientPlatform: () => string;
   setNotificationBadge: (badge: { count: number; image: string | null }) => Promise<void>;

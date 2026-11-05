@@ -112,6 +112,7 @@ export const WINDOWS_POLICY_VALUES = {
   MaxRuntimeMode: { type: "string", path: ["limits", "maxRuntimeMode"] },
   Connect: { type: "boolean", path: ["limits", "connect"] },
   WebhookTasks: { type: "boolean", path: ["limits", "webhookTasks"] },
+  // Ignored since ADR 0007; still read so older Group Policy values load.
   Telemetry: { type: "boolean", path: ["limits", "telemetry"] },
   BrowserCookieImport: { type: "boolean", path: ["limits", "browserCookieImport"] },
   ProviderInstances: { type: "json", path: ["limits", "providers", "instances"] },

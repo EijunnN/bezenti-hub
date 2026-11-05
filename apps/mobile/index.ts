@@ -1,6 +1,8 @@
 // Must stay first: the render counter and behavior probe wrap the DevTools hook before any React commit.
 import "./src/features/development/render-counter-entry";
 import "./src/features/development/behavior-probe-entry";
+// Next, so rejections while the rest of the app loads are logged too.
+import "./src/lib/unhandledRejections";
 import { registerRootComponent } from "expo";
 import "react-native-gesture-handler";
 import { LogBox } from "react-native";
