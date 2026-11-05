@@ -9,7 +9,9 @@ import {
   NonNegativeInt,
   ProjectId,
   ProviderItemId,
+  SpaceId,
   TrimmedNonEmptyString,
+  UserId,
 } from "./baseSchemas.ts";
 import { RepositoryIdentity, ThreadEnvMode } from "./environment.ts";
 import { ModelSelection } from "./modelSelection.ts";
@@ -43,6 +45,8 @@ export const ApplicationProjectCreatedPayload = Schema.Struct({
   faviconPath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   projectIcon: Schema.optional(Schema.NullOr(StoredProjectIcon)),
   scripts: Schema.Array(ProjectScript),
+  spaceId: Schema.optional(SpaceId),
+  ownerUserId: Schema.optional(UserId),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });

@@ -22,13 +22,61 @@ import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import * as SessionStore from "./SessionStore.ts";
 import * as AuthHttp from "./http.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as SpacesHttp from "../spaces/http.ts";
+import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
+import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
+import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
+import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
+import * as ProjectHttp from "../project/http.ts";
+import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
+import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 
-class AuthTestApi extends HttpApi.make("environment").add(EnvironmentHttpApi.groups.auth) {}
+class AuthTestApi extends HttpApi.make("environment")
+  .add(EnvironmentHttpApi.groups.auth)
+  .add(EnvironmentHttpApi.groups.spaces)
+  .add(EnvironmentHttpApi.groups.projects) {}
 
 const ORIGIN = "http://127.0.0.1";
 const RP_ID = "127.0.0.1";
 
-const layerServices = EnvironmentAuth.layer.pipe(
+// Real Projects over the same database; workspaces and repository lookups are not under test.
+const layerProjects = RuntimeLayer.layerProjectService.pipe(
+  Layer.provideMerge(ProjectEnrichmentService.layer),
+  Layer.provide(
+    Layer.mergeAll(
+      Layer.succeed(WorkspacePaths.WorkspacePaths, {
+        normalizeWorkspaceRoot: (workspaceRoot) => Effect.succeed(workspaceRoot),
+        resolveRelativePathWithinRoot: ({ workspaceRoot, relativePath }) =>
+          Effect.succeed({ absolutePath: `${workspaceRoot}/${relativePath}`, relativePath }),
+      }),
+      Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+        resolve: () => Effect.succeed(null),
+      }),
+      Layer.succeed(ProjectFaviconResolver.ProjectFaviconResolver, {
+        invalidate: () => Effect.void,
+        resolvePath: () => Effect.succeed(null),
+      }),
+    ),
+  ),
+  Layer.provideMerge(ServerSettings.layerTest()),
+  Layer.provideMerge(
+    Layer.mergeAll(
+      Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
+        enqueueCommand: (effect) => effect,
+      }),
+      Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({ discard: () => Effect.void }),
+    ),
+  ),
+);
+
+const layerServices = Layer.mergeAll(
+  EnvironmentAuth.layer,
+  SpaceDirectory.layer,
+  layerProjects,
+).pipe(
   Layer.provide(ManagedPolicy.layerTest()),
   Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provideMerge(ServerSecretStore.layer),
@@ -41,6 +89,8 @@ export const serveAuthHttp = Effect.gen(function* () {
   const services = yield* Layer.build(layerServices);
   const routes = HttpApiBuilder.layer(AuthTestApi).pipe(
     Layer.provide(AuthHttp.layer),
+    Layer.provide(SpacesHttp.layer),
+    Layer.provide(ProjectHttp.layer),
     Layer.provide(AuthHttp.layerAuthenticatedAuth),
     Layer.provide(Layer.succeedContext(services)),
     Layer.provide(HttpPlatform.layer),
@@ -283,4 +333,17 @@ export const addMember = Effect.fn(function* (
     userId: UserId.make(member.id),
   });
   return `${server.sessions.cookieName}=${memberSession.token}`;
+});
+
+/** Makes a User a Member of an Organization; Invitations (ticket 06) will do this. */
+export const joinOrganization = Effect.fn(function* (
+  server: Server,
+  spaceId: string,
+  userId: string,
+  role: "admin" | "member" | "guest",
+) {
+  yield* server.sql`
+    INSERT INTO space_memberships (space_id, user_id, role, created_at)
+    VALUES (${spaceId}, ${userId}, ${role}, '2026-01-01T00:00:00.000Z')
+  `;
 });

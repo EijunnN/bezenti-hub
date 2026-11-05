@@ -37,9 +37,11 @@ import {
   RunId,
   RuntimeRequestId,
   ScheduledTaskId,
+  SpaceId,
   ThreadId,
   TrimmedNonEmptyString,
   TurnItemId,
+  UserId,
 } from "./baseSchemas.ts";
 import { AuthMcpClientAccess } from "./auth.ts";
 import { ChatAttachment } from "./chatAttachment.ts";
@@ -459,6 +461,9 @@ export const OrchestrationV2AppThread = Schema.Struct({
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
+  /** Absent for Threads from before Spaces, which belong to the Owner's Personal space. */
+  spaceId: Schema.optional(SpaceId),
+  ownerUserId: Schema.optional(UserId),
   lineage: OrchestrationV2AppThreadLineage,
   forkedFrom: Schema.NullOr(
     Schema.Union([
@@ -2089,6 +2094,8 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   historyOrigin: Schema.optional(OrchestrationV2ThreadHistoryOrigin),
   linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
+  spaceId: Schema.optional(SpaceId),
+  ownerUserId: Schema.optional(UserId),
   latestRunId: Schema.NullOr(RunId),
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2916,6 +2923,10 @@ export const OrchestrationV2Command = Schema.Union([
     interactionMode: ProviderInteractionMode,
     branch: Schema.NullOr(TrimmedNonEmptyString),
     worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+    /** The client's current Space; the server checks it and may replace it with the Project's. */
+    spaceId: Schema.optional(SpaceId),
+    /** Only the server sets this, from the creator's session. */
+    ownerUserId: Schema.optional(UserId),
     /** Only the server sets this; a client's thread.create never carries one. */
     linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
     /** Only the server sets this, with `linkOrigin`, for a linked environment's delegated task. */
@@ -3632,6 +3643,8 @@ export type OrchestrationV2ArchivedShellSnapshot = typeof OrchestrationV2Archive
 export const OrchestrationV2ThreadLaunchInput = Schema.Struct({
   commandId: CommandId,
   creationSource: Schema.optional(OrchestrationV2CreationSource),
+  /** The client's current Space, for a new Thread. */
+  spaceId: Schema.optional(SpaceId),
   threadId: Schema.optional(ThreadId),
   reuseExistingThread: Schema.optional(Schema.Boolean),
   projectId: ProjectId,

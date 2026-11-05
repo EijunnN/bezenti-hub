@@ -6,7 +6,9 @@ import {
   StoredProjectIcon,
   ProjectId,
   ProjectScript,
+  SpaceId,
   ThreadEnvMode,
+  UserId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
@@ -41,6 +43,8 @@ export const ProjectRow = Schema.Struct({
   scripts: Schema.Array(ProjectScript),
   pinnedAt: Schema.NullOr(IsoDateTime),
   archivedAt: Schema.NullOr(IsoDateTime),
+  spaceId: Schema.NullOr(SpaceId),
+  ownerUserId: Schema.NullOr(UserId),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   deletedAt: Schema.NullOr(IsoDateTime),
@@ -69,6 +73,8 @@ function toShell(row: ProjectRow): OrchestrationProjectShell {
     scripts: row.scripts,
     pinnedAt: row.pinnedAt,
     archivedAt: row.archivedAt,
+    spaceId: row.spaceId,
+    ownerUserId: row.ownerUserId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -126,6 +132,8 @@ export const make = Effect.gen(function* () {
         scripts_json AS "scripts",
         pinned_at AS "pinnedAt",
         archived_at AS "archivedAt",
+        space_id AS "spaceId",
+        owner_user_id AS "ownerUserId",
         created_at AS "createdAt",
         updated_at AS "updatedAt",
         deleted_at AS "deletedAt"
@@ -158,6 +166,8 @@ export const make = Effect.gen(function* () {
             scripts_json,
             pinned_at,
             archived_at,
+            space_id,
+            owner_user_id,
             created_at,
             updated_at,
             deleted_at
@@ -174,6 +184,8 @@ export const make = Effect.gen(function* () {
             ${encoded.scripts},
             ${encoded.pinnedAt},
             ${encoded.archivedAt},
+            ${encoded.spaceId},
+            ${encoded.ownerUserId},
             ${encoded.createdAt},
             ${encoded.updatedAt},
             ${encoded.deletedAt}
@@ -190,6 +202,8 @@ export const make = Effect.gen(function* () {
             scripts_json = excluded.scripts_json,
             pinned_at = excluded.pinned_at,
             archived_at = excluded.archived_at,
+            space_id = excluded.space_id,
+            owner_user_id = excluded.owner_user_id,
             created_at = excluded.created_at,
             updated_at = excluded.updated_at,
             deleted_at = excluded.deleted_at
@@ -240,6 +254,8 @@ export const make = Effect.gen(function* () {
           scripts: payload.scripts,
           pinnedAt: null,
           archivedAt: null,
+          spaceId: payload.spaceId ?? null,
+          ownerUserId: payload.ownerUserId ?? null,
           createdAt: payload.createdAt,
           updatedAt: payload.updatedAt,
           deletedAt: null,

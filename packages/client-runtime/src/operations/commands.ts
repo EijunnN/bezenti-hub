@@ -23,6 +23,7 @@ import {
   type RunId,
   type RuntimeMode,
   type RuntimeRequestId,
+  type SpaceId,
   type ThreadId,
   type ThreadEnvMode,
   type UploadChatAttachment,
@@ -34,6 +35,15 @@ import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 
 import { getInitialServerConfig, request } from "../rpc/client.ts";
+import * as EnvironmentSupervisor from "../connection/supervisor.ts";
+import { currentSpaceFor } from "../spaces/currentSpace.ts";
+
+/** The client's current Space on the target environment, for a new Project or Thread. */
+const currentSpace = Effect.gen(function* () {
+  const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+  const spaceId = currentSpaceFor(supervisor.target.environmentId);
+  return spaceId === undefined ? {} : { spaceId };
+});
 
 interface CommandMetadata {
   readonly commandId?: CommandId;
@@ -319,6 +329,7 @@ const mutateProject = Effect.fn("EnvironmentCommands.mutateProject")(function* (
         readonly createWorkspaceRootIfMissing?: boolean;
         readonly defaultModelSelection?: ModelSelection | null;
         readonly scripts?: ReadonlyArray<ProjectScript>;
+        readonly spaceId?: SpaceId;
       }
     | {
         readonly type: "project.update";
@@ -348,6 +359,7 @@ export const createProject = Effect.fn("EnvironmentCommands.createProject")(func
     projectId: input.projectId,
     title: input.title,
     workspaceRoot: input.workspaceRoot,
+    ...(yield* currentSpace),
     ...(input.createWorkspaceRootIfMissing === undefined
       ? {}
       : { createWorkspaceRootIfMissing: input.createWorkspaceRootIfMissing }),
@@ -403,6 +415,7 @@ export const createThread = Effect.fn("EnvironmentCommands.createThread")(functi
     creationSource: input.creationSource ?? "web",
     threadId: input.threadId,
     projectId: input.projectId,
+    ...(yield* currentSpace),
     title: input.title,
     modelSelection: input.modelSelection,
     runtimeMode: input.runtimeMode,
@@ -712,6 +725,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
     return yield* request(ORCHESTRATION_V2_WS_METHODS.launchThread, {
       commandId,
       creationSource: input.creationSource ?? "web",
+      ...(bootstrap === undefined ? {} : yield* currentSpace),
       threadId: input.threadId,
       ...(bootstrap === undefined ? { reuseExistingThread: true } : {}),
       projectId: thread.projectId,

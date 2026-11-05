@@ -514,6 +514,10 @@
     "./provider-clients": {
       "types": "./src/providerClients.ts",
       "default": "./src/providerClients.ts"
+    },
+    "./spaces/current-space": {
+      "types": "./src/spaces/currentSpace.ts",
+      "default": "./src/spaces/currentSpace.ts"
     }
   },
   "scripts": {

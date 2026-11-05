@@ -4,11 +4,18 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** done
 
 Spec: ../spec.md
 
-- [ ] Tablas de Spaces y Memberships; cada User tiene un Personal space implícito.
-- [ ] Solo el Owner crea Organizations (Deny para cualquier otro en `AccessPolicy`).
-- [ ] Selector de Space en web; crear Project o Thread lo asigna al Space actual con su autor.
-- [ ] Suite de tabla de `AccessPolicy` con las primeras filas; cada regla nueva será una fila.
+- [x] Tablas de Spaces y Memberships; cada User tiene un Personal space implícito.
+- [x] Solo el Owner crea Organizations (Deny para cualquier otro en `AccessPolicy`).
+- [x] Selector de Space en web; crear Project o Thread lo asigna al Space actual con su autor.
+- [x] Suite de tabla de `AccessPolicy` con las primeras filas; cada regla nueva será una fila.
+
+Notas de implementación:
+
+- Personal space: se crea perezosamente en el primer uso (`personal:<userId>`), no con el User.
+- Filas previas a Spaces: `space_id`/`owner_user_id` quedan `NULL` y cuentan como Personal space del Owner (la migración 084 no puede rellenarlas: el Owner puede no existir aún).
+- Crear en un Personal space exige `personalSpace.create`; hasta el ticket 10 solo el Owner puede.
+- Selector de Space en móvil: ticket 16.

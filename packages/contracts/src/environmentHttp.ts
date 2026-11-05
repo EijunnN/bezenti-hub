@@ -60,6 +60,7 @@ import {
   AuthTotpEnrollment,
   AuthTotpSignInRequest,
 } from "./userAccounts.ts";
+import { CreateOrganizationRequest, SpaceDirectoryView, SpaceSummary } from "./spaces.ts";
 import {
   ExecutionEnvironmentDescriptor,
   ORCHESTRATION_PROTOCOL_HEADER,
@@ -149,6 +150,7 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "orchestration_thread_snapshot_failed",
   "orchestration_thread_bounded_snapshot_failed",
   "orchestration_thread_history_failed",
+  "spaces_failed",
   "internal_error",
 ]);
 export type EnvironmentInternalErrorReason = typeof EnvironmentInternalErrorReason.Type;
@@ -432,6 +434,8 @@ const EnvironmentOrchestrationThreadSnapshotErrors = [
 const EnvironmentProjectMutationErrors = [
   EnvironmentRequestInvalidError,
   EnvironmentScopeRequiredError,
+  // The current Space does not let this User create Projects.
+  EnvironmentHttpForbiddenError,
   EnvironmentInternalError,
 ] as const;
 
@@ -916,6 +920,29 @@ class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
+const EnvironmentSpaceErrors = [
+  // The session has no User, or the Space's rules refuse the change.
+  EnvironmentHttpForbiddenError,
+  EnvironmentInternalError,
+] as const;
+
+class EnvironmentSpacesHttpApi extends HttpApiGroup.make("spaces")
+  .add(
+    HttpApiEndpoint.get("list", "/api/spaces", {
+      headers: OptionalBearerHeaders,
+      success: SpaceDirectoryView,
+      error: EnvironmentSpaceErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("createOrganization", "/api/spaces/organizations", {
+      headers: OptionalBearerHeaders,
+      payload: CreateOrganizationRequest,
+      success: SpaceSummary,
+      error: EnvironmentSpaceErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  ) {}
+
 class EnvironmentProjectsHttpApi extends HttpApiGroup.make("projects")
   .add(
     HttpApiEndpoint.get("snapshot", "/api/projects", {
@@ -1036,5 +1063,6 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentOrchestrationHttpApi)
   .add(EnvironmentPullRequestsHttpApi)
   .add(EnvironmentProjectsHttpApi)
+  .add(EnvironmentSpacesHttpApi)
   .add(EnvironmentConnectHttpApi)
   .add(EnvironmentWebhooksHttpApi) {}

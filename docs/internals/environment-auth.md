@@ -88,6 +88,30 @@ assumes the old passkeys are lost or stolen, so in one transaction it spends the
 link, replaces every passkey with the new one, revokes the Owner's sessions and
 issues a new one.
 
+### Spaces
+
+Every Project and Thread belongs to a Space: an Organization or a User's Personal
+space. Who may do what is decided only by the pure
+[AccessPolicy](../../apps/server/src/auth/AccessPolicy.ts), whose table-driven test
+is the Role table; a new rule is a new row there, not a check at a call site.
+[SpaceDirectory](../../apps/server/src/spaces/SpaceDirectory.ts) loads the
+principal (Owner or not, Roles, Installation permissions) for it.
+
+The server stamps `spaceId` and `ownerUserId` when a Project or Thread is
+created, from the client's current Space and the session's User; a client's
+`ownerUserId` is dropped. A Thread joins its Project's Space when the Project
+has one, so only Threads in unstamped Projects (such as No project) take the
+current Space. Clients send their current Space only to the environment it came
+from, since another environment knows none of its ids. Sessions without a User
+exist only before the Owner does, and what they create stays unstamped.
+
+Rows from before Spaces keep `NULL` in both columns and count as the Owner's
+Personal space; the migration cannot backfill them because the Owner may not
+exist yet. A Personal space row is created on first use with the id
+`personal:<userId>`, so neither UserDirectory nor Invitations need to know about
+Spaces. Creating in a Personal space needs the `personalSpace.create`
+Installation permission, which only the Owner holds until the Owner can grant it.
+
 ### Sign-in rules
 
 Which accounts may use a password without a second factor is one function,

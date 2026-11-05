@@ -248,6 +248,14 @@ For provider-specific setup and accounts, see [Codex](./providers-codex.md),
 [Antigravity](./providers-antigravity.md), [Kiro](./providers-kiro.md),
 [Pi](./providers-pi.md), [Muse Code](./providers-muse.md), and [fx](./providers-fx.md).
 
+### Spaces and organizations
+
+Every project and thread belongs to a Space: your Personal space or an
+organization. Pick the current Space from the selector at the bottom of the
+sidebar; new projects and threads go there, and a thread started in a project
+joins that project's Space. The Owner creates organizations from the same
+selector with **Create organization**. The Owner can see every Personal space.
+
 ## Next steps
 
 - [Working with threads](./thread-sidebar.md): start tasks and organize parallel work.

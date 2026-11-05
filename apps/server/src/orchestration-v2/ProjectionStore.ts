@@ -1624,6 +1624,10 @@ export function threadShellFromProjection(
     ...(projection.thread.delegatedFrom === undefined
       ? {}
       : { delegatedFrom: projection.thread.delegatedFrom }),
+    ...(projection.thread.spaceId === undefined ? {} : { spaceId: projection.thread.spaceId }),
+    ...(projection.thread.ownerUserId === undefined
+      ? {}
+      : { ownerUserId: projection.thread.ownerUserId }),
     latestRunId: latestRun?.id ?? null,
     latestRunRequestedAt: latestRun?.requestedAt ?? null,
     latestRunStartedAt: latestRun?.startedAt ?? null,
@@ -1905,6 +1909,10 @@ function shellFromState(input: {
     ...(input.state.thread.delegatedFrom === undefined
       ? {}
       : { delegatedFrom: input.state.thread.delegatedFrom }),
+    ...(input.state.thread.spaceId === undefined ? {} : { spaceId: input.state.thread.spaceId }),
+    ...(input.state.thread.ownerUserId === undefined
+      ? {}
+      : { ownerUserId: input.state.thread.ownerUserId }),
     latestRunId: input.state.latestRunId,
     latestRunRequestedAt: input.state.latestRunRequestedAt,
     latestRunStartedAt: input.state.latestRunStartedAt,
@@ -2027,6 +2035,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 updated_at,
                 archived_at,
                 deleted_at,
+                space_id,
+                owner_user_id,
                 payload_json
               )
               VALUES (
@@ -2042,6 +2052,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ${stringField(payload, "updatedAt")},
                 ${nullableStringField(payload, "archivedAt")},
                 ${nullableStringField(payload, "deletedAt")},
+                ${event.payload.spaceId ?? null},
+                ${event.payload.ownerUserId ?? null},
                 ${payloadJson}
               )
               ON CONFLICT(thread_id)
@@ -2057,6 +2069,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 updated_at = excluded.updated_at,
                 archived_at = excluded.archived_at,
                 deleted_at = excluded.deleted_at,
+                space_id = excluded.space_id,
+                owner_user_id = excluded.owner_user_id,
                 payload_json = excluded.payload_json
             `;
               break;

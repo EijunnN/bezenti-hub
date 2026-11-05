@@ -10,9 +10,11 @@ import {
   NonNegativeInt,
   PositiveInt,
   ProjectId,
+  SpaceId,
   ThreadId,
   TrimmedNonEmptyString,
   TrimmedString,
+  UserId,
   type UnknownUnionMember,
 } from "./baseSchemas.ts";
 
@@ -163,6 +165,9 @@ export const Project = Schema.Struct({
   scripts: Schema.Array(ProjectScript),
   pinnedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   archivedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /** Null for Projects from before Spaces, which belong to the Owner's Personal space. */
+  spaceId: Schema.optional(Schema.NullOr(SpaceId)),
+  ownerUserId: Schema.optional(Schema.NullOr(UserId)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   deletedAt: Schema.NullOr(IsoDateTime),
@@ -208,6 +213,8 @@ export const ProjectMutation = Schema.Union([
     commandId: CommandId,
     projectId: ProjectId,
     ...ProjectCreatePayload.fields,
+    /** The client's current Space; the server checks it and stamps the creator. */
+    spaceId: Schema.optional(SpaceId),
   }),
   Schema.Struct({
     type: Schema.Literal("project.update"),
