@@ -20,22 +20,28 @@ import type * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 
 /**
- * `thread` and `project`: the middleware refuses ids the session cannot see. `filtered`: the
- * handler reads through SpaceVisibility. `unscoped`: why the rule does not apply here.
+ * `thread` and `project`: the middleware refuses ids the session cannot see. `command`: the
+ * same for what a command acts on, minus what it creates. `named`: every Project named at any
+ * depth, and no hidden Thread (drafts pass). `filtered`: the handler reads through
+ * SpaceVisibility. `unscoped`: why the rule does not apply here.
  */
-export type RpcSpaceAccess = "thread" | "project" | "filtered" | { readonly unscoped: string };
+export type RpcSpaceAccess =
+  | "thread"
+  | "project"
+  | "command"
+  | "named"
+  | "filtered"
+  | { readonly unscoped: string };
 
-const WRITE_RULES = { unscoped: "a write: ticket 08 asks AccessPolicy before dispatch" };
 const DRAFTS = {
   unscoped: "drafts use it before their Thread exists; ticket 08 sets the operate rules",
 };
 const BY_DIRECTORY = { unscoped: "works on a directory, which filesystem scopes guard" };
 
 export const RPC_SPACE_ACCESS = {
-  [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: WRITE_RULES,
-  [ORCHESTRATION_V2_WS_METHODS.launchThread]: {
-    unscoped: "creates a Thread; SpaceDirectory.claimCreation checks its Space",
-  },
+  // Which Role may write is ticket 08; here a hidden target answers like a missing one.
+  [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: "command",
+  [ORCHESTRATION_V2_WS_METHODS.launchThread]: "command",
   [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: "filtered",
   [ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot]: "filtered",
   [ORCHESTRATION_V2_WS_METHODS.searchThreads]: "filtered",
@@ -88,7 +94,7 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.deviceClose]: DRAFTS,
   [WS_METHODS.gitRunStackedAction]: BY_DIRECTORY,
   [WS_METHODS.gitPreparePullRequestThread]: BY_DIRECTORY,
-  [WS_METHODS.projectsMutate]: WRITE_RULES,
+  [WS_METHODS.projectsMutate]: "command",
   [WS_METHODS.scheduledTasksUpsert]: {
     unscoped: "scheduled tasks run as the Owner until ticket 13",
   },
@@ -102,7 +108,15 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.serverListAcpRegistryProviders]: "project",
   [WS_METHODS.serverSetAcpRegistryProvider]: "project",
   [WS_METHODS.serverDisableAcpRegistryProvider]: "project",
+  // Without a Project these name, the handler narrows them to the visible ones.
   [WS_METHODS.pullRequestsList]: "project",
+  [WS_METHODS.pullRequestsListStats]: "project",
+  [WS_METHODS.pullRequestsInvalidate]: "project",
+  [WS_METHODS.pullRequestsReportState]: "project",
+  [WS_METHODS.assetsCreateUrl]: "named",
+  [WS_METHODS.serverReportClientActivity]: {
+    unscoped: "reports this client's own activity and returns nothing",
+  },
   [WS_METHODS.pullRequestsFilterOptions]: "project",
   [WS_METHODS.pullRequestsSummary]: "project",
   [WS_METHODS.pullRequestsRouting]: "project",
@@ -142,10 +156,80 @@ export const spaceAccessForRpcMethod = (method: string): RpcSpaceAccess | undefi
 const notFound = () =>
   new SpaceResourceNotFoundError({ message: "That Project or Thread does not exist." });
 
-const field = (payload: unknown, name: string): unknown =>
-  Predicate.isObject(payload) && name in payload
+const THREAD_KEYS = new Set(["threadId", "threadIds"]);
+const PROJECT_KEYS = new Set(["projectId", "projectIds"]);
+
+/** Every string under one of `keys`, at any depth of the payload. */
+const idsUnder = (value: unknown, keys: ReadonlySet<string>, into: Array<string> = []) => {
+  if (Array.isArray(value)) {
+    for (const item of value) idsUnder(item, keys, into);
+  } else if (Predicate.isObject(value)) {
+    for (const [key, child] of Object.entries(value)) {
+      if (keys.has(key)) {
+        for (const id of Array.isArray(child) ? child : [child]) {
+          if (typeof id === "string") into.push(id);
+        }
+      } else {
+        idsUnder(child, keys, into);
+      }
+    }
+  }
+  return into;
+};
+
+const stringField = (payload: unknown, name: string): string | undefined => {
+  const value = Predicate.isObject(payload)
     ? (payload as Record<string, unknown>)[name]
     : undefined;
+  return typeof value === "string" ? value : undefined;
+};
+
+/**
+ * What a command acts on, which must be visible, and what it creates, which must only not
+ * belong to a Space the session cannot see.
+ */
+const commandTargets = (method: string, payload: unknown) => {
+  const type = stringField(payload, "type");
+  const created = new Set<string>();
+  if (method === WS_METHODS.projectsMutate) {
+    const projectId = stringField(payload, "projectId");
+    return {
+      threads: [],
+      projects: type === "project.create" || projectId === undefined ? [] : [projectId],
+      created: [],
+    };
+  }
+  if (method === ORCHESTRATION_V2_WS_METHODS.launchThread) {
+    const threadId = stringField(payload, "threadId");
+    const projectId = stringField(payload, "projectId");
+    return {
+      threads: [],
+      projects: projectId === undefined ? [] : [projectId],
+      created: threadId === undefined ? [] : [threadId],
+    };
+  }
+  const createdField =
+    type === "thread.create"
+      ? "threadId"
+      : type === "thread.fork" || type === "thread.created.record"
+        ? "targetThreadId"
+        : undefined;
+  const threads: Array<string> = [];
+  for (const field of [
+    "threadId",
+    "sourceThreadId",
+    "targetThreadId",
+    "parentThreadId",
+    "senderThreadId",
+  ]) {
+    const id = stringField(payload, field);
+    if (id === undefined) continue;
+    if (field === createdField) created.add(id);
+    else threads.push(id);
+  }
+  const projectId = stringField(payload, "projectId");
+  return { threads, projects: projectId === undefined ? [] : [projectId], created: [...created] };
+};
 
 /**
  * Refuses the call when the payload names a Project or Thread the viewer may not see. A
@@ -159,23 +243,41 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
 ) {
   if (visibility.all) return;
   const access = spaceAccessForRpcMethod(method);
+  const requireVisible = Effect.fn(function* (
+    threads: ReadonlyArray<string>,
+    projects: ReadonlyArray<string>,
+  ) {
+    const [visibleThreads, visibleProjects] = yield* Effect.all([
+      spaceVisibility.visibleThreadIds(visibility, threads as ReadonlyArray<ThreadId>),
+      spaceVisibility.visibleProjectIds(visibility, projects as ReadonlyArray<ProjectId>),
+    ]);
+    if (
+      threads.some((id) => !visibleThreads.has(id as ThreadId)) ||
+      projects.some((id) => !visibleProjects.has(id as ProjectId))
+    ) {
+      return yield* notFound();
+    }
+  });
   if (access === "thread") {
-    const threadId = field(payload, "threadId");
-    if (typeof threadId !== "string") return yield* notFound();
-    const visible = yield* spaceVisibility.visibleThreadIds(visibility, [threadId as ThreadId]);
-    if (!visible.has(threadId as ThreadId)) return yield* notFound();
+    const threads = idsUnder(payload, THREAD_KEYS);
+    if (stringField(payload, "threadId") === undefined) return yield* notFound();
+    return yield* requireVisible(threads, idsUnder(payload, PROJECT_KEYS));
+  }
+  if (access === "project") return yield* requireVisible([], idsUnder(payload, PROJECT_KEYS));
+  if (access === "named") {
+    yield* requireVisible([], idsUnder(payload, PROJECT_KEYS));
+    const hidden = yield* spaceVisibility.hiddenThreadIds(
+      visibility,
+      idsUnder(payload, THREAD_KEYS),
+    );
+    if (hidden.size > 0) return yield* notFound();
     return;
   }
-  if (access === "project") {
-    const single = field(payload, "projectId");
-    const many = field(payload, "projectIds");
-    const projectIds: Array<ProjectId> = [];
-    if (typeof single === "string") projectIds.push(single as ProjectId);
-    if (Array.isArray(many)) {
-      for (const id of many) if (typeof id === "string") projectIds.push(id as ProjectId);
-    }
-    if (projectIds.length === 0) return;
-    const visible = yield* spaceVisibility.visibleProjectIds(visibility, projectIds);
-    if (projectIds.some((projectId) => !visible.has(projectId))) return yield* notFound();
+  if (access === "command") {
+    const targets = commandTargets(method, payload);
+    yield* requireVisible(targets.threads, targets.projects);
+    // A new id that names a hidden Thread answers like any hidden Thread.
+    const hidden = yield* spaceVisibility.hiddenThreadIds(visibility, targets.created);
+    if (hidden.size > 0) return yield* notFound();
   }
 });

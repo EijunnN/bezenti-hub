@@ -11,6 +11,7 @@ import {
 } from "@t3tools/contracts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 
 import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
@@ -30,12 +31,18 @@ export const threadNotFound = Effect.fn("OrchestratorMcpService.threadNotFound")
 ) {
   const prefixed = ThreadId.make(`mcp:${threadId}`);
   const shell = yield* threads.getThreadShell(prefixed).pipe(Effect.orElseSucceed(() => null));
+  // Only a Thread the caller may see is suggested, so the hint says nothing about other Spaces.
+  const scope = yield* Effect.serviceOption(McpInvocationContext.McpInvocationContext);
+  const suggest =
+    shell !== null &&
+    shell.deletedAt === null &&
+    (yield* visibleShells(
+      Option.getOrElse(scope, () => ({})),
+      [shell],
+    )).length > 0;
   return yield* new OrchestratorMcpFailure({
     code: "thread_not_found",
-    message:
-      shell === null || shell.deletedAt !== null
-        ? message
-        : `${message} Did you mean \`${prefixed}\`?`,
+    message: suggest ? `${message} Did you mean \`${prefixed}\`?` : message,
   });
 });
 

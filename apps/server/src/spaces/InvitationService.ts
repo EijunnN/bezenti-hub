@@ -546,7 +546,11 @@ const make = Effect.gen(function* () {
           return { spaceId: spent.value.spaceId, session };
         }),
       )
-      .pipe(Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }));
+      // After the commit, so a viewer that refreshes on the bump reads the new Membership.
+      .pipe(
+        Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }),
+        Effect.ensuring(spaces.changed),
+      );
     throttle.reset(keys);
     return {
       result: { session: session.response, userId: pending.userId, spaceId },
@@ -599,7 +603,11 @@ const make = Effect.gen(function* () {
           return spent.value.spaceId;
         }),
       )
-      .pipe(Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }));
+      // After the commit, so a viewer that refreshes on the bump reads the new Membership.
+      .pipe(
+        Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }),
+        Effect.ensuring(spaces.changed),
+      );
     throttle.reset(keys);
     return { userId, spaceId };
   });

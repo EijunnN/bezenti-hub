@@ -4,6 +4,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import {
+  UserId,
   EnvironmentId,
   type ModelSelection,
   type OrchestrationV2AppThread,
@@ -1834,7 +1835,8 @@ it.effect.each([
   { relationshipToParent: null, subagent: false },
   { relationshipToParent: "subagent", subagent: true },
 ] as const)(
-  "ProviderSessionManagerV2 marks MCP credentials of delegated children ($relationshipToParent)",
+  // An agent reads Spaces as its Thread's owner; a server-made child, which has none, as its root's.
+  "ProviderSessionManagerV2 marks MCP credentials of delegated children and their User ($relationshipToParent)",
   ({ relationshipToParent, subagent }) =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
@@ -1854,12 +1856,20 @@ it.effect.each([
         });
         const created = yield* makeThreadCreatedEvent({ idAllocator, threadId, now });
         const parentThreadId = ThreadId.make("thread-provider-session-manager-mcp-parent");
+        const parent = yield* makeThreadCreatedEvent({
+          idAllocator,
+          threadId: parentThreadId,
+          now,
+        });
+        const owner = UserId.make("member-1");
         yield* eventSink.write({
           events: [
+            { ...parent, payload: { ...parent.payload, ownerUserId: owner } },
             {
               ...created,
               payload: {
                 ...created.payload,
+                ...(relationshipToParent === null ? { ownerUserId: owner } : {}),
                 lineage:
                   relationshipToParent === null
                     ? created.payload.lineage
@@ -1875,7 +1885,9 @@ it.effect.each([
           "",
         );
         assert.isDefined(token);
-        assert.equal((yield* registry.resolve(token!))?.thread.subagent, subagent);
+        const resolved = yield* registry.resolve(token!);
+        assert.equal(resolved?.thread.subagent, subagent);
+        assert.equal(resolved?.userId, owner);
         yield* manager.close(providerSessionId);
       });
 

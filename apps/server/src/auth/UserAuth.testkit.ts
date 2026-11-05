@@ -34,6 +34,8 @@ import * as InvitationService from "../spaces/InvitationService.ts";
 import * as InvitationsHttp from "../spaces/invitationsHttp.ts";
 import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
+import * as PullRequestHttp from "../pullRequest/http.ts";
+import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as OrchestrationHttp from "../orchestration-v2/http.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -54,7 +56,8 @@ class AuthTestApi extends HttpApi.make("environment")
   .add(EnvironmentHttpApi.groups.spaces)
   .add(EnvironmentHttpApi.groups.invitations)
   .add(EnvironmentHttpApi.groups.projects)
-  .add(EnvironmentHttpApi.groups.orchestration) {}
+  .add(EnvironmentHttpApi.groups.orchestration)
+  .add(EnvironmentHttpApi.groups.pullRequests) {}
 
 const ORIGIN = "http://127.0.0.1";
 const RP_ID = "127.0.0.1";
@@ -122,7 +125,13 @@ const layerThreads = Layer.mergeAll(
   ),
 );
 
+// Pull Request reads are not under test; one that reaches the service says so.
+const layerPullRequests = Layer.mock(PullRequestService.PullRequestService)({
+  diff: () => Effect.die("the diff was read"),
+});
+
 const layerServices = Layer.mergeAll(
+  layerPullRequests,
   Layer.merge(InvitationService.layer, SpaceVisibility.layer).pipe(
     Layer.provideMerge(Layer.merge(EnvironmentAuth.layer, SpaceDirectory.layer)),
   ),
@@ -145,6 +154,7 @@ export const serveAuthHttp = Effect.gen(function* () {
     Layer.provide(InvitationsHttp.layer),
     Layer.provide(ProjectHttp.layer),
     Layer.provide(OrchestrationHttp.layer),
+    Layer.provide(PullRequestHttp.layer),
     Layer.provide(AuthHttp.layerAuthenticatedAuth),
     Layer.provide(Layer.succeedContext(services)),
     Layer.provide(HttpPlatform.layer),

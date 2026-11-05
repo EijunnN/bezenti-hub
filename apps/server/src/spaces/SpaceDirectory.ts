@@ -149,7 +149,7 @@ export class SpaceDirectory extends Context.Service<
     ) => Effect.Effect<{ readonly id: SpaceId; readonly name: string }, SpaceClaimError>;
     /**
      * Makes the User a Member of the Organization with the Role; false when they already are one.
-     * Run it in the caller's transaction (accepting an Invitation).
+     * Run it in the caller's transaction (accepting an Invitation), then `changed` after it.
      */
     readonly addMembership: (input: {
       readonly spaceId: SpaceId;
@@ -168,6 +168,11 @@ export class SpaceDirectory extends Context.Service<
      * tell it is stale. Every such write goes through this service.
      */
     readonly revision: Effect.Effect<number>;
+    /**
+     * Bumps `revision`. Callers that write Memberships inside their own transaction run it once
+     * that transaction ends, so no viewer caches what it read before the commit.
+     */
+    readonly changed: Effect.Effect<void>;
   }
 >()("t3/spaces/SpaceDirectory") {}
 
@@ -179,7 +184,6 @@ const make = Effect.gen(function* () {
   const random = yield* SecureRandom.SecureRandom;
   const storageError = (cause: unknown) => new SpaceDirectoryStorageError({ cause });
   const revision = yield* Ref.make(0);
-  // Bumped before the write commits; a reader that sees the new number then waits on the writer.
   const changed = Ref.update(revision, (current) => current + 1);
 
   const findSpace = SqlSchema.findOneOption({
@@ -319,11 +323,10 @@ const make = Effect.gen(function* () {
     yield* requireAllowed(principal, "organization.create", AccessPolicy.installation);
     const spaceId = SpaceId.make(yield* random.uuidV4().pipe(Effect.mapError(storageError)));
     const now = DateTime.formatIso(yield* DateTime.now);
-    yield* changed;
     yield* sql`
       INSERT INTO spaces (space_id, kind, name, created_at)
       VALUES (${spaceId}, 'organization', ${name}, ${now})
-    `.pipe(Effect.mapError(storageError));
+    `.pipe(Effect.mapError(storageError), Effect.ensuring(changed));
     return {
       id: spaceId,
       kind: "organization",
@@ -386,7 +389,6 @@ const make = Effect.gen(function* () {
     readonly role: SpaceRole;
   }) {
     const now = DateTime.formatIso(yield* DateTime.now);
-    yield* changed;
     const inserted = yield* sql<{ readonly userId: string }>`
       INSERT INTO space_memberships (space_id, user_id, role, created_at)
       VALUES (${input.spaceId}, ${input.userId}, ${input.role}, ${now})
@@ -405,6 +407,7 @@ const make = Effect.gen(function* () {
     addMembership,
     viewableSpaces,
     revision: Ref.get(revision),
+    changed,
   });
 });
 

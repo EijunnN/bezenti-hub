@@ -5,6 +5,7 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  AuthTerminalReadScope,
   EventId,
   SpaceId,
   type OrchestrationV2AppThread,
@@ -149,6 +150,8 @@ import { layerSeesEverything } from "./spaces/SpaceVisibility.testkit.ts";
 import * as SpaceVisibility from "./spaces/SpaceVisibility.ts";
 import { bootstrapOwner, makeAuthenticator, serveAuthHttp } from "./auth/UserAuth.testkit.ts";
 import { visibleShells } from "./mcp/mcpVisibility.ts";
+import { threadNotFound } from "./mcp/threadAccess.ts";
+import * as McpInvocationContext from "./mcp/McpInvocationContext.ts";
 import * as RpcTest from "effect/rpc/RpcTest";
 import * as Context from "effect/Context";
 
@@ -1459,6 +1462,10 @@ describe("Space visibility", () => {
     ORCHESTRATION_V2_WS_METHODS.subscribeShell,
     ORCHESTRATION_V2_WS_METHODS.getThreadProjection,
     ORCHESTRATION_V2_WS_METHODS.getWorktreeThreadIds,
+    ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+    WS_METHODS.pullRequestsList,
+    WS_METHODS.scheduledTasksSubscribe,
+    WS_METHODS.subscribeTerminalMetadata,
   ] as const;
   const group = WsRpcGroup.omit(
     ...[...WsRpcGroup.requests.keys()].filter(
@@ -1578,6 +1585,7 @@ describe("Space visibility", () => {
   const connect = Effect.fn(function* (
     server: Effect.Success<typeof serveAuthHttp>,
     userId: UserId,
+    overrides: Layer.Layer<never> = Layer.empty,
   ) {
     const browser = yield* ServerBrowser.ServerBrowser;
     return yield* RpcTest.makeClient(group).pipe(
@@ -1593,7 +1601,11 @@ describe("Space visibility", () => {
               subject: "user-sign-in",
               userId,
               method: "browser-session-cookie",
-              scopes: [AuthOrchestrationReadScope],
+              scopes: [
+                AuthOrchestrationReadScope,
+                AuthOrchestrationOperateScope,
+                AuthTerminalReadScope,
+              ],
             }),
           ),
           Layer.provide(
@@ -1613,6 +1625,7 @@ describe("Space visibility", () => {
               Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({}),
               // The real Spaces, Projects and Thread reads over the hub's database.
               Layer.succeedContext(server.services),
+              overrides,
             ),
           ),
         ),
@@ -1716,11 +1729,13 @@ describe("Space visibility", () => {
         assert.deepEqual(yield* worktreeThreads, ["acme-child", "acme-late", "acme-thread"]);
 
         // Joining Globex shows its work on the same connection.
-        yield* Context.get(server.services, SpaceDirectory.SpaceDirectory).addMembership({
+        const spaces = Context.get(server.services, SpaceDirectory.SpaceDirectory);
+        yield* spaces.addMembership({
           spaceId: SpaceId.make(globex),
           userId: grace.userId,
           role: "member",
         });
+        yield* spaces.changed;
         assert.deepEqual(yield* worktreeThreads, [
           "acme-child",
           "acme-late",
@@ -1752,6 +1767,41 @@ describe("Space visibility", () => {
           "globex-thread",
         ]);
 
+        // A Pull Request diff in a hidden Project answers like one in a missing Project.
+        const diff = (projectId: string) =>
+          server.request("/api/pull-requests/diff", {
+            cookie: grace.cookie,
+            body: { projectId, repository: "acme/app", number: 1 },
+          });
+        // Grace now sees Globex; the Owner's Personal space stays hidden from her.
+        const hiddenDiff = yield* diff("legacy-app");
+        const missingDiff = yield* diff("no-such-project");
+        assert.equal(hiddenDiff.body._tag, "PullRequestUnavailableError");
+        const { traceId: _hiddenDiffTrace, ...hiddenDiffBody } = hiddenDiff.body;
+        const { traceId: _missingDiffTrace, ...missingDiffBody } = missingDiff.body;
+        assert.deepEqual(
+          [hiddenDiff.status, hiddenDiffBody],
+          [missingDiff.status, missingDiffBody],
+        );
+
+        // An agent that pastes a bare id is pointed at the `mcp:` Thread only if it may see it.
+        yield* server.eventSink.write({
+          events: [threadCreated({ id: "mcp:hint", projectId: "legacy-app" })],
+        });
+        const hint = (scope: { readonly userId?: UserId }) =>
+          threadNotFound(
+            Context.get(server.services, ThreadManagement.ThreadManagementService),
+            ThreadId.make("hint"),
+            "Not found.",
+          ).pipe(
+            Effect.flip,
+            Effect.map((failure) => failure.message),
+            Effect.provideService(McpInvocationContext.McpInvocationContext, scope as never),
+            Effect.provide(Layer.succeedContext(server.services)),
+          );
+        assert.equal(yield* hint({}), "Not found. Did you mean `mcp:hint`?");
+        assert.equal(yield* hint({ userId: grace.userId }), "Not found.");
+
         // An archived Organization disappears for its Members, not for the Owner.
         yield* server.sql`
           UPDATE spaces SET archived_at = '2026-11-02T00:00:00.000Z' WHERE space_id = ${globex}
@@ -1767,6 +1817,116 @@ describe("Space visibility", () => {
             Layer.mock(ServerBrowser.ServerBrowser)({}),
           ),
         ),
+      ),
+  );
+
+  const withHub = <A, E, R>(body: (seeded: Effect.Success<typeof hub>) => Effect.Effect<A, E, R>) =>
+    hub.pipe(
+      Effect.flatMap(body),
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.fresh(layerConfigSources),
+          Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+          Layer.mock(ServerBrowser.ServerBrowser)({}),
+        ),
+      ),
+    );
+
+  it.effect("a command on a hidden Thread or Project fails exactly like one on a missing one", () =>
+    withHub(({ server, grace }) =>
+      Effect.gen(function* () {
+        const client = yield* connect(server, grace.userId);
+        const archive = (threadId: string) =>
+          client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand]({
+            type: "thread.archive",
+            commandId: CommandId.make(`archive-${threadId}`),
+            threadId: ThreadId.make(threadId),
+          } as never).pipe(Effect.flip);
+        const hidden = yield* archive("globex-thread");
+        assert.equal(hidden._tag, "SpaceResourceNotFoundError");
+        assert.deepEqual(hidden, yield* archive("no-such-thread"));
+        // A new Thread in a hidden Project is refused the same way.
+        const created = yield* client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand]({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("create-in-globex"),
+          threadId: ThreadId.make("new-thread"),
+          projectId: ProjectId.make("globex-app"),
+          title: "Hello",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+        }).pipe(Effect.flip);
+        assert.deepEqual(created, hidden);
+      }),
+    ),
+  );
+
+  it.effect(
+    "listings that name no Project see only the viewer's, streams skip hidden Threads",
+    () =>
+      withHub(({ server, grace }) =>
+        Effect.gen(function* () {
+          const listed: Array<unknown> = [];
+          const task = (id: string, projectId: string, threadId: string | null) =>
+            ({ id, projectId, threadId, prompt: id }) as never;
+          const client = yield* connect(
+            server,
+            grace.userId,
+            Layer.mergeAll(
+              Layer.mock(PullRequestService.PullRequestService)({
+                list: (input) =>
+                  Effect.sync(() => {
+                    listed.push(input.projectIds);
+                    return { pullRequests: [] } as never;
+                  }),
+              }),
+              Layer.mock(ScheduledTasks.ScheduledTaskService)({
+                subscribeList: () =>
+                  Stream.make({
+                    tasks: [
+                      task("acme-task", "acme-app", "acme-thread"),
+                      task("globex-task", "globex-app", null),
+                      task("acme-on-hidden", "acme-app", "globex-thread"),
+                    ],
+                  }),
+              }),
+              Layer.mock(TerminalManager.TerminalManager)({
+                subscribeMetadata: (listener) =>
+                  listener({
+                    type: "snapshot",
+                    terminals: ["acme-thread", "globex-thread", "draft-thread"].map(
+                      (threadId) => ({ threadId, terminalId: "t", cwd: "/work" }) as never,
+                    ),
+                  }).pipe(Effect.as(() => undefined)),
+              }),
+            ),
+          );
+          yield* client[WS_METHODS.pullRequestsList]({ state: "open" } as never);
+          assert.deepEqual(listed, [["acme-app"]]);
+          const [tasks] = yield* client[WS_METHODS.scheduledTasksSubscribe]({} as never).pipe(
+            Stream.take(1),
+            Stream.runCollect,
+          );
+          assert.deepEqual(
+            tasks?.tasks.map((item) => item.id),
+            ["acme-task"],
+          );
+          const [terminals] = yield* client[WS_METHODS.subscribeTerminalMetadata]({} as never).pipe(
+            Stream.take(1),
+            Stream.runCollect,
+          );
+          assert.deepEqual(
+            terminals?.type === "snapshot"
+              ? terminals.terminals.map((item) => item.threadId)
+              : null,
+            ["acme-thread", "draft-thread"],
+          );
+        }),
       ),
   );
 });

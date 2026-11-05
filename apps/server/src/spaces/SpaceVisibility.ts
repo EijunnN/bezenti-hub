@@ -72,6 +72,14 @@ export class SpaceVisibility extends Context.Service<
       visibility: Visibility,
       threadIds: ReadonlyArray<ThreadId>,
     ) => Effect.Effect<ReadonlySet<ThreadId>>;
+    /**
+     * The ids among `threadIds` that exist in a Space the principal may not see. For streams
+     * that also carry draft Threads, which have no row yet and stay shown.
+     */
+    readonly hiddenThreadIds: (
+      visibility: Visibility,
+      threadIds: ReadonlyArray<string>,
+    ) => Effect.Effect<ReadonlySet<string>>;
     /** The ids among `projectIds` the principal may see. */
     readonly visibleProjectIds: (
       visibility: Visibility,
@@ -125,6 +133,19 @@ const make = Effect.gen(function* () {
     return new Set(rows.map((row) => ThreadId.make(row.threadId)));
   });
 
+  const hiddenThreadIds = Effect.fn("SpaceVisibility.hiddenThreadIds")(function* (
+    visibility: Visibility,
+    threadIds: ReadonlyArray<string>,
+  ) {
+    if (visibility.all || threadIds.length === 0) return new Set<string>();
+    const rows = yield* sql<{ readonly threadId: string }>`
+      SELECT t.thread_id AS "threadId" FROM orchestration_v2_projection_threads t
+      WHERE t.thread_id IN (SELECT value FROM json_each(${encodeIds(threadIds)}))
+        AND NOT COALESCE((${threadInSpaces(sql, "t", visibility.spaceIds)}), 0)
+    `.pipe(Effect.orDie);
+    return new Set(rows.map((row) => row.threadId));
+  });
+
   const visibleProjectIds = Effect.fn("SpaceVisibility.visibleProjectIds")(function* (
     visibility: Visibility,
     projectIds: ReadonlyArray<ProjectId>,
@@ -139,7 +160,13 @@ const make = Effect.gen(function* () {
     return new Set(rows.map((row) => ProjectId.make(row.projectId)));
   });
 
-  return SpaceVisibility.of({ of, viewer, visibleThreadIds, visibleProjectIds });
+  return SpaceVisibility.of({
+    of,
+    viewer,
+    visibleThreadIds,
+    hiddenThreadIds,
+    visibleProjectIds,
+  });
 });
 
 export const layer = Layer.effect(SpaceVisibility, make);

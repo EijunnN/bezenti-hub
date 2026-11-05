@@ -1,4 +1,4 @@
-import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { ProviderInstanceId, ThreadId, type UserId } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
@@ -20,6 +20,8 @@ export interface McpCredentialRequest {
   readonly browserToolsAvailable?: boolean;
   readonly capabilities?: ReadonlySet<McpInvocationContext.McpCapability>;
   readonly subagent?: boolean;
+  /** The User the agent reads as: the one who owns the Thread's turns. None reads as the Owner. */
+  readonly userId?: UserId | undefined;
 }
 
 export interface McpIssuedCredential {
@@ -111,6 +113,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           subagent: request.subagent === true,
         },
         client: undefined,
+        ...(request.userId === undefined ? {} : { userId: request.userId }),
         capabilities: new Set<McpInvocationContext.McpCapability>([
           "orchestration",
           "worktree",

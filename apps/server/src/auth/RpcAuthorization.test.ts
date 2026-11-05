@@ -36,18 +36,32 @@ import { RPC_SPACE_ACCESS, spaceAccessForRpcMethod } from "./RpcSpaceAccess.ts";
 import type * as SchemaAST from "effect/SchemaAST";
 import { layerSeesEverything } from "../spaces/SpaceVisibility.testkit.ts";
 
-/** The top-level field names a payload schema can carry, across its union members. */
-const payloadFields = (ast: SchemaAST.AST): ReadonlySet<string> => {
+/** Every field name a payload schema can carry, at any depth and in any union member. */
+const payloadFields = (
+  ast: SchemaAST.AST,
+  into: Set<string> = new Set(),
+  seen: Set<SchemaAST.AST> = new Set(),
+): Set<string> => {
+  if (seen.has(ast)) return into;
+  seen.add(ast);
   switch (ast._tag) {
     case "Objects":
-      return new Set(ast.propertySignatures.map((property) => String(property.name)));
+      for (const property of ast.propertySignatures) {
+        into.add(String(property.name));
+        payloadFields(property.type, into, seen);
+      }
+      break;
+    case "Arrays":
+      for (const element of [...ast.elements, ...ast.rest]) payloadFields(element, into, seen);
+      break;
     case "Union":
-      return new Set(ast.types.flatMap((member) => [...payloadFields(member)]));
+      for (const member of ast.types) payloadFields(member, into, seen);
+      break;
     case "Suspend":
-      return payloadFields(ast.thunk());
-    default:
-      return new Set();
+      payloadFields(ast.thunk(), into, seen);
+      break;
   }
+  return into;
 };
 
 describe("RPC authorization scopes", () => {
@@ -94,7 +108,7 @@ describe("RPC authorization scopes", () => {
     const named = [...WsRpcGroup.requests.entries()].flatMap(([tag, rpc]) => {
       const fields = payloadFields(rpc.payloadSchema.ast);
       return tag.startsWith("orchestration.") ||
-        ["threadId", "projectId", "projectIds"].some((field) => fields.has(field))
+        ["threadId", "threadIds", "projectId", "projectIds"].some((field) => fields.has(field))
         ? [tag]
         : [];
     });

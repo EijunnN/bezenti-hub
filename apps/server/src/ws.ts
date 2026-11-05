@@ -1177,16 +1177,21 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
             ]),
           );
           const snapshotSequence = yield* applicationEvents.latestApplicationSequence;
-          const changedProjects = (yield* visibleProjects(yield* projects.listShells())).flatMap(
-            (project) =>
-              identities.has(project.workspaceRoot)
-                ? [
-                    {
-                      ...project,
-                      repositoryIdentity: identities.get(project.workspaceRoot) ?? null,
-                    },
-                  ]
-                : [],
+          const shown = yield* visibleProjects(yield* projects.listShells());
+          // A root names a checkout on disk, so only roots of visible Projects are announced.
+          const visibleRoots = new Set(shown.map((project) => project.workspaceRoot));
+          const announced = (yield* currentVisibility).all
+            ? Array.from(changes)
+            : Array.from(changes).filter((change) => visibleRoots.has(change.workspaceRoot));
+          const changedProjects = shown.flatMap((project) =>
+            identities.has(project.workspaceRoot)
+              ? [
+                  {
+                    ...project,
+                    repositoryIdentity: identities.get(project.workspaceRoot) ?? null,
+                  },
+                ]
+              : [],
           );
           return shellStreamItemFromEnrichmentRefresh({
             snapshot: {
@@ -1196,10 +1201,11 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
               threads: [],
               archivedThreads: [],
             } as OrchestrationV2ShellSnapshot,
-            changes: Array.from(changes),
+            changes: announced,
           });
         }),
       ),
+      Stream.filter((item) => (item.resolvedRepositoryIdentityRoots ?? []).length > 0),
     );
 
     // Subscribe before loading for racing enrichments; initial refresh covers pre-subscription completions and cold HTTP snapshots.
@@ -1312,6 +1318,7 @@ export const layerWsRpc = (
       const currentSessionId = principal.sessionId;
       // What this connection may see; every Project and Thread read below filters by it.
       const { visibility: currentVisibility } = yield* SpaceVisibility.CurrentViewer;
+      const spaceVisibility = yield* SpaceVisibility.SpaceVisibility;
       const currentSpaceIds = Effect.map(currentVisibility, SpaceVisibility.spaceFilter);
       const sql = yield* SqlClient.SqlClient;
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
@@ -1444,6 +1451,42 @@ export const layerWsRpc = (
           : {
               tasks: result.tasks.map(({ webhook: _webhook, ...task }) => task),
             };
+      // A task names its Project and Thread and carries its prompt: show only visible ones.
+      const visibleScheduledTasks = Effect.fn("ws.scheduledTasks.visible")(function* (
+        result: ScheduledTaskListResult,
+      ) {
+        const visibility = yield* currentVisibility;
+        if (visibility.all) return result;
+        const [projects, threads] = yield* Effect.all([
+          spaceVisibility.visibleProjectIds(
+            visibility,
+            result.tasks.map((task) => task.projectId),
+          ),
+          spaceVisibility.hiddenThreadIds(
+            visibility,
+            result.tasks.flatMap((task) => (task.threadId === null ? [] : [task.threadId])),
+          ),
+        ]);
+        return {
+          ...result,
+          tasks: result.tasks.filter(
+            (task) =>
+              projects.has(task.projectId) &&
+              (task.threadId === null || !threads.has(task.threadId)),
+          ),
+        };
+      });
+      // Terminal and preview streams also carry drafts, which have no Thread row and stay shown.
+      const withoutHiddenThreads = Effect.fn("ws.withoutHiddenThreads")(function* <A>(
+        items: ReadonlyArray<A>,
+        threadIdOf: (item: A) => string,
+      ) {
+        const visibility = yield* currentVisibility;
+        if (visibility.all || items.length === 0) return items;
+        const hidden = yield* spaceVisibility.hiddenThreadIds(visibility, items.map(threadIdOf));
+        return items.filter((item) => !hidden.has(threadIdOf(item)));
+      });
+
       const authorizeEffect = <A, E, R>(
         requiredScope: AuthEnvironmentScope,
         effect: Effect.Effect<A, E, R>,
@@ -1930,6 +1973,26 @@ export const layerWsRpc = (
         },
       );
 
+      // Pull Request listings that name no Project read every Project; narrow them to the visible
+      // ones (the middleware already refused any it named that the viewer cannot see).
+      const withVisibleProjectIds = Effect.fn("ws.pullRequests.withVisibleProjectIds")(function* <
+        I extends {
+          readonly projectId?: ProjectId | undefined;
+          readonly projectIds?: ReadonlyArray<ProjectId> | undefined;
+        },
+      >(input: I) {
+        const visibility = yield* currentVisibility;
+        if (visibility.all || input.projectId !== undefined) return input;
+        const visible = (yield* projectStore.listShells().pipe(Effect.orDie)).flatMap((project) =>
+          SpaceVisibility.seesProject(visibility, project) ? [project.id] : [],
+        );
+        const projectIds =
+          input.projectIds === undefined
+            ? visible
+            : input.projectIds.filter((projectId) => visible.includes(projectId));
+        return { ...input, projectIds };
+      });
+
       const mutateProject = Effect.fn("ws.projects.mutate")(function* (mutation: ProjectMutation) {
         return yield* mutateProjectWithClone(
           projectService,
@@ -2212,7 +2275,9 @@ export const layerWsRpc = (
             ),
           ),
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
-          scheduledTasks.subscribeList().pipe(Stream.map(withVisibleWebhookUrls)),
+          scheduledTasks
+            .subscribeList()
+            .pipe(Stream.map(withVisibleWebhookUrls), Stream.mapEffect(visibleScheduledTasks)),
         [WS_METHODS.scheduledTasksUpsert]: (input) => scheduledTasks.upsert(input),
         [WS_METHODS.scheduledTasksSetEnabled]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
@@ -2630,9 +2695,11 @@ export const layerWsRpc = (
                 Effect.forkScoped,
               ),
           ),
-        [WS_METHODS.pullRequestsList]: (input) => pullRequests.list(input),
+        [WS_METHODS.pullRequestsList]: (input) =>
+          withVisibleProjectIds(input).pipe(Effect.flatMap(pullRequests.list)),
         [WS_METHODS.pullRequestsListStats]: (input) => pullRequests.listStats(input),
-        [WS_METHODS.pullRequestsFilterOptions]: (input) => pullRequests.filterOptions(input),
+        [WS_METHODS.pullRequestsFilterOptions]: (input) =>
+          withVisibleProjectIds(input).pipe(Effect.flatMap(pullRequests.filterOptions)),
         [WS_METHODS.pullRequestsRoutingIdentity]: (input) => pullRequests.routingIdentity(input),
         [WS_METHODS.pullRequestsRouting]: (input) => pullRequests.routing(input),
         [WS_METHODS.pullRequestsSummary]: (input) =>
@@ -3083,16 +3150,42 @@ export const layerWsRpc = (
               terminalManager.subscribeMetadata((event) => Queue.offer(queue, event)),
               (unsubscribe) => Effect.sync(unsubscribe),
             ),
+          ).pipe(
+            Stream.mapEffect((event): Effect.Effect<ReadonlyArray<TerminalMetadataStreamEvent>> =>
+              event.type === "snapshot"
+                ? withoutHiddenThreads(event.terminals, (terminal) => terminal.threadId).pipe(
+                    Effect.map((terminals) => [{ ...event, terminals }]),
+                  )
+                : withoutHiddenThreads([event], (item) =>
+                    item.type === "upsert" ? item.terminal.threadId : item.threadId,
+                  ),
+            ),
+            Stream.flatMap((events) => Stream.fromIterable(events)),
           ),
         [WS_METHODS.previewOpen]: (input) => previewManager.open(input),
         [WS_METHODS.previewResize]: (input) => previewManager.resize(input),
         [WS_METHODS.previewAdjust]: (input) => previewManager.adjust(input),
         [WS_METHODS.previewClose]: (input) => previewManager.close(input),
-        [WS_METHODS.previewList]: (input) => previewManager.list(input),
+        [WS_METHODS.previewList]: (input) =>
+          previewManager
+            .list(input)
+            .pipe(
+              Effect.flatMap((result) =>
+                withoutHiddenThreads([input], (item) => item.threadId).pipe(
+                  Effect.map((shown) =>
+                    shown.length === 0 ? { ...result, sessions: [] } : result,
+                  ),
+                ),
+              ),
+            ),
         [WS_METHODS.previewClearProfile]: (input) => serverBrowser.clearProfile(input.profileId),
         [WS_METHODS.previewReportProfiles]: (input) => reportProfiles(input),
         [WS_METHODS.previewReportStatus]: (input) => previewManager.reportStatus(input),
-        [WS_METHODS.subscribePreviewEvents]: (_input) => previewManager.events,
+        [WS_METHODS.subscribePreviewEvents]: (_input) =>
+          previewManager.events.pipe(
+            Stream.mapEffect((event) => withoutHiddenThreads([event], (item) => item.threadId)),
+            Stream.flatMap((events) => Stream.fromIterable(events)),
+          ),
         [WS_METHODS.deviceConfigure]: (input) => deviceService.configure(input),
         [WS_METHODS.deviceTestHost]: (input) => deviceService.testHost(input),
         [WS_METHODS.deviceEasAccount]: (input) => deviceService.easAccount(input),

@@ -69,6 +69,16 @@ export const layer = HttpApiBuilder.group(
             yield* requireEnvironmentScope(scope);
           }
           const principal = yield* EnvironmentAuthenticatedPrincipal;
+          // Changing a Project the User cannot see answers like changing a missing one.
+          if (args.payload.type !== "project.create") {
+            const visibility = yield* spaceVisibility.of(principal.userId);
+            const visible = yield* spaceVisibility.visibleProjectIds(visibility, [
+              args.payload.projectId,
+            ]);
+            if (!visible.has(args.payload.projectId)) {
+              return yield* failEnvironmentInvalidRequest("invalid_command");
+            }
+          }
           const operation = mutateProjectWithClone(
             projects,
             projectClones,
