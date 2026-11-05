@@ -42,7 +42,6 @@ import * as AcpRegistryRuntimeCoordinator from "@t3tools/provider-acp-registry/s
 import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRegistrySupport";
 import * as AgentSessionImporter from "./project/AgentSessionImporter.ts";
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
-import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as AntigravityInstallation from "./provider/AntigravityInstallation.ts";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
@@ -668,7 +667,6 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(AcpRegistrySupport.AcpRegistryCatalog)({}),
   Layer.mock(AgentSessionImporter.AgentSessionImporter)({}),
   Layer.mock(AgentSessionScanner.AgentSessionScanner)({}),
-  Layer.mock(AnalyticsService.AnalyticsService)({}),
   Layer.mock(AntigravityInstallation.AntigravityInstallation)({ managedDirectory: "/unused" }),
   Layer.mock(BackgroundPolicy.BackgroundPolicy)({}),
   Layer.mock(CheckpointDiffQuery.CheckpointDiffQuery)({}),
@@ -878,7 +876,7 @@ it.effect.each([
         },
       ).pipe(
         Effect.provide(
-          layerWsRpc({}, yield* ServerBrowser.ServerBrowser, () => Effect.void, {
+          layerWsRpc(yield* ServerBrowser.ServerBrowser, () => Effect.void, {
             secretReferences: true,
           }).pipe(
             Layer.provide(configRpcServices),
@@ -1099,7 +1097,7 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
       },
     ).pipe(
       Effect.provide(
-        layerWsRpc({}, yield* ServerBrowser.ServerBrowser, () => Effect.void, {
+        layerWsRpc(yield* ServerBrowser.ServerBrowser, () => Effect.void, {
           secretReferences: true,
         }).pipe(
           Layer.provide(configRpcServices),

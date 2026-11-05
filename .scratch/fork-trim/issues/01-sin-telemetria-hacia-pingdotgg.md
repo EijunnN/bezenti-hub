@@ -4,11 +4,11 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
 Plan: ../plan.md
 
-- [ ] No queda ningún destino de telemetría propiedad de pingdotgg en el código.
-- [ ] El OTLP configurable por el Owner sigue funcionando.
-- [ ] Test en la capa más baja que pruebe que no se envían eventos de producto.
-- [ ] `docs/user/telemetry.md` reescrito.
+- [x] No queda ningún destino de telemetría propiedad de pingdotgg en el código.
+- [x] El OTLP configurable por el Owner sigue funcionando.
+- [x] Test en la capa más baja que pruebe que no se envían eventos de producto.
+- [x] `docs/user/telemetry.md` reescrito.
