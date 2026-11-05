@@ -25,6 +25,7 @@ import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
@@ -37,7 +38,7 @@ import {
   sweepStalePendingAttachments,
 } from "../attachmentStore.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
-import { CloudManagedEndpointRuntime } from "../cloud/ManagedEndpointRuntime.ts";
+import { PublicHubUrl } from "../environment/PublicHubUrl.ts";
 import * as ServerConfig from "../config.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
@@ -74,14 +75,10 @@ const layerOrchestration = Layer.mergeAll(
   ),
 );
 
-// The Connect hostname the fake tunnel reports. Tests set it to null to simulate an unlink.
+// The public hostname the environment reports. Tests set it to null to simulate losing it.
 const hostname = Ref.makeUnsafe<string | null>("env.t3.test");
-const layerConnect = Layer.mock(CloudManagedEndpointRuntime)({
-  inspectConnector: Effect.map(Ref.get(hostname), (value) => ({
-    readyConnections: 1,
-    hostname: value,
-    protocol: "http2",
-  })),
+const layerPublicHubUrl = Layer.succeed(PublicHubUrl, {
+  publicHubHost: Effect.map(Ref.get(hostname), Option.fromNullishOr),
 });
 const layerProviders = Layer.mock(ProviderRegistry.ProviderRegistry)({
   getProviders: Effect.succeed([]),
@@ -120,7 +117,7 @@ const layerTest = GuestShareService.layer.pipe(
   ),
   Layer.provide(layerProviders),
   Layer.provideMerge(ServerSettings.layerTest({ guestSharingEnabled: true })),
-  Layer.provide(layerConnect),
+  Layer.provide(layerPublicHubUrl),
   Layer.provide(ServerSecretStore.layer),
   Layer.provideMerge(layerConfig),
   Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
@@ -266,7 +263,7 @@ it.effect("redeems only a short invite whose signature and share id are both cur
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("refuses guest requests once T3 Connect no longer serves the link's host", () =>
+it.effect("refuses guest requests once the environment no longer has the link's public host", () =>
   Effect.gen(function* () {
     const { guestShares, credential } = yield* shareThread;
     const { token: session } = yield* guestShares.redeem({ credential, name: "Sam" });
@@ -281,7 +278,7 @@ it.effect("refuses guest requests once T3 Connect no longer serves the link's ho
   }).pipe(Effect.provide(layerTest)),
 );
 
-it.effect("closes an open guest stream when T3 Connect stops serving the link's host", () =>
+it.effect("closes an open guest stream when the environment loses the link's public host", () =>
   Effect.gen(function* () {
     const { guestShares, credential } = yield* shareThread;
     const { token: session } = yield* guestShares.redeem({ credential, name: "Sam" });
@@ -290,7 +287,7 @@ it.effect("closes an open guest stream when T3 Connect stops serving the link's 
     );
     yield* Ref.set(hostname, null);
     yield* TestClock.adjust("30 seconds");
-    // No `ended`: the browser reconnects, and the host check refuses it while Connect is gone.
+    // No `ended`: the browser reconnects, and the host check refuses it while the host is gone.
     const received = Array.from(yield* Fiber.join(collecting));
     assert.deepEqual(
       received.map((event) => (event.type === "thread" ? event.item.kind : event.type)),
