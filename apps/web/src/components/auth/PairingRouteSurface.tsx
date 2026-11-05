@@ -17,7 +17,12 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { StandalonePage, StandalonePageHeader } from "../ui/standalone-page";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { OwnerAlreadyClaimedSurface, OwnerSetupSurface } from "./OwnerSetupSurface";
+import {
+  canRegisterPasskeys,
+  OwnerAlreadyClaimedSurface,
+  OwnerSetupNeedsSecureAddressSurface,
+  OwnerSetupSurface,
+} from "./OwnerSetupSurface";
 
 export function PairingPendingSurface() {
   return (
@@ -44,9 +49,11 @@ export function PairingRouteSurface({
   const [errorMessage, setErrorMessage] = useState(initialErrorMessage ?? "");
   const [isSubmitting, setIsSubmitting] = useState(false);
   // The administrative bootstrap link creates the Owner on a fresh Installation instead of pairing.
-  const [ownerSetup, setOwnerSetup] = useState<"checking" | "available" | "claimed" | null>(
-    autoPairToken ? "checking" : null,
-  );
+  const [ownerSetup, setOwnerSetup] = useState<
+    | { readonly status: "checking" }
+    | { readonly status: "available" | "claimed"; readonly credential: string }
+    | null
+  >(autoPairToken ? { status: "checking" } : null);
   const autoSubmitAttemptedRef = useRef(false);
 
   const submitCredential = async (nextCredential: string) => {
@@ -70,20 +77,37 @@ export function PairingRouteSurface({
     });
   };
 
-  const handleSubmit = async (event?: React.SubmitEvent<HTMLFormElement>) => {
-    event?.preventDefault();
-    await submitCredential(credential);
-  };
-
-  const autoSubmit = useEffectEvent(async (token: string) => {
-    const status = await fetchOwnerBootstrapStatus(token).catch(() => "not-applicable" as const);
+  // Checks before spending: pairing with the bootstrap link would skip creating the Owner.
+  const pairOrSetUpOwner = async (token: string) => {
+    setOwnerSetup({ status: "checking" });
+    const status = await fetchOwnerBootstrapStatus(token).then(
+      (value) => value,
+      () => null,
+    );
+    if (status === null) {
+      setOwnerSetup(null);
+      setErrorMessage("Could not check this link with the server. Reload and try again.");
+      return;
+    }
     if (status === "not-applicable") {
       setOwnerSetup(null);
       await submitCredential(token);
       return;
     }
-    setOwnerSetup(status);
-  });
+    setOwnerSetup({ status, credential: token });
+  };
+
+  const handleSubmit = async (event?: React.SubmitEvent<HTMLFormElement>) => {
+    event?.preventDefault();
+    const trimmed = credential.trim();
+    if (!trimmed) {
+      await submitCredential(trimmed);
+      return;
+    }
+    await pairOrSetUpOwner(trimmed);
+  };
+
+  const autoSubmit = useEffectEvent((token: string) => pairOrSetUpOwner(token));
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- strips the pairing token from the URL and submits it once when the route carries one
   useEffect(() => {
@@ -96,10 +120,19 @@ export function PairingRouteSurface({
     void autoSubmit(autoPairToken);
   }, [autoPairToken]);
 
-  if (ownerSetup === "checking") return <PairingPendingSurface />;
-  if (ownerSetup === "claimed") return <OwnerAlreadyClaimedSurface />;
-  if (ownerSetup === "available" && autoPairToken) {
-    return <OwnerSetupSurface credential={autoPairToken} onFinished={onAuthenticated} />;
+  if (ownerSetup?.status === "checking") return <PairingPendingSurface />;
+  if (ownerSetup?.status === "claimed") return <OwnerAlreadyClaimedSurface />;
+  if (ownerSetup?.status === "available") {
+    const { credential: bootstrapCredential } = ownerSetup;
+    return canRegisterPasskeys() ? (
+      <OwnerSetupSurface credential={bootstrapCredential} onFinished={onAuthenticated} />
+    ) : (
+      <OwnerSetupNeedsSecureAddressSurface
+        isPairing={isSubmitting}
+        errorMessage={errorMessage}
+        onPairInstead={() => void submitCredential(bootstrapCredential)}
+      />
+    );
   }
 
   return (

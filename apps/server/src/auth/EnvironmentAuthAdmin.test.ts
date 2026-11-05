@@ -84,6 +84,13 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
           });
         const startupPhone = yield* startup("192.168.1.20");
         const startupBrowser = yield* startup("127.0.0.1");
+        const signIn = (ipAddress: string) =>
+          sessions.issue({
+            subject: EnvironmentAuth.USER_SIGN_IN_SUBJECT,
+            client: { deviceType: "unknown", ipAddress },
+          });
+        const signedInPhone = yield* signIn("192.168.1.21");
+        const signedInBrowser = yield* signIn("127.0.0.1");
         yield* environmentAuth.createPairingLink({ subject: "one-time-token" });
 
         yield* EnvironmentAuth.make.pipe(
@@ -96,6 +103,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
         assert.notInclude(remaining, phone.sessionId);
         assert.notInclude(remaining, startupPhone.sessionId);
         assert.include(remaining, startupBrowser.sessionId);
+        assert.notInclude(remaining, signedInPhone.sessionId);
+        assert.include(remaining, signedInBrowser.sessionId);
         assert.include(remaining, bot.sessionId);
         assert.lengthOf(yield* pairingLinks.listActive(), 0);
       }).pipe(Effect.provide(layerEnvironmentAuth())),

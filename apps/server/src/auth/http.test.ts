@@ -133,6 +133,13 @@ it.effect("sets the selected browser session cookies through the HTTP route", ()
           expect(environmentBSession.status).toBe(200);
           expect(await environmentBSession.json()).toMatchObject({ authenticated: true });
 
+          // The reusable dev session outlives sign-out, so sign-out must not claim otherwise.
+          const devSignOut = await environmentA.handler(
+            postJson("/api/auth/sign-out", {}, { cookie: devCookieHeader }),
+            requestContext,
+          );
+          expect(await devSignOut.json()).toEqual({ signedOut: false });
+
           const pairingResponse = await environmentA.handler(
             postJson(
               "/api/auth/pairing-token",

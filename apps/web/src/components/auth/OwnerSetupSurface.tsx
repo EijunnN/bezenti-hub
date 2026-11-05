@@ -1,4 +1,5 @@
 import type { AuthOwnerBootstrapResult } from "@t3tools/contracts";
+import { browserSupportsWebAuthn } from "@simplewebauthn/browser";
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 
@@ -129,6 +130,42 @@ export function OwnerAlreadyClaimedSurface() {
       <div className="mt-6">
         <Button size="sm" render={<Link to="/sign-in" replace />}>
           Sign in
+        </Button>
+      </div>
+    </StandalonePage>
+  );
+}
+
+/** Passkeys need a secure context and a domain name: an IP address is not a valid WebAuthn RP ID. */
+export function canRegisterPasskeys(): boolean {
+  const hostname = window.location.hostname;
+  const isIpAddress = /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) || hostname.includes(":");
+  return window.isSecureContext && browserSupportsWebAuthn() && !isIpAddress;
+}
+
+export function OwnerSetupNeedsSecureAddressSurface({
+  isPairing,
+  errorMessage,
+  onPairInstead,
+}: {
+  isPairing: boolean;
+  errorMessage: string;
+  onPairInstead: () => void;
+}) {
+  return (
+    <StandalonePage>
+      <StandalonePageHeader
+        title="Create the Owner account from a secure address"
+        description="Passkeys need HTTPS with a domain name, or http://localhost on the server's machine. Open this link there to create the Owner account, or pair this browser without an account for now."
+      />
+      {errorMessage ? (
+        <Alert variant="error" className="mt-6">
+          <AlertDescription>{errorMessage}</AlertDescription>
+        </Alert>
+      ) : null}
+      <div className="mt-6">
+        <Button disabled={isPairing} size="sm" variant="outline" onClick={onPairInstead}>
+          {isPairing ? "Pairing..." : "Pair without an account"}
         </Button>
       </div>
     </StandalonePage>

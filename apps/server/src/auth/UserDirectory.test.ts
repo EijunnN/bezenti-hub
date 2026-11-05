@@ -7,6 +7,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Etag from "effect/http/Etag";
 import * as HttpPlatform from "effect/http/HttpPlatform";
 import * as HttpRouter from "effect/http/HttpRouter";
@@ -75,7 +76,7 @@ const serveAuthHttp = Effect.gen(function* () {
           ?.split(";", 1)[0],
       };
     });
-  return { environmentAuth, request };
+  return { environmentAuth, request, sql: Context.get(services, SqlClient.SqlClient) };
 });
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -202,22 +203,38 @@ const makeAuthenticator = () =>
     };
   });
 
-const bootstrapOwner = Effect.fn(function* (
+const startOwnerRegistration = Effect.fn(function* (
   server: Effect.Success<typeof serveAuthHttp>,
-  authenticator: Effect.Success<ReturnType<typeof makeAuthenticator>>,
+  credential: string,
 ) {
-  const { credential } = yield* server.environmentAuth.issueStartupPairingCredential();
   const status = yield* server.request("/api/auth/owner/status", { body: { credential } });
   expect(status.body).toEqual({ status: "available" });
   const ceremony = yield* server.request("/api/auth/owner/registration", {
     body: { credential, displayName: "Ada Lovelace" },
   });
   expect(ceremony.status).toBe(200);
-  const options = ceremony.body.options as CreationOptions;
-  const response = yield* Effect.promise(() => authenticator.create(options));
-  const created = yield* server.request("/api/auth/owner", {
-    body: { credential, ceremonyId: ceremony.body.ceremonyId, response },
+  return ceremony.body as { ceremonyId: string; options: CreationOptions };
+});
+
+const finishOwnerRegistration = Effect.fn(function* (
+  server: Effect.Success<typeof serveAuthHttp>,
+  authenticator: Effect.Success<ReturnType<typeof makeAuthenticator>>,
+  credential: string,
+  ceremony: { ceremonyId: string; options: CreationOptions },
+) {
+  const response = yield* Effect.promise(() => authenticator.create(ceremony.options));
+  return yield* server.request("/api/auth/owner", {
+    body: { credential, ceremonyId: ceremony.ceremonyId, response },
   });
+});
+
+const bootstrapOwner = Effect.fn(function* (
+  server: Effect.Success<typeof serveAuthHttp>,
+  authenticator: Effect.Success<ReturnType<typeof makeAuthenticator>>,
+) {
+  const { credential } = yield* server.environmentAuth.issueStartupPairingCredential();
+  const ceremony = yield* startOwnerRegistration(server, credential);
+  const created = yield* finishOwnerRegistration(server, authenticator, credential, ceremony);
   return { credential, created };
 });
 
@@ -304,5 +321,56 @@ it.effect("lets a recovery code sign the Owner in exactly once", () =>
 
     const reused = yield* server.request("/api/auth/recovery-code/sign-in", { body: { code } });
     expect(reused.status).toBe(401);
+  }),
+);
+
+it.effect("keeps the bootstrap link and no Owner when the Owner's session cannot be issued", () =>
+  Effect.gen(function* () {
+    const server = yield* serveAuthHttp;
+    const authenticator = yield* makeAuthenticator();
+    const { credential } = yield* server.environmentAuth.issueStartupPairingCredential();
+    yield* server.sql`
+      CREATE TRIGGER refuse_sessions BEFORE INSERT ON auth_sessions
+      BEGIN SELECT RAISE(ABORT, 'refused'); END
+    `;
+
+    const failed = yield* finishOwnerRegistration(
+      server,
+      authenticator,
+      credential,
+      yield* startOwnerRegistration(server, credential),
+    );
+    expect(failed.status).toBe(500);
+
+    yield* server.sql`DROP TRIGGER refuse_sessions`;
+    const created = yield* finishOwnerRegistration(
+      server,
+      authenticator,
+      credential,
+      yield* startOwnerRegistration(server, credential),
+    );
+    expect(created.status).toBe(200);
+  }),
+);
+
+it.effect("keeps a pending Owner registration while sign-in challenges flood in", () =>
+  Effect.gen(function* () {
+    const server = yield* serveAuthHttp;
+    const { credential } = yield* server.environmentAuth.issueStartupPairingCredential();
+    const ceremony = yield* startOwnerRegistration(server, credential);
+
+    yield* Effect.forEach(
+      Array.from({ length: 1_000 }),
+      () => server.request("/api/auth/passkey/challenge", { body: {} }),
+      { discard: true },
+    );
+
+    const created = yield* finishOwnerRegistration(
+      server,
+      yield* makeAuthenticator(),
+      credential,
+      ceremony,
+    );
+    expect(created.status).toBe(200);
   }),
 );

@@ -201,15 +201,10 @@ export const failEnvironmentInternal =
     return yield* new EnvironmentInternalError({ code: "internal_error", reason, traceId });
   });
 
-const appendSessionCookie = (cookieName: string, token: string, expiresAt: DateTime.DateTime) =>
-  Effect.fromResult(
-    Cookies.set(Cookies.empty, cookieName, token, {
-      expires: DateTime.toDate(expiresAt),
-      httpOnly: true,
-      path: "/",
-      sameSite: "lax",
-    }),
-  ).pipe(
+const SESSION_COOKIE_ATTRIBUTES = { httpOnly: true, path: "/", sameSite: "lax" } as const;
+
+const appendCookies = (cookies: ReturnType<typeof Cookies.set>) =>
+  Effect.fromResult(cookies).pipe(
     Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")),
     Effect.flatMap((cookies) =>
       HttpEffect.appendPreResponseHandler((_request, response) =>
@@ -218,17 +213,29 @@ const appendSessionCookie = (cookieName: string, token: string, expiresAt: DateT
     ),
   );
 
-const expireSessionCookie = (cookieName: string) =>
-  Effect.fromResult(
-    Cookies.expireCookie(Cookies.empty, cookieName, { httpOnly: true, path: "/", sameSite: "lax" }),
-  ).pipe(
-    Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")),
-    Effect.flatMap((cookies) =>
-      HttpEffect.appendPreResponseHandler((_request, response) =>
-        Effect.succeed(HttpServerResponse.mergeCookies(response, cookies)),
-      ),
-    ),
+const appendSessionCookie = (cookieName: string, token: string, expiresAt: DateTime.DateTime) =>
+  appendCookies(
+    Cookies.set(Cookies.empty, cookieName, token, {
+      ...SESSION_COOKIE_ATTRIBUTES,
+      expires: DateTime.toDate(expiresAt),
+    }),
   );
+
+const expireSessionCookies = (cookieNames: ReadonlyArray<string>) =>
+  Effect.forEach(
+    cookieNames,
+    (cookieName) =>
+      appendCookies(Cookies.expireCookie(Cookies.empty, cookieName, SESSION_COOKIE_ATTRIBUTES)),
+    { discard: true },
+  );
+
+const userSignInFailures = {
+  ServerAuthInvalidOriginError: () => failEnvironmentInvalidRequest("invalid_origin"),
+  ServerAuthInvalidCredentialError: () => failEnvironmentAuthInvalid("invalid_credential"),
+};
+
+const failUserSignInInternal = (error: EnvironmentAuth.ServerAuthInternalError) =>
+  failEnvironmentInternal("browser_session_issuance_failed", error);
 
 const failUserSignIn = <A, R>(
   effect: Effect.Effect<
@@ -240,13 +247,8 @@ const failUserSignIn = <A, R>(
   >,
 ) =>
   effect.pipe(
-    Effect.catchTags({
-      ServerAuthInvalidOriginError: () => failEnvironmentInvalidRequest("invalid_origin"),
-      ServerAuthInvalidCredentialError: () => failEnvironmentAuthInvalid("invalid_credential"),
-    }),
-    Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
-      failEnvironmentInternal("browser_session_issuance_failed", error),
-    ),
+    Effect.catchTags(userSignInFailures),
+    Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, failUserSignInInternal),
   );
 
 const failOwnerBootstrap = <A, R>(
@@ -261,14 +263,11 @@ const failOwnerBootstrap = <A, R>(
 ) =>
   effect.pipe(
     Effect.catchTags({
+      ...userSignInFailures,
       ServerAuthOwnerAlreadyClaimedError: (error) =>
         Effect.fail(new EnvironmentHttpConflictError({ message: error.message })),
-      ServerAuthInvalidOriginError: () => failEnvironmentInvalidRequest("invalid_origin"),
-      ServerAuthInvalidCredentialError: () => failEnvironmentAuthInvalid("invalid_credential"),
     }),
-    Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
-      failEnvironmentInternal("browser_session_issuance_failed", error),
-    ),
+    Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, failUserSignInInternal),
   );
 
 export const requireEnvironmentScope = Effect.fn("environment.auth.requireScope")(function* (
@@ -639,7 +638,11 @@ export const layer = HttpApiBuilder.group(
             yield* annotateEnvironmentRequest(args.endpoint.name);
             const request = yield* HttpServerRequest.HttpServerRequest;
             const signedOut = yield* serverAuth.signOut(request);
-            yield* expireSessionCookie(sessions.cookieName);
+            yield* expireSessionCookies(
+              sessions.legacyCookieName === undefined
+                ? [sessions.cookieName]
+                : [sessions.cookieName, sessions.legacyCookieName],
+            );
             return { signedOut };
           },
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>

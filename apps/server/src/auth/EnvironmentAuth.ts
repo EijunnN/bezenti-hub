@@ -43,6 +43,7 @@ import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerConfig from "../config.ts";
@@ -61,7 +62,7 @@ import { requestUrl } from "../requestUrl.ts";
 
 const DEFAULT_SESSION_SUBJECT = "cli-issued-session";
 /** Browser sessions a User signed in to with an account credential rather than a pairing link. */
-const USER_SIGN_IN_SUBJECT = "user-sign-in";
+export const USER_SIGN_IN_SUBJECT = "user-sign-in";
 export const INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT = "administrative-bootstrap";
 
 export interface IssuedPairingLink {
@@ -653,7 +654,7 @@ export class EnvironmentAuth extends Context.Service<
       UserBrowserSession,
       ServerAuthInvalidCredentialError | ServerAuthInternalError
     >;
-    /** Revokes the request's browser session; false when it carried none. */
+    /** Revokes the request's browser session; false when it carried none it may end. */
     readonly signOut: (
       request: HttpServerRequest.HttpServerRequest,
     ) => Effect.Effect<boolean, ServerAuthInternalError>;
@@ -809,6 +810,7 @@ export const make = Effect.gen(function* () {
   const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
   const sessions = yield* SessionStore.SessionStore;
   const userDirectory = yield* UserDirectory.UserDirectory;
+  const sql = yield* SqlClient.SqlClient;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const digest = yield* Digest.Digest;
   const descriptor = yield* policy.getDescriptor();
@@ -1499,6 +1501,14 @@ export const make = Effect.gen(function* () {
     user: AuthUser,
     requestMetadata: AuthClientMetadata,
   ) {
+    if (
+      !ManagedLimits.allowsRemoteClients(managedPolicy) &&
+      isRemoteClient(requestMetadata.ipAddress)
+    ) {
+      return yield* new ServerAuthInvalidCredentialError({
+        diagnostic: "The managed policy allows account sign-in only on this machine.",
+      });
+    }
     const previousCredential = selectRequestCredential(
       request,
       sessions.cookieName,
@@ -1606,11 +1616,24 @@ export const make = Effect.gen(function* () {
         response: input.response,
       })
       .pipe(Effect.mapError(passkeyRejected));
-    yield* bootstrapCredentials
-      .consume(input.credential)
-      .pipe(Effect.mapError(toBootstrapExchangeError));
-    const created = yield* userDirectory.createOwner(pending).pipe(ownerCreationFailures);
-    const session = yield* issueUserBrowserSession(request, created.user, requestMetadata);
+    // One transaction: a failure after spending the link would lose it, and the recovery codes
+    // are only ever returned here.
+    const { created, session } = yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          yield* bootstrapCredentials
+            .consume(input.credential)
+            .pipe(Effect.mapError(toBootstrapExchangeError));
+          const created = yield* userDirectory.createOwner(pending).pipe(ownerCreationFailures);
+          const session = yield* issueUserBrowserSession(request, created.user, requestMetadata);
+          return { created, session };
+        }),
+      )
+      .pipe(
+        Effect.catchTags({
+          SqlError: (cause) => Effect.fail(new ServerAuthUserDirectoryError({ cause })),
+        }),
+      );
     return {
       result: {
         session: session.response,
@@ -1659,9 +1682,9 @@ export const make = Effect.gen(function* () {
   const signOut: EnvironmentAuth["Service"]["signOut"] = (request) =>
     authenticateBrowserSession(request).pipe(
       Effect.flatMap((session) =>
-        // The reusable dev session outlives restarts; signing out of it only drops the cookie.
+        // The reusable dev session is shared across worktrees and is not this browser's to end.
         session.subject === "reusable-dev-token"
-          ? Effect.succeed(true)
+          ? Effect.succeed(false)
           : sessions
               .revoke(session.sessionId)
               .pipe(Effect.mapError((cause) => new ServerAuthSessionRevocationError({ cause }))),
@@ -1711,6 +1734,9 @@ export const make = Effect.gen(function* () {
   });
 });
 
+const isRemoteClient = (ipAddress: string | undefined) =>
+  ipAddress !== undefined && !isLocalLoopbackHost(ipAddress);
+
 /** Subjects of sessions and links a pairing link created, keyed by how the client paired. */
 const LINK_PAIRED_SUBJECTS = { link: "one-time-token", connect: "cloud-connect" } as const;
 
@@ -1735,11 +1761,12 @@ const revokePairedClientsThePolicyDisallows = Effect.fn(
   const sessions = (yield* stores.sessions.listActive()).filter(
     (session) =>
       disallowed.has(session.subject) ||
-      // The startup link also pairs browsers on this machine; only a device elsewhere goes.
+      // The startup link and account sign-in also serve browsers on this machine; only a
+      // device elsewhere goes.
       (!remoteAllowed &&
-        session.subject === INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT &&
-        session.client.ipAddress !== undefined &&
-        !isLocalLoopbackHost(session.client.ipAddress)),
+        (session.subject === INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT ||
+          session.subject === USER_SIGN_IN_SUBJECT) &&
+        isRemoteClient(session.client.ipAddress)),
   );
   const links = (yield* stores.pairingLinks.listActive()).filter((link) =>
     disallowed.has(link.subject),

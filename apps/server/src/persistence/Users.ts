@@ -194,7 +194,14 @@ const make = Effect.gen(function* () {
             ),
           ),
         )
-        .pipe(Effect.mapError(toUserRepositoryError("UserRepository.createOwner")));
+        .pipe(
+          // Another writer created the Owner between the check and the insert.
+          Effect.catchIf(
+            (error) => !Schema.isSchemaError(error) && error.reason._tag === "UniqueViolation",
+            () => Effect.succeed(false),
+          ),
+          Effect.mapError(toUserRepositoryError("UserRepository.createOwner")),
+        );
     }),
     getById: Effect.fn("UserRepository.getById")(function (userId) {
       return findUserById(userId).pipe(

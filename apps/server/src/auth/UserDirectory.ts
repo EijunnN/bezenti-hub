@@ -16,13 +16,15 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
 import * as Users from "../persistence/Users.ts";
 
 const CEREMONY_TTL = Duration.minutes(5);
-const MAX_PENDING_CEREMONIES = 1_000;
+// Sign-in challenges are unauthenticated, so they get their own bounded store; an Owner
+// registration needs the bootstrap link and can never be evicted by them.
+const MAX_PENDING_SIGN_INS = 1_000;
+const MAX_PENDING_OWNER_REGISTRATIONS = 16;
 const RECOVERY_CODE_COUNT = 10;
 const RECOVERY_CODE_LENGTH = 10;
 // Crockford base32: 32 symbols, so `byte & 31` is unbiased; no I, L, O or U to misread.
@@ -73,23 +75,45 @@ export interface PendingOwner {
   readonly passkey: Users.CreateOwnerInput["passkey"];
 }
 
-type Ceremony =
-  | {
-      readonly kind: "owner-registration";
-      readonly challenge: string;
-      readonly origin: string;
-      readonly rpId: string;
-      readonly expiresAt: DateTime.DateTime;
-      readonly userId: UserId;
-      readonly displayName: string;
-    }
-  | {
-      readonly kind: "sign-in";
-      readonly challenge: string;
-      readonly origin: string;
-      readonly rpId: string;
-      readonly expiresAt: DateTime.DateTime;
-    };
+interface Ceremony {
+  readonly challenge: string;
+  readonly origin: string;
+  readonly rpId: string;
+  readonly expiresAt: DateTime.DateTime;
+}
+
+interface OwnerRegistrationCeremony extends Ceremony {
+  readonly userId: UserId;
+  readonly displayName: string;
+}
+
+/**
+ * Pending WebAuthn ceremonies, single use. Every entry has the same TTL, so insertion order is
+ * expiry order and pruning stops at the first live entry.
+ */
+const makeCeremonyStore = <C extends Ceremony>(capacity: number) => {
+  const entries = new Map<string, C>();
+  return {
+    put: (ceremonyId: string, ceremony: C, now: DateTime.DateTime) =>
+      Effect.sync(() => {
+        for (const [id, entry] of entries) {
+          if (entries.size < capacity && DateTime.isGreaterThan(entry.expiresAt, now)) break;
+          entries.delete(id);
+        }
+        entries.set(ceremonyId, ceremony);
+      }),
+    take: (ceremonyId: string, origin: string, now: DateTime.DateTime) =>
+      Effect.sync(() => {
+        const ceremony = entries.get(ceremonyId);
+        entries.delete(ceremonyId);
+        return ceremony !== undefined &&
+          ceremony.origin === origin &&
+          DateTime.isGreaterThan(ceremony.expiresAt, now)
+          ? ceremony
+          : undefined;
+      }),
+  };
+};
 
 export class UserDirectory extends Context.Service<
   UserDirectory,
@@ -145,7 +169,10 @@ const make = Effect.gen(function* () {
   const users = yield* Users.UserRepository;
   const random = yield* SecureRandom.SecureRandom;
   const digest = yield* Digest.Digest;
-  const ceremonies = yield* Ref.make(new Map<string, Ceremony>());
+  const ownerRegistrations = makeCeremonyStore<OwnerRegistrationCeremony>(
+    MAX_PENDING_OWNER_REGISTRATIONS,
+  );
+  const signIns = makeCeremonyStore<Ceremony>(MAX_PENDING_SIGN_INS);
 
   const storage = Effect.mapError((cause: unknown) => new UserDirectoryStorageError({ cause }));
 
@@ -157,48 +184,19 @@ const make = Effect.gen(function* () {
   const hashRecoveryCode = (code: string) =>
     digest.digestHex(Digest.sha256, new TextEncoder().encode(normalizeRecoveryCode(code)));
 
-  const putCeremony = Effect.fn("UserDirectory.putCeremony")(function* (
-    ceremony: (expiresAt: DateTime.DateTime) => Ceremony,
-  ) {
-    const ceremonyId = yield* random.uuidV4();
-    const now = yield* DateTime.now;
-    const stored = ceremony(DateTime.add(now, { milliseconds: Duration.toMillis(CEREMONY_TTL) }));
-    yield* Ref.update(ceremonies, (current) => {
-      const next = new Map<string, Ceremony>();
-      for (const [id, entry] of current) {
-        if (DateTime.isGreaterThan(entry.expiresAt, now)) next.set(id, entry);
-      }
-      // Challenges are unauthenticated, so the oldest give way instead of growing without bound.
-      for (const id of next.keys()) {
-        if (next.size < MAX_PENDING_CEREMONIES) break;
-        next.delete(id);
-      }
-      return next.set(ceremonyId, stored);
-    });
-    return { ceremonyId, ceremony: stored };
-  });
+  const ceremonyExpiry = (now: DateTime.DateTime) =>
+    DateTime.add(now, { milliseconds: Duration.toMillis(CEREMONY_TTL) });
 
-  // Single use: a ceremony is removed whether or not its response verifies.
-  const takeCeremony = Effect.fn("UserDirectory.takeCeremony")(function* <
-    Kind extends Ceremony["kind"],
-  >(ceremonyId: string, kind: Kind, origin: string) {
-    const now = yield* DateTime.now;
-    const ceremony = yield* Ref.modify(ceremonies, (current) => {
-      const found = current.get(ceremonyId);
-      if (found === undefined) return [undefined, current] as const;
-      const next = new Map(current);
-      next.delete(ceremonyId);
-      return [found, next] as const;
-    });
-    if (
-      ceremony === undefined ||
-      ceremony.kind !== kind ||
-      ceremony.origin !== origin ||
-      !DateTime.isGreaterThan(ceremony.expiresAt, now)
-    ) {
+  const takeCeremony = Effect.fn("UserDirectory.takeCeremony")(function* <C extends Ceremony>(
+    store: ReturnType<typeof makeCeremonyStore<C>>,
+    ceremonyId: string,
+    origin: string,
+  ) {
+    const ceremony = yield* store.take(ceremonyId, origin, yield* DateTime.now);
+    if (ceremony === undefined) {
       return yield* new PasskeyRejectedError({ reason: "the sign-in attempt expired" });
     }
-    return ceremony as Extract<Ceremony, { kind: Kind }>;
+    return ceremony;
   });
 
   const startOwnerRegistration: UserDirectory["Service"]["startOwnerRegistration"] = Effect.fn(
@@ -210,15 +208,13 @@ const make = Effect.gen(function* () {
     const userId = UserId.make(yield* random.uuidV4());
     const challenge = yield* randomBase64Url(32);
     const rpId = new URL(origin).hostname;
-    const { ceremonyId } = yield* putCeremony((expiresAt) => ({
-      kind: "owner-registration",
-      challenge,
-      origin,
-      rpId,
-      expiresAt,
-      userId,
-      displayName,
-    }));
+    const ceremonyId = yield* random.uuidV4();
+    const now = yield* DateTime.now;
+    yield* ownerRegistrations.put(
+      ceremonyId,
+      { challenge, origin, rpId, expiresAt: ceremonyExpiry(now), userId, displayName },
+      now,
+    );
     return {
       ceremonyId,
       options: {
@@ -244,7 +240,7 @@ const make = Effect.gen(function* () {
   const verifyOwnerRegistration: UserDirectory["Service"]["verifyOwnerRegistration"] = Effect.fn(
     "UserDirectory.verifyOwnerRegistration",
   )(function* ({ ceremonyId, origin, response }) {
-    const ceremony = yield* takeCeremony(ceremonyId, "owner-registration", origin);
+    const ceremony = yield* takeCeremony(ownerRegistrations, ceremonyId, origin);
     const verification = yield* Effect.tryPromise({
       try: () =>
         verifyRegistrationResponse({
@@ -321,13 +317,13 @@ const make = Effect.gen(function* () {
   )(function* ({ origin }) {
     const challenge = yield* randomBase64Url(32);
     const rpId = new URL(origin).hostname;
-    const { ceremonyId } = yield* putCeremony((expiresAt) => ({
-      kind: "sign-in",
-      challenge,
-      origin,
-      rpId,
-      expiresAt,
-    }));
+    const ceremonyId = yield* random.uuidV4();
+    const now = yield* DateTime.now;
+    yield* signIns.put(
+      ceremonyId,
+      { challenge, origin, rpId, expiresAt: ceremonyExpiry(now) },
+      now,
+    );
     return {
       ceremonyId,
       options: {
@@ -350,7 +346,7 @@ const make = Effect.gen(function* () {
   const finishPasskeySignIn: UserDirectory["Service"]["finishPasskeySignIn"] = Effect.fn(
     "UserDirectory.finishPasskeySignIn",
   )(function* ({ ceremonyId, origin, response }) {
-    const ceremony = yield* takeCeremony(ceremonyId, "sign-in", origin);
+    const ceremony = yield* takeCeremony(signIns, ceremonyId, origin);
     const passkey = yield* users.getPasskey(response.id).pipe(storage);
     if (Option.isNone(passkey) || passkey.value.rpId !== ceremony.rpId) {
       return yield* new PasskeyRejectedError({ reason: "this passkey is not registered here" });
