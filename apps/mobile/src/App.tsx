@@ -17,8 +17,8 @@ import {
   type NavigationAction,
   type NavigationState,
 } from "@react-navigation/native";
+import { addHubOrigin, hubLinkOrigin } from "@t3tools/shared/threadLinks";
 import { pipe } from "effect/Function";
-import { DEFAULT_HOSTED_APP_URL } from "@t3tools/shared/hostedApp";
 
 import { RegistryContext } from "@effect/atom-react";
 import { ProjectChipIconRasterizer } from "./native/ProjectChipIconImages";
@@ -119,13 +119,17 @@ function getAppStateFromPath(path: string, options: Parameters<typeof getStateFr
   );
 }
 
+const HUB_LINK_ORIGIN = hubLinkOrigin({ publicUrl: process.env.EXPO_PUBLIC_T3CODE_PUBLIC_URL });
+addHubOrigin(HUB_LINK_ORIGIN);
+
 const appLinking = {
   prefixes: [
     Linking.createURL("/"),
     "t3code://",
     "t3code-dev://",
     "t3code-preview://",
-    DEFAULT_HOSTED_APP_URL,
+    // Copied links on the Hub's own domain, when the build names it (see app.config.ts).
+    ...(HUB_LINK_ORIGIN === null ? [] : [HUB_LINK_ORIGIN]),
   ],
   config: { initialRouteName: "Home" },
   filter: (url: string) => shouldHandleAppLink(url),

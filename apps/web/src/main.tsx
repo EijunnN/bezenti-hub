@@ -6,8 +6,10 @@ import "./index.css";
 
 import { startAppServices } from "./appInit";
 import { AppRoot } from "./AppRoot";
+import { registerWindowHubOrigin } from "./hubLinks";
 import { clearChunkReloadGuard, reloadOnceForChunkLoadError } from "./lib/chunkReloadGuard";
 
+registerWindowHubOrigin();
 const router = startAppServices();
 
 let chunkLoadFailed = false;

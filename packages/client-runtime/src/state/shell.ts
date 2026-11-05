@@ -8,6 +8,7 @@ import {
   type ThreadId,
   type ThreadPullRequestLink,
 } from "@t3tools/contracts";
+import { addHubOrigin } from "@t3tools/shared/threadLinks";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -562,6 +563,8 @@ export function createEnvironmentServerConfigsAtom(input: {
     for (const environmentId of enabledEnvironmentIds(get(input.catalogValueAtom))) {
       const config = get(input.serverConfigValueAtom(environmentId));
       if (config !== null) {
+        // Copied links point at the Hub's public URL; links to it in messages read as threads.
+        addHubOrigin(config.environment.publicUrl);
         next.set(environmentId, config);
       }
     }

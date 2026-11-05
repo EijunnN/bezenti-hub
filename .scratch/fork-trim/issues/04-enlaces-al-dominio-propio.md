@@ -4,9 +4,9 @@
 
 **Blocked by:** 03
 
-**Status:** ready-for-agent
+**Status:** done
 
 Plan: ../plan.md
 
-- [ ] Ningún enlace generado apunta a `app.t3.codes`.
-- [ ] La URL del Hub se configura en un solo sitio.
+- [x] Ningún enlace generado apunta a `app.t3.codes`.
+- [x] La URL del Hub se configura en un solo sitio.

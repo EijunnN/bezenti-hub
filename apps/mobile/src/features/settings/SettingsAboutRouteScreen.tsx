@@ -8,6 +8,7 @@ import { SymbolView } from "../../components/ui/AppSymbol";
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsScreen } from "./components/SettingsScreen";
+import { LEGAL_URL } from "./lib/legal-document-url";
 
 export function SettingsAboutRouteScreen() {
   const insets = useSafeAreaInsets();
@@ -43,7 +44,9 @@ function AppSettingsSection() {
         label="Open source licenses"
         target="SettingsOpenSourceLicenses"
       />
-      <SettingsRow icon="doc.text" label="Legal" fullScreenTarget="SettingsLegal" />
+      {LEGAL_URL === null ? null : (
+        <SettingsRow icon="doc.text" label="Legal" fullScreenTarget="SettingsLegal" />
+      )}
       <View className="flex-row items-center gap-4 p-4">
         <SymbolView
           name="info.circle"

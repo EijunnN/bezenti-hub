@@ -891,7 +891,7 @@ const layerMakeServer = Layer.unwrap(
       Layer.provideMerge(layerHttpServer),
       // One cell: EnvironmentAuth turns it on, the listener above reads it per connection.
       Layer.provideMerge(OwnerPresence.layer),
-      // Guest links get their host from T3CODE_PUBLIC_URL.
+      // Guest and MCP thread links get their address from T3CODE_PUBLIC_URL.
       Layer.provideMerge(PublicHubUrl.layer),
       Layer.provide(layerApplicationObservability),
       Layer.provideMerge(FetchHttpClient.layer),

@@ -179,10 +179,6 @@
       "types": "./src/desktopBootstrapToken.ts",
       "import": "./src/desktopBootstrapToken.ts"
     },
-    "./hostedApp": {
-      "types": "./src/hostedApp.ts",
-      "import": "./src/hostedApp.ts"
-    },
     "./oauthScope": {
       "types": "./src/oauthScope.ts",
       "import": "./src/oauthScope.ts"
