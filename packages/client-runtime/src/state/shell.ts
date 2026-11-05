@@ -8,7 +8,6 @@ import {
   type ThreadId,
   type ThreadPullRequestLink,
 } from "@t3tools/contracts";
-import { addHubOrigin } from "@t3tools/shared/threadLinks";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -40,6 +39,7 @@ import {
 } from "./shellReducer.ts";
 import { type EnvironmentCatalogState, enabledEnvironmentIds } from "./connections.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
+import { registerEnvironmentHubOrigins } from "../hubOrigins.ts";
 
 export type EnvironmentShellStatus = "empty" | "cached" | "synchronizing" | "live";
 
@@ -564,7 +564,7 @@ export function createEnvironmentServerConfigsAtom(input: {
       const config = get(input.serverConfigValueAtom(environmentId));
       if (config !== null) {
         // Copied links point at the Hub's public URL; links to it in messages read as threads.
-        addHubOrigin(config.environment.publicUrl);
+        registerEnvironmentHubOrigins({ publicUrl: config.environment.publicUrl });
         next.set(environmentId, config);
       }
     }
