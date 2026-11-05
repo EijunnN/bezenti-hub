@@ -18,6 +18,7 @@ export function isSidebarUtilityPage(pathname: string) {
 const SHELL_LESS_PATHS = new Set([
   "/pair",
   "/sign-in",
+  "/reset",
   "/connect",
   "/connect-agent",
   GUEST_PAGE_PATH,

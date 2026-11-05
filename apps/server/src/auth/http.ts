@@ -35,6 +35,7 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as CurrentPrincipal from "./CurrentPrincipal.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as SessionStore from "./SessionStore.ts";
+import * as UserDirectory from "./UserDirectory.ts";
 import { traceAuthenticatedRelayRequest, traceRelayRequest } from "../cloud/traceRelayRequest.ts";
 import { deriveAuthClientMetadata } from "./utils.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
@@ -270,6 +271,32 @@ const failOwnerBootstrap = <A, R>(
     Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, failUserSignInInternal),
   );
 
+/** The signed-in User managing their own account; pairing-link sessions have none. */
+const requireSessionUser = Effect.gen(function* () {
+  const principal = yield* EnvironmentAuthenticatedPrincipal;
+  if (principal.userId === undefined) {
+    return yield* new EnvironmentHttpForbiddenError({
+      message: "Sign in with an account to manage it.",
+    });
+  }
+  return principal.userId;
+});
+
+const failAccountChange = <A, R>(
+  effect: Effect.Effect<
+    A,
+    UserDirectory.AccountChangeRefusedError | UserDirectory.UserDirectoryStorageError,
+    R
+  >,
+) =>
+  effect.pipe(
+    Effect.catchTags({
+      AccountChangeRefusedError: (error) =>
+        Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+      UserDirectoryStorageError: (error) => failEnvironmentInternal("internal_error", error),
+    }),
+  );
+
 export const requireEnvironmentScope = Effect.fn("environment.auth.requireScope")(function* (
   scope: AuthEnvironmentScope,
 ) {
@@ -319,8 +346,105 @@ export const layer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
     const sessions = yield* SessionStore.SessionStore;
+    const userDirectory = yield* UserDirectory.UserDirectory;
 
     return handlers
+      .handle(
+        "passwordSignIn",
+        Effect.fn("environment.auth.passwordSignIn")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const result = yield* serverAuth
+            .signInWithPassword(request, args.payload, deriveAuthClientMetadata({ request }))
+            .pipe(failUserSignIn);
+          yield* appendCredentialResponseHeaders;
+          if ("sessionToken" in result) {
+            yield* appendSessionCookie(
+              sessions.cookieName,
+              result.sessionToken,
+              result.response.expiresAt,
+            );
+          }
+          return result.response;
+        }),
+      )
+      .handle(
+        "account",
+        Effect.fn("environment.auth.account")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          return yield* userDirectory.getAccount(yield* requireSessionUser).pipe(failAccountChange);
+        }),
+      )
+      .handle(
+        "setPassword",
+        Effect.fn("environment.auth.setPassword")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          return yield* userDirectory.setPassword(yield* requireSessionUser, args.payload).pipe(
+            Effect.catchTags({
+              LoginNameTakenError: (error) =>
+                Effect.fail(new EnvironmentHttpConflictError({ message: error.message })),
+              AccountChangeRefusedError: (error) =>
+                Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+              UserDirectoryStorageError: (error) =>
+                failEnvironmentInternal("internal_error", error),
+            }),
+          );
+        }),
+      )
+      .handle(
+        "startTotpEnrollment",
+        Effect.fn("environment.auth.startTotpEnrollment")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* appendCredentialResponseHeaders;
+          return yield* userDirectory
+            .startTotpEnrollment(yield* requireSessionUser)
+            .pipe(failAccountChange);
+        }),
+      )
+      .handle(
+        "confirmTotpEnrollment",
+        Effect.fn("environment.auth.confirmTotpEnrollment")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          return yield* userDirectory
+            .confirmTotpEnrollment(yield* requireSessionUser, args.payload.code)
+            .pipe(failAccountChange);
+        }),
+      )
+      .handle(
+        "resetLinkStatus",
+        Effect.fn("environment.auth.resetLinkStatus")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            return yield* userDirectory.getResetLinkStatus(args.payload.token);
+          },
+          Effect.catchTags({
+            UserDirectoryStorageError: (error) => failEnvironmentInternal("internal_error", error),
+          }),
+        ),
+      )
+      .handle(
+        "resetLinkRegistration",
+        Effect.fn("environment.auth.resetLinkRegistration")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          return yield* serverAuth
+            .beginResetLinkRegistration(request, args.payload.token)
+            .pipe(failUserSignIn);
+        }),
+      )
+      .handle(
+        "redeemResetLink",
+        Effect.fn("environment.auth.redeemResetLink")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const { response, sessionToken } = yield* serverAuth
+            .redeemResetLink(request, args.payload, deriveAuthClientMetadata({ request }))
+            .pipe(failUserSignIn);
+          yield* appendSessionCookie(sessions.cookieName, sessionToken, response.expiresAt);
+          yield* appendCredentialResponseHeaders;
+          return response;
+        }),
+      )
       .handle(
         "session",
         Effect.fn("environment.auth.session")(

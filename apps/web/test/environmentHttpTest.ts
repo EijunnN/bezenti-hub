@@ -121,7 +121,15 @@ export async function installEnvironmentHttpTest(scenario: EnvironmentHttpTestSc
             .handle("passkeyChallenge", () => unexpectedEndpoint("auth.passkeyChallenge"))
             .handle("passkeySignIn", () => unexpectedEndpoint("auth.passkeySignIn"))
             .handle("recoveryCodeSignIn", () => unexpectedEndpoint("auth.recoveryCodeSignIn"))
-            .handle("signOut", () => unexpectedEndpoint("auth.signOut")),
+            .handle("signOut", () => unexpectedEndpoint("auth.signOut"))
+            .handle("passwordSignIn", () => unexpectedEndpoint("auth.passwordSignIn"))
+            .handle("account", () => unexpectedEndpoint("auth.account"))
+            .handle("setPassword", () => unexpectedEndpoint("auth.setPassword"))
+            .handle("startTotpEnrollment", () => unexpectedEndpoint("auth.startTotpEnrollment"))
+            .handle("confirmTotpEnrollment", () => unexpectedEndpoint("auth.confirmTotpEnrollment"))
+            .handle("resetLinkStatus", () => unexpectedEndpoint("auth.resetLinkStatus"))
+            .handle("resetLinkRegistration", () => unexpectedEndpoint("auth.resetLinkRegistration"))
+            .handle("redeemResetLink", () => unexpectedEndpoint("auth.redeemResetLink")),
         ),
       ]),
       Effect.provideService(EnvironmentAuthenticatedAuth, authenticatedAuth),

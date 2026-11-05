@@ -14,6 +14,7 @@ import { PersistenceDecodeError, PersistenceSqlError, type UserRepositoryError }
 export const UserRecord = Schema.Struct({
   userId: UserId,
   displayName: Schema.String,
+  loginName: Schema.NullOr(Schema.String),
   isOwner: Schema.BooleanFromBit,
   createdAt: Schema.DateTimeUtcFromString,
   disabledAt: Schema.NullOr(Schema.DateTimeUtcFromString),
@@ -53,6 +54,48 @@ const ConsumeRecoveryCodeInput = Schema.Struct({
   usedAt: Schema.DateTimeUtcFromString,
 });
 
+export const UserCredentials = Schema.Struct({
+  passwordHash: Schema.NullOr(Schema.String),
+  totpSecretCiphertext: Schema.NullOr(Schema.String),
+});
+export type UserCredentials = typeof UserCredentials.Type;
+
+const SetPasswordInput = Schema.Struct({
+  userId: UserId,
+  loginName: Schema.String,
+  passwordHash: Schema.String,
+  updatedAt: Schema.DateTimeUtcFromString,
+});
+
+const SetTotpInput = Schema.Struct({
+  userId: UserId,
+  secretCiphertext: Schema.String,
+  step: Schema.Int,
+  enrolledAt: Schema.DateTimeUtcFromString,
+});
+
+const RecordTotpStepInput = Schema.Struct({ userId: UserId, step: Schema.Int });
+
+const CreateResetLinkInput = Schema.Struct({
+  linkId: Schema.String,
+  userId: UserId,
+  tokenHash: Schema.String,
+  createdBy: Schema.NullOr(UserId),
+  createdAt: Schema.DateTimeUtcFromString,
+  expiresAt: Schema.DateTimeUtcFromString,
+});
+
+const ResetLinkLookup = Schema.Struct({
+  tokenHash: Schema.String,
+  now: Schema.DateTimeUtcFromString,
+});
+
+const AddPasskeyInput = Schema.Struct({
+  userId: UserId,
+  passkey: Schema.Struct(PasskeyFields),
+  createdAt: Schema.DateTimeUtcFromString,
+});
+
 export class UserRepository extends Context.Service<
   UserRepository,
   {
@@ -72,6 +115,36 @@ export class UserRepository extends Context.Service<
     readonly consumeRecoveryCode: (
       input: typeof ConsumeRecoveryCodeInput.Type,
     ) => Effect.Effect<Option.Option<UserId>, UserRepositoryError>;
+    readonly getOwner: () => Effect.Effect<Option.Option<UserRecord>, UserRepositoryError>;
+    readonly getByLoginName: (
+      loginName: string,
+    ) => Effect.Effect<Option.Option<UserRecord>, UserRepositoryError>;
+    readonly getCredentials: (
+      userId: UserId,
+    ) => Effect.Effect<UserCredentials, UserRepositoryError>;
+    /** Sets the login name and password together; false when another User has that name. */
+    readonly setPassword: (
+      input: typeof SetPasswordInput.Type,
+    ) => Effect.Effect<boolean, UserRepositoryError>;
+    readonly setTotp: (input: typeof SetTotpInput.Type) => Effect.Effect<void, UserRepositoryError>;
+    /** Records a used TOTP step; false when that step or a later one was already used. */
+    readonly recordTotpStep: (
+      input: typeof RecordTotpStepInput.Type,
+    ) => Effect.Effect<boolean, UserRepositoryError>;
+    readonly createResetLink: (
+      input: typeof CreateResetLinkInput.Type,
+    ) => Effect.Effect<void, UserRepositoryError>;
+    /** The User of an unused, unexpired reset link. */
+    readonly findResetLink: (
+      input: typeof ResetLinkLookup.Type,
+    ) => Effect.Effect<Option.Option<UserId>, UserRepositoryError>;
+    /** Marks an unused, unexpired link used and returns its User. */
+    readonly consumeResetLink: (
+      input: typeof ResetLinkLookup.Type,
+    ) => Effect.Effect<Option.Option<UserId>, UserRepositoryError>;
+    readonly addPasskey: (
+      input: typeof AddPasskeyInput.Type,
+    ) => Effect.Effect<void, UserRepositoryError>;
   }
 >()("t3/persistence/Users/UserRepository") {}
 
@@ -123,19 +196,135 @@ const make = Effect.gen(function* () {
     }),
   });
 
+  const userColumns = sql.literal(`
+    user_id AS "userId",
+    display_name AS "displayName",
+    login_name AS "loginName",
+    is_owner AS "isOwner",
+    created_at AS "createdAt",
+    disabled_at AS "disabledAt",
+    removed_at AS "removedAt"
+  `);
+
   const findUserById = SqlSchema.findOneOption({
     Request: UserId,
     Result: UserRecord,
+    execute: (userId) => sql`SELECT ${userColumns} FROM users WHERE user_id = ${userId}`,
+  });
+
+  const findOwnerRecord = SqlSchema.findOneOption({
+    Request: Schema.Void,
+    Result: UserRecord,
+    execute: () => sql`SELECT ${userColumns} FROM users WHERE is_owner = 1`,
+  });
+
+  const findUserByLoginName = SqlSchema.findOneOption({
+    Request: Schema.String,
+    Result: UserRecord,
+    execute: (loginName) => sql`SELECT ${userColumns} FROM users WHERE login_name = ${loginName}`,
+  });
+
+  const findCredentials = SqlSchema.findOne({
+    Request: UserId,
+    Result: UserCredentials,
     execute: (userId) => sql`
       SELECT
-        user_id AS "userId",
-        display_name AS "displayName",
-        is_owner AS "isOwner",
-        created_at AS "createdAt",
-        disabled_at AS "disabledAt",
-        removed_at AS "removedAt"
-      FROM users
-      WHERE user_id = ${userId}
+        (SELECT password_hash FROM user_passwords WHERE user_id = ${userId}) AS "passwordHash",
+        (SELECT secret_ciphertext FROM user_totp WHERE user_id = ${userId}) AS "totpSecretCiphertext"
+    `,
+  });
+
+  const writePassword = SqlSchema.void({
+    Request: SetPasswordInput,
+    execute: Effect.fn("UserRepository.writePassword")(function* (input) {
+      yield* sql`UPDATE users SET login_name = ${input.loginName} WHERE user_id = ${input.userId}`;
+      yield* sql`
+        INSERT INTO user_passwords (user_id, password_hash, updated_at)
+        VALUES (${input.userId}, ${input.passwordHash}, ${input.updatedAt})
+        ON CONFLICT (user_id) DO UPDATE
+        SET password_hash = excluded.password_hash, updated_at = excluded.updated_at
+      `;
+    }),
+  });
+
+  const writeTotp = SqlSchema.void({
+    Request: SetTotpInput,
+    execute: (input) => sql`
+      INSERT INTO user_totp (user_id, secret_ciphertext, enrolled_at, last_used_step)
+      VALUES (${input.userId}, ${input.secretCiphertext}, ${input.enrolledAt}, ${input.step})
+      ON CONFLICT (user_id) DO UPDATE
+      SET
+        secret_ciphertext = excluded.secret_ciphertext,
+        enrolled_at = excluded.enrolled_at,
+        last_used_step = excluded.last_used_step
+    `,
+  });
+
+  const advanceTotpStep = SqlSchema.findOneOption({
+    Request: RecordTotpStepInput,
+    Result: Schema.Struct({ userId: UserId }),
+    execute: ({ userId, step }) => sql`
+      UPDATE user_totp
+      SET last_used_step = ${step}
+      WHERE user_id = ${userId} AND last_used_step < ${step}
+      RETURNING user_id AS "userId"
+    `,
+  });
+
+  const insertResetLink = SqlSchema.void({
+    Request: CreateResetLinkInput,
+    execute: (input) => sql`
+      INSERT INTO user_reset_links (
+        link_id, user_id, token_hash, created_by, created_at, expires_at
+      )
+      VALUES (
+        ${input.linkId},
+        ${input.userId},
+        ${input.tokenHash},
+        ${input.createdBy},
+        ${input.createdAt},
+        ${input.expiresAt}
+      )
+    `,
+  });
+
+  // ISO-8601 UTC strings of one width compare in time order.
+  const findLiveResetLink = SqlSchema.findOneOption({
+    Request: ResetLinkLookup,
+    Result: Schema.Struct({ userId: UserId }),
+    execute: ({ tokenHash, now }) => sql`
+      SELECT user_id AS "userId"
+      FROM user_reset_links
+      WHERE token_hash = ${tokenHash} AND used_at IS NULL AND expires_at > ${now}
+    `,
+  });
+
+  const useResetLink = SqlSchema.findOneOption({
+    Request: ResetLinkLookup,
+    Result: Schema.Struct({ userId: UserId }),
+    execute: ({ tokenHash, now }) => sql`
+      UPDATE user_reset_links
+      SET used_at = ${now}
+      WHERE token_hash = ${tokenHash} AND used_at IS NULL AND expires_at > ${now}
+      RETURNING user_id AS "userId"
+    `,
+  });
+
+  const insertPasskey = SqlSchema.void({
+    Request: AddPasskeyInput,
+    execute: ({ userId, passkey, createdAt }) => sql`
+      INSERT INTO user_passkeys (
+        credential_id, user_id, public_key, sign_count, transports, rp_id, created_at
+      )
+      VALUES (
+        ${passkey.credentialId},
+        ${userId},
+        ${passkey.publicKey},
+        ${passkey.signCount},
+        ${passkey.transports},
+        ${passkey.rpId},
+        ${createdAt}
+      )
     `,
   });
 
@@ -224,6 +413,69 @@ const make = Effect.gen(function* () {
       return useRecoveryCode(input).pipe(
         Effect.map(Option.map((row) => row.userId)),
         Effect.mapError(toUserRepositoryError("UserRepository.consumeRecoveryCode")),
+      );
+    }),
+    getOwner: Effect.fn("UserRepository.getOwner")(function () {
+      return findOwnerRecord(undefined).pipe(
+        NodeSqliteClient.readOnly,
+        Effect.mapError(toUserRepositoryError("UserRepository.getOwner")),
+      );
+    }),
+    getByLoginName: Effect.fn("UserRepository.getByLoginName")(function (loginName) {
+      return findUserByLoginName(loginName).pipe(
+        NodeSqliteClient.readOnly,
+        Effect.mapError(toUserRepositoryError("UserRepository.getByLoginName")),
+      );
+    }),
+    getCredentials: Effect.fn("UserRepository.getCredentials")(function (userId) {
+      return findCredentials(userId).pipe(
+        NodeSqliteClient.readOnly,
+        Effect.mapError(toUserRepositoryError("UserRepository.getCredentials")),
+      );
+    }),
+    setPassword: Effect.fn("UserRepository.setPassword")(function (input) {
+      return sql.withTransaction(writePassword(input)).pipe(
+        Effect.as(true),
+        // Another User already signs in with this login name.
+        Effect.catchIf(
+          (error) => !Schema.isSchemaError(error) && error.reason._tag === "UniqueViolation",
+          () => Effect.succeed(false),
+        ),
+        Effect.mapError(toUserRepositoryError("UserRepository.setPassword")),
+      );
+    }),
+    setTotp: Effect.fn("UserRepository.setTotp")(function (input) {
+      return writeTotp(input).pipe(
+        Effect.mapError(toUserRepositoryError("UserRepository.setTotp")),
+      );
+    }),
+    recordTotpStep: Effect.fn("UserRepository.recordTotpStep")(function (input) {
+      return advanceTotpStep(input).pipe(
+        Effect.map(Option.isSome),
+        Effect.mapError(toUserRepositoryError("UserRepository.recordTotpStep")),
+      );
+    }),
+    createResetLink: Effect.fn("UserRepository.createResetLink")(function (input) {
+      return insertResetLink(input).pipe(
+        Effect.mapError(toUserRepositoryError("UserRepository.createResetLink")),
+      );
+    }),
+    findResetLink: Effect.fn("UserRepository.findResetLink")(function (input) {
+      return findLiveResetLink(input).pipe(
+        NodeSqliteClient.readOnly,
+        Effect.map(Option.map((row) => row.userId)),
+        Effect.mapError(toUserRepositoryError("UserRepository.findResetLink")),
+      );
+    }),
+    consumeResetLink: Effect.fn("UserRepository.consumeResetLink")(function (input) {
+      return useResetLink(input).pipe(
+        Effect.map(Option.map((row) => row.userId)),
+        Effect.mapError(toUserRepositoryError("UserRepository.consumeResetLink")),
+      );
+    }),
+    addPasskey: Effect.fn("UserRepository.addPasskey")(function (input) {
+      return insertPasskey(input).pipe(
+        Effect.mapError(toUserRepositoryError("UserRepository.addPasskey")),
       );
     }),
   });

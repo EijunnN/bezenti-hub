@@ -1,7 +1,7 @@
 import * as Schema from "effect/Schema";
 
 import { AuthBrowserSessionResult } from "./auth.ts";
-import { TrimmedNonEmptyString, UserId } from "./baseSchemas.ts";
+import { TrimmedNonEmptyString, TrimmedString, UserId } from "./baseSchemas.ts";
 
 export const AuthUser = Schema.Struct({
   id: UserId,
@@ -128,3 +128,74 @@ export const AuthSignOutResult = Schema.Struct({
   signedOut: Schema.Boolean,
 });
 export type AuthSignOutResult = typeof AuthSignOutResult.Type;
+
+/** How a User names themselves at password sign-in; unique in the Installation, ignoring case. */
+export const AuthLoginName = TrimmedString.check(Schema.isPattern(/^[A-Za-z0-9][\w.-]{1,39}$/));
+
+export const AuthPassword = Schema.String.check(Schema.isMinLength(8), Schema.isMaxLength(256));
+
+export const AuthAccount = Schema.Struct({
+  user: AuthUser,
+  loginName: Schema.NullOr(Schema.String),
+  hasPassword: Schema.Boolean,
+  totpEnrolled: Schema.Boolean,
+  /** This account may sign in with a password only together with a TOTP code. */
+  passwordRequiresTotp: Schema.Boolean,
+});
+export type AuthAccount = typeof AuthAccount.Type;
+
+export const AuthSetPasswordRequest = Schema.Struct({
+  loginName: AuthLoginName,
+  password: AuthPassword,
+  /** Required when the account already has a password. */
+  currentPassword: Schema.optionalKey(Schema.String),
+});
+export type AuthSetPasswordRequest = typeof AuthSetPasswordRequest.Type;
+
+export const AuthTotpEnrollment = Schema.Struct({
+  /** Base32, for authenticator apps that cannot scan the QR code. */
+  secret: TrimmedNonEmptyString,
+  otpauthUri: TrimmedNonEmptyString,
+});
+export type AuthTotpEnrollment = typeof AuthTotpEnrollment.Type;
+
+export const AuthTotpCode = Schema.String.check(Schema.isPattern(/^\d{6}$/));
+
+export const AuthTotpConfirmRequest = Schema.Struct({ code: AuthTotpCode });
+export type AuthTotpConfirmRequest = typeof AuthTotpConfirmRequest.Type;
+
+export const AuthPasswordSignInRequest = Schema.Struct({
+  loginName: Schema.String,
+  password: Schema.String,
+  totpCode: Schema.optionalKey(AuthTotpCode),
+});
+export type AuthPasswordSignInRequest = typeof AuthPasswordSignInRequest.Type;
+
+/** The password was right but the account also needs a TOTP code; send both again. */
+export const AuthSecondFactorRequired = Schema.Struct({
+  authenticated: Schema.Literal(false),
+  secondFactor: Schema.Literal("totp"),
+});
+export type AuthSecondFactorRequired = typeof AuthSecondFactorRequired.Type;
+
+export const AuthPasswordSignInResult = Schema.Union([
+  AuthBrowserSessionResult,
+  AuthSecondFactorRequired,
+]);
+export type AuthPasswordSignInResult = typeof AuthPasswordSignInResult.Type;
+
+export const AuthResetLinkRequest = Schema.Struct({ token: TrimmedNonEmptyString });
+export type AuthResetLinkRequest = typeof AuthResetLinkRequest.Type;
+
+export const AuthResetLinkStatus = Schema.Union([
+  Schema.Struct({ status: Schema.Literal("valid"), displayName: Schema.String }),
+  Schema.Struct({ status: Schema.Literal("invalid") }),
+]);
+export type AuthResetLinkStatus = typeof AuthResetLinkStatus.Type;
+
+export const AuthResetLinkRedeemRequest = Schema.Struct({
+  token: TrimmedNonEmptyString,
+  ceremonyId: TrimmedNonEmptyString,
+  response: AuthPasskeyRegistrationResponse,
+});
+export type AuthResetLinkRedeemRequest = typeof AuthResetLinkRedeemRequest.Type;

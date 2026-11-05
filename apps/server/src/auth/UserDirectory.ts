@@ -1,15 +1,22 @@
 import {
+  type AuthAccount,
   type AuthPasskeyAuthenticationResponse,
   type AuthPasskeyRegistrationCeremony,
   type AuthPasskeyRegistrationResponse,
   type AuthPasskeySignInCeremony,
+  type AuthPasswordSignInRequest,
+  type AuthResetLinkStatus,
+  type AuthSetPasswordRequest,
+  type AuthTotpEnrollment,
   type AuthUser,
   UserId,
 } from "@t3tools/contracts";
 import { verifyAuthenticationResponse, verifyRegistrationResponse } from "@simplewebauthn/server";
 import { isoBase64URL } from "@simplewebauthn/server/helpers";
 import * as Context from "effect/Context";
+import * as Aead from "effect/crypto/Aead";
 import * as Digest from "effect/crypto/Digest";
+import * as Mac from "effect/crypto/Mac";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -19,12 +26,17 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as Users from "../persistence/Users.ts";
+import * as AccountCredentials from "./AccountCredentials.ts";
+import * as ServerSecretStore from "./ServerSecretStore.ts";
 
 const CEREMONY_TTL = Duration.minutes(5);
 // Sign-in challenges are unauthenticated, so they get their own bounded store; an Owner
 // registration needs the bootstrap link and can never be evicted by them.
 const MAX_PENDING_SIGN_INS = 1_000;
 const MAX_PENDING_OWNER_REGISTRATIONS = 16;
+const TOTP_ENROLLMENT_TTL = Duration.minutes(10);
+const RESET_LINK_TTL = Duration.hours(1);
+const CREDENTIAL_KEY_SECRET_NAME = "user-credential-key";
 const RECOVERY_CODE_COUNT = 10;
 const RECOVERY_CODE_LENGTH = 10;
 // Crockford base32: 32 symbols, so `byte & 31` is unbiased; no I, L, O or U to misread.
@@ -59,6 +71,49 @@ export class RecoveryCodeRejectedError extends Schema.TaggedError<RecoveryCodeRe
   }
 }
 
+/** A signed-in User's change to their own credentials that the account's rules refuse. */
+export class AccountChangeRefusedError extends Schema.TaggedError<AccountChangeRefusedError>()(
+  "AccountChangeRefusedError",
+  { reason: Schema.String },
+) {
+  override get message(): string {
+    return this.reason;
+  }
+}
+
+export class LoginNameTakenError extends Schema.TaggedError<LoginNameTakenError>()(
+  "LoginNameTakenError",
+  {},
+) {
+  override get message(): string {
+    return "Another account already uses that sign-in name.";
+  }
+}
+
+export class PasswordRejectedError extends Schema.TaggedError<PasswordRejectedError>()(
+  "PasswordRejectedError",
+  {},
+) {
+  override get message(): string {
+    return "That sign-in name, password or code is not right.";
+  }
+}
+
+export class ResetLinkRejectedError extends Schema.TaggedError<ResetLinkRejectedError>()(
+  "ResetLinkRejectedError",
+  {},
+) {
+  override get message(): string {
+    return "This reset link expired or was already used.";
+  }
+}
+
+export class NoOwnerError extends Schema.TaggedError<NoOwnerError>()("NoOwnerError", {}) {
+  override get message(): string {
+    return "This Installation has no Owner yet. Open the first-run setup link instead.";
+  }
+}
+
 export class UserDirectoryStorageError extends Schema.TaggedError<UserDirectoryStorageError>()(
   "UserDirectoryStorageError",
   { cause: Schema.Defect() },
@@ -74,6 +129,22 @@ export interface PendingOwner {
   readonly displayName: string;
   readonly passkey: Users.CreateOwnerInput["passkey"];
 }
+
+/** A verified passkey registration for an existing User, not yet stored. */
+export interface PendingPasskey {
+  readonly userId: UserId;
+  readonly passkey: Users.CreateOwnerInput["passkey"];
+}
+
+export type PasswordCheck =
+  | { readonly _tag: "verified"; readonly user: AuthUser }
+  | { readonly _tag: "totp-required" };
+
+/**
+ * Accounts that may use a password only together with TOTP. Today that is the Owner; Admins join
+ * when Roles exist (see the sign-in rules in docs/internals/environment-auth.md).
+ */
+const passwordRequiresTotp = (user: Pick<Users.UserRecord, "isOwner">): boolean => user.isOwner;
 
 interface Ceremony {
   readonly challenge: string;
@@ -149,8 +220,83 @@ export class UserDirectory extends Context.Service<
     readonly redeemRecoveryCode: (
       code: string,
     ) => Effect.Effect<AuthUser, RecoveryCodeRejectedError | UserDirectoryStorageError>;
+    readonly getAccount: (
+      userId: UserId,
+    ) => Effect.Effect<AuthAccount, AccountChangeRefusedError | UserDirectoryStorageError>;
+    readonly setPassword: (
+      userId: UserId,
+      input: AuthSetPasswordRequest,
+    ) => Effect.Effect<
+      AuthAccount,
+      AccountChangeRefusedError | LoginNameTakenError | UserDirectoryStorageError
+    >;
+    /** A new secret held until a code from it confirms the enrollment. */
+    readonly startTotpEnrollment: (
+      userId: UserId,
+    ) => Effect.Effect<AuthTotpEnrollment, AccountChangeRefusedError | UserDirectoryStorageError>;
+    readonly confirmTotpEnrollment: (
+      userId: UserId,
+      code: string,
+    ) => Effect.Effect<AuthAccount, AccountChangeRefusedError | UserDirectoryStorageError>;
+    readonly checkPassword: (
+      input: AuthPasswordSignInRequest,
+    ) => Effect.Effect<PasswordCheck, PasswordRejectedError | UserDirectoryStorageError>;
+    /** A single-use link that lets the Owner register a new passkey; the token is shown once. */
+    readonly issueOwnerResetLink: () => Effect.Effect<
+      { readonly token: string; readonly expiresAt: DateTime.Utc; readonly user: AuthUser },
+      NoOwnerError | UserDirectoryStorageError
+    >;
+    readonly getResetLinkStatus: (
+      token: string,
+    ) => Effect.Effect<AuthResetLinkStatus, UserDirectoryStorageError>;
+    readonly startResetRegistration: (input: {
+      readonly token: string;
+      readonly origin: string;
+    }) => Effect.Effect<
+      AuthPasskeyRegistrationCeremony,
+      ResetLinkRejectedError | UserDirectoryStorageError
+    >;
+    readonly verifyResetRegistration: (input: {
+      readonly ceremonyId: string;
+      readonly origin: string;
+      readonly response: AuthPasskeyRegistrationResponse;
+    }) => Effect.Effect<PendingPasskey, PasskeyRejectedError>;
+    /** Spends the link and stores the passkey; run it in the transaction that issues the session. */
+    readonly redeemResetLink: (input: {
+      readonly token: string;
+      readonly pending: PendingPasskey;
+    }) => Effect.Effect<AuthUser, ResetLinkRejectedError | UserDirectoryStorageError>;
   }
 >()("t3/auth/UserDirectory") {}
+
+const registrationCeremony = (input: {
+  readonly ceremonyId: string;
+  readonly challenge: string;
+  readonly rpId: string;
+  readonly userId: UserId;
+  readonly displayName: string;
+}): AuthPasskeyRegistrationCeremony => ({
+  ceremonyId: input.ceremonyId,
+  options: {
+    challenge: input.challenge,
+    rp: { id: input.rpId, name: "T3 Code" },
+    user: {
+      id: isoBase64URL.fromUTF8String(input.userId),
+      name: input.displayName,
+      displayName: input.displayName,
+    },
+    pubKeyCredParams: SUPPORTED_ALGORITHMS.map((alg) => ({ alg, type: "public-key" as const })),
+    timeout: Duration.toMillis(CEREMONY_TTL),
+    authenticatorSelection: {
+      residentKey: "required",
+      requireResidentKey: true,
+      userVerification: "preferred",
+    },
+    attestation: "none",
+  },
+});
+
+const normalizeLoginName = (loginName: string) => loginName.trim().toLowerCase();
 
 const toAuthUser = (user: Users.UserRecord): AuthUser => ({
   id: user.userId,
@@ -173,6 +319,14 @@ const make = Effect.gen(function* () {
     MAX_PENDING_OWNER_REGISTRATIONS,
   );
   const signIns = makeCeremonyStore<Ceremony>(MAX_PENDING_SIGN_INS);
+  // Gated by a live reset link, so the Owner-registration bound is plenty.
+  const resetRegistrations = makeCeremonyStore<OwnerRegistrationCeremony>(
+    MAX_PENDING_OWNER_REGISTRATIONS,
+  );
+  const pendingTotp = new Map<UserId, { secret: Uint8Array; expiresAt: DateTime.DateTime }>();
+  const secretStore = yield* ServerSecretStore.ServerSecretStore;
+  const cryptoContext = yield* Effect.context<Mac.Mac | Aead.Aead | SecureRandom.SecureRandom>();
+  const withCrypto = Effect.provide(cryptoContext);
 
   const storage = Effect.mapError((cause: unknown) => new UserDirectoryStorageError({ cause }));
 
@@ -215,32 +369,19 @@ const make = Effect.gen(function* () {
       { challenge, origin, rpId, expiresAt: ceremonyExpiry(now), userId, displayName },
       now,
     );
-    return {
-      ceremonyId,
-      options: {
-        challenge,
-        rp: { id: rpId, name: "T3 Code" },
-        user: {
-          id: isoBase64URL.fromUTF8String(userId),
-          name: displayName,
-          displayName,
-        },
-        pubKeyCredParams: SUPPORTED_ALGORITHMS.map((alg) => ({ alg, type: "public-key" as const })),
-        timeout: Duration.toMillis(CEREMONY_TTL),
-        authenticatorSelection: {
-          residentKey: "required",
-          requireResidentKey: true,
-          userVerification: "preferred",
-        },
-        attestation: "none",
-      },
-    } satisfies AuthPasskeyRegistrationCeremony;
+    return registrationCeremony({ ceremonyId, challenge, rpId, userId, displayName });
   });
 
-  const verifyOwnerRegistration: UserDirectory["Service"]["verifyOwnerRegistration"] = Effect.fn(
-    "UserDirectory.verifyOwnerRegistration",
-  )(function* ({ ceremonyId, origin, response }) {
-    const ceremony = yield* takeCeremony(ownerRegistrations, ceremonyId, origin);
+  const verifyRegistration = Effect.fn("UserDirectory.verifyRegistration")(function* (
+    store: ReturnType<typeof makeCeremonyStore<OwnerRegistrationCeremony>>,
+    input: {
+      readonly ceremonyId: string;
+      readonly origin: string;
+      readonly response: AuthPasskeyRegistrationResponse;
+    },
+  ) {
+    const { response } = input;
+    const ceremony = yield* takeCeremony(store, input.ceremonyId, input.origin);
     const verification = yield* Effect.tryPromise({
       try: () =>
         verifyRegistrationResponse({
@@ -270,8 +411,7 @@ const make = Effect.gen(function* () {
     }
     const { credential } = verification.registrationInfo;
     return {
-      userId: ceremony.userId,
-      displayName: ceremony.displayName,
+      ceremony,
       passkey: {
         credentialId: credential.id,
         publicKey: isoBase64URL.fromBuffer(credential.publicKey),
@@ -279,6 +419,17 @@ const make = Effect.gen(function* () {
         transports: credential.transports ?? [],
         rpId: ceremony.rpId,
       },
+    };
+  });
+
+  const verifyOwnerRegistration: UserDirectory["Service"]["verifyOwnerRegistration"] = Effect.fn(
+    "UserDirectory.verifyOwnerRegistration",
+  )(function* (input) {
+    const { ceremony, passkey } = yield* verifyRegistration(ownerRegistrations, input);
+    return {
+      userId: ceremony.userId,
+      displayName: ceremony.displayName,
+      passkey,
     } satisfies PendingOwner;
   });
 
@@ -414,6 +565,259 @@ const make = Effect.gen(function* () {
     return toAuthUser(user.value);
   });
 
+  const credentialKey = secretStore.getOrCreateRandom(CREDENTIAL_KEY_SECRET_NAME, 32).pipe(storage);
+
+  const requireAccount = (userId: UserId) =>
+    activeUser(userId).pipe(
+      Effect.flatMap(
+        Option.match({
+          onNone: () =>
+            Effect.fail(new AccountChangeRefusedError({ reason: "This account cannot sign in." })),
+          onSome: Effect.succeed,
+        }),
+      ),
+    );
+
+  const accountOf = Effect.fn("UserDirectory.accountOf")(function* (user: Users.UserRecord) {
+    const credentials = yield* users.getCredentials(user.userId).pipe(storage);
+    return {
+      user: toAuthUser(user),
+      loginName: user.loginName,
+      hasPassword: credentials.passwordHash !== null,
+      totpEnrolled: credentials.totpSecretCiphertext !== null,
+      passwordRequiresTotp: passwordRequiresTotp(user),
+    } satisfies AuthAccount;
+  });
+
+  const getAccount: UserDirectory["Service"]["getAccount"] = Effect.fn("UserDirectory.getAccount")(
+    function* (userId) {
+      return yield* accountOf(yield* requireAccount(userId));
+    },
+  );
+
+  const setPassword: UserDirectory["Service"]["setPassword"] = Effect.fn(
+    "UserDirectory.setPassword",
+  )(function* (userId, input) {
+    const user = yield* requireAccount(userId);
+    const credentials = yield* users.getCredentials(userId).pipe(storage);
+    if (passwordRequiresTotp(user) && credentials.totpSecretCiphertext === null) {
+      return yield* new AccountChangeRefusedError({
+        reason: "Set up an authenticator app first: this account needs a code with its password.",
+      });
+    }
+    if (
+      credentials.passwordHash !== null &&
+      !(yield* AccountCredentials.verifyPassword(
+        input.currentPassword ?? "",
+        credentials.passwordHash,
+      ))
+    ) {
+      return yield* new AccountChangeRefusedError({ reason: "Your current password is wrong." });
+    }
+    const passwordHash = yield* AccountCredentials.hashPassword(input.password).pipe(withCrypto);
+    const saved = yield* users
+      .setPassword({
+        userId,
+        loginName: normalizeLoginName(input.loginName),
+        passwordHash,
+        updatedAt: yield* DateTime.now,
+      })
+      .pipe(storage);
+    if (!saved) {
+      return yield* new LoginNameTakenError({});
+    }
+    return yield* accountOf(yield* requireAccount(userId));
+  });
+
+  const startTotpEnrollment: UserDirectory["Service"]["startTotpEnrollment"] = Effect.fn(
+    "UserDirectory.startTotpEnrollment",
+  )(function* (userId) {
+    const user = yield* requireAccount(userId);
+    const secret = yield* AccountCredentials.generateTotpSecret.pipe(withCrypto);
+    const now = yield* DateTime.now;
+    pendingTotp.set(userId, {
+      secret,
+      expiresAt: DateTime.add(now, { milliseconds: Duration.toMillis(TOTP_ENROLLMENT_TTL) }),
+    });
+    return AccountCredentials.totpEnrollment(secret, user.loginName ?? user.displayName);
+  });
+
+  const confirmTotpEnrollment: UserDirectory["Service"]["confirmTotpEnrollment"] = Effect.fn(
+    "UserDirectory.confirmTotpEnrollment",
+  )(function* (userId, code) {
+    const user = yield* requireAccount(userId);
+    const now = yield* DateTime.now;
+    const pending = pendingTotp.get(userId);
+    if (pending === undefined || !DateTime.isGreaterThan(pending.expiresAt, now)) {
+      pendingTotp.delete(userId);
+      return yield* new AccountChangeRefusedError({
+        reason: "This setup expired. Start again to get a new code.",
+      });
+    }
+    const step = yield* AccountCredentials.matchTotpStep(
+      pending.secret,
+      code,
+      DateTime.toEpochMillis(now),
+    ).pipe(withCrypto);
+    if (step === undefined) {
+      return yield* new AccountChangeRefusedError({
+        reason: "That code did not match. Check the time on your device and try again.",
+      });
+    }
+    const secretCiphertext = yield* credentialKey.pipe(
+      Effect.flatMap((key) => AccountCredentials.seal(key, pending.secret, userId)),
+      withCrypto,
+      storage,
+    );
+    yield* users.setTotp({ userId, secretCiphertext, step, enrolledAt: now }).pipe(storage);
+    pendingTotp.delete(userId);
+    return yield* accountOf(user);
+  });
+
+  // Unknown names still pay for one hash, so timing does not reveal which names exist.
+  const decoyPasswordHash = yield* Effect.cached(
+    AccountCredentials.hashPassword("decoy password").pipe(withCrypto),
+  );
+
+  const checkPassword: UserDirectory["Service"]["checkPassword"] = Effect.fn(
+    "UserDirectory.checkPassword",
+  )(function* (input) {
+    const found = yield* users.getByLoginName(normalizeLoginName(input.loginName)).pipe(storage);
+    const credentials = Option.isSome(found)
+      ? yield* users.getCredentials(found.value.userId).pipe(storage)
+      : undefined;
+    const hash = credentials?.passwordHash ?? (yield* decoyPasswordHash);
+    const passwordMatches = yield* AccountCredentials.verifyPassword(input.password, hash);
+    if (
+      Option.isNone(found) ||
+      credentials?.passwordHash == null ||
+      !passwordMatches ||
+      found.value.disabledAt !== null ||
+      found.value.removedAt !== null
+    ) {
+      return yield* new PasswordRejectedError({});
+    }
+    const user = found.value;
+    const totpSecretCiphertext = credentials.totpSecretCiphertext;
+    if (totpSecretCiphertext === null) {
+      // A rule change (a Role, later) can leave a password-only account that now needs TOTP.
+      if (passwordRequiresTotp(user)) return yield* new PasswordRejectedError({});
+      return { _tag: "verified", user: toAuthUser(user) } as const;
+    }
+    if (input.totpCode === undefined) {
+      return { _tag: "totp-required" } as const;
+    }
+    const secret = yield* credentialKey.pipe(
+      Effect.flatMap((key) => AccountCredentials.open(key, totpSecretCiphertext, user.userId)),
+      withCrypto,
+      storage,
+    );
+    const step = yield* AccountCredentials.matchTotpStep(
+      secret,
+      input.totpCode,
+      DateTime.toEpochMillis(yield* DateTime.now),
+    ).pipe(withCrypto);
+    if (
+      step === undefined ||
+      !(yield* users.recordTotpStep({ userId: user.userId, step }).pipe(storage))
+    ) {
+      return yield* new PasswordRejectedError({});
+    }
+    return { _tag: "verified", user: toAuthUser(user) } as const;
+  });
+
+  const hashResetToken = (token: string) =>
+    digest.digestHex(Digest.sha256, new TextEncoder().encode(token));
+
+  const issueOwnerResetLink: UserDirectory["Service"]["issueOwnerResetLink"] = Effect.fn(
+    "UserDirectory.issueOwnerResetLink",
+  )(function* () {
+    const owner = yield* users.getOwner().pipe(storage);
+    if (Option.isNone(owner)) {
+      return yield* new NoOwnerError({});
+    }
+    const token = yield* randomBase64Url(32);
+    const now = yield* DateTime.now;
+    const expiresAt = DateTime.toUtc(
+      DateTime.add(now, { milliseconds: Duration.toMillis(RESET_LINK_TTL) }),
+    );
+    yield* users
+      .createResetLink({
+        linkId: yield* random.uuidV4(),
+        userId: owner.value.userId,
+        tokenHash: yield* hashResetToken(token),
+        // Issued from the Hub's shell, not by a signed-in User.
+        createdBy: null,
+        createdAt: now,
+        expiresAt,
+      })
+      .pipe(storage);
+    return { token, expiresAt, user: toAuthUser(owner.value) };
+  });
+
+  const liveResetLinkUser = Effect.fn("UserDirectory.liveResetLinkUser")(function* (token: string) {
+    const userId = yield* users
+      .findResetLink({ tokenHash: yield* hashResetToken(token), now: yield* DateTime.now })
+      .pipe(storage);
+    return Option.isNone(userId) ? Option.none() : yield* activeUser(userId.value);
+  });
+
+  const getResetLinkStatus: UserDirectory["Service"]["getResetLinkStatus"] = Effect.fn(
+    "UserDirectory.getResetLinkStatus",
+  )(function* (token) {
+    const user = yield* liveResetLinkUser(token);
+    return Option.isSome(user)
+      ? ({ status: "valid", displayName: user.value.displayName } as const)
+      : ({ status: "invalid" } as const);
+  });
+
+  const startResetRegistration: UserDirectory["Service"]["startResetRegistration"] = Effect.fn(
+    "UserDirectory.startResetRegistration",
+  )(function* ({ token, origin }) {
+    const user = yield* liveResetLinkUser(token);
+    if (Option.isNone(user)) {
+      return yield* new ResetLinkRejectedError({});
+    }
+    const challenge = yield* randomBase64Url(32);
+    const rpId = new URL(origin).hostname;
+    const ceremonyId = yield* random.uuidV4();
+    const now = yield* DateTime.now;
+    const { userId, displayName } = user.value;
+    yield* resetRegistrations.put(
+      ceremonyId,
+      { challenge, origin, rpId, expiresAt: ceremonyExpiry(now), userId, displayName },
+      now,
+    );
+    return registrationCeremony({ ceremonyId, challenge, rpId, userId, displayName });
+  });
+
+  const verifyResetRegistration: UserDirectory["Service"]["verifyResetRegistration"] = Effect.fn(
+    "UserDirectory.verifyResetRegistration",
+  )(function* (input) {
+    const { ceremony, passkey } = yield* verifyRegistration(resetRegistrations, input);
+    return { userId: ceremony.userId, passkey } satisfies PendingPasskey;
+  });
+
+  const redeemResetLink: UserDirectory["Service"]["redeemResetLink"] = Effect.fn(
+    "UserDirectory.redeemResetLink",
+  )(function* ({ token, pending }) {
+    const now = yield* DateTime.now;
+    const userId = yield* users
+      .consumeResetLink({ tokenHash: yield* hashResetToken(token), now })
+      .pipe(storage);
+    if (Option.isNone(userId) || userId.value !== pending.userId) {
+      return yield* new ResetLinkRejectedError({});
+    }
+    const user = yield* activeUser(userId.value);
+    if (Option.isNone(user)) {
+      return yield* new ResetLinkRejectedError({});
+    }
+    yield* users
+      .addPasskey({ userId: userId.value, passkey: pending.passkey, createdAt: now })
+      .pipe(storage);
+    return toAuthUser(user.value);
+  });
+
   return UserDirectory.of({
     hasOwner: Effect.fn("UserDirectory.hasOwner")(function () {
       return users.hasOwner().pipe(storage);
@@ -424,6 +828,16 @@ const make = Effect.gen(function* () {
     startPasskeySignIn,
     finishPasskeySignIn,
     redeemRecoveryCode,
+    getAccount,
+    setPassword,
+    startTotpEnrollment,
+    confirmTotpEnrollment,
+    checkPassword,
+    issueOwnerResetLink,
+    getResetLinkStatus,
+    startResetRegistration,
+    verifyResetRegistration,
+    redeemResetLink,
   });
 });
 

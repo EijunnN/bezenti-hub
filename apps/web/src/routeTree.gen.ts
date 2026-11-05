@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as WelcomeRouteImport } from './routes/welcome'
 import { Route as SignInRouteImport } from './routes/sign-in'
+import { Route as ResetRouteImport } from './routes/reset'
 import { Route as PairRouteImport } from './routes/pair'
 import { Route as GuestRouteImport } from './routes/guest'
 import { Route as ConnectAgentRouteImport } from './routes/connect-agent'
@@ -60,6 +61,11 @@ const WelcomeRoute = WelcomeRouteImport.update({
 const SignInRoute = SignInRouteImport.update({
   id: '/sign-in',
   path: '/sign-in',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ResetRoute = ResetRouteImport.update({
+  id: '/reset',
+  path: '/reset',
   getParentRoute: () => rootRouteImport,
 } as any)
 const PairRoute = PairRouteImport.update({
@@ -274,6 +280,7 @@ export interface FileRoutesByFullPath {
   '/connect-agent': typeof ConnectAgentRoute
   '/guest': typeof GuestRoute
   '/pair': typeof PairRoute
+  '/reset': typeof ResetRoute
   '/sign-in': typeof SignInRoute
   '/welcome': typeof WelcomeRoute
   '/new': typeof ChatNewRoute
@@ -316,6 +323,7 @@ export interface FileRoutesByTo {
   '/connect-agent': typeof ConnectAgentRoute
   '/guest': typeof GuestRoute
   '/pair': typeof PairRoute
+  '/reset': typeof ResetRoute
   '/sign-in': typeof SignInRoute
   '/welcome': typeof WelcomeRoute
   '/new': typeof ChatNewRoute
@@ -361,6 +369,7 @@ export interface FileRoutesById {
   '/connect-agent': typeof ConnectAgentRoute
   '/guest': typeof GuestRoute
   '/pair': typeof PairRoute
+  '/reset': typeof ResetRoute
   '/sign-in': typeof SignInRoute
   '/welcome': typeof WelcomeRoute
   '/_chat/new': typeof ChatNewRoute
@@ -407,6 +416,7 @@ export interface FileRouteTypes {
     | '/connect-agent'
     | '/guest'
     | '/pair'
+    | '/reset'
     | '/sign-in'
     | '/welcome'
     | '/new'
@@ -449,6 +459,7 @@ export interface FileRouteTypes {
     | '/connect-agent'
     | '/guest'
     | '/pair'
+    | '/reset'
     | '/sign-in'
     | '/welcome'
     | '/new'
@@ -493,6 +504,7 @@ export interface FileRouteTypes {
     | '/connect-agent'
     | '/guest'
     | '/pair'
+    | '/reset'
     | '/sign-in'
     | '/welcome'
     | '/_chat/new'
@@ -538,6 +550,7 @@ export interface RootRouteChildren {
   ConnectAgentRoute: typeof ConnectAgentRoute
   GuestRoute: typeof GuestRoute
   PairRoute: typeof PairRoute
+  ResetRoute: typeof ResetRoute
   SignInRoute: typeof SignInRoute
   WelcomeRoute: typeof WelcomeRoute
   ProjectsProjectKeyRoute: typeof ProjectsProjectKeyRoute
@@ -558,6 +571,13 @@ declare module '@tanstack/react-router' {
       path: '/sign-in'
       fullPath: '/sign-in'
       preLoaderRoute: typeof SignInRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/reset': {
+      id: '/reset'
+      path: '/reset'
+      fullPath: '/reset'
+      preLoaderRoute: typeof ResetRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/pair': {
@@ -933,6 +953,7 @@ const rootRouteChildren: RootRouteChildren = {
   ConnectAgentRoute: ConnectAgentRoute,
   GuestRoute: GuestRoute,
   PairRoute: PairRoute,
+  ResetRoute: ResetRoute,
   SignInRoute: SignInRoute,
   WelcomeRoute: WelcomeRoute,
   ProjectsProjectKeyRoute: ProjectsProjectKeyRoute,

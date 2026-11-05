@@ -10,6 +10,7 @@ import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 
 import {
+  formatIssuedOwnerResetLink,
   formatIssuedPairingCredential,
   formatIssuedSession,
   formatPairingCredentialList,
@@ -68,16 +69,16 @@ const subjectFlag = Flag.String("subject").pipe(
   Flag.optional,
 );
 
-const baseUrlFlag = Flag.String("base-url").pipe(
-  Flag.withSchema(
-    Schema.URLFromString.pipe(
-      Schema.check(
-        Schema.makeFilter((url) => url.protocol === "http:" || url.protocol === "https:", {
-          expected: "an http:// or https:// URL",
-        }),
-      ),
-    ),
+const baseUrlFlagSchema = Schema.URLFromString.pipe(
+  Schema.check(
+    Schema.makeFilter((url) => url.protocol === "http:" || url.protocol === "https:", {
+      expected: "an http:// or https:// URL",
+    }),
   ),
+);
+
+const baseUrlFlag = Flag.String("base-url").pipe(
+  Flag.withSchema(baseUrlFlagSchema),
   Flag.withDescription("Optional public base URL used to print a ready `/pair#token=...` link."),
   Flag.optional,
 );
@@ -248,7 +249,39 @@ const sessionCommand = Command.make("session").pipe(
   Command.withSubcommands([sessionIssueCommand, sessionListCommand, sessionRevokeCommand]),
 );
 
+const ownerResetCommand = Command.make("owner-reset", {
+  ...authLocationFlags,
+  baseUrl: Flag.String("base-url").pipe(
+    Flag.withSchema(baseUrlFlagSchema),
+    Flag.withDescription(
+      "The Hub's public address, used to print a ready `/reset#token=...` link. Passkeys only work on that address.",
+    ),
+    Flag.optional,
+  ),
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription(
+    "Issue a single-use link, valid for one hour, that lets the Owner register a new passkey.",
+  ),
+  Command.withHandler((flags) =>
+    runWithEnvironmentAuth(
+      flags,
+      (environmentAuth) =>
+        Effect.gen(function* () {
+          const issued = yield* environmentAuth.issueOwnerResetLink();
+          yield* Console.log(
+            formatIssuedOwnerResetLink(issued, {
+              json: flags.json,
+              ...(Option.isSome(flags.baseUrl) ? { baseUrl: flags.baseUrl.value.href } : {}),
+            }),
+          );
+        }),
+      { quietLogs: flags.json },
+    ),
+  ),
+);
+
 export const authCommand = Command.make("auth").pipe(
   Command.withDescription("Manage the local auth control plane for headless deployments."),
-  Command.withSubcommands([pairingCommand, sessionCommand]),
+  Command.withSubcommands([pairingCommand, sessionCommand, ownerResetCommand]),
 );

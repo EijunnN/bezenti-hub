@@ -1,8 +1,14 @@
 import {
+  type AuthAccount,
   type AuthOwnerBootstrapResult,
   type AuthOwnerBootstrapStatus,
+  type AuthPasskeyRegistrationCeremony,
+  type AuthResetLinkStatus,
+  type AuthSetPasswordRequest,
+  type AuthTotpEnrollment,
   EnvironmentHttpCommonError,
   EnvironmentHttpConflictError,
+  EnvironmentHttpForbiddenError,
 } from "@t3tools/contracts";
 import { startAuthentication, startRegistration, WebAuthnError } from "@simplewebauthn/browser";
 import type * as Context from "effect/Context";
@@ -20,10 +26,11 @@ export class UserSignInError extends Schema.TaggedError<UserSignInError>()("User
 const isUserSignInError = Schema.is(UserSignInError);
 const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
 const isEnvironmentHttpConflictError = Schema.is(EnvironmentHttpConflictError);
+const isEnvironmentHttpForbiddenError = Schema.is(EnvironmentHttpForbiddenError);
 
 function toUserSignInError(cause: unknown, rejectedMessage: string): UserSignInError {
   if (isUserSignInError(cause)) return cause;
-  if (isEnvironmentHttpConflictError(cause)) {
+  if (isEnvironmentHttpConflictError(cause) || isEnvironmentHttpForbiddenError(cause)) {
     return new UserSignInError({ message: cause.message, cause });
   }
   if (isEnvironmentHttpCommonError(cause)) {
@@ -71,6 +78,17 @@ export async function createOwnerAccount(input: {
   readonly displayName: string;
 }): Promise<AuthOwnerBootstrapResult> {
   const ceremony = await request((client) => client.auth.ownerRegistration({ payload: input }));
+  const response = await registerPasskey(ceremony);
+  return request(
+    (client) =>
+      client.auth.ownerBootstrap({
+        payload: { credential: input.credential, ceremonyId: ceremony.ceremonyId, response },
+      }),
+    "This setup link expired or the passkey was not accepted. Restart the server for a new link.",
+  );
+}
+
+async function registerPasskey(ceremony: AuthPasskeyRegistrationCeremony) {
   const registration = await startRegistration({
     optionsJSON: {
       ...ceremony.options,
@@ -79,28 +97,68 @@ export async function createOwnerAccount(input: {
   }).catch((cause: unknown) => {
     throw toUserSignInError(cause, "");
   });
-  return request(
-    (client) =>
-      client.auth.ownerBootstrap({
-        payload: {
-          credential: input.credential,
-          ceremonyId: ceremony.ceremonyId,
-          response: {
-            id: registration.id,
-            rawId: registration.rawId,
-            type: "public-key",
-            response: {
-              clientDataJSON: registration.response.clientDataJSON,
-              attestationObject: registration.response.attestationObject,
-              ...(registration.response.transports
-                ? { transports: registration.response.transports }
-                : {}),
-            },
-          },
-        },
-      }),
-    "This setup link expired or the passkey was not accepted. Restart the server for a new link.",
+  return {
+    id: registration.id,
+    rawId: registration.rawId,
+    type: "public-key" as const,
+    response: {
+      clientDataJSON: registration.response.clientDataJSON,
+      attestationObject: registration.response.attestationObject,
+      ...(registration.response.transports ? { transports: registration.response.transports } : {}),
+    },
+  };
+}
+
+export async function fetchResetLinkStatus(token: string): Promise<AuthResetLinkStatus> {
+  return request((client) => client.auth.resetLinkStatus({ payload: { token } }));
+}
+
+/** Registers a new passkey from a reset link, which is then spent, and signs this browser in. */
+export async function resetPasskey(token: string): Promise<void> {
+  const rejected = "This reset link expired or was already used. Issue a new one from the Hub.";
+  const ceremony = await request(
+    (client) => client.auth.resetLinkRegistration({ payload: { token } }),
+    rejected,
   );
+  const response = await registerPasskey(ceremony);
+  await request(
+    (client) =>
+      client.auth.redeemResetLink({
+        payload: { token, ceremonyId: ceremony.ceremonyId, response },
+      }),
+    rejected,
+  );
+}
+
+/** "totp-required" when the password was right but the account also needs a code. */
+export async function signInWithPassword(input: {
+  readonly loginName: string;
+  readonly password: string;
+  readonly totpCode?: string;
+}): Promise<"signed-in" | "totp-required"> {
+  const result = await request(
+    (client) => client.auth.passwordSignIn({ payload: input }),
+    input.totpCode === undefined
+      ? "That sign-in name or password is not right."
+      : "That code is not right, or it was already used. Wait for the next one.",
+  );
+  return result.authenticated ? "signed-in" : "totp-required";
+}
+
+export function fetchAccount(): Promise<AuthAccount> {
+  return request((client) => client.auth.account({ headers: {} }));
+}
+
+export function setAccountPassword(payload: AuthSetPasswordRequest): Promise<AuthAccount> {
+  return request((client) => client.auth.setPassword({ headers: {}, payload }));
+}
+
+export function startTotpEnrollment(): Promise<AuthTotpEnrollment> {
+  return request((client) => client.auth.startTotpEnrollment({ headers: {} }));
+}
+
+export function confirmTotpEnrollment(code: string): Promise<AuthAccount> {
+  return request((client) => client.auth.confirmTotpEnrollment({ headers: {}, payload: { code } }));
 }
 
 export async function signInWithPasskey(): Promise<void> {

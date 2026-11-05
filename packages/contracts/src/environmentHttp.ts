@@ -38,6 +38,7 @@ import {
   ServerAuthSessionMethod,
 } from "./auth.ts";
 import {
+  AuthAccount,
   AuthOwnerBootstrapRequest,
   AuthOwnerBootstrapResult,
   AuthOwnerBootstrapStatus,
@@ -46,8 +47,16 @@ import {
   AuthPasskeyRegistrationCeremony,
   AuthPasskeySignInCeremony,
   AuthPasskeySignInRequest,
+  AuthPasswordSignInRequest,
+  AuthPasswordSignInResult,
   AuthRecoveryCodeSignInRequest,
+  AuthResetLinkRedeemRequest,
+  AuthResetLinkRequest,
+  AuthResetLinkStatus,
+  AuthSetPasswordRequest,
   AuthSignOutResult,
+  AuthTotpConfirmRequest,
+  AuthTotpEnrollment,
 } from "./userAccounts.ts";
 import {
   ExecutionEnvironmentDescriptor,
@@ -357,6 +366,11 @@ const EnvironmentOwnerBootstrapErrors = [
   ...EnvironmentUserSignInErrors,
   // The Installation already has an Owner.
   EnvironmentHttpConflictError,
+] as const;
+const EnvironmentAccountErrors = [
+  // The session has no User, or the account's rules refuse the change.
+  EnvironmentHttpForbiddenError,
+  EnvironmentInternalError,
 ] as const;
 const EnvironmentTokenExchangeErrors = [
   EnvironmentRequestInvalidError,
@@ -672,6 +686,65 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
     HttpApiEndpoint.post("signOut", "/api/auth/sign-out", {
       success: AuthSignOutResult,
       error: [EnvironmentInternalError],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("passwordSignIn", "/api/auth/password/sign-in", {
+      payload: AuthPasswordSignInRequest,
+      success: AuthPasswordSignInResult,
+      error: EnvironmentUserSignInErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("account", "/api/auth/account", {
+      headers: OptionalBearerHeaders,
+      success: AuthAccount,
+      error: EnvironmentAccountErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("setPassword", "/api/auth/account/password", {
+      headers: OptionalBearerHeaders,
+      payload: AuthSetPasswordRequest,
+      success: AuthAccount,
+      // The login name belongs to another User.
+      error: [...EnvironmentAccountErrors, EnvironmentHttpConflictError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("startTotpEnrollment", "/api/auth/account/totp/enrollment", {
+      headers: OptionalBearerHeaders,
+      success: AuthTotpEnrollment,
+      error: EnvironmentAccountErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("confirmTotpEnrollment", "/api/auth/account/totp", {
+      headers: OptionalBearerHeaders,
+      payload: AuthTotpConfirmRequest,
+      success: AuthAccount,
+      error: EnvironmentAccountErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("resetLinkStatus", "/api/auth/reset/status", {
+      payload: AuthResetLinkRequest,
+      success: AuthResetLinkStatus,
+      error: [EnvironmentInternalError],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("resetLinkRegistration", "/api/auth/reset/registration", {
+      payload: AuthResetLinkRequest,
+      success: AuthPasskeyRegistrationCeremony,
+      error: EnvironmentUserSignInErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("redeemResetLink", "/api/auth/reset", {
+      payload: AuthResetLinkRedeemRequest,
+      success: AuthBrowserSessionResult,
+      error: EnvironmentUserSignInErrors,
     }),
   ) {}
 

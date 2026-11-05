@@ -43,9 +43,33 @@ it. Once an Owner exists that link refuses Owner creation and the web app sends
 its visitor to sign in, though other clients can still exchange it to pair.
 A passkey is bound to the host name the browser used when it was registered
 (the WebAuthn relying party ID, taken from the request's `Origin`), so moving
-the Installation to another domain strands existing passkeys; recovery codes
-are the way back in. They are random enough that a plain SHA-256 is stored,
-and each is spent atomically on use.
+the Installation to another domain strands existing passkeys. Recovery codes
+and Owner reset links are the way back in. Both are random enough that a plain
+SHA-256 is stored, and each is spent atomically on use. A reset link comes from
+`t3 auth owner-reset`, which writes to the database directly, so it works with
+the server stopped. It lasts one hour, and spending it, storing the new passkey
+and issuing the session happen in one transaction.
+
+### Sign-in rules
+
+Which accounts may use a password without a second factor is one function,
+`passwordRequiresTotp` in UserDirectory, and today it is true only for the Owner.
+The spec gives Admins the same rule once Roles exist, so extend that function
+rather than checking `isOwner` at call sites. It applies twice: setting a
+password needs TOTP enrolled first, and password sign-in refuses an account the
+rule covers when it has no TOTP. That second check catches an account whose rule
+changed after it set a password. Any account with TOTP enrolled must give a code
+with its password. The first step answers `secondFactor: "totp"` without issuing
+a session, and the client sends the password again with the code. No half-signed
+state is kept between the two steps.
+
+Passwords are argon2id (19 MiB, two passes) via `hash-wasm`, which is
+WebAssembly. A native addon would need a build per platform staged into the
+desktop and CLI artifacts, and `node:crypto.argon2` needs Node 24.7, newer than
+the server's supported floor. TOTP secrets are sealed with AES-256-GCM under
+the `user-credential-key` server secret, with the User id as associated data.
+Each code's 30-second step is recorded, so a code works once. Password and TOTP
+attempts are not rate limited yet.
 
 ### Guest links are not sessions
 

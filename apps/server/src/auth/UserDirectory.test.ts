@@ -1,10 +1,12 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { EnvironmentHttpApi } from "@t3tools/contracts";
+import { EnvironmentHttpApi, UserId } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import { isoCBOR } from "@simplewebauthn/server/helpers";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -20,6 +22,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
+import * as SessionStore from "./SessionStore.ts";
 import * as AuthHttp from "./http.ts";
 
 class AuthTestApi extends HttpApi.make("environment").add(EnvironmentHttpApi.groups.auth) {}
@@ -76,7 +79,12 @@ const serveAuthHttp = Effect.gen(function* () {
           ?.split(";", 1)[0],
       };
     });
-  return { environmentAuth, request, sql: Context.get(services, SqlClient.SqlClient) };
+  return {
+    environmentAuth,
+    request,
+    sessions: Context.get(services, SessionStore.SessionStore),
+    sql: Context.get(services, SqlClient.SqlClient),
+  };
 });
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -372,5 +380,172 @@ it.effect("keeps a pending Owner registration while sign-in challenges flood in"
       ceremony,
     );
     expect(created.status).toBe(200);
+  }),
+);
+
+// An authenticator app, written from RFC 6238 independently of the server's code.
+const totpCode = (base32Secret: string, nowMillis: number) =>
+  Effect.promise(async () => {
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let bits = "";
+    for (const char of base32Secret) bits += alphabet.indexOf(char).toString(2).padStart(5, "0");
+    const keyBytes = Uint8Array.from(bits.match(/.{8}/g) ?? [], (byte) => Number.parseInt(byte, 2));
+    const key = await crypto.subtle.importKey(
+      "raw",
+      keyBytes,
+      { name: "HMAC", hash: "SHA-1" },
+      false,
+      ["sign"],
+    );
+    const counter = new Uint8Array(8);
+    new DataView(counter.buffer).setBigUint64(0, BigInt(Math.floor(nowMillis / 30_000)));
+    const tag = new DataView(await crypto.subtle.sign("HMAC", key, counter));
+    const offset = tag.getUint8(tag.byteLength - 1) & 0x0f;
+    return String((tag.getUint32(offset) & 0x7fff_ffff) % 1_000_000).padStart(6, "0");
+  });
+
+it.effect("lets a Member sign in with a password alone", () =>
+  Effect.gen(function* () {
+    const server = yield* serveAuthHttp;
+    yield* server.sql`
+      INSERT INTO users (user_id, display_name, is_owner, created_at)
+      VALUES ('member-1', 'Grace Hopper', 0, '2026-01-01T00:00:00.000Z')
+    `;
+    const memberSession = yield* server.sessions.issue({
+      method: "browser-session-cookie",
+      subject: EnvironmentAuth.USER_SIGN_IN_SUBJECT,
+      userId: UserId.make("member-1"),
+    });
+    const cookie = `${server.sessions.cookieName}=${memberSession.token}`;
+
+    const set = yield* server.request("/api/auth/account/password", {
+      body: { loginName: "Grace", password: "correct horse battery" },
+      cookie,
+    });
+    expect(set.body).toMatchObject({ loginName: "grace", hasPassword: true, totpEnrolled: false });
+
+    const wrong = yield* server.request("/api/auth/password/sign-in", {
+      body: { loginName: "grace", password: "wrong horse battery" },
+    });
+    expect(wrong.status).toBe(401);
+    const signedIn = yield* server.request("/api/auth/password/sign-in", {
+      body: { loginName: "GRACE", password: "correct horse battery" },
+    });
+    expect(signedIn.body).toMatchObject({ authenticated: true });
+    const session = yield* server.request("/api/auth/session", { cookie: signedIn.cookie ?? "" });
+    expect(session.body).toMatchObject({ authenticated: true, userId: "member-1" });
+
+    const changeWithoutCurrent = yield* server.request("/api/auth/account/password", {
+      body: { loginName: "grace", password: "another horse battery" },
+      cookie,
+    });
+    expect(changeWithoutCurrent.status).toBe(403);
+  }),
+);
+
+it.effect("requires the Owner's password to come with a TOTP code", () =>
+  Effect.gen(function* () {
+    const server = yield* serveAuthHttp;
+    const { created } = yield* bootstrapOwner(server, yield* makeAuthenticator());
+    const cookie = created.cookie ?? "";
+    const ownerId = (created.body.user as { id: string }).id;
+    const password = { loginName: "ada", password: "analytical engine" };
+
+    const refused = yield* server.request("/api/auth/account/password", { body: password, cookie });
+    expect(refused.status).toBe(403);
+
+    const enrollment = yield* server.request("/api/auth/account/totp/enrollment", {
+      body: {},
+      cookie,
+    });
+    const secret = enrollment.body.secret as string;
+    expect(enrollment.body.otpauthUri).toContain(`secret=${secret}`);
+    const now = yield* Clock.currentTimeMillis;
+    const wrongEnrollmentCode = yield* server.request("/api/auth/account/totp", {
+      body: { code: yield* totpCode(secret, now + 5 * 60_000) },
+      cookie,
+    });
+    expect(wrongEnrollmentCode.status).toBe(403);
+    const unenrolled = yield* server.request("/api/auth/account", { cookie });
+    expect(unenrolled.body).toMatchObject({ totpEnrolled: false, passwordRequiresTotp: true });
+    const confirmed = yield* server.request("/api/auth/account/totp", {
+      body: { code: yield* totpCode(secret, now) },
+      cookie,
+    });
+    expect(confirmed.body).toMatchObject({ totpEnrolled: true });
+
+    const set = yield* server.request("/api/auth/account/password", { body: password, cookie });
+    expect(set.body).toMatchObject({ hasPassword: true, totpEnrolled: true });
+
+    const firstStep = yield* server.request("/api/auth/password/sign-in", { body: password });
+    expect(firstStep.body).toEqual({ authenticated: false, secondFactor: "totp" });
+    expect(firstStep.cookie).toBeUndefined();
+
+    yield* TestClock.adjust("1 minute");
+    const later = yield* Clock.currentTimeMillis;
+    const wrongCode = yield* server.request("/api/auth/password/sign-in", {
+      body: { ...password, totpCode: yield* totpCode(secret, later + 10 * 60_000) },
+    });
+    expect(wrongCode.status).toBe(401);
+    const code = yield* totpCode(secret, later);
+    const signedIn = yield* server.request("/api/auth/password/sign-in", {
+      body: { ...password, totpCode: code },
+    });
+    const session = yield* server.request("/api/auth/session", { cookie: signedIn.cookie ?? "" });
+    expect(session.body).toMatchObject({ authenticated: true, userId: ownerId });
+
+    const replayed = yield* server.request("/api/auth/password/sign-in", {
+      body: { ...password, totpCode: code },
+    });
+    expect(replayed.status).toBe(401);
+  }),
+);
+
+it.effect("lets the Owner register a new passkey once from a reset link that expires", () =>
+  Effect.gen(function* () {
+    const server = yield* serveAuthHttp;
+    const { created } = yield* bootstrapOwner(server, yield* makeAuthenticator());
+    const ownerId = (created.body.user as { id: string }).id;
+    // What `t3 auth owner-reset` calls.
+    const { token } = yield* server.environmentAuth.issueOwnerResetLink();
+
+    const status = yield* server.request("/api/auth/reset/status", { body: { token } });
+    expect(status.body).toEqual({ status: "valid", displayName: "Ada Lovelace" });
+    const newAuthenticator = yield* makeAuthenticator();
+    const ceremony = yield* server.request("/api/auth/reset/registration", { body: { token } });
+    const response = yield* Effect.promise(() =>
+      newAuthenticator.create(ceremony.body.options as CreationOptions),
+    );
+    const redeemed = yield* server.request("/api/auth/reset", {
+      body: { token, ceremonyId: ceremony.body.ceremonyId, response },
+    });
+    const session = yield* server.request("/api/auth/session", { cookie: redeemed.cookie ?? "" });
+    expect(session.body).toMatchObject({ authenticated: true, userId: ownerId });
+
+    const challenge = yield* server.request("/api/auth/passkey/challenge", { body: {} });
+    const assertion = yield* Effect.promise(() =>
+      newAuthenticator.get(challenge.body.options as RequestOptions),
+    );
+    const signedIn = yield* server.request("/api/auth/passkey/sign-in", {
+      body: { ceremonyId: challenge.body.ceremonyId, response: assertion },
+    });
+    expect(signedIn.status).toBe(200);
+
+    const spent = yield* server.request("/api/auth/reset/status", { body: { token } });
+    expect(spent.body).toEqual({ status: "invalid" });
+    const reused = yield* server.request("/api/auth/reset/registration", { body: { token } });
+    expect(reused.status).toBe(401);
+
+    const expiring = yield* server.environmentAuth.issueOwnerResetLink();
+    yield* TestClock.adjust("59 minutes");
+    const fresh = yield* server.request("/api/auth/reset/status", {
+      body: { token: expiring.token },
+    });
+    expect(fresh.body).toMatchObject({ status: "valid" });
+    yield* TestClock.adjust("2 minutes");
+    const expired = yield* server.request("/api/auth/reset/registration", {
+      body: { token: expiring.token },
+    });
+    expect(expired.status).toBe(401);
   }),
 );

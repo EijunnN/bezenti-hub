@@ -209,6 +209,22 @@ with an account**, or go to `/sign-in`. A passkey works only on the address you
 registered it on, so create the account from the address you plan to keep
 using. Sign out from **Settings → Access**.
 
+For devices without passkeys, add a password under **Settings → Access → Your
+account**. You choose a sign-in name there too. The Owner must first set up an
+authenticator app (1Password, Google Authenticator and similar) in the same
+section, and then signs in with the password plus the app's six-digit code.
+
+If you lose every passkey and recovery code, run this in the server's shell:
+
+```bash
+t3 auth owner-reset --base-url https://hub.example.com
+```
+
+It prints a link that lets you register a new passkey. The link works once and
+expires after an hour. Open it on the address you sign in on, since a passkey
+works only there. Anyone holding the link can take over the Owner account, so
+don't share it.
+
 For provider-specific setup and accounts, see [Codex](./providers-codex.md),
 [Claude](./providers-claude.md), [OpenCode](./providers-opencode.md),
 [Antigravity](./providers-antigravity.md), [Kiro](./providers-kiro.md),

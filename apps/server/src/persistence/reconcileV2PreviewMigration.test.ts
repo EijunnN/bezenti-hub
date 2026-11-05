@@ -61,6 +61,7 @@ describe("V2 preview upgrade", () => {
         [79, "DelegatedRecoveryIndexes"],
         [80, "Users"],
         [81, "AuthSessionUserId"],
+        [82, "UserPasswordsTotpAndResetLinks"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -165,6 +166,7 @@ describe("V2 preview upgrade", () => {
         [79, "DelegatedRecoveryIndexes"],
         [80, "Users"],
         [81, "AuthSessionUserId"],
+        [82, "UserPasswordsTotpAndResetLinks"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

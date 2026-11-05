@@ -25,6 +25,9 @@ import {
   type AuthPasskeyRegistrationCeremony,
   type AuthPasskeySignInCeremony,
   type AuthPasskeySignInRequest,
+  type AuthPasswordSignInRequest,
+  type AuthResetLinkRedeemRequest,
+  type AuthSecondFactorRequired,
   type AuthUser,
   DpopFailureReason,
   type UserId,
@@ -654,6 +657,33 @@ export class EnvironmentAuth extends Context.Service<
       UserBrowserSession,
       ServerAuthInvalidCredentialError | ServerAuthInternalError
     >;
+    /** Signs in, or answers that the account also needs a TOTP code with the password. */
+    readonly signInWithPassword: (
+      request: HttpServerRequest.HttpServerRequest,
+      input: AuthPasswordSignInRequest,
+      requestMetadata: AuthClientMetadata,
+    ) => Effect.Effect<
+      UserBrowserSession | { readonly response: AuthSecondFactorRequired },
+      ServerAuthInvalidCredentialError | ServerAuthInternalError
+    >;
+    readonly beginResetLinkRegistration: (
+      request: HttpServerRequest.HttpServerRequest,
+      token: string,
+    ) => Effect.Effect<
+      AuthPasskeyRegistrationCeremony,
+      ServerAuthInvalidOriginError | ServerAuthInvalidCredentialError | ServerAuthInternalError
+    >;
+    /** Registers the new passkey, spends the reset link and signs this browser in. */
+    readonly redeemResetLink: (
+      request: HttpServerRequest.HttpServerRequest,
+      input: AuthResetLinkRedeemRequest,
+      requestMetadata: AuthClientMetadata,
+    ) => Effect.Effect<
+      UserBrowserSession,
+      ServerAuthInvalidOriginError | ServerAuthInvalidCredentialError | ServerAuthInternalError
+    >;
+    /** For the Hub's shell (`t3 auth owner-reset`), when the Owner has lost every passkey. */
+    readonly issueOwnerResetLink: UserDirectory.UserDirectory["Service"]["issueOwnerResetLink"];
     /** Revokes the request's browser session; false when it carried none it may end. */
     readonly signOut: (
       request: HttpServerRequest.HttpServerRequest,
@@ -1679,6 +1709,61 @@ export const make = Effect.gen(function* () {
     return yield* issueUserBrowserSession(request, user, requestMetadata);
   });
 
+  const signInWithPassword: EnvironmentAuth["Service"]["signInWithPassword"] = Effect.fn(
+    "EnvironmentAuth.signInWithPassword",
+  )(function* (request, input, requestMetadata) {
+    const checked = yield* userDirectory.checkPassword(input).pipe(
+      Effect.catchTags({
+        PasswordRejectedError: (cause) =>
+          Effect.fail(new ServerAuthInvalidCredentialError({ diagnostic: cause.message })),
+        UserDirectoryStorageError: (cause) => Effect.fail(userDirectoryFailure(cause)),
+      }),
+    );
+    if (checked._tag === "totp-required") {
+      return { response: { authenticated: false, secondFactor: "totp" } } as const;
+    }
+    return yield* issueUserBrowserSession(request, checked.user, requestMetadata);
+  });
+
+  const resetLinkFailures = {
+    ResetLinkRejectedError: (cause: UserDirectory.ResetLinkRejectedError) =>
+      Effect.fail(new ServerAuthInvalidCredentialError({ diagnostic: cause.message })),
+    UserDirectoryStorageError: (cause: UserDirectory.UserDirectoryStorageError) =>
+      Effect.fail(userDirectoryFailure(cause)),
+  };
+
+  const beginResetLinkRegistration: EnvironmentAuth["Service"]["beginResetLinkRegistration"] =
+    Effect.fn("EnvironmentAuth.beginResetLinkRegistration")(function* (request, token) {
+      const origin = yield* resolvePasskeyOrigin(request);
+      return yield* userDirectory
+        .startResetRegistration({ token, origin })
+        .pipe(Effect.catchTags(resetLinkFailures));
+    });
+
+  const redeemResetLink: EnvironmentAuth["Service"]["redeemResetLink"] = Effect.fn(
+    "EnvironmentAuth.redeemResetLink",
+  )(function* (request, input, requestMetadata) {
+    const origin = yield* resolvePasskeyOrigin(request);
+    const pending = yield* userDirectory
+      .verifyResetRegistration({ ceremonyId: input.ceremonyId, origin, response: input.response })
+      .pipe(Effect.mapError(passkeyRejected));
+    // Spending the link, storing the passkey and issuing the session succeed or fail together.
+    return yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const user = yield* userDirectory
+            .redeemResetLink({ token: input.token, pending })
+            .pipe(Effect.catchTags(resetLinkFailures));
+          return yield* issueUserBrowserSession(request, user, requestMetadata);
+        }),
+      )
+      .pipe(
+        Effect.catchTags({
+          SqlError: (cause) => Effect.fail(new ServerAuthUserDirectoryError({ cause })),
+        }),
+      );
+  });
+
   const signOut: EnvironmentAuth["Service"]["signOut"] = (request) =>
     authenticateBrowserSession(request).pipe(
       Effect.flatMap((session) =>
@@ -1730,6 +1815,10 @@ export const make = Effect.gen(function* () {
     beginPasskeySignIn,
     completePasskeySignIn,
     signInWithRecoveryCode,
+    signInWithPassword,
+    beginResetLinkRegistration,
+    redeemResetLink,
+    issueOwnerResetLink: userDirectory.issueOwnerResetLink,
     signOut,
   });
 });

@@ -1,4 +1,9 @@
-import type { AuthClientMetadata, AuthClientSession, AuthPairingLink } from "@t3tools/contracts";
+import type {
+  AuthClientMetadata,
+  AuthClientSession,
+  AuthPairingLink,
+  AuthUser,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
 import type { IssuedBearerSession, IssuedPairingLink } from "./auth/EnvironmentAuth.ts";
@@ -62,6 +67,38 @@ export function formatIssuedPairingCredential(
       `Token: ${credential.credential}`,
       ...(pairUrl ? [`Pair URL: ${pairUrl}`] : []),
       `Expires at: ${toIsoString(credential.expiresAt)}`,
+    ].join(newline) + newline
+  );
+}
+
+export function formatIssuedOwnerResetLink(
+  issued: { readonly token: string; readonly expiresAt: DateTime.Utc; readonly user: AuthUser },
+  options?: { readonly json?: boolean; readonly baseUrl?: string },
+): string {
+  const fragment = `#${new URLSearchParams([["token", issued.token]])}`;
+  const resetUrl =
+    options?.baseUrl != null && options.baseUrl.length > 0
+      ? new URL(`/reset${fragment}`, options.baseUrl).toString()
+      : undefined;
+  if (options?.json) {
+    return `${JSON.stringify(
+      {
+        token: issued.token,
+        expiresAt: toIsoString(issued.expiresAt),
+        ...(resetUrl ? { resetUrl } : {}),
+      },
+      null,
+      2,
+    )}${newline}`;
+  }
+  return (
+    [
+      `Issued a single-use reset link for ${issued.user.displayName}.`,
+      resetUrl
+        ? `Reset URL: ${resetUrl}`
+        : `Open /reset${fragment} on the Hub's own address (or pass --base-url).`,
+      `Expires at: ${toIsoString(issued.expiresAt)}`,
+      "It lets the Owner register a new passkey. Anyone holding it can, so share it with nobody.",
     ].join(newline) + newline
   );
 }
