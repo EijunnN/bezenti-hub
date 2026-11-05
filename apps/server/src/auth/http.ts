@@ -376,6 +376,8 @@ export const layer = HttpApiBuilder.group(
               Effect.catchTags({
                 ServerAuthInvalidCredentialError:
                   userSignInFailures.ServerAuthInvalidCredentialError,
+                SecondFactorMissingError: (error) =>
+                  Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
                 SignInThrottledError: failThrottled,
               }),
               Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, failUserSignInInternal),

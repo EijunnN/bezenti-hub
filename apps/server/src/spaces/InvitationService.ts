@@ -34,6 +34,7 @@ import type { HttpServerRequest } from "effect/http";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
 
+import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import { makeSignInThrottle } from "../auth/signInThrottle.ts";
 import * as UserDirectory from "../auth/UserDirectory.ts";
@@ -193,6 +194,25 @@ const toSummary = (row: InvitationRow, nowIso: string): InvitationSummary => {
   };
 };
 
+const DENIED_REASONS: Record<AccessPolicy.DenyReason, string> = {
+  "owner-only": "Only the Owner invites people to this Organization.",
+  "not-a-member": "Only the Owner invites people to this Organization.",
+  "role-not-allowed": "Only the Owner invites people to this Organization.",
+  "not-your-personal-space": "Nothing is shared from a Personal space.",
+  "missing-installation-permission": "Only the Owner invites people to this Organization.",
+  "space-archived": "This Organization is archived.",
+  "space-frozen": "This Space is frozen.",
+  "wrong-resource": "Only Organizations take Invitations; nothing is shared from a Personal space.",
+};
+
+const deniedReason = (reason: string) =>
+  Object.hasOwn(DENIED_REASONS, reason)
+    ? DENIED_REASONS[reason as AccessPolicy.DenyReason]
+    : DENIED_REASONS["owner-only"];
+
+// Not found and not allowed answer alike, so a revoke never confirms an Invitation exists.
+const NOT_YOURS_TO_REVOKE = "You can't revoke that Invitation.";
+
 const ADMIN_NEEDS_MORE =
   "An Admin signs in with a passkey, or with a password plus an authenticator app.";
 
@@ -274,16 +294,7 @@ const make = Effect.gen(function* () {
     effect.pipe(
       Effect.catchTags({
         SpaceAccessDeniedError: (error) =>
-          Effect.fail(
-            new InvitationRefusedError({
-              reason:
-                error.reason === "space-archived"
-                  ? "This Organization is archived."
-                  : error.reason === "wrong-resource"
-                    ? "Only Organizations take Invitations; nothing is shared from a Personal space."
-                    : "Only the Owner invites people to this Organization.",
-            }),
-          ),
+          Effect.fail(new InvitationRefusedError({ reason: deniedReason(error.reason) })),
         SpaceNotFoundError: () =>
           Effect.fail(new InvitationRefusedError({ reason: "That Organization does not exist." })),
       }),
@@ -329,9 +340,16 @@ const make = Effect.gen(function* () {
     function* (actor, invitationId) {
       const found = yield* findById(invitationId).pipe(storage);
       if (Option.isNone(found)) {
-        return yield* new InvitationRefusedError({ reason: "That Invitation does not exist." });
+        return yield* new InvitationRefusedError({ reason: NOT_YOURS_TO_REVOKE });
       }
-      yield* spaces.authorize(actor, "invitation.manage", found.value.spaceId).pipe(refuseDenied);
+      yield* spaces.authorize(actor, "invitation.manage", found.value.spaceId).pipe(
+        Effect.catchTags({
+          SpaceAccessDeniedError: () =>
+            Effect.fail(new InvitationRefusedError({ reason: NOT_YOURS_TO_REVOKE })),
+          SpaceNotFoundError: () =>
+            Effect.fail(new InvitationRefusedError({ reason: NOT_YOURS_TO_REVOKE })),
+        }),
+      );
       const now = yield* nowIso;
       const revoked = yield* sql<{ readonly invitationId: string }>`
         UPDATE space_invitations SET revoked_at = ${now}
@@ -353,39 +371,75 @@ const make = Effect.gen(function* () {
   );
 
   const nowMillis = DateTime.now.pipe(Effect.map(DateTime.toEpochMillis));
-  const throttleKeys = (clientIp: string | undefined) => [`invitation-ip:${clientIp ?? "unknown"}`];
+  // A link's failures count against that link, and against the client when its address is known.
+  // There is no shared bucket for unknown addresses: behind a proxy one prober would lock out
+  // every invitee.
+  const ipKeys = (clientIp: string | undefined) =>
+    clientIp === undefined ? [] : [`invitation-ip:${clientIp}`];
+  const linkKeys = (tokenHash: string, clientIp: string | undefined) => [
+    `invitation:${tokenHash}`,
+    ...ipKeys(clientIp),
+  ];
   const requireNotThrottled = Effect.fn("InvitationService.requireNotThrottled")(function* (
-    clientIp: string | undefined,
+    keys: ReadonlyArray<string>,
   ) {
     const now = yield* nowMillis;
-    const lockedUntil = throttle.lockedUntil(throttleKeys(clientIp), now);
+    const lockedUntil = throttle.lockedUntil(keys, now);
     if (lockedUntil !== undefined) {
       return yield* new UserDirectory.SignInThrottledError({
         retryAfterSeconds: Math.ceil((lockedUntil - now) / 1000),
       });
     }
   });
-  const recordFailure = (clientIp: string | undefined) =>
-    nowMillis.pipe(Effect.map((now) => throttle.recordFailure(throttleKeys(clientIp), now)));
+  const recordFailure = (keys: ReadonlyArray<string>) =>
+    nowMillis.pipe(Effect.map((now) => throttle.recordFailure(keys, now)));
+  const tokenExists = SqlSchema.findOneOption({
+    Request: Schema.String,
+    Result: Schema.Struct({ invitationId: InvitationId }),
+    execute: (tokenHash) => sql`
+      SELECT invitation_id AS "invitationId" FROM space_invitations WHERE token_hash = ${tokenHash}
+    `,
+  });
 
-  /** The live Invitation behind a token; a miss counts toward the client's back-off. */
+  /**
+   * The live Invitation behind a token. An unknown token counts against the client; one that
+   * expired, was revoked or used counts against itself, except when only previewed.
+   */
   const requireLive = Effect.fn("InvitationService.requireLive")(function* (
     token: string,
     clientIp: string | undefined,
+    options: { readonly countDeadLink: boolean } = { countDeadLink: true },
   ) {
-    yield* requireNotThrottled(clientIp);
     const tokenHash = yield* hashToken(token);
+    const keys = linkKeys(tokenHash, clientIp);
+    yield* requireNotThrottled(keys);
     const live = yield* findLive({ tokenHash, now: yield* nowIso }).pipe(storage);
     if (Option.isNone(live)) {
-      yield* recordFailure(clientIp);
+      const known = Option.isSome(yield* tokenExists(tokenHash).pipe(storage));
+      if (!known) yield* recordFailure(ipKeys(clientIp));
+      else if (options.countDeadLink) yield* recordFailure(keys);
       return yield* new InvitationInvalidError({});
     }
-    return { tokenHash, invitation: live.value };
+    return { tokenHash, keys, invitation: live.value };
   });
+
+  /** A refusal after the link checked out (a wrong code, a taken name) counts against it. */
+  const countRefusals =
+    (keys: ReadonlyArray<string>) =>
+    <A, E extends { readonly _tag: string }, R>(effect: Effect.Effect<A, E, R>) =>
+      effect.pipe(
+        Effect.tapError((error) =>
+          error._tag === "InvitationRefusedError" ||
+          error._tag === "InvitationConflictError" ||
+          error._tag === "InvitationInvalidError"
+            ? recordFailure(keys)
+            : Effect.void,
+        ),
+      );
 
   const preview: InvitationService["Service"]["preview"] = Effect.fn("InvitationService.preview")(
     function* (token, clientIp) {
-      return yield* requireLive(token, clientIp).pipe(
+      return yield* requireLive(token, clientIp, { countDeadLink: false }).pipe(
         Effect.map(({ invitation }): InvitationPreview => ({
           status: "valid",
           organizationName: invitation.organizationName,
@@ -421,122 +475,139 @@ const make = Effect.gen(function* () {
       .pipe(storage);
   });
 
+  type LiveLink = Effect.Success<ReturnType<typeof requireLive>>;
+
+  const acceptLive = Effect.fnUntraced(function* (
+    request: HttpServerRequest.HttpServerRequest,
+    input: AcceptInvitationRequest,
+    requestMetadata: AuthClientMetadata,
+    { tokenHash, invitation, keys }: LiveLink,
+  ) {
+    let pending: UserDirectory.PendingInvitee;
+    if (input.method === "passkey") {
+      const origin = yield* environmentAuth.passkeyOrigin(request);
+      pending = yield* users
+        .verifyInviteeRegistration({
+          ceremonyId: input.ceremonyId,
+          origin,
+          response: input.response,
+        })
+        .pipe(Effect.mapError((error) => new InvitationRefusedError({ reason: error.message })));
+      if (pending.tokenHash !== tokenHash) return yield* new InvitationInvalidError({});
+    } else {
+      if (invitation.role === "admin" && input.totp === undefined) {
+        return yield* new InvitationRefusedError({ reason: ADMIN_NEEDS_MORE });
+      }
+      pending = yield* users
+        .prepareInviteePassword({
+          tokenHash,
+          displayName: input.displayName,
+          loginName: input.loginName,
+          password: input.password,
+          totp: input.totp,
+        })
+        .pipe(
+          Effect.catchTags({
+            AccountChangeRefusedError: (error) =>
+              Effect.fail(new InvitationRefusedError({ reason: error.reason })),
+            LoginNameTakenError: (error) =>
+              Effect.fail(new InvitationConflictError({ reason: error.message })),
+            UserDirectoryStorageError: (error) => Effect.fail(storageError(error)),
+          }),
+        );
+    }
+    const userFailures = {
+      LoginNameTakenError: (error: UserDirectory.LoginNameTakenError) =>
+        Effect.fail(new InvitationConflictError({ reason: error.message })),
+      UserDirectoryStorageError: (error: UserDirectory.UserDirectoryStorageError) =>
+        Effect.fail(storageError(error)),
+    };
+    const { spaceId, session } = yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const user = yield* users.createInvitedUser(pending).pipe(Effect.catchTags(userFailures));
+          const spent = yield* spend({ tokenHash, now: yield* nowIso, userId: user.id }).pipe(
+            storage,
+          );
+          // Another browser accepted it first, or it was revoked or expired meanwhile.
+          if (Option.isNone(spent)) return yield* new InvitationInvalidError({});
+          yield* spaces
+            .addMembership({
+              spaceId: spent.value.spaceId,
+              userId: user.id,
+              role: spent.value.role,
+            })
+            .pipe(storage);
+          const session = yield* environmentAuth.startUserBrowserSession(
+            request,
+            user,
+            requestMetadata,
+          );
+          return { spaceId: spent.value.spaceId, session };
+        }),
+      )
+      .pipe(Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }));
+    throttle.reset(keys);
+    return {
+      result: { session: session.response, userId: pending.userId, spaceId },
+      sessionToken: session.sessionToken,
+    };
+  });
+
   const accept: InvitationService["Service"]["accept"] = Effect.fn("InvitationService.accept")(
     function* (request, input, requestMetadata) {
-      const clientIp = requestMetadata.ipAddress;
-      const { tokenHash, invitation } = yield* requireLive(input.token, clientIp);
-      let pending: UserDirectory.PendingInvitee;
-      if (input.method === "passkey") {
-        const origin = yield* environmentAuth.passkeyOrigin(request);
-        pending = yield* users
-          .verifyInviteeRegistration({
-            ceremonyId: input.ceremonyId,
-            origin,
-            response: input.response,
-          })
-          .pipe(Effect.mapError((error) => new InvitationRefusedError({ reason: error.message })));
-        if (pending.tokenHash !== tokenHash) return yield* new InvitationInvalidError({});
-      } else {
-        if (invitation.role === "admin" && input.totp === undefined) {
-          return yield* new InvitationRefusedError({ reason: ADMIN_NEEDS_MORE });
-        }
-        pending = yield* users
-          .prepareInviteePassword({
-            tokenHash,
-            displayName: input.displayName,
-            loginName: input.loginName,
-            password: input.password,
-            totp: input.totp,
-          })
-          .pipe(
-            Effect.catchTags({
-              AccountChangeRefusedError: (error) =>
-                Effect.fail(new InvitationRefusedError({ reason: error.reason })),
-              LoginNameTakenError: (error) =>
-                Effect.fail(new InvitationConflictError({ reason: error.message })),
-              UserDirectoryStorageError: (error) => Effect.fail(storageError(error)),
-            }),
-          );
-      }
-      const userFailures = {
-        LoginNameTakenError: (error: UserDirectory.LoginNameTakenError) =>
-          Effect.fail(new InvitationConflictError({ reason: error.message })),
-        UserDirectoryStorageError: (error: UserDirectory.UserDirectoryStorageError) =>
-          Effect.fail(storageError(error)),
-      };
-      const { spaceId, session } = yield* sql
-        .withTransaction(
-          Effect.gen(function* () {
-            const user = yield* users
-              .createInvitedUser(pending)
-              .pipe(Effect.catchTags(userFailures));
-            const spent = yield* spend({ tokenHash, now: yield* nowIso, userId: user.id }).pipe(
-              storage,
-            );
-            // Another browser accepted it first, or it was revoked or expired meanwhile.
-            if (Option.isNone(spent)) return yield* new InvitationInvalidError({});
-            yield* spaces
-              .addMembership({
-                spaceId: spent.value.spaceId,
-                userId: user.id,
-                role: spent.value.role,
-              })
-              .pipe(storage);
-            const session = yield* environmentAuth.startUserBrowserSession(
-              request,
-              user,
-              requestMetadata,
-            );
-            return { spaceId: spent.value.spaceId, session };
-          }),
-        )
-        .pipe(Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }));
-      throttle.reset(throttleKeys(clientIp));
-      return {
-        result: { session: session.response, userId: pending.userId, spaceId },
-        sessionToken: session.sessionToken,
-      };
+      const live = yield* requireLive(input.token, requestMetadata.ipAddress);
+      return yield* acceptLive(request, input, requestMetadata, live).pipe(
+        countRefusals(live.keys),
+      );
     },
   );
 
+  const joinLive = Effect.fnUntraced(function* (
+    userId: UserId,
+    { tokenHash, invitation, keys }: LiveLink,
+  ) {
+    const principal = yield* spaces.principalOf(userId).pipe(storage);
+    if (principal.isOwner) {
+      return yield* new InvitationConflictError({
+        reason: "You're the Owner, who already sees every Organization.",
+      });
+    }
+    if (principal.roles.has(invitation.spaceId)) {
+      return yield* new InvitationConflictError({
+        reason: `You're already in ${invitation.organizationName}.`,
+      });
+    }
+    if (invitation.role === "admin" && !(yield* users.hasStrongSignIn(userId).pipe(storage))) {
+      return yield* new InvitationRefusedError({
+        reason: `${ADMIN_NEEDS_MORE} Add one in Settings, then open this link again.`,
+      });
+    }
+    const spaceId = yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const spent = yield* spend({ tokenHash, now: yield* nowIso, userId }).pipe(storage);
+          if (Option.isNone(spent)) return yield* new InvitationInvalidError({});
+          const added = yield* spaces
+            .addMembership({ spaceId: spent.value.spaceId, userId, role: spent.value.role })
+            .pipe(storage);
+          if (!added) {
+            return yield* new InvitationConflictError({
+              reason: `You're already in ${invitation.organizationName}.`,
+            });
+          }
+          return spent.value.spaceId;
+        }),
+      )
+      .pipe(Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }));
+    throttle.reset(keys);
+    return { userId, spaceId };
+  });
+
   const join: InvitationService["Service"]["join"] = Effect.fn("InvitationService.join")(
     function* (userId, token, clientIp) {
-      const { tokenHash, invitation } = yield* requireLive(token, clientIp);
-      const principal = yield* spaces.principalOf(userId).pipe(storage);
-      if (principal.isOwner) {
-        return yield* new InvitationConflictError({
-          reason: "You're the Owner, who already sees every Organization.",
-        });
-      }
-      if (principal.roles.has(invitation.spaceId)) {
-        return yield* new InvitationConflictError({
-          reason: `You're already in ${invitation.organizationName}.`,
-        });
-      }
-      if (invitation.role === "admin" && !(yield* users.hasStrongSignIn(userId).pipe(storage))) {
-        return yield* new InvitationRefusedError({
-          reason: `${ADMIN_NEEDS_MORE} Add one in Settings, then open this link again.`,
-        });
-      }
-      const spaceId = yield* sql
-        .withTransaction(
-          Effect.gen(function* () {
-            const spent = yield* spend({ tokenHash, now: yield* nowIso, userId }).pipe(storage);
-            if (Option.isNone(spent)) return yield* new InvitationInvalidError({});
-            const added = yield* spaces
-              .addMembership({ spaceId: spent.value.spaceId, userId, role: spent.value.role })
-              .pipe(storage);
-            if (!added) {
-              return yield* new InvitationConflictError({
-                reason: `You're already in ${invitation.organizationName}.`,
-              });
-            }
-            return spent.value.spaceId;
-          }),
-        )
-        .pipe(Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }));
-      throttle.reset(throttleKeys(clientIp));
-      return { userId, spaceId };
+      const live = yield* requireLive(token, clientIp);
+      return yield* joinLive(userId, live).pipe(countRefusals(live.keys));
     },
   );
 

@@ -1,21 +1,19 @@
 import {
   createInvitation,
+  INVITATION_STATUS_LABELS,
   invitationLink,
   listInvitations,
   revokeInvitation,
+  SPACE_ROLE_LABELS,
 } from "@t3tools/client-runtime/spaces/invitations";
-import type {
-  InvitationStatus,
-  InvitationSummary,
-  SpaceRole,
-  SpaceSummary,
-} from "@t3tools/contracts";
+import type { InvitationSummary, SpaceRole, SpaceSummary } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import { useEffect, useId, useState } from "react";
 
 import { PrimaryEnvironmentHttpClient } from "../../environments/primary/httpClient";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { errorMessageOf as messageOf } from "../../lib/errorMessage";
 import { runPrimaryHttp } from "../../lib/runtime";
 import { Button } from "../ui/button";
 import {
@@ -29,17 +27,6 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
-
-const ROLE_LABELS: Record<SpaceRole, string> = { admin: "Admin", member: "Member", guest: "Guest" };
-const STATUS_LABELS: Record<InvitationStatus, string> = {
-  pending: "Pending",
-  accepted: "Accepted",
-  expired: "Expired",
-  revoked: "Revoked",
-};
-
-const messageOf = (cause: unknown, fallback: string) =>
-  cause instanceof Error && cause.message.length > 0 ? cause.message : fallback;
 
 const formatDay = (date: DateTime.Utc) => DateTime.toDate(date).toLocaleDateString();
 
@@ -55,6 +42,11 @@ function describe(invitation: InvitationSummary) {
       return `Expires ${formatDay(invitation.expiresAt)}`;
   }
 }
+
+const fetchInvitations = (spaceId: SpaceSummary["id"]) =>
+  runPrimaryHttp(
+    PrimaryEnvironmentHttpClient.pipe(Effect.flatMap((client) => listInvitations(client, spaceId))),
+  );
 
 /** The Owner's Invitations for one Organization: create a link, copy it, see and revoke them. */
 export function InvitationsDialog({
@@ -72,15 +64,9 @@ export function InvitationsDialog({
   const [busy, setBusy] = useState(false);
   const { copyToClipboard, isCopied } = useCopyToClipboard({ target: "invitation link" });
 
-  const fetchList = () =>
-    runPrimaryHttp(
-      PrimaryEnvironmentHttpClient.pipe(
-        Effect.flatMap((client) => listInvitations(client, space.id)),
-      ),
-    );
   const reload = async () => {
     try {
-      setInvitations((await fetchList()).invitations);
+      setInvitations((await fetchInvitations(space.id)).invitations);
     } catch (cause) {
       setError(messageOf(cause, "Could not load the invitations."));
     }
@@ -89,11 +75,7 @@ export function InvitationsDialog({
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads this Organization's Invitations from the server when the dialog opens
   useEffect(() => {
     let cancelled = false;
-    void runPrimaryHttp(
-      PrimaryEnvironmentHttpClient.pipe(
-        Effect.flatMap((client) => listInvitations(client, space.id)),
-      ),
-    ).then(
+    void fetchInvitations(space.id).then(
       (list) => {
         if (!cancelled) setInvitations(list.invitations);
       },
@@ -204,7 +186,8 @@ export function InvitationsDialog({
                       className="flex items-center justify-between gap-2 text-sm"
                     >
                       <span className="min-w-0 truncate">
-                        {ROLE_LABELS[invitation.role]} · {STATUS_LABELS[invitation.status]} ·{" "}
+                        {SPACE_ROLE_LABELS[invitation.role]} ·{" "}
+                        {INVITATION_STATUS_LABELS[invitation.status]} ·{" "}
                         <span className="text-muted-foreground">{describe(invitation)}</span>
                       </span>
                       {invitation.status === "pending" ? (

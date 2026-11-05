@@ -224,13 +224,44 @@ it.effect("asks an Admin invitee for a passkey or a password with TOTP", () =>
       totp: { enrollmentId, code: "000000" },
     });
     expect(wrongCode.status).toBe(403);
+    const code = yield* totpCode(secret, yield* Clock.currentTimeMillis);
     const accepted = yield* acceptWithPassword(server, token, "grace", {
-      totp: { enrollmentId, code: yield* totpCode(secret, yield* Clock.currentTimeMillis) },
+      totp: { enrollmentId, code },
     });
     expect(accepted.status).toBe(200);
     expect(yield* spacesOf(server, accepted.cookie ?? "")).toContainEqual(
       expect.objectContaining({ id: acmeId, role: "admin" }),
     );
+
+    // The code that confirmed the enrollment does not sign in a second time.
+    const signIn = yield* server.request("/api/auth/password/sign-in", {
+      body: { loginName: "grace", password: PASSWORD },
+    });
+    const replay = yield* server.request("/api/auth/password/totp", {
+      body: { challengeId: signIn.body.challengeId, code },
+    });
+    expect(replay.status).toBe(401);
+  }),
+);
+
+it.effect("checks an Admin invitee's code before saying whether a sign-in name is taken", () =>
+  Effect.gen(function* () {
+    const { server, owner, acmeId } = yield* ownerWithOrganization();
+    const grace = yield* addMember(server);
+    yield* server.request("/api/auth/account/password", {
+      body: { loginName: "grace", password: PASSWORD },
+      cookie: grace,
+    });
+    const token = (yield* invite(server, owner, acmeId, "admin")).body.token as string;
+    const enrollment = yield* server.request("/api/invitations/totp-enrollment", {
+      body: { token },
+    });
+    const { enrollmentId } = enrollment.body as { enrollmentId: string };
+
+    const taken = yield* acceptWithPassword(server, token, "grace", {
+      totp: { enrollmentId, code: "000000" },
+    });
+    expect(taken.status).toBe(403);
   }),
 );
 
@@ -298,17 +329,62 @@ it.effect("adds the Organization to a signed-in User who accepts", () =>
   }),
 );
 
-it.effect("backs off after repeated failed redemptions", () =>
+it.effect("backs off repeated failed accepts of one link", () =>
+  Effect.gen(function* () {
+    const { server, owner, acmeId } = yield* ownerWithOrganization();
+    const token = (yield* invite(server, owner, acmeId, "admin")).body.token as string;
+    const enrollment = yield* server.request("/api/invitations/totp-enrollment", {
+      body: { token },
+    });
+    const { enrollmentId, secret } = enrollment.body as { enrollmentId: string; secret: string };
+    const withCode = (code: string) =>
+      acceptWithPassword(server, token, "grace", {
+        totp: { enrollmentId, code },
+      });
+
+    for (let failure = 0; failure < 5; failure += 1) {
+      expect((yield* withCode("000000")).status).toBe(403);
+    }
+    expect((yield* withCode(yield* totpCode(secret, yield* Clock.currentTimeMillis))).status).toBe(
+      429,
+    );
+    yield* TestClock.adjust("31 seconds");
+    expect((yield* withCode(yield* totpCode(secret, yield* Clock.currentTimeMillis))).status).toBe(
+      200,
+    );
+  }),
+);
+
+it.effect("does not let guesses from an unknown client lock out other invitees", () =>
   Effect.gen(function* () {
     const { server, owner, acmeId } = yield* ownerWithOrganization();
     const token = (yield* invite(server, owner, acmeId)).body.token as string;
 
-    for (let failure = 0; failure < 5; failure += 1) {
+    // Behind a proxy no client address is known; guesses there must not share one bucket.
+    for (let failure = 0; failure < 6; failure += 1) {
       expect((yield* preview(server, `guess-${failure}`)).body).toEqual({ status: "invalid" });
     }
-    expect((yield* preview(server, token)).status).toBe(429);
-    expect((yield* acceptWithPassword(server, token)).status).toBe(429);
-    yield* TestClock.adjust("31 seconds");
+    expect((yield* preview(server, token)).body).toMatchObject({ status: "valid" });
     expect((yield* acceptWithPassword(server, token)).status).toBe(200);
+  }),
+);
+
+it.effect("answers a revoke the same whether or not the Invitation exists", () =>
+  Effect.gen(function* () {
+    const { server, owner, acmeId } = yield* ownerWithOrganization();
+    const created = yield* invite(server, owner, acmeId);
+    const invitationId = (created.body.invitation as { id: string }).id;
+    const member = yield* addMember(server);
+
+    const real = yield* server.request("/api/invitations/revoke", {
+      body: { invitationId },
+      cookie: member,
+    });
+    const missing = yield* server.request("/api/invitations/revoke", {
+      body: { invitationId: "no-such-invitation" },
+      cookie: member,
+    });
+    expect(real.status).toBe(403);
+    expect(missing).toEqual(real);
   }),
 );

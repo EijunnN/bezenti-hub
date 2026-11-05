@@ -1,14 +1,24 @@
-import type { AuthTotpEnrollment, InvitationPreview, SpaceRole } from "@t3tools/contracts";
+import { SPACE_ROLE_LABELS } from "@t3tools/client-runtime/spaces/invitations";
+import {
+  AuthLoginName,
+  type AuthTotpEnrollment,
+  type InvitationPreview,
+  type SpaceRole,
+} from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { useEffect, useState } from "react";
 
 import { peekPairingTokenFromUrl, stripPairingTokenFromUrl } from "../../environments/primary/auth";
 import {
   acceptInvitationWithPasskey,
   acceptInvitationWithPassword,
+  fetchAccount,
   fetchInvitationPreview,
   joinInvitation,
+  signOut,
   startInvitationTotpEnrollment,
 } from "../../environments/primary/userAccounts";
+import { errorMessageOf as messageOf } from "../../lib/errorMessage";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -16,20 +26,32 @@ import { QRCodeSvg } from "../ui/qr-code";
 import { StandalonePage, StandalonePageHeader } from "../ui/standalone-page";
 import { canRegisterPasskeys } from "./OwnerSetupSurface";
 
-// Mirrors AuthLoginName in the contracts.
-const LOGIN_NAME_PATTERN = /^[A-Za-z0-9][\w.-]{1,39}$/;
-
-const ROLE_LABELS: Record<SpaceRole, string> = {
-  admin: "Admin",
-  member: "Member",
-  guest: "Guest",
-};
+const isLoginName = Schema.is(AuthLoginName);
 
 type LinkState = { readonly status: "checking" } | InvitationPreview;
 type Method = "passkey" | "password";
 
-const messageOf = (cause: unknown, fallback: string) =>
-  cause instanceof Error ? cause.message : fallback;
+// The tab keeps the token until the Invitation is accepted or found invalid, so a reload or
+// switching account mid-way does not lose it; it never goes back into the address bar.
+const TOKEN_STORAGE_KEY = "t3code:invitation-token";
+
+function takeInvitationToken(): string | null {
+  const fromUrl = peekPairingTokenFromUrl();
+  try {
+    if (fromUrl !== null) window.sessionStorage.setItem(TOKEN_STORAGE_KEY, fromUrl);
+    return fromUrl ?? window.sessionStorage.getItem(TOKEN_STORAGE_KEY);
+  } catch {
+    return fromUrl;
+  }
+}
+
+export function forgetInvitationToken() {
+  try {
+    window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+  } catch {
+    // Nothing was kept.
+  }
+}
 
 /**
  * Where an Invitation link lands: who invites you to which Organization with what Role, the
@@ -44,7 +66,7 @@ export function InvitationSurface({
   readonly onAccepted: (result: { readonly userId: string; readonly spaceId: string }) => void;
 }) {
   // The fragment never reaches the server; read it once, then drop it from the address bar.
-  const [token] = useState(peekPairingTokenFromUrl);
+  const [token] = useState(takeInvitationToken);
   const [link, setLink] = useState<LinkState>(
     token === null ? { status: "invalid" } : { status: "checking" },
   );
@@ -57,6 +79,7 @@ export function InvitationSurface({
     let cancelled = false;
     void fetchInvitationPreview(token).then(
       (preview) => {
+        if (preview.status === "invalid") forgetInvitationToken();
         if (!cancelled) setLink(preview);
       },
       (cause: unknown) => {
@@ -100,7 +123,7 @@ export function InvitationSurface({
     <StandalonePage>
       <StandalonePageHeader
         title={`Join ${link.organizationName}`}
-        description={`${link.inviterName} invited you as ${ROLE_LABELS[link.role]}.`}
+        description={`${link.inviterName} invited you as ${SPACE_ROLE_LABELS[link.role]}.`}
       />
       <div className="mt-6 space-y-4">
         <Alert>
@@ -126,8 +149,30 @@ function JoinAsSignedInUser({
   readonly token: string;
   readonly onAccepted: (result: { readonly userId: string; readonly spaceId: string }) => void;
 }) {
+  const [name, setName] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- asks the server who is signed in, so the page names the account the link would join
+  useEffect(() => {
+    let cancelled = false;
+    void fetchAccount().then(
+      (account) => {
+        if (!cancelled) setName(account.user.displayName);
+      },
+      () => {
+        if (!cancelled) setName("");
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const switchAccount = async () => {
+    setBusy(true);
+    await signOut().catch(() => undefined);
+    // The token stays in this tab, so the page comes back with the form for a new account.
+    window.location.replace("/invite");
+  };
   const join = async () => {
     setBusy(true);
     setError("");
@@ -141,11 +186,17 @@ function JoinAsSignedInUser({
   return (
     <div className="space-y-3">
       <p className="text-sm text-muted-foreground">
-        You're signed in, so the Organization is added to your account.
+        {name ? `Signed in as ${name}.` : "You're signed in."} Accepting adds the Organization to
+        this account.
       </p>
-      <Button disabled={busy} size="sm" onClick={() => void join()}>
-        Accept invitation
-      </Button>
+      <div className="flex flex-wrap gap-2">
+        <Button disabled={busy || name === null} size="sm" onClick={() => void join()}>
+          {name ? `Accept as ${name}` : "Accept invitation"}
+        </Button>
+        <Button disabled={busy} size="sm" variant="ghost" onClick={() => void switchAccount()}>
+          Use a different account
+        </Button>
+      </div>
       {error ? (
         <Alert variant="error">
           <AlertDescription>{error}</AlertDescription>
@@ -204,7 +255,7 @@ function CreateInvitedUser({
   const code = totpCode.replace(/\s/g, "");
   const passwordReady =
     name.length > 0 &&
-    LOGIN_NAME_PATTERN.test(loginName.trim()) &&
+    isLoginName(loginName.trim()) &&
     password.length >= 8 &&
     (!needsTotp || (enrollment !== null && code.length === 6));
 

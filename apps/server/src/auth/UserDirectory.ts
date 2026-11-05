@@ -109,6 +109,16 @@ export class PasswordRejectedError extends Schema.TaggedError<PasswordRejectedEr
   }
 }
 
+/** The right password for an account that may use one only with TOTP, which it has not set up. */
+export class SecondFactorMissingError extends Schema.TaggedError<SecondFactorMissingError>()(
+  "SecondFactorMissingError",
+  {},
+) {
+  override get message(): string {
+    return "This account needs an authenticator app with its password. Sign in with your passkey, then add one under Settings → Access.";
+  }
+}
+
 export class ResetLinkRejectedError extends Schema.TaggedError<ResetLinkRejectedError>()(
   "ResetLinkRejectedError",
   {},
@@ -189,6 +199,8 @@ export interface PendingInvitee {
   readonly passkey: Users.CreateOwnerInput["passkey"] | null;
   readonly password: { readonly loginName: string; readonly passwordHash: string } | null;
   readonly totpSecretCiphertext: string | null;
+  /** The step of the code that confirmed the enrollment, so it cannot also sign in. */
+  readonly totpStep: number | null;
 }
 
 interface Ceremony {
@@ -327,7 +339,10 @@ export class UserDirectory extends Context.Service<
       clientIp: string | undefined,
     ) => Effect.Effect<
       PasswordCheck,
-      PasswordRejectedError | SignInThrottledError | UserDirectoryStorageError
+      | PasswordRejectedError
+      | SecondFactorMissingError
+      | SignInThrottledError
+      | UserDirectoryStorageError
     >;
     readonly checkTotp: (
       input: AuthTotpSignInRequest,
@@ -1027,10 +1042,14 @@ const make = Effect.gen(function* () {
       );
       return { _tag: "totp-required", challengeId } as const;
     }
-    // A rule change (becoming an Admin) can leave a password-only account that now needs TOTP.
-    if (!canSignIn || credentials === undefined || passwordRequiresTotp(user, credentials)) {
+    if (!canSignIn || credentials === undefined) {
       yield* recordFailure(keys);
       return yield* new PasswordRejectedError({});
+    }
+    // A rule change (becoming an Admin) can leave a password-only account that now needs TOTP.
+    // The password was right, so say why instead of counting a guess.
+    if (passwordRequiresTotp(user, credentials)) {
+      return yield* new SecondFactorMissingError({});
     }
     throttle.reset(keys);
     return { _tag: "verified", user: toAuthUser(user) } as const;
@@ -1207,6 +1226,7 @@ const make = Effect.gen(function* () {
         passkey,
         password: null,
         totpSecretCiphertext: null,
+        totpStep: null,
       } satisfies PendingInvitee;
     });
 
@@ -1231,11 +1251,9 @@ const make = Effect.gen(function* () {
     "UserDirectory.prepareInviteePassword",
   )(function* (input) {
     const loginName = normalizeLoginName(input.loginName);
-    if (Option.isSome(yield* users.getByLoginName(loginName).pipe(storage))) {
-      return yield* new LoginNameTakenError({});
-    }
     const userId = UserId.make(yield* random.uuidV4());
     let totpSecretCiphertext: string | null = null;
+    let totpStep: number | null = null;
     if (input.totp !== undefined) {
       const now = yield* DateTime.now;
       const pending = yield* inviteeTotpEnrollments.get(input.totp.enrollmentId, now);
@@ -1254,11 +1272,16 @@ const make = Effect.gen(function* () {
           reason: "That code did not match. Check the time on your device and try again.",
         });
       }
+      totpStep = step;
       totpSecretCiphertext = yield* credentialKey.pipe(
         Effect.flatMap((key) => AccountCredentials.seal(key, pending.secret, userId)),
         withCrypto,
         storage,
       );
+    }
+    // Only after the code checks out, so the answer is no free probe of which names exist.
+    if (Option.isSome(yield* users.getByLoginName(loginName).pipe(storage))) {
+      return yield* new LoginNameTakenError({});
     }
     return {
       userId,
@@ -1267,6 +1290,7 @@ const make = Effect.gen(function* () {
       passkey: null,
       password: { loginName, passwordHash: yield* hashPassword(input.password) },
       totpSecretCiphertext,
+      totpStep,
     } satisfies PendingInvitee;
   });
 
@@ -1280,7 +1304,13 @@ const make = Effect.gen(function* () {
         createdAt: yield* DateTime.now,
         passkey: pending.passkey,
         password: pending.password,
-        totpSecretCiphertext: pending.totpSecretCiphertext,
+        totp:
+          pending.totpSecretCiphertext === null
+            ? null
+            : {
+                secretCiphertext: pending.totpSecretCiphertext,
+                lastUsedStep: pending.totpStep ?? -1,
+              },
       })
       .pipe(storage);
     if (!created) return yield* new LoginNameTakenError({});

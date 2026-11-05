@@ -1,4 +1,5 @@
-import type { AuthAccount, AuthTotpEnrollment } from "@t3tools/contracts";
+import { type AuthAccount, AuthLoginName, type AuthTotpEnrollment } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { type ReactNode, useEffect, useState } from "react";
 
 import { usePrimarySessionState } from "../../environments/primary";
@@ -11,17 +12,14 @@ import {
   type StepUp,
   startTotpEnrollment,
 } from "../../environments/primary/userAccounts";
+import { errorMessageOf } from "../../lib/errorMessage";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { QRCodeSvg } from "../ui/qr-code";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
-// Mirrors AuthLoginName in the contracts.
-const LOGIN_NAME_PATTERN = /^[A-Za-z0-9][\w.-]{1,39}$/;
-
-const errorMessageOf = (cause: unknown, fallback: string) =>
-  cause instanceof Error ? cause.message : fallback;
+const isLoginName = Schema.is(AuthLoginName);
 
 const stripSpaces = (code: string) => code.replace(/\s/g, "");
 
@@ -473,7 +471,7 @@ function PasswordRow({
           className="mt-3 flex max-w-sm flex-col gap-2"
           onSubmit={(event) => {
             event.preventDefault();
-            if (!LOGIN_NAME_PATTERN.test(loginName.trim())) {
+            if (!isLoginName(loginName.trim())) {
               setErrorMessage(
                 "Use 2 to 40 letters, digits, dots, dashes or underscores, starting with a letter or digit.",
               );

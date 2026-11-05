@@ -100,7 +100,7 @@ export const CreateUserInput = Schema.Struct({
   createdAt: Schema.DateTimeUtcFromString,
   passkey: Schema.NullOr(Schema.Struct(PasskeyFields)),
   password: Schema.NullOr(Schema.Struct({ loginName: Schema.String, passwordHash: Schema.String })),
-  totpSecretCiphertext: Schema.NullOr(Schema.String),
+  totp: Schema.NullOr(Schema.Struct({ secretCiphertext: Schema.String, lastUsedStep: Schema.Int })),
 });
 export type CreateUserInput = typeof CreateUserInput.Type;
 
@@ -232,15 +232,23 @@ const make = Effect.gen(function* () {
     }),
   });
 
-  const insertUser = SqlSchema.void({
+  // Only a taken login name is an expected conflict; any other one is a storage error.
+  const insertUserRow = SqlSchema.findAll({
     Request: CreateUserInput,
-    execute: Effect.fn("UserRepository.insertUser")(function* (input) {
-      yield* sql`
-        INSERT INTO users (user_id, display_name, login_name, is_owner, created_at)
-        VALUES (
-          ${input.userId}, ${input.displayName}, ${input.password?.loginName ?? null}, 0, ${input.createdAt}
-        )
-      `;
+    Result: Schema.Struct({ userId: UserId }),
+    execute: (input) => sql`
+      INSERT INTO users (user_id, display_name, login_name, is_owner, created_at)
+      VALUES (
+        ${input.userId}, ${input.displayName}, ${input.password?.loginName ?? null}, 0, ${input.createdAt}
+      )
+      ON CONFLICT (login_name) DO NOTHING
+      RETURNING user_id AS "userId"
+    `,
+  });
+
+  const insertUserCredentials = SqlSchema.void({
+    Request: CreateUserInput,
+    execute: Effect.fn("UserRepository.insertUserCredentials")(function* (input) {
       if (input.passkey !== null) {
         yield* sql`
           INSERT INTO user_passkeys (
@@ -263,11 +271,14 @@ const make = Effect.gen(function* () {
           VALUES (${input.userId}, ${input.password.passwordHash}, ${input.createdAt})
         `;
       }
-      if (input.totpSecretCiphertext !== null) {
-        // The enrollment code proved the app works; it was no sign-in, so no step is spent.
+      if (input.totp !== null) {
+        // The enrollment code's step counts as used, so the same code cannot also sign in.
         yield* sql`
           INSERT INTO user_totp (user_id, secret_ciphertext, enrolled_at, last_used_step)
-          VALUES (${input.userId}, ${input.totpSecretCiphertext}, ${input.createdAt}, -1)
+          VALUES (
+            ${input.userId}, ${input.totp.secretCiphertext}, ${input.createdAt},
+            ${input.totp.lastUsedStep}
+          )
         `;
       }
     }),
@@ -489,12 +500,12 @@ const make = Effect.gen(function* () {
         );
     }),
     createUser: Effect.fn("UserRepository.createUser")(function (input) {
-      return insertUser(input).pipe(
-        Effect.as(true),
-        // Another User already signs in with this login name.
-        Effect.catchIf(
-          (error) => !Schema.isSchemaError(error) && error.reason._tag === "UniqueViolation",
-          () => Effect.succeed(false),
+      return insertUserRow(input).pipe(
+        Effect.flatMap((inserted) =>
+          // Another User already signs in with this login name.
+          inserted.length === 0
+            ? Effect.succeed(false)
+            : insertUserCredentials(input).pipe(Effect.as(true)),
         ),
         Effect.mapError(toUserRepositoryError("UserRepository.createUser")),
       );

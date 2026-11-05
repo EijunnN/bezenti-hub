@@ -2,7 +2,7 @@ import { currentSpaceStorageKey } from "@t3tools/client-runtime/spaces/space-dir
 import { UserId } from "@t3tools/contracts";
 import { createFileRoute } from "@tanstack/react-router";
 
-import { InvitationSurface } from "../components/auth/InvitationSurface";
+import { forgetInvitationToken, InvitationSurface } from "../components/auth/InvitationSurface";
 
 export const Route = createFileRoute("/invite")({
   component: InviteRouteView,
@@ -14,6 +14,7 @@ function InviteRouteView() {
     <InvitationSurface
       signedIn={authGateState.status === "authenticated"}
       onAccepted={({ userId, spaceId }) => {
+        forgetInvitationToken();
         // Start in the Organization just joined; the Space selector reads this choice on load.
         try {
           window.localStorage.setItem(currentSpaceStorageKey(UserId.make(userId)), spaceId);

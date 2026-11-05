@@ -403,6 +403,8 @@ const EnvironmentOwnerBootstrapErrors = [
 const EnvironmentPasswordSignInErrors = [
   ...EnvironmentUserSignInErrors,
   EnvironmentRateLimitedError,
+  // The right password for an account that also needs TOTP and has none set up.
+  EnvironmentHttpForbiddenError,
 ] as const;
 const EnvironmentAccountErrors = [
   // The session has no User, the step-up proof failed, or the account's rules refuse the change.

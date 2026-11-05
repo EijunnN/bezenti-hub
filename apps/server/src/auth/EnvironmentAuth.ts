@@ -705,6 +705,7 @@ export class EnvironmentAuth extends Context.Service<
     ) => Effect.Effect<
       UserBrowserSession | { readonly response: AuthSecondFactorRequired },
       | ServerAuthInvalidCredentialError
+      | UserDirectory.SecondFactorMissingError
       | UserDirectory.SignInThrottledError
       | ServerAuthInternalError
     >;

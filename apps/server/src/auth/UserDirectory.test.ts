@@ -240,10 +240,18 @@ it.effect("refuses a password alone for an Admin, as for the Owner", () =>
       VALUES ('org-acme', 'organization', 'Acme', '2026-01-01T00:00:00.000Z')`;
     yield* joinOrganization(server, "org-acme", "member-1", "admin");
 
-    const signIn = yield* server.request("/api/auth/password/sign-in", {
-      body: { loginName: "grace", password: "correct horse battery" },
+    // The right password gets told why, and is not counted as a guess.
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const signIn = yield* server.request("/api/auth/password/sign-in", {
+        body: { loginName: "grace", password: "correct horse battery" },
+      });
+      expect(signIn.status).toBe(403);
+      expect(signIn.body.message).toContain("authenticator app");
+    }
+    const wrong = yield* server.request("/api/auth/password/sign-in", {
+      body: { loginName: "grace", password: "wrong horse battery" },
     });
-    expect(signIn.status).toBe(401);
+    expect(wrong.status).toBe(401);
     const account = yield* server.request("/api/auth/account", { cookie });
     expect(account.body).toMatchObject({ passwordRequiresTotp: true });
   }),
