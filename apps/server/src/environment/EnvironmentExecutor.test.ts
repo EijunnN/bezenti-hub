@@ -44,6 +44,7 @@ const makeAdapter = (
   openSession: () => Effect.die("not opened in these tests"),
 });
 
+// Replays the last change, so a publish before the executor subscribes still reaches it.
 class InstanceChanges extends Context.Service<InstanceChanges, PubSub.PubSub<void>>()(
   "t3/environment/EnvironmentExecutor.test/InstanceChanges",
 ) {}
@@ -69,7 +70,7 @@ const makeLayer = (hubAdapter: ProviderAdapter.ProviderAdapterV2["Service"]) => 
   );
   return EnvironmentExecutor.layerProviderAdapterRegistry.pipe(
     Layer.provideMerge(layerHubMachine),
-    Layer.provideMerge(Layer.effect(InstanceChanges, PubSub.unbounded<void>())),
+    Layer.provideMerge(Layer.effect(InstanceChanges, PubSub.unbounded<void>({ replay: 1 }))),
   );
 };
 
