@@ -10,3 +10,5 @@
 - [ ] Acción de mover con el mismo diálogo y las mismas reglas que en web: esperar o parar, progreso y error.
 - [ ] Lista de Environments de solo lectura para el Owner.
 - [ ] Typecheck y tests de mobile en verde.
+- [ ] Móvil pasa a una sola conexión, la del Hub (heredado del ticket 07): hoy guarda varias conexiones, puede añadir varios Hubs o servidores sueltos (con pairing) e indexa Threads y rutas por `environmentId`. Quitar el pairing a servidores sueltos y el modelo multi-servidor.
+- [ ] Quitar `environmentId` de `ScopedThreadRef` en client-runtime, web y móvil (expand–contract), ahora que solo hay una conexión; borrar las comprobaciones «desktop-local» y los flujos de pairing que quedaron en el onboarding web y en el handler de enlaces de desktop.
