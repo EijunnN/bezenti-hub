@@ -1,4 +1,5 @@
 import { makeAssistantStreamingFilter } from "./assistantStreaming.ts";
+import { SESSION_RELEASED_DURING_START } from "./ProviderSessionManager.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   findEnvironmentSessionLost,
@@ -1733,7 +1734,12 @@ export const layer: Layer.Layer<
               Effect.andThen(
                 Ref.get(eventStreamFailed).pipe(
                   Effect.flatMap((failed) =>
-                    failed ? Fiber.await(providerEventFiber) : Effect.void,
+                    failed
+                      ? Fiber.await(providerEventFiber)
+                      : // A session released under the start ended its event stream too.
+                        Cause.pretty(cause).includes(SESSION_RELEASED_DURING_START)
+                        ? Fiber.await(providerEventFiber).pipe(Effect.timeoutOption("10 seconds"))
+                        : Effect.void,
                   ),
                 ),
               ),

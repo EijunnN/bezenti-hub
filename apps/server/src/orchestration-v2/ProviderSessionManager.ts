@@ -80,6 +80,10 @@ export const ProviderSessionReleaseReason = Schema.Literals([
 ]);
 export type ProviderSessionReleaseReason = typeof ProviderSessionReleaseReason.Type;
 
+/** The refusal when a turn's session is released while it starts (its machine lost it). */
+export const SESSION_RELEASED_DURING_START =
+  "The provider session was released while the turn started.";
+
 export class ProviderSessionOpenError extends Schema.TaggedError<ProviderSessionOpenError>()(
   "ProviderSessionOpenError",
   {
@@ -1875,7 +1879,7 @@ export const layerWithOptions = (
                               threadId: input.threadId,
                               providerThreadId: input.providerThread.id,
                               runId: input.runId,
-                              cause: "The provider session was released while the turn started.",
+                              cause: SESSION_RELEASED_DURING_START,
                             }),
                           ),
                     ),
