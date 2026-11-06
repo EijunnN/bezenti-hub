@@ -3,8 +3,11 @@
 // Clients show controls from the server's AccessPolicy answers (`canCreateOrganization`,
 // `canCreateThreads`) instead.
 import type {
+  CommandId,
   InstallationPermission,
+  ProjectId,
   SpaceDirectoryView,
+  SpaceId,
   SpaceSummary,
   UserId,
 } from "@t3tools/contracts";
@@ -19,6 +22,38 @@ export const fetchSpaceDirectory = (client: EnvironmentHttpClient) =>
 
 export const createOrganization = (client: EnvironmentHttpClient, name: string) =>
   client.spaces.createOrganization({ headers: {}, payload: { name } });
+
+/** The Owner archives, restores and (once archived) deletes an Organization. */
+export const archiveOrganization = (client: EnvironmentHttpClient, spaceId: SpaceId) =>
+  client.spaces.archiveOrganization({ headers: {}, params: { spaceId } });
+export const restoreOrganization = (client: EnvironmentHttpClient, spaceId: SpaceId) =>
+  client.spaces.restoreOrganization({ headers: {}, params: { spaceId } });
+export const deleteOrganization = (client: EnvironmentHttpClient, spaceId: SpaceId) =>
+  client.spaces.deleteOrganization({ headers: {}, params: { spaceId } });
+
+/** Moves a Project with all its Threads to another Space; refused while one of them runs. */
+export const moveProject = (
+  client: EnvironmentHttpClient,
+  input: {
+    readonly commandId: CommandId;
+    readonly projectId: ProjectId;
+    readonly spaceId: SpaceId;
+  },
+) => client.projects.mutate({ headers: {}, payload: { type: "project.move", ...input } });
+
+/**
+ * The Spaces a Project in `from` may move to, from the server's answers per Space. A Project
+ * from before Spaces (no Space) is in the Owner's Personal space. Empty when it may not leave.
+ */
+export function projectMoveDestinations(
+  view: SpaceDirectoryView,
+  from: SpaceId | null | undefined,
+): ReadonlyArray<SpaceSummary> {
+  const origin = from ?? (view.isOwner === true ? view.personalSpaceId : null);
+  const source = view.spaces.find((space) => space.id === origin);
+  if (source === undefined || source.canMoveProjectsOut !== true) return [];
+  return view.spaces.filter((space) => space.id !== origin && space.canMoveProjectsIn === true);
+}
 
 /** The Owner's Users admin view. */
 export const fetchInstallationUsers = (client: EnvironmentHttpClient) =>

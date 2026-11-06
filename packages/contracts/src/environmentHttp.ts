@@ -922,6 +922,32 @@ class EnvironmentSpacesHttpApi extends HttpApiGroup.make("spaces")
       success: SpaceDirectoryView,
       error: EnvironmentSpaceErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  // The Owner's: archive hides the Organization from its Members and stops what runs in it;
+  // restore brings it back; delete, only once archived, removes it with everything in it.
+  .add(
+    HttpApiEndpoint.post("archiveOrganization", "/api/spaces/:spaceId/archive", {
+      headers: OptionalBearerHeaders,
+      params: SpaceParams,
+      success: SpaceDirectoryView,
+      error: EnvironmentSpaceErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("restoreOrganization", "/api/spaces/:spaceId/restore", {
+      headers: OptionalBearerHeaders,
+      params: SpaceParams,
+      success: SpaceDirectoryView,
+      error: EnvironmentSpaceErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("deleteOrganization", "/api/spaces/:spaceId/delete", {
+      headers: OptionalBearerHeaders,
+      params: SpaceParams,
+      success: SpaceDirectoryView,
+      error: EnvironmentSpaceErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
 const InstallationUserParams = Schema.Struct({ userId: UserId });

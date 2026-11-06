@@ -84,7 +84,11 @@ export function SpaceSelector() {
   const current = view.spaces.find((space) => space.id === currentSpaceId) ?? view.spaces[0];
   const CurrentIcon = current?.kind === "organization" ? BuildingIcon : UserIcon;
   // Only the Owner lists other Users' Personal spaces, to read them.
-  const ownSpaces = view.spaces.filter((space) => space.kind === "organization" || space.isOwn);
+  const ownSpaces = view.spaces.filter(
+    (space) => (space.kind === "organization" && space.archived !== true) || space.isOwn,
+  );
+  // Only the Owner lists archived Organizations, to restore or delete them.
+  const archivedOrganizations = view.spaces.filter((space) => space.archived === true);
   const othersPersonal = view.spaces.filter((space) => space.kind === "personal" && !space.isOwn);
   const notice =
     current === undefined
@@ -93,7 +97,9 @@ export function SpaceSelector() {
         ? "The Owner can see everything in your Personal space."
         : current.kind === "personal" && !current.isOwn
           ? `Reading ${current.name}'s Personal space. New Threads can't start here.`
-          : null;
+          : current.archived === true
+            ? `${current.name} is archived: its Members can't see it and nothing runs in it.`
+            : null;
 
   return (
     <SidebarMenu>
@@ -132,6 +138,24 @@ export function SpaceSelector() {
                 ))}
               </MenuRadioGroup>
             </MenuGroup>
+            {archivedOrganizations.length > 0 ? (
+              <>
+                <MenuSeparator />
+                <MenuGroup>
+                  <MenuGroupLabel>Archived</MenuGroupLabel>
+                  <MenuRadioGroup
+                    value={current?.id}
+                    onValueChange={(value) => selectSpace(value as SpaceId)}
+                  >
+                    {archivedOrganizations.map((space) => (
+                      <MenuRadioItem key={space.id} value={space.id} closeOnClick>
+                        {space.name}
+                      </MenuRadioItem>
+                    ))}
+                  </MenuRadioGroup>
+                </MenuGroup>
+              </>
+            ) : null}
             {othersPersonal.length > 0 ? (
               <>
                 <MenuSeparator />
@@ -195,6 +219,8 @@ export function SpaceSelector() {
         {managing && current?.kind === "organization" ? (
           <OrganizationSettingsDialog
             space={current}
+            isOwner={view.isOwner === true}
+            onChanged={reload}
             onClose={() => setManaging(false)}
             onLeft={() => {
               setManaging(false);

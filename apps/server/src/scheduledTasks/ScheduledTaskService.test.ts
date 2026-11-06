@@ -697,6 +697,22 @@ it.effect("a task acts as the User who created it, and only they change or run i
       // When it runs, it acts as Grace, whoever triggers the run.
       yield* service.runNow({ id: task.id }).pipe(Effect.exit);
       assert.deepEqual(yield* Ref.get(launchedAs), ["grace"]);
+      // Nothing runs in an archived Organization: its due runs are skipped, not fired.
+      const scheduled = yield* service
+        .upsert({
+          ...taskIn("acme-app"),
+          id: ScheduledTaskId.make("task:scheduled"),
+          enabled: true,
+        })
+        .pipe(asGrace);
+      yield* sql`UPDATE spaces SET archived_at = ${at} WHERE space_id = 'acme'`;
+      yield* TestClock.adjust("6 seconds");
+      yield* TestClock.adjust("60 seconds");
+      assert.deepEqual(yield* Ref.get(launchedAs), ["grace"]);
+      const [skipped] = yield* sql<{ readonly nextRunAt: string }>`
+        SELECT next_run_at AS "nextRunAt" FROM scheduled_tasks WHERE task_id = 'task:scheduled'
+      `;
+      assert.isAbove(Date.parse(skipped!.nextRunAt), Date.parse(scheduled.task.nextRunAt!));
     }).pipe(Effect.provide(layer));
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );

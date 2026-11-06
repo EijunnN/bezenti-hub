@@ -2988,6 +2988,7 @@ export const layerWsRpc = (
                   commandId: mutation.commandId,
                   message:
                     cause._tag === "ProjectNotEmptyError" ||
+                    cause._tag === "ProjectMoveBlockedError" ||
                     cause._tag === "SpaceAccessDeniedError" ||
                     cause._tag === "SpaceNotFoundError"
                       ? cause.message

@@ -778,6 +778,19 @@ export const layer = Layer.effect(
         ),
     );
 
+    // Nothing runs in an archived Organization: its scheduled runs are skipped, not queued.
+    const inArchivedSpace = (task: ScheduledTask) =>
+      Option.isNone(spaces)
+        ? Effect.succeed(false)
+        : spaces.value
+            .inArchivedSpace(
+              task.threadId === null
+                ? { kind: "project", id: task.projectId }
+                : { kind: "thread", id: ThreadId.make(task.threadId) },
+            )
+            .pipe(Effect.orElseSucceed(() => false));
+    const ARCHIVED_SPACE = "Its Organization is archived, so nothing runs in it.";
+
     const runTask = Effect.fn("ScheduledTaskService.runTask")(function* (
       task: ScheduledTask,
       trigger: "scheduled" | "manual" | "webhook",
@@ -838,6 +851,12 @@ export const layer = Layer.effect(
                     ? "The task was paused before this delivery ran."
                     : null;
           if (reason !== null) return yield* new WebhookDeliverySkipped({ reason });
+        }
+        if (trigger !== "scheduled" && (yield* inArchivedSpace(active))) {
+          if (webhook !== undefined) {
+            return yield* new WebhookDeliverySkipped({ reason: ARCHIVED_SPACE });
+          }
+          return yield* taskError(ARCHIVED_SPACE, { taskId: task.id });
         }
 
         if (webhook === undefined) yield* markRunning(active.id, startedAtIso);
@@ -1104,7 +1123,11 @@ export const layer = Layer.effect(
           Effect.suspend(() =>
             isMissedFixedTimeRun(task.schedule, dueAt, now)
               ? rescheduleMissedRun(task, now)
-              : runTask(task, "scheduled"),
+              : inArchivedSpace(task).pipe(
+                  Effect.flatMap((archived) =>
+                    archived ? rescheduleMissedRun(task, now) : runTask(task, "scheduled"),
+                  ),
+                ),
           ).pipe(
             Effect.catch((cause) =>
               Effect.logWarning("Scheduled task run failed", { taskId: task.id, cause }),

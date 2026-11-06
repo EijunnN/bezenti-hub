@@ -1,4 +1,5 @@
 import * as GuestShareService from "../guest/GuestShareService.ts";
+import * as OrganizationLifecycle from "../spaces/OrganizationLifecycle.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
@@ -382,6 +383,17 @@ export const layerProduction = Layer.mergeAll(
   layerScheduledTaskProvided,
   layerScratchThreadPromotionProvided,
   layerSecretRequestsProvided,
+  // Archive stops what runs in an Organization; delete goes through the Project delete path.
+  OrganizationLifecycle.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        layerProjectService,
+        layerThreadManagementProvided,
+        ProjectionStore.layer,
+        SpaceDirectory.layer,
+      ),
+    ),
+  ),
   GuestShareService.layer.pipe(
     Layer.provide(Layer.merge(layerOrchestratorProvided, layerCommandOutputHubProvided)),
   ),

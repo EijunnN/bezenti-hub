@@ -228,6 +228,16 @@ export const ProjectMutation = Schema.Union([
     projectId: ProjectId,
     force: Schema.optional(Schema.Boolean),
   }),
+  /**
+   * Moves the Project and all its Threads to another Space. Refused while any of its Threads is
+   * running; in the destination it uses that Space's vaults and AI accounts.
+   */
+  Schema.Struct({
+    type: Schema.Literal("project.move"),
+    commandId: CommandId,
+    projectId: ProjectId,
+    spaceId: SpaceId,
+  }),
 ]);
 export type ProjectMutation = typeof ProjectMutation.Type;
 

@@ -288,6 +288,7 @@ export const make = Effect.gen(function* () {
         ...(payload.scripts === undefined ? {} : { scripts: payload.scripts }),
         ...(payload.pinnedAt === undefined ? {} : { pinnedAt: payload.pinnedAt }),
         ...(payload.archivedAt === undefined ? {} : { archivedAt: payload.archivedAt }),
+        ...(payload.spaceId === undefined ? {} : { spaceId: payload.spaceId }),
         updatedAt: payload.updatedAt,
       }).pipe(mapError("apply"));
     },

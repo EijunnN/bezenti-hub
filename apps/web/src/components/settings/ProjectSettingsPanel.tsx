@@ -5,7 +5,17 @@ import { useEnvironmentsWithScope } from "../../state/session";
 import { mapAtomCommandResult, settlePromise } from "@t3tools/client-runtime/state/runtime";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { planProjectRemoval } from "@t3tools/client-runtime/state/projects";
-import { type EnvironmentId, type SidebarProjectGroupingMode } from "@t3tools/contracts";
+import {
+  CommandId,
+  type EnvironmentId,
+  type SidebarProjectGroupingMode,
+  type SpaceId,
+} from "@t3tools/contracts";
+import {
+  moveProject,
+  projectMoveDestinations,
+} from "@t3tools/client-runtime/spaces/space-directory";
+import * as Effect from "effect/Effect";
 import {
   checkProjectAccess,
   reportProjectFailure,
@@ -17,6 +27,11 @@ import { InfoIcon, Trash2Icon } from "lucide-react";
 import { lazy, Suspense, useRef, useState, type ReactNode } from "react";
 
 import { useComposerDraftStore } from "../../composerDraftStore";
+import { PrimaryEnvironmentHttpClient } from "../../environments/primary/httpClient";
+import { errorMessageOf } from "../../lib/errorMessage";
+import { runPrimaryHttp } from "../../lib/runtime";
+import { randomUUID } from "../../lib/utils";
+import { useCurrentSpace } from "../../state/currentSpace";
 import { releaseProjectDraftUploads } from "../../lib/composerDraftUploads";
 import { persistClientSettingsUpdate, useClientSettings } from "../../hooks/useSettings";
 import { readLocalApi } from "../../localApi";
@@ -145,6 +160,88 @@ interface ProjectSelection {
   readonly environmentId: EnvironmentId | null;
   readonly checkoutKey: string | null;
   readonly memberKeys: ReadonlyArray<string>;
+}
+
+/**
+ * "Move to…": the Spaces this User may move the Project into, from the server's answers. Spaces
+ * live on the primary environment, so only its Project is moved.
+ */
+function ProjectSpaceSettings({ group }: { group: SidebarProjectSnapshot }) {
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const view = useCurrentSpace((state) =>
+    state.environmentId === primaryEnvironmentId ? state.view : null,
+  );
+  const [moving, setMoving] = useState(false);
+  const primaryMembers = group.memberProjects.filter(
+    (member) => member.environmentId === primaryEnvironmentId,
+  );
+  const project = primaryMembers.length === 1 ? primaryMembers[0] : undefined;
+  if (view === null || project === undefined) return null;
+  const destinations = projectMoveDestinations(view, project.spaceId);
+  if (destinations.length === 0) return null;
+  const originId = project.spaceId ?? view.personalSpaceId;
+  const originName = view.spaces.find((space) => space.id === originId)?.name ?? "its Space";
+
+  const moveTo = async (spaceId: SpaceId) => {
+    const destination = destinations.find((space) => space.id === spaceId);
+    if (destination === undefined) return;
+    const api = readLocalApi();
+    const message = `Move "${project.title}" to ${destination.name}?
+Its Threads go with it. Who can see it changes to ${destination.name}'s people, and it uses ${destination.name}'s vaults and AI accounts from now on.`;
+    const confirmed = api
+      ? await settlePromise(() => api.dialogs.confirm(message))
+      : { _tag: "Success" as const, value: window.confirm(message) };
+    if (confirmed._tag === "Failure" || !confirmed.value) return;
+    setMoving(true);
+    try {
+      await runPrimaryHttp(
+        PrimaryEnvironmentHttpClient.pipe(
+          Effect.flatMap((client) =>
+            moveProject(client, {
+              commandId: CommandId.make(`project-move:${randomUUID()}`),
+              projectId: project.id,
+              spaceId,
+            }),
+          ),
+        ),
+      );
+      toastManager.add({ type: "success", title: `Moved to ${destination.name}` });
+    } catch (cause) {
+      toastManager.add({
+        type: "error",
+        title: "Could not move the project",
+        description: errorMessageOf(cause, "Try again."),
+      });
+    }
+    setMoving(false);
+  };
+
+  return (
+    <SettingsSection title="Space">
+      <SettingsRow
+        title="Move to another Space"
+        description={`In ${originName}. Its Threads move with it; stop running ones first.`}
+        control={
+          <select
+            aria-label="Move to…"
+            className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm sm:w-64"
+            disabled={moving}
+            value=""
+            onChange={(event) => void moveTo(event.currentTarget.value as SpaceId)}
+          >
+            <option value="" disabled>
+              Move to…
+            </option>
+            {destinations.map((space) => (
+              <option key={space.id} value={space.id}>
+                {space.name}
+              </option>
+            ))}
+          </select>
+        }
+      />
+    </SettingsSection>
+  );
 }
 
 function sameProjectSelection(a: ProjectSelection | null, b: ProjectSelection): boolean {
@@ -653,6 +750,7 @@ function ProjectDetail({
             </>
           ) : null}
         </SettingsSection>
+        <ProjectSpaceSettings group={group} />
         <ProjectDefaultsSettings category="project" />
         <ProjectActionsSettings />
         {checkoutChoices}

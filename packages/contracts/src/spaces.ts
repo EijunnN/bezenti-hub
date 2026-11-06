@@ -37,6 +37,15 @@ export const SpaceSummary = Schema.Struct({
    * (or have a passkey). Optional so older servers decode.
    */
   pendingAdmin: Schema.optional(Schema.Boolean),
+  /**
+   * An archived Organization: only the Owner lists it, to restore or delete it. Nothing runs or
+   * starts in it. Optional so older servers decode.
+   */
+  archived: Schema.optional(Schema.Boolean),
+  /** Whether the viewer may move a Project out of this Space. Optional so older servers decode. */
+  canMoveProjectsOut: Schema.optional(Schema.Boolean),
+  /** Whether the viewer may move a Project into this Space. Optional so older servers decode. */
+  canMoveProjectsIn: Schema.optional(Schema.Boolean),
 });
 export type SpaceSummary = typeof SpaceSummary.Type;
 

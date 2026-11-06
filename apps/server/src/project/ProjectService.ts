@@ -18,6 +18,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import { withCommandMetrics } from "../observability/Metrics.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
@@ -32,6 +33,7 @@ import {
 } from "../orchestration-v2/ProjectCommands.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
+import { threadHasUnfinishedWork } from "../orchestration-v2/Orchestrator.ts";
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
@@ -62,6 +64,24 @@ export interface ProjectDeleteInput {
   readonly projectId: ProjectId;
   readonly force?: boolean;
 }
+
+export interface ProjectMoveInput {
+  readonly commandId: CommandId;
+  readonly projectId: ProjectId;
+  readonly spaceId: SpaceId;
+}
+
+/** A Project is moved only once none of its Threads runs. */
+export class ProjectMoveBlockedError extends Schema.TaggedError<ProjectMoveBlockedError>()(
+  "ProjectMoveBlockedError",
+  { projectId: ProjectId, threadTitles: Schema.Array(Schema.String) },
+) {
+  override get message(): string {
+    const names = this.threadTitles.map((title) => `"${title}"`).join(", ");
+    return `Stop the running Threads of this Project before moving it: ${names}.`;
+  }
+}
+const isMoveBlocked = Schema.is(ProjectMoveBlockedError);
 
 export class ProjectNotFoundError extends Schema.TaggedError<ProjectNotFoundError>()(
   "ProjectNotFoundError",
@@ -103,6 +123,7 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
       "list-projects",
       "list-threads",
       "delete-thread",
+      "move-thread",
       "dispatch-project-command",
     ]),
     projectId: Schema.optional(ProjectId),
@@ -118,6 +139,8 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
 export type ProjectServiceError =
   | SpaceDirectory.SpaceClaimError
   | SpaceDirectory.ItemAccessError
+  | SpaceDirectory.ProjectMoveError
+  | ProjectMoveBlockedError
   | ProjectNotFoundError
   | ProjectConflictError
   | ProjectNotEmptyError
@@ -135,6 +158,19 @@ export class ProjectService extends Context.Service<
     >;
     readonly update: (input: ProjectUpdateInput) => Effect.Effect<Project, ProjectServiceError>;
     readonly delete: (input: ProjectDeleteInput) => Effect.Effect<Project, ProjectServiceError>;
+    /**
+     * Moves the Project and every Thread in it to another Space (`project.move`), refused while
+     * any of them runs. Viewers of the origin lose it and those of the destination gain it live.
+     */
+    readonly move: (input: ProjectMoveInput) => Effect.Effect<Project, ProjectServiceError>;
+    /**
+     * Permanently deletes every Project and Thread of a Space through their own delete paths, as
+     * deleting an archived Organization does. Retry-safe: a rerun deletes what is left.
+     */
+    readonly deleteSpaceContent: (input: {
+      readonly commandId: CommandId;
+      readonly spaceId: SpaceId;
+    }) => Effect.Effect<void, ProjectServiceError>;
     readonly getById: (
       projectId: ProjectId,
       options?: { readonly includeDeleted?: boolean },
@@ -171,6 +207,7 @@ export class ProjectService extends Context.Service<
 >()("t3/project/ProjectService") {}
 
 export const make = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
   const projects = yield* ProjectStore.ProjectStoreV2;
   const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
   const spaces = yield* SpaceDirectory.SpaceDirectory;
@@ -460,7 +497,7 @@ export const make = Effect.gen(function* () {
   );
 
   const deleteChildThread = Effect.fn("ProjectService.deleteChildThread")(function* (
-    input: ProjectDeleteInput,
+    input: { readonly commandId: CommandId; readonly projectId?: ProjectId },
     threadId: ThreadId,
   ) {
     yield* legacyImporter.ensureTranscript(threadId);
@@ -472,7 +509,10 @@ export const make = Effect.gen(function* () {
       "subagents",
       "providerSessions",
     ]);
-    if (projection.thread.deletedAt !== null || projection.thread.projectId !== input.projectId) {
+    if (
+      projection.thread.deletedAt !== null ||
+      (input.projectId !== undefined && projection.thread.projectId !== input.projectId)
+    ) {
       return;
     }
     const command = {
@@ -575,6 +615,169 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  const listProjectThreads = (projectId: ProjectId) =>
+    sql<{ readonly threadId: ThreadId; readonly title: string }>`
+      SELECT thread_id AS "threadId", title FROM orchestration_v2_projection_threads
+      WHERE project_id = ${projectId} AND deleted_at IS NULL
+      ORDER BY created_at ASC, thread_id ASC
+    `.pipe(
+      Effect.mapError(
+        (cause) => new ProjectOperationError({ operation: "list-threads", projectId, cause }),
+      ),
+    );
+  const threadWork = (threadId: ThreadId, projectId: ProjectId) =>
+    threadProjections
+      .getThreadRecords(threadId, ["runs", "runtimeRequests"], { turnItemTypes: [] })
+      .pipe(
+        Effect.mapError(
+          (cause) => new ProjectOperationError({ operation: "list-threads", projectId, cause }),
+        ),
+      );
+
+  /** Gives one Thread its Project's new Space, unless it started running since the check. */
+  const moveThread = Effect.fn("ProjectService.moveThread")(function* (
+    input: ProjectMoveInput,
+    threadId: ThreadId,
+  ) {
+    const records = yield* threadWork(threadId, input.projectId);
+    const thread = records.thread;
+    if (
+      thread.deletedAt !== null ||
+      thread.projectId !== input.projectId ||
+      thread.spaceId === input.spaceId
+    ) {
+      return false;
+    }
+    if (threadHasUnfinishedWork(records)) {
+      return yield* new ProjectMoveBlockedError({
+        projectId: input.projectId,
+        threadTitles: [thread.title],
+      });
+    }
+    const commandId = CommandId.make(`${input.commandId}:move-thread:${threadId}`);
+    const now = yield* DateTime.now;
+    const id = yield* idAllocator.allocate.event({ threadId, commandId });
+    const committed = yield* eventSink.commitCommand({
+      commandId,
+      commandType: "thread.space.move",
+      threadId,
+      acceptedAt: now,
+      events: [
+        {
+          id,
+          type: "thread.metadata-updated",
+          threadId,
+          providerInstanceId: thread.providerInstanceId,
+          occurredAt: now,
+          payload: { ...thread, spaceId: input.spaceId },
+        },
+      ],
+      effects: [],
+    });
+    if (committed.receipt.status === "rejected") {
+      return yield* Effect.fail(committed.receipt.error ?? "The Thread move was rejected.");
+    }
+    return true;
+  });
+
+  const move: ProjectService["Service"]["move"] = Effect.fn("ProjectService.move")(
+    function* (input) {
+      const { projectId } = input;
+      const existing = yield* readRow(projectId);
+      if (Option.isNone(existing)) return yield* new ProjectNotFoundError({ projectId });
+      const actor = yield* spaces.actingUser;
+      const route = yield* spaces.authorizeProjectMove({
+        actor: Option.getOrUndefined(actor),
+        projectId,
+        spaceId: input.spaceId,
+      });
+      const threads = yield* listProjectThreads(projectId);
+      let moved = false;
+      if (route.from !== route.to) {
+        // Nothing is half-moved: every Thread is idle first (each is checked again as it moves).
+        const running: Array<string> = [];
+        for (const thread of threads) {
+          if (threadHasUnfinishedWork(yield* threadWork(thread.threadId, projectId))) {
+            running.push(thread.title);
+          }
+        }
+        if (running.length > 0) {
+          return yield* new ProjectMoveBlockedError({ projectId, threadTitles: running });
+        }
+        // Spec 3 (Sandboxes) moves the Project's workspace to the destination's Sandbox here.
+        // Audit (ticket 14): `project.move` by the acting User, from `route.from` to `route.to`.
+        yield* commit({
+          type: "project.meta.update",
+          commandId: input.commandId,
+          projectId,
+          spaceId: route.to,
+        });
+        moved = true;
+      }
+      // Threads follow, legacy ones with no Space of their own too. A rerun finishes a move cut
+      // short; Threads created meanwhile were already stamped with the new Space.
+      for (const thread of threads) {
+        const changed = yield* threadCommands
+          .withLock(thread.threadId, moveThread({ ...input, spaceId: route.to }, thread.threadId))
+          .pipe(
+            Effect.mapError((cause) =>
+              isMoveBlocked(cause)
+                ? cause
+                : new ProjectOperationError({ operation: "move-thread", projectId, cause }),
+            ),
+          );
+        moved ||= changed;
+      }
+      if (moved) {
+        yield* spaces
+          .projectMoved(route)
+          .pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("Could not refresh the viewers of a moved Project", { cause }),
+            ),
+          );
+      }
+      return yield* readCommitted(projectId);
+    },
+  );
+
+  const deleteSpaceContent: ProjectService["Service"]["deleteSpaceContent"] = Effect.fn(
+    "ProjectService.deleteSpaceContent",
+  )(function* (input) {
+    const spaceProjects = yield* sql<{ readonly projectId: ProjectId }>`
+      SELECT project_id AS "projectId" FROM projection_projects
+      WHERE space_id = ${input.spaceId} AND deleted_at IS NULL
+    `.pipe(
+      Effect.mapError((cause) => new ProjectOperationError({ operation: "list-projects", cause })),
+    );
+    for (const { projectId } of spaceProjects) {
+      yield* deleteProject({
+        commandId: CommandId.make(`${input.commandId}:project:${projectId}`),
+        projectId,
+        force: true,
+      });
+    }
+    // Threads stamped with the Space whose Project is elsewhere or gone.
+    const leftovers = yield* sql<{ readonly threadId: ThreadId }>`
+      SELECT thread_id AS "threadId" FROM orchestration_v2_projection_threads
+      WHERE space_id = ${input.spaceId} AND deleted_at IS NULL
+    `.pipe(
+      Effect.mapError((cause) => new ProjectOperationError({ operation: "list-threads", cause })),
+    );
+    yield* Effect.forEach(
+      leftovers,
+      ({ threadId }) =>
+        threadCommands
+          .withLock(threadId, deleteChildThread({ commandId: input.commandId }, threadId))
+          .pipe(
+            Effect.mapError(
+              (cause) => new ProjectOperationError({ operation: "delete-thread", cause }),
+            ),
+          ),
+      { concurrency: 1, discard: true },
+    );
+  });
+
   const enrichShell = (shell: OrchestrationProjectShell) =>
     projectEnrichment.getAvailable(shell.workspaceRoot).pipe(
       Effect.map((enrichment) => ({
@@ -655,6 +858,8 @@ export const make = Effect.gen(function* () {
     bootstrap,
     update,
     delete: deleteProject,
+    move,
+    deleteSpaceContent,
     getById,
     getByWorkspaceRoot,
     snapshot,

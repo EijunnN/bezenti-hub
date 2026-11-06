@@ -2,6 +2,7 @@ import {
   EnvironmentAuthenticatedPrincipal,
   EnvironmentHttpApi,
   EnvironmentHttpForbiddenError,
+  type UserId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
@@ -11,7 +12,9 @@ import {
   appendCredentialResponseHeaders,
   failEnvironmentInternal,
 } from "../auth/http.ts";
+import * as CommandActor from "../auth/CommandActor.ts";
 import * as MembershipService from "./MembershipService.ts";
+import * as OrganizationLifecycle from "./OrganizationLifecycle.ts";
 import * as SpaceDirectory from "./SpaceDirectory.ts";
 
 const requireUser = Effect.gen(function* () {
@@ -23,6 +26,12 @@ const requireUser = Effect.gen(function* () {
 });
 
 const failStorage = (cause: unknown) => failEnvironmentInternal("spaces_failed", cause);
+
+const lifecycleFailures = {
+  OrganizationRefusedError: (error: OrganizationLifecycle.OrganizationRefusedError) =>
+    Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+  OrganizationStorageError: failStorage,
+};
 
 const membershipFailures = {
   MembershipRefusedError: (error: MembershipService.MembershipRefusedError) =>
@@ -36,6 +45,17 @@ export const layer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const spaces = yield* SpaceDirectory.SpaceDirectory;
     const memberships = yield* MembershipService.MembershipService;
+    const lifecycle = yield* OrganizationLifecycle.OrganizationLifecycle;
+    // Stopping and deleting Threads acts as the Owner who asked.
+    const runLifecycle = Effect.fnUntraced(function* (
+      change: (actor: UserId) => ReturnType<typeof lifecycle.archive>,
+    ) {
+      const actor = yield* requireUser;
+      return yield* change(actor).pipe(
+        CommandActor.actAs(actor),
+        Effect.catchTags(lifecycleFailures),
+      );
+    });
     return handlers
       .handle(
         "list",
@@ -109,6 +129,27 @@ export const layer = HttpApiBuilder.group(
               userId: args.payload.userId,
             })
             .pipe(Effect.catchTags(membershipFailures));
+        }),
+      )
+      .handle(
+        "archiveOrganization",
+        Effect.fn("environment.spaces.archiveOrganization")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          return yield* runLifecycle((actor) => lifecycle.archive(actor, args.params.spaceId));
+        }),
+      )
+      .handle(
+        "restoreOrganization",
+        Effect.fn("environment.spaces.restoreOrganization")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          return yield* runLifecycle((actor) => lifecycle.restore(actor, args.params.spaceId));
+        }),
+      )
+      .handle(
+        "deleteOrganization",
+        Effect.fn("environment.spaces.deleteOrganization")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          return yield* runLifecycle((actor) => lifecycle.delete(actor, args.params.spaceId));
         }),
       )
       .handle(

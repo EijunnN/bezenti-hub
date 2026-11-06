@@ -285,10 +285,39 @@ client-chosen id names an existing Thread fails before anything is provisioned,
 alike for hidden and visible Threads, and Pull Request
 calls routed by repository see only visible Projects (`RequestVisibility`).
 
+An Organization's lifecycle is the Owner's
+([OrganizationLifecycle](../../apps/server/src/spaces/OrganizationLifecycle.ts)).
+Archiving sets `archived_at` and, like a removal, marks its Members'
+`access_narrowed_through` and closes their sockets, so their shells resume without
+it; it then stops the Organization's running Threads as the Owner (the Sandbox stop
+of spec 3 goes there too). Scheduled tasks whose Project or Thread is in an archived
+Space skip their runs (manual and webhook runs are refused), and every create or
+continue there is refused by the policy. Restoring clears `archived_at` and
+publishes on the Members' access-change hubs, so open shells reload with it. Delete
+is refused unless archived: it deletes the Organization's Projects (with their
+Threads) and leftover Threads through `ProjectService`'s event-sourced delete paths,
+with command ids fixed per Organization so a retry replays, then removes its
+Memberships, Invitations and row in one transaction.
+
+Moving a Project (`project.move` in the project mutation) is decided on both
+Spaces: the mover runs the origin and the destination (Admin of an Organization, or
+the User of a Personal space). The Owner moves anything except into or out of
+another User's Personal space, other than out of a removed User's frozen one.
+Nothing moves into an archived or frozen Space. `ProjectService.move` refuses while
+any of its Threads has unfinished work (`ProjectMoveBlockedError` names them),
+records the Project's new `spaceId` on a `project.meta-updated` event, then gives
+each Thread the new Space with a `thread.metadata-updated` event under its lock,
+checking again that it is idle. Afterwards `SpaceDirectory.projectMoved` bumps
+`revision`, marks who lost it as narrowed and publishes on every viewer's
+access-change hub, so the origin's open shells drop it and the destination's gain
+it. A rerun of an interrupted move finishes its Threads.
+
 Spaces are read and Organizations created over HTTP (`/api/spaces`), beside the
 account endpoints, rather than as guarded WS commands: creating an Organization
 depends on who the User is, not on a session scope, so clients show controls from
-the server's `canCreateOrganization`, `canCreateThreads` and `canInvite` answers.
+the server's `canCreateOrganization`, `canCreateThreads`, `canInvite`,
+`canMoveProjectsOut` and `canMoveProjectsIn` answers; archived Organizations are
+listed (marked `archived`) only to the Owner.
 Per-Thread controls come from `threadRolePermissions` in the client runtime, which
 mirrors the policy from the directory's Roles and `isOwner`; the server stays the
 judge.

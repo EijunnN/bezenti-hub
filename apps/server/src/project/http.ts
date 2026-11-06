@@ -24,7 +24,7 @@ import { mutateProjectWithClone } from "./ProjectMutation.ts";
 const failProjectMutation = Effect.fn("environment.projects.failMutation")(function* (
   cause: ProjectService.ProjectServiceError | ServerRuntimeStartup.ServerRuntimeStartupError,
 ) {
-  if (cause._tag === "SpaceAccessDeniedError") {
+  if (cause._tag === "SpaceAccessDeniedError" || cause._tag === "ProjectMoveBlockedError") {
     return yield* new EnvironmentHttpForbiddenError({ message: cause.message });
   }
   if (

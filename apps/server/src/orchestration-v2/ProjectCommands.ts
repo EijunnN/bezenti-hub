@@ -43,6 +43,8 @@ export interface ProjectMetaUpdateCommand {
   readonly scripts?: ReadonlyArray<ProjectScript>;
   readonly pinned?: boolean;
   readonly archived?: boolean;
+  /** Another Space, once the move was authorized and its Threads are idle. */
+  readonly spaceId?: SpaceId;
 }
 
 export interface ProjectDeleteCommand {
@@ -223,6 +225,7 @@ export function planProjectCommand(input: {
           ...(command.archived === undefined
             ? {}
             : { archivedAt: command.archived ? (project.archivedAt ?? occurredAt) : null }),
+          ...(command.spaceId === undefined ? {} : { spaceId: command.spaceId }),
           updatedAt: occurredAt,
         },
       });

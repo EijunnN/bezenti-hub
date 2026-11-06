@@ -83,6 +83,28 @@ const linusAs = (nextRole?: SpaceRole) =>
 const otherAdmin = (nextRole?: SpaceRole) =>
   membership("hedy", "admin", nextRole === undefined ? {} : { nextRole });
 
+const otherOrganization: AccessPolicy.SpaceResource = { ...organization, id: OTHER_ORG };
+const move = (
+  from: AccessPolicy.SpaceResource,
+  to: AccessPolicy.SpaceResource,
+): AccessPolicy.MoveResource => ({ kind: "move", from, to });
+const adminOfBoth = principal("ada", {
+  roles: [
+    [ORG, "admin"],
+    [OTHER_ORG, "admin"],
+  ],
+});
+const adminHereMemberThere = principal("ada", {
+  roles: [
+    [ORG, "admin"],
+    [OTHER_ORG, "member"],
+  ],
+});
+const personalAdmin = principal("grace", {
+  roles: [[ORG, "admin"]],
+  permissions: ["personalSpace.create"],
+});
+
 const allow = AccessPolicy.allow;
 const deny = AccessPolicy.deny;
 
@@ -705,6 +727,181 @@ const rows: ReadonlyArray<
     "installationPermission.manage",
     AccessPolicy.installation,
     deny("owner-only"),
+  ],
+
+  // An Organization's lifecycle is the Owner's: archive, restore, and delete once archived.
+  ["the Owner archives an Organization", owner, "organization.archive", organization, allow],
+  [
+    "the Owner restores an archived Organization",
+    owner,
+    "organization.restore",
+    archivedOrganization,
+    allow,
+  ],
+  [
+    "the Owner deletes an archived Organization",
+    owner,
+    "organization.delete",
+    archivedOrganization,
+    allow,
+  ],
+  [
+    "not even the Owner deletes an Organization that is not archived",
+    owner,
+    "organization.delete",
+    organization,
+    deny("not-archived"),
+  ],
+  ["an Admin cannot archive", admin, "organization.archive", organization, deny("owner-only")],
+  [
+    "an Admin cannot restore",
+    admin,
+    "organization.restore",
+    archivedOrganization,
+    deny("owner-only"),
+  ],
+  [
+    "an Admin cannot delete",
+    admin,
+    "organization.delete",
+    archivedOrganization,
+    deny("owner-only"),
+  ],
+  [
+    "a Personal space is not archived like an Organization",
+    owner,
+    "organization.archive",
+    personalOf("grace"),
+    deny("wrong-resource"),
+  ],
+
+  // Moving a Project: Admin (or its Personal space's User) in the origin and in the destination.
+  [
+    "an Admin of both moves between them",
+    adminOfBoth,
+    "project.move",
+    move(organization, otherOrganization),
+    allow,
+  ],
+  [
+    "an Admin of the origin who is a Member of the destination cannot",
+    adminHereMemberThere,
+    "project.move",
+    move(organization, otherOrganization),
+    deny("role-not-allowed"),
+  ],
+  [
+    "a Member of the origin cannot, even as Admin of the destination",
+    adminHereMemberThere,
+    "project.move",
+    move(otherOrganization, organization),
+    deny("role-not-allowed"),
+  ],
+  [
+    "nobody moves into an Organization they are not in",
+    admin,
+    "project.move",
+    move(organization, otherOrganization),
+    deny("not-a-member"),
+  ],
+  [
+    "a User moves their Project from their Personal space into an Organization they run",
+    personalAdmin,
+    "project.move",
+    move(personalOf("grace"), organization),
+    allow,
+  ],
+  ["and back", personalAdmin, "project.move", move(organization, personalOf("grace")), allow],
+  [
+    "not from a Personal space they may not use",
+    principal("grace", { roles: [[ORG, "admin"]] }),
+    "project.move",
+    move(personalOf("grace"), organization),
+    deny("missing-installation-permission"),
+  ],
+  [
+    "not out of someone else's Personal space",
+    admin,
+    "project.move",
+    move(personalOf("grace"), organization),
+    deny("not-your-personal-space"),
+  ],
+  [
+    "the Owner moves between Organizations",
+    owner,
+    "project.move",
+    move(organization, otherOrganization),
+    allow,
+  ],
+  [
+    "the Owner moves out of their own Personal space",
+    owner,
+    "project.move",
+    move(personalOf("owner"), organization),
+    allow,
+  ],
+  [
+    "not even the Owner moves into another User's Personal space",
+    owner,
+    "project.move",
+    move(organization, personalOf("grace")),
+    deny("personal-space-read-only"),
+  ],
+  [
+    "not even the Owner moves out of another User's Personal space",
+    owner,
+    "project.move",
+    move(personalOf("grace"), organization),
+    deny("personal-space-read-only"),
+  ],
+  [
+    "the Owner moves out of a removed User's frozen Personal space, which was handed to them",
+    owner,
+    "project.move",
+    move({ ...personalOf("grace"), frozen: true }, organization),
+    allow,
+  ],
+  [
+    "nobody moves into a frozen Personal space",
+    owner,
+    "project.move",
+    move(organization, { ...personalOf("owner"), frozen: true }),
+    deny("space-frozen"),
+  ],
+  [
+    "nobody moves into an archived Organization",
+    owner,
+    "project.move",
+    move(otherOrganization, archivedOrganization),
+    deny("space-archived"),
+  ],
+  [
+    "the Owner rescues a Project from an archived Organization",
+    owner,
+    "project.move",
+    move(archivedOrganization, otherOrganization),
+    allow,
+  ],
+  [
+    "an Admin cannot move out of an archived Organization",
+    adminOfBoth,
+    "project.move",
+    move(archivedOrganization, otherOrganization),
+    deny("space-archived"),
+  ],
+  [
+    "a move to the same Space is no move",
+    owner,
+    "project.move",
+    move(organization, organization),
+    deny("wrong-resource"),
+  ],
+  [
+    "a move is decided on its origin and destination",
+    owner,
+    "project.move",
+    organization,
+    deny("wrong-resource"),
   ],
 ];
 

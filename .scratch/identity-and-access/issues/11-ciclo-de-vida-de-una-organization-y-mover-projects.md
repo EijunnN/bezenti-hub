@@ -4,11 +4,11 @@
 
 **Blocked by:** 08, 10
 
-**Status:** ready-for-agent
+**Status:** done
 
 Spec: ../spec.md
 
-- [ ] Archivar, restaurar y borrar definitivamente una Organization, con el borrado solo desde archivada.
-- [ ] Mover Project con comprobación de origen y destino en `AccessPolicy`.
-- [ ] Mover rechaza un Project con Threads en curso y lo indica.
-- [ ] Tests de frontera para archivar/restaurar y para mover.
+- [x] Archivar, restaurar y borrar definitivamente una Organization, con el borrado solo desde archivada.
+- [x] Mover Project con comprobación de origen y destino en `AccessPolicy`.
+- [x] Mover rechaza un Project con Threads en curso y lo indica.
+- [x] Tests de frontera para archivar/restaurar y para mover.
