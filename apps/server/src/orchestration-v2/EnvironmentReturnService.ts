@@ -56,6 +56,7 @@ export const layer: Layer.Layer<
     // The server provides these; orchestration-only hosts join no machines.
     const environments = yield* Effect.serviceOption(EnvironmentRegistry.EnvironmentRegistry);
     const remote = yield* Effect.serviceOption(RemoteEnvironments.RemoteEnvironments);
+    const repositories = yield* Effect.serviceOption(HubRepository.HubRepositories);
     const scope = yield* Effect.scope;
 
     const logged =
@@ -161,9 +162,15 @@ export const layer: Layer.Layer<
       for (const [threadId, known] of yield* formerThreads(environmentId)) {
         yield* Effect.gen(function* () {
           const thread = yield* projections.getThread(threadId);
-          // Its worktree there, else the Project's checkout, unless another Thread works in it.
+          // A Thread without a Project uses its own Hub repository, never the Project's.
+          const repository = Option.isNone(repositories)
+            ? undefined
+            : Option.getOrUndefined(yield* repositories.value.threads.repositoryOfThread(threadId));
+          // Its worktree (or own folder) there, else the Project's checkout, unless another
+          // Thread works in it; a Thread without a Project never falls back to a shared folder.
           const worktree = thread.move?.knownWorktrees?.[environmentId];
           let cwd = worktree;
+          if (cwd === undefined && repository?.scratch !== undefined) return;
           if (cwd === undefined) {
             const checkout = yield* executor.workspace.paths.checkout(thread.projectId);
             if (Option.isNone(checkout)) return;
@@ -184,6 +191,9 @@ export const layer: Layer.Layer<
             cwd,
             projectId: thread.projectId,
             threadId,
+            ...(repository?.key.scratchThreadId === undefined
+              ? {}
+              : { scratchThreadId: repository.key.scratchThreadId }),
             baseRef: known.baseRef === null ? null : CheckpointRef.make(known.baseRef),
             recoveredRef,
           });

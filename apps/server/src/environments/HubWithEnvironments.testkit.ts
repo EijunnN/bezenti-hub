@@ -40,6 +40,7 @@ import * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as ServerConfig from "../config.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
+import { scratchRootOf } from "../environment/ScratchWorkspace.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as McpSessionRegistryTestkit from "../mcp/McpSessionRegistry.testkit.ts";
 import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
@@ -405,22 +406,38 @@ export const seedProject = Effect.fn("HubWithEnvironments.seedProject")(function
     readonly defaultModelSelection: ModelSelection | null;
     /** Its Space; none is a Project from before Spaces, in the Owner's Personal space. */
     readonly spaceId?: SpaceId;
+    /**
+     * The Hub's scratch Project instead, where Threads without a Project live: its workspace root
+     * is the Hub's scratch folder, with no repository of its own.
+     */
+    readonly scratch?: boolean;
   },
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const workspaceRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-hub-project-" });
-  const git = (...args: ReadonlyArray<string>) =>
-    Effect.flatMap(VcsProcess.VcsProcess, (vcs) =>
-      vcs.run({ operation: "HubWithEnvironments.git", command: "git", args, cwd: workspaceRoot }),
-    ).pipe(Effect.provide(VcsProcess.layer), Effect.orDie);
-  yield* git("init", "--initial-branch=main");
-  yield* git("config", "user.email", "hub@example.com");
-  yield* git("config", "user.name", "Hub");
-  yield* fs.writeFileString(path.join(workspaceRoot, "README.md"), "# Remote project\n");
-  yield* git("add", "README.md");
-  yield* git("commit", "-m", "Initial commit");
-  yield* git("remote", "add", "origin", workspaceRoot);
+  let workspaceRoot: string;
+  if (input.scratch === true) {
+    const config = Context.get(
+      server.services as unknown as Context.Context<ServerConfig.ServerConfig>,
+      ServerConfig.ServerConfig,
+    );
+    workspaceRoot = scratchRootOf(path, config.baseDir);
+    yield* fs.makeDirectory(workspaceRoot, { recursive: true }).pipe(Effect.orDie);
+  } else {
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-hub-project-" });
+    workspaceRoot = root;
+    const git = (...args: ReadonlyArray<string>) =>
+      Effect.flatMap(VcsProcess.VcsProcess, (vcs) =>
+        vcs.run({ operation: "HubWithEnvironments.git", command: "git", args, cwd: root }),
+      ).pipe(Effect.provide(VcsProcess.layer), Effect.orDie);
+    yield* git("init", "--initial-branch=main");
+    yield* git("config", "user.email", "hub@example.com");
+    yield* git("config", "user.name", "Hub");
+    yield* fs.writeFileString(path.join(root, "README.md"), "# Remote project\n");
+    yield* git("add", "README.md");
+    yield* git("commit", "-m", "Initial commit");
+    yield* git("remote", "add", "origin", root);
+  }
   const projects = Context.get(
     server.services as unknown as Context.Context<ProjectStore.ProjectStoreV2>,
     ProjectStore.ProjectStoreV2,

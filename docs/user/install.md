@@ -520,6 +520,15 @@ a later release. If a step fails, the Thread stays on the machine it was on and
 the dialog says which step failed and why. Only one move of a Thread runs at a
 time, only the Thread's creator can move it, and the audit log records each move.
 
+A Thread without a project works the same way. It can start on a joined machine,
+in its own folder there (under the machine's `projects/scratch`), and its
+checkpoints go to a repository on the Hub of that Thread alone, which only the
+machine running it can reach. Moving it takes its folder to the new machine,
+with its branches and commits, and with no worktree and no setup script. Git
+repositories nested inside the folder don't move, and the timeline says which.
+Whatever the new machine's old copy of the folder had is kept under a
+`refs/t3/recovered/...` ref, in that folder and on the Hub.
+
 ### When a machine goes away
 
 If a Thread's machine drops while a turn runs, the Thread's header, its sidebar row

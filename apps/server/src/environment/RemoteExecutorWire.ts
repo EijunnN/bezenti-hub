@@ -76,6 +76,8 @@ import {
   MovePrepareResult,
   MoveRecoverInput,
   MoveRecoverResult,
+  MovePublishScratchInput,
+  MovePublishScratchResult,
 } from "./MovedWorkspace.ts";
 
 const RuntimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy;
@@ -101,8 +103,14 @@ export type WireMcpCredential = typeof WireMcpCredential.Type;
 export const WireCheckout = Schema.Struct({
   path: Schema.String,
   cloneUrl: Schema.NullOr(Schema.String),
+  /** A Thread without a Project: `path` is its scratch workspace, made (with git) when missing. */
+  scratch: Schema.optionalKey(Schema.Boolean),
   hubRefs: Schema.optionalKey(
-    Schema.Struct({ projectId: ProjectId, refs: Schema.Array(CheckpointRef) }),
+    Schema.Struct({
+      projectId: ProjectId,
+      scratchThreadId: Schema.optionalKey(ThreadId),
+      refs: Schema.Array(CheckpointRef),
+    }),
   ),
 });
 export type WireCheckout = typeof WireCheckout.Type;
@@ -235,6 +243,8 @@ const DiffInput = Schema.Struct({
 const HubRepositoryTransfer = Schema.Struct({
   cwd: Schema.String,
   projectId: ProjectId,
+  /** The Thread without a Project whose own repository this is (`/api/git/thread/<id>`). */
+  scratchThreadId: Schema.optionalKey(ThreadId),
   checkpointRefs: Schema.Array(CheckpointRef),
 });
 
@@ -384,12 +394,19 @@ export const REMOTE_OPERATIONS = {
   ),
   "checkpoint.push": checkpoint(HubRepositoryTransfer, Schema.Void),
   "checkpoint.fetch": checkpoint(HubRepositoryTransfer, Schema.Void),
+  // A Thread without a Project's folder made before folders got git: it gets its repository.
+  "checkpoint.ensureScratch": checkpoint(Schema.Struct({ folder: Schema.String }), Schema.Void),
+  // A Thread without a Project leaves: its folder's branches and HEAD, as refs to push.
+  "move.publishScratch": checkpoint(MovePublishScratchInput, MovePublishScratchResult),
   // Moving a Thread here: the checkout (cloned when missing) fetches what the Thread continues
   // from, then the Thread's branch or worktree is made over it and the setup script runs.
   "move.fetch": checkpoint(
     Schema.Struct({
       checkout: WireCheckout,
       projectId: ProjectId,
+      scratchThreadId: Schema.optionalKey(ThreadId),
+      /** A Thread without a Project: where its folder's own history is, fetched too. */
+      scratchHistory: Schema.optionalKey(Schema.String),
       refs: Schema.Array(CheckpointRef),
     }),
     MoveFetchResult,

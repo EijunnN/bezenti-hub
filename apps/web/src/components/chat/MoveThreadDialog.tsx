@@ -22,8 +22,10 @@ import {
   environmentUnavailableReason,
   useHubEnvironments,
 } from "~/environments/primary/useHubEnvironments";
+import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
-import { useThreadShell } from "~/state/entities";
+import { readProject, useThreadShell } from "~/state/entities";
+import { environmentServerConfigsAtom } from "~/state/server";
 import { threadEnvironment } from "~/state/threads";
 import { useOrchestrationCommand } from "~/state/use-orchestration-command";
 import { EnvironmentStatusDot } from "../EnvironmentStatusDot";
@@ -160,6 +162,14 @@ function MoveThreadDialog({
   const [ifRunning, setIfRunning] = useState<"wait" | "stop">("wait");
   const [send, setSend] = useState<SendState>({ status: "idle" });
 
+  const serverConfig = useAtomValue(environmentServerConfigsAtom).get(threadRef.environmentId);
+  const project =
+    thread === null
+      ? null
+      : readProject({ environmentId: threadRef.environmentId, projectId: thread.projectId });
+  // A Thread without a Project moves its own folder: no worktree, no setup script.
+  const withoutProject =
+    project !== null && isScratchProject(project, serverConfig?.scratchWorkspaceRoot);
   const sourceId = thread?.activeEnvironmentId;
   const sourceName = nameOf(environments, sourceId);
   const currentMove = thread?.move ?? null;
@@ -227,19 +237,18 @@ function MoveThreadDialog({
           {sourceId === null && shownMove === null ? (
             <DialogDescription>
               The machine this Thread ran on was removed. The Thread keeps its history and goes on
-              on the machine you choose, from the last checkpoint it uploaded: the new machine
-              fetches it into a worktree of the Thread&apos;s own, with its branch, and runs the
-              Project&apos;s setup script there.
+              on the machine you choose, from the last checkpoint it uploaded.
             </DialogDescription>
           ) : (
             <DialogDescription>
               The Thread keeps its history and goes on running on the machine you choose. If{" "}
               {movedFromName} is online, it first uploads a final checkpoint with any changes made
-              by hand. The new machine fetches it into a worktree of the Thread&apos;s own, with its
-              branch, and runs the Project&apos;s setup script there, which also rebuilds ignored
-              files such as dependencies. If {movedFromName} is offline, the Thread continues from
-              the last checkpoint it uploaded, and changes it kept are put on a separate branch when
-              it comes back.
+              by hand.{" "}
+              {withoutProject
+                ? "The new machine fetches it into the Thread's own folder there, with the folder's branches; repositories nested in the folder stay behind."
+                : "The new machine fetches it into a worktree of the Thread's own, with its branch, and runs the Project's setup script there, which also rebuilds ignored files such as dependencies."}{" "}
+              If {movedFromName} is offline, the Thread continues from the last checkpoint it
+              uploaded, and changes it kept are put on a separate branch when it comes back.
             </DialogDescription>
           )}
         </DialogHeader>

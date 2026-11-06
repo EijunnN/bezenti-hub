@@ -58,6 +58,11 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
+import * as Path from "effect/Path";
+import * as SqlClient from "effect/sql/SqlClient";
+
+import * as ServerConfig from "../config.ts";
+import { makeScratchThreads } from "../environment/ScratchWorkspace.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -626,6 +631,21 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
   // Which machines are connected right now; absent on hosts that run nothing remote.
   const executors = yield* Effect.serviceOption(EnvironmentExecutor.EnvironmentExecutorRegistry);
+  // A Thread without a Project works in its own scratch folder, which any Environment makes.
+  const scratchThreads = Option.map(
+    Option.all({
+      config: yield* Effect.serviceOption(ServerConfig.ServerConfig),
+      path: yield* Effect.serviceOption(Path.Path),
+      sql: yield* Effect.serviceOption(SqlClient.SqlClient),
+    }),
+    ({ config, path, sql }) => makeScratchThreads({ sql, path, baseDir: config.baseDir }),
+  );
+  const isScratchWorkspace = (projectId: ProjectId, worktreePath: string) =>
+    Option.match(scratchThreads, {
+      onNone: () => Effect.succeed(false),
+      onSome: (threads) =>
+        threads.isScratchFolder(projectId, worktreePath).pipe(Effect.orElseSucceed(() => false)),
+    });
 
   const assertProviderInstanceEnabled: ThreadManagementServiceShape["assertProviderInstanceEnabled"] =
     (input) =>
@@ -851,17 +871,26 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
         providerInstanceId: command.modelSelection.instanceId,
       })
       .pipe(
-        Effect.flatMap((activeEnvironmentId) =>
-          // Worktrees are still made on the Hub machine only.
-          activeEnvironmentId !== HUB_MACHINE_ENVIRONMENT_ID && command.worktreePath !== null
-            ? Effect.fail(
-                new EnvironmentRegistry.ThreadEnvironmentUnavailableError({
-                  environmentId: activeEnvironmentId,
-                  reason: "worktree-unsupported",
-                }),
-              )
-            : Effect.succeed({ ...command, activeEnvironmentId }),
-        ),
+        Effect.flatMap((activeEnvironmentId) => {
+          const placed = Effect.succeed({ ...command, activeEnvironmentId });
+          const worktreePath = command.worktreePath;
+          if (activeEnvironmentId === HUB_MACHINE_ENVIRONMENT_ID || worktreePath === null) {
+            return placed;
+          }
+          // Worktrees are still made on the Hub machine only; a scratch folder anywhere.
+          return isScratchWorkspace(command.projectId, worktreePath).pipe(
+            Effect.flatMap((scratch) =>
+              scratch
+                ? placed
+                : Effect.fail(
+                    new EnvironmentRegistry.ThreadEnvironmentUnavailableError({
+                      environmentId: activeEnvironmentId,
+                      reason: "worktree-unsupported",
+                    }),
+                  ),
+            ),
+          );
+        }),
         Effect.mapError(reject),
       );
   };

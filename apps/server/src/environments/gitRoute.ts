@@ -1,9 +1,9 @@
 /**
- * `/api/git/<projectId>`: the Hub repository over git smart HTTP, relayed to `git http-backend`.
- * The Environment credential is checked on every request, and a machine sees and writes only the
+ * `/api/git/<projectId>` and `/api/git/thread/<threadId>` (a Thread without a Project): the Hub
+ * repository over git smart HTTP, relayed to `git http-backend`. A machine sees and writes only the
  * refs of Threads it runs, in Projects where its owner may start Threads; nobody deletes.
  */
-import { EnvironmentId, ProjectId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Config from "effect/Config";
 import * as Digest from "effect/crypto/Digest";
@@ -188,17 +188,27 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
   const request = yield* HttpServerRequest.HttpServerRequest;
   const url = requestUrl(request);
   if (Option.isNone(url)) return HttpServerResponse.text("Bad Request", { status: 400 });
-  const [encodedProjectId, ...rest] = url.value.pathname
+  const serviceOf = (endpoint: string) => {
+    const service =
+      endpoint === "info/refs" && request.method === "GET"
+        ? url.value.searchParams.get("service")
+        : request.method === "POST"
+          ? endpoint
+          : null;
+    return service !== null && SERVICES.has(service) ? service : null;
+  };
+  // `<projectId>/<endpoint>`, or `thread/<threadId>/<endpoint>` for a Thread's own repository.
+  const segments = url.value.pathname
     .slice(HubRepository.HUB_REPOSITORY_ROUTE_PREFIX.length + 1)
     .split("/");
+  const asThread =
+    segments[0] === HubRepository.THREAD_REPOSITORY_SEGMENT &&
+    segments.length >= 3 &&
+    serviceOf(segments.slice(2).join("/")) !== null;
+  const [encodedId, ...rest] = asThread ? segments.slice(1) : segments;
   const endpoint = rest.join("/");
-  const service =
-    endpoint === "info/refs" && request.method === "GET"
-      ? url.value.searchParams.get("service")
-      : request.method === "POST"
-        ? endpoint
-        : null;
-  if (encodedProjectId === undefined || service === null || !SERVICES.has(service)) {
+  const service = serviceOf(endpoint);
+  if (encodedId === undefined || encodedId.length === 0 || service === null) {
     return HttpServerResponse.text("Not Found", { status: 404 });
   }
   if (!isSecureEnvironmentTransport(request)) {
@@ -213,7 +223,41 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
   if (contentLength !== undefined && Number(contentLength) > deps.maxRequestBytes) {
     return HttpServerResponse.text("Payload Too Large", { status: 413 });
   }
-  const projectId = ProjectId.make(decodeURIComponent(encodedProjectId));
+  const decodedId = yield* Effect.try({
+    try: () => decodeURIComponent(encodedId),
+    catch: () => new HubRepositoryHttpError({ detail: "The repository name is not valid." }),
+  }).pipe(Effect.option);
+  if (Option.isNone(decodedId)) return HttpServerResponse.text("Not Found", { status: 404 });
+  // A Thread's own repository is that of a Thread without a Project; a Project's is any other's.
+  const { threads } = deps.repositories;
+  const resolved = yield* Effect.result(
+    asThread
+      ? threads.repositoryOfThread(ThreadId.make(decodedId.value)).pipe(
+          Effect.map((found) =>
+            Option.filter(
+              Option.map(found, (entry) => entry.key),
+              (entry) => entry.scratchThreadId !== undefined,
+            ),
+          ),
+        )
+      : // The scratch Project's Threads each have their own repository, never a shared one.
+        threads.isScratchProject(ProjectId.make(decodedId.value)).pipe(
+          Effect.map((scratch) =>
+            scratch
+              ? Option.none<HubRepository.HubRepositoryKey>()
+              : Option.some<HubRepository.HubRepositoryKey>({
+                  projectId: ProjectId.make(decodedId.value),
+                }),
+          ),
+        ),
+  );
+  // Which repository it is could not be read: the machine tries again, nothing goes elsewhere.
+  if (resolved._tag === "Failure") {
+    return HttpServerResponse.text("Service Unavailable", { status: 503 });
+  }
+  const key = resolved.success;
+  if (Option.isNone(key)) return HttpServerResponse.text("Not Found", { status: 404 });
+  const { projectId } = key.value;
   const project = yield* deps.projects.get(projectId).pipe(Effect.orElseSucceed(Option.none));
   if (Option.isNone(project)) return HttpServerResponse.text("Not Found", { status: 404 });
   // The machine works for its owner only: in Spaces where they may start Threads.
@@ -225,8 +269,12 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
     );
   if (!allowed) return HttpServerResponse.text("Forbidden", { status: 403 });
 
-  const prefixes = yield* refPrefixesFor(deps, projectId, check.environmentId);
-  yield* deps.repositories.ensure(projectId);
+  const prefixes = yield* refPrefixesFor(deps, key.value, check.environmentId);
+  // A Thread's own repository is only for the machine that runs it (or the target of its move).
+  if (key.value.scratchThreadId !== undefined && prefixes.readable.length === 0) {
+    return HttpServerResponse.text("Forbidden", { status: 403 });
+  }
+  yield* deps.repositories.ensure(key.value);
   const contentType = request.headers["content-type"];
   const contentEncoding = request.headers["content-encoding"];
   const gitProtocol = request.headers["git-protocol"];
@@ -247,7 +295,7 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
     ]),
     GIT_PROJECT_ROOT: deps.repositories.root,
     GIT_HTTP_EXPORT_ALL: "1",
-    PATH_INFO: `/${deps.repositories.directoryOf(projectId)}/${endpoint}`,
+    PATH_INFO: `/${deps.repositories.directoryOf(key.value)}/${endpoint}`,
     REQUEST_METHOD: request.method,
     QUERY_STRING: url.value.search.slice(1),
     REMOTE_USER: check.environmentId,
@@ -366,9 +414,14 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
  */
 const refPrefixesFor = Effect.fn("HubRepositoryHttp.refPrefixesFor")(function* (
   deps: { readonly sql: SqlClient.SqlClient; readonly digest: Digest.Digest["Service"] },
-  projectId: ProjectId,
+  key: HubRepository.HubRepositoryKey,
   environmentId: EnvironmentId,
 ) {
+  // A Thread's own repository holds that Thread's refs only.
+  const repositoryThreads =
+    key.scratchThreadId === undefined
+      ? deps.sql`thread.project_id = ${key.projectId}`
+      : deps.sql`thread.thread_id = ${key.scratchThreadId}`;
   const rows = yield* deps.sql<{
     readonly threadId: string;
     readonly scopeId: string | null;
@@ -379,7 +432,7 @@ const refPrefixesFor = Effect.fn("HubRepositoryHttp.refPrefixesFor")(function* (
     FROM orchestration_v2_projection_threads thread
     LEFT JOIN orchestration_v2_projection_checkpoint_scopes scope
       ON scope.thread_id = thread.thread_id
-    WHERE thread.project_id = ${projectId}
+    WHERE ${repositoryThreads}
       AND (
         thread.active_environment_id = ${environmentId}
         OR (
@@ -403,6 +456,8 @@ const refPrefixesFor = Effect.fn("HubRepositoryHttp.refPrefixesFor")(function* (
       readable.add(prefix);
       if (row.active === 1) writable.add(prefix);
     }
+    // The target of a move uploads what it sets aside of its own before the Thread is its own.
+    writable.add(HubRepository.threadRefPrefixes(row.threadId)[1]);
   }
   // Threads that moved away from this machine and run elsewhere now: it may only hand over the
   // changes it still had for them (`RecoveredChanges`), one new ref each time, and read nothing.
@@ -410,7 +465,7 @@ const refPrefixesFor = Effect.fn("HubRepositoryHttp.refPrefixesFor")(function* (
     SELECT DISTINCT thread.thread_id AS "threadId"
     FROM orchestration_v2_projection_threads thread
     JOIN orchestration_v2_projection_turn_items item ON item.thread_id = thread.thread_id
-    WHERE thread.project_id = ${projectId}
+    WHERE ${repositoryThreads}
       AND thread.deleted_at IS NULL
       AND (thread.active_environment_id IS NULL OR thread.active_environment_id != ${environmentId})
       AND item.type = 'environment_move'

@@ -47,6 +47,7 @@ import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import * as HubRepository from "../checkpointing/HubRepository.ts";
+import * as ScratchWorkspace from "../environment/ScratchWorkspace.ts";
 import * as ServerConfig from "../config.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import {
@@ -273,10 +274,22 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
       ),
     );
 
-  /** The Project's checkout: used where it is, else cloned from the Project's own remote. */
+  /**
+   * The Project's checkout: used where it is, else cloned from the Project's own remote. A Thread
+   * without a Project's scratch workspace is made empty instead, as its own git repository.
+   */
   const ensureCheckout = Effect.fn("EnvironmentAgent.ensureCheckout")(function* (
     checkout: WireCheckout,
   ) {
+    if (checkout.scratch === true) {
+      if (Option.isNone(vcs)) {
+        return yield* Effect.fail(`This machine cannot make the folder ${checkout.path}.`);
+      }
+      return yield* ScratchWorkspace.ensureScratchRepository(
+        { vcs: vcs.value, fileSystem, path: NodePath },
+        checkout.path,
+      ).pipe(Effect.mapError((cause) => cause.message));
+    }
     if (yield* fileSystem.exists(checkout.path).pipe(Effect.orElseSucceed(() => false))) return;
     if (checkout.cloneUrl === null || Option.isNone(vcs)) {
       return yield* Effect.fail(
@@ -308,10 +321,10 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
     remoteOf:
       credential === undefined
         ? undefined
-        : (projectId) =>
+        : (key) =>
             Effect.succeed(
               HubRepository.withEnvironmentCredential(
-                HubRepository.hubRepositoryUrl(input.hubUrl, projectId),
+                HubRepository.hubRepositoryUrl(input.hubUrl, key),
                 credential,
               ),
             ),
@@ -390,7 +403,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
         yield* hubRepository
           .fetch({
             cwd: request.checkout.path,
-            projectId: hubRefs.projectId,
+            ...HubRepository.keyOf(hubRefs),
             checkpointRefs: hubRefs.refs,
           })
           .pipe(
@@ -730,6 +743,12 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
         return hubRepository.push(request as RemoteInput<"checkpoint.push">);
       case "checkpoint.fetch":
         return hubRepository.fetch(request as RemoteInput<"checkpoint.fetch">);
+      case "checkpoint.ensureScratch":
+        return local.workspace.hubRepository.ensureScratch(
+          (request as RemoteInput<"checkpoint.ensureScratch">).folder,
+        );
+      case "move.publishScratch":
+        return local.workspace.move.publishScratch(request as RemoteInput<"move.publishScratch">);
       // A Thread moves here: its checkout (cloned when missing) fetches what it continues from.
       case "move.fetch": {
         const moved = request as RemoteInput<"move.fetch">;
@@ -749,8 +768,18 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
               ? Effect.void
               : hubRepository.fetch({
                   cwd: moved.checkout.path,
-                  projectId: moved.projectId,
+                  ...HubRepository.keyOf(moved),
                   checkpointRefs: moved.refs,
+                }),
+          ),
+          // A Thread without a Project brings its folder's own branches and HEAD.
+          Effect.andThen(
+            moved.scratchHistory === undefined
+              ? Effect.void
+              : hubRepository.fetchPrefix({
+                  cwd: moved.checkout.path,
+                  ...HubRepository.keyOf(moved),
+                  prefix: moved.scratchHistory,
                 }),
           ),
           Effect.as({ checkout: moved.checkout.path }),
@@ -781,7 +810,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
             status === "recovered"
               ? hubRepository.push({
                   cwd: recover.cwd,
-                  projectId: recover.projectId,
+                  ...HubRepository.keyOf(recover),
                   checkpointRefs: [recover.recoveredRef],
                 })
               : Effect.void,

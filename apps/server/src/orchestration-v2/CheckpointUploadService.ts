@@ -20,12 +20,15 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
+import type { ThreadRepository } from "../environment/ScratchWorkspace.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 
@@ -84,6 +87,10 @@ export const layer: Layer.Layer<
     const eventSink = yield* EventSink.EventSinkV2;
     const ids = yield* IdAllocator.IdAllocatorV2;
     const threadLocks = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+    // Which repository each Thread uploads to; absent off the Hub (orchestration-only tests).
+    const repositories = yield* Effect.serviceOption(HubRepository.HubRepositories);
+    /** Each Thread's repository, read once while its Project stays the same. */
+    const keys = new Map<ThreadId, HubRepository.HubRepositoryKey>();
     const scope = yield* Effect.scope;
     const uploads = new Map<ThreadId, ThreadUpload>();
     /**
@@ -157,11 +164,27 @@ export const layer: Layer.Layer<
         ({ checkpoint }) => needsSource.get(checkpoint.id) !== executor.environmentId,
       );
       if (pending.length === 0) return "done" as const;
+      // A Thread without a Project uploads to its own repository. A failed read fails the
+      // upload (it retries), never sends it to another repository.
       const projectId = ProjectId.make(thread.projectId);
+      let key = keys.get(threadId);
+      if (key === undefined || key.projectId !== projectId) {
+        const found = Option.isSome(repositories)
+          ? yield* repositories.value.threads.repositoryOfThread(threadId)
+          : Option.none<ThreadRepository>();
+        if (Option.isNone(found) && Option.isSome(repositories)) return "done" as const;
+        key = Option.match(found, { onNone: () => ({ projectId }), onSome: (entry) => entry.key });
+        keys.set(threadId, key);
+      }
+      const repositoryKey = key;
       const { hubRepository, checkpoints } = executor.workspace;
       const push = (cwd: string, batch: ReadonlyArray<PendingCheckpoint>) =>
         hubRepository
-          .push({ cwd, projectId, checkpointRefs: batch.map(({ checkpoint }) => checkpoint.ref) })
+          .push({
+            cwd,
+            ...HubRepository.keyOf(repositoryKey),
+            checkpointRefs: batch.map(({ checkpoint }) => checkpoint.ref),
+          })
           .pipe(
             Effect.as(true),
             Effect.orElseSucceed(() => false),

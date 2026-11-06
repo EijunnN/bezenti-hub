@@ -1,7 +1,13 @@
 import { assert, it } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { CommandId, ProjectId, ThreadId, VcsProcessSpawnError } from "@t3tools/contracts";
+import {
+  CommandId,
+  GitCommandError,
+  ProjectId,
+  ThreadId,
+  VcsProcessSpawnError,
+} from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -156,6 +162,59 @@ it.effect("offers a Scratch folder when Git is not installed", () =>
   ),
 );
 
+const layerNoGit = Layer.succeed(VcsProcess.VcsProcess, {
+  run: (input) =>
+    Effect.fail(
+      new VcsProcessSpawnError({
+        operation: input.operation,
+        command: input.command,
+        cwd: input.cwd,
+        cause: PlatformError.systemError({
+          _tag: "NotFound",
+          module: "ChildProcess",
+          method: "spawn",
+          syscall: `spawn ${input.command}`,
+        }),
+      }),
+    ),
+});
+
+it.effect("gives a Scratch thread its folder when Git is not installed, without a repository", () =>
+  withScratch(
+    () =>
+      Effect.gen(function* () {
+        const scratch = yield* ManagedProjectFolders.ManagedProjectFolders;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const { projectId } = yield* scratch.ensureScratchProject;
+        const folder = Option.getOrThrow(
+          yield* scratch.folderForThread({
+            projectId,
+            threadId: ThreadId.make("thread:no-git"),
+            text: "No git here",
+          }),
+        );
+        assert.isTrue(yield* fileSystem.exists(folder));
+        assert.isFalse(yield* fileSystem.exists(path.join(folder, ".git")));
+      }),
+    {
+      vcsProcess: layerNoGit,
+      git: Layer.mock(GitVcsDriver.GitVcsDriver)({
+        readConfigValue: () => Effect.succeed(null),
+        execute: (input) =>
+          Effect.fail(
+            new GitCommandError({
+              operation: input.operation,
+              command: "git",
+              cwd: input.cwd,
+              detail: "git is not installed",
+            }),
+          ),
+      }),
+    },
+  ),
+);
+
 it.effect("creates one Scratch project, even for concurrent first requests", () =>
   withScratch(() =>
     Effect.gen(function* () {
@@ -243,6 +302,8 @@ it.effect("gives each Scratch thread its own folder, named from its message", ()
       assert.equal(new Set([first, second, third]).size, 3);
       for (const folder of [first, second, third]) {
         assert.equal(path.dirname(folder), root);
+        // Its own repository, for its checkpoints.
+        assert.isTrue(yield* fileSystem.exists(path.join(folder, ".git")));
         assert.match(path.basename(folder), /^\d{4}-\d{2}-\d{2}-convert-these-pngs-to-webp-/);
         assert.isTrue(yield* fileSystem.exists(folder));
       }

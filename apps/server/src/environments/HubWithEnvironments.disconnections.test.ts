@@ -634,7 +634,7 @@ describe("Hub con Environments: disconnections", () => {
         assert.isTrue(notice.ref.startsWith(prefix), notice.ref);
         assert.match(notice.ref.slice(prefix.length), /^[A-Za-z0-9-]+$/);
         const repositories = hub.service(HubRepository.HubRepositories);
-        const hubRepository = `${repositories.root}/${repositories.directoryOf(thread.projectId)}`;
+        const hubRepository = `${repositories.root}/${repositories.directoryOf({ projectId: thread.projectId })}`;
         const listed = yield* git(repositories.root, [
           `--git-dir=${hubRepository}`,
           "show",
@@ -706,7 +706,7 @@ describe("Hub con Environments: disconnections", () => {
 
       const push = (machine: TestEnvironment, refspec: string) => {
         const remote = HubRepository.withEnvironmentCredential(
-          HubRepository.hubRepositoryUrl(hub.server.url, thread.projectId),
+          HubRepository.hubRepositoryUrl(hub.server.url, { projectId: thread.projectId }),
           machine.credential,
         );
         return git(laptopCheckout, ["push", remote.url, refspec], { ...remote.env });
