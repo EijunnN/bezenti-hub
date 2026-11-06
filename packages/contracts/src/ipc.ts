@@ -989,6 +989,18 @@ export interface DesktopBridge {
   ) => Promise<T | null>;
   receiveProviderAuthCallback: (authorizationUrl: string) => Promise<string>;
   cancelProviderAuthCallback: (authorizationUrl: string) => Promise<void>;
+  /**
+   * Opens a Hub's sign-in page in the system browser and resolves with the one-time code it sends
+   * back to a loopback port, and that port's redirect. The renderer keeps the PKCE verifier and
+   * exchanges the code.
+   */
+  signInToHub: (request: {
+    readonly hubUrl: string;
+    readonly codeChallenge: string;
+    readonly state: string;
+    readonly clientLabel?: string;
+  }) => Promise<{ readonly code: string; readonly redirectUri: string }>;
+  cancelSignInToHub: (state: string) => Promise<void>;
   openExternal: (url: string) => Promise<boolean>;
   /** Reads http(s) media in the main process, outside renderer CORS and CSP; null on network failure. */
   readMedia: (url: string) => Promise<DesktopMediaRead | null>;

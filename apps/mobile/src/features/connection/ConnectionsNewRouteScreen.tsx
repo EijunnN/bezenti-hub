@@ -21,8 +21,8 @@ import { useAppearancePreferences } from "../settings/appearance/AppearancePrefe
 import { SettingsScreen } from "../settings/components/SettingsScreen";
 import { AppText as Text, AppTextInput, type AppTextInputProps } from "../../components/ui/AppText";
 import { FrostedCutout } from "../../components/ui/FrostedCutout";
-import { buildPairingUrl, extractPairingUrlFromQrPayload, parsePairingUrl } from "./pairing";
-import { useRemoteConnections } from "../../state/use-remote-environment-registry";
+import { extractPairingUrlFromQrPayload, parsePairingUrl } from "./pairing";
+import { signInToHub, useRemoteConnections } from "../../state/use-remote-environment-registry";
 import { SymbolView } from "../../components/ui/AppSymbol";
 import { autoConnectReport, devAutoConnectAttemptAtom } from "./devAutoConnect";
 import { leaveSettingsPage } from "../settings/settings-navigation";
@@ -63,9 +63,8 @@ function PairingForm({
   const navigation = useNavigation();
   const routeName = useRoute().name;
   const insets = useSafeAreaInsets();
-  const [initialPairing] = useState(() => parsePairingUrl(routePairingUrl || connectionPairingUrl));
-  const [hostInput, setHostInput] = useState(initialPairing.host);
-  const [codeInput, setCodeInput] = useState(initialPairing.code);
+  // A dev prefill (or a pasted pairing link) fills the address; a pairing link there still pairs.
+  const [addressInput, setAddressInput] = useState(() => routePairingUrl || connectionPairingUrl);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   // The user's own edit or submit dismisses the dev auto-connect report.
@@ -80,32 +79,23 @@ function PairingForm({
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const screenFocused = useIsFocused();
   const [scannerLocked, setScannerLocked] = useState(false);
-  // A good scan parks the camera so it can't re-read the code over later edits.
-  const [scanComplete, setScanComplete] = useState(false);
+  // The QR is an optional shortcut: the camera only runs after the user asks for it.
+  const [scanRequested, setScanRequested] = useState(false);
 
   const headerIconColor = useUniwindTheme()["--color-icon"];
 
-  const connectDisabled = connecting || hostInput.trim().length === 0;
+  const connectDisabled = connecting || addressInput.trim().length === 0;
 
-  const clearError = () => {
+  const handleAddressChange = (value: string) => {
+    setAddressInput(value);
     setSubmitError(null);
     setOwnAttempt(true);
-  };
-
-  const handleHostChange = (value: string) => {
-    setHostInput(value);
-    clearError();
-  };
-
-  const handleCodeChange = (value: string) => {
-    setCodeInput(value);
-    clearError();
   };
 
   const handleScanPress = async () => {
     const permission = await requestCameraPermission();
     if (permission.granted) {
-      setScanComplete(false);
+      setScanRequested(true);
       return;
     }
     if (permission.canAskAgain) return;
@@ -119,40 +109,7 @@ function PairingForm({
     );
   };
 
-  const handleQrScan = ({ data }: { readonly data: string }) => {
-    if (scannerLocked) {
-      return;
-    }
-
-    setScannerLocked(true);
-
-    try {
-      const pairingUrl = extractPairingUrlFromQrPayload(data);
-      const { host, code } = parsePairingUrl(pairingUrl);
-      setHostInput(host);
-      setCodeInput(code);
-      onChangeConnectionPairingUrl(pairingUrl);
-      setScanComplete(true);
-      setScannerLocked(false);
-    } catch (error) {
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      Dialog.alert(
-        "Invalid QR code",
-        error instanceof Error ? error.message : "Scanned QR code was not recognized.",
-      );
-      setTimeout(() => {
-        setScannerLocked(false);
-      }, 600);
-    }
-  };
-
-  const handleSubmit = async () => {
-    const pairingUrl = buildPairingUrl(hostInput, codeInput);
-    setOwnAttempt(true);
-    setSubmitError(null);
-    setIsSubmitting(true);
-    onChangeConnectionPairingUrl(pairingUrl);
-    const outcome = await onConnectPress(pairingUrl, routeFor);
+  const finish = (outcome: { readonly ok: boolean; readonly error: string | null }) => {
     setIsSubmitting(false);
     setSubmitError(outcome.error);
     void Haptics.notificationAsync(
@@ -160,24 +117,77 @@ function PairingForm({
         ? Haptics.NotificationFeedbackType.Success
         : Haptics.NotificationFeedbackType.Error,
     );
-    if (outcome.ok) {
-      // Replacing with Home would nest it inside any sheet below; return to the opener.
-      if (!navigation.canGoBack()) {
-        navigation.dispatch(StackActions.replace("Home"));
-      } else {
-        // Added from the Settings list, the new environment shows on Environments.
-        leaveSettingsPage(navigation, workspaceHasColumns(), "SettingsEnvironments");
-      }
+    if (!outcome.ok) return;
+    // Replacing with Home would nest it inside any sheet below; return to the opener.
+    if (!navigation.canGoBack()) {
+      navigation.dispatch(StackActions.replace("Home"));
+    } else {
+      // Added from the Settings list, the new environment shows on Environments.
+      leaveSettingsPage(navigation, workspaceHasColumns(), "SettingsEnvironments");
     }
+  };
+
+  const pair = async (pairingUrl: string) => {
+    setOwnAttempt(true);
+    setSubmitError(null);
+    setIsSubmitting(true);
+    onChangeConnectionPairingUrl(pairingUrl);
+    finish(await onConnectPress(pairingUrl, routeFor));
+  };
+
+  const handleQrScan = ({ data }: { readonly data: string }) => {
+    if (scannerLocked) {
+      return;
+    }
+
+    setScannerLocked(true);
+
+    let pairingUrl: string | null = null;
+    let problem = "This QR code does not hold a pairing code.";
+    try {
+      const scanned = extractPairingUrlFromQrPayload(data);
+      if (parsePairingUrl(scanned).code !== "") pairingUrl = scanned;
+    } catch (error) {
+      if (error instanceof Error) problem = error.message;
+    }
+    if (pairingUrl !== null) {
+      setScanRequested(false);
+      setScannerLocked(false);
+      void pair(pairingUrl);
+      return;
+    }
+    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    Dialog.alert("Invalid QR code", problem);
+    setTimeout(() => {
+      setScannerLocked(false);
+    }, 600);
+  };
+
+  const handleSubmit = async () => {
+    const address = addressInput.trim();
+    // A pasted pairing link pairs as before; a bare address signs in to the Hub.
+    if (parsePairingUrl(address).code !== "") {
+      await pair(address);
+      return;
+    }
+    setOwnAttempt(true);
+    setSubmitError(null);
+    setIsSubmitting(true);
+    const outcome = await signInToHub(address, routeFor);
+    if (outcome.cancelled) {
+      setIsSubmitting(false);
+      return;
+    }
+    finish(outcome);
   };
 
   return (
     <SettingsScreen
       formSheet={routeName === "ConnectionsNew"}
-      title="Add environment"
+      title="Add a Hub"
       actions={[
         {
-          accessibilityLabel: connecting ? "Connecting" : "Add environment",
+          accessibilityLabel: connecting ? "Signing in" : "Sign in",
           loading: connecting,
           icon: "checkmark",
           tintColor: headerIconColor,
@@ -201,16 +211,7 @@ function PairingForm({
         }}
       >
         <View collapsable={false} className="gap-6.5">
-          <PairingScanCard
-            cameraActive={cameraPermission?.granted === true && screenFocused && !scanComplete}
-            onScan={handleQrScan}
-            onScanPress={() => {
-              void handleScanPress();
-            }}
-          />
-
           <View collapsable={false} className="gap-2">
-            <Text className="px-4 text-sm font-t3-medium text-foreground-muted">Or enter it</Text>
             <View
               collapsable={false}
               className={cn(
@@ -219,19 +220,12 @@ function PairingForm({
               )}
             >
               <PairingInputRow
-                label="Address"
+                label="Hub"
                 keyboardType="url"
-                placeholder="192.168.1.100:3773"
-                value={hostInput}
-                onChangeText={handleHostChange}
-              />
-              <View className="ml-4 border-t border-border-subtle" />
-              <PairingInputRow
-                label="Code"
-                placeholder="Pairing code"
+                placeholder="hub.example.com"
                 returnKeyType="go"
-                value={codeInput}
-                onChangeText={handleCodeChange}
+                value={addressInput}
+                onChangeText={handleAddressChange}
                 onSubmitEditing={() => {
                   if (!connectDisabled) void handleSubmit();
                 }}
@@ -245,8 +239,23 @@ function PairingForm({
               )}
             >
               {pairingConnectionError ??
-                "For machines on your local network or tailnet. The machine keeps its own provider credentials."}
+                "Enter your Hub's address. You sign in with your passkey or password in the browser, then come back here."}
             </Text>
+          </View>
+
+          <View collapsable={false} className="gap-2">
+            <Text className="px-4 text-sm font-t3-medium text-foreground-muted">
+              Or scan a pairing code
+            </Text>
+            <PairingScanCard
+              cameraActive={
+                scanRequested && cameraPermission?.granted === true && screenFocused && !connecting
+              }
+              onScan={handleQrScan}
+              onScanPress={() => {
+                void handleScanPress();
+              }}
+            />
           </View>
         </View>
       </ScrollView>

@@ -15,7 +15,11 @@ import { environmentSession } from "./session";
 import { environmentCatalog } from "../connection/catalog";
 import { createRemoteEnvironmentProjectionAtoms } from "./remote-environment-projections";
 import { serverEnvironment } from "./server";
-import { connectPairingUrl as connectPairingUrlCommand } from "../connection/onboarding";
+import {
+  connectAppSignIn as connectAppSignInCommand,
+  connectPairingUrl as connectPairingUrlCommand,
+} from "../connection/onboarding";
+import { signInToHubInBrowser } from "../features/connection/hubSignIn";
 
 const connectionPairingUrlAtom = Atom.make("").pipe(
   Atom.keepAlive,
@@ -52,8 +56,11 @@ export async function pairEnvironment(
     appAtomRegistry.set(connectionPairingUrlAtom, "");
     return { ok: true, error: null };
   }
-  const error = Cause.squash(result.cause);
-  const message = error instanceof Error ? error.message : "Failed to pair with the environment.";
+  return pairingFailure(Cause.squash(result.cause), "Failed to pair with the environment.");
+}
+
+function pairingFailure(error: unknown, fallback: string): PairingOutcome {
+  const message = error instanceof Error ? error.message : fallback;
   if (
     error !== null &&
     typeof error === "object" &&
@@ -64,6 +71,38 @@ export async function pairEnvironment(
     return { ok: false, error: null };
   }
   return { ok: false, error: message };
+}
+
+/**
+ * Adds a Hub by its address: signs in in the system browser, then saves the Hub with the session
+ * the one-time code exchanges for. A cancelled sign-in is not an error.
+ */
+export async function signInToHub(
+  hubAddress: string,
+  expectedEnvironmentId?: EnvironmentId,
+): Promise<PairingOutcome & { readonly cancelled?: boolean }> {
+  let outcome: Awaited<ReturnType<typeof signInToHubInBrowser>>;
+  try {
+    outcome = await signInToHubInBrowser(hubAddress);
+  } catch (error) {
+    return pairingFailure(error, "Could not open the Hub's sign-in.");
+  }
+  if (outcome._tag === "cancelled") return { ok: false, error: null, cancelled: true };
+  const result = await runAtomCommand(
+    appAtomRegistry,
+    connectAppSignInCommand,
+    {
+      hubUrl: outcome.hubUrl,
+      code: outcome.code,
+      codeVerifier: outcome.codeVerifier,
+      redirectUri: outcome.redirectUri,
+      ...(expectedEnvironmentId === undefined ? {} : { expectedEnvironmentId }),
+    },
+    { reportFailure: false },
+  );
+  return AsyncResult.isSuccess(result)
+    ? { ok: true, error: null }
+    : pairingFailure(Cause.squash(result.cause), "Could not add the Hub.");
 }
 
 const remoteEnvironmentProjections = createRemoteEnvironmentProjectionAtoms({
@@ -178,7 +217,7 @@ export function useRemoteConnections() {
     } as const;
     Dialog.alert(
       "Remove from this device?",
-      `Forget ${environment.environmentLabel} and its cached threads on this device. Switch it off instead to keep it saved.`,
+      `Sign out of ${environment.environmentLabel} and forget its cached threads on this device. Switch it off instead to keep it saved.`,
       [{ text: "Cancel", style: "cancel" }, remove],
     );
   };

@@ -30,6 +30,7 @@ import * as OwnerPresence from "./OwnerPresence.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import * as SessionStore from "./SessionStore.ts";
 import * as AuthHttp from "./http.ts";
+import * as AppSignInHttp from "./appSignInHttp.ts";
 import * as McpOAuth from "./McpOAuth.ts";
 import * as McpOAuthHttp from "./mcpOAuthHttp.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
@@ -59,6 +60,7 @@ import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 
 class AuthTestApi extends HttpApi.make("environment")
   .add(EnvironmentHttpApi.groups.auth)
+  .add(EnvironmentHttpApi.groups.appSignIn)
   .add(EnvironmentHttpApi.groups.spaces)
   .add(EnvironmentHttpApi.groups.invitations)
   .add(EnvironmentHttpApi.groups.projects)
@@ -178,6 +180,7 @@ export const serveAuthHttpWith = Effect.fn(function* (config: { readonly publicU
   const services = yield* Layer.build(makeLayerServices(config));
   const routes = HttpApiBuilder.layer(AuthTestApi).pipe(
     Layer.provide(AuthHttp.layer),
+    Layer.provide(AppSignInHttp.layer),
     Layer.provide(SpacesHttp.layer),
     Layer.provide(InvitationsHttp.layer),
     Layer.provide(ProjectHttp.layer),

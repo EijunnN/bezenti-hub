@@ -94,6 +94,56 @@ assumes the old passkeys are lost or stolen, so in one transaction it spends the
 link, replaces every passkey with the new one, revokes the Owner's sessions and
 issues a new one.
 
+### App sign-in
+
+The desktop and mobile apps sign in to a Hub through the system browser
+(RFC 8252), so passkeys and password managers work and the app never sees a
+credential. [AppSignIn](../../apps/server/src/auth/AppSignIn.ts) is the whole
+server side:
+
+- The app makes a PKCE verifier and `state`, and opens `/app-sign-in` with the
+  S256 challenge, its redirect and a label. The page signs in as any browser
+  does, then the User approves: `POST /api/auth/app-sign-in/approve` takes only
+  the browser's own cookie (its origin checked with it), never a bearer token,
+  so every app session traces back to a sign-in in a browser. The page and
+  `/connect-agent` are served with `frame-ancestors 'none'` and
+  `X-Frame-Options: DENY`, so another site cannot frame the consent. Cancel
+  returns `error=access_denied` with the `state` to the same redirect.
+- The redirect is a loopback `http://127.0.0.1:<port>/callback` or `[::1]`, never
+  `localhost`, which can resolve elsewhere (RFC 8252 §8.3) (the desktop
+  app listens on a port of its own for that one sign-in) or exactly
+  `t3code[-dev|-preview]://auth/callback`
+  ([`appSignInRedirectKind`](../../packages/shared/src/appSignIn.ts)). Anything
+  else is refused, so the page is not an open redirect and the code never
+  leaves the device that asked for it.
+- The Hub keeps the code's SHA-256 in memory with the User, challenge and
+  redirect, for one minute. `POST /api/auth/app-sign-in/token` spends a code on
+  its first presentation, even when the verifier or redirect then fails, and
+  issues a bearer (or, with a DPoP proof, DPoP) session for that User, subject
+  `app-sign-in`, with the standard scopes the approving browser session held,
+  never more. A restart drops pending codes;
+  the app just signs in again. Like other app tokens it lasts 30 days from
+  issue and does not slide.
+- Signing out (`POST /api/auth/sign-out`) ends the request's own session,
+  cookie or token, so removing a Hub from an app revokes its session there. The
+  client also signs out a new session it could not save, and the previous one
+  when it signs in to a saved Hub again. Apps refuse a plain-HTTP Hub address
+  outside this machine, the LAN and the tailnet, as the Hub's transport rule
+  would.
+
+A custom URL scheme is not owned: another app on the phone can register
+`t3code://`. It cannot use a code it intercepts, because the exchange needs the
+verifier that stayed in the T3 Code app, and a callback whose `state` is not
+the app's own is dropped. iOS hands an `ASWebAuthenticationSession` result
+only to the app that opened it; on Android the redirect is an ordinary intent
+that another app could catch, which is why the verifier matters. What a scheme
+cannot stop is
+a malicious app starting its own sign-in, with its own verifier, and asking the
+User to approve it; the approval page names the client label (chosen by the
+app) and where the code goes, and says to continue only with a sign-in the
+User just started. Claimed HTTPS redirects (universal and app links) would
+close that gap and are the next step if it matters.
+
 ### Spaces
 
 Every Project and Thread belongs to a Space: an Organization or a User's Personal
