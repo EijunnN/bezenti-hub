@@ -29,6 +29,7 @@ import { resolveThreadRouteTarget } from "../../threadRoutes";
 import { assetEnvironment } from "../../state/assets";
 import { readProject, readThreadShell } from "../../state/entities";
 import { useEnvironmentHttpBaseUrl, usePrimaryEnvironment } from "../../state/environments";
+import { readHubLinkOrigin } from "../../hubLinks";
 import { previewEnvironment } from "../../state/preview";
 import { allReachableShellsLiveAtom } from "../../state/shell";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -206,7 +207,7 @@ export function DesktopWebLinkCoordinator() {
       await pairFromLink(pairingUrl);
       return;
     }
-    const appPath = promptLinkAppPath(url);
+    const appPath = promptLinkAppPath(url, readHubLinkOrigin() ?? undefined);
     if (appPath !== null) {
       await router.navigate({ href: appPath });
       return;

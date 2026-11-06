@@ -1,7 +1,7 @@
 # Product usage data
 
 This build of T3 Code sends no product usage data anywhere. The server, the web app, the desktop
-app and the mobile app do not send usage events to `ingest.t3.codes` or PostHog, do not send
+app and the mobile app do not send usage events to pingdotgg's ingest service or PostHog, do not send
 connection traces to Axiom, and the mobile app sends no crash reports. There is nothing to turn
 off. See [ADR 0007](../adr/0007-no-upstream-services.md).
 

@@ -4,13 +4,17 @@ import {
   encodeComposerContextFragment,
 } from "@t3tools/shared/composerContextClipboard";
 import { threadLinkContextReferences } from "@t3tools/shared/composerContextReferences";
+import { addHubOrigin } from "@t3tools/shared/threadLinks";
 import { describe, expect, it } from "vite-plus/test";
 
 import { resolveThreadReferenceCopyTarget } from "./threadReference.ts";
 
+addHubOrigin("https://hub.example.com");
+
 const thread = {
   threadRef: { environmentId: EnvironmentId.make("env-1"), threadId: ThreadId.make("thread-1") },
   title: "Fix the login flow",
+  hubOrigin: "https://hub.example.com",
 };
 
 const crossRepositoryPullRequest: ThreadPullRequestLink = {
@@ -99,17 +103,20 @@ describe("resolveThreadReferenceCopyTarget", () => {
       ],
     });
     // The plain text opens the thread anywhere and pastes back as the copied record's chip.
-    expect(target!.value).toBe("https://app.t3.codes/threads/env-1/thread-1");
+    expect(target!.value).toBe("https://hub.example.com/threads/env-1/thread-1");
     expect(threadLinkContextReferences(target!.value, pasted!.records, () => undefined)).toEqual({
       text: `[Fix the login flow](t3-context://v1/thread/${pasted!.records[0]!.contextId})`,
       records: pasted!.records,
     });
   });
 
-  it("links through the build's hosted app", () => {
+  it("links through the Hub's origin, or as a v2 link without one", () => {
     expect(
-      resolveThreadReferenceCopyTarget({ ...thread, hostedAppUrl: "https://preview.t3.codes" })
+      resolveThreadReferenceCopyTarget({ ...thread, hubOrigin: "https://preview.example.com" })
         ?.value,
-    ).toBe("https://preview.t3.codes/threads/env-1/thread-1");
+    ).toBe("https://preview.example.com/threads/env-1/thread-1");
+    expect(resolveThreadReferenceCopyTarget({ ...thread, hubOrigin: null })?.value).toBe(
+      "[Fix the login flow](t3-thread://v2/env-1/thread-1)",
+    );
   });
 });

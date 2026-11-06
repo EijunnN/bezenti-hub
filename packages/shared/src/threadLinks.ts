@@ -2,19 +2,55 @@ import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contract
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
-import { DEFAULT_HOSTED_APP_URL } from "./hostedApp.ts";
-
 export const THREAD_LINK_PROTOCOL = "t3-thread";
 const V1_PREFIX = `${THREAD_LINK_PROTOCOL}://v1/`;
 const V2_PREFIX = `${THREAD_LINK_PROTOCOL}://v2/`;
-const HOSTED_PREFIX = `${DEFAULT_HOSTED_APP_URL}/threads/`;
 const HOSTED_SEGMENT = "[A-Za-z0-9_%-]+";
-const HOSTED_LINK = `${HOSTED_PREFIX.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}${HOSTED_SEGMENT}/${HOSTED_SEGMENT}`;
-// Code comes first in the alternation so a link written inside a code span or fence is skipped.
-const THREAD_LINK_OUTSIDE_CODE = new RegExp(
-  String.raw`(?<fence>(\`{3,}|~{3,})[\s\S]*?(?:\2|$))|(?<span>(\`+)[^\n]*?\4)|\[(?<label>[^\]\n]*)\]\((?<href>t3-thread:\/\/v[12]\/[^\s)]+|${HOSTED_LINK})\)|<(?<autolink>t3-thread:\/\/v[12]\/[^\s<>]+|${HOSTED_LINK})>|(?<bare>${HOSTED_LINK})(?![\w%/?#-])`,
-  "g",
-);
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+
+function httpOrigin(value: string | null | undefined): string | null {
+  if (!value || !URL.canParse(value)) return null;
+  const url = new URL(value);
+  return url.protocol === "https:" || url.protocol === "http:" ? url.origin : null;
+}
+
+/**
+ * Where links that open this Hub point (ADR 0007): its public URL (`T3CODE_PUBLIC_URL`), else the
+ * origin the client reached it on, for local and LAN use. Null when neither is an http(s) origin.
+ */
+export function hubLinkOrigin(input: {
+  readonly publicUrl?: string | null | undefined;
+  readonly currentOrigin?: string | null | undefined;
+}): string | null {
+  return httpOrigin(input.publicUrl) ?? httpOrigin(input.currentOrigin);
+}
+
+// The Hubs whose `/threads/<environment>/<thread>` links name a thread. A link on any other site
+// stays an ordinary link.
+const hubOrigins = new Set<string>();
+let hostedPrefixes: ReadonlyArray<string> = [];
+let threadLinkOutsideCode = buildThreadLinkPattern();
+
+function buildThreadLinkPattern(): RegExp {
+  const hosted =
+    hostedPrefixes.length === 0
+      ? "(?!)"
+      : `(?:${hostedPrefixes.map(escapeRegExp).join("|")})${HOSTED_SEGMENT}/${HOSTED_SEGMENT}`;
+  // Code comes first in the alternation so a link written inside a code span or fence is skipped.
+  return new RegExp(
+    String.raw`(?<fence>(\`{3,}|~{3,})[\s\S]*?(?:\2|$))|(?<span>(\`+)[^\n]*?\4)|\[(?<label>[^\]\n]*)\]\((?<href>t3-thread:\/\/v[12]\/[^\s)]+|${hosted})\)|<(?<autolink>t3-thread:\/\/v[12]\/[^\s<>]+|${hosted})>|(?<bare>${hosted})(?![\w%/?#-])`,
+    "g",
+  );
+}
+
+/** Reads `<origin>/threads/...` links as thread links from now on; a non-http origin is ignored. */
+export function addHubOrigin(value: string | null | undefined): void {
+  const origin = httpOrigin(value);
+  if (origin === null || hubOrigins.has(origin)) return;
+  hubOrigins.add(origin);
+  hostedPrefixes = [...hubOrigins].map((known) => `${known}/threads/`);
+  threadLinkOutsideCode = buildThreadLinkPattern();
+}
 
 const decodeThreadId = Schema.decodeUnknownOption(ThreadId);
 const decodeEnvironmentId = Schema.decodeUnknownOption(EnvironmentId);
@@ -32,16 +68,16 @@ const hostedSegment = (id: string) =>
     (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
   );
 
-/** Opens the thread from anywhere: the hosted app offers the desktop app, the mobile app, or itself. */
-export function hostedThreadLink(ref: ScopedThreadRef, origin = DEFAULT_HOSTED_APP_URL): string {
+/** Opens the thread from anywhere through the Hub at `origin` (see `hubLinkOrigin`). */
+export function hostedThreadLink(ref: ScopedThreadRef, origin: string): string {
   const path = `/threads/${hostedSegment(ref.environmentId)}/${hostedSegment(ref.threadId)}`;
   return new URL(path, origin).toString();
 }
 
 const HOSTED_PATH = new RegExp(`^(${HOSTED_SEGMENT})/(${HOSTED_SEGMENT})$`);
 
-function parseHostedThreadLink(href: string): ThreadLink | null {
-  const match = HOSTED_PATH.exec(href.slice(HOSTED_PREFIX.length));
+function parseHostedThreadLink(href: string, prefix: string): ThreadLink | null {
+  const match = HOSTED_PATH.exec(href.slice(prefix.length));
   if (!match) return null;
   try {
     const environmentId = Option.getOrNull(decodeEnvironmentId(decodeURIComponent(match[1]!)));
@@ -57,7 +93,8 @@ function parseHostedThreadLink(href: string): ThreadLink | null {
  * except in a hosted link, which escapes them itself.
  */
 export function parseThreadLinkHref(href: string): ThreadLink | null {
-  if (href.startsWith(HOSTED_PREFIX)) return parseHostedThreadLink(href);
+  const hostedPrefix = hostedPrefixes.find((prefix) => href.startsWith(prefix));
+  if (hostedPrefix !== undefined) return parseHostedThreadLink(href, hostedPrefix);
   if (href.startsWith(V1_PREFIX)) {
     const threadId = Option.getOrNull(decodeThreadId(href.slice(V1_PREFIX.length)));
     return threadId === null ? null : { environmentId: null, threadId };
@@ -128,19 +165,26 @@ export function formatThreadLink(ref: ThreadLink, label?: string): string {
   return cleaned ? `[${cleaned}](${threadLinkHref(ref)})` : `<${threadLinkHref(ref)}>`;
 }
 
-/** What a person copies out of T3 Code: a Markdown link that opens the thread anywhere. */
+/**
+ * What a person copies out of T3 Code: a Markdown link that opens the thread anywhere, or a v2
+ * link when there is no Hub origin to point at.
+ */
 export function formatHostedThreadLink(
   ref: ScopedThreadRef,
   label: string,
-  origin?: string,
+  origin: string | null,
 ): string {
+  if (origin === null) return formatThreadLink(ref, label);
   const href = hostedThreadLink(ref, origin);
   const cleaned = linkLabel(label);
   return cleaned ? `[${cleaned}](${href})` : href;
 }
 
 export function hasThreadLinks(markdown: string): boolean {
-  return markdown.includes(`${THREAD_LINK_PROTOCOL}://v`) || markdown.includes(HOSTED_PREFIX);
+  return (
+    markdown.includes(`${THREAD_LINK_PROTOCOL}://v`) ||
+    hostedPrefixes.some((prefix) => markdown.includes(prefix))
+  );
 }
 
 /** Every thread the markdown's links can name, so their titles are keyed reads. */
@@ -150,7 +194,7 @@ export function threadLinkRefs(
 ): ReadonlyArray<ScopedThreadRef> {
   const refs = new Map<string, ScopedThreadRef>();
   // Hermes' matchAll yields matches without `groups`; exec keeps them.
-  const pattern = new RegExp(THREAD_LINK_OUTSIDE_CODE);
+  const pattern = new RegExp(threadLinkOutsideCode);
   for (let match = pattern.exec(markdown); match !== null; match = pattern.exec(markdown)) {
     const href = match.groups?.href ?? match.groups?.autolink ?? match.groups?.bare;
     const link = href === undefined ? null : parseThreadLinkHref(href);
@@ -177,7 +221,7 @@ export function replaceThreadLinks(
   replace: (link: ThreadLink, label: string | undefined) => string | undefined,
 ): string {
   if (!hasThreadLinks(markdown)) return markdown;
-  return markdown.replace(THREAD_LINK_OUTSIDE_CODE, (source, ...args) => {
+  return markdown.replace(threadLinkOutsideCode, (source, ...args) => {
     const groups = args.at(-1) as Partial<Record<"href" | "autolink" | "bare" | "label", string>>;
     const href = groups.href ?? groups.autolink ?? groups.bare;
     const link = href === undefined ? null : parseThreadLinkHref(href);

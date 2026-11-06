@@ -61,7 +61,7 @@ import {
 } from "@t3tools/contracts";
 import { renderAssistantCitationsAsText } from "@t3tools/shared/assistantCitations";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
-import { hostedThreadLink, parseThreadLinkHref } from "@t3tools/shared/threadLinks";
+import { formatHostedThreadLink, parseThreadLinkHref } from "@t3tools/shared/threadLinks";
 import { PROMPT_LINK_MAX_PROMPT_LENGTH } from "@t3tools/shared/promptLinks";
 import {
   parseComposerContextHref,
@@ -288,6 +288,7 @@ import {
 } from "./ThreadMarkdownImage";
 import { openSettings } from "../settings/settings-navigation";
 import { useSelectWorkspaceDetail } from "../workspace/useSelectWorkspaceDetail";
+import { readHubLinkOrigin } from "../../state/hubLinks";
 
 const WIDE_MARKDOWN_BLOCK_OPTIONS = {
   // iOS blockquotes and selectable text measure separately; definite bubble width matches UIKit's drawing width.
@@ -396,6 +397,7 @@ const USER_MESSAGE_COPY_MENU_ACTIONS = [
 ];
 
 function UserMessageCopyButton(props: {
+  readonly environmentId: EnvironmentId;
   readonly text: string;
   readonly onCopy: (() => Promise<void>) | undefined;
   readonly tintColor: ColorValue;
@@ -416,7 +418,8 @@ function UserMessageCopyButton(props: {
     <Menu
       actions={USER_MESSAGE_COPY_MENU_ACTIONS}
       onPressAction={({ nativeEvent }) => {
-        if (nativeEvent.event === "copy-prompt-link") void copyPromptLink(linkText);
+        if (nativeEvent.event === "copy-prompt-link")
+          void copyPromptLink(linkText, props.environmentId);
       }}
       shouldOpenOnLongPress
     >
@@ -1553,6 +1556,7 @@ function ThreadAutomationMessageRow(props: {
             {props.timestampLabel}
           </Text>
           <UserMessageCopyButton
+            environmentId={props.environmentId}
             text={props.text}
             onCopy={undefined}
             tintColor={props.iconSubtleColor}
@@ -2221,6 +2225,7 @@ function renderFeedEntry(
               ) : null}
               {presentation.text.trim().length > 0 ? (
                 <UserMessageCopyButton
+                  environmentId={props.environmentId}
                   text={presentation.text}
                   onCopy={
                     message.context && presentation.attribution !== "guest"
@@ -3060,7 +3065,10 @@ export const ThreadFeed = memo(function ThreadFeed({
       const thread = resolveLinkedThread(href);
       if (thread) {
         if (actionId === "open-thread") onMarkdownLinkPress(href);
-        else if (actionId === "copy-thread-link") copyTextWithHaptic(hostedThreadLink(thread));
+        else if (actionId === "copy-thread-link")
+          copyTextWithHaptic(
+            formatHostedThreadLink(thread, "", readHubLinkOrigin(thread.environmentId)),
+          );
         return;
       }
       const target = resolveFileChipTarget(href, props.workspaceRoot);

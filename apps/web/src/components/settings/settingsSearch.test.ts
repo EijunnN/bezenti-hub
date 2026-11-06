@@ -111,27 +111,6 @@ describe("searchSettings", () => {
     expect(searchSettings("update track")).toEqual([]);
   });
 
-  it("offers the hosted channel picker only where it renders, never in the desktop app", async () => {
-    vi.resetModules();
-    vi.doMock("~/env", async (importOriginal) => ({
-      ...(await importOriginal<typeof import("~/env")>()),
-      isElectron: true,
-    }));
-    vi.doMock("~/branding", async (importOriginal) => ({
-      ...(await importOriginal<typeof import("~/branding")>()),
-      HOSTED_APP_CHANNEL: "latest",
-    }));
-    try {
-      const { SETTINGS_SEARCH_ITEMS: items, settingsForThisPlatform } =
-        await import("./settingsSearch");
-      expect(settingsForThisPlatform(items).some((item) => item.id === "update-track")).toBe(false);
-    } finally {
-      vi.doUnmock("~/env");
-      vi.doUnmock("~/branding");
-      vi.resetModules();
-    }
-  });
-
   it("hides settings whose controls are unavailable", () => {
     const available = filterAvailableSettingsSearchItems({
       hasEnvironment: false,
