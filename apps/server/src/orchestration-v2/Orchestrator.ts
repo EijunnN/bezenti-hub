@@ -19,6 +19,7 @@ import {
   legacyThreadPullRequestKey,
 } from "../sourceControl/threadPullRequests.ts";
 import {
+  EnvironmentExecutorUnavailableError,
   HUB_MACHINE_ENVIRONMENT_ID,
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type ChatAttachment,
@@ -559,6 +560,9 @@ const STARTS_WORK: ReadonlySet<OrchestrationV2ServerCommand["type"]> = new Set([
  * since they would run on the machine it is leaving. Answering a request of the running turn is
  * still allowed while the move waits for that turn.
  */
+/** A Thread's machine has no executor now (it is away). */
+const isExecutorUnavailable = Schema.is(EnvironmentExecutorUnavailableError);
+
 const BLOCKED_WHILE_MOVING: ReadonlySet<OrchestrationV2ServerCommand["type"]> = new Set([
   "message.dispatch",
   "queue.resume",
@@ -1703,7 +1707,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         projection.thread.deletedAt !== null ||
         projection.runs.some(isActiveRun) ||
         // The queue starts where the Thread runs once its move ends (`ThreadMoveService`).
-        projection.thread.move?.status === "running"
+        projection.thread.move?.status === "running" ||
+        // Its Environment was removed: the queue waits for the move that gives it another.
+        projection.thread.activeEnvironmentId === null
       ) {
         return;
       }
@@ -6236,9 +6242,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         modelSelection.instanceId === queueProviderThread.providerInstanceId
           ? queueProviderThread
           : rootProviderThreadsForProvider(projection, modelSelection.instanceId)[0];
-      const queuedAdapter = yield* providerAdapters
-        .get(modelSelection.instanceId)
-        .pipe(mapDispatchError(command));
       const selectedProviderSession =
         targetProviderThread?.providerSessionId === null ||
         targetProviderThread?.providerSessionId === undefined
@@ -6259,12 +6262,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           capabilities: queuedCapabilities,
         }),
       );
+      // Only a new provider thread needs the adapter: with the Thread's machine away (a paused
+      // turn) its own provider thread takes the message, and no machine is asked.
+      const queuedDriver =
+        targetProviderThread?.driver ??
+        (yield* providerAdapters.get(modelSelection.instanceId).pipe(mapDispatchError(command)))
+          .driver;
       const queuedProviderThread: OrchestrationV2ProviderThread = targetProviderThread ?? {
         id: idAllocator.derive.providerThread({
-          driver: queuedAdapter.driver,
+          driver: queuedDriver,
           nativeThreadId: `pending:${runId}`,
         }),
-        driver: queuedAdapter.driver,
+        driver: queuedDriver,
         providerInstanceId: modelSelection.instanceId,
         providerSessionId: null,
         appThreadId: command.threadId,
@@ -6285,19 +6294,27 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         queueBehindRun.status === "preparing" || worktreeMissingRun !== undefined
           ? null
           : yield* runtimePolicy.resolve({ thread: projection.thread, modelSelection }).pipe(
-              Effect.flatMap((resolvedRuntimePolicy) =>
-                checkpointService.prepareRootRunScope({
-                  threadId: command.threadId,
-                  runId,
-                  rootNodeId,
-                  providerThreadId: queuedProviderThread.id,
-                  cwd:
-                    resolvedRuntimePolicy.cwd ??
-                    selectedProviderSession?.cwd ??
-                    projection.thread.worktreePath ??
-                    process.cwd(),
-                  createdAt: now,
-                }),
+              Effect.asSome,
+              // Its machine is away (a paused turn): the scope is made when the run starts.
+              Effect.catchIf(
+                (error) => isExecutorUnavailable((error as { readonly cause?: unknown }).cause),
+                () => Effect.succeedNone,
+              ),
+              Effect.flatMap((resolved) =>
+                Option.isNone(resolved)
+                  ? Effect.succeed(null)
+                  : checkpointService.prepareRootRunScope({
+                      threadId: command.threadId,
+                      runId,
+                      rootNodeId,
+                      providerThreadId: queuedProviderThread.id,
+                      cwd:
+                        resolved.value.cwd ??
+                        selectedProviderSession?.cwd ??
+                        projection.thread.worktreePath ??
+                        process.cwd(),
+                      createdAt: now,
+                    }),
               ),
               Effect.mapError(
                 (cause) =>

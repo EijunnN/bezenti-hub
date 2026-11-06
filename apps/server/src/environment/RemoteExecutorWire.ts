@@ -70,7 +70,13 @@ import {
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Schema from "effect/Schema";
 
-import { MoveFetchResult, MovePrepareInput, MovePrepareResult } from "./MovedWorkspace.ts";
+import {
+  MoveFetchResult,
+  MovePrepareInput,
+  MovePrepareResult,
+  MoveRecoverInput,
+  MoveRecoverResult,
+} from "./MovedWorkspace.ts";
 
 const RuntimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy;
 const ProviderThread = OrchestrationV2ProviderThread;
@@ -389,6 +395,8 @@ export const REMOTE_OPERATIONS = {
     MoveFetchResult,
   ),
   "move.prepare": checkpoint(MovePrepareInput, MovePrepareResult),
+  // Back with a Thread that moved away: its changes never uploaded go to a recovered ref.
+  "move.recover": checkpoint(MoveRecoverInput, MoveRecoverResult),
   // Workspace calls name the Thread's workspace root on the machine and paths relative to it; the
   // machine refuses whatever resolves (symlinks included) outside the root. They carry the
   // contract's own errors, so the Hub hands a machine's answer to the client as it came.

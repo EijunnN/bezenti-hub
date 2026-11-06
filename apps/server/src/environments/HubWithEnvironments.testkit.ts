@@ -197,6 +197,11 @@ export interface TestEnvironment {
   readonly connect: Effect.Effect<void>;
   /** Drops the socket. The machine keeps running: its sessions and unacknowledged events stay. */
   readonly disconnect: Effect.Effect<void>;
+  /**
+   * The machine's server process dies and starts again, offline: its provider sessions and
+   * unacknowledged events are gone, its files stay. `connect` brings it back.
+   */
+  readonly restart: Effect.Effect<void>;
 }
 
 /** A joined Environment's half: its executor and agent over the given provider adapters. */
@@ -256,12 +261,19 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
     Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
   const machine = yield* Layer.build(layerMachine).pipe(Effect.orDie);
-  const agent = yield* EnvironmentAgent.make({
-    environmentId: input.environmentId,
-    hubUrl: input.hubUrl,
-    credential: input.credential,
-  }).pipe(Effect.provideContext(machine));
-  const report = agent.report;
+  // The agent and its provider processes live in their own scope, so a test can kill them
+  // (`restart`) while the machine's files, checkouts and config stay.
+  const startAgent = Effect.gen(function* () {
+    const processScope = yield* Scope.fork(scope);
+    const started = yield* EnvironmentAgent.make({
+      environmentId: input.environmentId,
+      hubUrl: input.hubUrl,
+      credential: input.credential,
+    }).pipe(Effect.provideContext(machine), Effect.provideService(Scope.Scope, processScope));
+    return { agent: started, processScope };
+  });
+  let running = yield* startAgent;
+  const report = Effect.suspend(() => running.agent.report);
   const hello: Effect.Effect<EnvironmentHelloFrame> = Effect.map(report, (described) => ({
     type: "hello",
     protocolVersion: ENVIRONMENT_CONNECTION_PROTOCOL_VERSION,
@@ -300,7 +312,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
       heartbeat,
       onWelcome: () => Deferred.succeed(welcomed, undefined).pipe(Effect.asVoid),
       serve: (write) =>
-        Effect.map(agent.attach(write), (served) => ({
+        Effect.map(running.agent.attach(write), (served) => ({
           receive: (frame: unknown) => {
             const request = frame as { readonly type?: unknown; readonly method?: unknown };
             if (request.type === "request" && typeof request.method === "string") {
@@ -320,6 +332,15 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
     connection = undefined;
     return current === undefined ? Effect.void : Fiber.interrupt(current);
   });
+  const restart = disconnect.pipe(
+    Effect.andThen(Effect.suspend(() => Scope.close(running.processScope, Exit.void))),
+    Effect.andThen(startAgent),
+    Effect.flatMap((started) =>
+      Effect.sync(() => {
+        running = started;
+      }),
+    ),
+  );
   if (input.connect) yield* connect;
   return {
     environmentId: input.environmentId,
@@ -331,6 +352,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
     awaitRequest,
     connect,
     disconnect,
+    restart,
   } satisfies TestEnvironment;
 });
 

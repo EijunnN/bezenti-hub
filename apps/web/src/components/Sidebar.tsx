@@ -2649,7 +2649,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 canShareWithGuestAtom(threadRef.environmentId),
               ),
               canTurnIntoProject: canTurnThreadIntoProject(threadRef),
-              canMoveEnvironment: readHubEnvironments().length > 1,
+              canMoveEnvironment:
+                readHubEnvironments().length > 1 || thread.activeEnvironmentId === null,
               role: readThreadRolePermissions(thread.environmentId, thread.source),
               supports: {
                 settlement: configLoaded,

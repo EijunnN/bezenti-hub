@@ -1856,6 +1856,17 @@ export const OrchestrationV2TurnItem = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
+    /** Changes a machine still had for a Thread that moved away, kept on a branch of the Hub. */
+    type: Schema.Literal("recovered_changes"),
+    environmentId: EnvironmentId,
+    environmentName: Schema.String,
+    /** `refs/t3/recovered/<threadId>/<timestamp>` in the Project's Hub repository. */
+    ref: TrimmedNonEmptyString,
+    /** What the changes are compared with: what the machine last uploaded of the Thread. */
+    baseRef: Schema.NullOr(TrimmedNonEmptyString),
+  }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("fork"),
     source: Schema.Union([
       Schema.Struct({ type: Schema.Literal("run"), threadId: ThreadId, runId: RunId }),
@@ -2708,6 +2719,17 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     setAsideRefs: Schema.optional(Schema.Array(Schema.String)),
     /** Absent means it moved. */
     outcome: Schema.optional(Schema.Literals(["moved", "cancelled"])),
+  }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemJsonBaseFields,
+    /** Changes a machine still had for a Thread that moved away, kept on a branch of the Hub. */
+    type: Schema.Literal("recovered_changes"),
+    environmentId: EnvironmentId,
+    environmentName: Schema.String,
+    /** `refs/t3/recovered/<threadId>/<timestamp>` in the Project's Hub repository. */
+    ref: TrimmedNonEmptyString,
+    /** What the changes are compared with: what the machine last uploaded of the Thread. */
+    baseRef: Schema.NullOr(TrimmedNonEmptyString),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,

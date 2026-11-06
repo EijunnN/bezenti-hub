@@ -143,13 +143,32 @@ const parseReceiveCommands = (
   }
 };
 
-/** Why the machine may not make these updates, or undefined when it may. */
-const refuseUpdates = (updates: ReadonlyArray<RefUpdate>, prefixes: ReadonlyArray<string>) => {
+/** One path segment: the timestamp of a recovery, never a deeper ref. */
+const RECOVERY_NAME = /^[A-Za-z0-9_-]+$/u;
+
+/**
+ * Why the machine may not make these updates, or undefined when it may. Besides the refs of the
+ * Threads it runs, a machine a Thread moved away from may create (never update) exactly one ref
+ * per recovery under that Thread's `refs/t3/recovered/<id>/<timestamp>`.
+ */
+const refuseUpdates = (
+  updates: ReadonlyArray<RefUpdate>,
+  prefixes: {
+    readonly writable: ReadonlyArray<string>;
+    readonly recoverable: ReadonlyArray<string>;
+  },
+) => {
   for (const update of updates) {
     if (ZERO_OID.test(update.newOid)) return `Deleting ${update.ref} is not allowed.`;
-    if (!prefixes.some((prefix) => update.ref.startsWith(prefix))) {
-      return `${update.ref} is not a ref of a Thread this machine runs.`;
-    }
+    if (prefixes.writable.some((prefix) => update.ref.startsWith(prefix))) continue;
+    const recovery = prefixes.recoverable.some(
+      (prefix) =>
+        update.ref.startsWith(prefix) && RECOVERY_NAME.test(update.ref.slice(prefix.length)),
+    );
+    if (recovery && ZERO_OID.test(update.oldOid)) continue;
+    return recovery
+      ? `${update.ref} already exists: recovered changes are never overwritten.`
+      : `${update.ref} is not a ref of a Thread this machine runs.`;
   }
   return undefined;
 };
@@ -222,6 +241,9 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
       ["transfer.hideRefs", "refs/"],
       ["transfer.hideRefs", "HEAD"],
       ...prefixes.readable.map((prefix) => ["transfer.hideRefs", `!${prefix}`] as const),
+      // A machine a Thread left only creates a recovered ref there (checked above); it fetches
+      // none of them.
+      ...prefixes.recoverable.map((prefix) => ["receive.hideRefs", `!${prefix}`] as const),
     ]),
     GIT_PROJECT_ROOT: deps.repositories.root,
     GIT_HTTP_EXPORT_ALL: "1",
@@ -265,7 +287,7 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
       }
       const refusal =
         commands._tag === "parsed"
-          ? refuseUpdates(commands.updates, prefixes.writable)
+          ? refuseUpdates(commands.updates, prefixes)
           : "The push could not be read.";
       if (refusal !== undefined) return HttpServerResponse.text(refusal, { status: 403 });
       body = Stream.concat(
@@ -382,7 +404,21 @@ const refPrefixesFor = Effect.fn("HubRepositoryHttp.refPrefixesFor")(function* (
       if (row.active === 1) writable.add(prefix);
     }
   }
-  return { readable: [...readable], writable: [...writable] };
+  // Threads that moved away from this machine and run elsewhere now: it may only hand over the
+  // changes it still had for them (`RecoveredChanges`), one new ref each time, and read nothing.
+  const former = yield* deps.sql<{ readonly threadId: string }>`
+    SELECT DISTINCT thread.thread_id AS "threadId"
+    FROM orchestration_v2_projection_threads thread
+    JOIN orchestration_v2_projection_turn_items item ON item.thread_id = thread.thread_id
+    WHERE thread.project_id = ${projectId}
+      AND thread.deleted_at IS NULL
+      AND (thread.active_environment_id IS NULL OR thread.active_environment_id != ${environmentId})
+      AND item.type = 'environment_move'
+      AND json_extract(item.payload_json, '$.sourceEnvironmentId') = ${environmentId}
+      AND json_extract(item.payload_json, '$.outcome') IS NOT 'cancelled'
+  `;
+  const recoverable = former.map((row) => HubRepository.threadRefPrefixes(row.threadId)[1]);
+  return { readable: [...readable], writable: [...writable], recoverable };
 });
 
 /** Registered where the server keeps Hub repositories; joined machines serve none. */

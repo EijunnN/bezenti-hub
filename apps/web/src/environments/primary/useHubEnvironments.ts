@@ -62,6 +62,30 @@ export interface ActiveEnvironmentView {
   readonly name: string;
   readonly status: EnvironmentConnectionStatus;
   readonly isHubMachine: boolean;
+  /** Its Environment was removed: it runs nowhere until it moves («needs an environment»). */
+  readonly needsEnvironment: boolean;
+}
+
+/** The words for a Thread whose Environment was removed. */
+export const NEEDS_ENVIRONMENT_LABEL = "Needs an environment";
+/** The words for a Thread whose turn waits for its machine to come back. */
+export const PAUSED_OFFLINE_LABEL = "Paused, environment offline";
+
+/**
+ * What the Thread's state is because of where it runs: «needs an environment» once its machine
+ * was removed, «paused, environment offline» while a turn is under way on a machine that is not
+ * online (it resumes when the machine returns, or the Thread moves). Null otherwise.
+ */
+export function threadEnvironmentState(
+  environment: ActiveEnvironmentView | null,
+  turnUnderWay: boolean,
+): "needs-environment" | "paused-offline" | null {
+  if (environment === null) return null;
+  if (environment.needsEnvironment) return "needs-environment";
+  if (turnUnderWay && !environment.isHubMachine && environment.status !== "online") {
+    return "paused-offline";
+  }
+  return null;
 }
 
 export const ENVIRONMENT_STATUS_LABELS: Record<EnvironmentConnectionStatus, string> = {
@@ -74,11 +98,18 @@ export const ENVIRONMENT_STATUS_LABELS: Record<EnvironmentConnectionStatus, stri
  * A Thread's Active environment, a field of the Thread from the stream, by name and live status;
  * a Thread that names none runs on the Hub machine. Null when the User can't see the machine.
  */
-function activeEnvironmentOf(
+export function activeEnvironmentOf(
   list: ReadonlyArray<HubEnvironmentSummary>,
   environmentId: EnvironmentId | null | undefined,
 ): ActiveEnvironmentView | null {
-  if (environmentId === null) return null;
+  if (environmentId === null) {
+    return {
+      name: "No environment",
+      status: "offline",
+      isHubMachine: false,
+      needsEnvironment: true,
+    };
+  }
   const id = environmentId ?? HUB_MACHINE_ENVIRONMENT_ID;
   const environment = list.find((entry) => entry.id === id);
   if (environment === undefined) return null;
@@ -86,6 +117,7 @@ function activeEnvironmentOf(
     name: environment.name,
     status: environment.kind === "hub" ? "online" : environment.status,
     isHubMachine: environment.kind === "hub",
+    needsEnvironment: false,
   };
 }
 
@@ -114,6 +146,7 @@ export function useHasJoinedEnvironments(): boolean {
 
 /** "Laptop" while online, "Laptop, offline" otherwise: the words an accessible name ends with. */
 export function activeEnvironmentLabel(environment: ActiveEnvironmentView): string {
+  if (environment.needsEnvironment) return NEEDS_ENVIRONMENT_LABEL.toLowerCase();
   return environment.status === "online"
     ? environment.name
     : `${environment.name}, ${ENVIRONMENT_STATUS_LABELS[environment.status].toLowerCase()}`;

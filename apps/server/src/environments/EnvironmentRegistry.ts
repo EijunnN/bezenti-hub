@@ -27,8 +27,10 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Stream from "effect/Stream";
 
 import * as AuditLog from "../audit/AuditLog.ts";
 import * as AccessPolicy from "../auth/AccessPolicy.ts";
@@ -281,6 +283,11 @@ export class EnvironmentRegistry extends Context.Service<
       readonly userId: UserId | undefined;
       readonly environmentId: EnvironmentId;
     }) => Effect.Effect<Option.Option<{ readonly name: string }>, EnvironmentStorageError>;
+    /**
+     * Each Environment once its removal committed (from Settings, `t3 leave`, or its owner turned
+     * off): its Threads then need an environment.
+     */
+    readonly removed: Stream.Stream<EnvironmentId>;
   }
 >()("t3/environments/EnvironmentRegistry") {}
 
@@ -295,6 +302,7 @@ const make = Effect.gen(function* () {
   const storageError = (cause: unknown) => new EnvironmentStorageError({ cause });
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const platform = yield* HostProcess.Platform;
+  const removals = yield* PubSub.unbounded<EnvironmentId>();
 
   const sha256 = (value: string) =>
     digester.digest(Digest.sha256, new TextEncoder().encode(value)).pipe(
@@ -476,6 +484,7 @@ const make = Effect.gen(function* () {
         .pipe(Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }));
       // After the commit: a socket closed first could reconnect before the revocation lands.
       yield* connections.close(environmentId, "environment-removed");
+      yield* PubSub.publish(removals, environmentId);
     },
   );
 
@@ -534,7 +543,10 @@ const make = Effect.gen(function* () {
       for (const row of rows) yield* revoke({ row, actor, via: "userTurnedOff" });
       return Effect.forEach(
         rows,
-        (row) => connections.close(EnvironmentId.make(row.environmentId), "owner-inactive"),
+        (row) =>
+          connections
+            .close(EnvironmentId.make(row.environmentId), "owner-inactive")
+            .pipe(Effect.andThen(PubSub.publish(removals, EnvironmentId.make(row.environmentId)))),
         { discard: true },
       );
     },
@@ -625,7 +637,10 @@ const make = Effect.gen(function* () {
           }),
         )
         .pipe(Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }));
-      if (left) yield* connections.close(check.environmentId, "environment-removed");
+      if (left) {
+        yield* connections.close(check.environmentId, "environment-removed");
+        yield* PubSub.publish(removals, check.environmentId);
+      }
       return left;
     },
   );
@@ -719,6 +734,7 @@ const make = Effect.gen(function* () {
     recordHello,
     recordHeartbeat,
     leave,
+    removed: Stream.fromPubSub(removals),
   });
 });
 

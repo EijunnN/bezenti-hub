@@ -13,6 +13,7 @@ import {
   EnvironmentExecutorSessionEnded,
   EnvironmentExecutorUnavailableError,
   type EnvironmentHeartbeatFrame,
+  EnvironmentSessionLostError,
   EnvironmentWorkspaceStreamEnd,
   EnvironmentWorkspaceStreamItem,
   type EnvironmentHelloFrame,
@@ -153,6 +154,19 @@ export class RemoteEnvironments extends Context.Service<
     >;
     /** A Thread changed Environments: events and attachment reads are checked anew. */
     readonly threadMoved: (threadId: ThreadId) => Effect.Effect<void>;
+    /**
+     * The Environment was removed: its sessions end (their turns interrupted) even if it was
+     * offline, since it will not come back to report them.
+     */
+    readonly environmentRemoved: (environmentId: EnvironmentId) => Effect.Effect<void>;
+    /**
+     * The Thread leaves a machine that is away while its turn is paused there: the Thread's
+     * sessions on it end here (the turn is interrupted) and the machine drops them on return.
+     */
+    readonly abandonSessions: (
+      environmentId: EnvironmentId,
+      threadId: ThreadId,
+    ) => Effect.Effect<void>;
     /** Every connected machine's preview events, live (each machine streams its own). */
     readonly previewEvents: Stream.Stream<PreviewEvent>;
   }
@@ -720,6 +734,9 @@ const make = Effect.gen(function* () {
       prepare: Effect.fn("RemoteEnvironments.move.prepare")((input) =>
         callCheckpoint<MovedWorkspace.MovePrepareResult>(link, "move.prepare", input),
       ),
+      recover: Effect.fn("RemoteEnvironments.move.recover")((input) =>
+        callCheckpoint<MovedWorkspace.MoveRecoverResult>(link, "move.recover", input),
+      ),
     };
     // Resolved on the Hub from what the Environment reported: the Orchestrator asks while deciding.
     const runtimePolicy: RuntimePolicy.RuntimePolicyV2Shape = {
@@ -990,19 +1007,44 @@ const make = Effect.gen(function* () {
     return { _tag: "success", value: { base64: Buffer.from(bytes.value).toString("base64") } };
   });
 
+  const nameOf = (environmentId: EnvironmentId) =>
+    sql<{ readonly name: string }>`
+      SELECT name FROM environments WHERE environment_id = ${environmentId}
+    `.pipe(
+      Effect.map((rows) => rows[0]?.name ?? "The Environment"),
+      Effect.orElseSucceed(() => "The Environment"),
+    );
+
+  /**
+   * Ends a session the machine no longer runs: its turn is interrupted, not failed
+   * (`EnvironmentSessionLostError`), so the Thread goes on there or elsewhere.
+   */
+  const loseSession = Effect.fn("RemoteEnvironments.loseSession")(function* (
+    link: Link,
+    providerSessionId: string,
+    sink: SessionSink,
+    reason: EnvironmentSessionLostError["reason"],
+  ) {
+    yield* Queue.fail(
+      sink.queue,
+      new ProviderAdapter.ProviderAdapterEventStreamError({
+        driver: sink.driver,
+        providerSessionId:
+          providerSessionId as ProviderAdapter.ProviderAdapterV2SessionRuntime["providerSessionId"],
+        cause: new EnvironmentSessionLostError({
+          environmentId: link.environmentId,
+          environmentName: yield* nameOf(link.environmentId),
+          reason,
+        }),
+      }),
+    );
+  });
+
   const retire = (link: Link) =>
     Effect.forEach(
       [...link.sessions.entries()],
       ([providerSessionId, sink]) =>
-        Queue.fail(
-          sink.queue,
-          new ProviderAdapter.ProviderAdapterEventStreamError({
-            driver: sink.driver,
-            providerSessionId:
-              providerSessionId as ProviderAdapter.ProviderAdapterV2SessionRuntime["providerSessionId"],
-            cause: "The Environment was removed.",
-          }),
-        ),
+        loseSession(link, providerSessionId, sink, "environment-removed"),
       { discard: true },
     ).pipe(Effect.andThen(Effect.sync(() => link.sessions.clear())));
 
@@ -1059,15 +1101,7 @@ const make = Effect.gen(function* () {
       for (const [providerSessionId, sink] of link.sessions) {
         if (reported.has(providerSessionId)) continue;
         link.sessions.delete(providerSessionId);
-        yield* Queue.fail(
-          sink.queue,
-          new ProviderAdapter.ProviderAdapterEventStreamError({
-            driver: sink.driver,
-            providerSessionId:
-              providerSessionId as ProviderAdapter.ProviderAdapterV2SessionRuntime["providerSessionId"],
-            cause: "The provider session no longer runs on its Environment.",
-          }),
-        );
+        yield* loseSession(link, providerSessionId, sink, "process-ended");
       }
       const unknown = hello.sessions
         .map((session) => session.providerSessionId)
@@ -1145,6 +1179,26 @@ const make = Effect.gen(function* () {
 
   return RemoteEnvironments.of({
     connect,
+    environmentRemoved: Effect.fn("RemoteEnvironments.environmentRemoved")(
+      function* (environmentId) {
+        const link = links.get(environmentId);
+        if (link === undefined) return;
+        yield* retire(link);
+        // A socket still open is closed by the removal; its finalizer finds nothing left to end.
+        if (link.channel === undefined) links.delete(environmentId);
+      },
+    ),
+    abandonSessions: Effect.fn("RemoteEnvironments.abandonSessions")(
+      function* (environmentId, threadId) {
+        const link = links.get(environmentId);
+        if (link === undefined) return;
+        for (const [providerSessionId, sink] of link.sessions) {
+          if (sink.threadId !== threadId) continue;
+          link.sessions.delete(providerSessionId);
+          yield* loseSession(link, providerSessionId, sink, "moved-while-offline");
+        }
+      },
+    ),
     previewEvents: Stream.fromPubSub(previewEvents),
     threadMoved: Effect.fn("RemoteEnvironments.threadMoved")(function* (threadId) {
       yield* Effect.sync(() => {

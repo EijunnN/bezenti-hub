@@ -122,6 +122,16 @@ export function V2LifecycleRow(props: {
       />
     );
   }
+  if (item.type === "recovered_changes") {
+    return (
+      <TimelineSystemDivider
+        label={`Recovered changes from ${item.environmentName}`}
+        detail={`${item.environmentName} still had changes for this Thread after it moved. They are kept, not merged, on the branch ${item.ref} of the Hub repository; ${item.environmentName}'s own files were left as they were.`}
+        icon={ArrowRightLeftIcon}
+        wrapDetail
+      />
+    );
+  }
   if (item.type === "fork") {
     const relatedThreadId = item.source.type === "run" ? item.source.threadId : item.targetThreadId;
     return (

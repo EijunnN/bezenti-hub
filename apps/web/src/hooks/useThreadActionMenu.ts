@@ -152,7 +152,8 @@ export function useThreadActionMenu(input: {
         snoozePresets,
         canShareWithGuest,
         canTurnIntoProject: canTurnThreadIntoProject(threadRef),
-        canMoveEnvironment: readHubEnvironments().length > 1,
+        // A Thread whose machine was removed can always go to the Hub machine.
+        canMoveEnvironment: readHubEnvironments().length > 1 || thread.activeEnvironmentId === null,
         role: readThreadRolePermissions(threadRef.environmentId, thread.source),
       });
       const clicked = await settlePromise(() => api.contextMenu.show(items, position));

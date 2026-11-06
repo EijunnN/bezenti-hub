@@ -58,6 +58,7 @@ import * as RuntimePolicy from "./RuntimePolicy.ts";
 import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ThreadMoveService from "./ThreadMoveService.ts";
+import * as EnvironmentReturnService from "./EnvironmentReturnService.ts";
 import * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import * as ThreadForkService from "./ThreadForkService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
@@ -313,6 +314,8 @@ const layerThreadManagementProvided = ThreadManagementService.layerWithLegacyImp
   Layer.provide(
     Layer.mergeAll(
       layerOrchestratorProvided,
+      // Which machines are connected, so a message to a paused Thread queues.
+      layerEnvironmentExecutorsProvided,
       layerLegacyV1ThreadImporterProvided,
       layerCommandReceiptStoreProvided,
       layerProviderSessionManagerProvided,
@@ -440,7 +443,22 @@ const layerThreadMovesProvided = ThreadMoveService.layer.pipe(
   ),
 );
 
+// Removed machines release their Threads; returning ones hand over the changes they kept.
+const layerEnvironmentReturnsProvided = EnvironmentReturnService.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      layerEnvironmentExecutorsProvided,
+      layerRemoteEnvironmentsProvided,
+      layerEventSink,
+      IdAllocator.layer,
+      ThreadCommandExecutor.layer,
+      ProjectionStore.layer,
+    ),
+  ),
+);
+
 export const layer = Layer.mergeAll(
+  layerEnvironmentReturnsProvided,
   layerEnvironmentExecutorsProvided,
   layerRemoteEnvironmentsProvided,
   layerCheckpointUploadsProvided,

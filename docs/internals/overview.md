@@ -139,7 +139,7 @@ on its own in-process executor. Constraints that span both halves:
   read, it delivers nothing more for that session until the machine resends after a reconnect.
 - Machine work for a Thread whose Environment is away waits without holding back the Hub's own
   effects on that Thread; work for a removed Environment fails on its first attempt, and its
-  cleanup is skipped (`threadEnvironmentRemoved`, where ticket 10's «needs an environment» hooks in).
+  cleanup is skipped (`threadEnvironmentRemoved`). See «Disconnections» below.
 - The agent reaches the Hub's MCP: the Hub issues the per-Thread credential as for a local session,
   and the machine points it at `<the Hub URL it joined>/mcp`. Its own MCP server is not used.
 - Attachments stay on the Hub. A turn sends each one's id and SHA-256; the machine fetches the ones
@@ -178,7 +178,9 @@ one, a machine sees and writes only the refs of Threads it is the Active environ
 checkpoint scopes, `refs/t3/threads/<id>/`, `refs/t3/recovered/<id>/`, the id percent-encoded):
 `transfer.hideRefs` hides the rest, and the ref updates of a push are read and checked before git
 sees them. The target of a Thread's running move also reads (never writes) that Thread's refs, so
-it can fetch what the Thread continues from before the Thread is its own. Nobody deletes a ref; an update need not fast-forward, since a rollback reuses its own
+it can fetch what the Thread continues from before the Thread is its own. A machine a Thread moved
+away from (an `environment_move` names it as the source) may only create, never update, one
+`refs/t3/recovered/<id>/<timestamp>` (a single path segment) for it, and reads none of its refs. Nobody deletes a ref; an update need not fast-forward, since a rollback reuses its own
 checkpoint refs. Transfers always name the Hub repository by URL or path, never a remote of the
 checkout, so nothing reaches `origin`.
 
@@ -240,6 +242,34 @@ machine that has not said hello yet is unknown, not offline: the move gives each
 (`RECONNECT_GRACE`) before going on without the source or failing for the target. Scope cwds
 recorded before a move are still the source machine's paths, so rolling back to a turn from before
 the move is not supported yet.
+
+### Disconnections
+
+A machine that drops keeps running: its agent spools each session's events (bounded per session,
+`SPOOL_LIMIT`) until the Hub acknowledges them and resends them on the next socket, so a turn
+whose process survived goes on with nothing lost or doubled. Clients show such a Thread
+«paused, environment offline» (a turn under way, its machine not online; derived from the
+Thread's runtime and the Environment's live status). The hello lists the sessions still alive;
+one the machine lost fails on the Hub with `EnvironmentSessionLostError`, which
+[RunExecutionService](../../apps/server/src/orchestration-v2/RunExecutionService.ts) turns into
+an interrupted turn (a `run_interrupt_result` saying why) instead of a failed one, so the queue
+goes on there. While a Thread's machine is away, a User's message that would steer or start
+work goes to the queue (`ThreadManagementService`, `queueWhileAway`). A move with **Stop the
+turn** from a machine that is away ends its sessions on the Hub
+(`RemoteEnvironments.abandonSessions`, the same interrupted turn); the machine drops them when it
+returns, since the Hub no longer knows them.
+
+[EnvironmentReturnService](../../apps/server/src/orchestration-v2/EnvironmentReturnService.ts)
+handles the rest. When an Environment is removed (`EnvironmentRegistry.removed`, and at startup
+for removals not yet handled) its sessions end (`environmentRemoved`) and each of its Threads gets
+`activeEnvironmentId: null` («needs an environment»): history intact, no new messages, its queue
+held, movable (the move's source is then null). Each time a joined machine connects, it is asked
+(`move.recover`) about every Thread that moved away from it: the workspace the Thread had there
+(its known worktree, else the Project's checkout unless another Thread runs in it) is captured
+into `refs/t3/recovered/<id>/<timestamp>` and compared with what the machine last handed over
+(the move's `continuesFrom`, or the previous recovery; HEAD when there is none). A difference is
+pushed to the Hub repository and noted in the Thread (`recovered_changes`, with the ref and the
+machine); otherwise the local ref is deleted. The workspace itself is never changed.
 
 ### Workspace RPCs
 

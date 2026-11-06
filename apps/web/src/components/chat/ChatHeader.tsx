@@ -48,6 +48,8 @@ import { EnvironmentStatusDot } from "../EnvironmentStatusDot";
 import {
   type ActiveEnvironmentView,
   ENVIRONMENT_STATUS_LABELS,
+  NEEDS_ENVIRONMENT_LABEL,
+  PAUSED_OFFLINE_LABEL,
   activeEnvironmentLabel,
 } from "../../environments/primary/useHubEnvironments";
 
@@ -58,6 +60,8 @@ interface ChatHeaderProps {
   activeThreadLinkOrigin?: string | null | undefined;
   /** The Environment the Thread runs on, by name and live status. */
   activeEnvironment?: ActiveEnvironmentView | null | undefined;
+  /** «Needs an environment», or «paused, environment offline» while its turn waits. */
+  environmentState?: "needs-environment" | "paused-offline" | null | undefined;
   /** The Thread's latest move to another Environment; shown while it runs. */
   activeThreadMove?: OrchestrationV2ThreadMove | null | undefined;
   isServerThread: boolean;
@@ -88,6 +92,7 @@ export const ChatHeader = memo(function ChatHeader({
   activeThreadTitle,
   activeThreadLinkOrigin,
   activeEnvironment,
+  environmentState,
   activeThreadMove,
   isServerThread,
   activeProject,
@@ -432,7 +437,29 @@ export const ChatHeader = memo(function ChatHeader({
               <TooltipPopup side="top">{activeThreadTitle}</TooltipPopup>
             </Tooltip>
           )}
-          {renamingTitle === null && activeEnvironment ? (
+          {renamingTitle === null && activeEnvironment?.needsEnvironment ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Badge
+                    variant="warning"
+                    size="sm"
+                    role="status"
+                    data-environment-state="needs-environment"
+                    aria-label={`Active environment: none. ${NEEDS_ENVIRONMENT_LABEL}`}
+                  />
+                }
+              >
+                <EnvironmentStatusDot status="offline" />
+                {NEEDS_ENVIRONMENT_LABEL}
+              </TooltipTrigger>
+              <TooltipPopup side="top">
+                The machine this Thread ran on was removed. Its history is kept; move it to another
+                Environment to continue.
+              </TooltipPopup>
+            </Tooltip>
+          ) : null}
+          {renamingTitle === null && activeEnvironment && !activeEnvironment.needsEnvironment ? (
             <Tooltip>
               <TooltipTrigger
                 render={
@@ -453,6 +480,29 @@ export const ChatHeader = memo(function ChatHeader({
               <TooltipPopup side="top">
                 Runs on {activeEnvironment.name} ·{" "}
                 {ENVIRONMENT_STATUS_LABELS[activeEnvironment.status]}
+              </TooltipPopup>
+            </Tooltip>
+          ) : null}
+          {renamingTitle === null && environmentState === "paused-offline" && activeEnvironment ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Badge
+                    variant="warning"
+                    size="sm"
+                    role="status"
+                    data-environment-state="paused-offline"
+                    aria-label={PAUSED_OFFLINE_LABEL}
+                  />
+                }
+              >
+                {PAUSED_OFFLINE_LABEL}
+              </TooltipTrigger>
+              <TooltipPopup side="top">
+                {activeEnvironment.name} is{" "}
+                {ENVIRONMENT_STATUS_LABELS[activeEnvironment.status].toLowerCase()}. The turn goes
+                on when it comes back; messages you send are queued until then, or until you move
+                the Thread.
               </TooltipPopup>
             </Tooltip>
           ) : null}

@@ -17,6 +17,7 @@ import { resolveSettledThreadTimestamp } from "@t3tools/client-runtime/state/thr
 import { type EnvironmentThreadSearchMatch } from "@t3tools/client-runtime/state/thread-search";
 import {
   formatWorkingDurationLabel,
+  threadRuntimeIsActive,
   resolveThreadProviderStack,
 } from "@t3tools/client-runtime/state/models";
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
@@ -117,7 +118,10 @@ import { MiddleTruncate } from "../ui/middle-truncate";
 import { EnvironmentStatusDot } from "../EnvironmentStatusDot";
 import {
   ENVIRONMENT_STATUS_LABELS,
+  NEEDS_ENVIRONMENT_LABEL,
+  PAUSED_OFFLINE_LABEL,
   activeEnvironmentLabel,
+  threadEnvironmentState,
   useActiveEnvironment,
   useHasJoinedEnvironments,
 } from "../../environments/primary/useHubEnvironments";
@@ -1017,11 +1021,19 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     activeEnvironment === null || (activeEnvironment.isHubMachine && !hasJoinedEnvironments)
       ? null
       : activeEnvironment;
+  const environmentState = threadEnvironmentState(
+    activeEnvironment,
+    threadRuntimeIsActive(thread.runtime),
+  );
   const accessibility = resolveSidebarRowAccessibility({
     title:
-      shownEnvironment === null
-        ? thread.title
-        : `${thread.title}, runs on ${activeEnvironmentLabel(shownEnvironment)}`,
+      environmentState === "needs-environment"
+        ? `${thread.title}, ${NEEDS_ENVIRONMENT_LABEL.toLowerCase()}`
+        : shownEnvironment === null
+          ? thread.title
+          : `${thread.title}, ${
+              environmentState === "paused-offline" ? `${PAUSED_OFFLINE_LABEL.toLowerCase()}, ` : ""
+            }runs on ${activeEnvironmentLabel(shownEnvironment)}`,
     statusLabel: topStatus?.label ?? null,
     projectDisplayName: props.projectDisplayName,
     isActive: props.isActive,
@@ -1078,10 +1090,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           className="inline-flex shrink-0 items-center gap-1 truncate text-muted-foreground text-xs"
         >
           <EnvironmentStatusDot status={shownEnvironment.status} />
-          {shownEnvironment.name}
-          {shownEnvironment.status === "online"
+          {shownEnvironment.needsEnvironment ? NEEDS_ENVIRONMENT_LABEL : shownEnvironment.name}
+          {shownEnvironment.status === "online" || shownEnvironment.needsEnvironment
             ? null
-            : ` · ${ENVIRONMENT_STATUS_LABELS[shownEnvironment.status]}`}
+            : ` · ${environmentState === "paused-offline" ? PAUSED_OFFLINE_LABEL : ENVIRONMENT_STATUS_LABELS[shownEnvironment.status]}`}
         </span>
       </>
     );

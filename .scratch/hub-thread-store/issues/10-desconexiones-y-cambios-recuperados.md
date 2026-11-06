@@ -9,7 +9,7 @@ Cuando vuelve una máquina que tenía cambios sin subir de un Thread que ya se m
 
 **Blocked by:** 08.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] El Environment guarda en un spool local acotado los eventos que el Hub aún no confirmó y los reenvía al reconectar. No se pierde ni se duplica nada al cortar la red a mitad de un turno.
 - [ ] Al reconectar, el saludo lista las sesiones vivas.

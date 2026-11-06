@@ -1,4 +1,4 @@
-import { LockIcon } from "lucide-react";
+import { ArrowRightLeftIcon, LockIcon } from "lucide-react";
 import { ChildThreadApprovals } from "./chat/ChildThreadApprovals";
 import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
@@ -374,7 +374,15 @@ const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_MODELS: ServerProvider["models"] = [];
 const EMPTY_USAGE_LIMIT_SOURCES: UsageLimitSourceSnapshots = [];
 import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplates";
-import { useActiveEnvironment } from "../environments/primary/useHubEnvironments";
+import {
+  NEEDS_ENVIRONMENT_LABEL,
+  PAUSED_OFFLINE_LABEL,
+  threadEnvironmentState,
+  useActiveEnvironment,
+} from "../environments/primary/useHubEnvironments";
+import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/models";
+import { openMoveThreadDialog } from "./chat/MoveThreadDialog";
+import { Button } from "./ui/button";
 import { HubEnvironmentSelector } from "./chat/HubEnvironmentSelector";
 
 const EMPTY_FEEDBACK_SUBMISSIONS: ReadonlyArray<CodexFeedbackSubmission> = [];
@@ -977,6 +985,9 @@ export default function ChatView(props: ChatViewProps) {
   const browserAvailable = isPreviewSupportedInRuntime() || activeEnvironmentServerBrowser;
   const activeThreadShell = serverThread;
   const threadActiveEnvironment = useActiveEnvironment(activeThreadShell?.activeEnvironmentId);
+  const threadEnvState = isServerThread
+    ? threadEnvironmentState(threadActiveEnvironment, threadRuntimeIsActive(activeRuntime))
+    : null;
   const timelineThreadError =
     serverRuntime?.status === "failed" &&
     serverRuntime.lastErrorClass === "usage_limit" &&
@@ -2556,6 +2567,40 @@ export default function ChatView(props: ChatViewProps) {
     const limitRecoveryItems = limitRecoveryBanner === null ? [] : [limitRecoveryBanner];
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
+    // Where the Thread runs keeps it from going on: say why, and offer the move.
+    const environmentItems: ComposerBannerStackItem[] =
+      threadEnvState === null
+        ? []
+        : [
+            {
+              id: `thread-environment:${threadEnvState}`,
+              variant: "warning",
+              group: "environment",
+              icon: <ArrowRightLeftIcon />,
+              title:
+                threadEnvState === "needs-environment"
+                  ? NEEDS_ENVIRONMENT_LABEL
+                  : PAUSED_OFFLINE_LABEL,
+              description:
+                threadEnvState === "needs-environment"
+                  ? "The machine this Thread ran on was removed. Its history is kept: move it to another Environment to continue."
+                  : `${threadActiveEnvironment?.name ?? "Its Environment"} is offline. The turn goes on when it comes back; messages you send now are queued until then, or until you move the Thread.`,
+              actions: (
+                <Button
+                  size="xs"
+                  variant="outline"
+                  onClick={() =>
+                    activeThread &&
+                    openMoveThreadDialog(
+                      scopeThreadRef(activeThread.environmentId, activeThread.id),
+                    )
+                  }
+                >
+                  Move to another Environment
+                </Button>
+              ),
+            },
+          ];
     // Someone else's Thread: say why the composer is closed, whatever state the Thread is in.
     const roleItems: ComposerBannerStackItem[] =
       threadRole.continueBlockedReason === null
@@ -2571,6 +2616,7 @@ export default function ChatView(props: ChatViewProps) {
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...roleItems,
+        ...environmentItems,
         ...feedbackBannerItems,
         ...fallbackItems,
         ...limitRecoveryItems,
@@ -2581,6 +2627,7 @@ export default function ChatView(props: ChatViewProps) {
     }
     return [
       ...roleItems,
+      ...environmentItems,
       ...feedbackBannerItems,
       ...fallbackItems,
       ...limitRecoveryItems,
@@ -3296,6 +3343,7 @@ export default function ChatView(props: ChatViewProps) {
               activeThreadTitle={activeThread.title}
               activeThreadLinkOrigin={activeThreadShell?.linkOrigin?.label ?? null}
               activeEnvironment={isServerThread ? threadActiveEnvironment : null}
+              environmentState={threadEnvState}
               activeThreadMove={isServerThread ? (activeThreadShell?.move ?? null) : null}
               activeProject={activeProject ?? null}
               parentThreadLink={headerParentThreadLink}

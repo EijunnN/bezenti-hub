@@ -459,6 +459,14 @@ export const layer: Layer.Layer<
         if (still.value.move.waitingOn !== waitingOn) {
           yield* advance(threadId, move.id, { waitingOn });
         }
+        if (move.ifRunning === "stop" && !stopped && !sourceOnline) {
+          // The turn is paused on a machine that is away: nothing can reach it to stop it, so
+          // its sessions end here and the turn is interrupted; the machine drops them on return.
+          stopped = true;
+          if (Option.isSome(remote) && move.sourceEnvironmentId !== null) {
+            yield* remote.value.abandonSessions(move.sourceEnvironmentId, threadId);
+          }
+        }
         if (move.ifRunning === "stop" && !stopped) {
           stopped = true;
           yield* orchestrator

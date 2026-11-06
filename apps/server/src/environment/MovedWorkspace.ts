@@ -64,6 +64,65 @@ export const MovePrepareResult = Schema.Struct({
 });
 export type MovePrepareResult = typeof MovePrepareResult.Type;
 
+/**
+ * A machine is back with a Thread that moved away: what its workspace holds that it never
+ * uploaded is kept in `recoveredRef` and pushed to the Hub. The workspace itself is left as it is.
+ */
+export const MoveRecoverInput = Schema.Struct({
+  /** The Thread's workspace on the machine, as it last ran there. */
+  cwd: Schema.String,
+  projectId: ProjectId,
+  threadId: ThreadId,
+  /** What the machine last uploaded of it (or recovered before); none compares with HEAD. */
+  baseRef: Schema.NullOr(CheckpointRef),
+  /** `refs/t3/recovered/<threadId>/<timestamp>`. */
+  recoveredRef: CheckpointRef,
+});
+export type MoveRecoverInput = typeof MoveRecoverInput.Type;
+
+export const MoveRecoverResult = Schema.Struct({
+  status: Schema.Literals(["missing", "unchanged", "recovered"]),
+});
+export type MoveRecoverResult = typeof MoveRecoverResult.Type;
+
+/**
+ * Captures the workspace into `recoveredRef` and keeps it only if it differs from `baseRef` (or
+ * HEAD without one). Pushing it is the caller's: each machine reaches the Hub its own way.
+ */
+export const captureRecoveredChanges = Effect.fn("MovedWorkspace.captureRecovered")(function* (
+  deps: {
+    readonly vcs: VcsProcess.VcsProcess["Service"];
+    readonly checkpoints: CheckpointStore.CheckpointStore["Service"];
+    readonly fileSystem: FileSystem.FileSystem;
+  },
+  input: MoveRecoverInput,
+): Effect.fn.Return<MoveRecoverResult["status"], CheckpointStoreError> {
+  const exists = yield* deps.fileSystem.exists(input.cwd).pipe(Effect.orElseSucceed(() => false));
+  if (!exists || !(yield* deps.checkpoints.isGitRepository(input.cwd))) return "missing";
+  const tree = (name: string) =>
+    deps.vcs
+      .run({
+        operation: "MovedWorkspace.captureRecovered",
+        command: "git",
+        cwd: input.cwd,
+        args: ["rev-parse", "--verify", "--quiet", `${name}^{tree}`],
+        allowNonZeroExit: true,
+      })
+      .pipe(Effect.map((output) => (output.exitCode === 0 ? output.stdout.trim() : null)));
+  yield* deps.checkpoints.captureCheckpoint({ cwd: input.cwd, checkpointRef: input.recoveredRef });
+  const captured = yield* tree(input.recoveredRef);
+  const base =
+    (input.baseRef === null ? null : yield* tree(input.baseRef)) ?? (yield* tree("HEAD"));
+  if (captured !== null && captured === base) {
+    yield* deps.checkpoints.deleteCheckpointRefs({
+      cwd: input.cwd,
+      checkpointRefs: [input.recoveredRef],
+    });
+    return "unchanged";
+  }
+  return "recovered";
+});
+
 const failed = (operation: string, cwd: string, detail: string, exitCode = 1) =>
   new VcsProcessExitError({ operation, command: "git", cwd, exitCode, detail });
 

@@ -19,7 +19,7 @@ import {
   EnvironmentUnavailableProvider,
 } from "./environmentConnection.ts";
 
-export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 5;
+export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 6;
 
 /**
  * The Hub machine's Environment id. It is a constant so the `environments` table can seed the
@@ -36,6 +36,45 @@ export class EnvironmentExecutorUnavailableError extends Schema.TaggedError<Envi
     return `Environment ${this.environmentId} has no executor.`;
   }
 }
+
+/**
+ * A provider session that ran on a joined Environment is gone with its process: the machine came
+ * back without it (`process-ended`), it was removed, or the Thread moved away while the turn was
+ * paused on it. Its turn ends as interrupted, not failed, and the Thread goes on there or elsewhere.
+ */
+export class EnvironmentSessionLostError extends Schema.TaggedError<EnvironmentSessionLostError>()(
+  "EnvironmentSessionLostError",
+  {
+    environmentId: EnvironmentId,
+    environmentName: Schema.String,
+    reason: Schema.Literals(["process-ended", "environment-removed", "moved-while-offline"]),
+  },
+) {
+  override get message(): string {
+    switch (this.reason) {
+      case "environment-removed":
+        return `${this.environmentName} was removed from the Hub while this turn ran there. Move the Thread to another Environment to continue.`;
+      case "moved-while-offline":
+        return `This turn was paused on ${this.environmentName}, which was offline, and was stopped to move the Thread.`;
+      case "process-ended":
+        return `The agent on ${this.environmentName} stopped while ${this.environmentName} was offline. Send a message to continue here, or move the Thread to another Environment.`;
+    }
+  }
+}
+
+const isEnvironmentSessionLost = Schema.is(EnvironmentSessionLostError);
+
+/** The `EnvironmentSessionLostError` an error carries, through the errors that wrap it. */
+export const findEnvironmentSessionLost = (
+  error: unknown,
+): EnvironmentSessionLostError | undefined => {
+  let current = error;
+  for (let depth = 0; depth < 8 && typeof current === "object" && current !== null; depth += 1) {
+    if (isEnvironmentSessionLost(current)) return current;
+    current = (current as { readonly cause?: unknown }).cause;
+  }
+  return undefined;
+};
 
 export const EnvironmentExecutorTransport = Schema.Literals(["in-process", "remote"]);
 export type EnvironmentExecutorTransport = typeof EnvironmentExecutorTransport.Type;
@@ -72,6 +111,7 @@ const ENVIRONMENT_EXECUTOR_OPERATIONS = {
     "checkpoint.fetch",
     "move.fetch",
     "move.prepare",
+    "move.recover",
     "runtimePolicy.resolve",
     "launch.prepareWorktree",
     "launch.runSetupScript",

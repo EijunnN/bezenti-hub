@@ -111,6 +111,13 @@ export interface EnvironmentMoveWorkspace {
   readonly prepare: (
     input: MovedWorkspace.MovePrepareInput,
   ) => Effect.Effect<MovedWorkspace.MovePrepareResult, CheckpointStoreError>;
+  /**
+   * Back with a Thread that moved away: keeps what its workspace holds that was never uploaded
+   * under a recovered ref, uploaded to the Hub. Nothing in the workspace changes.
+   */
+  readonly recover: (
+    input: MovedWorkspace.MoveRecoverInput,
+  ) => Effect.Effect<MovedWorkspace.MoveRecoverResult, CheckpointStoreError>;
 }
 
 /**
@@ -466,6 +473,30 @@ const makeMoveWorkspace = (input: {
                 ),
             },
             request,
+          ),
+    recover: (request) =>
+      Option.isNone(vcs) || Option.isNone(fileSystem)
+        ? Effect.fail(
+            new VcsUnsupportedOperationError({
+              operation: "EnvironmentExecutor.move.recover",
+              kind: "git",
+              detail: "This server cannot look for a moved Thread's changes.",
+            }),
+          )
+        : MovedWorkspace.captureRecoveredChanges(
+            { vcs: vcs.value, checkpoints: input.checkpoints, fileSystem: fileSystem.value },
+            request,
+          ).pipe(
+            Effect.tap((status) =>
+              status === "recovered"
+                ? input.hubRepository.push({
+                    cwd: request.cwd,
+                    projectId: request.projectId,
+                    checkpointRefs: [request.recoveredRef],
+                  })
+                : Effect.void,
+            ),
+            Effect.map((status) => ({ status })),
           ),
   };
 };

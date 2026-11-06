@@ -65,6 +65,7 @@ import {
   type WireAttachmentRef,
   type WireCheckout,
 } from "../environment/RemoteExecutorWire.ts";
+import { captureRecoveredChanges } from "../environment/MovedWorkspace.ts";
 import { terminalOutputStream } from "../terminal/OutputProtocol.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as JoinedWorkspaceRoots from "../workspace/JoinedWorkspaceRoots.ts";
@@ -757,6 +758,37 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
       }
       case "move.prepare":
         return local.workspace.move.prepare(request as RemoteInput<"move.prepare">);
+      // Back with a Thread that moved away: what it never uploaded goes to the Hub, through this
+      // machine's own credential; the workspace stays as it is.
+      case "move.recover": {
+        const recover = request as RemoteInput<"move.recover">;
+        if (Option.isNone(vcs)) {
+          return Effect.fail(
+            new VcsProcessExitError({
+              operation: "EnvironmentAgent.move.recover",
+              command: "git",
+              cwd: recover.cwd,
+              exitCode: 1,
+              detail: "This machine has no git.",
+            }),
+          );
+        }
+        return captureRecoveredChanges(
+          { vcs: vcs.value, checkpoints: local.workspace.checkpoints, fileSystem },
+          recover,
+        ).pipe(
+          Effect.tap((status) =>
+            status === "recovered"
+              ? hubRepository.push({
+                  cwd: recover.cwd,
+                  projectId: recover.projectId,
+                  checkpointRefs: [recover.recoveredRef],
+                })
+              : Effect.void,
+          ),
+          Effect.map((status) => ({ status })),
+        );
+      }
       // The Hub already authorized these and resolved their paths onto this machine.
       case "files.read": {
         const rooted = request as RemoteInput<"files.read">;

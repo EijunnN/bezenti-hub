@@ -520,6 +520,31 @@ a later release. If a step fails, the Thread stays on the machine it was on and
 the dialog says which step failed and why. Only one move of a Thread runs at a
 time, only the Thread's creator can move it, and the audit log records each move.
 
+### When a machine goes away
+
+If a Thread's machine drops while a turn runs, the Thread's header, its sidebar row
+and the composer say **Paused, environment offline**. The machine keeps what the
+agent does meanwhile and sends it when it reconnects, so nothing is lost or shown
+twice: if the agent was still running, the turn simply goes on. If the machine's
+T3 server stopped too, the turn ends as interrupted ("The agent on Laptop stopped
+while Laptop was offline"); send a message to go on there, or move the Thread.
+Messages you send to a paused Thread wait in its queue and start when the turn
+ends there or once you move it. To move a paused Thread right away, choose **Stop
+the turn** in the move dialog: **Wait for the turn to finish** waits for the
+machine to come back.
+
+When a machine that was off comes back with changes for a Thread that moved away
+in the meantime (files you edited by hand there, never uploaded), it puts them on a
+separate branch in the Hub's repository, `refs/t3/recovered/<thread>/<time>`, and
+the Thread's timeline says **Recovered changes from Laptop** with that branch.
+Nothing is merged and the machine's own files are left as they are, so you can
+still bring the changes back yourself from either place.
+
+**Remove** a machine and its Threads keep all their history but run nowhere: they
+say **Needs an environment** and take no new messages until you move them (the
+composer offers **Move to another Environment**). A turn that was running there
+ends as interrupted.
+
 ## Next steps
 
 - [Working with threads](./thread-sidebar.md): start tasks and organize parallel work.

@@ -70,6 +70,7 @@ import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
+import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
@@ -603,6 +604,14 @@ const FORCE_STOP_REASON = "Force stopped by user";
 const FORCE_STOP_RELEASE_WAIT = "10 seconds";
 const isForceStopThreadError = Schema.is(OrchestrationV2ForceStopThreadError);
 
+/** A turn that is under way; on a machine that went offline it is paused until it returns. */
+const PAUSABLE_RUN_STATUSES: ReadonlySet<string> = new Set([
+  "preparing",
+  "starting",
+  "running",
+  "waiting",
+]);
+
 const makeWith = Effect.fn("ThreadManagementService.make")(function* (
   spaces: Option.Option<SpaceDirectory.SpaceDirectory["Service"]>,
   environments: Option.Option<EnvironmentRegistry.EnvironmentRegistry["Service"]> = Option.none(),
@@ -615,6 +624,8 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+  // Which machines are connected right now; absent on hosts that run nothing remote.
+  const executors = yield* Effect.serviceOption(EnvironmentExecutor.EnvironmentExecutorRegistry);
 
   const assertProviderInstanceEnabled: ThreadManagementServiceShape["assertProviderInstanceEnabled"] =
     (input) =>
@@ -885,10 +896,61 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
     );
   };
 
+  /**
+   * A message for a Thread whose machine is away: while its turn is paused (the Environment is
+   * offline) it waits in the queue instead of steering a turn that cannot hear it, and it starts
+   * when the turn resumes or ends there, or after a move. A Thread whose Environment was removed
+   * («needs an environment») takes no new work until it moves.
+   */
+  const queueWhileAway = (
+    command: OrchestrationV2ServerCommand,
+  ): Effect.Effect<OrchestrationV2ServerCommand, Orchestrator.OrchestratorCommandRejectedError> => {
+    if (command.type !== "message.dispatch" || command.createdBy !== "user") {
+      return Effect.succeed(command);
+    }
+    const reject = (cause: unknown) =>
+      new Orchestrator.OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause,
+      });
+    return orchestrator.getThreadRecords(command.threadId, ["runs"]).pipe(
+      Effect.option,
+      Effect.flatMap((records) =>
+        Effect.gen(function* () {
+          // A Thread the projection does not have yet is decided by the Orchestrator as before.
+          if (Option.isNone(records)) return command;
+          const { thread, runs } = records.value;
+          const environmentId = thread.activeEnvironmentId;
+          if (environmentId === null) {
+            return yield* reject(
+              "This Thread needs an environment: the machine it ran on was removed. Move it to another Environment to continue.",
+            );
+          }
+          if (
+            environmentId === undefined ||
+            environmentId === HUB_MACHINE_ENVIRONMENT_ID ||
+            Option.isNone(executors) ||
+            command.dispatchMode.type === "queue_after_active" ||
+            command.dispatchMode.type === "defer_start" ||
+            !runs.some((run) => PAUSABLE_RUN_STATUSES.has(run.status))
+          ) {
+            return command;
+          }
+          const connected = yield* executors.value.get(environmentId).pipe(Effect.option);
+          if (Option.isSome(connected)) return command;
+          const { deliveryIntent: _deliveryIntent, ...rest } = command;
+          return { ...rest, dispatchMode: { type: "queue_after_active" as const } };
+        }),
+      ),
+    );
+  };
+
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
     claimThreadSpace(command).pipe(
       Effect.flatMap(placeThread),
       Effect.flatMap(checkMoveTarget),
+      Effect.flatMap(queueWhileAway),
       Effect.flatMap((claimed) =>
         ensureCommandTranscripts(claimed).pipe(
           Effect.andThen(assertDispatchTargetEnabled(claimed)),

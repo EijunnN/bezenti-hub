@@ -555,6 +555,7 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
     case "compaction":
     case "handoff":
     case "environment_move":
+    case "recovered_changes":
     case "fork":
     case "thread_created":
       return "zap";
@@ -615,6 +616,8 @@ function itemSummary(
       return item.failure.class === "usage_limit" ? "Usage limit reached" : "Provider error";
     case "handoff":
       return "Context handed off";
+    case "recovered_changes":
+      return `Recovered changes from ${item.environmentName}`;
     case "environment_move":
       return item.outcome === "cancelled"
         ? `Move to ${item.targetEnvironmentName} cancelled`
@@ -681,6 +684,8 @@ function itemPreview(item: OrchestrationV2TurnItem): string | null {
     case "compaction":
     case "handoff":
       return item.summary ?? null;
+    case "recovered_changes":
+      return item.ref;
     case "environment_move":
       return item.actorName === undefined ? null : `by ${item.actorName}`;
     case "fork":

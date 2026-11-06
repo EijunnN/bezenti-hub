@@ -8,7 +8,12 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { previewDefaultEnvironment } from "./useHubEnvironments";
+import {
+  activeEnvironmentLabel,
+  activeEnvironmentOf,
+  previewDefaultEnvironment,
+  threadEnvironmentState,
+} from "./useHubEnvironments";
 
 const claude = ProviderInstanceId.make("claudeAgent");
 const ada = UserId.make("ada");
@@ -67,5 +72,33 @@ describe("previewDefaultEnvironment", () => {
         userId: ada,
       }),
     ).toBe(HUB_MACHINE_ENVIRONMENT_ID);
+  });
+});
+
+describe("threadEnvironmentState", () => {
+  const list = [hubMachine, machine("laptop"), machine("away", { status: "offline" })];
+  const on = (id: string | null) =>
+    activeEnvironmentOf(list, id === null ? null : EnvironmentId.make(id));
+
+  it("says a Thread whose machine was removed needs an environment", () => {
+    const removed = on(null);
+    expect(threadEnvironmentState(removed, false)).toBe("needs-environment");
+    expect(removed === null ? null : activeEnvironmentLabel(removed)).toBe("needs an environment");
+  });
+
+  it("pauses a turn only while its machine is not online", () => {
+    expect(threadEnvironmentState(on("away"), true)).toBe("paused-offline");
+    expect(threadEnvironmentState(on("away"), false)).toBeNull();
+    expect(threadEnvironmentState(on("laptop"), true)).toBeNull();
+    expect(threadEnvironmentState(on(HUB_MACHINE_ENVIRONMENT_ID), true)).toBeNull();
+    expect(
+      threadEnvironmentState(
+        activeEnvironmentOf(
+          [hubMachine, machine("laptop", { status: "reconnecting" })],
+          EnvironmentId.make("laptop"),
+        ),
+        true,
+      ),
+    ).toBe("paused-offline");
   });
 });

@@ -18,6 +18,7 @@ import { useState } from "react";
 
 import {
   ENVIRONMENT_STATUS_LABELS,
+  activeEnvironmentOf,
   environmentUnavailableReason,
   useHubEnvironments,
 } from "~/environments/primary/useHubEnvironments";
@@ -171,9 +172,13 @@ function MoveThreadDialog({
       : null;
   const shownMove = ownMove ?? (currentMove?.status === "running" ? currentMove : null);
   const turnRunning = thread !== null && threadRuntimeIsActive(thread.runtime);
+  // A Thread whose Environment was removed (null) runs nowhere: every Environment is a target.
   const candidates = environments.filter(
-    (environment) => environment.id !== (sourceId ?? HUB_MACHINE_ENVIRONMENT_ID),
+    (environment) =>
+      environment.id !== (sourceId === undefined ? HUB_MACHINE_ENVIRONMENT_ID : sourceId),
   );
+  const source = activeEnvironmentOf(environments, sourceId);
+  const sourceAway = source !== null && !source.isHubMachine && source.status !== "online";
   const providerInstanceId = thread?.modelSelection.instanceId;
   const reasonOf = (environment: HubEnvironmentSummary) =>
     providerInstanceId === undefined
@@ -219,14 +224,24 @@ function MoveThreadDialog({
       <DialogPopup className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Move to another Environment</DialogTitle>
-          <DialogDescription>
-            The Thread keeps its history and goes on running on the machine you choose. If{" "}
-            {movedFromName} is online, it first uploads a final checkpoint with any changes made by
-            hand. The new machine fetches it into a worktree of the Thread&apos;s own, with its
-            branch, and runs the Project&apos;s setup script there, which also rebuilds ignored
-            files such as dependencies. If {movedFromName} is offline, the Thread continues from the
-            last checkpoint it uploaded.
-          </DialogDescription>
+          {sourceId === null && shownMove === null ? (
+            <DialogDescription>
+              The machine this Thread ran on was removed. The Thread keeps its history and goes on
+              on the machine you choose, from the last checkpoint it uploaded: the new machine
+              fetches it into a worktree of the Thread&apos;s own, with its branch, and runs the
+              Project&apos;s setup script there.
+            </DialogDescription>
+          ) : (
+            <DialogDescription>
+              The Thread keeps its history and goes on running on the machine you choose. If{" "}
+              {movedFromName} is online, it first uploads a final checkpoint with any changes made
+              by hand. The new machine fetches it into a worktree of the Thread&apos;s own, with its
+              branch, and runs the Project&apos;s setup script there, which also rebuilds ignored
+              files such as dependencies. If {movedFromName} is offline, the Thread continues from
+              the last checkpoint it uploaded, and changes it kept are put on a separate branch when
+              it comes back.
+            </DialogDescription>
+          )}
         </DialogHeader>
         <DialogPanel>
           <div className="flex flex-col gap-4">
@@ -279,6 +294,12 @@ function MoveThreadDialog({
                 {turnRunning ? (
                   <fieldset className="flex flex-col gap-2">
                     <legend className="mb-2 font-medium text-sm">A turn is running</legend>
+                    {sourceAway ? (
+                      <p className="text-muted-foreground text-sm">
+                        The turn is paused: {sourceName} is offline. Waiting means the move waits
+                        for {sourceName} to come back; stopping the turn moves the Thread now.
+                      </p>
+                    ) : null}
                     <RadioGroup
                       aria-label="A turn is running"
                       value={ifRunning}
