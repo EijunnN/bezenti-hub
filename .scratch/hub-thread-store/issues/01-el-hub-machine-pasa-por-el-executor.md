@@ -10,7 +10,7 @@ El Hub machine usa ese executor con un transporte en proceso. Para el User no ca
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Existe un registro de Environment executors con una entrada para el Hub machine, y el ProviderAdapterRegistry, los checkpoints, el RuntimePolicy y las RPC de workspace pasan por él.
 - [ ] Los effects atados a un proceso se enrutan por el Active environment del Thread. En este ticket siempre es el Hub machine.
