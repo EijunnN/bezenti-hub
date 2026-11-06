@@ -544,6 +544,14 @@ export function threadHasUnfinishedWork(records: {
   );
 }
 
+/** Commands that start agent work in a Thread, refused where nothing may run. */
+const STARTS_WORK: ReadonlySet<OrchestrationV2ServerCommand["type"]> = new Set([
+  "message.dispatch",
+  "thread.fork",
+  "delegated_task.request",
+  "delegated_task.remote.request",
+]);
+
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   switch (command.type) {
     case "thread.create":
@@ -13538,6 +13546,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                 }),
             ),
           );
+      }
+    }
+
+    // Nothing starts in an archived or frozen Space or a Project being moved, whoever asks:
+    // the server's own resumes, continuations and recoveries included.
+    if (Option.isSome(spaces) && STARTS_WORK.has(command.type)) {
+      for (const access of threadAccessOf(command)) {
+        const blocked = yield* spaces.value
+          .workBlocked(access.threadId)
+          .pipe(Effect.mapError(rejected));
+        if (blocked !== undefined) {
+          return yield* rejected(
+            new SpaceDirectory.SpaceAccessDeniedError({
+              action: "thread.continue",
+              reason: blocked,
+            }),
+          );
+        }
       }
     }
 

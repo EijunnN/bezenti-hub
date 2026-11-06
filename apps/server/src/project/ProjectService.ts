@@ -16,6 +16,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -33,7 +34,11 @@ import {
 } from "../orchestration-v2/ProjectCommands.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
-import { threadHasUnfinishedWork } from "../orchestration-v2/Orchestrator.ts";
+import {
+  LIVE_WORK_FIELDS,
+  LIVE_WORK_FILTER,
+  threadHasLiveWork,
+} from "../orchestration-v2/threadLiveWork.ts";
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
@@ -627,17 +632,21 @@ export const make = Effect.gen(function* () {
     );
   const threadWork = (threadId: ThreadId, projectId: ProjectId) =>
     threadProjections
-      .getThreadRecords(threadId, ["runs", "runtimeRequests"], { turnItemTypes: [] })
+      .getThreadRecords(threadId, LIVE_WORK_FIELDS, LIVE_WORK_FILTER)
       .pipe(
         Effect.mapError(
           (cause) => new ProjectOperationError({ operation: "list-threads", projectId, cause }),
         ),
       );
 
-  /** Gives one Thread its Project's new Space, unless it started running since the check. */
+  /**
+   * Gives one Thread the Project's new Space, checked as a move out of the Thread's own Space
+   * (a stray Thread stamped elsewhere is not the mover's to take unless they run that Space).
+   */
   const moveThread = Effect.fn("ProjectService.moveThread")(function* (
     input: ProjectMoveInput,
     threadId: ThreadId,
+    actor: UserId | undefined,
   ) {
     const records = yield* threadWork(threadId, input.projectId);
     const thread = records.thread;
@@ -648,7 +657,12 @@ export const make = Effect.gen(function* () {
     ) {
       return false;
     }
-    if (threadHasUnfinishedWork(records)) {
+    yield* spaces.authorizeProjectMove({
+      actor,
+      item: { kind: "thread", id: threadId },
+      spaceId: input.spaceId,
+    });
+    if (threadHasLiveWork(records)) {
       return yield* new ProjectMoveBlockedError({
         projectId: input.projectId,
         threadTitles: [thread.title],
@@ -669,7 +683,7 @@ export const make = Effect.gen(function* () {
           threadId,
           providerInstanceId: thread.providerInstanceId,
           occurredAt: now,
-          payload: { ...thread, spaceId: input.spaceId },
+          payload: { ...thread, spaceId: input.spaceId, updatedAt: now },
         },
       ],
       effects: [],
@@ -685,58 +699,79 @@ export const make = Effect.gen(function* () {
       const { projectId } = input;
       const existing = yield* readRow(projectId);
       if (Option.isNone(existing)) return yield* new ProjectNotFoundError({ projectId });
-      const actor = yield* spaces.actingUser;
+      const actor = Option.getOrUndefined(yield* spaces.actingUser);
       const route = yield* spaces.authorizeProjectMove({
-        actor: Option.getOrUndefined(actor),
-        projectId,
+        actor,
+        item: { kind: "project", id: projectId },
         spaceId: input.spaceId,
       });
-      const threads = yield* listProjectThreads(projectId);
-      let moved = false;
-      if (route.from !== route.to) {
-        // Nothing is half-moved: every Thread is idle first (each is checked again as it moves).
-        const running: Array<string> = [];
-        for (const thread of threads) {
-          if (threadHasUnfinishedWork(yield* threadWork(thread.threadId, projectId))) {
-            running.push(thread.title);
+      const moved = yield* Ref.make(false);
+      // While it moves nothing is created or started in it, and each Thread is checked idle under
+      // its own lock, so a dispatch that passed before the mark has already created its run.
+      const relocate = Effect.gen(function* () {
+        if (route.from !== route.to) {
+          const running: Array<string> = [];
+          for (const thread of yield* listProjectThreads(projectId)) {
+            const live = yield* threadCommands.withLock(
+              thread.threadId,
+              threadWork(thread.threadId, projectId),
+            );
+            if (threadHasLiveWork(live)) running.push(thread.title);
           }
+          if (running.length > 0) {
+            return yield* new ProjectMoveBlockedError({ projectId, threadTitles: running });
+          }
+          // Spec 3 (Sandboxes) moves the Project's workspace to the destination's Sandbox here.
+          // Audit (ticket 14): `project.move` by the acting User, from `route.from` to `route.to`.
+          yield* commit({
+            type: "project.meta.update",
+            commandId: input.commandId,
+            projectId,
+            spaceId: route.to,
+          });
+          yield* Ref.set(moved, true);
         }
-        if (running.length > 0) {
-          return yield* new ProjectMoveBlockedError({ projectId, threadTitles: running });
+        // Listed after the Project moved, so none created before it is left behind; legacy
+        // Threads with no Space of their own follow too. A rerun finishes a move cut short.
+        for (const thread of yield* listProjectThreads(projectId)) {
+          const changed = yield* threadCommands
+            .withLock(
+              thread.threadId,
+              moveThread({ ...input, spaceId: route.to }, thread.threadId, actor),
+            )
+            .pipe(
+              Effect.mapError((cause) =>
+                isMoveBlocked(cause) ||
+                (typeof cause === "object" &&
+                  cause !== null &&
+                  "_tag" in cause &&
+                  (cause._tag === "SpaceAccessDeniedError" ||
+                    cause._tag === "SpaceNotFoundError" ||
+                    cause._tag === "SpaceResourceNotFoundError" ||
+                    cause._tag === "SpaceDirectoryStorageError"))
+                  ? (cause as SpaceDirectory.ProjectMoveError | ProjectMoveBlockedError)
+                  : new ProjectOperationError({ operation: "move-thread", projectId, cause }),
+              ),
+            );
+          if (changed) yield* Ref.set(moved, true);
         }
-        // Spec 3 (Sandboxes) moves the Project's workspace to the destination's Sandbox here.
-        // Audit (ticket 14): `project.move` by the acting User, from `route.from` to `route.to`.
-        yield* commit({
-          type: "project.meta.update",
-          commandId: input.commandId,
-          projectId,
-          spaceId: route.to,
-        });
-        moved = true;
-      }
-      // Threads follow, legacy ones with no Space of their own too. A rerun finishes a move cut
-      // short; Threads created meanwhile were already stamped with the new Space.
-      for (const thread of threads) {
-        const changed = yield* threadCommands
-          .withLock(thread.threadId, moveThread({ ...input, spaceId: route.to }, thread.threadId))
-          .pipe(
-            Effect.mapError((cause) =>
-              isMoveBlocked(cause)
-                ? cause
-                : new ProjectOperationError({ operation: "move-thread", projectId, cause }),
-            ),
-          );
-        moved ||= changed;
-      }
-      if (moved) {
-        yield* spaces
-          .projectMoved(route)
-          .pipe(
-            Effect.catch((cause) =>
-              Effect.logWarning("Could not refresh the viewers of a moved Project", { cause }),
-            ),
-          );
-      }
+      });
+      yield* spaces.whileProjectMoves(projectId, relocate).pipe(
+        // Whatever moved, even on a failure part way, its viewers reload.
+        Effect.ensuring(
+          Effect.flatMap(Ref.get(moved), (any) =>
+            any
+              ? spaces.projectMoved(route).pipe(
+                  Effect.catch((cause) =>
+                    Effect.logWarning("Could not refresh the viewers of a moved Project", {
+                      cause,
+                    }),
+                  ),
+                )
+              : Effect.void,
+          ),
+        ),
+      );
       return yield* readCommitted(projectId);
     },
   );

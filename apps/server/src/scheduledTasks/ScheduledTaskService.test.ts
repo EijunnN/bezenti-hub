@@ -713,6 +713,11 @@ it.effect("a task acts as the User who created it, and only they change or run i
         SELECT next_run_at AS "nextRunAt" FROM scheduled_tasks WHERE task_id = 'task:scheduled'
       `;
       assert.isAbove(Date.parse(skipped!.nextRunAt), Date.parse(scheduled.task.nextRunAt!));
+      // Nor once the Organization is gone.
+      yield* sql`DELETE FROM space_memberships WHERE space_id = 'acme'`;
+      yield* sql`DELETE FROM spaces WHERE space_id = 'acme'`;
+      yield* TestClock.adjust("120 seconds");
+      assert.deepEqual(yield* Ref.get(launchedAs), ["grace"]);
     }).pipe(Effect.provide(layer));
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );

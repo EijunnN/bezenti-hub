@@ -2,6 +2,7 @@ import {
   AuthOrchestrationReadScope,
   EnvironmentAuthenticatedPrincipal,
   EnvironmentHttpApi,
+  EnvironmentHttpConflictError,
   EnvironmentHttpForbiddenError,
   requiredScopesForProjectMutation,
 } from "@t3tools/contracts";
@@ -24,7 +25,11 @@ import { mutateProjectWithClone } from "./ProjectMutation.ts";
 const failProjectMutation = Effect.fn("environment.projects.failMutation")(function* (
   cause: ProjectService.ProjectServiceError | ServerRuntimeStartup.ServerRuntimeStartupError,
 ) {
-  if (cause._tag === "SpaceAccessDeniedError" || cause._tag === "ProjectMoveBlockedError") {
+  // Stop its running Threads, then try again.
+  if (cause._tag === "ProjectMoveBlockedError") {
+    return yield* new EnvironmentHttpConflictError({ message: cause.message });
+  }
+  if (cause._tag === "SpaceAccessDeniedError") {
     return yield* new EnvironmentHttpForbiddenError({ message: cause.message });
   }
   if (

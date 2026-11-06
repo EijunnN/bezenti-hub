@@ -456,6 +456,8 @@ const EnvironmentProjectMutationErrors = [
   EnvironmentScopeRequiredError,
   // The current Space does not let this User create Projects.
   EnvironmentHttpForbiddenError,
+  // A move refused while one of the Project's Threads runs.
+  EnvironmentHttpConflictError,
   EnvironmentInternalError,
 ] as const;
 

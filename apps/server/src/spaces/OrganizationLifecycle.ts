@@ -18,7 +18,11 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { threadHasUnfinishedWork } from "../orchestration-v2/Orchestrator.ts";
+import {
+  LIVE_WORK_FIELDS,
+  LIVE_WORK_FILTER,
+  threadHasLiveWork,
+} from "../orchestration-v2/threadLiveWork.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -103,10 +107,13 @@ const make = Effect.gen(function* () {
   const stopRunning = Effect.fn("OrganizationLifecycle.stopRunning")(function* (spaceId: SpaceId) {
     const at = DateTime.toEpochMillis(yield* DateTime.now);
     for (const { threadId } of yield* threadsIn(spaceId)) {
-      const records = yield* projections.getThreadRecords(threadId, ["runs", "runtimeRequests"], {
-        turnItemTypes: [],
-      });
-      if (!threadHasUnfinishedWork(records)) continue;
+      // Background commands and delegated tasks outlive a completed turn; Stop ends them too.
+      const records = yield* projections.getThreadRecords(
+        threadId,
+        LIVE_WORK_FIELDS,
+        LIVE_WORK_FILTER,
+      );
+      if (!threadHasLiveWork(records)) continue;
       yield* threads
         .dispatch({
           type: "thread.stop",
@@ -155,7 +162,8 @@ const make = Effect.gen(function* () {
   const deleteOrganization: OrganizationLifecycle["Service"]["delete"] = Effect.fn(
     "OrganizationLifecycle.delete",
   )(function* (actor, spaceId) {
-    yield* spaces.authorize(actor, "organization.delete", spaceId).pipe(Effect.mapError(refusal));
+    // Marked first, in one transaction with the check: once deletion starts it is never restored.
+    yield* spaces.beginOrganizationDeletion({ actor, spaceId }).pipe(Effect.mapError(refusal));
     // Event-sourced content first, each through its own delete path; ids are fixed per
     // Organization so a retry replays what already committed.
     yield* projects

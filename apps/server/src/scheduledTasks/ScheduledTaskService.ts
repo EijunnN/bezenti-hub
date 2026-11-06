@@ -778,18 +778,27 @@ export const layer = Layer.effect(
         ),
     );
 
-    // Nothing runs in an archived Organization: its scheduled runs are skipped, not queued.
-    const inArchivedSpace = (task: ScheduledTask) =>
+    // A task runs only in an open Space: not in an archived or frozen one, nor once its Space
+    // is gone. A failed read counts as closed ("unknown"), so this tick skips it and the next
+    // poll asks again.
+    const spaceOfTask = (task: ScheduledTask) =>
       Option.isNone(spaces)
-        ? Effect.succeed(false)
+        ? Effect.succeed("open" as const)
         : spaces.value
-            .inArchivedSpace(
+            .spaceState(
               task.threadId === null
                 ? { kind: "project", id: task.projectId }
                 : { kind: "thread", id: ThreadId.make(task.threadId) },
             )
-            .pipe(Effect.orElseSucceed(() => false));
-    const ARCHIVED_SPACE = "Its Organization is archived, so nothing runs in it.";
+            .pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("Could not read a scheduled task's Space; skipping it", {
+                  taskId: task.id,
+                  cause,
+                }).pipe(Effect.as("unknown" as const)),
+              ),
+            );
+    const CLOSED_SPACE = "Its Space is archived or gone, so nothing runs in it.";
 
     const runTask = Effect.fn("ScheduledTaskService.runTask")(function* (
       task: ScheduledTask,
@@ -852,11 +861,11 @@ export const layer = Layer.effect(
                     : null;
           if (reason !== null) return yield* new WebhookDeliverySkipped({ reason });
         }
-        if (trigger !== "scheduled" && (yield* inArchivedSpace(active))) {
+        if (trigger !== "scheduled" && (yield* spaceOfTask(active)) !== "open") {
           if (webhook !== undefined) {
-            return yield* new WebhookDeliverySkipped({ reason: ARCHIVED_SPACE });
+            return yield* new WebhookDeliverySkipped({ reason: CLOSED_SPACE });
           }
-          return yield* taskError(ARCHIVED_SPACE, { taskId: task.id });
+          return yield* taskError(CLOSED_SPACE, { taskId: task.id });
         }
 
         if (webhook === undefined) yield* markRunning(active.id, startedAtIso);
@@ -1123,9 +1132,13 @@ export const layer = Layer.effect(
           Effect.suspend(() =>
             isMissedFixedTimeRun(task.schedule, dueAt, now)
               ? rescheduleMissedRun(task, now)
-              : inArchivedSpace(task).pipe(
-                  Effect.flatMap((archived) =>
-                    archived ? rescheduleMissedRun(task, now) : runTask(task, "scheduled"),
+              : spaceOfTask(task).pipe(
+                  Effect.flatMap((state) =>
+                    state === "open"
+                      ? runTask(task, "scheduled")
+                      : state === "unknown"
+                        ? Effect.void
+                        : rescheduleMissedRun(task, now),
                   ),
                 ),
           ).pipe(
