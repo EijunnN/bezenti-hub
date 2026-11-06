@@ -199,6 +199,29 @@ accepts a provider event only from the Thread's Active environment. The agent
 there calls the Hub's MCP with the per-Thread credential the Hub issued, so it
 acts with exactly its User's permissions.
 
+A Project's preferred Environment (`project.update` with
+`preferredEnvironmentId`) may be set only to a machine its setter may use
+([`mayUseEnvironment`](../../apps/server/src/environments/EnvironmentRegistry.ts));
+an unknown or removed machine is refused alike. Placement takes the User's own
+choice first, then the preference, then the Hub machine; a preference the User
+may not use (the Owner's laptop, for a Member), or one offline or without the
+provider, falls back to the Hub machine instead of refusing, since that User
+never chose it; clients preview the same rule (`previewThreadPlacement`).
+
+The desktop app's «Use this computer as an Environment»
+([DesktopJoinedEnvironment](../../apps/desktop/src/joinedEnvironment/DesktopJoinedEnvironment.ts))
+is the same flow, not a second one. It runs the bundled server's `t3 join --no-browser` in a T3
+home of its own, `<the app's T3 home>/joined-environment`, opens the approval link the CLI prints
+with the system browser, and so leaves the credential in that server's secret store exactly as
+the CLI does. It then runs that server through the desktop's backend manager (restarts with
+backoff, SIGTERM then kill on stop), in desktop bootstrap mode so it ends with the app, with
+`--base-dir` so a `T3CODE_HOME` the app runs under cannot point it at the app's own state, and
+with `/health` as its readiness probe. It is kept out of the backend pool: the renderer lists the
+pool as local environments to connect to, and a joined server serves no clients. «Leave» stops
+it and runs `t3 leave`. The app stays a client of its Hubs throughout; closing its last window
+leaves it running (on Windows and Linux too) while the setting is on and «Keep running when the
+window is closed» is.
+
 ### Spaces
 
 Every Project and Thread belongs to a Space: an Organization or a User's Personal

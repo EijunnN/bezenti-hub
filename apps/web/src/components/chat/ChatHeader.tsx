@@ -42,14 +42,20 @@ import { cn } from "~/lib/utils";
 import { textDirection } from "~/textDirection";
 import { useClientSettings } from "../../hooks/useSettings";
 import { GuestShareIndicator } from "./GuestShareControls";
+import { EnvironmentStatusDot } from "../EnvironmentStatusDot";
+import {
+  type ActiveEnvironmentView,
+  ENVIRONMENT_STATUS_LABELS,
+  activeEnvironmentLabel,
+} from "../../environments/primary/useHubEnvironments";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
   activeThreadId: ThreadId;
   activeThreadTitle: string;
   activeThreadLinkOrigin?: string | null | undefined;
-  /** The Environment the Thread runs on, by name. */
-  activeEnvironmentName?: string | null | undefined;
+  /** The Environment the Thread runs on, by name and live status. */
+  activeEnvironment?: ActiveEnvironmentView | null | undefined;
   isServerThread: boolean;
   activeProject: EnvironmentProject | null;
   parentThreadLink: { threadId: ThreadId; title: string } | null;
@@ -77,7 +83,7 @@ export const ChatHeader = memo(function ChatHeader({
   activeThreadId,
   activeThreadTitle,
   activeThreadLinkOrigin,
-  activeEnvironmentName,
+  activeEnvironment,
   isServerThread,
   activeProject,
   parentThreadLink,
@@ -421,20 +427,28 @@ export const ChatHeader = memo(function ChatHeader({
               <TooltipPopup side="top">{activeThreadTitle}</TooltipPopup>
             </Tooltip>
           )}
-          {renamingTitle === null && activeEnvironmentName ? (
+          {renamingTitle === null && activeEnvironment ? (
             <Tooltip>
               <TooltipTrigger
                 render={
                   <Badge
                     variant="outline"
                     size="sm"
-                    aria-label={`Active environment: ${activeEnvironmentName}`}
+                    data-environment-status={activeEnvironment.status}
+                    aria-label={`Active environment: ${activeEnvironmentLabel(activeEnvironment)}`}
                   />
                 }
               >
-                {activeEnvironmentName}
+                <EnvironmentStatusDot status={activeEnvironment.status} />
+                {activeEnvironment.name}
+                {activeEnvironment.status === "online"
+                  ? null
+                  : ` · ${ENVIRONMENT_STATUS_LABELS[activeEnvironment.status]}`}
               </TooltipTrigger>
-              <TooltipPopup side="top">Runs on {activeEnvironmentName}</TooltipPopup>
+              <TooltipPopup side="top">
+                Runs on {activeEnvironment.name} ·{" "}
+                {ENVIRONMENT_STATUS_LABELS[activeEnvironment.status]}
+              </TooltipPopup>
             </Tooltip>
           ) : null}
           {renamingTitle === null && activeThreadLinkOrigin ? (

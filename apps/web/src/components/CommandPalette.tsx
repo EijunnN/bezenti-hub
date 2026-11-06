@@ -792,7 +792,7 @@ function OpenCommandPaletteDialog(props: {
         );
     if (latestThread) {
       await navigate({
-        to: "/$environmentId/$threadId",
+        to: "/$threadId",
         params: buildThreadRouteParams(scopeThreadRef(latestThread.environmentId, latestThread.id)),
       });
       return;
@@ -1746,7 +1746,7 @@ function OpenCommandPaletteDialog(props: {
             icon: <MessageSquareIcon className={ITEM_ICON_CLASS} />,
             runThread: async (thread) => {
               await navigate({
-                to: "/$environmentId/$threadId",
+                to: "/$threadId",
                 params: buildThreadRouteParams(scopeThreadRef(thread.environmentId, thread.id)),
               });
             },
@@ -1821,7 +1821,7 @@ function OpenCommandPaletteDialog(props: {
       );
       if (latestThread && latestThread.settledOverride !== "settled") {
         await navigate({
-          to: "/$environmentId/$threadId",
+          to: "/$threadId",
           params: buildThreadRouteParams(
             scopeThreadRef(latestThread.environmentId, latestThread.id),
           ),

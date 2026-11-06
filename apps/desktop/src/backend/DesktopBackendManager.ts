@@ -76,6 +76,8 @@ export interface DesktopBackendStartConfig extends BackendProcessContext {
   readonly preflightFailure: Option.Option<PreflightFailure>;
   readonly runningDistro?: string;
   readonly wslRuntimeId?: string;
+  /** Default `/.well-known/t3/environment`; a joined-mode server answers only `/health`. */
+  readonly readinessPath?: string;
 }
 
 export interface PreflightFailure {
@@ -321,12 +323,16 @@ const closeRun = (
 };
 
 const waitForHttpReady = (
-  options: BackendProcessContext & { readonly timeout: Duration.Duration },
+  options: BackendProcessContext & {
+    readonly timeout: Duration.Duration;
+    readonly readinessPath?: string | undefined;
+  },
 ): Effect.Effect<void, BackendReadinessTimeoutError, HttpClient.HttpClient> => {
-  const readinessUrl = new URL(BACKEND_READINESS_PATH, options.httpBaseUrl);
+  const path = options.readinessPath ?? BACKEND_READINESS_PATH;
+  const readinessUrl = new URL(path, options.httpBaseUrl);
   return waitForHttpReadyShared({
     baseUrl: options.httpBaseUrl.href,
-    path: BACKEND_READINESS_PATH,
+    path,
     timeoutMs: Duration.toMillis(options.timeout),
     intervalMs: Duration.toMillis(DEFAULT_BACKEND_READINESS_INTERVAL),
     probeTimeoutMs: Duration.toMillis(DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT),
@@ -554,6 +560,7 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
       cwd: options.cwd,
       httpBaseUrl: options.httpBaseUrl,
       timeout: options.readinessTimeout ?? DEFAULT_BACKEND_READINESS_TIMEOUT,
+      readinessPath: options.readinessPath,
     }).pipe(
       Effect.flatMap(() => options.onReady?.() ?? Effect.void),
       Effect.as(true),

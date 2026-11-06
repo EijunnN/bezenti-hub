@@ -83,11 +83,9 @@ export function threadReadLabel(label: string, target: ReturnType<typeof useThre
 
 export function ThreadReadLabel({
   label,
-  environmentId,
   linked,
 }: {
   label: NonNullable<ReturnType<typeof threadReadLabel>>;
-  environmentId: EnvironmentId;
   linked: boolean;
 }) {
   return (
@@ -95,8 +93,8 @@ export function ThreadReadLabel({
       <span className="shrink-0">{label.prefix} “</span>
       {linked ? (
         <Link
-          to="/$environmentId/$threadId"
-          params={{ environmentId, threadId: label.threadId }}
+          to="/$threadId"
+          params={{ threadId: label.threadId }}
           className="min-w-0 truncate rounded-sm text-foreground underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-ring"
           onClick={stopRowToggle}
           onKeyDown={stopRowToggle}
@@ -434,11 +432,7 @@ function WorkEntryLogRow(props: WorkEntryRowProps) {
                   }
                 />
               ) : threadLabel ? (
-                <ThreadReadLabel
-                  label={threadLabel}
-                  environmentId={ctx.activeThreadEnvironmentId}
-                  linked
-                />
+                <ThreadReadLabel label={threadLabel} linked />
               ) : (
                 previewText
               )}

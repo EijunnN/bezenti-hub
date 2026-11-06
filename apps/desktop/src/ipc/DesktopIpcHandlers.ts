@@ -68,6 +68,14 @@ import {
 } from "./methods/legacyLocalStorage.ts";
 import { getWslState, setWslBackendEnabled, setWslDistro, setWslOnly } from "./methods/wsl.ts";
 import {
+  cancelJoinAsEnvironment,
+  getJoinedEnvironmentState,
+  joinAsEnvironment,
+  leaveJoinedEnvironment,
+  setJoinedEnvironmentEnabled,
+  setJoinedEnvironmentKeepRunning,
+} from "./methods/joinedEnvironment.ts";
+import {
   getCliCommandState,
   installCliCommand,
   uninstallCliCommand,
@@ -127,6 +135,13 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(setWslBackendEnabled);
   yield* ipc.handle(setWslDistro);
   yield* ipc.handle(setWslOnly);
+
+  yield* ipc.handle(getJoinedEnvironmentState);
+  yield* ipc.handle(joinAsEnvironment);
+  yield* ipc.handle(cancelJoinAsEnvironment);
+  yield* ipc.handle(setJoinedEnvironmentEnabled);
+  yield* ipc.handle(setJoinedEnvironmentKeepRunning);
+  yield* ipc.handle(leaveJoinedEnvironment);
 
   yield* ipc.handle(pickFolder);
   yield* ipc.handle(pickProjectFavicon);

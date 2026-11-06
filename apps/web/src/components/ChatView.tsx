@@ -374,10 +374,7 @@ const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_MODELS: ServerProvider["models"] = [];
 const EMPTY_USAGE_LIMIT_SOURCES: UsageLimitSourceSnapshots = [];
 import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplates";
-import {
-  activeEnvironmentName,
-  useHubEnvironments,
-} from "../environments/primary/useHubEnvironments";
+import { useActiveEnvironment } from "../environments/primary/useHubEnvironments";
 import { HubEnvironmentSelector } from "./chat/HubEnvironmentSelector";
 
 const EMPTY_FEEDBACK_SUBMISSIONS: ReadonlyArray<CodexFeedbackSubmission> = [];
@@ -873,7 +870,7 @@ export default function ChatView(props: ChatViewProps) {
         sideChat: true,
         open: (): void => {
           void navigate({
-            to: "/$environmentId/$threadId",
+            to: "/$threadId",
             params: buildThreadRouteParams(sideChatParentRef),
           });
         },
@@ -884,7 +881,7 @@ export default function ChatView(props: ChatViewProps) {
         title: parentSubagentThread?.title ?? "Parent thread",
         open: (): void => {
           void navigate({
-            to: "/$environmentId/$threadId",
+            to: "/$threadId",
             params: buildThreadRouteParams(parentSubagentThreadRef),
           });
         },
@@ -901,7 +898,7 @@ export default function ChatView(props: ChatViewProps) {
         : {
             open: (): void => {
               void navigate({
-                to: "/$environmentId/$threadId",
+                to: "/$threadId",
                 params: buildThreadRouteParams(parentRef),
               });
             },
@@ -979,7 +976,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   const browserAvailable = isPreviewSupportedInRuntime() || activeEnvironmentServerBrowser;
   const activeThreadShell = serverThread;
-  const hubEnvironments = useHubEnvironments();
+  const threadActiveEnvironment = useActiveEnvironment(activeThreadShell?.activeEnvironmentId);
   const timelineThreadError =
     serverRuntime?.status === "failed" &&
     serverRuntime.lastErrorClass === "usage_limit" &&
@@ -3298,11 +3295,7 @@ export default function ChatView(props: ChatViewProps) {
               isServerThread={isServerThread}
               activeThreadTitle={activeThread.title}
               activeThreadLinkOrigin={activeThreadShell?.linkOrigin?.label ?? null}
-              activeEnvironmentName={
-                isServerThread
-                  ? activeEnvironmentName(hubEnvironments, activeThreadShell?.activeEnvironmentId)
-                  : null
-              }
+              activeEnvironment={isServerThread ? threadActiveEnvironment : null}
               activeProject={activeProject ?? null}
               parentThreadLink={headerParentThreadLink}
               onOpenThread={onOpenRelatedThreadStable}
@@ -3761,6 +3754,9 @@ export default function ChatView(props: ChatViewProps) {
                                             <HubEnvironmentSelector
                                               draftThreadId={activeThread.id}
                                               providerInstanceId={activeProviderInstanceId}
+                                              preferredEnvironmentId={
+                                                activeProject?.preferredEnvironmentId ?? null
+                                              }
                                             />
                                           )}
                                           <ComposerContextPermissions

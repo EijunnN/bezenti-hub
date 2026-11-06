@@ -4,6 +4,7 @@ import type { EnvironmentThreadState } from "@t3tools/client-runtime/state/threa
 import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import type { DraftId } from "./composerDraftStore";
+import { readHubEnvironmentId } from "./state/hubEnvironment";
 
 export type ThreadRouteTarget =
   | {
@@ -55,20 +56,17 @@ export function resolveThreadRouteRenderState(input: {
     : "ready";
 }
 
-export function buildThreadRouteParams(ref: ScopedThreadRef): {
-  environmentId: EnvironmentId;
-  threadId: ThreadId;
-} {
-  return {
-    environmentId: ref.environmentId,
-    threadId: ref.threadId,
-  };
+/**
+ * A Thread's route is `/$threadId`. The client has one connection, the Hub's, so the Thread's id
+ * alone names it, and the URL stays the same when the Thread moves to another Environment.
+ */
+export function buildThreadRouteParams(ref: ScopedThreadRef): { threadId: ThreadId } {
+  return { threadId: ref.threadId };
 }
 
-/** Whether a (decoded) location pathname is `ref`'s own thread route, `/$environmentId/$threadId`. */
+/** Whether a (decoded) location pathname is `ref`'s own thread route, `/$threadId`. */
 export function isThreadRoutePathname(pathname: string, ref: ScopedThreadRef): boolean {
-  const { environmentId, threadId } = buildThreadRouteParams(ref);
-  return pathname.replace(/\/$/, "") === `/${environmentId}/${threadId}`;
+  return pathname.replace(/\/$/, "") === `/${ref.threadId}`;
 }
 
 export function buildDraftThreadRouteParams(draftId: DraftId): {
@@ -77,24 +75,29 @@ export function buildDraftThreadRouteParams(draftId: DraftId): {
   return { draftId };
 }
 
+/**
+ * The route's Thread, on the Hub connection: `hubEnvironmentId` is that connection's id, unknown
+ * until it is first reached. A route that still names an environment (the old links) keeps it.
+ */
 export function resolveThreadRouteRef(
   params: Partial<Record<"environmentId" | "threadId", string | undefined>>,
+  hubEnvironmentId: EnvironmentId | null = readHubEnvironmentId(),
 ): ScopedThreadRef | null {
-  if (!params.environmentId || !params.threadId) {
+  const environmentId = params.environmentId ?? hubEnvironmentId;
+  if (!environmentId || !params.threadId) {
     return null;
   }
 
-  return scopeThreadRef(params.environmentId as EnvironmentId, params.threadId as ThreadId);
+  return scopeThreadRef(environmentId as EnvironmentId, params.threadId as ThreadId);
 }
 
 export function resolveThreadRouteTarget(
   params: Partial<Record<"environmentId" | "threadId" | "draftId", string | undefined>>,
+  hubEnvironmentId: EnvironmentId | null = readHubEnvironmentId(),
 ): ThreadRouteTarget | null {
-  if (params.environmentId && params.threadId) {
-    return {
-      kind: "server",
-      threadRef: scopeThreadRef(params.environmentId as EnvironmentId, params.threadId as ThreadId),
-    };
+  const threadRef = resolveThreadRouteRef(params, hubEnvironmentId);
+  if (threadRef !== null) {
+    return { kind: "server", threadRef };
   }
 
   if (!params.draftId) {

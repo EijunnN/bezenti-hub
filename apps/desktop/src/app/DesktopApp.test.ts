@@ -58,6 +58,7 @@ import * as DesktopSshPasswordPrompts from "../ssh/DesktopSshPasswordPrompts.ts"
 import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
 import * as DesktopWebLinks from "./DesktopWebLinks.ts";
 import * as DesktopWslEnvironment from "../wsl/DesktopWslEnvironment.ts";
+import * as DesktopJoinedEnvironment from "../joinedEnvironment/DesktopJoinedEnvironment.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
@@ -171,6 +172,10 @@ it.effect(
           Effect.provideService(DesktopWslBackend.DesktopWslBackend, {
             reconcile: Effect.void,
           } as DesktopWslBackend.DesktopWslBackend["Service"]),
+          Effect.provideService(DesktopJoinedEnvironment.DesktopJoinedEnvironment, {
+            reconcile: Effect.void,
+            stop: Effect.void,
+          } as DesktopJoinedEnvironment.DesktopJoinedEnvironment["Service"]),
           Effect.provideService(DesktopAppActivation.DesktopAppActivation, {
             start: Effect.void,
           } as unknown as DesktopAppActivation.DesktopAppActivation["Service"]),

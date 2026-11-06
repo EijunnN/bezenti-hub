@@ -264,6 +264,7 @@ function makeHarness(options: HarnessOptions = {}) {
               archivedAt: null,
               spaceId: null,
               ownerUserId: null,
+              preferredEnvironmentId: null,
               createdAt: project.createdAt,
               updatedAt: project.updatedAt,
               deletedAt: project.deletedAt,

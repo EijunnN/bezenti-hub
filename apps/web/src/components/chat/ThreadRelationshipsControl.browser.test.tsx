@@ -138,7 +138,7 @@ it.each([
   await expect.element(page.getByText(title, { exact: true })).not.toBeInTheDocument();
   await vi.waitFor(() => {
     expect(screen.router?.state.location.pathname).toBe(
-      action === "merge" ? "/environment/source" : "/environment/fork",
+      action === "merge" ? "/source" : "/environment/fork",
     );
   });
   if (action === "disconnect") {
@@ -189,9 +189,7 @@ it("opens an idle child from Lineage when its shell has not been loaded", async 
   const child = screen.getByRole("button", { name: /Idle child/ });
   await expect.element(child).toBeEnabled();
   await child.click();
-  await vi.waitFor(() =>
-    expect(screen.router?.state.location.pathname).toBe("/local/omitted-child"),
-  );
+  await vi.waitFor(() => expect(screen.router?.state.location.pathname).toBe("/omitted-child"));
 });
 
 it("shows a lineage thread's full title in its tooltip", async () => {

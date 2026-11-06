@@ -17,6 +17,8 @@ export class DesktopState extends Context.Service<
   {
     readonly backendReady: Ref.Ref<boolean>;
     readonly quitting: Ref.Ref<boolean>;
+    /** Closing the last window leaves the app running, for the joined Environment server. */
+    readonly keepRunningWithoutWindows: Ref.Ref<boolean>;
     readonly primaryBackendStartup: SubscriptionRef.SubscriptionRef<PrimaryBackendStartup>;
   }
 >()("@t3tools/desktop/app/DesktopState") {}
@@ -24,6 +26,7 @@ export class DesktopState extends Context.Service<
 const make = Effect.all({
   backendReady: Ref.make(false),
   quitting: Ref.make(false),
+  keepRunningWithoutWindows: Ref.make(false),
   primaryBackendStartup: SubscriptionRef.make<PrimaryBackendStartup>({ _tag: "Starting" }),
 });
 

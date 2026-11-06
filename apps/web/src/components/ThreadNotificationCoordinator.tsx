@@ -177,8 +177,8 @@ export function startThreadNotifications(
           onClick: () => {
             toastManager.close(toastId);
             void router.navigate({
-              to: "/$environmentId/$threadId",
-              params: { environmentId, threadId: thread.id },
+              to: "/$threadId",
+              params: { threadId: thread.id },
             });
           },
         },
@@ -207,8 +207,8 @@ export function startThreadNotifications(
         window.focus();
         void window.desktopBridge?.revealWindow().catch(() => undefined);
         void router.navigate({
-          to: "/$environmentId/$threadId",
-          params: { environmentId, threadId: thread.id },
+          to: "/$threadId",
+          params: { threadId: thread.id },
         });
       });
     } catch {

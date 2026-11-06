@@ -9,6 +9,7 @@ import {
   type SpaceId,
   type ThreadId,
   type UserId,
+  HUB_MACHINE_ENVIRONMENT_ID,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
@@ -44,6 +45,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as CommandActor from "../auth/CommandActor.ts";
@@ -131,6 +133,7 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
       "delete-thread",
       "move-thread",
       "dispatch-project-command",
+      "check-environment",
     ]),
     projectId: Schema.optional(ProjectId),
     workspaceRoot: Schema.optional(Schema.String),
@@ -245,6 +248,7 @@ export const make = Effect.gen(function* () {
     archivedAt: row.archivedAt,
     spaceId: row.spaceId,
     ownerUserId: row.ownerUserId,
+    preferredEnvironmentId: row.preferredEnvironmentId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     deletedAt: row.deletedAt,
@@ -486,6 +490,36 @@ export const make = Effect.gen(function* () {
       if (Option.isNone(existing)) {
         return yield* new ProjectNotFoundError({ projectId: input.projectId });
       }
+      // The Hub machine is everyone's and is what no preference means, so it is stored as none.
+      const preferredEnvironmentId =
+        input.preferredEnvironmentId === HUB_MACHINE_ENVIRONMENT_ID
+          ? null
+          : input.preferredEnvironmentId;
+      if (preferredEnvironmentId !== undefined && preferredEnvironmentId !== null) {
+        const actor = yield* spaces.actingUser;
+        const usable = yield* EnvironmentRegistry.mayUseEnvironment(
+          Option.getOrUndefined(actor),
+          preferredEnvironmentId,
+        ).pipe(
+          Effect.provideService(SqlClient.SqlClient, sql),
+          Effect.provideService(SpaceDirectory.SpaceDirectory, spaces),
+          Effect.mapError(
+            (cause) =>
+              new ProjectOperationError({
+                operation: "check-environment",
+                projectId: input.projectId,
+                cause,
+              }),
+          ),
+        );
+        // Someone else's machine and an unknown one answer alike.
+        if (!usable) {
+          return yield* new SpaceDirectory.SpaceAccessDeniedError({
+            action: "environment.use",
+            reason: "not-yours",
+          });
+        }
+      }
       const previousRoot = existing.value.workspaceRoot;
       const workspaceRoot =
         input.workspaceRoot === undefined
@@ -512,6 +546,7 @@ export const make = Effect.gen(function* () {
         ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
         ...(input.pinned === undefined ? {} : { pinned: input.pinned }),
         ...(input.archived === undefined ? {} : { archived: input.archived }),
+        ...(preferredEnvironmentId === undefined ? {} : { preferredEnvironmentId }),
       });
       if (workspaceRoot !== previousRoot) {
         yield* projectEnrichment.invalidate([previousRoot, workspaceRoot]);

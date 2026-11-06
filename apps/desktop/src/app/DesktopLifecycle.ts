@@ -273,9 +273,13 @@ export const make = DesktopLifecycle.of({
         Effect.gen(function* () {
           const app = yield* ElectronApp.ElectronApp;
           const state = yield* DesktopState.DesktopState;
-          if (environment.platform !== "darwin" && !(yield* Ref.get(state.quitting))) {
-            yield* app.quit;
+          if (environment.platform === "darwin" || (yield* Ref.get(state.quitting))) return;
+          // The User chose to keep this computer serving its Hub with no window open.
+          if (yield* Ref.get(state.keepRunningWithoutWindows)) {
+            yield* logLifecycleInfo("all windows closed; staying open for the joined Environment");
+            return;
           }
+          yield* app.quit;
         }).pipe(Effect.withSpan("desktop.lifecycle.windowAllClosed")),
       );
     });

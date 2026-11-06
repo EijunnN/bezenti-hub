@@ -1,4 +1,4 @@
-import { HUB_MACHINE_ENVIRONMENT_ID, type ProviderInstanceId } from "@t3tools/contracts";
+import type { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import { memo } from "react";
 
 import {
@@ -6,7 +6,9 @@ import {
   environmentUnavailableReason,
   useHubEnvironmentChoice,
   useHubEnvironments,
+  previewDefaultEnvironment,
 } from "../../environments/primary/useHubEnvironments";
+import { useCurrentSpace } from "../../state/currentSpace";
 import { ComposerContextLabel } from "../ComposerContextLabel";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import {
@@ -23,21 +25,32 @@ import { useComposerMenuProps } from "./composerEventScope";
 
 /**
  * Where a new Thread runs, among the Hub's Environments the User may use. The Hub decides and
- * checks the choice; an Environment that is offline or lacks the provider shows why.
+ * checks the choice; an Environment that is offline or lacks the provider shows why. Left alone,
+ * it shows where the Hub will put the Thread, by the Hub's own rule (`previewThreadPlacement`);
+ * a machine the User picks is sent as their choice, even the default.
  */
 export const HubEnvironmentSelector = memo(function HubEnvironmentSelector({
   draftThreadId,
   providerInstanceId,
+  preferredEnvironmentId,
 }: {
   draftThreadId: string;
   providerInstanceId: ProviderInstanceId;
+  preferredEnvironmentId: EnvironmentId | null;
 }) {
   const environments = useHubEnvironments();
   const chosen = useHubEnvironmentChoice(draftThreadId);
+  const userId = useCurrentSpace((state) => state.view?.userId ?? null);
   const floatingLayerProps = useComposerMenuProps();
   // One machine to pick from is no choice.
   if (environments.length < 2) return null;
-  const selectedId = chosen ?? HUB_MACHINE_ENVIRONMENT_ID;
+  const defaultId = previewDefaultEnvironment({
+    environments,
+    preferredEnvironmentId,
+    providerInstanceId,
+    userId,
+  });
+  const selectedId = chosen ?? defaultId;
   const selected = environments.find((environment) => environment.id === selectedId);
   const items = environments.map((environment) => ({
     value: environment.id,
@@ -47,12 +60,7 @@ export const HubEnvironmentSelector = memo(function HubEnvironmentSelector({
     <Select
       modal={false}
       value={selectedId}
-      onValueChange={(value) =>
-        chooseHubEnvironment(
-          draftThreadId,
-          value === null || value === HUB_MACHINE_ENVIRONMENT_ID ? null : value,
-        )
-      }
+      onValueChange={(value) => chooseHubEnvironment(draftThreadId, value)}
       items={items}
     >
       <Tooltip>

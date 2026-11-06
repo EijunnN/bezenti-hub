@@ -4,6 +4,7 @@ import { RepositoryIdentity, ThreadEnvMode } from "./environment.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import {
   CommandId,
+  EnvironmentId,
   ForwardCompatibleUnion,
   isUnknownUnionMember,
   IsoDateTime,
@@ -168,6 +169,8 @@ export const Project = Schema.Struct({
   /** Null for Projects from before Spaces, which belong to the Owner's Personal space. */
   spaceId: Schema.optional(Schema.NullOr(SpaceId)),
   ownerUserId: Schema.optional(Schema.NullOr(UserId)),
+  /** Where its new Threads start when nobody chooses; null or absent for the Hub machine. */
+  preferredEnvironmentId: Schema.optional(Schema.NullOr(EnvironmentId)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   deletedAt: Schema.NullOr(IsoDateTime),
@@ -198,6 +201,8 @@ export const ProjectUpdatePayload = Schema.Struct({
   faviconPath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   defaultThreadEnvMode: Schema.optional(Schema.NullOr(ThreadEnvMode)),
   scripts: Schema.optional(Schema.Array(ProjectScript)),
+  /** Only an Environment the caller may use; null for the Hub machine. */
+  preferredEnvironmentId: Schema.optional(Schema.NullOr(EnvironmentId)),
   pinned: Schema.optional(Schema.Boolean),
   archived: Schema.optional(
     Schema.Boolean.annotate({

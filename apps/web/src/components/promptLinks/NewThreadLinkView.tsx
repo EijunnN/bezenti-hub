@@ -309,8 +309,8 @@ export function NewThreadLinkView({ link }: { readonly link: NewThreadLink }) {
         const threadRef = scopeThreadRef(next.thread.environmentId, next.thread.id);
         if (link.prompt !== null) placeLinkedPrompt(threadRef, link.prompt);
         void navigate({
-          to: "/$environmentId/$threadId",
-          params: { environmentId: next.thread.environmentId, threadId: next.thread.id },
+          to: "/$threadId",
+          params: { threadId: next.thread.id },
           replace: true,
         });
         return;
