@@ -166,6 +166,9 @@ type TimelineFollow = ReturnType<typeof useTimelineFollow>;
 
 interface ComposerSendInput {
   readonly environmentId: EnvironmentId;
+  /** False on someone else's Thread: nothing is sent, approvals included, and the reason shows. */
+  readonly canContinueThread: boolean;
+  readonly cannotContinueReason: string | null;
   readonly routeThreadKey: string;
   readonly currentRouteThreadKeyRef: { readonly current: string | null };
   readonly draftId: DraftId | null;
@@ -430,6 +433,15 @@ export function useComposerSend(input: ComposerSendInput) {
       return;
     }
 
+    if (!input.canContinueThread) {
+      if (activeThread) {
+        setThreadError(
+          activeThread.id,
+          input.cannotContinueReason ?? "This connection cannot change threads.",
+        );
+      }
+      return;
+    }
     const notifyDirectAnnotationAttached = () => {
       if (!directAnnotation) return;
       toastManager.add(

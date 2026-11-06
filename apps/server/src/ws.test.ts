@@ -2107,6 +2107,18 @@ describe("Space visibility", () => {
           refusal(yield* dispatch(asGrace, message("acme-thread"))),
           "Only the person who started this Thread can continue it. Start a new Thread to build on it.",
         );
+        // Answering its agent's approval acts in the owner's live session too.
+        assert.equal(
+          refusal(
+            yield* dispatch(asGrace, {
+              type: "runtime-request.respond",
+              threadId: "acme-thread",
+              requestId: "approval-1",
+              decision: "accept",
+            }),
+          ),
+          "Only the person who started this Thread can continue it. Start a new Thread to build on it.",
+        );
         // Not even an Admin continues someone else's Thread.
         assert.isNotNull(refusal(yield* dispatch(asAda, message("grace-thread"))));
         assert.match(

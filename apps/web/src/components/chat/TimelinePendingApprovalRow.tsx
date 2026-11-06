@@ -78,7 +78,8 @@ export const TimelinePendingApprovalRow = memo(function TimelinePendingApprovalR
                 <ShieldIcon aria-hidden className="size-3 shrink-0" />
                 Waiting for approval
               </span>
-              {onRespondToApproval ? (
+              {/* Only the Thread's creator answers its agent; others see that it waits. */}
+              {onRespondToApproval && canOperateThread ? (
                 <>
                   <span aria-hidden className="text-muted-foreground">
                     ·

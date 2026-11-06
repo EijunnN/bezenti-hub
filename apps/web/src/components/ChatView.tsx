@@ -1,3 +1,4 @@
+import { LockIcon } from "lucide-react";
 import { ChildThreadApprovals } from "./chat/ChildThreadApprovals";
 import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
@@ -2609,8 +2610,21 @@ export default function ChatView(props: ChatViewProps) {
     const limitRecoveryItems = limitRecoveryBanner === null ? [] : [limitRecoveryBanner];
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
+    // Someone else's Thread: say why the composer is closed, whatever state the Thread is in.
+    const roleItems: ComposerBannerStackItem[] =
+      threadRole.continueBlockedReason === null
+        ? []
+        : [
+            {
+              id: "thread-role:not-yours",
+              variant: "info",
+              icon: <LockIcon />,
+              title: threadRole.continueBlockedReason,
+            },
+          ];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
+        ...roleItems,
         ...feedbackBannerItems,
         ...fallbackItems,
         ...limitRecoveryItems,
@@ -2620,6 +2634,7 @@ export default function ChatView(props: ChatViewProps) {
       ];
     }
     return [
+      ...roleItems,
       ...feedbackBannerItems,
       ...fallbackItems,
       ...limitRecoveryItems,
@@ -2891,6 +2906,8 @@ export default function ChatView(props: ChatViewProps) {
   });
   const { onSend } = useComposerSend({
     environmentId,
+    canContinueThread: threadRole.canContinue,
+    cannotContinueReason: threadRole.continueBlockedReason,
     routeThreadKey,
     currentRouteThreadKeyRef,
     draftId,
@@ -3548,7 +3565,10 @@ export default function ChatView(props: ChatViewProps) {
                         : undefined
                     }
                   >
-                    <ChildThreadApprovals threadRef={activeThreadRef} />
+                    {/* Answering an agent acts in its Thread's live session: the creator's alone. */}
+                    {threadRole.canContinue ? (
+                      <ChildThreadApprovals threadRef={activeThreadRef} />
+                    ) : null}
                     <ComposerSurface.Shell contextRow={showComposerContextStrip}>
                       <ComposerSurface.Host
                         inert={queuedRunEdit.isSaving}
