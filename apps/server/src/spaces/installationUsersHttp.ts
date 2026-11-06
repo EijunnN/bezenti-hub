@@ -14,6 +14,7 @@ import {
   failEnvironmentNotFound,
   requireEnvironmentScope,
 } from "../auth/http.ts";
+import * as InstallationUserService from "./InstallationUserService.ts";
 import * as SpaceDirectory from "./SpaceDirectory.ts";
 
 // Being the Owner is not enough: a narrowed session of the Owner's (a read-only client, an
@@ -36,6 +37,7 @@ export const layer = HttpApiBuilder.group(
   "installationUsers",
   Effect.fnUntraced(function* (handlers) {
     const spaces = yield* SpaceDirectory.SpaceDirectory;
+    const installationUsers = yield* InstallationUserService.InstallationUserService;
     return handlers
       .handle(
         "list",
@@ -60,6 +62,25 @@ export const layer = HttpApiBuilder.group(
               userId: args.params.userId,
               permission: args.payload.permission,
               granted: args.payload.granted,
+            })
+            .pipe(
+              Effect.catchTags({
+                SpaceAccessDeniedError: failDenied,
+                InstallationUserNotFoundError: () => failEnvironmentNotFound("user_not_found"),
+                SpaceDirectoryStorageError: failStorage,
+              }),
+            );
+        }),
+      )
+      .handle(
+        "setStatus",
+        Effect.fn("environment.installationUsers.setStatus")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          return yield* installationUsers
+            .setStatus({
+              actorUserId: yield* requireUser(AuthAccessWriteScope),
+              userId: args.params.userId,
+              status: args.payload.status,
             })
             .pipe(
               Effect.catchTags({

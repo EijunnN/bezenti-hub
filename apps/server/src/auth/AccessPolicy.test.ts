@@ -83,6 +83,14 @@ const linusAs = (nextRole?: SpaceRole) =>
 const otherAdmin = (nextRole?: SpaceRole) =>
   membership("hedy", "admin", nextRole === undefined ? {} : { nextRole });
 
+const userTarget = (userId: string, isOwner = false): AccessPolicy.UserResource => ({
+  kind: "user",
+  userId: UserId.make(userId),
+  isOwner,
+});
+const disabledMember: AccessPolicy.Principal = { ...member, inactive: true };
+const frozenPersonal: AccessPolicy.SpaceResource = { ...personalOf("grace"), frozen: true };
+
 const allow = AccessPolicy.allow;
 const deny = AccessPolicy.deny;
 
@@ -705,6 +713,94 @@ const rows: ReadonlyArray<
     "installationPermission.manage",
     AccessPolicy.installation,
     deny("owner-only"),
+  ],
+
+  // Disabling and removing Users: only the Owner, never the Owner themselves.
+  ["the Owner disables a User", owner, "user.disable", userTarget("grace"), allow],
+  ["the Owner removes a User", owner, "user.remove", userTarget("grace"), allow],
+  [
+    "nobody disables the Owner",
+    owner,
+    "user.disable",
+    userTarget("owner", true),
+    deny("owner-protected"),
+  ],
+  [
+    "nobody removes the Owner",
+    owner,
+    "user.remove",
+    userTarget("owner", true),
+    deny("owner-protected"),
+  ],
+  [
+    "an Admin cannot disable a User",
+    admin,
+    "user.disable",
+    userTarget("grace"),
+    deny("owner-only"),
+  ],
+  ["a Member cannot remove a User", member, "user.remove", userTarget("ada"), deny("owner-only")],
+  ["User rules need a User", owner, "user.remove", organization, deny("wrong-resource")],
+
+  // A disabled or removed User may do nothing, though their Memberships remain.
+  [
+    "a disabled Member no longer views",
+    disabledMember,
+    "space.view",
+    organization,
+    deny("user-inactive"),
+  ],
+  [
+    "a disabled Member continues not even their own Thread",
+    disabledMember,
+    "thread.continue",
+    gracesThread,
+    deny("user-inactive"),
+  ],
+  [
+    "a disabled Admin's guest link stops",
+    { ...admin, inactive: true },
+    "guestLink.create",
+    organization,
+    deny("user-inactive"),
+  ],
+
+  // A removed User's Personal space: frozen, read by the Owner, who may only delete from it.
+  ["the Owner reads a frozen Personal space", owner, "space.view", frozenPersonal, allow],
+  [
+    "the Owner deletes a Thread from a frozen Personal space without archiving it",
+    owner,
+    "thread.delete",
+    owned("thread", "grace", { space: frozenPersonal }),
+    allow,
+  ],
+  [
+    "the Owner deletes a Project from a frozen Personal space",
+    owner,
+    "project.delete",
+    owned("project", "grace", { space: frozenPersonal }),
+    allow,
+  ],
+  [
+    "the Owner archives nothing in a frozen Personal space",
+    owner,
+    "project.archive",
+    owned("project", "grace", { space: frozenPersonal }),
+    deny("personal-space-read-only"),
+  ],
+  [
+    "the Owner continues nothing in a frozen Personal space",
+    owner,
+    "thread.continue",
+    owned("thread", "grace", { space: frozenPersonal }),
+    deny("personal-space-read-only"),
+  ],
+  [
+    "the Owner starts no Thread in a frozen Personal space",
+    owner,
+    "thread.create",
+    frozenPersonal,
+    deny("space-frozen"),
   ],
 ];
 

@@ -4,6 +4,7 @@
 // `canCreateThreads`) instead.
 import type {
   InstallationPermission,
+  InstallationUserStatus,
   SpaceDirectoryView,
   SpaceSummary,
   UserId,
@@ -35,6 +36,13 @@ export const setInstallationPermission = (
     params: { userId },
     payload: { permission, granted },
   });
+
+/** Disables, re-enables or removes a User; removing cannot be undone. */
+export const setInstallationUserStatus = (
+  client: EnvironmentHttpClient,
+  userId: UserId,
+  status: InstallationUserStatus,
+) => client.installationUsers.setStatus({ headers: {}, params: { userId }, payload: { status } });
 
 export const INSTALLATION_PERMISSION_LABELS: Record<InstallationPermission, string> = {
   "personalSpace.create": "Use their Personal space",

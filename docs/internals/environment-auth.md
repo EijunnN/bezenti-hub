@@ -350,6 +350,24 @@ link records its creator and stops working once that User may no longer create
 guest links on its Thread (checked on every guest request), which covers removal
 and demotion without a write to the Thread.
 
+### Disabled and removed Users
+
+[InstallationUserService](../../apps/server/src/spaces/InstallationUserService.ts)
+sets `users.disabled_at` / `removed_at` and, in the same transaction, expires
+their reset links and revokes the Invitations they created; removal also deletes
+their Memberships and sets their Personal space's `frozen_at`. After it commits
+it revokes every `auth_sessions` row (browser, app, MCP client and CLI bearer are
+all sessions) and pairing link of theirs, which closes their sockets. Their
+principal carries `inactive`, which the policy denies everywhere, so anything
+that acts _as_ them without a session (guest links they made, scheduled-task
+runs, agent tool calls) stops too, and their Memberships can stay for a
+re-enable. A trigger refuses a new session or pairing link for an inactive User,
+closing the race with a sign-in already under way; app sign-in codes need no
+revocation since their exchange checks the User. Sign-in says the account is
+disabled or removed only after the credential verified, so it is no oracle.
+The User row stays as a tombstone for names. A frozen Personal space is
+read-only for everyone; the Owner may only delete from it, archived or not.
+
 Reset links are the Owner's alone (`UserDirectory.issueResetLink`; `created_by`
 names the issuer), since a link takes the account over. Redeeming one registers a
 passkey or, for anyone but the Owner, sets a new password; either way it removes

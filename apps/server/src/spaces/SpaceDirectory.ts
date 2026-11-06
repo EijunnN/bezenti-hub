@@ -1,6 +1,7 @@
 import {
   InstallationPermission,
   type InstallationUser,
+  InstallationUserStatus,
   type MemberList,
   type MemberSummary,
   type ProjectId,
@@ -54,6 +55,8 @@ const DENIED_ACTION_LABELS: Record<string, string> = {
   "membership.remove": "remove this person",
   "membership.leave": "leave for someone else",
   "membership.resetLink": "give this person a reset link",
+  "user.disable": "disable this User",
+  "user.remove": "remove this User",
   "thread.continue": "continue this Thread",
   "thread.archive": "archive or restore this Thread",
   "thread.stop": "stop this Thread",
@@ -80,6 +83,15 @@ const deniedMessage = (action: string, reason: string): string | undefined => {
   }
   if (action === "installationPermission.manage") {
     return "Only the Owner grants Installation permissions.";
+  }
+  if (reason === "owner-protected") return "The Owner can't be disabled or removed.";
+  if (reason === "user-removed") return "A removed User stays removed.";
+  if (action === "user.disable" || action === "user.remove") {
+    return "Only the Owner disables or removes Users.";
+  }
+  if (reason === "user-inactive") return "This account can no longer sign in.";
+  if (reason === "space-frozen") {
+    return "This Personal space belonged to a removed User: it can only be read, or its content deleted.";
   }
   if (reason === "no-such-member") return "That person is not in this Organization.";
   if (action.startsWith("membership.") && reason === "owner-only") {
@@ -231,6 +243,30 @@ export class SpaceDirectory extends Context.Service<
       InstallationUser,
       SpaceAccessDeniedError | InstallationUserNotFoundError | SpaceDirectoryStorageError
     >;
+    /**
+     * Refuses a change to the User's status the policy denies (only the Owner, never on the Owner)
+     * and returns them as they are now.
+     */
+    readonly authorizeUserChange: (input: {
+      readonly actorUserId: UserId;
+      readonly action: "user.disable" | "user.remove";
+      readonly userId: UserId;
+    }) => Effect.Effect<
+      InstallationUser,
+      SpaceAccessDeniedError | InstallationUserNotFoundError | SpaceDirectoryStorageError
+    >;
+    /**
+     * What a disabled or removed User loses in the Spaces, in the caller's transaction: the
+     * Invitations they made stop, and on removal their Memberships end and their Personal space
+     * freezes. Then `membershipsChanged` after it.
+     */
+    readonly endAccessOf: (input: {
+      readonly userId: UserId;
+      readonly removed: boolean;
+    }) => Effect.Effect<void, SpaceDirectoryStorageError>;
+    readonly installationUser: (
+      userId: UserId,
+    ) => Effect.Effect<Option.Option<InstallationUser>, SpaceDirectoryStorageError>;
     /**
      * Subscribes now (so nothing published after it returns is missed) to changes of the
      * User's access that a cached read cannot follow (a Space they saw is now hidden), so their
@@ -406,9 +442,11 @@ const make = Effect.gen(function* () {
       spaceId: Schema.NullOr(SpaceId),
       role: Schema.NullOr(SpaceRole),
       strongSignIn: Schema.BooleanFromBit,
+      inactive: Schema.BooleanFromBit,
     }),
     execute: (userId) => sql`
       SELECT users.is_owner AS "isOwner", m.space_id AS "spaceId", m.role AS role,
+        (users.disabled_at IS NOT NULL OR users.removed_at IS NOT NULL) AS "inactive",
         (EXISTS (SELECT 1 FROM user_passkeys WHERE user_id = users.user_id)
         OR EXISTS (SELECT 1 FROM user_totp WHERE user_id = users.user_id)) AS "strongSignIn"
       FROM users LEFT JOIN space_memberships AS m ON m.user_id = users.user_id
@@ -427,34 +465,41 @@ const make = Effect.gen(function* () {
     displayName: Schema.String,
     loginName: Schema.NullOr(Schema.String),
     isOwner: Schema.BooleanFromBit,
+    status: InstallationUserStatus,
     permissions: Schema.NullOr(Schema.String),
   });
   const USER_COLUMNS = `users.user_id AS "id", users.display_name AS "displayName",
     users.login_name AS "loginName", users.is_owner AS "isOwner",
+    CASE WHEN users.removed_at IS NOT NULL THEN 'removed'
+      WHEN users.disabled_at IS NOT NULL THEN 'disabled' ELSE 'active' END AS "status",
     (SELECT group_concat(permission, ' ') FROM installation_permissions p
       WHERE p.user_id = users.user_id) AS "permissions"`;
   const listUserRows = SqlSchema.findAll({
     Request: Schema.Void,
     Result: UserRow,
     execute: () => sql`
-      SELECT ${sql.literal(USER_COLUMNS)} FROM users WHERE removed_at IS NULL
-      ORDER BY is_owner DESC, display_name COLLATE NOCASE ASC, user_id ASC
+      SELECT ${sql.literal(USER_COLUMNS)} FROM users
+      ORDER BY is_owner DESC, removed_at IS NOT NULL, display_name COLLATE NOCASE ASC, user_id ASC
     `,
   });
   const findUserRow = SqlSchema.findOneOption({
     Request: UserId,
     Result: UserRow,
     execute: (userId) => sql`
-      SELECT ${sql.literal(USER_COLUMNS)} FROM users
-      WHERE user_id = ${userId} AND removed_at IS NULL
+      SELECT ${sql.literal(USER_COLUMNS)} FROM users WHERE user_id = ${userId}
     `,
   });
   // Other Users' Personal spaces, which only the Owner lists.
   const listOthersPersonalSpaces = SqlSchema.findAll({
     Request: UserId,
-    Result: Schema.Struct({ spaceId: SpaceId, displayName: Schema.String }),
+    Result: Schema.Struct({
+      spaceId: SpaceId,
+      displayName: Schema.String,
+      frozen: Schema.BooleanFromBit,
+    }),
     execute: (userId) => sql`
-      SELECT s.space_id AS "spaceId", u.display_name AS "displayName"
+      SELECT s.space_id AS "spaceId", u.display_name AS "displayName",
+        s.frozen_at IS NOT NULL AS "frozen"
       FROM spaces s JOIN users u ON u.user_id = s.personal_owner_user_id
       WHERE s.kind = 'personal' AND s.personal_owner_user_id <> ${userId}
       ORDER BY u.display_name COLLATE NOCASE ASC, s.space_id ASC
@@ -466,6 +511,7 @@ const make = Effect.gen(function* () {
     displayName: row.displayName,
     loginName: row.loginName,
     isOwner: row.isOwner,
+    status: row.status,
     installationPermissions: row.isOwner
       ? []
       : (row.permissions ?? "").split(" ").filter(isPermission).toSorted(),
@@ -507,6 +553,7 @@ const make = Effect.gen(function* () {
       isOwner: rows[0]?.isOwner ?? false,
       installationPermissions: new Set(permissions.map((row) => row.permission)),
       roles,
+      inactive: rows[0]?.inactive ?? false,
     } satisfies AccessPolicy.Principal;
     return { principal, storedRoles, pendingAdmin };
   }, Effect.mapError(storageError));
@@ -564,15 +611,19 @@ const make = Effect.gen(function* () {
           ...(pendingAdmin.has(row.spaceId) ? { pendingAdmin: true } : {}),
         })),
       // The Owner reads every other User's Personal space and adds nothing to it.
-      ...othersPersonal.map((row) => ({
-        id: row.spaceId,
-        kind: "personal" as const,
-        name: row.displayName.trim() || "Personal",
-        role: null,
-        isOwn: false,
-        canCreateThreads: false,
-        canInvite: false,
-      })),
+      ...othersPersonal.map((row) => {
+        const name = row.displayName.trim() || "Personal";
+        return {
+          id: row.spaceId,
+          kind: "personal" as const,
+          name: row.frozen ? `${name} (removed)` : name,
+          role: null,
+          isOwn: false,
+          canCreateThreads: false,
+          canInvite: false,
+          ...(row.frozen ? { frozen: true } : {}),
+        };
+      }),
     ];
     return {
       userId,
@@ -620,7 +671,7 @@ const make = Effect.gen(function* () {
       const principal = yield* principalOf(input.actorUserId);
       yield* requireAllowed(principal, "installationPermission.manage", AccessPolicy.installation);
       const target = yield* findUserRow(input.userId).pipe(Effect.mapError(storageError));
-      if (Option.isNone(target)) {
+      if (Option.isNone(target) || target.value.status === "removed") {
         return yield* new InstallationUserNotFoundError({ userId: input.userId });
       }
       // The Owner holds every permission; there is nothing to grant or revoke.
@@ -646,6 +697,56 @@ const make = Effect.gen(function* () {
       return toInstallationUser(Option.getOrElse(updated, () => target.value));
     },
   );
+
+  const installationUser = Effect.fn("SpaceDirectory.installationUser")(function* (userId: UserId) {
+    const row = yield* findUserRow(userId).pipe(Effect.mapError(storageError));
+    return Option.map(row, toInstallationUser);
+  });
+
+  const authorizeUserChange = Effect.fn("SpaceDirectory.authorizeUserChange")(function* (input: {
+    readonly actorUserId: UserId;
+    readonly action: "user.disable" | "user.remove";
+    readonly userId: UserId;
+  }) {
+    const principal = yield* principalOf(input.actorUserId);
+    // Only the Owner learns whether the User exists.
+    if (!principal.isOwner || principal.inactive === true) {
+      return yield* new SpaceAccessDeniedError({ action: input.action, reason: "owner-only" });
+    }
+    const target = yield* findUserRow(input.userId).pipe(Effect.mapError(storageError));
+    if (Option.isNone(target)) {
+      return yield* new InstallationUserNotFoundError({ userId: input.userId });
+    }
+    yield* requireAllowed(principal, input.action, {
+      kind: "user",
+      userId: target.value.id,
+      isOwner: target.value.isOwner,
+    });
+    return toInstallationUser(target.value);
+  });
+
+  const endAccessOf = Effect.fn("SpaceDirectory.endAccessOf")(function* (input: {
+    readonly userId: UserId;
+    readonly removed: boolean;
+  }) {
+    const now = DateTime.formatIso(yield* DateTime.now);
+    yield* sql`
+        UPDATE space_invitations SET revoked_at = ${now}
+        WHERE created_by = ${input.userId} AND accepted_at IS NULL AND revoked_at IS NULL
+      `;
+    if (!input.removed) return;
+    // What they created stays in each Organization.
+    yield* sql`DELETE FROM space_memberships WHERE user_id = ${input.userId}`;
+    yield* sql`
+        UPDATE users
+        SET access_narrowed_through = (SELECT COALESCE(MAX(sequence), 0) FROM orchestration_events)
+        WHERE user_id = ${input.userId}
+      `;
+    yield* sql`
+        UPDATE spaces SET frozen_at = ${now}
+        WHERE personal_owner_user_id = ${input.userId} AND frozen_at IS NULL
+      `;
+  }, Effect.mapError(storageError));
 
   /**
    * A Space the User may not see answers exactly like one that does not exist, so naming
@@ -1074,6 +1175,9 @@ const make = Effect.gen(function* () {
     view,
     listUsers,
     setInstallationPermission,
+    authorizeUserChange,
+    endAccessOf,
+    installationUser,
     subscribeAccessChanges,
     createOrganization,
     claimCreation,

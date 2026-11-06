@@ -252,6 +252,10 @@ const userSignInFailures = {
   ServerAuthInvalidCredentialError: () => failEnvironmentAuthInvalid("invalid_credential"),
 };
 
+// Said only after the credential checked out, so it reveals nothing to someone guessing.
+const failInactive = (error: UserDirectory.AccountInactiveError) =>
+  Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message }));
+
 const failUserSignInInternal = (error: EnvironmentAuth.ServerAuthInternalError) =>
   failEnvironmentInternal("browser_session_issuance_failed", error);
 
@@ -395,6 +399,7 @@ export const layer = HttpApiBuilder.group(
                   userSignInFailures.ServerAuthInsecureTransportError,
                 SecondFactorMissingError: (error) =>
                   Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+                AccountInactiveError: failInactive,
                 SignInThrottledError: failThrottled,
               }),
               Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, failUserSignInInternal),
@@ -424,6 +429,7 @@ export const layer = HttpApiBuilder.group(
                 ServerAuthInsecureTransportError:
                   userSignInFailures.ServerAuthInsecureTransportError,
                 SignInThrottledError: failThrottled,
+                AccountInactiveError: failInactive,
               }),
               Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, failUserSignInInternal),
             );
@@ -844,7 +850,10 @@ export const layer = HttpApiBuilder.group(
           const request = yield* HttpServerRequest.HttpServerRequest;
           const { response, sessionToken } = yield* serverAuth
             .completePasskeySignIn(request, args.payload, deriveAuthClientMetadata({ request }))
-            .pipe(failUserSignIn);
+            .pipe(
+              Effect.catchTags({ ...userSignInFailures, AccountInactiveError: failInactive }),
+              Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, failUserSignInInternal),
+            );
           yield* appendSessionCookie(sessions.cookieName, sessionToken, response.expiresAt);
           yield* appendCredentialResponseHeaders;
           return response;

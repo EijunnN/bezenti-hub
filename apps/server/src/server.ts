@@ -172,6 +172,7 @@ import { acceptsHubConnection, loopbackUrlHostForAddress } from "./startupAccess
 import * as OrchestrationHttp from "./orchestration-v2/http.ts";
 import * as ProjectHttp from "./project/http.ts";
 import * as MembershipService from "./spaces/MembershipService.ts";
+import * as InstallationUserService from "./spaces/InstallationUserService.ts";
 import * as SpaceDirectory from "./spaces/SpaceDirectory.ts";
 import * as SpaceVisibility from "./spaces/SpaceVisibility.ts";
 import * as SpacesHttp from "./spaces/http.ts";
@@ -467,6 +468,7 @@ const layerServerEnvironment = ServerEnvironment.layer.pipe(Layer.provide(Server
 const layerAuth = Layer.mergeAll(
   InvitationService.layer,
   MembershipService.layer,
+  InstallationUserService.layer,
   SpaceVisibility.layer,
 ).pipe(
   Layer.provideMerge(EnvironmentAuth.layer.pipe(Layer.provideMerge(SpaceDirectory.layer))),

@@ -1,7 +1,8 @@
 /**
  * Who may do what in which Space. Pure; each rule is one row in AccessPolicy.test.ts. The Owner
  * may do everything except create in an archived or frozen Space, change anything in another
- * User's Personal space (only read it) and share from a Personal space.
+ * User's Personal space (only read it, and delete from a frozen one), share from a Personal space
+ * and disable or remove themselves. A disabled or removed User may do nothing.
  */
 import type {
   InstallationPermission,
@@ -17,6 +18,8 @@ export interface Principal {
   readonly installationPermissions: ReadonlySet<InstallationPermission>;
   /** The User's Role in each Organization they are a Member of. */
   readonly roles: ReadonlyMap<SpaceId, SpaceRole>;
+  /** Disabled or removed: every action is refused, though their Memberships may remain. */
+  readonly inactive?: boolean;
 }
 
 export interface SpaceResource {
@@ -51,7 +54,19 @@ export interface MembershipResource {
   readonly nextRole?: SpaceRole;
 }
 
-export type Resource = SpaceResource | InstallationResource | OwnedResource | MembershipResource;
+/** A User of the Installation, as the Owner disables or removes them. */
+export interface UserResource {
+  readonly kind: "user";
+  readonly userId: UserId;
+  readonly isOwner: boolean;
+}
+
+export type Resource =
+  | SpaceResource
+  | InstallationResource
+  | OwnedResource
+  | MembershipResource
+  | UserResource;
 
 export type Action =
   | "space.view"
@@ -60,6 +75,10 @@ export type Action =
   | "organization.create"
   /** List Users and grant or revoke their Installation permissions. */
   | "installationPermission.manage"
+  /** Disable a User or turn them back on: their sessions end, their Memberships stay. */
+  | "user.disable"
+  /** Remove a User for good: their Memberships end and their Personal space freezes. */
+  | "user.remove"
   /** Create an Invitation into an Organization as a Member or Guest. */
   | "invitation.create"
   /** List and revoke an Organization's Invitations. */
@@ -112,6 +131,8 @@ const OWNER_ONLY: ReadonlySet<Action> = new Set([
   "installationPermission.manage",
 ]);
 
+const USER_ACTIONS: ReadonlySet<Action> = new Set(["user.disable", "user.remove"]);
+
 const MEMBERSHIP_ACTIONS: ReadonlySet<Action> = new Set([
   "membership.changeRole",
   "membership.remove",
@@ -144,6 +165,10 @@ export type DenyReason =
   | "missing-installation-permission"
   | "space-archived"
   | "space-frozen"
+  /** The User was disabled or removed. */
+  | "user-inactive"
+  /** Nobody disables or removes the Owner. */
+  | "owner-protected"
   /** Someone else's Thread or Project. */
   | "not-yours"
   /** Only archived items are deleted permanently. */
@@ -163,6 +188,7 @@ const isOwned = (resource: Resource): resource is OwnedResource =>
   resource.kind === "thread" || resource.kind === "project";
 const isMembership = (resource: Resource): resource is MembershipResource =>
   resource.kind === "membership";
+const isUser = (resource: Resource): resource is UserResource => resource.kind === "user";
 
 const ROLES_THAT_CREATE_PROJECTS: ReadonlySet<SpaceRole> = new Set(["admin", "member"]);
 const ADMIN_ONLY: ReadonlySet<SpaceRole> = new Set(["admin"]);
@@ -198,8 +224,10 @@ const othersPersonalSpace = (principal: Principal, space: SpaceResource) =>
 
 const decideOwned = (principal: Principal, action: Action, item: OwnedResource): Decision => {
   const { space } = item;
+  const deletes = action === "thread.delete" || action === "project.delete";
   if (principal.isOwner && othersPersonalSpace(principal, space)) {
-    return deny("personal-space-read-only");
+    // A removed User's work is the Owner's to keep or delete, archived or not.
+    return space.frozen && deletes ? allow : deny("personal-space-read-only");
   }
   if (action === "thread.continue") {
     if (space.archived) return deny("space-archived");
@@ -209,7 +237,7 @@ const decideOwned = (principal: Principal, action: Action, item: OwnedResource):
   }
   if (principal.isOwner) return allow;
   if (space.archived) return deny("space-archived");
-  const deletes = action === "thread.delete" || action === "project.delete";
+  if (space.frozen) return deny("space-frozen");
   if (space.kind === "personal") {
     const reach = inPersonalSpace(principal, space);
     if (reach._tag === "Deny") return reach;
@@ -268,6 +296,12 @@ const decideMembership = (
 };
 
 export const decide = (principal: Principal, action: Action, resource: Resource): Decision => {
+  if (principal.inactive === true) return deny("user-inactive");
+  if (USER_ACTIONS.has(action) || isUser(resource)) {
+    if (!USER_ACTIONS.has(action) || !isUser(resource)) return deny("wrong-resource");
+    if (!principal.isOwner) return deny("owner-only");
+    return resource.isOwner ? deny("owner-protected") : allow;
+  }
   if (MEMBERSHIP_ACTIONS.has(action) || isMembership(resource)) {
     return MEMBERSHIP_ACTIONS.has(action) && isMembership(resource)
       ? decideMembership(principal, action, resource)

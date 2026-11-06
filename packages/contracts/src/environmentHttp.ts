@@ -74,6 +74,7 @@ import {
   MemberRequest,
   MemberResetLink,
   SetInstallationPermissionRequest,
+  SetInstallationUserStatusRequest,
   SpaceDirectoryView,
   SpaceSummary,
 } from "./spaces.ts";
@@ -406,7 +407,8 @@ const EnvironmentOwnerBootstrapErrors = [
 const EnvironmentPasswordSignInErrors = [
   ...EnvironmentUserSignInErrors,
   EnvironmentRateLimitedError,
-  // The right password for an account that also needs TOTP and has none set up.
+  // The right password for an account that also needs TOTP and has none set up, or that the
+  // Owner disabled or removed.
   EnvironmentHttpForbiddenError,
 ] as const;
 const EnvironmentAccountErrors = [
@@ -602,7 +604,8 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
     HttpApiEndpoint.post("passkeySignIn", "/api/auth/passkey/sign-in", {
       payload: AuthPasskeySignInRequest,
       success: AuthBrowserSessionResult,
-      error: EnvironmentUserSignInErrors,
+      // Forbidden: the passkey is right but the Owner disabled or removed the account.
+      error: [...EnvironmentUserSignInErrors, EnvironmentHttpForbiddenError],
     }),
   )
   .add(
@@ -931,7 +934,8 @@ const EnvironmentInstallationUserErrors = [
   EnvironmentScopeRequiredError,
 ] as const;
 
-// The Owner's Users admin view: list Users and grant or revoke their Installation permissions.
+// The Owner's Users admin view: list Users, grant or revoke their Installation permissions, and
+// disable, re-enable or remove them.
 class EnvironmentInstallationUsersHttpApi extends HttpApiGroup.make("installationUsers")
   .add(
     HttpApiEndpoint.get("list", "/api/installation/users", {
@@ -945,6 +949,15 @@ class EnvironmentInstallationUsersHttpApi extends HttpApiGroup.make("installatio
       headers: OptionalBearerHeaders,
       params: InstallationUserParams,
       payload: SetInstallationPermissionRequest,
+      success: InstallationUser,
+      error: [...EnvironmentInstallationUserErrors, EnvironmentResourceNotFoundError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("setStatus", "/api/installation/users/:userId/status", {
+      headers: OptionalBearerHeaders,
+      params: InstallationUserParams,
+      payload: SetInstallationUserStatusRequest,
       success: InstallationUser,
       error: [...EnvironmentInstallationUserErrors, EnvironmentResourceNotFoundError],
     }).middleware(EnvironmentAuthenticatedAuth),

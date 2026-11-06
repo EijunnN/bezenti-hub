@@ -209,6 +209,8 @@ const DENIED_REASONS: Record<AccessPolicy.DenyReason, string> = {
   "wrong-resource": "Only Organizations take Invitations; nothing is shared from a Personal space.",
   "not-yours": ADMINS_INVITE,
   "not-archived": ADMINS_INVITE,
+  "user-inactive": "This account can no longer sign in.",
+  "owner-protected": ADMINS_INVITE,
 };
 
 const deniedReason = (reason: string) =>

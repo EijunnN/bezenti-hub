@@ -37,6 +37,11 @@ export const SpaceSummary = Schema.Struct({
    * (or have a passkey). Optional so older servers decode.
    */
   pendingAdmin: Schema.optional(Schema.Boolean),
+  /**
+   * A removed User's Personal space, which the Owner keeps read-only and may only delete content
+   * from. Optional so older servers decode.
+   */
+  frozen: Schema.optional(Schema.Boolean),
 });
 export type SpaceSummary = typeof SpaceSummary.Type;
 
@@ -101,12 +106,20 @@ export const MemberResetLink = Schema.Struct({
 });
 export type MemberResetLink = typeof MemberResetLink.Type;
 
+/**
+ * Whether a User may sign in. Disabled is reversible; removed is not, and the User stays only as a
+ * name for what they did.
+ */
+export const InstallationUserStatus = Schema.Literals(["active", "disabled", "removed"]);
+export type InstallationUserStatus = typeof InstallationUserStatus.Type;
+
 /** A User as the Owner sees them in the Users admin view. */
 export const InstallationUser = Schema.Struct({
   id: UserId,
   displayName: Schema.String,
   loginName: Schema.NullOr(Schema.String),
   isOwner: Schema.Boolean,
+  status: InstallationUserStatus,
   /** What the Owner granted them; the Owner holds every permission and lists none. */
   installationPermissions: Schema.Array(InstallationPermission),
 });
@@ -120,3 +133,6 @@ export const SetInstallationPermissionRequest = Schema.Struct({
   granted: Schema.Boolean,
 });
 export type SetInstallationPermissionRequest = typeof SetInstallationPermissionRequest.Type;
+
+export const SetInstallationUserStatusRequest = Schema.Struct({ status: InstallationUserStatus });
+export type SetInstallationUserStatusRequest = typeof SetInstallationUserStatusRequest.Type;

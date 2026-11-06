@@ -40,6 +40,7 @@ import * as InvitationService from "../spaces/InvitationService.ts";
 import * as MembershipService from "../spaces/MembershipService.ts";
 import * as InvitationsHttp from "../spaces/invitationsHttp.ts";
 import * as InstallationUsersHttp from "../spaces/installationUsersHttp.ts";
+import * as InstallationUserService from "../spaces/InstallationUserService.ts";
 import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as PullRequestHttp from "../pullRequest/http.ts";
@@ -148,6 +149,7 @@ const makeLayerServices = (config: { readonly publicUrl?: URL }) =>
     Layer.mergeAll(
       InvitationService.layer,
       MembershipService.layer,
+      InstallationUserService.layer,
       SpaceVisibility.layer,
       Layer.merge(McpOAuth.layer, McpOAuth.layerMcpClientAuthenticator).pipe(
         Layer.provide(ServerSettings.layerTest()),

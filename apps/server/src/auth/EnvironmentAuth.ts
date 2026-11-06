@@ -645,6 +645,7 @@ export class EnvironmentAuth extends Context.Service<
       UserBrowserSession,
       | ServerAuthInvalidOriginError
       | ServerAuthInvalidCredentialError
+      | UserDirectory.AccountInactiveError
       | ServerAuthInsecureTransportError
       | ServerAuthInternalError
     >;
@@ -664,6 +665,7 @@ export class EnvironmentAuth extends Context.Service<
     ) => Effect.Effect<
       UserBrowserSession | { readonly response: AuthSecondFactorRequired },
       | ServerAuthInvalidCredentialError
+      | UserDirectory.AccountInactiveError
       | ServerAuthInsecureTransportError
       | UserDirectory.SecondFactorMissingError
       | UserDirectory.SignInThrottledError
@@ -677,6 +679,7 @@ export class EnvironmentAuth extends Context.Service<
     ) => Effect.Effect<
       UserBrowserSession,
       | ServerAuthInvalidCredentialError
+      | UserDirectory.AccountInactiveError
       | ServerAuthInsecureTransportError
       | UserDirectory.SignInThrottledError
       | ServerAuthInternalError

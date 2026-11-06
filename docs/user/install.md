@@ -279,6 +279,23 @@ selector reminds you of this while your Personal space is the current Space.
 Nothing in a Personal space is shared with anyone else: no invitations, no guest
 links; to share work, it has to move to an organization.
 
+### Disabling and removing people
+
+In **Users and permissions** the Owner can **Disable** a person: they are signed
+out everywhere at once (browsers, the desktop and mobile apps, outside agents and
+`t3` tokens), their pending reset links, pairing codes and invitations stop
+working, their scheduled tasks no longer run anything, and signing in tells them the Owner
+disabled the account. They stay in their organizations; **Turn back on** lets
+them sign in again.
+
+**Remove** is for good and asks you to type their sign-in name. On top of
+disabling, it takes them out of every organization (what they made there stays)
+and freezes their Personal space: it is listed for the Owner as "name (removed)"
+under **Personal spaces (read only)**, nobody can add to or change it, and the
+Owner can only read it or delete what is in it. Moving its projects to an
+organization is not available yet. Their name stays on what they did. The Owner
+cannot be disabled or removed.
+
 What you can change depends on your Role in the organization:
 
 | Action                               | Admin | Member |    Guest     |

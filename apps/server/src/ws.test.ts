@@ -2572,6 +2572,7 @@ describe("Space visibility", () => {
             displayName: "grace",
             loginName: "grace",
             isOwner: false,
+            status: "active",
             installationPermissions: [],
           });
 

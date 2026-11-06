@@ -120,6 +120,26 @@ export class SecondFactorMissingError extends Schema.TaggedError<SecondFactorMis
   }
 }
 
+/**
+ * The right credential for an account the Owner disabled or removed. Said only once the
+ * credential checked out, so it tells a guesser nothing.
+ */
+export class AccountInactiveError extends Schema.TaggedError<AccountInactiveError>()(
+  "AccountInactiveError",
+  { removed: Schema.Boolean },
+) {
+  override get message(): string {
+    return this.removed
+      ? "This account was removed from this Hub."
+      : "The Owner disabled this account. Ask them to turn it back on.";
+  }
+}
+
+const inactiveError = (user: Users.UserRecord) =>
+  user.disabledAt === null && user.removedAt === null
+    ? undefined
+    : new AccountInactiveError({ removed: user.removedAt !== null });
+
 export class ResetLinkRejectedError extends Schema.TaggedError<ResetLinkRejectedError>()(
   "ResetLinkRejectedError",
   {},
@@ -312,7 +332,10 @@ export class UserDirectory extends Context.Service<
       readonly ceremonyId: string;
       readonly origin: string;
       readonly response: AuthPasskeyAuthenticationResponse;
-    }) => Effect.Effect<AuthUser, PasskeyRejectedError | UserDirectoryStorageError>;
+    }) => Effect.Effect<
+      AuthUser,
+      PasskeyRejectedError | AccountInactiveError | UserDirectoryStorageError
+    >;
     readonly redeemRecoveryCode: (
       code: string,
     ) => Effect.Effect<AuthUser, RecoveryCodeRejectedError | UserDirectoryStorageError>;
@@ -345,6 +368,7 @@ export class UserDirectory extends Context.Service<
     ) => Effect.Effect<
       PasswordCheck,
       | PasswordRejectedError
+      | AccountInactiveError
       | SecondFactorMissingError
       | SignInThrottledError
       | UserDirectoryStorageError
@@ -354,7 +378,10 @@ export class UserDirectory extends Context.Service<
       clientIp: string | undefined,
     ) => Effect.Effect<
       AuthUser,
-      PasswordRejectedError | SignInThrottledError | UserDirectoryStorageError
+      | PasswordRejectedError
+      | AccountInactiveError
+      | SignInThrottledError
+      | UserDirectoryStorageError
     >;
     /** A single-use link that lets the Owner register a new passkey; the token is shown once. */
     readonly issueOwnerResetLink: () => Effect.Effect<
@@ -538,6 +565,8 @@ const make = Effect.gen(function* () {
     readonly userId: UserId;
     /** False for a decoy challenge after a wrong password: no code will pass it. */
     readonly passwordOk: boolean;
+    /** The password was right but the Owner disabled or removed the account. */
+    readonly inactiveWithPassword: boolean;
     readonly clientIp: string | undefined;
     attempts: number;
     readonly expiresAt: DateTime.DateTime;
@@ -765,10 +794,12 @@ const make = Effect.gen(function* () {
         usedAt: yield* DateTime.now,
       })
       .pipe(storage);
-    const user = yield* activeUser(passkey.value.userId);
+    const user = yield* users.getById(passkey.value.userId).pipe(storage);
     if (Option.isNone(user)) {
       return yield* new PasskeyRejectedError({ reason: "this account cannot sign in" });
     }
+    const inactive = inactiveError(user.value);
+    if (inactive !== undefined) return yield* inactive;
     return toAuthUser(user.value);
   });
 
@@ -909,7 +940,10 @@ const make = Effect.gen(function* () {
               response: reauth.response,
             }).pipe(
               Effect.map((signedIn) => signedIn.id === user.userId),
-              Effect.catchTags({ PasskeyRejectedError: () => Effect.succeed(false) }),
+              Effect.catchTags({
+                PasskeyRejectedError: () => Effect.succeed(false),
+                AccountInactiveError: () => Effect.succeed(false),
+              }),
             )
           : credentials.passwordHash !== null &&
             (yield* verifyPassword(reauth.password, credentials.passwordHash)) &&
@@ -1071,8 +1105,8 @@ const make = Effect.gen(function* () {
     const hash = credentials?.passwordHash ?? (yield* decoyPasswordHash);
     const passwordMatches =
       (yield* verifyPassword(input.password, hash)) && credentials?.passwordHash != null;
-    const canSignIn =
-      user !== undefined && user.disabledAt === null && user.removedAt === null && passwordMatches;
+    const inactive = user === undefined ? undefined : inactiveError(user);
+    const canSignIn = user !== undefined && inactive === undefined && passwordMatches;
     const totpCiphertext = credentials?.totpSecretCiphertext ?? null;
     if (user !== undefined && totpCiphertext !== null) {
       // The code step comes whether or not the password was right, so this answer alone never
@@ -1084,6 +1118,7 @@ const make = Effect.gen(function* () {
         {
           userId: user.userId,
           passwordOk: canSignIn,
+          inactiveWithPassword: inactive !== undefined && passwordMatches,
           clientIp,
           attempts: 0,
           expiresAt: ceremonyExpiry(now),
@@ -1092,6 +1127,7 @@ const make = Effect.gen(function* () {
       );
       return { _tag: "totp-required", challengeId } as const;
     }
+    if (inactive !== undefined && passwordMatches) return yield* inactive;
     if (!canSignIn || credentials === undefined) {
       yield* recordFailure(keys);
       return yield* new PasswordRejectedError({});
@@ -1119,6 +1155,17 @@ const make = Effect.gen(function* () {
         yield* totpChallenges.delete(input.challengeId);
       }
       const credentials = yield* users.getCredentials(challenge.userId).pipe(storage);
+      // Both factors were right for an account that may no longer sign in: say so.
+      if (
+        challenge.inactiveWithPassword &&
+        credentials.totpSecretCiphertext !== null &&
+        (yield* acceptTotpCode(challenge.userId, credentials.totpSecretCiphertext, input.code))
+      ) {
+        yield* totpChallenges.delete(input.challengeId);
+        const record = yield* users.getById(challenge.userId).pipe(storage);
+        const inactive = Option.isSome(record) ? inactiveError(record.value) : undefined;
+        return yield* inactive ?? new PasswordRejectedError({});
+      }
       const user = yield* activeUser(challenge.userId);
       const accepted =
         challenge.passwordOk &&
