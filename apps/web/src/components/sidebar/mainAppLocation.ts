@@ -22,6 +22,7 @@ const SHELL_LESS_PATHS = new Set([
   "/invite",
   "/connect-agent",
   "/app-sign-in",
+  "/register-environment",
   GUEST_PAGE_PATH,
 ]);
 

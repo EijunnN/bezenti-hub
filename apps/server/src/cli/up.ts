@@ -20,6 +20,10 @@ import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 import { resolveHostCliCommand } from "./invocation.ts";
 import * as CliService from "./service.ts";
+import { readJoinedHubState } from "../environments/joinedHubState.ts";
+import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
+import * as Schema from "effect/Schema";
+import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
 
 /** How other devices reach this machine now. */
 interface Setup {
@@ -314,9 +318,10 @@ export const upCommand = Command.make("up", {
 );
 
 /** `t3 status --json`, for scripts and agents. */
-const setupJson = (setup: Setup) =>
+const setupJson = (setup: Setup, joined: JoinedStatus | null = null) =>
   JSON.stringify(
     {
+      ...(joined === null ? {} : { joined }),
       service: {
         supported: setup.service.supported,
         installed: setup.service.installed,
@@ -331,6 +336,74 @@ const setupJson = (setup: Setup) =>
     null,
     2,
   );
+
+interface JoinedStatus {
+  readonly hubUrl: string;
+  readonly name: string;
+  readonly environmentId: string;
+  /** From the running server's `/health`; null when it is not running. */
+  readonly connection: { readonly _tag: string; readonly [key: string]: unknown } | null;
+}
+
+/** A joined machine's Hub, and how its running server's connection stands. */
+const HealthBody = Schema.Struct({
+  connection: Schema.StructWithRest(Schema.Struct({ _tag: Schema.String }), [
+    Schema.Record(Schema.String, Schema.Unknown),
+  ]),
+});
+
+const readJoinedStatus = Effect.fn("cli.status.joined")(function* (
+  config: ServerConfig.ServerConfig["Service"],
+) {
+  const read = yield* readJoinedHubState(config.joinedHubPath).pipe(Effect.result);
+  if (read._tag === "Failure") {
+    return {
+      hubUrl: `unreadable (${config.joinedHubPath}) · run \`t3 leave\` to forget it`,
+      name: "",
+      environmentId: "",
+      connection: null,
+    } satisfies JoinedStatus;
+  }
+  const joined = read.success;
+  if (Option.isNone(joined)) return null;
+  const runtime = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(
+    Effect.orElseSucceed(() => Option.none()),
+  );
+  const connection = Option.isNone(runtime)
+    ? null
+    : yield* HttpClient.get(`http://127.0.0.1:${runtime.value.port}/health`).pipe(
+        Effect.flatMap(HttpClientResponse.schemaBodyJson(HealthBody)),
+        Effect.map((body) => body.connection),
+        Effect.timeout("3 seconds"),
+        Effect.provide(FetchHttpClient.layer),
+        Effect.orElseSucceed(() => null),
+      );
+  return {
+    hubUrl: joined.value.hubUrl,
+    name: joined.value.name,
+    environmentId: joined.value.environmentId,
+    connection,
+  } satisfies JoinedStatus;
+});
+
+const describeConnection = (connection: JoinedStatus["connection"]) => {
+  if (connection === null) return "server not running · start it with `t3 serve`";
+  switch (connection._tag) {
+    case "connected":
+      return `connected since ${String(connection.since)}`;
+    case "stopped":
+      return `refused · ${String(connection.message)}`;
+    default:
+      return connection.lastError ? `reconnecting · ${String(connection.lastError)}` : "connecting";
+  }
+};
+
+const formatJoined = (joined: JoinedStatus) =>
+  [
+    `  ${"Hub".padEnd(15)}${joined.hubUrl}`,
+    `  ${"Name".padEnd(15)}${joined.name}`,
+    `  ${"Connection".padEnd(15)}${describeConnection(joined.connection)}`,
+  ].join("\n");
 
 export const statusCommand = Command.make("status", {
   ...projectLocationFlags,
@@ -355,10 +428,12 @@ export const statusCommand = Command.make("status", {
           CliService.layer(config).pipe(Layer.provideMerge(ServerConfig.layer(config))),
         ),
       );
+      const joined = yield* readJoinedStatus(config);
+      if (flags.json) return yield* Console.log(setupJson(setup, joined));
       yield* Console.log(
-        flags.json
-          ? setupJson(setup)
-          : `This machine\n${formatSetup(setup)}\n\nChange access: \`t3 up\`.`,
+        joined === null
+          ? `This machine\n${formatSetup(setup)}\n\nChange access: \`t3 up\`.`
+          : `This machine is an Environment of a Hub\n${formatJoined(joined)}\n\nLeave the Hub: \`t3 leave\`.`,
       );
     }),
   ),

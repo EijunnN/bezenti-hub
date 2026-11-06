@@ -16,6 +16,7 @@ import { environmentCommand } from "./cli/environment.ts";
 import { appCommand } from "./cli/app.ts";
 import { browserCommand } from "./cli/browser.ts";
 import { pairCommand } from "./cli/pair.ts";
+import { joinCommand, leaveCommand } from "./cli/join.ts";
 import { extendConnectionAttemptTimeout, keepOutboundFetchOnHttp1 } from "./outboundHttp.ts";
 import { sharedServerCommandFlags } from "./cli/config.ts";
 import { projectCommand } from "./cli/project.ts";
@@ -59,6 +60,8 @@ export const makeCli = () =>
       threadCommand,
       upCommand,
       statusCommand,
+      joinCommand,
+      leaveCommand,
       serviceCommand,
       uninstallCommand,
       serviceLauncherCommand,

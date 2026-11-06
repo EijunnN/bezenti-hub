@@ -212,6 +212,7 @@ const DENIED_REASONS: Record<AccessPolicy.DenyReason, string> = {
   "not-archived": ADMINS_INVITE,
   "user-inactive": "This account can no longer sign in.",
   "owner-protected": ADMINS_INVITE,
+  "hub-machine": ADMINS_INVITE,
 };
 
 const deniedReason = (reason: string) =>

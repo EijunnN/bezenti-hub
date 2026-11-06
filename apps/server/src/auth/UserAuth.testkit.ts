@@ -1,4 +1,5 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EnvironmentHttpApi,
@@ -17,6 +18,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as Etag from "effect/http/Etag";
 import * as HttpPlatform from "effect/http/HttpPlatform";
 import * as HttpRouter from "effect/http/HttpRouter";
+import * as HttpServer from "effect/http/HttpServer";
 import * as HttpApi from "effect/http-api/HttpApi";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
@@ -24,6 +26,9 @@ import * as AuditLog from "../audit/AuditLog.ts";
 import * as AuditHttp from "../audit/http.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as EnvironmentConnectRoute from "../environments/connectRoute.ts";
+import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
+import * as HubEnvironmentsHttp from "../environments/http.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import { layerTestPeer, TEST_PEER_HEADER } from "./clientConnection.testkit.ts";
@@ -70,6 +75,7 @@ class AuthTestApi extends HttpApi.make("environment")
   .add(EnvironmentHttpApi.groups.invitations)
   .add(EnvironmentHttpApi.groups.installationUsers)
   .add(EnvironmentHttpApi.groups.audit)
+  .add(EnvironmentHttpApi.groups.environments)
   .add(EnvironmentHttpApi.groups.projects)
   .add(EnvironmentHttpApi.groups.orchestration)
   .add(EnvironmentHttpApi.groups.pullRequests)
@@ -159,6 +165,7 @@ const makeLayerServices = (config: { readonly publicUrl?: URL }) =>
           InstallationUserService.layer,
           SpaceVisibility.layer,
           AuditLog.layer,
+          EnvironmentRegistry.layer,
           Layer.merge(McpOAuth.layer, McpOAuth.layerMcpClientAuthenticator).pipe(
             Layer.provide(ServerSettings.layerTest()),
             Layer.provide(
@@ -188,9 +195,16 @@ const makeLayerServices = (config: { readonly publicUrl?: URL }) =>
     Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
 
-/** A Hub over HTTP routes, optionally published on `publicUrl`. */
-export const serveAuthHttpWith = Effect.fn(function* (config: { readonly publicUrl?: URL } = {}) {
-  const services = yield* Layer.build(makeLayerServices(config));
+/**
+ * A Hub over HTTP routes, optionally published on `publicUrl`. With `listen`, the same routes and
+ * the Environment socket also answer on a real loopback port (`url`), for WebSocket clients.
+ */
+export const serveAuthHttpWith = Effect.fn(function* (
+  config: { readonly publicUrl?: URL; readonly listen?: boolean } = {},
+) {
+  const services = yield* Layer.build(
+    makeLayerServices(config.publicUrl === undefined ? {} : { publicUrl: config.publicUrl }),
+  );
   const routes = HttpApiBuilder.layer(AuthTestApi).pipe(
     Layer.provide(AuthHttp.layer),
     Layer.provide(AppSignInHttp.layer),
@@ -198,6 +212,7 @@ export const serveAuthHttpWith = Effect.fn(function* (config: { readonly publicU
     Layer.provide(InvitationsHttp.layer),
     Layer.provide(InstallationUsersHttp.layer),
     Layer.provide(AuditHttp.layer),
+    Layer.provide(HubEnvironmentsHttp.layer),
     Layer.provide(ProjectHttp.layer),
     Layer.provide(OrchestrationHttp.layer),
     Layer.provide(PullRequestHttp.layer),
@@ -211,6 +226,24 @@ export const serveAuthHttpWith = Effect.fn(function* (config: { readonly publicU
   );
   const { handler, dispose } = HttpRouter.toWebHandler(routes, { disableLogger: true });
   yield* Effect.addFinalizer(() => Effect.promise(dispose));
+  let url = "";
+  if (config.listen === true) {
+    const served = yield* HttpRouter.serve(
+      Layer.mergeAll(
+        routes,
+        EnvironmentConnectRoute.layer.pipe(Layer.provide(Layer.succeedContext(services))),
+      ),
+      { disableListenLog: true, disableLogger: true },
+    ).pipe(
+      Layer.provide(Layer.succeedContext(services)),
+      Layer.provideMerge(NodeHttpServer.layerTest),
+      Layer.fresh,
+      Layer.build,
+    );
+    const address = Context.get(served, HttpServer.HttpServer).address;
+    if (address._tag === "UnixPathAddress") return yield* Effect.die("expected a TCP address");
+    url = `http://127.0.0.1:${address.port}`;
+  }
   const environmentAuth = Context.get(services, EnvironmentAuth.EnvironmentAuth);
   // Requests run on this test's clock, so expiry follows TestClock.
   const requestContext = Context.merge(services, yield* Effect.context());
@@ -261,6 +294,8 @@ export const serveAuthHttpWith = Effect.fn(function* (config: { readonly publicU
   return {
     environmentAuth,
     services,
+    /** The real loopback address, with `listen`. */
+    url,
     request,
     sessions: Context.get(services, SessionStore.SessionStore),
     projects: Context.get(services, ProjectService.ProjectService),

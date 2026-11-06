@@ -112,6 +112,23 @@ const personalAdmin = principal("grace", {
   permissions: ["personalSpace.create"],
 });
 
+const hubMachine: AccessPolicy.EnvironmentResource = {
+  kind: "environment",
+  environmentKind: "hub",
+  ownerUserId: null,
+};
+const ownersLaptop: AccessPolicy.EnvironmentResource = {
+  kind: "environment",
+  environmentKind: "external",
+  ownerUserId: UserId.make("owner"),
+};
+
+const gracesLaptop: AccessPolicy.EnvironmentResource = {
+  kind: "environment",
+  environmentKind: "external",
+  ownerUserId: UserId.make("grace"),
+};
+
 const allow = AccessPolicy.allow;
 const deny = AccessPolicy.deny;
 
@@ -1001,6 +1018,59 @@ const rows: ReadonlyArray<
     "a move is decided on its origin and destination",
     owner,
     "project.move",
+    organization,
+    deny("wrong-resource"),
+  ],
+  // Environments: only the Owner joins machines, and a personal one is its owner's alone.
+  ["Owner registers a machine", owner, "environment.register", AccessPolicy.installation, allow],
+  [
+    "an Admin does not register a machine",
+    admin,
+    "environment.register",
+    AccessPolicy.installation,
+    deny("owner-only"),
+  ],
+  ["a Member uses the Hub machine", member, "environment.view", hubMachine, allow],
+  [
+    "a Member does not see the Owner's personal machine",
+    member,
+    "environment.view",
+    ownersLaptop,
+    deny("not-yours"),
+  ],
+  ["Owner sees their personal machine", owner, "environment.view", ownersLaptop, allow],
+  ["Owner sees another User's personal machine", owner, "environment.view", gracesLaptop, allow],
+  ["Owner removes another User's machine", owner, "environment.remove", gracesLaptop, allow],
+  [
+    "a Member does not see another Member's machine",
+    principal("ada", { roles: [[ORG, "member"]] }),
+    "environment.view",
+    gracesLaptop,
+    deny("not-yours"),
+  ],
+  ["a Member sees their own machine", member, "environment.view", gracesLaptop, allow],
+  ["Owner renames their machine", owner, "environment.rename", ownersLaptop, allow],
+  ["Owner renames the Hub machine", owner, "environment.rename", hubMachine, allow],
+  ["Owner removes their machine", owner, "environment.remove", ownersLaptop, allow],
+  ["nobody removes the Hub machine", owner, "environment.remove", hubMachine, deny("hub-machine")],
+  [
+    "an Admin does not rename the Hub machine",
+    admin,
+    "environment.rename",
+    hubMachine,
+    deny("owner-only"),
+  ],
+  [
+    "a disabled User sees no Environment",
+    disabledMember,
+    "environment.view",
+    hubMachine,
+    deny("user-inactive"),
+  ],
+  [
+    "an Environment action needs an Environment",
+    owner,
+    "environment.view",
     organization,
     deny("wrong-resource"),
   ],

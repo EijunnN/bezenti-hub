@@ -144,6 +144,55 @@ app) and where the code goes, and says to continue only with a sign-in the
 User just started. Claimed HTTPS redirects (universal and app links) would
 close that gap and are the next step if it matters.
 
+### Joined environments
+
+`t3 join <hub>` makes a machine one of the Hub's External environments
+([EnvironmentJoin](../../apps/server/src/environments/EnvironmentJoin.ts)). The
+machine makes its credential itself, `t3env.<issuing Hub's id>.<secret>`, and
+starts a join request carrying only its SHA-256 and a PKCE challenge; the
+credential never travels. The Owner approves on «Register this machine», from
+any device. The policy asks `environment.register` (Owner only) first, so a
+Member's proof is never checked; then `UserDirectory.confirmStrongFactor` needs a
+fresh passkey assertion or a password _with_ a TOTP code in the same request, so
+a stolen browser session cannot add a machine. Approval writes the row and its
+`environment.register` entry; the machine asks the outcome with its verifier
+until then, and asking again after a lost answer gets the same machine, never a
+second one. A browser on the machine itself is also sent to `t3 join`'s loopback
+port (as app sign-in does), only as a nudge to ask now. The PKCE store is shared
+with app sign-in ([pkceGrants](../../apps/server/src/auth/pkceGrants.ts)).
+
+The credential is not a session: `SessionStore` never sees it, so only
+`/api/environment/connect` and `/api/environments/leave` accept it, as with
+guest tokens. The Hub keeps its hash and who approved it when. The Hub's id in
+it is the server's persisted EnvironmentId, not the Hub machine's row id (the
+constant `environment:hub-machine`, the same on every Hub), so a Hub can tell a
+credential another Hub issued from an unknown one; a Hub whose `welcome` names
+another id gets the socket closed by the machine. `leave` refuses plain HTTP
+from off the Hub's machine, as the socket does (`isSecureEnvironmentTransport`).
+A machine belongs to its owner: turning off or removing that User revokes their
+machines in the same transaction and closes their sockets after it commits, and
+the credential check refuses a machine whose owner is off in any case.
+
+The socket ([connectRoute](../../apps/server/src/environments/connectRoute.ts))
+upgrades before it checks the credential, so every refusal reaches the machine
+as a close code it can explain (`ENVIRONMENT_CLOSE_REASONS` in the
+[protocol contract](../../packages/contracts/src/environmentConnection.ts));
+the `final` ones stop the machine's reconnect loop, the rest back off with
+jitter. The server's reader must be acquired before a close is written, or the
+handshake never completes and the client times out waiting for `open`.
+Removing an Environment revokes its row (kept, so the next use answers
+`credential-revoked`, not unknown) and after the commit closes its live socket.
+The socket is tracked before the credential is checked a second time, so a
+removal that lands between the upgrade and the hello is never missed. Two
+processes with one credential would take turns forever, so the newer connection
+wins and the older stops on a final `replaced`. Status is computed when
+read from `last_seen_at` and whether a socket is attached, not kept by timers.
+
+A joined server ([JoinedHub](../../apps/server/src/environments/JoinedHub.ts))
+serves only `/health` on loopback: no web app, sign-in or user WebSocket. Its
+mode comes from `joined-hub.json` in the state dir, which `t3 join` writes and
+`t3 leave` removes.
+
 ### Spaces
 
 Every Project and Thread belongs to a Space: an Organization or a User's Personal
@@ -443,8 +492,8 @@ before an Owner exists and fails the action after. Entries snapshot the Space an
 Organizations and Projects are deleted while Users are only tombstoned. Detail
 keys are an allow-list per action (`AUDIT_DETAIL_KEYS` in contracts); any
 other key is dropped on write, whatever the caller passes.
-`secret.*` and `environment.register` are in the closed `AuditAction` list for
-the specs that own them to record. The read (`/api/installation/audit`) is
+`secret.*` are in the closed `AuditAction` list for the spec that owns secrets
+to record. The read (`/api/installation/audit`) is
 Owner-only and needs `access:read`; anyone else gets the same 403 whatever
 they filter by.
 

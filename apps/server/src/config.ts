@@ -11,6 +11,7 @@ import * as Schema from "effect/Schema";
 import type { OtlpEndpointSource } from "@t3tools/contracts";
 import { sweepStalePendingAttachments } from "./attachmentStore.ts";
 import type { TrustedProxies } from "./auth/clientConnection.ts";
+import type { JoinedHubState } from "./environments/joinedHubState.ts";
 import {
   DEFAULT_SIGNAL_EXPORT,
   nodeProcessRuntimeAttributes,
@@ -54,6 +55,8 @@ export interface ServerDerivedPaths {
   readonly environmentIdPath: string;
   readonly serverRuntimeStatePath: string;
   readonly secretsDir: string;
+  /** Present once `t3 join` attached this machine to a Hub: the server starts joined. */
+  readonly joinedHubPath: string;
 }
 
 export interface DeriveServerPathsOptions {
@@ -111,6 +114,11 @@ export class ServerConfig extends Context.Service<
     readonly logWebSocketEvents: boolean;
     readonly tailscaleServeEnabled: boolean;
     readonly tailscaleServePort: number;
+    /**
+     * Joined mode: this machine is an Environment of that Hub. It serves no clients, sign-in or
+     * user WebSocket, only `/health` on loopback, and keeps one socket open to the Hub.
+     */
+    readonly joinedHub?: JoinedHubState | undefined;
   }
 >()("t3/config/ServerConfig") {
   static readonly layerTest = (
@@ -174,6 +182,7 @@ export const deriveServerPaths = Effect.fn(function* (
     environmentIdPath: join(stateDir, "environment-id"),
     serverRuntimeStatePath: join(stateDir, "server-runtime.json"),
     secretsDir: join(stateDir, "secrets"),
+    joinedHubPath: join(stateDir, "joined-hub.json"),
   };
 });
 

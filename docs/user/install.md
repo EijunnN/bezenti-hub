@@ -398,6 +398,41 @@ and who can see it changes at once. Stop its running threads first: the move is
 refused while any of them runs, and says which. In the new Space the project uses
 that Space's vaults and AI accounts.
 
+### Join a machine to your Hub
+
+Your PC, laptop or another server can become one of the Hub's Environments, so
+work can later run there. On that machine, run:
+
+```bash
+t3 join https://hub.example.com
+```
+
+It prints a link to the Hub's **Register this machine** page and opens it in a
+browser on that machine; add `--no-browser` to only print it, and open the link
+on any device, your phone included. Sign in as the Owner, check the operating
+system, hostname and request time, change the name if you like, and confirm with
+your passkey, or your password and authenticator code. `t3 join` finishes by
+itself once you approve. Only the Owner can add machines, and each one is its
+owner's: Members never see it. The Hub's address must be `https://`; plain
+`http://` is accepted only for a Hub on the same machine.
+
+Joining a server that already has its own users or threads cuts them off, since
+a joined machine serves no sign-in; `t3 join` refuses unless you add `--force`.
+
+Then start the joined machine's server with `t3 serve` (or restart it). A
+joined machine serves no web app and no sign-in of its own: it keeps one
+connection out to the Hub, so you open no ports, and it reconnects by itself
+after a reboot or network drop. `t3 status` shows its Hub and whether it is
+connected; `t3 leave` removes it from the Hub.
+
+In **Settings → Environments**, **Machines on this Hub** lists every machine
+with its status (online, reconnecting or offline), when it was last seen, its
+providers and their versions, and its free CPU, memory and disk. **Rename**
+changes its name; **Remove** disconnects it at once and its credential stops
+working, so a lost machine loses access immediately. The Hub machine itself is
+always listed and cannot be removed. Joining, renaming and removing are recorded
+in the audit log.
+
 ## Next steps
 
 - [Working with threads](./thread-sidebar.md): start tasks and organize parallel work.

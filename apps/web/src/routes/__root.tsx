@@ -155,7 +155,8 @@ function RootRouteBranch() {
     pathname === "/reset" ||
     pathname === "/invite" ||
     pathname === "/connect-agent" ||
-    pathname === "/app-sign-in"
+    pathname === "/app-sign-in" ||
+    pathname === "/register-environment"
   ) {
     return <Outlet />;
   }

@@ -9,6 +9,8 @@ export * from "./userAccounts.ts";
 export * from "./spaces.ts";
 export * from "./invitations.ts";
 export * from "./audit.ts";
+export * from "./environmentConnection.ts";
+export * from "./hubEnvironments.ts";
 export * from "./environment.ts";
 export * from "./environmentHttp.ts";
 export * from "./environmentExecutor.ts";

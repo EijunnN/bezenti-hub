@@ -547,7 +547,12 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
 
     yield* forkParked(
       Effect.gen(function* () {
-        if (serverConfig.startupPresentation === "headless") {
+        if (serverConfig.joinedHub !== undefined) {
+          // Nobody signs in to a joined machine; the Hub is where its work shows.
+          yield* Console.log(
+            `  Joined to ${serverConfig.joinedHub.hubUrl} as ${serverConfig.joinedHub.name}. Run \`t3 status\` to see the connection.`,
+          );
+        } else if (serverConfig.startupPresentation === "headless") {
           yield* Effect.logDebug("startup phase: headless access info");
           const accessInfo = yield* issueHeadlessServeAccessInfo();
           yield* runStartupPhase(

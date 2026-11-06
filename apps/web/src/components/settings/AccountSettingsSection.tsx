@@ -116,19 +116,19 @@ export function AccountSettingsSection() {
   );
 }
 
-interface StepUpState {
+export interface StepUpState {
   readonly usePasskey: boolean;
   readonly password: string;
   readonly code: string;
 }
 
-const emptyStepUp = (account: AuthAccount): StepUpState => ({
+export const emptyStepUp = (account: AuthAccount): StepUpState => ({
   usePasskey: account.hasPasskey,
   password: "",
   code: "",
 });
 
-const toStepUp = (account: AuthAccount, state: StepUpState): StepUp => {
+export const toStepUp = (account: AuthAccount, state: StepUpState): StepUp => {
   if (!account.hasPasskey && !account.hasPassword) return { method: "none" };
   if (state.usePasskey || !account.hasPassword) return { method: "passkey" };
   return {
@@ -139,7 +139,7 @@ const toStepUp = (account: AuthAccount, state: StepUpState): StepUp => {
 };
 
 /** Changing a sign-in method needs proof you can sign in now: your passkey, or password and code. */
-function StepUpFields({
+export function StepUpFields({
   account,
   disabled,
   value,

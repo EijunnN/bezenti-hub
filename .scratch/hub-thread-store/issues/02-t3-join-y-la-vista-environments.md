@@ -9,7 +9,7 @@ En Settings → Environments, el Owner ve cada máquina y puede renombrarla o qu
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Hay una tabla `environments` con el Hub machine sembrado como tipo `hub`. La credencial se guarda hasheada y nunca se muestra.
 - [ ] Flujo de `t3 join`:

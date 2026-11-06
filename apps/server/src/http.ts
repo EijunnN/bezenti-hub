@@ -571,7 +571,11 @@ const streamStaticFile = (file: FileSystem.File, size: bigint) =>
     }),
   );
 
-const CONSENT_PAGE_PATHS: ReadonlySet<string> = new Set(["/app-sign-in", "/connect-agent"]);
+const CONSENT_PAGE_PATHS: ReadonlySet<string> = new Set([
+  "/app-sign-in",
+  "/connect-agent",
+  "/register-environment",
+]);
 
 const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
   function* (immutableBuildAssets: ReadonlySet<string>) {

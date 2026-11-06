@@ -69,7 +69,7 @@ function toUserSignInError(cause: unknown, rejectedMessage: string): UserSignInE
   return new UserSignInError({ message: "Could not reach this Installation. Try again.", cause });
 }
 
-async function request<A, E>(
+export async function request<A, E>(
   run: (client: Context.Service.Shape<typeof PrimaryEnvironmentHttpClient>) => Effect.Effect<A, E>,
   rejectedMessage = "That sign-in was not accepted.",
 ): Promise<A> {
@@ -192,7 +192,7 @@ export type StepUp =
 
 const STEP_UP_REJECTED = "Confirming it's you failed: check your password, code or passkey.";
 
-async function toReauth(stepUp: StepUp): Promise<AuthReauth | undefined> {
+export async function toReauth(stepUp: StepUp): Promise<AuthReauth | undefined> {
   if (stepUp.method === "none") return undefined;
   if (stepUp.method === "password") return stepUp;
   const ceremony = await request((client) => client.auth.passkeyChallenge({}));

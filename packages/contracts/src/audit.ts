@@ -4,8 +4,7 @@ import { SpaceId, TrimmedNonEmptyString, UserId } from "./baseSchemas.ts";
 
 /**
  * Every action the audit log records. Closed: a new sensitive action adds its name here and
- * records it from its service. `secret.*` and `environment.register` are recorded by the specs
- * that own secrets and Environments.
+ * records it from its service. `secret.*` are recorded by the spec that owns secrets.
  */
 export const AuditAction = Schema.Literals([
   "owner.bootstrap",
@@ -36,6 +35,8 @@ export const AuditAction = Schema.Literals([
   "secret.reveal",
   "secret.edit",
   "environment.register",
+  "environment.rename",
+  "environment.remove",
 ]);
 export type AuditAction = typeof AuditAction.Type;
 
@@ -90,7 +91,10 @@ export const AUDIT_DETAIL_KEYS = {
   "cliSession.issue": ["sessionId", "label", "scopes"],
   "secret.reveal": ["vault"],
   "secret.edit": ["vault"],
-  "environment.register": ["kind"],
+  "environment.register": ["kind", "os"],
+  "environment.rename": ["from", "to"],
+  /** `settings` from the Hub, `leave` from the machine, `userTurnedOff` with its owner. */
+  "environment.remove": ["via"],
 } as const satisfies Record<AuditAction, ReadonlyArray<string>>;
 
 export type AuditDetailOf<A extends AuditAction> = {

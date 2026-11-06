@@ -1,0 +1,304 @@
+// @effect-diagnostics nodeBuiltinImport:off -- statfs has no Effect FileSystem equivalent.
+/**
+ * Joined mode: a server that `t3 join` attached to a Hub. It serves no clients, sign-in or user
+ * WebSocket; it keeps one outbound socket to the Hub and answers `/health` on loopback, which
+ * `t3 status` reads. See docs/internals/environment-auth.md#joined-environments.
+ */
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+
+import {
+  ENVIRONMENT_CLOSE_MESSAGES,
+  ENVIRONMENT_CLOSE_REASONS,
+  ENVIRONMENT_CONNECT_PATH,
+  ENVIRONMENT_CONNECTION_PROTOCOL_VERSION,
+  ENVIRONMENT_HEARTBEAT_INTERVAL_MS,
+  type EnvironmentCloseReason,
+  environmentCloseReasonOf,
+  type EnvironmentDiskSpace,
+  EnvironmentHeartbeatFrame,
+  EnvironmentHelloFrame,
+  type EnvironmentId,
+  type EnvironmentProviderSummary,
+  EnvironmentWelcomeFrame,
+  type HostResourcesSnapshot,
+  type ServerProvider,
+} from "@t3tools/contracts";
+import * as NodeSocket from "@effect/platform-node/NodeSocket";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Context from "effect/Context";
+import * as Random from "effect/Random";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import { HttpRouter, HttpServerResponse } from "effect/http";
+import * as Socket from "effect/socket/Socket";
+
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as ServerConfig from "../config.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as HostResources from "../resourceTelemetry/HostResources.ts";
+import { makeFrameReader } from "./socketFrames.ts";
+import { ENVIRONMENT_CREDENTIAL_SECRET, type JoinedHubState } from "./joinedHubState.ts";
+
+const RECONNECT_BASE_MS = 1_000;
+const RECONNECT_MAX_MS = 60_000;
+
+export const toProviderSummary = (provider: ServerProvider): EnvironmentProviderSummary => ({
+  instanceId: provider.instanceId,
+  provider: provider.driver,
+  displayName: provider.displayName ?? null,
+  enabled: provider.enabled,
+  installed: provider.installed,
+  version: provider.version,
+  capabilities: {
+    runtimeModes: [...(provider.supportedRuntimeModes ?? [])],
+    conversationRollback: provider.supportsConversationRollback ?? false,
+    textGeneration: provider.supportsTextGeneration ?? false,
+  },
+});
+
+export const readDiskSpace = (directory: string) =>
+  Effect.tryPromise(() => NodeFSP.statfs(directory)).pipe(
+    Effect.map((stats): EnvironmentDiskSpace => ({
+      totalBytes: stats.blocks * stats.bsize,
+      availableBytes: stats.bavail * stats.bsize,
+    })),
+    Effect.orElseSucceed(() => null),
+  );
+
+/** Exponential with full jitter in its upper half, so machines a Hub restart drops spread out. */
+const reconnectDelayMs = (attempt: number, unit: number) => {
+  const ceiling = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** Math.min(attempt, 16));
+  return Math.round(ceiling / 2 + (ceiling / 2) * unit);
+};
+
+export interface ConnectionOutcome {
+  /** The Hub accepted this machine before the connection ended. */
+  readonly welcomed: boolean;
+  /** Why the Hub closed it, when it said. */
+  readonly reason: EnvironmentCloseReason | undefined;
+  readonly message: string;
+}
+
+const encodeHello = Schema.encodeSync(Schema.fromJsonString(EnvironmentHelloFrame));
+const encodeHeartbeat = Schema.encodeSync(Schema.fromJsonString(EnvironmentHeartbeatFrame));
+const decodeWelcome = Schema.decodeUnknownOption(Schema.fromJsonString(EnvironmentWelcomeFrame));
+
+const webSocketConstructor = Layer.effect(
+  Socket.WebSocketConstructor,
+  Effect.gen(function* () {
+    const make = yield* Socket.WebSocketConstructor;
+    return (url, options) => {
+      const socket = make(url, options);
+      // An unhandled `error` on a failed dial would exit the process; the reader reports it.
+      socket.addEventListener("error", () => undefined);
+      return socket;
+    };
+  }),
+).pipe(Layer.provide(NodeSocket.layerWebSocketConstructor));
+
+/** One connection to the Hub, from dial to close: hello, welcome, then heartbeats. */
+export const connectOnce = Effect.fn("JoinedHub.connectOnce")(function* (input: {
+  readonly hubUrl: string;
+  readonly credential: string;
+  readonly expectedHubId: EnvironmentId;
+  readonly hello: Effect.Effect<EnvironmentHelloFrame>;
+  readonly heartbeat: Effect.Effect<EnvironmentHeartbeatFrame>;
+  readonly onWelcome: (welcome: EnvironmentWelcomeFrame) => Effect.Effect<void>;
+}) {
+  const url = new URL(ENVIRONMENT_CONNECT_PATH, input.hubUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  const welcomed = yield* Ref.make(false);
+  const socket = yield* Socket.makeWebSocket(url.toString(), {
+    openTimeout: "15 seconds",
+    headers: { authorization: `Bearer ${input.credential}` },
+  }).pipe(Effect.provide(webSocketConstructor));
+  const session = Effect.scoped(
+    Effect.gen(function* () {
+      const nextFrame = makeFrameReader(yield* socket.reader);
+      const writer = yield* socket.writer;
+      yield* writer.write(encodeHello(yield* input.hello));
+      const welcome = decodeWelcome(yield* nextFrame);
+      if (Option.isNone(welcome)) {
+        return {
+          welcomed: false,
+          reason: "protocol-error",
+          message: "The Hub did not welcome this machine.",
+        } satisfies ConnectionOutcome;
+      }
+      // The address may now answer as another Hub; this machine's credential is not for it.
+      if (welcome.value.hubEnvironmentId !== input.expectedHubId) {
+        yield* writer.write(new Socket.CloseEvent(1000)).pipe(Effect.ignore);
+        return {
+          welcomed: false,
+          reason: "credential-other-hub",
+          message: ENVIRONMENT_CLOSE_MESSAGES["credential-other-hub"],
+        } satisfies ConnectionOutcome;
+      }
+      yield* Ref.set(welcomed, true);
+      yield* input.onWelcome(welcome.value);
+      yield* Effect.forever(
+        Effect.sleep(ENVIRONMENT_HEARTBEAT_INTERVAL_MS).pipe(
+          Effect.andThen(input.heartbeat),
+          Effect.flatMap((frame) => writer.write(encodeHeartbeat(frame))),
+        ),
+      ).pipe(Effect.forkScoped);
+      // Nothing else arrives yet; reading keeps the close from the Hub coming.
+      return yield* Effect.forever(nextFrame);
+    }),
+  );
+  return yield* session.pipe(
+    Effect.catchTags({
+      SocketError: (error) =>
+        Ref.get(welcomed).pipe(
+          Effect.map((wasWelcomed): ConnectionOutcome => {
+            const reason =
+              error.reason._tag === "SocketCloseError"
+                ? environmentCloseReasonOf(error.reason.code)
+                : undefined;
+            return {
+              welcomed: wasWelcomed,
+              reason,
+              message: reason === undefined ? error.message : ENVIRONMENT_CLOSE_MESSAGES[reason],
+            };
+          }),
+        ),
+    }),
+  );
+});
+
+export type JoinedConnectionState =
+  | { readonly _tag: "connecting"; readonly attempt: number; readonly lastError: string | null }
+  | { readonly _tag: "connected"; readonly since: string }
+  /** The Hub refused this machine for good (removed, wrong Hub, version); `t3 join` fixes it. */
+  | { readonly _tag: "stopped"; readonly reason: EnvironmentCloseReason; readonly message: string };
+
+export class HubConnector extends Context.Service<
+  HubConnector,
+  {
+    readonly joined: JoinedHubState;
+    readonly state: Effect.Effect<JoinedConnectionState>;
+  }
+>()("t3/environments/JoinedHub/HubConnector") {}
+
+/** What this machine tells the Hub about itself. */
+const makeReports = Effect.gen(function* () {
+  const providers = yield* ProviderRegistry.ProviderRegistry;
+  const hostResources = yield* HostResources.HostResources;
+  const config = yield* ServerConfig.ServerConfig;
+  const platform = yield* HostProcess.Platform;
+  const providerSummaries = providers.getProviders.pipe(
+    Effect.map((list) => list.map(toProviderSummary)),
+  );
+  const resources = Effect.all({
+    hostResources: hostResources.read,
+    disk: readDiskSpace(config.baseDir),
+  });
+  const hello: Effect.Effect<EnvironmentHelloFrame> = Effect.gen(function* () {
+    const { hostResources: snapshot, disk } = yield* resources;
+    return {
+      type: "hello",
+      protocolVersion: ENVIRONMENT_CONNECTION_PROTOCOL_VERSION,
+      os: platform,
+      hostname: NodeOS.hostname() || "unknown",
+      providers: yield* providerSummaries,
+      hostResources: snapshot satisfies HostResourcesSnapshot,
+      disk,
+      sessions: [],
+    };
+  });
+  const heartbeat: Effect.Effect<EnvironmentHeartbeatFrame> = Effect.gen(function* () {
+    const { hostResources: snapshot, disk } = yield* resources;
+    return {
+      type: "heartbeat",
+      hostResources: snapshot,
+      disk,
+      providers: yield* providerSummaries,
+    };
+  });
+  return { hello, heartbeat };
+});
+
+export const layer = (joined: JoinedHubState) =>
+  Layer.effect(
+    HubConnector,
+    Effect.gen(function* () {
+      const secrets = yield* ServerSecretStore.ServerSecretStore;
+      const reports = yield* makeReports;
+      const state = yield* Ref.make<JoinedConnectionState>({
+        _tag: "connecting",
+        attempt: 0,
+        lastError: null,
+      });
+      const credential = yield* secrets.get(ENVIRONMENT_CREDENTIAL_SECRET).pipe(
+        Effect.map(Option.map((bytes) => new TextDecoder().decode(bytes))),
+        Effect.orElseSucceed(() => Option.none<string>()),
+      );
+      const run = Effect.gen(function* () {
+        if (Option.isNone(credential)) {
+          return yield* Ref.set(state, {
+            _tag: "stopped",
+            reason: "credential-missing",
+            message: ENVIRONMENT_CLOSE_MESSAGES["credential-missing"],
+          });
+        }
+        let attempt = 0;
+        while (true) {
+          const outcome = yield* connectOnce({
+            hubUrl: joined.hubUrl,
+            credential: credential.value,
+            expectedHubId: joined.hubEnvironmentId,
+            hello: reports.hello,
+            heartbeat: reports.heartbeat,
+            onWelcome: () =>
+              DateTime.now.pipe(
+                Effect.flatMap((now) =>
+                  Ref.set(state, { _tag: "connected", since: DateTime.formatIso(now) }),
+                ),
+              ),
+          });
+          if (outcome.reason !== undefined && ENVIRONMENT_CLOSE_REASONS[outcome.reason].final) {
+            yield* Effect.logWarning("The Hub refused this machine", { reason: outcome.reason });
+            return yield* Ref.set(state, {
+              _tag: "stopped",
+              reason: outcome.reason,
+              message: outcome.message,
+            });
+          }
+          attempt = outcome.welcomed ? 0 : attempt + 1;
+          yield* Ref.set(state, {
+            _tag: "connecting",
+            attempt,
+            lastError: outcome.message || null,
+          });
+          yield* Effect.sleep(reconnectDelayMs(attempt, yield* Random.next));
+        }
+      });
+      yield* Effect.forkScoped(run);
+      return HubConnector.of({ joined, state: Ref.get(state) });
+    }),
+  );
+
+/** `/health` on loopback: what `t3 status` shows about a joined machine. */
+export const layerHealthRoute = HttpRouter.use((router) =>
+  Effect.gen(function* () {
+    const connector = yield* HubConnector;
+    yield* router.add(
+      "GET",
+      "/health",
+      Effect.gen(function* () {
+        return yield* HttpServerResponse.json({
+          mode: "joined",
+          hubUrl: connector.joined.hubUrl,
+          environmentId: connector.joined.environmentId,
+          name: connector.joined.name,
+          connection: yield* connector.state,
+        });
+      }),
+    );
+  }),
+);

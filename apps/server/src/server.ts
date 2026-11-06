@@ -181,6 +181,11 @@ import * as InvitationsHttp from "./spaces/invitationsHttp.ts";
 import * as InstallationUsersHttp from "./spaces/installationUsersHttp.ts";
 import * as AuditLog from "./audit/AuditLog.ts";
 import * as AuditHttp from "./audit/http.ts";
+import * as EnvironmentConnectRoute from "./environments/connectRoute.ts";
+import * as EnvironmentRegistry from "./environments/EnvironmentRegistry.ts";
+import * as HubEnvironmentsHttp from "./environments/http.ts";
+import * as JoinedHub from "./environments/JoinedHub.ts";
+import type { JoinedHubState } from "./environments/joinedHubState.ts";
 import * as NetService from "@t3tools/shared/Net";
 import {
   disableTailscaleServe,
@@ -473,6 +478,7 @@ const layerAuth = Layer.mergeAll(
   InstallationUserService.layer,
   SpaceVisibility.layer,
   AuditLog.layer,
+  EnvironmentRegistry.layer,
 ).pipe(
   Layer.provideMerge(EnvironmentAuth.layer.pipe(Layer.provideMerge(SpaceDirectory.layer))),
   Layer.provideMerge(layerPersistence),
@@ -660,6 +666,29 @@ const layerCommandReadiness = HttpRouter.middleware(
   { global: true },
 );
 
+// The Hub machine is this process: its providers and resources are read live, not reported.
+const layerHubMachineSnapshot = Layer.effect(
+  EnvironmentRegistry.HubMachineSnapshot,
+  Effect.gen(function* () {
+    const providers = yield* ProviderRegistry.ProviderRegistry;
+    const hostResources = yield* HostResources.HostResources;
+    const config = yield* ServerConfig.ServerConfig;
+    return {
+      providers: providers.getProviders.pipe(
+        Effect.map((list) => list.map(JoinedHub.toProviderSummary)),
+      ),
+      resources: Effect.all({
+        hostResources: hostResources.read,
+        disk: JoinedHub.readDiskSpace(config.baseDir),
+      }),
+    };
+  }),
+);
+
+// Joined mode serves `/health` and nothing else: no client, sign-in or user WebSocket.
+const layerJoinedRoutes = (joined: JoinedHubState) =>
+  JoinedHub.layerHealthRoute.pipe(Layer.provide(JoinedHub.layer(joined)));
+
 const layerMakeRoutes = Layer.mergeAll(
   Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
@@ -673,6 +702,7 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provide(InvitationsHttp.layer),
       Layer.provide(InstallationUsersHttp.layer),
       Layer.provide(AuditHttp.layer),
+      Layer.provide(HubEnvironmentsHttp.layer),
       Layer.provide(ServerHttp.layerServerEnvironmentHttpApi),
       Layer.provide(WebhookRoute.layer),
       Layer.provide(AuthHttp.layerAuthenticatedAuth),
@@ -685,6 +715,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerBrowserStream.routeLayer,
     ServerHttp.layerStaticAndDevRoute,
     Ws.layer,
+    EnvironmentConnectRoute.layer,
   ),
   McpHttpServer.layer.pipe(
     Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
@@ -719,6 +750,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ),
   ),
   Layer.provide(PreviewAutomationBroker.layer),
+  Layer.provide(layerHubMachineSnapshot),
   Layer.provide(layerCommandReadiness),
   Layer.provide(ServerHttp.layerBrowserApiCors),
   Layer.provide(ServerHttp.layerHttpCompression),
@@ -881,10 +913,15 @@ const layerMakeServer = Layer.unwrap(
       ).pipe(Effect.asVoid),
     }).pipe(Layer.provideMerge(layerRuntimeDependencies), Layer.provide(layerLauncher));
 
-    const layerRoutes = HttpRouter.serve(layerMakeRoutes.pipe(Layer.provide(layerLauncher)), {
-      disableLogger: !config.logWebSocketEvents,
-      routerConfig: HTTP_ROUTER_CONFIG,
-    }).pipe(
+    const layerRoutes = HttpRouter.serve(
+      config.joinedHub === undefined
+        ? layerMakeRoutes.pipe(Layer.provide(layerLauncher))
+        : layerJoinedRoutes(config.joinedHub),
+      {
+        disableLogger: !config.logWebSocketEvents,
+        routerConfig: HTTP_ROUTER_CONFIG,
+      },
+    ).pipe(
       withUntracedRequests,
       Layer.tap(() => Deferred.succeed(routesReady, undefined).pipe(Effect.orDie)),
     );
