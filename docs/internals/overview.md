@@ -187,6 +187,41 @@ there may be an older capture of a reused ordinal), so they work with the machin
 then they run on the Thread's Active environment. A restore whose ref is missing in the workspace
 (a move, or refs dropped there) fetches it from the Hub repository first.
 
+### Threads without a Project
+
+A Thread without a Project is a Thread in the scratch Project, whose workspace root is the Hub's
+`<base dir>/scratch` ([ManagedProjectFolders](../../apps/server/src/project/ManagedProjectFolders.ts)).
+Its worktree is its own folder there, made with `git init` when git is there (best effort: without
+git the Thread still works, with no checkpoints, and a move says why it can't). A folder from before
+gets its repository where the Thread runs, at its next checkpoint or move (`checkpoint.ensureScratch`).
+Only such a folder (directly in the scratch folder, of the scratch Project) is stored relative to the
+checkout for a Thread on another Environment, where it resolves under that machine's checkout of the
+scratch Project (`<workspace root>/scratch/<folder>`); left null until the Project is projected. Every
+other worktree elsewhere stays host-bound, and `ThreadManagementService` still places those on the Hub
+machine only. A machine opening a session for one makes the folder, with git, instead of cloning
+(`WireCheckout.scratch`).
+
+[ScratchWorkspace](../../apps/server/src/environment/ScratchWorkspace.ts) (`makeScratchThreads`,
+reached as `HubRepositories.threads`) alone decides whether a Thread has no Project, its folder and
+its repository; whether a Project is the scratch one is read once per Project. Its checkpoints go to
+a Hub repository of its own: `HubRepositoryKey { projectId, scratchThreadId }`, under
+`hub-repositories/threads/`, served at `/api/git/thread/<threadId>`. Every transfer carries
+`scratchThreadId`; a read that fails is an error that retries (503 on the route), never a fallback to
+the Project's key, and `HubRepositories.ensure` refuses the scratch Project's own key, so no shared
+repository exists. The route authorizes as for a Project and then serves only the Thread's Active
+environment and the target of its running move (which may write only `refs/t3/recovered/<id>/`);
+anyone else gets 403. Diffs read it once uploaded, as a Project's.
+
+A move of one keeps its folder name and moves the folder's own history: at `final-checkpoint` the
+source publishes its branches and HEAD under `refs/t3/threads/<id>/scratch/<moveId>/`
+(`move.publishScratch`) and pushes them with the final checkpoint; repositories nested in the folder
+are in no checkpoint, so the timeline says they stay behind. `move.fetch` with `scratch` makes
+`<the target's checkout of the scratch Project>/<folder>` (with git) and fetches those refs;
+`move.prepare` with `scratch` works in that folder (no worktree, no setup script): what it had that
+differs is captured to `refs/t3/recovered/<id>/<time>/workspace`, a branch the source's replaces to
+`.../branch/<name>`, both pushed to the Hub, then the source's branches and HEAD and the checkpoint's
+files are laid over it.
+
 ### Moving a Thread
 
 `thread.move { threadId, targetEnvironmentId, ifRunning }` is a client command. The Hub checks the

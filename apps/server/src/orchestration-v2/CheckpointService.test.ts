@@ -131,6 +131,7 @@ it.live("restores a checkpoint the workspace lacks from the Hub's repository of 
           remote: { url: hub },
           refs: input.checkpointRefs,
         }).pipe(Effect.provideService(VcsProcess.VcsProcess, vcs)),
+      ensureScratch: () => Effect.void,
     });
     const scope: OrchestrationV2CheckpointScope = {
       id: CheckpointScopeId.make("checkpoint-scope:restore"),

@@ -39,6 +39,7 @@ import * as Stream from "effect/Stream";
 import * as AuditLog from "../audit/AuditLog.ts";
 import * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
+import type { MoveFetchInput } from "../environment/MovedWorkspace.ts";
 import * as ProjectCheckouts from "../environment/ProjectCheckouts.ts";
 import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -159,6 +160,14 @@ export const layer: Layer.Layer<
     const remote = yield* Effect.serviceOption(RemoteEnvironments.RemoteEnvironments);
     const audit = yield* Effect.serviceOption(AuditLog.AuditLog);
     const settings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
+    // A Thread without a Project moves its scratch workspace through its own repository.
+    const repositories = yield* Effect.serviceOption(HubRepository.HubRepositories);
+    const scratchOf = (thread: OrchestrationV2AppThread) =>
+      Option.isNone(repositories)
+        ? Effect.succeed(undefined)
+        : repositories.value.threads
+            .scratchWorkspaceOf(thread.id)
+            .pipe(Effect.mapError((error) => new MoveStepFailure({ message: error.message })));
     const scope = yield* Effect.scope;
     const running = new Set<ThreadId>();
 
@@ -542,19 +551,36 @@ export const layer: Layer.Layer<
         );
       const source = executor.value;
       const cwd = yield* asStep(workspaceOn(source, thread));
+      const scratch = yield* scratchOf(thread);
+      // A folder from before folders got git gets its repository first, so it can move.
+      if (scratch !== undefined) yield* asStep(source.workspace.hubRepository.ensureScratch(cwd));
       yield* asStep(source.workspace.checkpoints.captureCheckpoint({ cwd, checkpointRef: ref }));
+      // A folder's own branches and HEAD go with it.
+      const published =
+        scratch === undefined
+          ? { refs: [], nested: [] }
+          : yield* asStep(
+              source.workspace.move.publishScratch({
+                cwd,
+                prefix: HubRepository.scratchHistoryPrefix(thread.id, move.id),
+              }),
+            );
       yield* asStep(
         source.workspace.hubRepository.push({
           cwd,
           projectId: thread.projectId,
-          checkpointRefs: [ref],
+          ...(scratch === undefined ? {} : { scratchThreadId: scratch.threadId }),
+          checkpointRefs: [ref, ...published.refs],
         }),
       );
       return {
-        kind: "final",
-        ref,
-        appRunOrdinal: null,
-      } satisfies OrchestrationV2ThreadMoveCheckpoint;
+        checkpoint: {
+          kind: "final",
+          ref,
+          appRunOrdinal: null,
+        } satisfies OrchestrationV2ThreadMoveCheckpoint,
+        nested: published.nested,
+      };
     });
 
     /** The newest checkpoint of the Thread the Hub repository has. */
@@ -776,6 +802,30 @@ export const layer: Layer.Layer<
       ).pipe(Effect.forkIn(scope));
     });
 
+    /**
+     * What a Thread without a Project's folder had on the target, set aside by the move, goes to
+     * the Hub too (the target may write the Thread's `recovered` refs while its move runs).
+     */
+    const uploadSetAside = Effect.fn("ThreadMoves.uploadSetAside")(function* (
+      thread: OrchestrationV2AppThread,
+      move: OrchestrationV2ThreadMove,
+      cwd: string,
+      refs: ReadonlyArray<string>,
+    ) {
+      if (refs.length === 0) return;
+      const scratch = yield* scratchOf(thread);
+      if (scratch === undefined) return;
+      const target = yield* targetOf(move);
+      yield* asFailure(
+        target.workspace.hubRepository.push({
+          cwd,
+          projectId: thread.projectId,
+          scratchThreadId: scratch.threadId,
+          checkpointRefs: refs.map((ref) => CheckpointRef.make(ref)),
+        }),
+      );
+    });
+
     /** A cancelled move: its timeline entry and audit, then the queue goes on where it runs. */
     const cancelled = Effect.fn("ThreadMoves.cancelled")(function* (
       thread: OrchestrationV2AppThread,
@@ -817,10 +867,16 @@ export const layer: Layer.Layer<
       move: OrchestrationV2ThreadMove,
     ) {
       const target = yield* targetOf(move);
+      const scratch = yield* scratchWithHistory(thread, move);
       const checkout =
         move.targetCheckout ??
-        (yield* asFailure(target.workspace.move.fetch({ projectId: thread.projectId, refs: [] })))
-          .checkout;
+        (yield* asFailure(
+          target.workspace.move.fetch({
+            projectId: thread.projectId,
+            refs: [],
+            ...(scratch === undefined ? {} : { scratch }),
+          }),
+        )).checkout;
       return yield* asFailure(
         target.workspace.move.prepare({
           checkout,
@@ -830,7 +886,10 @@ export const layer: Layer.Layer<
           branch: thread.branch,
           knownWorktree: move.knownWorktrees?.[move.targetEnvironmentId] ?? null,
           setAsidePrefix: HubRepository.threadRefPrefixes(thread.id)[1],
-          setupScript: yield* setupScriptOf(thread),
+          // A scratch workspace is the Thread's own folder: no worktree, no setup script.
+          setupScript: scratch === undefined ? yield* setupScriptOf(thread) : null,
+          ...(scratch === undefined ? {} : { scratch: true }),
+          ...(scratch?.history === undefined ? {} : { scratchHistory: scratch.history }),
         }),
       );
     });
@@ -1035,6 +1094,21 @@ export const layer: Layer.Layer<
       return handoff;
     });
 
+    /** A Thread without a Project's folder, with its history when the source published it. */
+    const scratchWithHistory = (
+      thread: OrchestrationV2AppThread,
+      move: OrchestrationV2ThreadMove,
+    ) =>
+      scratchOf(thread).pipe(
+        Effect.map((scratch): MoveFetchInput["scratch"] =>
+          scratch === undefined
+            ? undefined
+            : move.continuesFrom?.kind === "final"
+              ? { ...scratch, history: HubRepository.scratchHistoryPrefix(thread.id, move.id) }
+              : scratch,
+        ),
+      );
+
     /** The workflow from the step the Thread records, to the switch or a failure. */
     const runMove = Effect.fn("ThreadMoves.run")(function* (
       threadId: ThreadId,
@@ -1064,10 +1138,29 @@ export const layer: Layer.Layer<
               outcome = yield* Effect.result(finalCheckpoint(thread, move, restarted));
             }
             if (outcome._tag === "Success") {
-              yield* advance(threadId, move.id, {
-                step: "fetching",
-                continuesFrom: outcome.success,
-              });
+              const { nested } = outcome.success;
+              yield* advance(
+                threadId,
+                move.id,
+                { step: "fetching", continuesFrom: outcome.success.checkpoint },
+                // Repositories nested in a folder are in no checkpoint: the Thread says so.
+                nested.length === 0
+                  ? undefined
+                  : (now) =>
+                      latestRunOf(threadId).pipe(
+                        Effect.flatMap((latestRun) =>
+                          timelineEvent(thread, now, latestRun?.id ?? null, (base) => ({
+                            ...base,
+                            id: TurnItemId.make(`turn-item:environment-move-nested:${move.id}`),
+                            status: "completed",
+                            title: "Nested repositories stay behind",
+                            type: "system_notice",
+                            message: `These folders are git repositories of their own, so their contents do not move: ${nested.join(", ")}.`,
+                          })),
+                        ),
+                        Effect.map((event) => [event]),
+                      ),
+              );
             } else if (isSourceOffline(outcome.failure)) {
               yield* advance(threadId, move.id, { step: "fetching", sourceOffline: true });
             } else {
@@ -1088,12 +1181,13 @@ export const layer: Layer.Layer<
               yield* advance(threadId, move.id, { continuesFrom });
             }
             const fetched = yield* Effect.result(
-              targetOf(move).pipe(
-                Effect.flatMap((target) =>
+              Effect.all([targetOf(move), scratchWithHistory(thread, move)]).pipe(
+                Effect.flatMap(([target, scratch]) =>
                   asFailure(
                     target.workspace.move.fetch({
                       projectId: thread.projectId,
                       refs: continuesFrom.ref === null ? [] : [continuesFrom.ref],
+                      ...(scratch === undefined ? {} : { scratch }),
                     }),
                   ),
                 ),
@@ -1107,7 +1201,13 @@ export const layer: Layer.Layer<
             break;
           }
           case "preparing": {
-            const prepared = yield* Effect.result(prepare(thread, move));
+            const prepared = yield* Effect.result(
+              prepare(thread, move).pipe(
+                Effect.tap((result) =>
+                  uploadSetAside(thread, move, result.cwd, result.setAsideRefs),
+                ),
+              ),
+            );
             if (prepared._tag === "Failure") return yield* failed(prepared.failure);
             const { setupScript } = prepared.success;
             yield* advance(

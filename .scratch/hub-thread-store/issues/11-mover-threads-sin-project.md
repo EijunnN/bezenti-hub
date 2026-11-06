@@ -4,7 +4,7 @@
 
 **Blocked by:** 08.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Cada Thread sin Project tiene un repositorio del Hub para su carpeta temporal, con la misma autorización que un Project de su Space.
 - [ ] La subida de checkpoints, los diffs con la máquina apagada, el move y los cambios recuperados funcionan igual que con un Project.

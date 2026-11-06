@@ -38,6 +38,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
@@ -62,6 +63,7 @@ import {
   type ExecutorChannel,
 } from "./ExecutorChannel.ts";
 import * as ProjectCheckouts from "./ProjectCheckouts.ts";
+import * as ScratchWorkspace from "./ScratchWorkspace.ts";
 import {
   ProviderEventJson,
   REMOTE_OPERATIONS,
@@ -197,6 +199,7 @@ const make = Effect.gen(function* () {
   // Without git processes (orchestration-only hosts) a missing checkout is not cloned.
   const vcs = yield* Effect.serviceOption(VcsProcess.VcsProcess);
   const sql = yield* SqlClient.SqlClient;
+  const filePath = yield* Path.Path;
   const links = new Map<EnvironmentId, Link>();
   let streamCount = 0;
   const previewEvents = yield* PubSub.unbounded<PreviewEvent>();
@@ -315,19 +318,54 @@ const make = Effect.gen(function* () {
       projects,
     });
 
+  /** The ready checkpoint refs of the Thread the Hub repository has. */
+  const uploadedRefsOf = (threadId: ThreadId | undefined) =>
+    threadId === undefined
+      ? Effect.succeed([] as ReadonlyArray<CheckpointRef>)
+      : sql<{ readonly ref: string }>`
+          SELECT json_extract(payload_json, '$.ref') AS ref
+          FROM orchestration_v2_projection_checkpoints
+          WHERE thread_id = ${threadId} AND status = 'ready' AND uploaded_to_hub = 1
+        `.pipe(
+          Effect.map((rows) => rows.map((row) => CheckpointRef.make(row.ref))),
+          Effect.orElseSucceed(() => [] as ReadonlyArray<CheckpointRef>),
+        );
+
+  const scratchThreads = ScratchWorkspace.makeScratchThreads({
+    sql,
+    path: filePath,
+    baseDir: config.baseDir,
+  });
+
   /**
    * The Project's checkout on the Environment, the Hub checkout's `origin` to clone from, and the
    * Thread's checkpoint refs the Hub repository has, which the checkout fetches if it lacks them.
+   * For a Thread without a Project (`scratch`) it is the Thread's scratch workspace there, made
+   * with git when missing, which fetches from the Thread's own repository.
    */
   const checkoutFor = Effect.fn("RemoteEnvironments.checkoutFor")(function* (
     link: Link,
     projectId: ProjectId,
     threadId: ThreadId | undefined,
+    scratch?: { readonly threadId: ThreadId; readonly folder: string },
   ) {
     const path = yield* pathsOf(link)
       .checkout(projectId)
       .pipe(Effect.option, Effect.map(Option.flatten));
     if (Option.isNone(path)) return undefined;
+    if (scratch !== undefined) {
+      const folder = ScratchWorkspace.scratchFolderIn(filePath, path.value, scratch.folder);
+      if (folder === null) return undefined;
+      const refs = yield* uploadedRefsOf(threadId);
+      return {
+        path: folder,
+        cloneUrl: null,
+        scratch: true,
+        ...(refs.length === 0
+          ? {}
+          : { hubRefs: { projectId, scratchThreadId: scratch.threadId, refs: [...refs] } }),
+      } satisfies WireCheckout;
+    }
     const project = yield* projects.get(projectId).pipe(Effect.option, Effect.map(Option.flatten));
     const cloneUrl =
       Option.isNone(project) || Option.isNone(vcs)
@@ -348,20 +386,11 @@ const make = Effect.gen(function* () {
               ),
               Effect.orElseSucceed(() => null),
             );
-    const uploaded =
-      threadId === undefined
-        ? []
-        : yield* sql<{ readonly ref: string }>`
-            SELECT json_extract(payload_json, '$.ref') AS ref
-            FROM orchestration_v2_projection_checkpoints
-            WHERE thread_id = ${threadId} AND status = 'ready' AND uploaded_to_hub = 1
-          `.pipe(Effect.orElseSucceed(() => []));
+    const uploaded = yield* uploadedRefsOf(threadId);
     return {
       path: path.value,
       cloneUrl,
-      ...(uploaded.length === 0
-        ? {}
-        : { hubRefs: { projectId, refs: uploaded.map((row) => CheckpointRef.make(row.ref)) } }),
+      ...(uploaded.length === 0 ? {} : { hubRefs: { projectId, refs: [...uploaded] } }),
     } satisfies WireCheckout;
   });
 
@@ -474,7 +503,21 @@ const make = Effect.gen(function* () {
       const thread = yield* projections.getThread(input.threadId).pipe(Effect.option);
       const checkout = Option.isNone(thread)
         ? undefined
-        : yield* checkoutFor(link, thread.value.projectId, input.threadId);
+        : yield* checkoutFor(
+            link,
+            thread.value.projectId,
+            input.threadId,
+            yield* scratchThreads.scratchWorkspaceOf(input.threadId).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterOpenSessionError({
+                    driver,
+                    providerSessionId: input.providerSessionId,
+                    cause,
+                  }),
+              ),
+            ),
+          );
       const mcp = yield* mcpSessions.read(input.threadId);
       const sink: SessionSink = {
         threadId: input.threadId,
@@ -701,10 +744,16 @@ const make = Effect.gen(function* () {
       fetch: Effect.fn("RemoteEnvironments.hubRepository.fetch")((input) =>
         callCheckpoint<void>(link, "checkpoint.fetch", input),
       ),
+      ensureScratch: Effect.fn("RemoteEnvironments.hubRepository.ensureScratch")((folder) =>
+        callCheckpoint<void>(link, "checkpoint.ensureScratch", { folder }),
+      ),
     };
     const move: EnvironmentExecutor.EnvironmentMoveWorkspace = {
+      publishScratch: Effect.fn("RemoteEnvironments.move.publishScratch")((input) =>
+        callCheckpoint<MovedWorkspace.MovePublishScratchResult>(link, "move.publishScratch", input),
+      ),
       fetch: Effect.fn("RemoteEnvironments.move.fetch")(function* (input) {
-        const checkout = yield* checkoutFor(link, input.projectId, undefined);
+        const checkout = yield* checkoutFor(link, input.projectId, undefined, input.scratch);
         if (checkout === undefined) {
           return yield* new VcsUnsupportedOperationError({
             operation: "RemoteEnvironments.move.fetch",
@@ -715,6 +764,10 @@ const make = Effect.gen(function* () {
         return yield* callCheckpoint<MovedWorkspace.MoveFetchResult>(link, "move.fetch", {
           checkout,
           projectId: input.projectId,
+          ...(input.scratch === undefined ? {} : { scratchThreadId: input.scratch.threadId }),
+          ...(input.scratch?.history === undefined
+            ? {}
+            : { scratchHistory: input.scratch.history }),
           refs: input.refs,
         });
       }),
