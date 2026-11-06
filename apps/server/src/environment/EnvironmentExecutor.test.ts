@@ -143,7 +143,7 @@ it.effect("capabilities come from the snapshot, refreshed on instance changes an
 
       const entry = yield* cache.forThread({ threadId, providerInstanceId: instanceId });
       assert.deepEqual(entry.capabilities, CodexProviderCapabilitiesV2);
-      assert.equal(entry.driver, driver);
+      assert.equal(entry.provider, driver);
       const metadata = yield* adapters.getMetadata!(instanceId);
       assert.deepEqual(metadata.capabilities, CodexProviderCapabilitiesV2);
       assert.equal(reads.count, 1);

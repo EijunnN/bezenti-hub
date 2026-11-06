@@ -12,8 +12,7 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { OrchestrationV2ProviderCapabilities } from "./orchestrationV2.ts";
-import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
-import { HostResourcesSnapshot } from "./resourceTelemetry.ts";
+import { EnvironmentHostResources, EnvironmentProviderSummary } from "./environmentConnection.ts";
 
 export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 1;
 
@@ -83,10 +82,11 @@ export type EnvironmentExecutorOperation = typeof EnvironmentExecutorOperation.T
 
 /** What an Environment publishes about one provider instance, in its hello and each heartbeat. */
 export const EnvironmentProviderCapabilitySnapshot = Schema.Struct({
-  instanceId: ProviderInstanceId,
-  driver: ProviderDriverKind,
+  instanceId: EnvironmentProviderSummary.fields.instanceId,
+  provider: EnvironmentProviderSummary.fields.provider,
+  enabled: EnvironmentProviderSummary.fields.enabled,
   continuationKey: TrimmedNonEmptyString,
-  enabled: Schema.Boolean,
+  /** What the Orchestrator decides from; the summary's `capabilities` are what Settings shows. */
   capabilities: OrchestrationV2ProviderCapabilities,
 });
 export type EnvironmentProviderCapabilitySnapshot =
@@ -98,7 +98,7 @@ export const EnvironmentExecutorSnapshot = Schema.Struct({
   environmentId: EnvironmentId,
   transport: EnvironmentExecutorTransport,
   providers: Schema.Array(EnvironmentProviderCapabilitySnapshot),
-  resources: Schema.optional(HostResourcesSnapshot),
+  resources: Schema.optional(EnvironmentHostResources),
   observedAt: IsoDateTime,
 });
 export type EnvironmentExecutorSnapshot = typeof EnvironmentExecutorSnapshot.Type;

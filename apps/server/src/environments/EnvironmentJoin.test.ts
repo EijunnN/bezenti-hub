@@ -1,4 +1,5 @@
 import { assert, it } from "@effect/vitest";
+import { HUB_MACHINE_ENVIRONMENT_ID } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
 import { addMember, passkeyReauth } from "../auth/UserAuth.testkit.ts";
@@ -30,7 +31,7 @@ it.effect("the Owner registers a machine with a passkey and it joins as their pe
         { name: "Laptop", kind: "external", status: "offline" },
       ],
     );
-    assert.equal(environments[0]!.id, "environment:hub-machine");
+    assert.equal(environments[0]!.id, HUB_MACHINE_ENVIRONMENT_ID);
     assert.equal(environments[1]!.hostname, "ada-laptop");
     // The list never carries the credential, nor does the Hub keep it.
     assert.notInclude(JSON.stringify(environments), joined.credential);
@@ -203,7 +204,7 @@ it.effect("renaming and removing are audited, and the Hub machine stays", () =>
 
     const hubRemoval = yield* server.request("/api/environments/remove", {
       cookie: owner,
-      body: { environmentId: "environment:hub-machine" },
+      body: { environmentId: HUB_MACHINE_ENVIRONMENT_ID },
     });
     assert.equal(hubRemoval.status, 403);
 

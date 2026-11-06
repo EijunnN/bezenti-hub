@@ -1,3 +1,4 @@
+import { HUB_MACHINE_ENVIRONMENT_ID } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -33,9 +34,9 @@ export default Effect.gen(function* () {
   `;
   yield* sql`CREATE UNIQUE INDEX environments_one_hub ON environments(kind) WHERE kind = 'hub'`;
   yield* sql`CREATE INDEX environments_owner_idx ON environments(owner_user_id)`;
-  // The Hub machine's id is a constant (`environment:hub-machine`), the same on every Hub.
+  // The Hub machine's id is a constant, the same on every Hub.
   yield* sql`
     INSERT INTO environments (environment_id, name, kind, registered_at)
-    VALUES ('environment:hub-machine', 'Hub machine', 'hub', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    VALUES (${HUB_MACHINE_ENVIRONMENT_ID}, 'Hub machine', 'hub', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
   `;
 });

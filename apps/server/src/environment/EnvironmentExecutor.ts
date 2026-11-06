@@ -201,15 +201,19 @@ const describeLocalProviders = Effect.fn("EnvironmentExecutor.describeLocalProvi
   const described = yield* Effect.forEach(instanceIds, (instanceId) =>
     Effect.exit(
       adapters.getMetadata !== undefined
-        ? adapters
-            .getMetadata(instanceId)
-            .pipe(Effect.map((metadata) => ({ instanceId, ...metadata })))
+        ? adapters.getMetadata(instanceId).pipe(
+            Effect.map(({ driver, ...metadata }) => ({
+              instanceId,
+              provider: driver,
+              ...metadata,
+            })),
+          )
         : adapters.get(instanceId).pipe(
             Effect.flatMap((adapter) =>
               adapter.getCapabilities().pipe(
                 Effect.map((capabilities) => ({
                   instanceId,
-                  driver: adapter.driver,
+                  provider: adapter.driver,
                   continuationKey: `${adapter.driver}:instance:${instanceId}`,
                   enabled: true,
                   capabilities,
@@ -259,7 +263,7 @@ const makeInProcessExecutor = (input: InProcessExecutorInput): EnvironmentExecut
     describe: Effect.gen(function* () {
       const providers = yield* describeLocalProviders(input.adapters);
       const resources = Option.isSome(input.hostResources)
-        ? yield* input.hostResources.value.read
+        ? { hostResources: yield* input.hostResources.value.read, disk: null }
         : undefined;
       const observedAt = DateTime.formatIso(yield* DateTime.now);
       return {
@@ -420,7 +424,7 @@ export const layerProviderAdapterRegistry: Layer.Layer<
           ),
         );
         return {
-          driver: entry.driver,
+          driver: entry.provider,
           continuationKey: entry.continuationKey,
           enabled: entry.enabled,
           capabilities: entry.capabilities,
