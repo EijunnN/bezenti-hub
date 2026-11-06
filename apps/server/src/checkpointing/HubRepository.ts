@@ -1,11 +1,13 @@
 /**
  * The Hub's git repository of each Project, where every Environment uploads its checkpoint refs.
- * Transfers name it by URL or path, never by a remote of the checkout, so nothing reaches
- * `origin`. See docs/internals/overview.md, «Hub repository».
+ * A Thread without a Project has one of its own, for its scratch workspace. Transfers name it by
+ * URL or path, never by a remote of the checkout, so nothing reaches `origin`. See
+ * docs/internals/overview.md, «Hub repository».
  */
 import {
   type CheckpointRef,
   type ProjectId,
+  type ThreadId,
   type VcsError,
   VcsProcessExitError,
   VcsUnsupportedOperationError,
@@ -14,9 +16,12 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
+import { isScratchWorkspaceRoot, scratchFolderName } from "../environment/ScratchWorkspace.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import type { VcsCheckpointOps } from "../vcs/VcsDriver.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -36,8 +41,26 @@ export const threadRefPrefixes = (threadId: string) => {
   return [`refs/t3/threads/${key}/`, `refs/t3/recovered/${key}/`] as const;
 };
 
-export const hubRepositoryUrl = (hubUrl: string, projectId: ProjectId) =>
-  new URL(`${HUB_REPOSITORY_ROUTE_PREFIX}/${encodeURIComponent(projectId)}`, hubUrl).toString();
+/**
+ * Which Hub repository: the Project's, or, for a Thread without a Project (one in the scratch
+ * Project), that Thread's own, since its scratch workspace shares nothing with another's.
+ */
+export interface HubRepositoryKey {
+  readonly projectId: ProjectId;
+  readonly scratchThreadId?: ThreadId | undefined;
+}
+
+/** The segment of `/api/git/thread/<threadId>`, a Thread's own repository. */
+export const THREAD_REPOSITORY_SEGMENT = "thread";
+
+/** The key's path under `/api/git`: `<projectId>`, or `thread/<threadId>`. */
+const repositoryPathOf = (key: HubRepositoryKey) =>
+  key.scratchThreadId === undefined
+    ? encodeURIComponent(key.projectId)
+    : `${THREAD_REPOSITORY_SEGMENT}/${encodeURIComponent(key.scratchThreadId)}`;
+
+export const hubRepositoryUrl = (hubUrl: string, key: HubRepositoryKey) =>
+  new URL(`${HUB_REPOSITORY_ROUTE_PREFIX}/${repositoryPathOf(key)}`, hubUrl).toString();
 
 /** A repository to push to or fetch from, and what a git process needs in its environment. */
 export interface HubRemote {
@@ -191,14 +214,19 @@ export const fetchMissingRefs = Effect.fn("HubRepository.fetchMissingRefs")(func
   });
 });
 
-export interface CheckoutTransferInput {
-  /** A folder of the checkout on this machine. */
+export interface CheckoutTransferInput extends HubRepositoryKey {
+  /** A folder of the checkout (or scratch workspace) on this machine. */
   readonly cwd: string;
-  readonly projectId: ProjectId;
   readonly checkpointRefs: ReadonlyArray<CheckpointRef>;
 }
 
-/** A checkout's side of the Hub repository of a Project. */
+/** The repository part of a transfer, without undefined keys (they cross the wire). */
+export const keyOf = (input: HubRepositoryKey): HubRepositoryKey =>
+  input.scratchThreadId === undefined
+    ? { projectId: input.projectId }
+    : { projectId: input.projectId, scratchThreadId: input.scratchThreadId };
+
+/** A checkout's side of the Hub repository of a Project or of a Thread without one. */
 export interface CheckoutTransfers {
   /** Uploads the refs from the checkout, replacing the Hub's refs of the same names. */
   readonly push: (input: CheckoutTransferInput) => Effect.Effect<void, VcsError>;
@@ -212,7 +240,7 @@ export interface CheckoutTransfers {
  */
 export const makeCheckoutTransfers = (input: {
   readonly vcs: VcsProcess.VcsProcess["Service"] | undefined;
-  readonly remoteOf: ((projectId: ProjectId) => Effect.Effect<HubRemote, VcsError>) | undefined;
+  readonly remoteOf: ((key: HubRepositoryKey) => Effect.Effect<HubRemote, VcsError>) | undefined;
   readonly unavailable: string;
 }): CheckoutTransfers => {
   const transfer =
@@ -224,7 +252,7 @@ export const makeCheckoutTransfers = (input: {
           new VcsUnsupportedOperationError({ operation, kind: "git", detail: input.unavailable }),
         );
       }
-      return remoteOf(request.projectId).pipe(
+      return remoteOf(keyOf(request)).pipe(
         Effect.flatMap((remote) => run({ cwd: request.cwd, remote, refs: request.checkpointRefs })),
         Effect.provideService(VcsProcess.VcsProcess, vcs),
       );
@@ -235,34 +263,88 @@ export const makeCheckoutTransfers = (input: {
   };
 };
 
-/** A Project's repository folder: readable, and distinct for ids that read alike. */
-const directoryNameOf = (projectId: ProjectId) => {
+/** A name for a repository folder: readable, and distinct for ids that read alike. */
+const folderNameOf = (id: string) => {
   let hash = 0x811c9dc5;
-  for (let index = 0; index < projectId.length; index += 1) {
-    hash = Math.imul(hash ^ projectId.charCodeAt(index), 0x01000193) >>> 0;
+  for (let index = 0; index < id.length; index += 1) {
+    hash = Math.imul(hash ^ id.charCodeAt(index), 0x01000193) >>> 0;
   }
-  const readable = projectId.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 64);
+  const readable = id.replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 64);
   return `${readable}-${hash.toString(16).padStart(8, "0")}.git`;
 };
+
+/** A Project's folder at the root; a Thread's own under `threads/`, where no Project's can be. */
+const directoryNameOf = (key: HubRepositoryKey) =>
+  key.scratchThreadId === undefined
+    ? folderNameOf(key.projectId)
+    : `threads/${folderNameOf(key.scratchThreadId)}`;
 
 export class HubRepositories extends Context.Service<
   HubRepositories,
   {
-    /** The folder holding every Project's repository, as git http-backend's project root. */
+    /** The folder holding every repository, as git http-backend's project root. */
     readonly root: string;
-    /** The Project's repository folder, relative to `root`. */
-    readonly directoryOf: (projectId: ProjectId) => string;
-    /** Creates the Project's bare repository when it has none; its absolute path. */
-    readonly ensure: (projectId: ProjectId) => Effect.Effect<string, VcsError>;
-    /** Whether the Project's repository has every one of the refs. */
+    /** The repository's folder, relative to `root`. */
+    readonly directoryOf: (key: HubRepositoryKey) => string;
+    /** Creates the bare repository when there is none; its absolute path. */
+    readonly ensure: (key: HubRepositoryKey) => Effect.Effect<string, VcsError>;
+    /** Whether the repository has every one of the refs. */
     readonly hasRefs: (
-      projectId: ProjectId,
+      key: HubRepositoryKey,
       refs: ReadonlyArray<CheckpointRef>,
     ) => Effect.Effect<boolean>;
+    /**
+     * The repository a Thread's checkpoints go to: its own for a Thread without a Project (in the
+     * scratch Project), else its Project's. None for a Thread the Hub does not have.
+     */
+    readonly keyOfThread: (threadId: ThreadId) => Effect.Effect<Option.Option<HubRepositoryKey>>;
     /** Checkpoint reads (diffs, authored paths) run in a repository folder from `ensure`. */
     readonly checkpoints: VcsCheckpointOps;
   }
 >()("t3/checkpointing/HubRepository/HubRepositories") {}
+
+/**
+ * The key of a Thread's repository, from the Hub's projection: its own when its Project is the
+ * scratch one (`<base dir>/scratch`, where Threads without a Project live).
+ */
+export const keyOfThreadIn = Effect.fn("HubRepository.keyOfThreadIn")(function* (
+  deps: { readonly sql: SqlClient.SqlClient; readonly path: Path.Path; readonly baseDir: string },
+  threadId: ThreadId,
+) {
+  const rows = yield* deps.sql<{
+    readonly projectId: string;
+    readonly workspaceRoot: string | null;
+  }>`
+    SELECT thread.project_id AS "projectId", project.workspace_root AS "workspaceRoot"
+    FROM orchestration_v2_projection_threads thread
+    LEFT JOIN projection_projects project ON project.project_id = thread.project_id
+    WHERE thread.thread_id = ${threadId}
+  `;
+  const row = rows[0];
+  if (row === undefined) return Option.none<HubRepositoryKey>();
+  const projectId = row.projectId as ProjectId;
+  return Option.some<HubRepositoryKey>(
+    row.workspaceRoot !== null && isScratchWorkspaceRoot(deps.path, deps.baseDir, row.workspaceRoot)
+      ? { projectId, scratchThreadId: threadId }
+      : { projectId },
+  );
+});
+
+/**
+ * A Thread without a Project's own repository and its scratch workspace's folder name, which it
+ * keeps on every machine; undefined for a Thread in a Project or one with no folder of its own.
+ */
+export const scratchWorkspaceOf = Effect.fn("HubRepository.scratchWorkspaceOf")(function* (
+  repositories: Option.Option<HubRepositories["Service"]>,
+  thread: { readonly id: ThreadId; readonly worktreePath: string | null },
+) {
+  if (Option.isNone(repositories) || thread.worktreePath === null) return undefined;
+  const key = yield* repositories.value.keyOfThread(thread.id);
+  const folder = scratchFolderName(thread.worktreePath);
+  return Option.isSome(key) && key.value.scratchThreadId !== undefined && folder !== null
+    ? { threadId: key.value.scratchThreadId, folder }
+    : undefined;
+});
 
 export const layer = Layer.effect(
   HubRepositories,
@@ -271,6 +353,7 @@ export const layer = Layer.effect(
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const vcs = yield* VcsProcess.VcsProcess;
+    const sql = yield* SqlClient.SqlClient;
     // Git refuses to find a bare repository from its cwd where `safe.bareRepository` is
     // `explicit`, so every command in one names it.
     const inBareRepository = VcsProcess.VcsProcess.of({
@@ -282,14 +365,16 @@ export const layer = Layer.effect(
       Effect.provideService(VcsProcess.VcsProcess, inBareRepository),
     );
     const root = path.join(config.stateDir, "hub-repositories");
-    const pathOf = (projectId: ProjectId) => path.join(root, directoryNameOf(projectId));
+    const pathOf = (key: HubRepositoryKey) => path.join(root, directoryNameOf(key));
     const initialized = (repository: string) =>
       fileSystem.exists(path.join(repository, "HEAD")).pipe(Effect.orElseSucceed(() => false));
 
-    const ensure = Effect.fn("HubRepositories.ensure")(function* (projectId: ProjectId) {
-      const repository = pathOf(projectId);
+    const ensure = Effect.fn("HubRepositories.ensure")(function* (key: HubRepositoryKey) {
+      const repository = pathOf(key);
       if (yield* initialized(repository)) return repository;
-      yield* fileSystem.makeDirectory(root, { recursive: true }).pipe(Effect.ignore);
+      yield* fileSystem
+        .makeDirectory(path.dirname(repository), { recursive: true })
+        .pipe(Effect.ignore);
       // Initializing twice is harmless, so concurrent first uploads need no lock.
       yield* gitIn(vcs, {
         operation: "HubRepositories.init",
@@ -303,14 +388,24 @@ export const layer = Layer.effect(
       root,
       directoryOf: directoryNameOf,
       ensure,
-      hasRefs: Effect.fn("HubRepositories.hasRefs")(function* (projectId, refs) {
-        const repository = pathOf(projectId);
+      hasRefs: Effect.fn("HubRepositories.hasRefs")(function* (key, refs) {
+        const repository = pathOf(key);
         if (!(yield* initialized(repository))) return false;
         const present = yield* existingRefs(vcs, root, refs, repository).pipe(
           Effect.orElseSucceed(() => new Set<string>()),
         );
         return refs.every((ref) => present.has(ref));
       }),
+      keyOfThread: Effect.fn("HubRepositories.keyOfThread")((threadId) =>
+        keyOfThreadIn({ sql, path, baseDir: config.baseDir }, threadId).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Could not read which Hub repository a Thread uses", {
+              threadId,
+              cause,
+            }).pipe(Effect.as(Option.none<HubRepositoryKey>())),
+          ),
+        ),
+      ),
       checkpoints: driver.checkpoints,
     });
   }),

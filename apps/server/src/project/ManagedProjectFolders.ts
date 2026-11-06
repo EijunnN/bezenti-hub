@@ -22,6 +22,7 @@ import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
+import { scratchRootOf } from "../environment/ScratchWorkspace.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ProjectService from "./ProjectService.ts";
@@ -240,7 +241,7 @@ const make = Effect.gen(function* () {
     gitWorkflow.isRepository(config.baseDir).pipe(
       Effect.catchIf(isGitMissing, () => Effect.succeed(false)),
       Effect.map((isRepository) =>
-        isRepository ? Option.none<string>() : Option.some(path.resolve(config.baseDir, "scratch")),
+        isRepository ? Option.none<string>() : Option.some(scratchRootOf(path, config.baseDir)),
       ),
       Effect.catchCause((cause) =>
         Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.succeed(Option.none<string>()),
@@ -332,7 +333,7 @@ const make = Effect.gen(function* () {
       path.join(root.value, [date, words, idPart].filter(Boolean).join("-"));
     yield* makeScratchFolder(root.value);
     const fullFolder = folderFor(id);
-    return yield* claimFreeFolder(
+    const claimed = yield* claimFreeFolder(
       (attempt) =>
         attempt === 1
           ? Effect.succeedSome(folderFor(id.slice(-8)))
@@ -344,6 +345,18 @@ const make = Effect.gen(function* () {
               ),
       (folder, cause) => new ScratchFolderError({ folder, cause }),
     );
+    // Its own repository, so its turns get checkpoints that upload to the Hub and move with it.
+    if (Option.isSome(claimed)) {
+      yield* git
+        .execute({
+          operation: "ManagedProjectFolders.initScratch",
+          cwd: claimed.value,
+          args: ["init", "--quiet"],
+          timeoutMs: 10_000,
+        })
+        .pipe(Effect.mapError((cause) => new ScratchFolderError({ folder: claimed.value, cause })));
+    }
+    return claimed;
   });
 
   const namedProjectsRoot = path.resolve(config.baseDir, "projects");

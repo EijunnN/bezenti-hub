@@ -23,6 +23,7 @@ import * as Schema from "effect/Schema";
 
 import { isGitImport, parseTurnDiffFilesFromNumstat } from "../checkpointing/Diffs.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
+import * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 
@@ -136,7 +137,10 @@ export interface CheckpointServiceV2Shape {
   readonly restore: (input: {
     readonly scope: OrchestrationV2CheckpointScope;
     readonly checkpoint: OrchestrationV2Checkpoint;
-    /** With it, a ref the workspace lacks is fetched from the Hub's repository of the Project. */
+    /**
+     * With it, a ref the workspace lacks is fetched from the Hub's repository of the Project, or
+     * of the Thread for one without a Project.
+     */
     readonly projectId?: ProjectId;
   }) => Effect.Effect<void, CheckpointServiceV2Error>;
   readonly deleteStaleRefs: (input: {
@@ -248,6 +252,7 @@ export const layer: Layer.Layer<
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
     // Absent where no Environment executors run (orchestration-only hosts).
     const hubRepository = yield* Effect.serviceOption(EnvironmentExecutor.HubRepositoryTransfers);
+    const hubRepositories = yield* Effect.serviceOption(HubRepository.HubRepositories);
     const workspaceLocks = yield* KeyedLock.make<string>();
     const withWorkspaceLock = <A, E, R>(cwd: string, effect: Effect.Effect<A, E, R>) =>
       workspaceLocks.withLock(cwd, effect);
@@ -521,7 +526,8 @@ export const layer: Layer.Layer<
             });
           }
 
-          if (input.projectId !== undefined && Option.isSome(hubRepository)) {
+          const projectId = input.projectId;
+          if (projectId !== undefined && Option.isSome(hubRepository)) {
             const present = yield* checkpointStore.hasCheckpointRef({
               cwd: input.scope.cwd,
               checkpointRef: input.checkpoint.ref,
@@ -529,10 +535,14 @@ export const layer: Layer.Layer<
             // Captured elsewhere (before a move) or pruned here: the Hub's copy restores it. A
             // failed fetch leaves the restore below to report the ref unavailable.
             if (!present) {
+              // A Thread without a Project fetches from its own repository.
+              const key = Option.isSome(hubRepositories)
+                ? yield* hubRepositories.value.keyOfThread(input.scope.threadId)
+                : Option.none<HubRepository.HubRepositoryKey>();
               yield* hubRepository.value
                 .fetch({
                   cwd: input.scope.cwd,
-                  projectId: input.projectId,
+                  ...HubRepository.keyOf(Option.getOrElse(key, () => ({ projectId }))),
                   checkpointRefs: [input.checkpoint.ref],
                 })
                 .pipe(

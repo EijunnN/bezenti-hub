@@ -54,6 +54,7 @@ import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as MovedWorkspace from "./MovedWorkspace.ts";
 import * as ProjectCheckouts from "./ProjectCheckouts.ts";
 import type * as RemoteExecutorWire from "./RemoteExecutorWire.ts";
+import * as ScratchWorkspace from "./ScratchWorkspace.ts";
 import { locateInCheckout } from "./WorkspaceLocation.ts";
 
 export { EnvironmentExecutorUnavailableError } from "@t3tools/contracts";
@@ -426,11 +427,31 @@ const makeMoveWorkspace = (input: {
   const { vcs, fileSystem, path, config, platform, home } = input.deps;
   return {
     fetch: Effect.fn("EnvironmentExecutor.move.fetch")(function* (request) {
-      const checkout = yield* input.checkoutOf(request.projectId);
+      let checkout = yield* input.checkoutOf(request.projectId);
+      const { scratch } = request;
+      // A Thread without a Project moves into its own scratch workspace, made here if missing.
+      if (scratch !== undefined) {
+        if (Option.isNone(vcs) || Option.isNone(fileSystem) || Option.isNone(path)) {
+          return yield* noCheckout(
+            request.projectId,
+            "This server cannot make a scratch workspace.",
+          );
+        }
+        const folder = ScratchWorkspace.scratchFolderIn(path.value, checkout, scratch.folder);
+        if (folder === null) {
+          return yield* noCheckout(request.projectId, `${scratch.folder} is not a folder name.`);
+        }
+        yield* ScratchWorkspace.ensureScratchRepository(
+          { vcs: vcs.value, fileSystem: fileSystem.value, path: path.value },
+          folder,
+        );
+        checkout = folder;
+      }
       if (request.refs.length > 0) {
         yield* input.hubRepository.fetch({
           cwd: checkout,
           projectId: request.projectId,
+          ...(scratch === undefined ? {} : { scratchThreadId: scratch.threadId }),
           checkpointRefs: request.refs,
         });
       }
@@ -489,8 +510,8 @@ const localHubRepository = (
     vcs: Option.getOrUndefined(vcs),
     remoteOf: Option.match(repositories, {
       onNone: () => undefined,
-      onSome: (hub) => (projectId: ProjectId) =>
-        hub.ensure(projectId).pipe(Effect.map((url) => ({ url }))),
+      onSome: (hub) => (key: HubRepository.HubRepositoryKey) =>
+        hub.ensure(key).pipe(Effect.map((url) => ({ url }))),
     }),
     unavailable: "This server keeps no Hub repository.",
   });

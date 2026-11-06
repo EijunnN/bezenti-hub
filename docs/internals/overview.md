@@ -187,6 +187,34 @@ there may be an older capture of a reused ordinal), so they work with the machin
 then they run on the Thread's Active environment. A restore whose ref is missing in the workspace
 (a move, or refs dropped there) fetches it from the Hub repository first.
 
+### Threads without a Project
+
+A Thread without a Project is a Thread in the scratch Project, whose workspace root is the Hub's
+`<base dir>/scratch` ([ManagedProjectFolders](../../apps/server/src/project/ManagedProjectFolders.ts)).
+Its worktree is its own folder there, made with `git init` so its turns get checkpoints. The folder
+is inside the scratch Project's checkout, so its logical form is relative (`<folder>`) even for a
+Thread created on another Environment, where it resolves under that machine's checkout of the
+scratch Project (`<workspace root>/scratch/<folder>`); `ThreadManagementService` places such a
+Thread anywhere, while other worktrees still need the Hub machine. A machine opening a session for
+one makes the folder, with git, instead of cloning (`WireCheckout.scratch`).
+
+Its checkpoints go to a Hub repository of its own, never one shared by every such Thread
+([ScratchWorkspace](../../apps/server/src/environment/ScratchWorkspace.ts)):
+`HubRepositoryKey { projectId, scratchThreadId }`, under `hub-repositories/threads/`, served at
+`/api/git/thread/<threadId>`. `HubRepositories.keyOfThread` decides it from the projection (the
+Thread's Project is the scratch one), and every transfer (`checkpoint.push`/`fetch`, the session's
+fetch, a move's fetch) carries `scratchThreadId`. The route authorizes as for a Project (the
+machine's owner may start Threads in its Space) and then serves only the Thread's Active
+environment and the target of its running move; anyone else gets 403. `/api/git/<scratch Project>`
+is 404. Diffs read it once uploaded, as a Project's.
+
+A move of one keeps its folder name: `move.fetch` gets `scratch { threadId, folder }` and makes
+`<the target's checkout of the scratch Project>/<folder>` (with git) as the checkout, and
+`move.prepare` with `scratch` works in that folder, never a worktree, and runs no setup script. What
+the folder already had there that differs from its HEAD is captured to
+`refs/t3/recovered/<id>/<time>/workspace` before the checkpoint's files are laid over it. A Thread
+made before its folder had git has no checkpoints, and its move fails at `final-checkpoint`.
+
 ### Moving a Thread
 
 `thread.move { threadId, targetEnvironmentId, ifRunning }` is a client command. The Hub checks the

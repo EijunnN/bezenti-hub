@@ -149,6 +149,10 @@ export const layer: Layer.Layer<
     const remote = yield* Effect.serviceOption(RemoteEnvironments.RemoteEnvironments);
     const audit = yield* Effect.serviceOption(AuditLog.AuditLog);
     const settings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
+    // A Thread without a Project moves its scratch workspace through its own repository.
+    const repositories = yield* Effect.serviceOption(HubRepository.HubRepositories);
+    const scratchOf = (thread: OrchestrationV2AppThread) =>
+      HubRepository.scratchWorkspaceOf(repositories, thread);
     const scope = yield* Effect.scope;
     const running = new Set<ThreadId>();
 
@@ -528,10 +532,12 @@ export const layer: Layer.Layer<
       const source = executor.value;
       const cwd = yield* asStep(workspaceOn(source, thread));
       yield* asStep(source.workspace.checkpoints.captureCheckpoint({ cwd, checkpointRef: ref }));
+      const scratch = yield* scratchOf(thread);
       yield* asStep(
         source.workspace.hubRepository.push({
           cwd,
           projectId: thread.projectId,
+          ...(scratch === undefined ? {} : { scratchThreadId: scratch.threadId }),
           checkpointRefs: [ref],
         }),
       );
@@ -767,10 +773,16 @@ export const layer: Layer.Layer<
       move: OrchestrationV2ThreadMove,
     ) {
       const target = yield* targetOf(move);
+      const scratch = yield* scratchOf(thread);
       const checkout =
         move.targetCheckout ??
-        (yield* asFailure(target.workspace.move.fetch({ projectId: thread.projectId, refs: [] })))
-          .checkout;
+        (yield* asFailure(
+          target.workspace.move.fetch({
+            projectId: thread.projectId,
+            refs: [],
+            ...(scratch === undefined ? {} : { scratch }),
+          }),
+        )).checkout;
       return yield* asFailure(
         target.workspace.move.prepare({
           checkout,
@@ -780,7 +792,9 @@ export const layer: Layer.Layer<
           branch: thread.branch,
           knownWorktree: move.knownWorktrees?.[move.targetEnvironmentId] ?? null,
           setAsidePrefix: HubRepository.threadRefPrefixes(thread.id)[1],
-          setupScript: yield* setupScriptOf(thread),
+          // A scratch workspace is the Thread's own folder: no worktree, no setup script.
+          setupScript: scratch === undefined ? yield* setupScriptOf(thread) : null,
+          ...(scratch === undefined ? {} : { scratch: true }),
         }),
       );
     });
@@ -837,6 +851,7 @@ export const layer: Layer.Layer<
               // Recorded before it is fetched, so the Thread shows what it will continue from.
               yield* advance(threadId, move.id, { continuesFrom });
             }
+            const scratch = yield* scratchOf(thread);
             const fetched = yield* Effect.result(
               targetOf(move).pipe(
                 Effect.flatMap((target) =>
@@ -844,6 +859,7 @@ export const layer: Layer.Layer<
                     target.workspace.move.fetch({
                       projectId: thread.projectId,
                       refs: continuesFrom.ref === null ? [] : [continuesFrom.ref],
+                      ...(scratch === undefined ? {} : { scratch }),
                     }),
                   ),
                 ),

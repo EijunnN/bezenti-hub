@@ -119,8 +119,13 @@ export const make = Effect.gen(function* () {
     );
     if (uploaded && input.projectId !== undefined && Option.isSome(hubRepositories)) {
       const repositories = hubRepositories.value;
-      if (yield* repositories.hasRefs(input.projectId, input.refs)) {
-        const cwd = yield* repositories.ensure(input.projectId);
+      const projectId = input.projectId;
+      // A Thread without a Project reads its own repository.
+      const key = Option.getOrElse(yield* repositories.keyOfThread(input.threadId), () => ({
+        projectId,
+      }));
+      if (yield* repositories.hasRefs(key, input.refs)) {
+        const cwd = yield* repositories.ensure(key);
         return { cwd, reads: repositories.checkpoints as CheckpointReads };
       }
     }

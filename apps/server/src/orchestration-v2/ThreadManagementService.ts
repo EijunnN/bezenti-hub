@@ -58,8 +58,13 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
+import * as Path from "effect/Path";
+
+import * as ServerConfig from "../config.ts";
+import { isScratchWorkspaceRoot, scratchRootOf } from "../environment/ScratchWorkspace.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
+import * as ProjectStore from "./ProjectStore.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { projectedRowEncodedBytes } from "./threadHistoryPaging.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
@@ -615,6 +620,26 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+  // A Thread without a Project works in its own scratch folder, which any Environment makes.
+  const scratchDeps = Option.all({
+    config: yield* Effect.serviceOption(ServerConfig.ServerConfig),
+    path: yield* Effect.serviceOption(Path.Path),
+    projects: yield* Effect.serviceOption(ProjectStore.ProjectStoreV2),
+  });
+  const isScratchWorkspace = (projectId: ProjectId, worktreePath: string) =>
+    Option.match(scratchDeps, {
+      onNone: () => Effect.succeed(false),
+      onSome: ({ config, path, projects }) =>
+        projects.get(projectId).pipe(
+          Effect.map(
+            (project) =>
+              Option.isSome(project) &&
+              isScratchWorkspaceRoot(path, config.baseDir, project.value.workspaceRoot) &&
+              path.dirname(path.resolve(worktreePath)) === scratchRootOf(path, config.baseDir),
+          ),
+          Effect.orElseSucceed(() => false),
+        ),
+    });
 
   const assertProviderInstanceEnabled: ThreadManagementServiceShape["assertProviderInstanceEnabled"] =
     (input) =>
@@ -840,17 +865,26 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
         providerInstanceId: command.modelSelection.instanceId,
       })
       .pipe(
-        Effect.flatMap((activeEnvironmentId) =>
-          // Worktrees are still made on the Hub machine only.
-          activeEnvironmentId !== HUB_MACHINE_ENVIRONMENT_ID && command.worktreePath !== null
-            ? Effect.fail(
-                new EnvironmentRegistry.ThreadEnvironmentUnavailableError({
-                  environmentId: activeEnvironmentId,
-                  reason: "worktree-unsupported",
-                }),
-              )
-            : Effect.succeed({ ...command, activeEnvironmentId }),
-        ),
+        Effect.flatMap((activeEnvironmentId) => {
+          const placed = Effect.succeed({ ...command, activeEnvironmentId });
+          const worktreePath = command.worktreePath;
+          if (activeEnvironmentId === HUB_MACHINE_ENVIRONMENT_ID || worktreePath === null) {
+            return placed;
+          }
+          // Worktrees are still made on the Hub machine only; a scratch folder anywhere.
+          return isScratchWorkspace(command.projectId, worktreePath).pipe(
+            Effect.flatMap((scratch) =>
+              scratch
+                ? placed
+                : Effect.fail(
+                    new EnvironmentRegistry.ThreadEnvironmentUnavailableError({
+                      environmentId: activeEnvironmentId,
+                      reason: "worktree-unsupported",
+                    }),
+                  ),
+            ),
+          );
+        }),
         Effect.mapError(reject),
       );
   };

@@ -97,7 +97,11 @@ import type * as Statement from "effect/sql/Statement";
 import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
 import { threadInSpaces } from "../spaces/SpaceVisibility.ts";
-import { hostLocationJson, hubMachineLocationJson } from "../environment/WorkspaceLocation.ts";
+import {
+  hostLocationJson,
+  hubMachineLocationJson,
+  isCheckoutRelativeJson,
+} from "../environment/WorkspaceLocation.ts";
 import {
   isThreadHistoryUserTurn,
   isConversationHistoryItem,
@@ -2089,18 +2093,25 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               const payloadJson = yield* encodeThreadPayload(event.payload);
               const payload = parseEncodedPayload(payloadJson);
               const activeEnvironmentId = event.payload.activeEnvironmentId;
+              const hubLocationJson =
+                event.payload.worktreePath === null
+                  ? null
+                  : hubMachineLocationJson(
+                      yield* hubMachineCheckout(event.payload.projectId),
+                      event.payload.worktreePath,
+                    );
               const worktreeLocationJson =
                 event.payload.worktreePath === null
                   ? null
                   : activeEnvironmentId !== undefined &&
                       activeEnvironmentId !== null &&
-                      activeEnvironmentId !== HUB_MACHINE_ENVIRONMENT_ID
+                      activeEnvironmentId !== HUB_MACHINE_ENVIRONMENT_ID &&
+                      // A folder inside the Project's checkout (a Thread without a Project's own
+                      // scratch folder) is found in that checkout on every machine.
+                      !isCheckoutRelativeJson(hubLocationJson)
                     ? // Only a move gives a Thread elsewhere a worktree: it is that machine's path.
                       hostLocationJson(activeEnvironmentId, event.payload.worktreePath)
-                    : hubMachineLocationJson(
-                        yield* hubMachineCheckout(event.payload.projectId),
-                        event.payload.worktreePath,
-                      );
+                    : hubLocationJson;
               yield* sql`
               INSERT INTO orchestration_v2_projection_threads (
                 thread_id,

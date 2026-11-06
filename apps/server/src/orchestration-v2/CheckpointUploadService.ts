@@ -20,11 +20,13 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
@@ -84,6 +86,8 @@ export const layer: Layer.Layer<
     const eventSink = yield* EventSink.EventSinkV2;
     const ids = yield* IdAllocator.IdAllocatorV2;
     const threadLocks = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+    // Which repository each Thread uploads to; absent off the Hub (orchestration-only tests).
+    const repositories = yield* Effect.serviceOption(HubRepository.HubRepositories);
     const scope = yield* Effect.scope;
     const uploads = new Map<ThreadId, ThreadUpload>();
     /**
@@ -157,11 +161,20 @@ export const layer: Layer.Layer<
         ({ checkpoint }) => needsSource.get(checkpoint.id) !== executor.environmentId,
       );
       if (pending.length === 0) return "done" as const;
-      const projectId = ProjectId.make(thread.projectId);
+      // A Thread without a Project uploads to its own repository.
+      const key = Option.isSome(repositories)
+        ? Option.getOrElse(yield* repositories.value.keyOfThread(threadId), () => ({
+            projectId: ProjectId.make(thread.projectId),
+          }))
+        : { projectId: ProjectId.make(thread.projectId) };
       const { hubRepository, checkpoints } = executor.workspace;
       const push = (cwd: string, batch: ReadonlyArray<PendingCheckpoint>) =>
         hubRepository
-          .push({ cwd, projectId, checkpointRefs: batch.map(({ checkpoint }) => checkpoint.ref) })
+          .push({
+            cwd,
+            ...HubRepository.keyOf(key),
+            checkpointRefs: batch.map(({ checkpoint }) => checkpoint.ref),
+          })
           .pipe(
             Effect.as(true),
             Effect.orElseSucceed(() => false),

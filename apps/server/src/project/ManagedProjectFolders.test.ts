@@ -243,6 +243,8 @@ it.effect("gives each Scratch thread its own folder, named from its message", ()
       assert.equal(new Set([first, second, third]).size, 3);
       for (const folder of [first, second, third]) {
         assert.equal(path.dirname(folder), root);
+        // Its own repository, for its checkpoints.
+        assert.isTrue(yield* fileSystem.exists(path.join(folder, ".git")));
         assert.match(path.basename(folder), /^\d{4}-\d{2}-\d{2}-convert-these-pngs-to-webp-/);
         assert.isTrue(yield* fileSystem.exists(folder));
       }

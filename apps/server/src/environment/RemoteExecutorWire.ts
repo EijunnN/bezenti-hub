@@ -95,8 +95,14 @@ export type WireMcpCredential = typeof WireMcpCredential.Type;
 export const WireCheckout = Schema.Struct({
   path: Schema.String,
   cloneUrl: Schema.NullOr(Schema.String),
+  /** A Thread without a Project: `path` is its scratch workspace, made (with git) when missing. */
+  scratch: Schema.optionalKey(Schema.Boolean),
   hubRefs: Schema.optionalKey(
-    Schema.Struct({ projectId: ProjectId, refs: Schema.Array(CheckpointRef) }),
+    Schema.Struct({
+      projectId: ProjectId,
+      scratchThreadId: Schema.optionalKey(ThreadId),
+      refs: Schema.Array(CheckpointRef),
+    }),
   ),
 });
 export type WireCheckout = typeof WireCheckout.Type;
@@ -229,6 +235,8 @@ const DiffInput = Schema.Struct({
 const HubRepositoryTransfer = Schema.Struct({
   cwd: Schema.String,
   projectId: ProjectId,
+  /** The Thread without a Project whose own repository this is (`/api/git/thread/<id>`). */
+  scratchThreadId: Schema.optionalKey(ThreadId),
   checkpointRefs: Schema.Array(CheckpointRef),
 });
 
@@ -384,6 +392,7 @@ export const REMOTE_OPERATIONS = {
     Schema.Struct({
       checkout: WireCheckout,
       projectId: ProjectId,
+      scratchThreadId: Schema.optionalKey(ThreadId),
       refs: Schema.Array(CheckpointRef),
     }),
     MoveFetchResult,

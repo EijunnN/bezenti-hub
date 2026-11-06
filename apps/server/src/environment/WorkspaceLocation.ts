@@ -99,6 +99,16 @@ export function hubMachineLocationJson(checkout: string | null, absolute: string
       );
 }
 
+/** Whether a stored form is relative to the checkout, so every machine resolves it in its own. */
+export function isCheckoutRelativeJson(json: string | null): boolean {
+  if (json === null) return false;
+  try {
+    return decodeWorkspaceLocationJson(json).base === "checkout";
+  } catch {
+    return false;
+  }
+}
+
 /** The stored form of an absolute path only `environmentId` can resolve. */
 export function hostLocationJson(environmentId: EnvironmentId, absolute: string): string {
   return encodeWorkspaceLocationJson({ base: "host", environmentId, path: absolute });

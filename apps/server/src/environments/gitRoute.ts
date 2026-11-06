@@ -1,15 +1,16 @@
 /**
- * `/api/git/<projectId>`: the Hub repository over git smart HTTP, relayed to `git http-backend`.
- * The Environment credential is checked on every request, and a machine sees and writes only the
+ * `/api/git/<projectId>` and `/api/git/thread/<threadId>` (a Thread without a Project): the Hub
+ * repository over git smart HTTP, relayed to `git http-backend`. A machine sees and writes only the
  * refs of Threads it runs, in Projects where its owner may start Threads; nobody deletes.
  */
-import { EnvironmentId, ProjectId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Config from "effect/Config";
 import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Pull from "effect/Pull";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -20,6 +21,8 @@ import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as HubRepository from "../checkpointing/HubRepository.ts";
+import * as ServerConfig from "../config.ts";
+import { isScratchWorkspaceRoot } from "../environment/ScratchWorkspace.ts";
 import { checkpointRefForScopeOrdinal } from "../orchestration-v2/CheckpointService.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { requestUrl } from "../requestUrl.ts";
@@ -165,21 +168,33 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
   readonly digest: Digest.Digest["Service"];
   readonly maxRequestBytes: number;
   readonly nullDevice: string;
+  readonly path: Path.Path;
+  readonly baseDir: string;
 }) {
   const request = yield* HttpServerRequest.HttpServerRequest;
   const url = requestUrl(request);
   if (Option.isNone(url)) return HttpServerResponse.text("Bad Request", { status: 400 });
-  const [encodedProjectId, ...rest] = url.value.pathname
+  const serviceOf = (endpoint: string) => {
+    const service =
+      endpoint === "info/refs" && request.method === "GET"
+        ? url.value.searchParams.get("service")
+        : request.method === "POST"
+          ? endpoint
+          : null;
+    return service !== null && SERVICES.has(service) ? service : null;
+  };
+  // `<projectId>/<endpoint>`, or `thread/<threadId>/<endpoint>` for a Thread's own repository.
+  const segments = url.value.pathname
     .slice(HubRepository.HUB_REPOSITORY_ROUTE_PREFIX.length + 1)
     .split("/");
+  const asThread =
+    segments[0] === HubRepository.THREAD_REPOSITORY_SEGMENT &&
+    segments.length >= 3 &&
+    serviceOf(segments.slice(2).join("/")) !== null;
+  const [encodedId, ...rest] = asThread ? segments.slice(1) : segments;
   const endpoint = rest.join("/");
-  const service =
-    endpoint === "info/refs" && request.method === "GET"
-      ? url.value.searchParams.get("service")
-      : request.method === "POST"
-        ? endpoint
-        : null;
-  if (encodedProjectId === undefined || service === null || !SERVICES.has(service)) {
+  const service = serviceOf(endpoint);
+  if (encodedId === undefined || encodedId.length === 0 || service === null) {
     return HttpServerResponse.text("Not Found", { status: 404 });
   }
   if (!isSecureEnvironmentTransport(request)) {
@@ -194,9 +209,29 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
   if (contentLength !== undefined && Number(contentLength) > deps.maxRequestBytes) {
     return HttpServerResponse.text("Payload Too Large", { status: 413 });
   }
-  const projectId = ProjectId.make(decodeURIComponent(encodedProjectId));
+  const decodedId = yield* Effect.try({
+    try: () => decodeURIComponent(encodedId),
+    catch: () => new HubRepositoryHttpError({ detail: "The repository name is not valid." }),
+  }).pipe(Effect.option);
+  if (Option.isNone(decodedId)) return HttpServerResponse.text("Not Found", { status: 404 });
+  // A Thread's own repository is that of a Thread without a Project; a Project's is any other's.
+  const key: Option.Option<HubRepository.HubRepositoryKey> = asThread
+    ? Option.filter(
+        yield* deps.repositories.keyOfThread(ThreadId.make(decodedId.value)),
+        (found) => found.scratchThreadId !== undefined,
+      )
+    : Option.some({ projectId: ProjectId.make(decodedId.value) });
+  if (Option.isNone(key)) return HttpServerResponse.text("Not Found", { status: 404 });
+  const { projectId } = key.value;
   const project = yield* deps.projects.get(projectId).pipe(Effect.orElseSucceed(Option.none));
   if (Option.isNone(project)) return HttpServerResponse.text("Not Found", { status: 404 });
+  // The scratch Project's Threads each have their own repository, never a shared one.
+  if (
+    key.value.scratchThreadId === undefined &&
+    isScratchWorkspaceRoot(deps.path, deps.baseDir, project.value.workspaceRoot)
+  ) {
+    return HttpServerResponse.text("Not Found", { status: 404 });
+  }
   // The machine works for its owner only: in Spaces where they may start Threads.
   const allowed = yield* deps.spaces
     .claimCreation({ action: "thread.create", actorUserId: check.ownerUserId, projectId })
@@ -206,8 +241,12 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
     );
   if (!allowed) return HttpServerResponse.text("Forbidden", { status: 403 });
 
-  const prefixes = yield* refPrefixesFor(deps, projectId, check.environmentId);
-  yield* deps.repositories.ensure(projectId);
+  const prefixes = yield* refPrefixesFor(deps, key.value, check.environmentId);
+  // A Thread's own repository is only for the machine that runs it (or the target of its move).
+  if (key.value.scratchThreadId !== undefined && prefixes.readable.length === 0) {
+    return HttpServerResponse.text("Forbidden", { status: 403 });
+  }
+  yield* deps.repositories.ensure(key.value);
   const contentType = request.headers["content-type"];
   const contentEncoding = request.headers["content-encoding"];
   const gitProtocol = request.headers["git-protocol"];
@@ -225,7 +264,7 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
     ]),
     GIT_PROJECT_ROOT: deps.repositories.root,
     GIT_HTTP_EXPORT_ALL: "1",
-    PATH_INFO: `/${deps.repositories.directoryOf(projectId)}/${endpoint}`,
+    PATH_INFO: `/${deps.repositories.directoryOf(key.value)}/${endpoint}`,
     REQUEST_METHOD: request.method,
     QUERY_STRING: url.value.search.slice(1),
     REMOTE_USER: check.environmentId,
@@ -344,9 +383,14 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
  */
 const refPrefixesFor = Effect.fn("HubRepositoryHttp.refPrefixesFor")(function* (
   deps: { readonly sql: SqlClient.SqlClient; readonly digest: Digest.Digest["Service"] },
-  projectId: ProjectId,
+  key: HubRepository.HubRepositoryKey,
   environmentId: EnvironmentId,
 ) {
+  // A Thread's own repository holds that Thread's refs only.
+  const repositoryThreads =
+    key.scratchThreadId === undefined
+      ? deps.sql`thread.project_id = ${key.projectId}`
+      : deps.sql`thread.thread_id = ${key.scratchThreadId}`;
   const rows = yield* deps.sql<{
     readonly threadId: string;
     readonly scopeId: string | null;
@@ -357,7 +401,7 @@ const refPrefixesFor = Effect.fn("HubRepositoryHttp.refPrefixesFor")(function* (
     FROM orchestration_v2_projection_threads thread
     LEFT JOIN orchestration_v2_projection_checkpoint_scopes scope
       ON scope.thread_id = thread.thread_id
-    WHERE thread.project_id = ${projectId}
+    WHERE ${repositoryThreads}
       AND (
         thread.active_environment_id = ${environmentId}
         OR (
@@ -402,6 +446,8 @@ export const layer = HttpRouter.use((router) =>
         Config.withDefault(2 * 1024 * 1024 * 1024),
       ),
       nullDevice: (yield* HostProcess.Platform) === "win32" ? "NUL" : "/dev/null",
+      path: yield* Path.Path,
+      baseDir: (yield* ServerConfig.ServerConfig).baseDir,
     }).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("Hub repository request failed", { cause }).pipe(
