@@ -18,10 +18,8 @@ import {
   type EnvironmentLiveProviderSession,
   type EnvironmentOrchestrationCapabilities,
   ProviderDriverKind,
-  type ProjectId,
   type ProviderInstanceId,
   type ThreadId,
-  VcsUnsupportedOperationError,
 } from "@t3tools/contracts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -264,34 +262,22 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
       .pipe(Effect.mapError((cause) => `Could not clone the Project: ${cause.message}`));
   });
 
-  /** Pushes to or fetches from the Hub's repository of the Project, over HTTP with the credential. */
-  const transfer = (
-    operation: string,
-    run: typeof HubRepository.pushRefs | typeof HubRepository.fetchMissingRefs,
-    request: {
-      readonly cwd: string;
-      readonly projectId: ProjectId;
-      readonly checkpointRefs: ReadonlyArray<
-        RemoteInput<"checkpoint.push">["checkpointRefs"][number]
-      >;
-    },
-  ) =>
-    Option.isNone(vcs) || input.credential === undefined
-      ? Effect.fail(
-          new VcsUnsupportedOperationError({
-            operation,
-            kind: "git",
-            detail: "This machine cannot reach the Hub repository.",
-          }),
-        )
-      : run({
-          cwd: request.cwd,
-          remote: HubRepository.withEnvironmentCredential(
-            HubRepository.hubRepositoryUrl(input.hubUrl, request.projectId),
-            input.credential,
-          ),
-          refs: request.checkpointRefs,
-        }).pipe(Effect.provideService(VcsProcess.VcsProcess, vcs.value));
+  // The Hub's repository of a Project, over HTTP with this machine's credential.
+  const credential = input.credential;
+  const hubRepository = HubRepository.makeCheckoutTransfers({
+    vcs: Option.getOrUndefined(vcs),
+    remoteOf:
+      credential === undefined
+        ? undefined
+        : (projectId) =>
+            Effect.succeed(
+              HubRepository.withEnvironmentCredential(
+                HubRepository.hubRepositoryUrl(input.hubUrl, projectId),
+                credential,
+              ),
+            ),
+    unavailable: "This machine cannot reach the Hub repository.",
+  });
 
   /** Fetches from the Hub, by hash, the attachments a turn needs and this machine lacks. */
   const ensureAttachments = Effect.fn("EnvironmentAgent.ensureAttachments")(function* (
@@ -362,15 +348,17 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
       const hubRefs = request.checkout.hubRefs;
       // Once the Hub repository has the Thread's checkpoints, this checkout gets the ones it lacks.
       if (hubRefs !== undefined) {
-        yield* transfer("HubRepository.fetch", HubRepository.fetchMissingRefs, {
-          cwd: request.checkout.path,
-          projectId: hubRefs.projectId,
-          checkpointRefs: hubRefs.refs,
-        }).pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("Could not fetch the Thread's checkpoints from the Hub", { cause }),
-          ),
-        );
+        yield* hubRepository
+          .fetch({
+            cwd: request.checkout.path,
+            projectId: hubRefs.projectId,
+            checkpointRefs: hubRefs.refs,
+          })
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Could not fetch the Thread's checkpoints from the Hub", { cause }),
+            ),
+          );
       }
     }
     // The agent here reaches the Hub's MCP, with the credential the Hub issued for this Thread.
@@ -557,17 +545,9 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
       case "checkpoint.deleteRefs":
         return checkpoints.deleteCheckpointRefs(request as RemoteInput<"checkpoint.deleteRefs">);
       case "checkpoint.push":
-        return transfer(
-          "HubRepository.push",
-          HubRepository.pushRefs,
-          request as RemoteInput<"checkpoint.push">,
-        );
+        return hubRepository.push(request as RemoteInput<"checkpoint.push">);
       case "checkpoint.fetch":
-        return transfer(
-          "HubRepository.fetch",
-          HubRepository.fetchMissingRefs,
-          request as RemoteInput<"checkpoint.fetch">,
-        );
+        return hubRepository.fetch(request as RemoteInput<"checkpoint.fetch">);
     }
   };
 

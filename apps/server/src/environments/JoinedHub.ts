@@ -264,18 +264,16 @@ const readCredential = (secrets: ServerSecretStore.ServerSecretStore["Service"])
     Effect.orElseSucceed(() => Option.none<string>()),
   );
 
-const layerConnector = (joined: JoinedHubState) =>
+const layerConnector = (joined: JoinedHubState, credential: Option.Option<string>) =>
   Layer.effect(
     HubConnector,
     Effect.gen(function* () {
-      const secrets = yield* ServerSecretStore.ServerSecretStore;
       const reports = yield* makeReports;
       const state = yield* Ref.make<JoinedConnectionState>({
         _tag: "connecting",
         attempt: 0,
         lastError: null,
       });
-      const credential = yield* readCredential(secrets);
       const run = Effect.gen(function* () {
         if (Option.isNone(credential)) {
           return yield* Ref.set(state, {
@@ -324,19 +322,20 @@ const layerConnector = (joined: JoinedHubState) =>
 
 /** The connection to the Hub and the agent that serves its requests on this machine. */
 export const layer = (joined: JoinedHubState) =>
-  layerConnector(joined).pipe(
-    Layer.provide(
-      Layer.unwrap(
-        Effect.gen(function* () {
-          const credential = yield* readCredential(yield* ServerSecretStore.ServerSecretStore);
-          return EnvironmentAgent.layer({
+  Layer.unwrap(
+    Effect.gen(function* () {
+      // Read once: the socket and the Hub repository use the same credential.
+      const credential = yield* readCredential(yield* ServerSecretStore.ServerSecretStore);
+      return layerConnector(joined, credential).pipe(
+        Layer.provide(
+          EnvironmentAgent.layer({
             environmentId: joined.environmentId,
             hubUrl: joined.hubUrl,
             credential: Option.getOrUndefined(credential),
-          });
-        }),
-      ),
-    ),
+          }),
+        ),
+      );
+    }),
   );
 
 /** `/health` on loopback: what `t3 status` shows about a joined machine. */

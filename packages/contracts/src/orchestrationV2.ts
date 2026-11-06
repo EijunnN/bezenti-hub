@@ -1417,6 +1417,10 @@ export const OrchestrationV2Checkpoint = Schema.Struct({
 });
 export type OrchestrationV2Checkpoint = typeof OrchestrationV2Checkpoint.Type;
 
+/** The Hub's repository of the Project has the checkpoint's ref: it sets `uploadedToHub`. */
+export const OrchestrationV2CheckpointUploaded = Schema.Struct({ checkpointId: CheckpointId });
+export type OrchestrationV2CheckpointUploaded = typeof OrchestrationV2CheckpointUploaded.Type;
+
 export const OrchestrationV2CheckpointRollbackRequest = Schema.Struct({
   scopeId: CheckpointScopeId,
   checkpointId: CheckpointId,
@@ -2004,6 +2008,11 @@ export const OrchestrationV2DomainEvent = Schema.Union([
     ...OrchestrationV2EventBase.fields,
     type: Schema.Literal("checkpoint.rollback-requested"),
     payload: OrchestrationV2CheckpointRollbackRequest,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("checkpoint.uploaded"),
+    payload: OrchestrationV2CheckpointUploaded,
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
@@ -2891,6 +2900,11 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
     ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("checkpoint.rollback-requested"),
     payload: OrchestrationV2CheckpointRollbackRequestJson,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("checkpoint.uploaded"),
+    payload: OrchestrationV2CheckpointUploaded,
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,

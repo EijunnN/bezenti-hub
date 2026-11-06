@@ -410,6 +410,15 @@ export function applyOrchestrationV2ProjectionEvent(
       return { ...base, checkpointScopes: upsertEntity(base.checkpointScopes, event.payload) };
     case "checkpoint.captured":
       return { ...base, checkpoints: upsertEntity(base.checkpoints, event.payload) };
+    case "checkpoint.uploaded":
+      return {
+        ...base,
+        checkpoints: base.checkpoints.map((checkpoint) =>
+          checkpoint.id === event.payload.checkpointId
+            ? { ...checkpoint, uploadedToHub: true }
+            : checkpoint,
+        ),
+      };
     case "checkpoint.rollback-requested":
       return base;
     case "context-handoff.updated":

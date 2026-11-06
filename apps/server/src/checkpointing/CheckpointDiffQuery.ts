@@ -18,6 +18,7 @@ import * as Schema from "effect/Schema";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import { CHECKPOINT_DIFF_MAX_OUTPUT_BYTES } from "../vcs/VcsDriver.ts";
 import { checkpointRefForScopeOrdinal } from "../orchestration-v2/CheckpointService.ts";
+import type { ProjectionCheckpointContext } from "../orchestration-v2/ProjectionStore.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import {
   CheckpointDiffResultInvalidError,
@@ -99,16 +100,24 @@ export const make = Effect.gen(function* () {
     "diffCheckpoints" | "listAuthoredPaths"
   >;
   /**
-   * Where a diff reads both refs: the Hub repository once it has them, so it needs no machine;
-   * else the workspace on the Thread's Active environment, which captured them.
+   * Where a diff reads both refs: the Hub repository once both checkpoints are marked uploaded
+   * (a ref there may be an older capture of a reused ordinal), so it needs no machine; else the
+   * workspace on the Thread's Active environment, which captured them.
    */
   const readsFor = Effect.fn("CheckpointDiffQuery.readsFor")(function* (input: {
     readonly threadId: ThreadId;
     readonly projectId: ProjectId | undefined;
     readonly workspaceCwd: string;
     readonly refs: ReadonlyArray<CheckpointRef>;
+    readonly checkpoints: ProjectionCheckpointContext["checkpoints"];
   }) {
-    if (input.projectId !== undefined && Option.isSome(hubRepositories)) {
+    const uploaded = input.refs.every((ref) =>
+      input.checkpoints.some(
+        (checkpoint) =>
+          checkpoint.ref === ref && checkpoint.status === "ready" && checkpoint.uploadedToHub === 1,
+      ),
+    );
+    if (uploaded && input.projectId !== undefined && Option.isSome(hubRepositories)) {
       const repositories = hubRepositories.value;
       if (yield* repositories.hasRefs(input.projectId, input.refs)) {
         const cwd = yield* repositories.ensure(input.projectId);
@@ -247,6 +256,7 @@ export const make = Effect.gen(function* () {
         projectId: projection.projectId,
         workspaceCwd: toScope.cwd,
         refs: [fromCheckpointRef, toCheckpoint.ref],
+        checkpoints: projection.checkpoints,
       });
       const comparison = {
         cwd,

@@ -1,7 +1,7 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it, vi } from "@effect/vitest";
-import { CheckpointRef, CheckpointScopeId, RunId, ThreadId } from "@t3tools/contracts";
+import { CheckpointRef, CheckpointScopeId, ProjectId, RunId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -15,6 +15,7 @@ import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as CheckpointDiffQuery from "./CheckpointDiffQuery.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
+import * as HubRepository from "./HubRepository.ts";
 import { CheckpointRefUnavailableError, CheckpointTurnRangeUnavailableError } from "./Errors.ts";
 
 const threadId = ThreadId.make("thread:checkpoint-diff-v2");
@@ -341,5 +342,70 @@ it.effect("preserves an exact-fit filtered patch across batches without a marker
     const result = yield* query.getFullThreadDiff({ threadId, toTurnCount: 2 });
     assert.isTrue(result.diff === patches.join(""));
     assert.strictEqual(patchReads, 2);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect.each([
+  { uploadedToHub: undefined, reads: "the workspace" },
+  { uploadedToHub: 1, reads: "the Hub" },
+])("reads a turn diff from $reads when the checkpoints' upload is $uploadedToHub", (row) => {
+  const firstRef = CheckpointRef.make("refs/t3/test/first");
+  // The Hub repository has both refs, but they are only the turn's once the upload is marked:
+  // after a rollback the same names may hold another capture.
+  const layer = CheckpointDiffQuery.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ThreadManagement.ThreadManagementService)({
+          getCheckpointContext: () =>
+            Effect.succeed({
+              ...makeProjection(),
+              projectId: ProjectId.make("project:checkpoint-diff-v2"),
+              checkpoints: [
+                {
+                  scopeId: secondScopeId,
+                  runId: firstRunId,
+                  ordinalWithinScope: 0,
+                  appRunOrdinal: 1,
+                  status: "ready",
+                  ref: firstRef,
+                  ...(row.uploadedToHub === undefined ? {} : { uploadedToHub: row.uploadedToHub }),
+                },
+                {
+                  scopeId: secondScopeId,
+                  runId: secondRunId,
+                  ordinalWithinScope: 1,
+                  appRunOrdinal: 2,
+                  status: "ready",
+                  ref: secondRef,
+                  ...(row.uploadedToHub === undefined ? {} : { uploadedToHub: row.uploadedToHub }),
+                },
+              ],
+            }),
+        }),
+        Layer.mock(CheckpointStore.CheckpointStore)({
+          diffCheckpoints: () => Effect.succeed("from the workspace"),
+          listAuthoredPaths: () => Effect.succeed(null),
+        }),
+        Layer.mock(HubRepository.HubRepositories)({
+          root: "/hub",
+          directoryOf: () => "project.git",
+          hasRefs: () => Effect.succeed(true),
+          ensure: () => Effect.succeed("/hub/project.git"),
+          checkpoints: {
+            diffCheckpoints: () => Effect.succeed("from the Hub"),
+            listAuthoredPaths: () => Effect.succeed(null),
+          } as unknown as HubRepository.HubRepositories["Service"]["checkpoints"],
+        }),
+      ),
+    ),
+    Layer.provideMerge(NodeCrypto.layer),
+  );
+  return Effect.gen(function* () {
+    const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+    const result = yield* query.getTurnDiff({ threadId, fromTurnCount: 1, toTurnCount: 2 });
+    assert.strictEqual(
+      result.diff,
+      row.uploadedToHub === undefined ? "from the workspace" : "from the Hub",
+    );
   }).pipe(Effect.provide(layer));
 });

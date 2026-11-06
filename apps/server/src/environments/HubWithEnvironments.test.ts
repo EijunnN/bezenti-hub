@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- writes one attachment file for the Hub to serve.
 import * as NodeFSP from "node:fs/promises";
 
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
@@ -49,6 +50,7 @@ import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { ClaudeOrchestratorReplayHarness } from "../orchestration-v2/Adapters/ClaudeAdapterV2.testkit.ts";
+import { checkpointRefForScopeOrdinal } from "../orchestration-v2/CheckpointService.ts";
 import * as CheckpointUploadService from "../orchestration-v2/CheckpointUploadService.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
@@ -728,10 +730,13 @@ const awaitUploaded = Effect.fn(function* (hub: Hub, threadId: ThreadId, appRunO
   // The orchestration's own event stream: it sees the uploader's writes as clients do.
   yield* orchestrator.streamStoredEventsFrom({ threadId, afterSequence }).pipe(
     Stream.filter(
-      (stored) =>
-        stored.event.type === "checkpoint.captured" &&
-        stored.event.payload.uploadedToHub === true &&
-        stored.event.payload.appRunOrdinal === appRunOrdinal,
+      ({ event }) =>
+        event.type === "checkpoint.uploaded" &&
+        projection.checkpoints.some(
+          (checkpoint) =>
+            checkpoint.id === event.payload.checkpointId &&
+            checkpoint.appRunOrdinal === appRunOrdinal,
+        ),
     ),
     Stream.runHead,
     Effect.orDie,
@@ -769,6 +774,98 @@ const withEditingTurns = (
         ),
     })),
   ).pipe(Layer.provide(adapters));
+
+/** Ready checkpoints of a Thread (turns 1..count) that the Hub repository does not have yet. */
+const seedCheckpoints = Effect.fn(function* (hub: Hub, threadId: ThreadId, count: number) {
+  const projection = yield* hub
+    .service(Orchestrator.OrchestratorV2)
+    .getThreadProjection(threadId)
+    .pipe(Effect.orDie);
+  const now = projection.thread.createdAt;
+  const scopeId = CheckpointScopeId.make("scope:protocol");
+  const nodeId = NodeId.make("node:protocol");
+  const seeded = Array.from({ length: count }, (_, index) => ({
+    ordinal: index + 1,
+    ref: CheckpointRef.make(`refs/t3/orchestration-v2/checkpoints/protocol/ordinal/${index + 1}`),
+    checkpointId: CheckpointId.make(`checkpoint:protocol:${index + 1}`),
+  }));
+  yield* hub.server.eventSink
+    .write({
+      events: [
+        {
+          id: EventId.make("event:protocol-scope"),
+          type: "checkpoint-scope.created",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: scopeId,
+            threadId,
+            runId: null,
+            nodeId,
+            parentScopeId: null,
+            providerThreadId: null,
+            kind: "root_run",
+            ordinalWithinParent: 0,
+            advancesAppRunCount: true,
+            cwd: "/remote/projects/protocol",
+            createdAt: now,
+          },
+        },
+        ...seeded.map((checkpoint) => ({
+          id: EventId.make(`event:protocol-checkpoint:${checkpoint.ordinal}`),
+          type: "checkpoint.captured" as const,
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: checkpoint.checkpointId,
+            threadId,
+            scopeId,
+            runId: null,
+            nodeId,
+            parentCheckpointId: null,
+            ordinalWithinScope: checkpoint.ordinal,
+            appRunOrdinal: checkpoint.ordinal,
+            ref: checkpoint.ref,
+            status: "ready" as const,
+            files: [],
+            capturedAt: now,
+            uploadedToHub: false,
+          },
+        })),
+      ],
+    })
+    .pipe(Effect.orDie);
+  return seeded as [(typeof seeded)[number], ...typeof seeded];
+});
+
+/** The machine answers the Hub's next request, which must be `method` with `payload`. */
+const answerNext = Effect.fn(function* (
+  machine: {
+    readonly nextFrame: Effect.Effect<Record<string, unknown>>;
+    readonly connection: RemoteEnvironments.RemoteConnection;
+  },
+  method: string,
+  payload: unknown,
+  result:
+    | { readonly _tag: "success"; readonly value: unknown }
+    | { readonly _tag: "failure"; readonly error: unknown },
+) {
+  const frame = yield* machine.nextFrame;
+  assert.deepEqual({ method: frame.method, payload: frame.payload }, { method, payload });
+  yield* machine.connection.receive({ type: "response", requestId: frame.requestId, result });
+});
+
+const PUSH_FAILED = {
+  _tag: "failure",
+  error: {
+    _tag: "VcsProcessExitError",
+    operation: "HubRepository.push",
+    command: "git push",
+    cwd: "/remote/projects/protocol",
+    exitCode: 1,
+    detail: "src refspec does not match any",
+  },
+} as const;
 
 describe("Hub repository", () => {
   it.live(
@@ -819,12 +916,12 @@ describe("Hub repository", () => {
             Effect.orDie,
           );
 
-        assert.equal((yield* push(own)).exitCode, 0);
+        // Its own Project: it may fetch (which refs it may see is the next test's).
         const listed = yield* git(workspaceRoot, ["ls-remote", remote(own).url], {
           env: remote(own).env ?? {},
         });
         assert.equal(listed.exitCode, 0);
-        assert.include(listed.stdout, ref);
+        assert.equal(yield* advertised(own), 200);
 
         // Another User's Space: the Owner's machine neither reads nor writes its Project.
         assert.equal(yield* advertised(others), 403);
@@ -837,7 +934,12 @@ describe("Hub repository", () => {
           .service(EnvironmentRegistry.EnvironmentRegistry)
           .remove({ actorUserId: owner, environmentId: laptop.environmentId });
         assert.equal(yield* advertised(own), 401);
-        assert.notEqual((yield* push(own)).exitCode, 0);
+        assert.notEqual(
+          (yield* git(workspaceRoot, ["ls-remote", remote(own).url], {
+            env: remote(own).env ?? {},
+          })).exitCode,
+          0,
+        );
       }).pipe(Effect.scoped),
   );
 
@@ -882,63 +984,103 @@ describe("Hub repository", () => {
       }).pipe(Effect.scoped),
   );
 
-  it.live("a failed upload shows as not uploaded and retries when the machine comes back", () =>
+  it.live("a machine reads and writes only the refs of Threads it runs, and deletes none", () =>
     Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("claudeAgent");
       const hub = yield* makeHub();
-      const opened = yield* openProtocolSession(hub);
-      const { threadId } = opened;
+      const laptop = yield* hub.join({ name: "Laptop", adapters: idleAdapters(instanceId) });
+      const desktop = yield* hub.join({ name: "Desktop", adapters: idleAdapters(instanceId) });
+      const projectId = ProjectId.make("project:shared");
+      const { workspaceRoot } = yield* seedProject(hub.server, {
+        projectId,
+        title: "Shared",
+        defaultModelSelection: null,
+      });
+      const threadId = ThreadId.make("thread:on-laptop");
+      yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("command:thread-on-laptop"),
+        threadId,
+        projectId,
+        title: "On the Laptop",
+        modelSelection: { instanceId, model: "claude-sonnet-4-6" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        activeEnvironmentId: laptop.environmentId,
+      });
+      const scopeId = CheckpointScopeId.make("scope:on-laptop");
       const projection = yield* hub
         .service(Orchestrator.OrchestratorV2)
         .getThreadProjection(threadId);
-      const now = projection.thread.createdAt;
-      const scopeId = CheckpointScopeId.make("scope:protocol");
-      const nodeId = NodeId.make("node:protocol");
-      const ref = CheckpointRef.make("refs/t3/orchestration-v2/checkpoints/protocol/ordinal/1");
-      const checkpointId = CheckpointId.make("checkpoint:protocol");
       yield* hub.server.eventSink.write({
         events: [
           {
-            id: EventId.make("event:protocol-scope"),
+            id: EventId.make("event:on-laptop-scope"),
             type: "checkpoint-scope.created",
             threadId,
-            occurredAt: now,
+            occurredAt: projection.thread.createdAt,
             payload: {
               id: scopeId,
               threadId,
               runId: null,
-              nodeId,
+              nodeId: NodeId.make("node:on-laptop"),
               parentScopeId: null,
               providerThreadId: null,
               kind: "root_run",
               ordinalWithinParent: 0,
               advancesAppRunCount: true,
-              cwd: "/remote/projects/protocol",
-              createdAt: now,
-            },
-          },
-          {
-            id: EventId.make("event:protocol-checkpoint"),
-            type: "checkpoint.captured",
-            threadId,
-            occurredAt: now,
-            payload: {
-              id: checkpointId,
-              threadId,
-              scopeId,
-              runId: null,
-              nodeId,
-              parentCheckpointId: null,
-              ordinalWithinScope: 1,
-              appRunOrdinal: 1,
-              ref,
-              status: "ready",
-              files: [],
-              capturedAt: now,
-              uploadedToHub: false,
+              cwd: workspaceRoot,
+              createdAt: projection.thread.createdAt,
             },
           },
         ],
       });
+      const checkpointRef = yield* checkpointRefForScopeOrdinal({
+        scopeId,
+        ordinalWithinScope: 1,
+      }).pipe(Effect.provide(NodeCrypto.layer));
+      const headRef = `${HubRepository.threadRefPrefixes(threadId)[0]}head`;
+      yield* git(workspaceRoot, ["update-ref", checkpointRef, "HEAD"]);
+      yield* git(workspaceRoot, ["update-ref", headRef, "HEAD"]);
+      const on = (machine: TestEnvironment, ...args: ReadonlyArray<string>) => {
+        const remote = HubRepository.withEnvironmentCredential(
+          HubRepository.hubRepositoryUrl(hub.server.url, projectId),
+          machine.credential,
+        );
+        return git(workspaceRoot, [args[0]!, remote.url, ...args.slice(1)], {
+          env: remote.env ?? {},
+        });
+      };
+
+      // The Laptop runs the Thread: it uploads the Thread's refs.
+      const succeeded = (output: { readonly exitCode: number; readonly stderr: string }) =>
+        assert.equal(output.exitCode, 0, output.stderr);
+      succeeded(yield* on(laptop, "push", `+${checkpointRef}:${checkpointRef}`));
+      succeeded(yield* on(laptop, "push", `+${headRef}:${headRef}`));
+      assert.include((yield* on(laptop, "ls-remote")).stdout, checkpointRef);
+      // Another machine sees none of them and changes none, nor writes outside a Thread's refs.
+      const seen = (yield* on(desktop, "ls-remote")).stdout;
+      assert.notInclude(seen, checkpointRef);
+      assert.notInclude(seen, headRef);
+      assert.notEqual((yield* on(desktop, "push", `+HEAD:${checkpointRef}`)).exitCode, 0);
+      assert.notEqual((yield* on(desktop, "push", `+HEAD:${headRef}`)).exitCode, 0);
+      assert.notEqual((yield* on(laptop, "push", "+HEAD:refs/heads/main")).exitCode, 0);
+      // Nobody deletes on the Hub, the machine that runs the Thread included.
+      assert.notEqual((yield* on(laptop, "push", `:${checkpointRef}`)).exitCode, 0);
+      assert.include((yield* on(laptop, "ls-remote")).stdout, checkpointRef);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a failed upload shows as not uploaded and retries when the machine comes back", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub();
+      const opened = yield* openProtocolSession(hub);
+      const { threadId } = opened;
+      const [{ ref, checkpointId }] = yield* seedCheckpoints(hub, threadId, 1);
       yield* hub.service(CheckpointUploadService.CheckpointUploads).request(threadId);
 
       const pushed = yield* opened.machine.nextFrame;
@@ -985,6 +1127,49 @@ describe("Hub repository", () => {
         result: { _tag: "success", value: null },
       });
       yield* awaitUploaded(hub, threadId, 1);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a ref its machine lacks is left for its source machine and holds back no other", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub();
+      const opened = yield* openProtocolSession(hub);
+      const [first, second] = yield* seedCheckpoints(hub, opened.threadId, 2);
+      assert.isDefined(second);
+      const transfer = (refs: ReadonlyArray<CheckpointRef>) => ({
+        cwd: "/remote/projects/protocol",
+        projectId: "project:protocol",
+        checkpointRefs: refs,
+      });
+      yield* hub.service(CheckpointUploadService.CheckpointUploads).request(opened.threadId);
+
+      // The batch fails, so each ref goes on its own: the one this checkout lacks is set aside.
+      yield* answerNext(
+        opened.machine,
+        "checkpoint.push",
+        transfer([first.ref, second.ref]),
+        PUSH_FAILED,
+      );
+      yield* answerNext(opened.machine, "checkpoint.push", transfer([first.ref]), {
+        _tag: "success",
+        value: null,
+      });
+      yield* answerNext(opened.machine, "checkpoint.push", transfer([second.ref]), PUSH_FAILED);
+      yield* answerNext(
+        opened.machine,
+        "checkpoint.hasRef",
+        { cwd: "/remote/projects/protocol", checkpointRef: second.ref },
+        { _tag: "success", value: false },
+      );
+      yield* awaitUploaded(hub, opened.threadId, 1);
+      const stored = yield* hub.server.sql<{ readonly id: string; readonly uploaded: number }>`
+        SELECT checkpoint_id AS id, uploaded_to_hub AS uploaded
+        FROM orchestration_v2_projection_checkpoints ORDER BY ordinal_within_scope
+      `;
+      assert.deepEqual(stored, [
+        { id: first.checkpointId, uploaded: 1 },
+        { id: second.checkpointId, uploaded: 0 },
+      ]);
     }).pipe(Effect.scoped),
   );
 });

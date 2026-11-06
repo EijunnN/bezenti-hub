@@ -8,6 +8,7 @@ import {
   type ProjectId,
   type VcsError,
   VcsProcessExitError,
+  VcsUnsupportedOperationError,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -26,6 +27,15 @@ const HUB_REPOSITORY_USERNAME = "t3-environment";
 const CREDENTIAL_VARIABLE = "T3CODE_HUB_GIT_CREDENTIAL";
 const TRANSFER_TIMEOUT_MS = 10 * 60_000;
 
+/**
+ * Where a Thread's own refs live in the Hub repository: its working branch and recovered changes.
+ * The id is percent-encoded, as git refuses `:` in a ref name.
+ */
+export const threadRefPrefixes = (threadId: string) => {
+  const key = encodeURIComponent(threadId);
+  return [`refs/t3/threads/${key}/`, `refs/t3/recovered/${key}/`] as const;
+};
+
 export const hubRepositoryUrl = (hubUrl: string, projectId: ProjectId) =>
   new URL(`${HUB_REPOSITORY_ROUTE_PREFIX}/${encodeURIComponent(projectId)}`, hubUrl).toString();
 
@@ -35,23 +45,45 @@ export interface HubRemote {
   readonly env?: Readonly<Record<string, string>>;
 }
 
+const PROTOCOL_VARIABLE = "T3CODE_HUB_GIT_PROTOCOL";
+const HOST_VARIABLE = "T3CODE_HUB_GIT_HOST";
+
+// Answers `get` only for the Hub's own protocol and host:port, all read from the environment.
+const CREDENTIAL_HELPER = [
+  "!f() {",
+  'test "$1" = get || exit 0; p=; h=;',
+  "while IFS='=' read -r k v; do",
+  'case "$k" in protocol) p=$v ;; host) h=$v ;; "") break ;; esac;',
+  "done;",
+  `test "$p" = "$${PROTOCOL_VARIABLE}" && test "$h" = "$${HOST_VARIABLE}" &&`,
+  `printf 'username=${HUB_REPOSITORY_USERNAME}\\npassword=%s\\n' "$${CREDENTIAL_VARIABLE}";`,
+  "}; f",
+].join(" ");
+
 /**
- * The Hub repository over HTTP, with `t3`'s credential helper: it answers the Environment
- * credential from the process environment, never a command line. The empty helper before it drops
- * the user's own helpers, so none of them is asked for the Hub or stores the credential.
+ * The Hub repository over HTTP, with `t3`'s credential helper: the credential stays in the process
+ * environment, never on a command line. The empty helper first drops the user's own, so none is
+ * asked or stores it; redirects are not followed, so it is never sent to another host.
  */
-export const withEnvironmentCredential = (url: string, credential: string): HubRemote => ({
-  url,
-  env: {
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_CONFIG_COUNT: "2",
-    GIT_CONFIG_KEY_0: "credential.helper",
-    GIT_CONFIG_VALUE_0: "",
-    GIT_CONFIG_KEY_1: "credential.helper",
-    GIT_CONFIG_VALUE_1: `!f() { test "$1" = get && printf 'username=${HUB_REPOSITORY_USERNAME}\\npassword=%s\\n' "$${CREDENTIAL_VARIABLE}"; }; f`,
-    [CREDENTIAL_VARIABLE]: credential,
-  },
-});
+export const withEnvironmentCredential = (url: string, credential: string): HubRemote => {
+  const target = new URL(url);
+  return {
+    url,
+    env: {
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_CONFIG_COUNT: "3",
+      GIT_CONFIG_KEY_0: "credential.helper",
+      GIT_CONFIG_VALUE_0: "",
+      GIT_CONFIG_KEY_1: "credential.helper",
+      GIT_CONFIG_VALUE_1: CREDENTIAL_HELPER,
+      GIT_CONFIG_KEY_2: "http.followRedirects",
+      GIT_CONFIG_VALUE_2: "false",
+      [PROTOCOL_VARIABLE]: target.protocol.slice(0, -1),
+      [HOST_VARIABLE]: target.host,
+      [CREDENTIAL_VARIABLE]: credential,
+    },
+  };
+};
 
 /** Git with git's own message on failure; it names the URL, never the credential. */
 const gitIn = (
@@ -158,6 +190,50 @@ export const fetchMissingRefs = Effect.fn("HubRepository.fetchMissingRefs")(func
     ],
   });
 });
+
+export interface CheckoutTransferInput {
+  /** A folder of the checkout on this machine. */
+  readonly cwd: string;
+  readonly projectId: ProjectId;
+  readonly checkpointRefs: ReadonlyArray<CheckpointRef>;
+}
+
+/** A checkout's side of the Hub repository of a Project. */
+export interface CheckoutTransfers {
+  /** Uploads the refs from the checkout, replacing the Hub's refs of the same names. */
+  readonly push: (input: CheckoutTransferInput) => Effect.Effect<void, VcsError>;
+  /** Downloads into the checkout the refs it lacks. */
+  readonly fetch: (input: CheckoutTransferInput) => Effect.Effect<void, VcsError>;
+}
+
+/**
+ * Transfers from this machine's checkouts to the Hub repository `remoteOf` names: on disk for the
+ * Hub machine, over HTTP with the credential for a joined one. Without one, each says why.
+ */
+export const makeCheckoutTransfers = (input: {
+  readonly vcs: VcsProcess.VcsProcess["Service"] | undefined;
+  readonly remoteOf: ((projectId: ProjectId) => Effect.Effect<HubRemote, VcsError>) | undefined;
+  readonly unavailable: string;
+}): CheckoutTransfers => {
+  const transfer =
+    (operation: string, run: typeof pushRefs | typeof fetchMissingRefs) =>
+    (request: CheckoutTransferInput) => {
+      const { vcs, remoteOf } = input;
+      if (vcs === undefined || remoteOf === undefined) {
+        return Effect.fail(
+          new VcsUnsupportedOperationError({ operation, kind: "git", detail: input.unavailable }),
+        );
+      }
+      return remoteOf(request.projectId).pipe(
+        Effect.flatMap((remote) => run({ cwd: request.cwd, remote, refs: request.checkpointRefs })),
+        Effect.provideService(VcsProcess.VcsProcess, vcs),
+      );
+    };
+  return {
+    push: transfer("HubRepository.push", pushRefs),
+    fetch: transfer("HubRepository.fetch", fetchMissingRefs),
+  };
+};
 
 /** A Project's repository folder: readable, and distinct for ids that read alike. */
 const directoryNameOf = (projectId: ProjectId) => {

@@ -251,6 +251,8 @@ const ProjectionCheckpointContext = Schema.Struct({
         appRunOrdinal,
         status,
         ref,
+        /** The `uploaded_to_hub` column: 1 once the Hub repository has this capture. */
+        uploadedToHub: Schema.optionalKey(Schema.NullOr(Schema.Number)),
       }),
     ),
   ),
@@ -979,6 +981,15 @@ export function applyToProjection(
       };
     case "checkpoint.rollback-requested":
       return base;
+    case "checkpoint.uploaded":
+      return {
+        ...base,
+        checkpoints: base.checkpoints.map((checkpoint) =>
+          checkpoint.id === event.payload.checkpointId
+            ? { ...checkpoint, uploadedToHub: true }
+            : checkpoint,
+        ),
+      };
     case "context-handoff.updated":
       return {
         ...base,
@@ -2819,6 +2830,14 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               break;
             }
             case "checkpoint.rollback-requested":
+              break;
+            case "checkpoint.uploaded":
+              yield* sql`
+              UPDATE orchestration_v2_projection_checkpoints
+              SET uploaded_to_hub = 1,
+                payload_json = json_set(payload_json, '$.uploadedToHub', json('true'))
+              WHERE checkpoint_id = ${event.payload.checkpointId}
+            `;
               break;
             case "context-handoff.updated": {
               const payloadJson = yield* encodeContextHandoffPayload(event.payload);
@@ -5330,7 +5349,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               SELECT scope_id AS "scopeId", run_id AS "runId",
                 ordinal_within_scope AS "ordinalWithinScope",
                 app_run_ordinal AS "appRunOrdinal", status,
-                json_extract(payload_json, '$.ref') AS ref
+                json_extract(payload_json, '$.ref') AS ref,
+                uploaded_to_hub AS "uploadedToHub"
               FROM orchestration_v2_projection_checkpoints
               WHERE thread_id = ${threadId}
               ORDER BY scope_id ASC, ordinal_within_scope ASC

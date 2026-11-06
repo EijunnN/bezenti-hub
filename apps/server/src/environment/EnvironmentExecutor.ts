@@ -4,7 +4,6 @@
  * Thread's Environment on each call (`docs/internals/overview.md`, «Environment executors»).
  */
 import {
-  type CheckpointRef,
   ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
   EnvironmentExecutorUnavailableError,
   EnvironmentId,
@@ -17,7 +16,6 @@ import {
   type OrchestrationV2AppThread,
   type ProjectId,
   type ThreadId,
-  VcsUnsupportedOperationError,
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Cause from "effect/Cause";
@@ -86,19 +84,14 @@ export interface EnvironmentWorkspaceRpc {
   readonly ports: PortScanner.PortDiscovery["Service"];
 }
 
-export interface HubRepositoryTransferInput {
-  /** A folder of the checkout on the executor's machine. */
-  readonly cwd: string;
-  readonly projectId: ProjectId;
-  readonly checkpointRefs: ReadonlyArray<CheckpointRef>;
-}
-
 /** The checkout's side of the Hub's repository of a Project (`HubRepository.ts`). */
 export interface EnvironmentHubRepository {
-  /** Uploads the refs from the checkout, replacing the Hub's refs of the same names. */
-  readonly push: (input: HubRepositoryTransferInput) => Effect.Effect<void, CheckpointStoreError>;
-  /** Downloads into the checkout the refs it lacks. */
-  readonly fetch: (input: HubRepositoryTransferInput) => Effect.Effect<void, CheckpointStoreError>;
+  readonly push: (
+    input: HubRepository.CheckoutTransferInput,
+  ) => Effect.Effect<void, CheckpointStoreError>;
+  readonly fetch: (
+    input: HubRepository.CheckoutTransferInput,
+  ) => Effect.Effect<void, CheckpointStoreError>;
 }
 
 export interface EnvironmentExecutor {
@@ -360,32 +353,16 @@ interface InProcessExecutorInput {
 const localHubRepository = (
   repositories: Option.Option<HubRepository.HubRepositories["Service"]>,
   vcs: Option.Option<VcsProcess.VcsProcess["Service"]>,
-): EnvironmentHubRepository => {
-  const transfer =
-    (
-      operation: string,
-      run: typeof HubRepository.pushRefs | typeof HubRepository.fetchMissingRefs,
-    ) =>
-    (input: HubRepositoryTransferInput) =>
-      Option.isNone(repositories) || Option.isNone(vcs)
-        ? Effect.fail(
-            new VcsUnsupportedOperationError({
-              operation,
-              kind: "git",
-              detail: "This server keeps no Hub repository.",
-            }),
-          )
-        : repositories.value.ensure(input.projectId).pipe(
-            Effect.flatMap((repository) =>
-              run({ cwd: input.cwd, remote: { url: repository }, refs: input.checkpointRefs }),
-            ),
-            Effect.provideService(VcsProcess.VcsProcess, vcs.value),
-          );
-  return {
-    push: transfer("HubRepository.push", HubRepository.pushRefs),
-    fetch: transfer("HubRepository.fetch", HubRepository.fetchMissingRefs),
-  };
-};
+): EnvironmentHubRepository =>
+  HubRepository.makeCheckoutTransfers({
+    vcs: Option.getOrUndefined(vcs),
+    remoteOf: Option.match(repositories, {
+      onNone: () => undefined,
+      onSome: (hub) => (projectId: ProjectId) =>
+        hub.ensure(projectId).pipe(Effect.map((url) => ({ url }))),
+    }),
+    unavailable: "This server keeps no Hub repository.",
+  });
 
 /** An executor whose machine is this process. */
 const makeInProcessExecutor = (input: InProcessExecutorInput): EnvironmentExecutor => ({
