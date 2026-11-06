@@ -458,6 +458,8 @@ export const DesktopWslStateSchema = Schema.Struct({
 export const DesktopJoinedEnvironmentStateSchema = Schema.Struct({
   /** The Hub this computer joined, from the joined server's `joined-hub.json`; null when not joined. */
   hub: Schema.NullOr(Schema.Struct({ url: Schema.String, name: Schema.String })),
+  /** `joined-hub.json` is unreadable: nothing starts; Join again replaces it, Leave forgets it. */
+  repair: Schema.NullOr(Schema.String),
   /** The joined server should run: it starts with the app and stops when this is turned off. */
   enabled: Schema.Boolean,
   /** On Windows and Linux, closing the last window leaves the app (and the server) running. */

@@ -40,6 +40,7 @@ function describe(state: DesktopJoinedEnvironmentState): string {
   if (state.joining !== null) {
     return `Approve this computer on ${state.joining.hubUrl} in your browser as its Owner. This finishes by itself.`;
   }
+  if (state.repair !== null) return state.repair;
   if (state.hub === null) {
     return "Run your Hub's Threads on this computer too. It joins the Hub you name, as `t3 join` does, and keeps one connection out to it.";
   }
@@ -109,6 +110,8 @@ export function JoinedEnvironmentSetting() {
 
   const joined = state.hub !== null;
   const joining = state.joining !== null;
+  // An unreadable `joined-hub.json`: join again over it, or leave to forget it.
+  const needsRepair = state.repair !== null;
   const badge =
     state.process === "running" && state.connection !== null
       ? STATUS_BADGES[state.connection.status]
@@ -133,7 +136,7 @@ export function JoinedEnvironmentSetting() {
         description={describe(state)}
         control={
           <div className="flex items-center gap-2">
-            {joined ? (
+            {joined || needsRepair ? (
               <Button
                 size="xs"
                 variant="destructive-outline"
@@ -168,7 +171,7 @@ export function JoinedEnvironmentSetting() {
           </div>
         }
       >
-        {!joined && !joining && showJoinForm ? (
+        {!joined && !joining && (showJoinForm || needsRepair) ? (
           <form
             className="mt-3 flex flex-col gap-2 sm:flex-row"
             onSubmit={(event) => {
@@ -187,7 +190,7 @@ export function JoinedEnvironmentSetting() {
               onChange={(event) => setHubUrl(event.currentTarget.value)}
             />
             <Button disabled={pending || hubUrl.trim() === ""} size="sm" type="submit">
-              Join
+              {needsRepair ? "Join again" : "Join"}
             </Button>
           </form>
         ) : null}
@@ -231,10 +234,13 @@ export function JoinedEnvironmentSetting() {
             <DialogHeader>
               <DialogTitle>Leave the Hub?</DialogTitle>
               <DialogDescription>
-                This computer stops running work for {state.hub?.url} and the Hub removes it. Its
-                Threads stay on the Hub. To come back, join again.
+                This computer stops running work for {state.hub?.url ?? "its Hub"} and the Hub
+                removes it. Its Threads stay on the Hub. To come back, join again.
               </DialogDescription>
             </DialogHeader>
+            {error ? (
+              <p className="whitespace-pre-line px-6 text-sm text-destructive">{error}</p>
+            ) : null}
             <DialogFooter>
               <Button type="button" variant="ghost" onClick={() => setConfirmLeave(false)}>
                 Cancel
@@ -243,7 +249,9 @@ export function JoinedEnvironmentSetting() {
                 disabled={pending}
                 variant="destructive"
                 onClick={() =>
-                  void run(() => bridge.leaveJoinedEnvironment()).then(() => {
+                  void run(() => bridge.leaveJoinedEnvironment()).then((left) => {
+                    // A Leave that failed stays open with its reason.
+                    if (!left) return;
                     setConfirmLeave(false);
                     setShowJoinForm(false);
                   })

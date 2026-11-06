@@ -44,7 +44,11 @@ const HEALTH_PATH = "/health";
 const HEALTH_TIMEOUT = Duration.seconds(2);
 const STOP_TIMEOUT = Duration.seconds(8);
 const ERROR_TAIL_LINES = 3;
-const APPROVAL_LINK = /(https?:\/\/\S*register-environment\?request=\S+)/;
+const APPROVAL_LINK = /(https?:\/\/\S+)/g;
+const REGISTER_PATH = "/register-environment";
+/** After the manager's own stop (SIGTERM, then kill after its grace), how long to see it gone. */
+const EXIT_CHECKS = 10;
+const EXIT_CHECK_INTERVAL = Duration.millis(200);
 // Strips terminal colors from CLI output.
 const ANSI = /\x1b\[[0-9;]*m/g;
 
@@ -93,6 +97,45 @@ export interface JoinedEnvironmentLaunch {
     port: number,
   ) => Effect.Effect<DesktopBackendManager.DesktopBackendStartConfig, PlatformError.PlatformError>;
 }
+
+/** The joined server's process, by the PID the manager started. */
+export interface ProcessControl {
+  readonly isAlive: (pid: number) => boolean;
+  readonly kill: (pid: number) => void;
+}
+
+const nodeProcesses: ProcessControl = {
+  isAlive: (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (cause) {
+      return (cause as NodeJS.ErrnoException).code === "EPERM";
+    }
+  },
+  kill: (pid) => {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Gone already.
+    }
+  },
+};
+
+/** The approval page `t3 join` prints, on the Hub the User named; any other link is ignored. */
+export const approvalLinkIn = (line: string, hubOrigin: string): string | null => {
+  for (const [candidate] of line.replace(ANSI, "").matchAll(APPROVAL_LINK)) {
+    if (!URL.canParse(candidate)) continue;
+    const url = new URL(candidate);
+    if (url.origin === hubOrigin && url.pathname === REGISTER_PATH) return url.href;
+  }
+  return null;
+};
+
+type JoinedHubRead =
+  | { readonly _tag: "none" }
+  | { readonly _tag: "joined"; readonly hub: { readonly url: string; readonly name: string } }
+  | { readonly _tag: "unreadable" };
 
 /** What the CLI keeps in `joined-hub.json`; only what this app shows. */
 const JoinedHub = Schema.fromJsonString(
@@ -156,6 +199,7 @@ const runCli = Effect.fn("desktop.joinedEnvironment.runCli")(function* (
 
 export const make = Effect.fn("desktop.joinedEnvironment.make")(function* (
   launch: JoinedEnvironmentLaunch,
+  processes: ProcessControl = nodeProcesses,
 ) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -207,18 +251,20 @@ export const make = Effect.fn("desktop.joinedEnvironment.make")(function* (
       ),
   });
 
-  const readJoinedHub = Effect.gen(function* () {
+  const readJoinedHub: Effect.Effect<JoinedHubRead> = Effect.gen(function* () {
     if (!(yield* fileSystem.exists(joinedHubPath).pipe(Effect.orElseSucceed(() => false)))) {
-      return Option.none<{ readonly url: string; readonly name: string }>();
+      return { _tag: "none" } as const;
     }
     const hub = yield* fileSystem
       .readFileString(joinedHubPath)
       .pipe(Effect.flatMap(decodeJoinedHub));
-    return Option.some({ url: hub.hubUrl, name: hub.name });
+    return { _tag: "joined", hub: { url: hub.hubUrl, name: hub.name } } as const;
   }).pipe(
-    // An unreadable file still names a joined machine: Leave is the way out.
-    Effect.orElseSucceed(() => Option.some({ url: "unreadable", name: joinedHubPath })),
+    // As `t3 join` and `t3 leave` do: no server starts on it, joining replaces it, leaving
+    // forgets it.
+    Effect.orElseSucceed((): JoinedHubRead => ({ _tag: "unreadable" })),
   );
+  const unreadableMessage = `${joinedHubPath} is unreadable, so this computer's Environment server does not start. Join again to replace it, or Leave to forget it.`;
 
   const readConnection = Effect.gen(function* () {
     const config = yield* server.currentConfig;
@@ -245,7 +291,8 @@ export const make = Effect.fn("desktop.joinedEnvironment.make")(function* (
           : "failed"
         : "stopped";
     return {
-      hub: Option.getOrNull(hub),
+      hub: hub._tag === "joined" ? hub.hub : null,
+      repair: hub._tag === "unreadable" ? unreadableMessage : null,
       enabled: settings.joinedEnvironmentEnabled,
       keepRunningWhenClosed: settings.joinedEnvironmentKeepRunning,
       process,
@@ -274,7 +321,7 @@ export const make = Effect.fn("desktop.joinedEnvironment.make")(function* (
     const settings = yield* appSettings.get;
     const hub = yield* readJoinedHub;
     yield* syncKeepRunning;
-    if (settings.joinedEnvironmentEnabled && Option.isSome(hub)) {
+    if (settings.joinedEnvironmentEnabled && hub._tag === "joined") {
       const snapshot = yield* server.snapshot;
       if (!snapshot.desiredRunning) {
         yield* Ref.set(startupFailure, null);
@@ -307,6 +354,7 @@ export const make = Effect.fn("desktop.joinedEnvironment.make")(function* (
 
   const runJoin = Effect.fn("desktop.joinedEnvironment.runJoin")(function* (input: {
     readonly hubUrl: string;
+    readonly hubOrigin: string;
     readonly name?: string;
   }) {
     const name = input.name?.trim() || NodeOS.hostname() || "This computer";
@@ -321,12 +369,17 @@ export const make = Effect.fn("desktop.joinedEnvironment.make")(function* (
         name.slice(0, 64),
       ]),
       (line) => {
-        const approvalUrl = APPROVAL_LINK.exec(line.replace(ANSI, ""))?.[1];
-        if (approvalUrl === undefined) return Effect.void;
-        return Ref.update(
-          joining,
-          Option.map((pending) => ({ ...pending, approvalUrl })),
-        ).pipe(Effect.andThen(shell.openExternal(approvalUrl)), Effect.asVoid);
+        const approvalUrl = approvalLinkIn(line, input.hubOrigin);
+        if (approvalUrl === null) return Effect.void;
+        return Ref.modify(joining, (current) => {
+          const pending = Option.getOrNull(current);
+          // Opened once: the first approval page on the Hub the User named.
+          if (pending === null || pending.approvalUrl !== null) return [false, current] as const;
+          return [true, Option.some({ ...pending, approvalUrl })] as const;
+        }).pipe(
+          Effect.flatMap((first) => (first ? shell.openExternal(approvalUrl) : Effect.void)),
+          Effect.asVoid,
+        );
       },
     ).pipe(provideSpawner);
     if (result.exitCode !== 0) {
@@ -346,14 +399,21 @@ export const make = Effect.fn("desktop.joinedEnvironment.make")(function* (
         detail: "Already joining; approve or cancel that first.",
       });
     }
-    if (Option.isSome(yield* readJoinedHub)) {
+    // An unreadable `joined-hub.json` is joined over, as `t3 join` does.
+    if ((yield* readJoinedHub)._tag === "joined") {
       return yield* new DesktopJoinedEnvironmentError({
         detail: "This computer is already an Environment of a Hub. Leave it first.",
       });
     }
+    if (!URL.canParse(input.hubUrl)) {
+      return yield* new DesktopJoinedEnvironmentError({
+        detail: "Enter the Hub's address, like https://hub.example.com.",
+      });
+    }
+    const hubOrigin = new URL(input.hubUrl).origin;
     yield* Ref.set(lastError, null);
     yield* Ref.set(joining, Option.some({ hubUrl: input.hubUrl, approvalUrl: null, fiber: null }));
-    const fiber = yield* runJoin(input).pipe(
+    const fiber = yield* runJoin({ ...input, hubOrigin }).pipe(
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)
           ? Effect.void
@@ -383,10 +443,14 @@ export const make = Effect.fn("desktop.joinedEnvironment.make")(function* (
   const setEnabled = Effect.fn("desktop.joinedEnvironment.setEnabled")(function* (
     enabled: boolean,
   ) {
-    if (enabled && Option.isNone(yield* readJoinedHub)) {
+    const hub: JoinedHubRead["_tag"] = enabled ? (yield* readJoinedHub)._tag : "joined";
+    if (hub === "none") {
       return yield* new DesktopJoinedEnvironmentError({
         detail: "Join a Hub first: this computer is not one of its Environments yet.",
       });
+    }
+    if (hub === "unreadable") {
+      return yield* new DesktopJoinedEnvironmentError({ detail: unreadableMessage });
     }
     yield* Ref.set(lastError, null);
     yield* saveSettings({ enabled });
@@ -402,9 +466,26 @@ export const make = Effect.fn("desktop.joinedEnvironment.make")(function* (
     return yield* state;
   });
 
+  /** The server's process is gone: killed by PID if the manager's stop did not end it. */
+  const confirmStopped = Effect.gen(function* () {
+    const pid = Option.getOrNull((yield* server.snapshot).activePid);
+    if (pid === null || !processes.isAlive(pid)) return;
+    yield* logWarning("the joined Environment server outlived its stop; killing it", { pid });
+    processes.kill(pid);
+    for (let check = 0; check < EXIT_CHECKS; check += 1) {
+      if (!processes.isAlive(pid)) return;
+      yield* Effect.sleep(EXIT_CHECK_INTERVAL);
+    }
+    return yield* new DesktopJoinedEnvironmentError({
+      detail: `This computer's Environment server (process ${pid}) did not stop, so it still holds ${launch.baseDir}. Quit T3 Code, then Leave again.`,
+    });
+  });
+
   const leave = Effect.gen(function* () {
     yield* saveSettings({ enabled: false });
     yield* reconcile;
+    // `t3 leave` beside a server still running there would orphan it with the state dir.
+    yield* confirmStopped;
     yield* Ref.set(lastError, null);
     const result = yield* runCli(launch.cli(["leave", "--base-dir", launch.baseDir])).pipe(
       provideSpawner,

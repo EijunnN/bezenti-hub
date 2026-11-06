@@ -3,6 +3,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as NetService from "@t3tools/shared/Net";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -39,11 +40,28 @@ interface Run {
 const makeHarness = Effect.fn(function* (options?: {
   readonly joinOutcome?: "approve" | "deny";
   readonly connection?: Record<string, unknown>;
+  /** Lines `t3 join` prints before its approval link. */
+  readonly joinPreamble?: ReadonlyArray<string>;
+  /** What `joined-hub.json` holds at launch. */
+  readonly joinedHub?: string;
+  readonly settings?: Partial<DesktopAppSettings.DesktopSettings>;
+  /** The server neither exits on stop nor on SIGTERM; `kills` says whether SIGKILL ends it. */
+  readonly stuckServer?: { readonly killEndsIt: boolean };
 }) {
   const baseDir = "/home/me/.t3/joined-environment";
   const joinedHubPath = `${baseDir}/userdata/joined-hub.json`;
   // The joined server's T3 home, as the stand-in CLI leaves it.
   const files = new Map<string, string>([[baseDir, ""]]);
+  if (options?.joinedHub !== undefined) files.set(joinedHubPath, options.joinedHub);
+  const stuckRelease = yield* Deferred.make<void>();
+  let serverAlive = false;
+  // The stuck server's own exit, which only SIGKILL (or the test's end) brings.
+  let stuckExited: Deferred.Deferred<number> | null = null;
+  const endStuckServer = () => {
+    if (stuckExited !== null) Deferred.doneUnsafe(stuckExited, Effect.succeed(0));
+    Deferred.doneUnsafe(stuckRelease, Effect.void);
+  };
+  const killedPids: Array<number> = [];
   const runs: Array<Run> = [];
   const opened: Array<string> = [];
   const approve = yield* Deferred.make<void>();
@@ -86,6 +104,7 @@ const makeHarness = Effect.fn(function* (options?: {
             handle({
               output: Stream.concat(
                 lines(
+                  ...(options?.joinPreamble ?? []),
                   `Approve this machine on the Hub as its Owner, from any device. Open:`,
                   `  ${APPROVAL}`,
                 ),
@@ -127,7 +146,16 @@ const makeHarness = Effect.fn(function* (options?: {
       }
       // The managed server: runs until the manager kills it.
       yield* Ref.update(servers, (count) => count + 1);
+      serverAlive = true;
       const exited = yield* Deferred.make<number>();
+      if (options?.stuckServer) {
+        stuckExited = exited;
+        return yield* Effect.acquireRelease(
+          Effect.succeed(handle({ exitCode: Deferred.await(exited) })),
+          // It exits only once killed by PID, or when the test ends.
+          () => Deferred.await(stuckRelease).pipe(Effect.andThen(Deferred.succeed(exited, 0))),
+        );
+      }
       return yield* Effect.acquireRelease(
         Effect.succeed(
           handle({
@@ -137,6 +165,7 @@ const makeHarness = Effect.fn(function* (options?: {
         ),
         () =>
           Ref.update(serverKills, (count) => count + 1).pipe(
+            Effect.tap(() => Effect.sync(() => (serverAlive = false))),
             Effect.andThen(Deferred.succeed(exited, 0)),
           ),
       );
@@ -172,7 +201,10 @@ const makeHarness = Effect.fn(function* (options?: {
     Layer.mock(ElectronShell.ElectronShell, {
       openExternal: (url) => Effect.sync(() => opened.push(String(url))).pipe(Effect.as(true)),
     }),
-    DesktopAppSettings.layerTest(),
+    DesktopAppSettings.layerTest({
+      ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+      ...options?.settings,
+    }),
     DesktopState.layer,
     Layer.succeed(DesktopObservability.DesktopBackendOutputLogFactory, {
       forInstance: () => Effect.succeed(stubLog),
@@ -197,34 +229,46 @@ const makeHarness = Effect.fn(function* (options?: {
   );
 
   const context = yield* Layer.build(layer);
-  const service = yield* DesktopJoinedEnvironment.make({
-    baseDir,
-    cli: (args) => ChildProcess.make("t3", args),
-    serveConfig: (port) =>
-      Effect.succeed({
-        executablePath: "t3",
-        args: ["serve", "--base-dir", baseDir],
-        entryPath: baseDir,
-        cwd: baseDir,
-        env: {},
-        extendEnv: true,
-        bootstrap: {
-          mode: "desktop",
-          noBrowser: true,
-          port,
-          t3Home: baseDir,
-          host: "127.0.0.1",
-          desktopBootstrapToken: "token",
-          tailscaleServeEnabled: false,
-          tailscaleServePort: 443,
-        },
-        bootstrapDelivery: "fd3",
-        httpBaseUrl: new URL(`http://127.0.0.1:${port}`),
-        captureOutput: true,
-        preflightFailure: Option.none(),
-        readinessPath: "/health",
-      }),
-  }).pipe(Effect.provide(context));
+  const service = yield* DesktopJoinedEnvironment.make(
+    {
+      baseDir,
+      cli: (args) => ChildProcess.make("t3", args),
+      serveConfig: (port) =>
+        Effect.succeed({
+          executablePath: "t3",
+          args: ["serve", "--base-dir", baseDir],
+          entryPath: baseDir,
+          cwd: baseDir,
+          env: {},
+          extendEnv: true,
+          bootstrap: {
+            mode: "desktop",
+            noBrowser: true,
+            port,
+            t3Home: baseDir,
+            host: "127.0.0.1",
+            desktopBootstrapToken: "token",
+            tailscaleServeEnabled: false,
+            tailscaleServePort: 443,
+          },
+          bootstrapDelivery: "fd3",
+          httpBaseUrl: new URL(`http://127.0.0.1:${port}`),
+          captureOutput: true,
+          preflightFailure: Option.none(),
+          readinessPath: "/health",
+        }),
+    },
+    {
+      isAlive: () => serverAlive,
+      kill: (pid) => {
+        killedPids.push(pid);
+        if (options?.stuckServer?.killEndsIt) {
+          serverAlive = false;
+          endStuckServer();
+        }
+      },
+    },
+  ).pipe(Effect.provide(context));
   return {
     service,
     context,
@@ -236,8 +280,23 @@ const makeHarness = Effect.fn(function* (options?: {
     serverKills,
     joinKilled,
     servers,
+    killedPids,
+    endStuckServer: () => Effect.sync(endStuckServer),
   };
 });
+
+/** Moves the test clock past the stop's timeout and the exit checks until `fiber` ends. */
+const untilDone = <A, E>(fiber: Fiber.Fiber<A, E>) =>
+  Effect.gen(function* () {
+    const done = yield* Deferred.make<void>();
+    yield* Fiber.await(fiber).pipe(
+      Effect.andThen(Deferred.succeed(done, undefined)),
+      Effect.forkChild,
+    );
+    for (let step = 0; step < 600 && !(yield* Deferred.isDone(done)); step += 1) {
+      yield* TestClock.adjust("100 millis");
+    }
+  });
 
 // The join and the manager run on fibers of their own; the test clock lets them through.
 const settle = TestClock.adjust("10 millis");
@@ -475,5 +534,117 @@ describe("DesktopJoinedEnvironment", () => {
         assert.deepEqual(join.args, ["/app/server/bin.mjs", "join", HUB]);
       }
     }).pipe(Effect.provide(Path.layer)),
+  );
+
+  it.effect("an unreadable joined-hub.json starts nothing and offers Join again or Leave", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          joinedHub: "{ not json",
+          settings: { joinedEnvironmentEnabled: true },
+        });
+        const { service } = harness;
+        yield* service.reconcile;
+        const state = yield* service.state;
+        assert.isNull(state.hub);
+        assert.include(state.repair ?? "", "is unreadable");
+        assert.equal(state.process, "stopped");
+        assert.equal(yield* Ref.get(harness.servers), 0, "no restart loop on a broken file");
+
+        const turnOn = yield* service.setEnabled(true).pipe(Effect.flip);
+        assert.include(turnOn.message, "is unreadable");
+
+        // Join again runs `t3 join`, which replaces the file.
+        yield* service.join({ hubUrl: HUB });
+        yield* Deferred.succeed(harness.approve, undefined);
+        const joined = yield* waitUntil(service, (next) => next.process === "running");
+        assert.deepEqual(joined.hub, { url: HUB, name: "Laptop" });
+        assert.isNull(joined.repair);
+      }),
+    ),
+  );
+
+  it.effect("Leave on an unreadable joined-hub.json runs `t3 leave` to forget it", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ joinedHub: "{ not json" });
+        yield* harness.service.leave;
+        assert.deepEqual(harness.runs.at(-1)?.args, ["leave", "--base-dir", harness.baseDir]);
+        const left = yield* harness.service.state;
+        assert.isNull(left.repair);
+        assert.isNull(left.hub);
+      }),
+    ),
+  );
+
+  it.effect("opens only the approval page on the Hub the User named", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          joinPreamble: [
+            "See https://evil.example/register-environment?request=req-1",
+            `Or ${HUB}/somewhere-else?request=req-1`,
+          ],
+        });
+        yield* harness.service.join({ hubUrl: `${HUB}/some/path` });
+        const waiting = yield* waitUntil(
+          harness.service,
+          (state) => state.joining?.approvalUrl != null,
+        );
+        assert.equal(waiting.joining?.approvalUrl, APPROVAL);
+        assert.deepEqual(harness.opened, [APPROVAL]);
+        assert.isNull(
+          DesktopJoinedEnvironment.approvalLinkIn(
+            `http://hub.example.com/register-environment`,
+            HUB,
+          ),
+        );
+        const notAUrl = yield* harness.service.cancelJoin.pipe(
+          Effect.andThen(harness.service.join({ hubUrl: "hub dot com" })),
+          Effect.flip,
+        );
+        assert.include(notAUrl.message, "Hub's address");
+      }),
+    ),
+  );
+
+  it.effect("Leave kills a server that outlives its stop before running `t3 leave`", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ stuckServer: { killEndsIt: true } });
+        const { service } = harness;
+        yield* service.join({ hubUrl: HUB });
+        yield* Deferred.succeed(harness.approve, undefined);
+        yield* waitUntil(service, (state) => state.process === "running");
+
+        const leaving = yield* service.leave.pipe(Effect.forkChild);
+        yield* untilDone(leaving);
+        const left = yield* Fiber.join(leaving);
+        assert.deepEqual(harness.killedPids, [4242]);
+        assert.deepEqual(harness.runs.at(-1)?.args, ["leave", "--base-dir", harness.baseDir]);
+        assert.isNull(left.hub);
+      }),
+    ),
+  );
+
+  it.effect("Leave fails, and runs no `t3 leave`, while the server will not die", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ stuckServer: { killEndsIt: false } });
+        const { service } = harness;
+        yield* service.join({ hubUrl: HUB });
+        yield* Deferred.succeed(harness.approve, undefined);
+        yield* waitUntil(service, (state) => state.process === "running");
+
+        const leaving = yield* service.leave.pipe(Effect.flip, Effect.forkChild);
+        yield* untilDone(leaving);
+        const failure = yield* Fiber.join(leaving);
+        assert.include(failure.message, "did not stop");
+        assert.notDeepEqual(harness.runs.at(-1)?.args, ["leave", "--base-dir", harness.baseDir]);
+        assert.deepEqual((yield* service.state).hub, { url: HUB, name: "Laptop" });
+        // The process ends at last; the manager then cleans up.
+        yield* harness.endStuckServer();
+      }),
+    ),
   );
 });
