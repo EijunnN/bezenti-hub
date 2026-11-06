@@ -485,6 +485,11 @@ own remotes: checkpoints are never pushed to `origin`. A machine can only reach
 the repositories of Projects its owner works in, and loses access as soon as it
 is removed.
 
+A Thread's terminals, its Files panel, file search and previews open on the
+machine it runs on, in that machine's copy of the Project. When the machine is
+off they say **Environment offline** instead; nothing you type or save is kept
+for later, so start the machine and try again.
+
 ## Next steps
 
 - [Working with threads](./thread-sidebar.md): start tasks and organize parallel work.

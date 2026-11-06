@@ -23,6 +23,7 @@ import * as Stream from "effect/Stream";
 import * as ServerConfig from "../config.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
+import * as JoinedWorkspaceRoots from "../workspace/JoinedWorkspaceRoots.ts";
 import * as EnvironmentAgent from "./EnvironmentAgent.ts";
 
 /** This machine's executor, answering only whether a folder is a repository, and counting. */
@@ -104,7 +105,15 @@ it.effect("a request resent with its idempotency key runs once and gets the firs
       requestId: "request-3",
       result: { _tag: "success", value: false },
     });
-  }).pipe(Effect.provide(layerMachine(calls)), Effect.scoped);
+  }).pipe(
+    Effect.provide(
+      Layer.merge(
+        layerMachine(calls),
+        JoinedWorkspaceRoots.layer.pipe(Layer.provide(NodeServices.layer)),
+      ),
+    ),
+    Effect.scoped,
+  );
 });
 
 /** A machine whose provider sessions end when the test says, each telling when its process went. */
@@ -220,7 +229,15 @@ it.effect("a session that ends while the Hub is away is reported when the socket
       method: "provider.sessionEnded",
       payload: { providerSessionId: "session-1", seq: 1 },
     });
-  }).pipe(Effect.provide(layerSessions(sessions)), Effect.scoped);
+  }).pipe(
+    Effect.provide(
+      Layer.merge(
+        layerSessions(sessions),
+        JoinedWorkspaceRoots.layer.pipe(Layer.provide(NodeServices.layer)),
+      ),
+    ),
+    Effect.scoped,
+  );
 });
 
 it.effect(
@@ -259,6 +276,14 @@ it.effect(
       });
       yield* Deferred.await(sessions.get("session-new")!.closed);
       assert.deepEqual((yield* agent.report).sessions, []);
-    }).pipe(Effect.provide(layerSessions(sessions)), Effect.scoped);
+    }).pipe(
+      Effect.provide(
+        Layer.merge(
+          layerSessions(sessions),
+          JoinedWorkspaceRoots.layer.pipe(Layer.provide(NodeServices.layer)),
+        ),
+      ),
+      Effect.scoped,
+    );
   },
 );

@@ -362,6 +362,25 @@ export class TerminalResizeError extends Schema.TaggedError<TerminalResizeError>
   }
 }
 
+/**
+ * A terminal of a Thread whose Active environment cannot take it: the machine is offline (nothing
+ * typed is kept for later), or the folder asked for is outside the Thread's workspace there.
+ */
+export class TerminalEnvironmentUnavailableError extends Schema.TaggedError<TerminalEnvironmentUnavailableError>()(
+  "TerminalEnvironmentUnavailableError",
+  {
+    threadId: Schema.String,
+    reason: Schema.Literals(["environment_offline", "outside_thread_workspace"]),
+    environmentName: Schema.optional(Schema.String),
+  },
+) {
+  override get message() {
+    return this.reason === "environment_offline"
+      ? `Environment offline: ${this.environmentName ?? "this Thread's Environment"} is not connected.`
+      : "This terminal can only open inside the Thread's workspace.";
+  }
+}
+
 export const TerminalError = Schema.Union([
   TerminalCwdError,
   TerminalHistoryError,
@@ -371,5 +390,6 @@ export const TerminalError = Schema.Union([
   TerminalNotRunningError,
   TerminalWriteError,
   TerminalResizeError,
+  TerminalEnvironmentUnavailableError,
 ]);
 export type TerminalError = typeof TerminalError.Type;

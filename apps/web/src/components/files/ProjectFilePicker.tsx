@@ -15,6 +15,7 @@ import {
   PROJECT_FILE_PICKER_RESULT_LIMIT,
 } from "./ProjectFilePicker.logic";
 import { useProjectFilePickerQuery } from "./projectFilesQueryState";
+import { FileMetadataThreadContext } from "~/hooks/FileMetadataThreadProvider";
 
 interface ProjectFilePickerProps {
   readonly setOpen: (open: boolean) => void;
@@ -152,5 +153,10 @@ export function ProjectFilePicker(props: ProjectFilePickerProps) {
     return <EmptyProjectFilePicker />;
   }
 
-  return <OpenProjectFilePicker setOpen={props.setOpen} target={target} />;
+  // The active Thread's files: the Hub searches them on its Active environment.
+  return (
+    <FileMetadataThreadContext value={target.threadRef}>
+      <OpenProjectFilePicker setOpen={props.setOpen} target={target} />
+    </FileMetadataThreadContext>
+  );
 }

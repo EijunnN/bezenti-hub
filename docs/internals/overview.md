@@ -186,6 +186,30 @@ there may be an older capture of a reused ordinal), so they work with the machin
 then they run on the Thread's Active environment. A restore whose ref is missing in the workspace
 (a move, or refs dropped there) fetches it from the Hub repository first.
 
+### Workspace RPCs
+
+A client's files, search, browse, terminal and preview RPCs name a folder, not a machine, so
+[ThreadWorkspace](../../apps/server/src/environment/ThreadWorkspace.ts) takes the machine from the
+Thread the call names (`threadId`, optional on the file, search and browse inputs): its Active
+environment, or the Hub machine for a call that names none, a draft, or a Thread on the Hub
+machine. A client path never picks a machine. Before forwarding, the Hub checks the spec 1 rules
+(`RpcSpaceAccess`: a named Thread is not hidden for reads and is the User's work for writes,
+terminals and previews) and `environment.use`, then locates every folder and path inside the
+Thread's workspace (its worktree, else its Project's checkout), as the Hub records it or as the
+machine reported it, and resolves it onto the machine. Anything outside is refused, including
+absolute paths elsewhere and `..`; on another machine only the workspace itself can be browsed.
+
+A forwarded call carries no idempotency key, so a dropped socket fails it at once as
+`environment_offline` (`TerminalEnvironmentUnavailableError`, `PreviewEnvironmentUnavailableError`
+for terminals and previews): nothing typed or saved waits to run later. Terminal output and
+preview events are streams the Hub opens with a request; the machine sends their items as
+`workspace.stream` frames, outside the provider events' `seq`, spool and acknowledgements, and
+stops on `workspace.streamCancel` or when the socket closes, where the Hub ends them as offline and
+the client reopens them. Each connected machine streams its preview events to the Hub for as long
+as its socket lives. A joined machine treats every workspace as known, since the Hub authorized
+and resolved the path. Server-rendered preview frames (`/api/preview-stream`) still come from the
+Hub machine's own browser only.
+
 ### Logical workspace paths
 
 A Project's checkout is a per-Environment fact. The Hub machine's checkout is always the Project's

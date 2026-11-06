@@ -5,6 +5,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -13,6 +14,7 @@ import * as ServerConfig from "../config.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as JoinedWorkspaceRoots from "./JoinedWorkspaceRoots.ts";
 import { isFilesystemRoot, managedWorktreesDirectories } from "../worktreesDirectory.ts";
 
 export class UnknownWorkspaceError extends Schema.TaggedError<UnknownWorkspaceError>()(
@@ -55,6 +57,7 @@ export const make = Effect.gen(function* () {
   const projectStore = yield* ProjectStore.ProjectStoreV2;
   const sql = yield* SqlClient.SqlClient;
   const git = yield* GitVcsDriver.GitVcsDriver;
+  const joinedRoots = yield* Effect.serviceOption(JoinedWorkspaceRoots.JoinedWorkspaceRoots);
 
   // Missing roots keep lexical paths; other resolution failures and filesystem roots grant nothing.
   const resolveRoot = (value: string) => {
@@ -70,6 +73,11 @@ export const make = Effect.gen(function* () {
 
   const contains: KnownWorkspaces["Service"]["contains"] = Effect.fn("KnownWorkspaces.contains")(
     function* (realPath) {
+      // A joined Environment registers no Projects: it knows only the Thread workspaces its Hub
+      // names in the calls running now.
+      if (config.joinedHub !== undefined) {
+        return Option.isSome(joinedRoots) && joinedRoots.value.contains(realPath);
+      }
       const within = (root: string | null) => root !== null && isWithinRoot(path, realPath, root);
       const worktreeSettings = yield* settings.getSettings.pipe(
         Effect.orElseSucceed(() => ({ worktreesDirectory: "", previousWorktreesDirectories: [] })),
@@ -148,3 +156,24 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(KnownWorkspaces, make);
+
+/** A joined machine's: only the roots of the calls its Hub is running now. */
+export const layerJoined = Layer.effect(
+  KnownWorkspaces,
+  Effect.gen(function* () {
+    const roots = yield* JoinedWorkspaceRoots.JoinedWorkspaceRoots;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    return KnownWorkspaces.of({
+      contains: Effect.fn("KnownWorkspaces.joined.contains")((realPath: string) =>
+        Effect.sync(() => roots.contains(realPath)),
+      ),
+      assertContains: Effect.fn("KnownWorkspaces.joined.assertContains")(function* (cwd) {
+        const real = yield* fileSystem
+          .realPath(path.resolve(cwd))
+          .pipe(Effect.mapError((cause) => new UnknownWorkspaceError({ cwd, cause })));
+        if (!roots.contains(real)) return yield* new UnknownWorkspaceError({ cwd });
+      }),
+    });
+  }),
+);

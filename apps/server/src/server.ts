@@ -125,6 +125,9 @@ import * as EventLoopMonitor from "./observability/EventLoopMonitor.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as DirectEndpoints from "./environment/DirectEndpoints.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
+import * as ProjectCheckouts from "./environment/ProjectCheckouts.ts";
+import * as ThreadWorkspace from "./environment/ThreadWorkspace.ts";
+import * as JoinedWorkspaceRoots from "./workspace/JoinedWorkspaceRoots.ts";
 import * as AuthHttp from "./auth/http.ts";
 import * as AppSignInHttp from "./auth/appSignInHttp.ts";
 import * as ReplayMarkers from "./auth/replayMarkers.ts";
@@ -556,6 +559,10 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
 );
 
 const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
+  // Reads the executor registry, the Environments table and the workspace services below.
+  ThreadWorkspace.layer.pipe(
+    Layer.provide(Layer.mergeAll(ProjectionStoreV2.layer, ProjectCheckouts.layer)),
+  ),
   layerThreadSettlementWorker,
   layerIdleCompactionWorker,
   StorageCleanup.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
@@ -643,6 +650,9 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
     ),
   ),
   Layer.provideMerge(layerWorkspace),
+  // A joined machine knows only the workspace roots its Hub names in running calls; its agent
+  // (routes) and KnownWorkspaces (above) share this one.
+  Layer.provideMerge(JoinedWorkspaceRoots.layer),
   Layer.provideMerge(ProjectEnrichmentService.layer),
   Layer.provideMerge(Layer.mergeAll(NativeAppIconResolver.layer, layerProjectFaviconResolver)),
   Layer.provideMerge(layerRepositoryIdentityResolver),

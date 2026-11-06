@@ -398,9 +398,29 @@ export class PreviewClearProfileError extends Schema.TaggedError<PreviewClearPro
   }
 }
 
+/**
+ * A preview of a Thread whose Active environment cannot take it: the machine is offline, or the
+ * caller may not use it. Nothing asked is kept to run later.
+ */
+export class PreviewEnvironmentUnavailableError extends Schema.TaggedError<PreviewEnvironmentUnavailableError>()(
+  "PreviewEnvironmentUnavailableError",
+  {
+    threadId: Schema.String,
+    reason: Schema.Literals(["environment_offline", "outside_thread_workspace"]),
+    environmentName: Schema.optional(Schema.String),
+  },
+) {
+  override get message() {
+    return this.reason === "environment_offline"
+      ? `Environment offline: ${this.environmentName ?? "this Thread's Environment"} is not connected.`
+      : "This preview is not available to you.";
+  }
+}
+
 export const PreviewError = Schema.Union([
   PreviewSessionLookupError,
   PreviewInvalidUrlError,
   PreviewControlRequiredError,
+  PreviewEnvironmentUnavailableError,
 ]);
 export type PreviewError = typeof PreviewError.Type;

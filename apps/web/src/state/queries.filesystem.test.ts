@@ -24,6 +24,9 @@ vi.mock("react", async (importOriginal) => ({
   useMemo: <A>(factory: () => A) => factory(),
   useState: <A>(value: A) => [value, vi.fn()],
 }));
+// Outside a Thread: hooks are called without rendering, so no context is read.
+vi.mock("~/hooks/useWorkspaceThreadId", () => ({ useWorkspaceThreadId: () => undefined }));
+
 vi.mock("./session", () => ({
   environmentSession: { sessionStateAtom: () => state.sessionAtom },
 }));

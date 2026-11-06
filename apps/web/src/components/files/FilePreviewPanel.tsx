@@ -7,6 +7,7 @@ import {
   type EnvironmentId,
   type ResolvedKeybindingsConfig,
   type ScopedThreadRef,
+  type ThreadId,
 } from "@t3tools/contracts";
 import { filePreviewDelimiter } from "@t3tools/shared/delimitedPreview";
 import { AuthFilesystemWriteScope } from "@t3tools/contracts";
@@ -119,6 +120,7 @@ import {
   workspaceAssetResource,
 } from "./filePreviewMode";
 import { changeFileSaveSession, useFileSaveSession } from "./fileSaveSessions";
+import { useWorkspaceThreadId } from "~/hooks/useWorkspaceThreadId";
 import { revisionedQuery } from "~/state/revisionedQuery";
 import {
   getOptimisticProjectFileQueryData,
@@ -603,11 +605,12 @@ function editableFileContents(
   cwd: string,
   relativePath: string,
   contents: string,
+  threadId: ThreadId | undefined,
 ): FileContents {
   return {
     name: relativePath,
     contents,
-    cacheKey: `editor:${environmentId}:${projectFileCacheKey(cwd, relativePath, contents)}`,
+    cacheKey: `editor:${environmentId}:${threadId ?? ""}:${projectFileCacheKey(cwd, relativePath, contents)}`,
   };
 }
 
@@ -689,15 +692,16 @@ function EditableFileSurface({
   };
   const surfaceRef = useRef<HTMLDivElement>(null);
   const selectionFrameRef = useRef<number | null>(null);
-  const saveTarget = { environmentId, cwd, relativePath };
+  const threadId = useWorkspaceThreadId(environmentId);
+  const saveTarget = { environmentId, cwd, relativePath, threadId };
   useFileSaveSession(saveTarget, onPendingChange);
   // Retain file identity for echoed editor changes; only external changes replace the editor's draft.
   const [externalFile, setExternalFile] = useState(() =>
-    editableFileContents(environmentId, cwd, relativePath, contents),
+    editableFileContents(environmentId, cwd, relativePath, contents, threadId),
   );
   const [editedContents, setEditedContents] = useState<string | null>(null);
   if (contents !== (editedContents ?? externalFile.contents)) {
-    setExternalFile(editableFileContents(environmentId, cwd, relativePath, contents));
+    setExternalFile(editableFileContents(environmentId, cwd, relativePath, contents, threadId));
     setEditedContents(null);
   }
   const { ready: editable, onPostRender: onEditablePostRender } =
@@ -716,9 +720,11 @@ function EditableFileSurface({
     file,
     lineAnnotations: nextLineAnnotations,
   }: EditorChangeEvent<"file", FileCommentAnnotationGroup, undefined>) => {
-    if (file.contents === getProjectFileContents(environmentId, cwd, relativePath)) return;
+    if (file.contents === getProjectFileContents(environmentId, cwd, relativePath, threadId)) {
+      return;
+    }
     setEditedContents(file.contents);
-    setProjectFileQueryData(environmentId, cwd, relativePath, file.contents);
+    setProjectFileQueryData(environmentId, cwd, relativePath, file.contents, threadId);
     changeFileSaveSession(saveTarget, file.contents);
     if (!nextLineAnnotations) return;
     const remapped = remapFileCommentAnnotations(nextLineAnnotations);
@@ -937,7 +943,8 @@ function RenderedMarkdownSurface({
   readOnly: boolean;
   workspaceMutationId: string | null;
 }) {
-  const saveTarget = { environmentId, cwd, relativePath };
+  const threadId = useWorkspaceThreadId(environmentId);
+  const saveTarget = { environmentId, cwd, relativePath, threadId };
   useFileSaveSession(saveTarget, onPendingChange);
 
   return (
@@ -953,11 +960,11 @@ function RenderedMarkdownSurface({
             ? undefined
             : ({ markerOffset, checked }) => {
                 const currentContents =
-                  getOptimisticProjectFileQueryData(environmentId, cwd, relativePath)?.contents ??
-                  contents;
+                  getOptimisticProjectFileQueryData(environmentId, cwd, relativePath, threadId)
+                    ?.contents ?? contents;
                 const nextContents = setMarkdownTaskChecked(currentContents, markerOffset, checked);
                 if (nextContents === currentContents) return;
-                setProjectFileQueryData(environmentId, cwd, relativePath, nextContents);
+                setProjectFileQueryData(environmentId, cwd, relativePath, nextContents, threadId);
                 changeFileSaveSession(saveTarget, nextContents);
               }
         }
@@ -1040,6 +1047,7 @@ export default function FilePreviewPanel({
   const fileAccess = useFilesystemReadAccess(environmentId);
   const { canReadFiles } = fileAccess;
   const canWriteFiles = useEnvironmentScope(environmentId, AuthFilesystemWriteScope);
+  const workspaceThreadId = useWorkspaceThreadId(environmentId);
   const file = useProjectFileQuery(
     environmentId,
     cwd,
@@ -1174,7 +1182,7 @@ export default function FilePreviewPanel({
       (isFolder || (!isMedia && !isPdf && !isDocument)) &&
       !selectedFilePending
       ? revisionedQuery(
-          getProjectFileQueryAtom(environmentId, cwd, relativePath),
+          getProjectFileQueryAtom(environmentId, cwd, relativePath, workspaceThreadId),
           workspaceMutationId,
         )
       : NO_FILE_REVISION_ATOM,

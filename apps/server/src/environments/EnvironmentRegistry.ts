@@ -272,6 +272,15 @@ export class EnvironmentRegistry extends Context.Service<
       readonly projectId: ProjectId;
       readonly providerInstanceId: ProviderInstanceId;
     }) => Effect.Effect<EnvironmentId, ThreadEnvironmentUnavailableError | EnvironmentStorageError>;
+    /**
+     * The Environment's name when the User may use it (`environment.use`: a personal machine is its
+     * owner's alone), whether or not it is online; None otherwise. Calls forwarded to a machine
+     * check it, so a Thread is never a way onto a machine its User may not use.
+     */
+    readonly usableBy: (input: {
+      readonly userId: UserId | undefined;
+      readonly environmentId: EnvironmentId;
+    }) => Effect.Effect<Option.Option<{ readonly name: string }>, EnvironmentStorageError>;
   }
 >()("t3/environments/EnvironmentRegistry") {}
 
@@ -677,9 +686,29 @@ const make = Effect.gen(function* () {
     return environmentId;
   });
 
+  const usableBy: EnvironmentRegistry["Service"]["usableBy"] = Effect.fn(
+    "EnvironmentRegistry.usableBy",
+  )(function* ({ userId, environmentId }) {
+    const [row] = yield* selectRows([
+      sql`environment_id = ${environmentId}`,
+      sql`revoked_at IS NULL`,
+    ]).pipe(Effect.mapError(storageError));
+    if (row === undefined || userId === undefined) return Option.none();
+    const principal = yield* principalOf(userId);
+    if (
+      principal === undefined ||
+      principal.inactive === true ||
+      !AccessPolicy.isAllowed(decide(principal, "environment.use", resourceOf(row)))
+    ) {
+      return Option.none();
+    }
+    return Option.some({ name: row.name });
+  });
+
   return EnvironmentRegistry.of({
     hubId,
     chooseForThread,
+    usableBy,
     list,
     rename,
     remove,

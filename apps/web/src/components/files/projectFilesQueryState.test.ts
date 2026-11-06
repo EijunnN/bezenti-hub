@@ -1,5 +1,5 @@
 import type { ProjectReadFileResult } from "@t3tools/contracts";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -52,6 +52,19 @@ describe("project files queries", () => {
     drainRegistryTasks();
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("keeps one Thread's unsaved file apart from another Thread's at the same path", () => {
+    const laptopThread = ThreadId.make("thread-on-laptop");
+    const hubThread = ThreadId.make("thread-on-hub");
+    setProjectFileQueryData(environmentId, "/repo", "notes.md", "laptop draft", laptopThread);
+    expect(
+      getUnsavedProjectFileQueryData(environmentId, "/repo", "notes.md", hubThread),
+    ).toBeNull();
+    expect(
+      getUnsavedProjectFileQueryData(environmentId, "/repo", "notes.md", laptopThread)?.contents,
+    ).toBe("laptop draft");
+    clearProjectFileQueryData(environmentId, "/repo", "notes.md", laptopThread);
   });
 
   it("resumes an unsaved draft after closing the preview and restoring write access", async () => {

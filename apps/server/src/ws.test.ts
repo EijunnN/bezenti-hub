@@ -6,6 +6,8 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthTerminalOperateScope,
+  AuthFilesystemReadScope,
+  AuthFilesystemWriteScope,
   AuthTerminalReadScope,
   EventId,
   GuestShareId,
@@ -1490,6 +1492,8 @@ describe("Space visibility", () => {
     WS_METHODS.subscribeTerminalMetadata,
     WS_METHODS.terminalWrite,
     WS_METHODS.terminalOpen,
+    WS_METHODS.projectsReadFile,
+    WS_METHODS.projectsWriteFile,
     WS_METHODS.mcpAppsCallTool,
     WS_METHODS.mcpAppsUpdateModelContext,
     WS_METHODS.secretsAnswerRequest,
@@ -1637,6 +1641,8 @@ describe("Space visibility", () => {
                 AuthOrchestrationOperateScope,
                 AuthTerminalReadScope,
                 AuthTerminalOperateScope,
+                AuthFilesystemReadScope,
+                AuthFilesystemWriteScope,
               ],
             }),
           ),
@@ -2533,6 +2539,31 @@ describe("Space visibility", () => {
           outcome(yield* open(asGus, "gus-draft", "/work/acme-app")),
           "SpaceActionDeniedError",
         );
+      }),
+    ),
+  );
+
+  it.effect("a file call that names a Thread keeps to who may see and work that Thread", () =>
+    withTeam(({ server, ada }) =>
+      Effect.gen(function* () {
+        const asAda = yield* connectWriter(server, ada.userId);
+        const refusal = (result: Result.Result<unknown, unknown>) =>
+          Result.isSuccess(result) ? "ran" : (result.failure as { _tag: string })._tag;
+        // An Admin sees grace-thread but saves only in a Thread of her own.
+        const saved = yield* asAda[WS_METHODS.projectsWriteFile]({
+          cwd: "/work/acme-app",
+          relativePath: "notes.md",
+          contents: "x",
+          threadId: "grace-thread",
+        } as never).pipe(Effect.result);
+        assert.equal(refusal(saved), "SpaceActionDeniedError");
+        // A Thread in a Space she cannot see answers like a missing one.
+        const read = yield* asAda[WS_METHODS.projectsReadFile]({
+          cwd: "/work/globex-app",
+          relativePath: "README.md",
+          threadId: "globex-thread",
+        } as never).pipe(Effect.result);
+        assert.equal(refusal(read), "SpaceResourceNotFoundError");
       }),
     ),
   );

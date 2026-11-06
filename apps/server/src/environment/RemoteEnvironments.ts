@@ -13,14 +13,17 @@ import {
   EnvironmentExecutorSessionEnded,
   EnvironmentExecutorUnavailableError,
   type EnvironmentHeartbeatFrame,
+  EnvironmentWorkspaceStreamEnd,
+  EnvironmentWorkspaceStreamItem,
   type EnvironmentHelloFrame,
   type EnvironmentId,
   type EnvironmentOrchestrationCapabilities,
   type EnvironmentProviderSummary,
+  type PreviewEvent,
   type ProjectId,
   type ProviderDriverKind,
   type ProviderInstanceId,
-  type ThreadId,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -33,6 +36,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
@@ -58,7 +62,9 @@ import * as ProjectCheckouts from "./ProjectCheckouts.ts";
 import {
   ProviderEventJson,
   REMOTE_OPERATIONS,
+  REMOTE_STREAM_ITEMS,
   type RemoteOperation,
+  type RemoteStreamOperation,
   type WireAttachmentRef,
   type WireCheckout,
   type WireSessionFeatures,
@@ -70,6 +76,8 @@ const RECONNECT_WAIT = "30 seconds";
 const MAX_RESENDS = 3;
 /** Lookups of a Thread's Active environment before an event is left for the next resend. */
 const ACTIVE_LOOKUP_RETRIES = 3;
+/** Items of one forwarded stream the Hub holds for a reader that has not taken them. */
+const MAX_STREAM_BACKLOG = 4_096;
 
 type SessionQueue = Queue.Queue<
   ProviderAdapter.ProviderAdapterV2Event,
@@ -107,6 +115,14 @@ interface Link {
   readonly pendingAcks: Map<string, number>;
   /** Each Thread's Active environment as last read; `threadMoved` forgets it. */
   readonly activeByThread: Map<ThreadId, EnvironmentId | null>;
+  /** Open workspace streams (terminal output), by subscription id; each lives on one socket. */
+  readonly streams: Map<string, WorkspaceStream>;
+}
+
+interface WorkspaceStream {
+  readonly operation: RemoteStreamOperation;
+  readonly channel: ExecutorChannel;
+  readonly queue: Queue.Queue<unknown, unknown>;
 }
 
 export interface RemoteConnection {
@@ -135,6 +151,8 @@ export class RemoteEnvironments extends Context.Service<
     >;
     /** A Thread changed Environments: events and attachment reads are checked anew. */
     readonly threadMoved: (threadId: ThreadId) => Effect.Effect<void>;
+    /** Every connected machine's preview events, live (each machine streams its own). */
+    readonly previewEvents: Stream.Stream<PreviewEvent>;
   }
 >()("t3/environment/RemoteEnvironments") {}
 
@@ -147,6 +165,12 @@ const decodeEvent = Schema.decodeUnknownOption(ProviderEventJson);
 const decodeProviderEvent = Schema.decodeUnknownOption(EnvironmentExecutorProviderEvent);
 const decodeSessionEnded = Schema.decodeUnknownOption(EnvironmentExecutorSessionEnded);
 const decodeAttachmentRead = Schema.decodeUnknownOption(EnvironmentAttachmentReadRequest);
+const decodeStreamItem = Schema.decodeUnknownOption(EnvironmentWorkspaceStreamItem);
+/** Whether a machine's failure is the operation's own error, by operation. */
+const isOperationError = Object.fromEntries(
+  Object.entries(REMOTE_OPERATIONS).map(([operation, spec]) => [operation, Schema.is(spec.error)]),
+) as unknown as Record<RemoteOperation, (value: unknown) => boolean>;
+const decodeStreamEnd = Schema.decodeUnknownOption(EnvironmentWorkspaceStreamEnd);
 
 /** Drops keys set to `undefined`, which an optional key's codec does not accept. */
 const definedOnly = <A extends object>(value: A): A =>
@@ -171,6 +195,8 @@ const make = Effect.gen(function* () {
   const vcs = yield* Effect.serviceOption(VcsProcess.VcsProcess);
   const sql = yield* SqlClient.SqlClient;
   const links = new Map<EnvironmentId, Link>();
+  let streamCount = 0;
+  const previewEvents = yield* PubSub.unbounded<PreviewEvent>();
 
   const sha256Hex = (bytes: Uint8Array) =>
     digester.digest(Digest.sha256, bytes).pipe(
@@ -505,6 +531,118 @@ const make = Effect.gen(function* () {
     }),
   });
 
+  const offline = (link: Link) =>
+    new EnvironmentExecutorUnavailableError({ environmentId: link.environmentId });
+
+  /** A workspace call: the machine's own error as it sent it, or offline at once (never queued). */
+  const forwardCall = (link: Link) =>
+    ((operation: RemoteOperation, input: unknown) =>
+      invoke(link, operation, input).pipe(
+        Effect.flatMap((outcome) => {
+          switch (outcome._tag) {
+            case "ok":
+              return Effect.succeed(outcome.value);
+            case "unavailable":
+              return Effect.fail(offline(link));
+            case "failed":
+              return isOperationError[operation](outcome.error)
+                ? Effect.fail(outcome.error as EnvironmentExecutorUnavailableError)
+                : Effect.die(
+                    new Error(`Environment ${link.environmentId} failed '${operation}'`, {
+                      cause: outcome.error,
+                    }),
+                  );
+          }
+        }),
+      )) as EnvironmentExecutor.EnvironmentWorkspaceForward["call"];
+
+  /**
+   * A stream the machine feeds with `workspace.stream` frames. It is live only: when its socket
+   * drops it fails as offline, and when nobody reads it any more the machine is told to stop.
+   */
+  const forwardStream = (link: Link) =>
+    ((operation: RemoteStreamOperation, input: object) =>
+      Stream.callback<unknown, unknown>((queue) =>
+        Effect.gen(function* () {
+          const channel = link.channel;
+          if (channel === undefined) return yield* Queue.fail(queue, offline(link));
+          streamCount += 1;
+          const subscriptionId = `${operation}:${streamCount}`;
+          link.streams.set(subscriptionId, { operation, channel, queue });
+          yield* Effect.addFinalizer(() =>
+            Effect.suspend(() => {
+              if (link.streams.get(subscriptionId)?.queue !== queue) return Effect.void;
+              link.streams.delete(subscriptionId);
+              return channel.event(ENVIRONMENT_EXECUTOR_FRAME_METHODS.workspaceStreamCancel, {
+                subscriptionId,
+              });
+            }),
+          );
+          const opened = yield* Effect.exit(
+            forwardCall(link)(operation, { ...input, subscriptionId } as never),
+          );
+          if (opened._tag === "Failure") {
+            const error = Cause.findErrorOption(opened.cause);
+            yield* Option.isSome(error)
+              ? Queue.fail(queue, error.value)
+              : Queue.failCause(queue, opened.cause);
+          }
+        }),
+      )) as unknown as EnvironmentExecutor.EnvironmentWorkspaceForward["stream"];
+
+  // Per streamed item (terminal output): too frequent for a span each.
+  const onStreamItem = Effect.fnUntraced(function* (link: Link, payload: unknown) {
+    const decoded = decodeStreamItem(payload);
+    if (Option.isNone(decoded)) return;
+    const stream = link.streams.get(decoded.value.subscriptionId);
+    if (stream === undefined) return;
+    const item = yield* decodeJson(REMOTE_STREAM_ITEMS[stream.operation], decoded.value.item).pipe(
+      Effect.option,
+    );
+    if (Option.isNone(item)) return;
+    // Bounded: a reader that falls this far behind loses the stream and opens it again (a
+    // terminal reattaches from its snapshot), so a slow client never holds the machine's socket.
+    if ((yield* Queue.size(stream.queue)) >= MAX_STREAM_BACKLOG) {
+      link.streams.delete(decoded.value.subscriptionId);
+      yield* stream.channel.event(ENVIRONMENT_EXECUTOR_FRAME_METHODS.workspaceStreamCancel, {
+        subscriptionId: decoded.value.subscriptionId,
+      });
+      return yield* Queue.end(stream.queue);
+    }
+    yield* Queue.offer(stream.queue, item.value);
+  });
+
+  const onStreamEnd = Effect.fn("RemoteEnvironments.onStreamEnd")(function* (
+    link: Link,
+    payload: unknown,
+  ) {
+    const decoded = decodeStreamEnd(payload);
+    if (Option.isNone(decoded)) return;
+    const stream = link.streams.get(decoded.value.subscriptionId);
+    if (stream === undefined) return;
+    link.streams.delete(decoded.value.subscriptionId);
+    if (decoded.value.error === undefined) return yield* Queue.end(stream.queue);
+    const error = yield* decodeJson(
+      REMOTE_OPERATIONS[stream.operation].error,
+      decoded.value.error,
+    ).pipe(Effect.option);
+    yield* Queue.fail(
+      stream.queue,
+      Option.getOrElse(error, () => offline(link)),
+    );
+  });
+
+  /** The streams that ran on a socket that closed end as offline; the client opens them again. */
+  const endStreamsOf = (link: Link, channel: ExecutorChannel) =>
+    Effect.forEach(
+      [...link.streams.entries()].filter(([, stream]) => stream.channel === channel),
+      ([subscriptionId, stream]) => {
+        link.streams.delete(subscriptionId);
+        return Queue.fail(stream.queue, offline(link));
+      },
+      { discard: true },
+    );
+
   const makeExecutor = (link: Link): EnvironmentExecutor.EnvironmentExecutor => {
     const providerOf = (instanceId: ProviderInstanceId) =>
       link.providers.find((provider) => provider.instanceId === instanceId);
@@ -600,7 +738,14 @@ const make = Effect.gen(function* () {
         adapters,
         capabilities: (instanceId) => cache.snapshotProvider(link.environmentId, instanceId),
       },
-      workspace: { paths, checkpoints, hubRepository, runtimePolicy, rpc: Option.none() },
+      workspace: {
+        paths,
+        checkpoints,
+        hubRepository,
+        runtimePolicy,
+        rpc: Option.none(),
+        forward: Option.some({ call: forwardCall(link), stream: forwardStream(link) }),
+      },
       host: {
         describe: cache.snapshot(link.environmentId).pipe(
           Effect.flatMap(
@@ -847,6 +992,7 @@ const make = Effect.gen(function* () {
         sessions: new Map(),
         pendingAcks: new Map(),
         activeByThread: new Map(),
+        streams: new Map(),
       };
       links.set(environmentId, link);
       link.workspaceRoot = hello.workspaceRoot;
@@ -865,6 +1011,10 @@ const make = Effect.gen(function* () {
               return onProviderEvent(link, payload);
             case ENVIRONMENT_EXECUTOR_FRAME_METHODS.sessionEnded:
               return onSessionEnded(link, payload);
+            case ENVIRONMENT_EXECUTOR_FRAME_METHODS.workspaceStreamItem:
+              return onStreamItem(link, payload);
+            case ENVIRONMENT_EXECUTOR_FRAME_METHODS.workspaceStreamEnd:
+              return onStreamEnd(link, payload);
             default:
               return Effect.void;
           }
@@ -873,6 +1023,7 @@ const make = Effect.gen(function* () {
       // In place before the old socket closes: calls it fails resend on this one.
       link.channel = channel;
       yield* previous?.close ?? Effect.void;
+      if (previous !== undefined) yield* endStreamsOf(link, previous);
       link.pendingAcks.clear();
       link.activeByThread.clear();
       for (const sink of link.sessions.values()) sink.stalled = false;
@@ -905,11 +1056,30 @@ const make = Effect.gen(function* () {
       const attached = link.attached;
       link.attached = yield* Deferred.make<void>();
       yield* Deferred.succeed(attached, undefined);
+      // The machine's previews reach the Hub's clients while this socket lives.
+      // Only a Thread's own machine reports on its previews; anything else is dropped and logged.
+      yield* forwardStream(link)("preview.events", {}).pipe(
+        Stream.runForEach((event) =>
+          activeFor(link, ThreadId.make(event.threadId)).pipe(
+            Effect.flatMap((active) =>
+              Option.isSome(active) && active.value === link.environmentId
+                ? PubSub.publish(previewEvents, event)
+                : Effect.logWarning(
+                    "Rejected a preview event from an Environment that is not the Thread's Active environment",
+                    { environmentId: link.environmentId, threadId: event.threadId },
+                  ),
+            ),
+          ),
+        ),
+        Effect.ignore,
+        Effect.forkScoped,
+      );
 
       let retireOnClose = false;
       yield* Effect.addFinalizer(() =>
         Effect.gen(function* () {
           yield* channel.close;
+          yield* endStreamsOf(link, channel);
           if (link.channel !== channel) return;
           link.channel = undefined;
           yield* registry.unregister(environmentId);
@@ -949,6 +1119,7 @@ const make = Effect.gen(function* () {
 
   return RemoteEnvironments.of({
     connect,
+    previewEvents: Stream.fromPubSub(previewEvents),
     threadMoved: Effect.fn("RemoteEnvironments.threadMoved")(function* (threadId) {
       yield* Effect.sync(() => {
         for (const link of links.values()) link.activeByThread.delete(threadId);

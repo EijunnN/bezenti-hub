@@ -4,7 +4,7 @@
 
 **Blocked by:** 04.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Las RPC de archivos, búsqueda, exploración, terminal y preview se autorizan en el Hub con las reglas del spec 1 y se reenvían al Active environment del Thread.
 - [ ] La entrada y salida de las terminales y los frames de preview van en vivo por el protocolo, sin spool.

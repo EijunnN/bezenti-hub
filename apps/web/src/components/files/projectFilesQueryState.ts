@@ -5,12 +5,14 @@ import {
   ProjectReadFileError,
   type ProjectReadFileResult,
   T3_PROJECT_FILE_NAME,
+  type ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { AsyncResult, Atom } from "effect/reactivity";
 
+import { useWorkspaceThreadId } from "~/hooks/useWorkspaceThreadId";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { useFilesystemReadAccess } from "~/state/filesystem";
 import { projectEnvironment } from "~/state/projects";
@@ -25,12 +27,14 @@ const EMPTY_PROJECT_ENTRIES_QUERY_ATOM = Atom.make(
 const EMPTY_PROJECT_FILE_QUERY_ATOM = Atom.make(
   AsyncResult.initial<ProjectReadFileResult, never>(false),
 ).pipe(Atom.withLabel("project-file-query:empty"));
+/** A file's unsaved contents, per Thread: two Threads' copies may live on different machines. */
 export function optimisticFileAtom(
   environmentId: EnvironmentId,
   cwd: string,
   relativePath: string,
+  threadId?: ThreadId,
 ) {
-  return projectEnvironment.optimisticFile({ environmentId, cwd, relativePath });
+  return projectEnvironment.optimisticFile({ environmentId, cwd, relativePath, threadId });
 }
 
 // Dirty contents must survive a closed preview, including failed or unauthorized saves.
@@ -59,17 +63,24 @@ function getProjectEntriesQueryAtom(
   environmentId: EnvironmentId,
   cwd: string,
   directoryPath?: string,
+  threadId?: ThreadId,
 ) {
   return projectEnvironment.listEntries({
     environmentId,
-    input: { cwd, ...(directoryPath !== undefined ? { directoryPath } : {}) },
+    input: {
+      cwd,
+      ...(directoryPath !== undefined ? { directoryPath } : {}),
+      ...(threadId !== undefined ? { threadId } : {}),
+    },
   });
 }
 
+/** With a Thread, the read runs on that Thread's Active environment. */
 export function getProjectFileQueryAtom(
   environmentId: EnvironmentId,
   cwd: string,
   relativePath: string | null,
+  threadId?: ThreadId,
 ) {
   return projectEnvironment.readFile({
     environmentId,
@@ -77,6 +88,7 @@ export function getProjectFileQueryAtom(
       cwd,
       relativePath: relativePath ?? EMPTY_PROJECT_FILE_PATH,
       ...(relativePath === T3_PROJECT_FILE_NAME ? { allowMissing: true } : {}),
+      ...(threadId !== undefined ? { threadId } : {}),
     },
   });
 }
@@ -86,8 +98,9 @@ export function setProjectFileQueryData(
   cwd: string,
   relativePath: string,
   contents: string,
+  threadId?: ThreadId,
 ): void {
-  const atom = optimisticFileAtom(environmentId, cwd, relativePath);
+  const atom = optimisticFileAtom(environmentId, cwd, relativePath, threadId);
   if (!unsavedFileMounts.has(atom)) {
     unsavedFileMounts.set(atom, appAtomRegistry.mount(atom));
   }
@@ -106,18 +119,25 @@ export function getOptimisticProjectFileQueryData(
   environmentId: EnvironmentId,
   cwd: string,
   relativePath: string,
+  threadId?: ThreadId,
 ): ProjectReadFileResult | null {
-  return appAtomRegistry.get(optimisticFileAtom(environmentId, cwd, relativePath))?.data ?? null;
+  return (
+    appAtomRegistry.get(optimisticFileAtom(environmentId, cwd, relativePath, threadId))?.data ??
+    null
+  );
 }
 
 export function getProjectFileContents(
   environmentId: EnvironmentId,
   cwd: string,
   relativePath: string,
+  threadId?: ThreadId,
 ): string | undefined {
-  const optimistic = getOptimisticProjectFileQueryData(environmentId, cwd, relativePath);
+  const optimistic = getOptimisticProjectFileQueryData(environmentId, cwd, relativePath, threadId);
   if (optimistic) return optimistic.contents;
-  const result = appAtomRegistry.get(getProjectFileQueryAtom(environmentId, cwd, relativePath));
+  const result = appAtomRegistry.get(
+    getProjectFileQueryAtom(environmentId, cwd, relativePath, threadId),
+  );
   const data = Option.getOrUndefined(AsyncResult.value(result));
   return data?.exists === false ? undefined : data?.contents;
 }
@@ -126,8 +146,11 @@ export function getUnsavedProjectFileQueryData(
   environmentId: EnvironmentId,
   cwd: string,
   relativePath: string,
+  threadId?: ThreadId,
 ): ProjectReadFileResult | null {
-  const optimistic = appAtomRegistry.get(optimisticFileAtom(environmentId, cwd, relativePath));
+  const optimistic = appAtomRegistry.get(
+    optimisticFileAtom(environmentId, cwd, relativePath, threadId),
+  );
   return optimistic?.confirmedAgainst === undefined ? (optimistic?.data ?? null) : null;
 }
 
@@ -136,12 +159,13 @@ export function confirmProjectFileQueryData(
   cwd: string,
   relativePath: string,
   contents: string,
+  threadId?: ThreadId,
 ): boolean {
-  const atom = optimisticFileAtom(environmentId, cwd, relativePath);
+  const atom = optimisticFileAtom(environmentId, cwd, relativePath, threadId);
   const optimisticFile = appAtomRegistry.get(atom);
   if (optimisticFile?.data.contents !== contents) return false;
 
-  const queryAtom = getProjectFileQueryAtom(environmentId, cwd, relativePath);
+  const queryAtom = getProjectFileQueryAtom(environmentId, cwd, relativePath, threadId);
   const confirmed = {
     ...optimisticFile,
     confirmedAgainst: appAtomRegistry.get(queryAtom),
@@ -165,17 +189,22 @@ export function resolveProjectFileQueryData(
   cwd: string,
   relativePath: string | null,
   data: ProjectReadFileResult | null,
+  threadId?: ThreadId,
 ): ProjectReadFileResult | null {
   if (relativePath === null) return data;
-  return appAtomRegistry.get(optimisticFileAtom(environmentId, cwd, relativePath))?.data ?? data;
+  return (
+    appAtomRegistry.get(optimisticFileAtom(environmentId, cwd, relativePath, threadId))?.data ??
+    data
+  );
 }
 
 export function clearProjectFileQueryData(
   environmentId: EnvironmentId,
   cwd: string,
   relativePath: string,
+  threadId?: ThreadId,
 ): void {
-  const atom = optimisticFileAtom(environmentId, cwd, relativePath);
+  const atom = optimisticFileAtom(environmentId, cwd, relativePath, threadId);
   appAtomRegistry.set(atom, null);
   releaseUnsavedFile(atom);
 }
@@ -200,8 +229,9 @@ export function useProjectEntriesQuery(
 ): ProjectQueryState<ProjectListEntriesResult> {
   const fileAccess = useFilesystemReadAccess(environmentId);
   const { canReadFiles } = fileAccess;
+  const threadId = useWorkspaceThreadId(environmentId);
   const atom = canReadFiles
-    ? getProjectEntriesQueryAtom(environmentId, cwd, directoryPath)
+    ? getProjectEntriesQueryAtom(environmentId, cwd, directoryPath, threadId)
     : EMPTY_PROJECT_ENTRIES_QUERY_ATOM;
   const result = useAtomValue(revisionedQuery(atom, canReadFiles ? revision : undefined));
   const refreshAtom = useAtomRefresh(atom);
@@ -255,10 +285,11 @@ export function useProjectFileQuery(
   // Read media-like paths too; a failed read is how folders with those names are detected.
   const fileAccess = useFilesystemReadAccess(environmentId);
   const { canReadFiles } = fileAccess;
+  const threadId = useWorkspaceThreadId(environmentId);
   const isQueryEnabled = enabled;
   const atom =
     enabled && canReadFiles
-      ? getProjectFileQueryAtom(environmentId, cwd, relativePath)
+      ? getProjectFileQueryAtom(environmentId, cwd, relativePath, threadId)
       : EMPTY_PROJECT_FILE_QUERY_ATOM;
   const result = useAtomValue(atom);
   const refreshAtom = useAtomRefresh(atom);
@@ -266,7 +297,7 @@ export function useProjectFileQuery(
   const readData = AsyncResult.getOrElse(result, () => null);
   const isMissing = readData?.exists === false;
   const optimisticResult = useAtomValue(
-    optimisticFileAtom(environmentId, cwd, relativePath ?? EMPTY_PROJECT_FILE_PATH),
+    optimisticFileAtom(environmentId, cwd, relativePath ?? EMPTY_PROJECT_FILE_PATH, threadId),
   );
   const optimisticFile = relativePath === null ? null : optimisticResult;
   const cause = failureCause(result);

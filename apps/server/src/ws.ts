@@ -61,15 +61,7 @@ import {
   type OrchestrationV2ShellSnapshot,
   type OrchestrationV2ThreadStreamItem,
   type ApplicationStoredEvent,
-  type ProjectEntriesFailure,
-  type ProjectFileFailure,
-  type ProjectFileOperation,
   type ProjectMutation,
-  ProjectListEntriesError,
-  ProjectReadFileError,
-  ProjectSearchContentsError,
-  ProjectSearchEntriesError,
-  ProjectWriteFileError,
   ProjectMutationError,
   ProviderUploadFeedbackError,
   ProviderSetupError,
@@ -77,8 +69,6 @@ import {
   type ServerConfigStreamEvent,
   type ServerLifecycleStreamEvent,
   type ServerProvider,
-  type FilesystemBrowseFailure,
-  FilesystemBrowseError,
   AssetWorkspaceContextNotFoundError,
   AssetWorkspaceContextResolutionError,
   SOURCE_CONTROL_MEDIA_ASSET,
@@ -95,8 +85,6 @@ import {
   type PullRequestRef,
   WS_METHODS,
   WsRpcGroup,
-  type TerminalAttachStreamEvent,
-  type TerminalError,
 } from "@t3tools/contracts";
 import {
   HttpRouter,
@@ -181,7 +169,6 @@ import * as ServerSettings from "./serverSettings.ts";
 import { invalidateSettingsSecrets } from "./sourceControl/sourceControlHostSecrets.ts";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
-import { terminalOutputStream, withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
@@ -193,12 +180,9 @@ import {
 } from "./attachmentStore.ts";
 import { parseBase64DataUrl } from "./imageMime.ts";
 import { deletePendingAttachment, issueAttachmentUploadUrl } from "./assets/AttachmentUpload.ts";
-import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as EnvironmentExecutor from "./environment/EnvironmentExecutor.ts";
-import * as KnownWorkspaces from "./workspace/KnownWorkspaces.ts";
-import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import { readWorkflowScript } from "./orchestration-v2/workflowScriptQuery.ts";
-import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
+import { withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
@@ -217,6 +201,7 @@ import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as DirectEndpoints from "./environment/DirectEndpoints.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
+import * as ThreadWorkspace from "./environment/ThreadWorkspace.ts";
 import * as DefectReporter from "./observability/DefectReporter.ts";
 import * as EventLoopMonitor from "./observability/EventLoopMonitor.ts";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
@@ -418,10 +403,6 @@ function withoutWorkspaceSnapshots(providers: ReadonlyArray<ServerProvider>): Se
   return providers.map(({ workspaceSnapshots: _workspaceSnapshots, ...provider }) => provider);
 }
 
-function unexpectedCompatibilityError(error: never): never {
-  throw new Error(`Unhandled compatibility error: ${String(error)}`);
-}
-
 const persistChatAttachments = Effect.fn("ws.assets.persistChatAttachments")(function* (input: {
   readonly threadId: ThreadId;
   readonly messageId: MessageId;
@@ -491,118 +472,6 @@ const persistChatAttachments = Effect.fn("ws.assets.persistChatAttachments")(fun
     { concurrency: 2 },
   );
 });
-
-function projectEntriesFailureContext(error: WorkspaceEntries.WorkspaceEntriesError): {
-  readonly failure: ProjectEntriesFailure;
-  readonly normalizedCwd?: string;
-  readonly timeout?: string;
-  readonly detail?: string;
-} {
-  switch (error._tag) {
-    case "WorkspaceRootNotExistsError":
-      return {
-        failure: "workspace_root_not_found",
-        normalizedCwd: error.normalizedWorkspaceRoot,
-      };
-    case "WorkspaceRootCreateFailedError":
-      return {
-        failure: "workspace_root_create_failed",
-        normalizedCwd: error.normalizedWorkspaceRoot,
-      };
-    case "WorkspaceRootStatFailedError":
-      return {
-        failure: "workspace_root_stat_failed",
-        normalizedCwd: error.normalizedWorkspaceRoot,
-        detail: error.phase,
-      };
-    case "WorkspaceRootNotDirectoryError":
-      return {
-        failure: "workspace_root_not_directory",
-        normalizedCwd: error.normalizedWorkspaceRoot,
-      };
-    case "WorkspaceEntriesReadDirectoryError":
-      return {
-        failure: "directory_list_failed",
-        ...(error.cwd !== undefined ? { normalizedCwd: error.cwd } : {}),
-        detail: error.message,
-      };
-    case "WorkspaceSearchIndexCreateFailed":
-      return {
-        failure: "search_index_create_failed",
-        normalizedCwd: error.cwd,
-        detail: error.reason,
-      };
-    case "WorkspaceSearchIndexScanTimedOut":
-      return {
-        failure: "search_index_scan_timed_out",
-        normalizedCwd: error.cwd,
-        timeout: error.timeout,
-      };
-    case "WorkspaceSearchIndexSearchFailed":
-      return {
-        failure: "search_index_search_failed",
-        normalizedCwd: error.cwd,
-        detail: error.reason,
-      };
-    default:
-      return unexpectedCompatibilityError(error);
-  }
-}
-
-function filesystemBrowseFailureContext(error: WorkspaceEntries.WorkspaceEntriesBrowseError): {
-  readonly failure: FilesystemBrowseFailure;
-  readonly parentPath?: string;
-  readonly platform?: string;
-} {
-  switch (error._tag) {
-    case "WorkspaceEntriesWindowsPathUnsupportedError":
-      return { failure: "windows_path_unsupported", platform: error.platform };
-    case "WorkspaceEntriesCurrentProjectRequiredError":
-      return { failure: "current_project_required" };
-    case "WorkspaceEntriesReadDirectoryError":
-      return { failure: "read_directory_failed", parentPath: error.parentPath };
-    default:
-      return unexpectedCompatibilityError(error);
-  }
-}
-
-function projectFileFailureContext(
-  error:
-    | WorkspaceFileSystem.WorkspaceFileSystemError
-    | WorkspacePaths.WorkspacePathOutsideRootError
-    | KnownWorkspaces.UnknownWorkspaceError,
-): {
-  readonly failure: ProjectFileFailure;
-  readonly resolvedPath?: string;
-  readonly resolvedWorkspaceRoot?: string;
-  readonly operation?: ProjectFileOperation;
-  readonly operationPath?: string;
-} {
-  switch (error._tag) {
-    case "WorkspacePathOutsideRootError":
-    case "UnknownWorkspaceError":
-      return { failure: "workspace_path_outside_root" };
-    case "WorkspaceFileSystemOperationError":
-      return {
-        failure: "operation_failed",
-        resolvedPath: error.resolvedPath,
-        operation: error.operation,
-        operationPath: error.operationPath,
-      };
-    case "WorkspaceFilePathEscapeError":
-      return {
-        failure: "resolved_path_outside_root",
-        resolvedPath: error.resolvedPath,
-        resolvedWorkspaceRoot: error.resolvedWorkspaceRoot,
-      };
-    case "WorkspacePathNotFileError":
-      return { failure: "path_not_file", resolvedPath: error.resolvedPath };
-    case "WorkspaceBinaryFileError":
-      return { failure: "binary_file", resolvedPath: error.resolvedPath };
-    default:
-      return unexpectedCompatibilityError(error);
-  }
-}
 
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
@@ -1428,15 +1297,20 @@ export const layerWsRpc = (
       const review = yield* ReviewService.ReviewService;
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
-      // Files, search, browse, terminals and previews act on the Hub machine through its
-      // Environment executor; RPCs on another Environment's Thread will route by Thread.
+      // What has no Thread (metadata, port discovery) acts on the Hub machine.
       const {
-        entries: workspaceEntries,
         files: workspaceFileSystem,
         terminals: terminalManager,
-        previews: previewManager,
         ports: portDiscovery,
       } = yield* EnvironmentExecutor.hubMachineWorkspaceRpc;
+      // Files, search, browse, terminals and previews of a Thread act on its Active environment.
+      const threadWorkspace = yield* Effect.serviceOption(ThreadWorkspace.ThreadWorkspace).pipe(
+        // A host without Environments (some tests) answers every call on this machine.
+        Effect.flatMap(
+          Option.match({ onSome: Effect.succeed, onNone: () => ThreadWorkspace.make }),
+        ),
+      );
+      const workspaceCaller = { userId: principal.userId };
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
       const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
       const acpRegistryCatalog = yield* AcpRegistrySupport.AcpRegistryCatalog;
@@ -2918,76 +2792,16 @@ export const layerWsRpc = (
             Effect.tap(() => refreshGitStatus(input.cwd)),
           ),
         [WS_METHODS.projectsSearchEntries]: (input) =>
-          workspaceEntries.search(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectSearchEntriesError({
-                  cwd: input.cwd,
-                  queryLength: input.query.length,
-                  limit: input.limit,
-                  ...projectEntriesFailureContext(cause),
-                  cause,
-                }),
-            ),
-          ),
+          threadWorkspace.searchEntries(input, workspaceCaller),
         [WS_METHODS.projectsSearchContents]: (input) =>
-          workspaceEntries.searchContents(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectSearchContentsError({
-                  cwd: input.cwd,
-                  queryLength: input.query.length,
-                  limit: input.limit,
-                  ...projectEntriesFailureContext(cause),
-                  cause,
-                }),
-            ),
-          ),
+          threadWorkspace.searchContents(input, workspaceCaller),
         [WS_METHODS.projectsListEntries]: (input) =>
-          workspaceEntries.list(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectListEntriesError({
-                  ...input,
-                  ...projectEntriesFailureContext(cause),
-                  cause,
-                }),
-            ),
-          ),
+          threadWorkspace.listEntries(input, workspaceCaller),
         [WS_METHODS.projectsListIgnoredFiles]: (input) =>
-          workspaceEntries.listIgnoredFiles(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectListEntriesError({
-                  ...input,
-                  ...projectEntriesFailureContext(cause),
-                  cause,
-                }),
-            ),
-          ),
-        [WS_METHODS.projectsReadFile]: (input) =>
-          workspaceFileSystem.readFile(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectReadFileError({
-                  ...input,
-                  ...projectFileFailureContext(cause),
-                  cause,
-                }),
-            ),
-          ),
+          threadWorkspace.listIgnoredFiles(input, workspaceCaller),
+        [WS_METHODS.projectsReadFile]: (input) => threadWorkspace.readFile(input, workspaceCaller),
         [WS_METHODS.projectsWriteFile]: (input) =>
-          workspaceFileSystem.writeFile(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectWriteFileError({
-                  cwd: input.cwd,
-                  relativePath: input.relativePath,
-                  ...projectFileFailureContext(cause),
-                  cause,
-                }),
-            ),
-          ),
+          threadWorkspace.writeFile(input, workspaceCaller),
         [WS_METHODS.projectsMutate]: (mutation) =>
           startup.enqueueCommand(mutateProject(mutation)).pipe(
             Effect.mapError(
@@ -3007,17 +2821,7 @@ export const layerWsRpc = (
           ),
         [WS_METHODS.shellOpenInEditor]: (input) => externalLauncher.launchEditor(input),
         [WS_METHODS.filesystemGetMetadata]: (input) => workspaceFileSystem.getMetadata(input),
-        [WS_METHODS.filesystemBrowse]: (input) =>
-          workspaceEntries.browse(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new FilesystemBrowseError({
-                  ...input,
-                  ...filesystemBrowseFailureContext(cause),
-                  cause,
-                }),
-            ),
-          ),
+        [WS_METHODS.filesystemBrowse]: (input) => threadWorkspace.browse(input, workspaceCaller),
         [WS_METHODS.attachmentsCreateUploadUrl]: (input) => issueAttachmentUploadUrl(input),
         [WS_METHODS.attachmentsDelete]: (input) => deletePendingAttachment(input.attachmentId),
         [WS_METHODS.agentSessionsScan]: () => agentSessionScanner.scan,
@@ -3184,23 +2988,23 @@ export const layerWsRpc = (
         [WS_METHODS.reviewGetBranchCommits]: (input) => review.getBranchCommits(input),
         [WS_METHODS.reviewGetDiffPreview]: (input) => review.getDiffPreview(input),
         [WS_METHODS.reviewGetDiffFileContents]: (input) => review.getDiffFileContents(input),
-        [WS_METHODS.terminalOpen]: (input) => terminalManager.open(input),
+        [WS_METHODS.terminalOpen]: (input) => threadWorkspace.terminalOpen(input, workspaceCaller),
         [WS_METHODS.terminalAttach]: (input, metadata) =>
-          terminalManager
-            .attachOutputStream(input, terminalViewerId(metadata))
+          threadWorkspace
+            .terminalAttach(input, terminalViewerId(metadata), workspaceCaller)
             .pipe(whileAllowed(WS_METHODS.terminalAttach, input)),
-        [WS_METHODS.terminalWrite]: (input) => terminalManager.write(input),
+        [WS_METHODS.terminalWrite]: (input) =>
+          threadWorkspace.terminalWrite(input, workspaceCaller),
         [WS_METHODS.terminalResize]: (input, metadata) =>
-          terminalManager.resize(input, terminalViewerId(metadata)),
-        [WS_METHODS.terminalClear]: (input) => terminalManager.clear(input),
-        [WS_METHODS.terminalClose]: (input) => terminalManager.close(input),
+          threadWorkspace.terminalResize(input, terminalViewerId(metadata), workspaceCaller),
+        [WS_METHODS.terminalClear]: (input) =>
+          threadWorkspace.terminalClear(input, workspaceCaller),
+        [WS_METHODS.terminalClose]: (input) =>
+          threadWorkspace.terminalClose(input, workspaceCaller),
         [WS_METHODS.terminalObserve]: (input) =>
-          terminalOutputStream<TerminalAttachStreamEvent, TerminalError>(
-            (listener, registerCleanup) =>
-              terminalManager.observeStream(input, listener, registerCleanup),
-            (listener, registerCleanup) =>
-              terminalManager.resyncStream(input, listener, registerCleanup),
-          ).pipe(whileAllowed(WS_METHODS.terminalObserve, input)),
+          threadWorkspace
+            .terminalObserve(input, workspaceCaller)
+            .pipe(whileAllowed(WS_METHODS.terminalObserve, input)),
         [WS_METHODS.subscribeTerminalMetadata]: (_input) =>
           Stream.callback<TerminalMetadataStreamEvent>((queue) =>
             Effect.acquireRelease(
@@ -3219,13 +3023,15 @@ export const layerWsRpc = (
             ),
             Stream.flatMap((events) => Stream.fromIterable(events)),
           ),
-        [WS_METHODS.previewOpen]: (input) => previewManager.open(input),
-        [WS_METHODS.previewResize]: (input) => previewManager.resize(input),
-        [WS_METHODS.previewAdjust]: (input) => previewManager.adjust(input),
-        [WS_METHODS.previewClose]: (input) => previewManager.close(input),
+        [WS_METHODS.previewOpen]: (input) => threadWorkspace.previewOpen(input, workspaceCaller),
+        [WS_METHODS.previewResize]: (input) =>
+          threadWorkspace.previewResize(input, workspaceCaller),
+        [WS_METHODS.previewAdjust]: (input) =>
+          threadWorkspace.previewAdjust(input, workspaceCaller),
+        [WS_METHODS.previewClose]: (input) => threadWorkspace.previewClose(input, workspaceCaller),
         [WS_METHODS.previewList]: (input) =>
-          previewManager
-            .list(input)
+          threadWorkspace
+            .previewList(input, workspaceCaller)
             .pipe(
               Effect.flatMap((result) =>
                 withoutHiddenThreads([input], (item) => item.threadId).pipe(
@@ -3237,9 +3043,10 @@ export const layerWsRpc = (
             ),
         [WS_METHODS.previewClearProfile]: (input) => serverBrowser.clearProfile(input.profileId),
         [WS_METHODS.previewReportProfiles]: (input) => reportProfiles(input),
-        [WS_METHODS.previewReportStatus]: (input) => previewManager.reportStatus(input),
+        [WS_METHODS.previewReportStatus]: (input) =>
+          threadWorkspace.previewReportStatus(input, workspaceCaller),
         [WS_METHODS.subscribePreviewEvents]: (_input) =>
-          previewManager.events.pipe(
+          threadWorkspace.previewEvents.pipe(
             Stream.mapEffect((event) => withoutHiddenThreads([event], (item) => item.threadId)),
             Stream.flatMap((events) => Stream.fromIterable(events)),
           ),
