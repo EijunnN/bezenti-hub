@@ -159,8 +159,8 @@ const fileSaveSessions = createFileSaveSessions({
     }),
   confirm: ({ environmentId, cwd, relativePath, threadId }, contents) =>
     confirmProjectFileQueryData(environmentId, cwd, relativePath, contents, threadId),
-  readUnsaved: ({ environmentId, cwd, relativePath }) =>
-    getUnsavedProjectFileQueryData(environmentId, cwd, relativePath)?.contents ?? null,
+  readUnsaved: ({ environmentId, cwd, relativePath, threadId }) =>
+    getUnsavedProjectFileQueryData(environmentId, cwd, relativePath, threadId)?.contents ?? null,
 });
 
 /** Holds the file's save session while the surface is mounted; the last surface to leave flushes. */

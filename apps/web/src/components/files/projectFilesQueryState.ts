@@ -27,12 +27,14 @@ const EMPTY_PROJECT_ENTRIES_QUERY_ATOM = Atom.make(
 const EMPTY_PROJECT_FILE_QUERY_ATOM = Atom.make(
   AsyncResult.initial<ProjectReadFileResult, never>(false),
 ).pipe(Atom.withLabel("project-file-query:empty"));
+/** A file's unsaved contents, per Thread: two Threads' copies may live on different machines. */
 export function optimisticFileAtom(
   environmentId: EnvironmentId,
   cwd: string,
   relativePath: string,
+  threadId?: ThreadId,
 ) {
-  return projectEnvironment.optimisticFile({ environmentId, cwd, relativePath });
+  return projectEnvironment.optimisticFile({ environmentId, cwd, relativePath, threadId });
 }
 
 // Dirty contents must survive a closed preview, including failed or unauthorized saves.
@@ -96,8 +98,9 @@ export function setProjectFileQueryData(
   cwd: string,
   relativePath: string,
   contents: string,
+  threadId?: ThreadId,
 ): void {
-  const atom = optimisticFileAtom(environmentId, cwd, relativePath);
+  const atom = optimisticFileAtom(environmentId, cwd, relativePath, threadId);
   if (!unsavedFileMounts.has(atom)) {
     unsavedFileMounts.set(atom, appAtomRegistry.mount(atom));
   }
@@ -116,8 +119,12 @@ export function getOptimisticProjectFileQueryData(
   environmentId: EnvironmentId,
   cwd: string,
   relativePath: string,
+  threadId?: ThreadId,
 ): ProjectReadFileResult | null {
-  return appAtomRegistry.get(optimisticFileAtom(environmentId, cwd, relativePath))?.data ?? null;
+  return (
+    appAtomRegistry.get(optimisticFileAtom(environmentId, cwd, relativePath, threadId))?.data ??
+    null
+  );
 }
 
 export function getProjectFileContents(
@@ -126,7 +133,7 @@ export function getProjectFileContents(
   relativePath: string,
   threadId?: ThreadId,
 ): string | undefined {
-  const optimistic = getOptimisticProjectFileQueryData(environmentId, cwd, relativePath);
+  const optimistic = getOptimisticProjectFileQueryData(environmentId, cwd, relativePath, threadId);
   if (optimistic) return optimistic.contents;
   const result = appAtomRegistry.get(
     getProjectFileQueryAtom(environmentId, cwd, relativePath, threadId),
@@ -139,8 +146,11 @@ export function getUnsavedProjectFileQueryData(
   environmentId: EnvironmentId,
   cwd: string,
   relativePath: string,
+  threadId?: ThreadId,
 ): ProjectReadFileResult | null {
-  const optimistic = appAtomRegistry.get(optimisticFileAtom(environmentId, cwd, relativePath));
+  const optimistic = appAtomRegistry.get(
+    optimisticFileAtom(environmentId, cwd, relativePath, threadId),
+  );
   return optimistic?.confirmedAgainst === undefined ? (optimistic?.data ?? null) : null;
 }
 
@@ -151,7 +161,7 @@ export function confirmProjectFileQueryData(
   contents: string,
   threadId?: ThreadId,
 ): boolean {
-  const atom = optimisticFileAtom(environmentId, cwd, relativePath);
+  const atom = optimisticFileAtom(environmentId, cwd, relativePath, threadId);
   const optimisticFile = appAtomRegistry.get(atom);
   if (optimisticFile?.data.contents !== contents) return false;
 
@@ -179,17 +189,22 @@ export function resolveProjectFileQueryData(
   cwd: string,
   relativePath: string | null,
   data: ProjectReadFileResult | null,
+  threadId?: ThreadId,
 ): ProjectReadFileResult | null {
   if (relativePath === null) return data;
-  return appAtomRegistry.get(optimisticFileAtom(environmentId, cwd, relativePath))?.data ?? data;
+  return (
+    appAtomRegistry.get(optimisticFileAtom(environmentId, cwd, relativePath, threadId))?.data ??
+    data
+  );
 }
 
 export function clearProjectFileQueryData(
   environmentId: EnvironmentId,
   cwd: string,
   relativePath: string,
+  threadId?: ThreadId,
 ): void {
-  const atom = optimisticFileAtom(environmentId, cwd, relativePath);
+  const atom = optimisticFileAtom(environmentId, cwd, relativePath, threadId);
   appAtomRegistry.set(atom, null);
   releaseUnsavedFile(atom);
 }
@@ -282,7 +297,7 @@ export function useProjectFileQuery(
   const readData = AsyncResult.getOrElse(result, () => null);
   const isMissing = readData?.exists === false;
   const optimisticResult = useAtomValue(
-    optimisticFileAtom(environmentId, cwd, relativePath ?? EMPTY_PROJECT_FILE_PATH),
+    optimisticFileAtom(environmentId, cwd, relativePath ?? EMPTY_PROJECT_FILE_PATH, threadId),
   );
   const optimisticFile = relativePath === null ? null : optimisticResult;
   const cause = failureCause(result);

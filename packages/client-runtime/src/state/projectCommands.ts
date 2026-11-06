@@ -3,6 +3,7 @@ import {
   ProjectId,
   type ProjectReadFileResult,
   type ScopedProjectRef,
+  type ThreadId,
   WS_METHODS,
 } from "@t3tools/contracts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -46,10 +47,17 @@ export interface OptimisticProjectFileTarget {
   readonly environmentId: EnvironmentId;
   readonly cwd: string;
   readonly relativePath: string;
+  /** Each Thread's copy is its own: Threads at one path may run on different machines. */
+  readonly threadId?: ThreadId | undefined;
 }
 
 function optimisticProjectFileKey(target: OptimisticProjectFileTarget): string {
-  return JSON.stringify([target.environmentId, target.cwd, target.relativePath]);
+  return JSON.stringify([
+    target.environmentId,
+    target.cwd,
+    target.relativePath,
+    target.threadId ?? null,
+  ]);
 }
 
 function writtenFilePaths(
