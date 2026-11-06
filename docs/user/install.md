@@ -425,6 +425,18 @@ connection out to the Hub, so you open no ports, and it reconnects by itself
 after a reboot or network drop. `t3 status` shows its Hub and whether it is
 connected; `t3 leave` removes it from the Hub.
 
+In the desktop app you can do the same without a terminal: in **Settings →
+Environments**, under **This app**, turn on **Use this computer as an
+Environment**, enter the Hub's address and choose **Join**. The approval page
+opens in your browser; once you approve, the app starts this computer's
+Environment server by itself and shows whether it is connected. It runs apart
+from the app's own local environment, in the `joined-environment` folder of
+the T3 home, and the app stays connected to your Hub as before. Turning the
+setting off stops that server and turning it on starts it again; it also starts
+with the app. With **Keep running when the window is closed** on, closing the
+window keeps the app, and this computer's Environment, running; quit the app to
+stop it. **Leave** removes this computer from the Hub.
+
 In **Settings → Environments**, **Machines on this Hub** lists every machine
 with its status (online, reconnecting or offline), when it was last seen, its
 providers and their versions, and its free CPU, memory and disk. **Rename**

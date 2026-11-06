@@ -189,6 +189,8 @@ describe("DesktopSettings", () => {
           wslBackendEnabled: false,
           wslOnly: false,
           wslDistro: null,
+          joinedEnvironmentEnabled: false,
+          joinedEnvironmentKeepRunning: true,
         } satisfies DesktopAppSettings.DesktopSettings);
       }),
     ),

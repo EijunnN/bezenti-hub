@@ -33,6 +33,7 @@ import * as DesktopStartupRecovery from "./DesktopStartupRecovery.ts";
 import * as DesktopState from "./DesktopState.ts";
 import * as DesktopSnapShot from "../snapShot/DesktopSnapShot.ts";
 import * as DesktopWslBackend from "../wsl/DesktopWslBackend.ts";
+import * as DesktopJoinedEnvironment from "../joinedEnvironment/DesktopJoinedEnvironment.ts";
 import * as DesktopRendererHistory from "../telemetry/DesktopRendererHistory.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
@@ -147,12 +148,21 @@ const fatalStartupCause = <E>(stage: string, cause: Cause.Cause<E>) =>
   handleFatalStartupError(stage, Cause.pretty(cause)).pipe(Effect.andThen(Effect.failCause(cause)));
 
 const stopAllPoolInstances = Effect.fn("desktop.app.stopAllPoolInstances")(
-  function* (): Effect.fn.Return<void, never, DesktopBackendPool.DesktopBackendPool> {
+  function* (): Effect.fn.Return<
+    void,
+    never,
+    DesktopBackendPool.DesktopBackendPool | DesktopJoinedEnvironment.DesktopJoinedEnvironment
+  > {
     const pool = yield* DesktopBackendPool.DesktopBackendPool;
+    const joinedEnvironment = yield* DesktopJoinedEnvironment.DesktopJoinedEnvironment;
     const instances = yield* pool.list;
     yield* Effect.forEach(
-      instances,
-      (instance) => instance.stop({ timeout: Duration.seconds(5) }),
+      [
+        ...instances.map((instance) => instance.stop({ timeout: Duration.seconds(5) })),
+        // Outside the pool, so the renderer never lists it; stopped with the rest.
+        joinedEnvironment.stop,
+      ],
+      (stop) => stop,
       { concurrency: "unbounded" },
     );
   },
@@ -183,6 +193,9 @@ const bootstrap = Effect.gen(function* () {
   );
 
   yield* snapShot.initialize;
+
+  // Starts with the app, local environment or not: it serves the Hub, not this app.
+  yield* Effect.forkScoped((yield* DesktopJoinedEnvironment.DesktopJoinedEnvironment).reconcile);
 
   if (!settings.localEnvironmentEnabled) {
     yield* logBootstrapInfo("bootstrap skipping local environment (disabled in settings)");

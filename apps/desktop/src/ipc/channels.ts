@@ -67,6 +67,13 @@ export const GET_WSL_STATE_CHANNEL = "desktop:get-wsl-state";
 export const SET_WSL_BACKEND_ENABLED_CHANNEL = "desktop:set-wsl-backend-enabled";
 export const SET_WSL_DISTRO_CHANNEL = "desktop:set-wsl-distro";
 export const SET_WSL_ONLY_CHANNEL = "desktop:set-wsl-only";
+export const GET_JOINED_ENVIRONMENT_STATE_CHANNEL = "desktop:get-joined-environment-state";
+export const JOIN_AS_ENVIRONMENT_CHANNEL = "desktop:join-as-environment";
+export const CANCEL_JOIN_AS_ENVIRONMENT_CHANNEL = "desktop:cancel-join-as-environment";
+export const SET_JOINED_ENVIRONMENT_ENABLED_CHANNEL = "desktop:set-joined-environment-enabled";
+export const SET_JOINED_ENVIRONMENT_KEEP_RUNNING_CHANNEL =
+  "desktop:set-joined-environment-keep-running";
+export const LEAVE_JOINED_ENVIRONMENT_CHANNEL = "desktop:leave-joined-environment";
 export const SSH_PASSWORD_PROMPT_CANCELLED_RESULT = "ssh-password-prompt-cancelled";
 export const PREVIEW_SET_FORWARDED_SHORTCUTS_CHANNEL = "desktop:preview-set-forwarded-shortcuts";
 export const PREVIEW_CREATE_TAB_CHANNEL = "desktop:preview-create-tab";

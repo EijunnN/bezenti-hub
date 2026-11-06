@@ -34,6 +34,10 @@ export interface DesktopSettings {
   readonly wslDistro: string | null;
   // Requires restart because the pool chooses its primary spec at layer initialization.
   readonly wslOnly: boolean;
+  /** «Use this computer as an Environment»: run the joined server with the app. */
+  readonly joinedEnvironmentEnabled: boolean;
+  /** Keep the app, and so the joined server, running when its last window closes. */
+  readonly joinedEnvironmentKeepRunning: boolean;
 }
 
 export interface DesktopSettingsChange {
@@ -69,6 +73,8 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   wslBackendEnabled: false,
   wslDistro: null,
   wslOnly: false,
+  joinedEnvironmentEnabled: false,
+  joinedEnvironmentKeepRunning: true,
 };
 
 const DesktopWindowBoundsDocument = Schema.Struct({
@@ -90,6 +96,8 @@ const DesktopSettingsDocument = Schema.Struct({
   wslMode: Schema.optionalKey(Schema.Literals(["local", "wsl"])),
   wslDistro: Schema.optionalKey(Schema.NullOr(Schema.String)),
   wslOnly: Schema.optionalKey(Schema.Boolean),
+  joinedEnvironmentEnabled: Schema.optionalKey(Schema.Boolean),
+  joinedEnvironmentKeepRunning: Schema.optionalKey(Schema.Boolean),
 });
 
 type DesktopSettingsDocument = typeof DesktopSettingsDocument.Type;
@@ -157,6 +165,10 @@ export class DesktopAppSettings extends Context.Service<
     readonly setWslOnly: (
       enabled: boolean,
     ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
+    readonly setJoinedEnvironment: (input: {
+      readonly enabled?: boolean;
+      readonly keepRunning?: boolean;
+    }) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
     readonly applyWslWindowsFallback: Effect.Effect<
       DesktopSettingsChange,
       DesktopSettingsWriteError
@@ -198,6 +210,8 @@ function normalizeDesktopSettingsDocument(parsed: DesktopSettingsDocument): Desk
     wslBackendEnabled,
     wslDistro: normalizeWslDistro(parsed.wslDistro),
     wslOnly: parsed.wslOnly === true,
+    joinedEnvironmentEnabled: parsed.joinedEnvironmentEnabled === true,
+    joinedEnvironmentKeepRunning: parsed.joinedEnvironmentKeepRunning !== false,
   };
 }
 
@@ -237,6 +251,12 @@ function toDesktopSettingsDocument(
   }
   if (settings.wslOnly !== defaults.wslOnly) {
     document.wslOnly = settings.wslOnly;
+  }
+  if (settings.joinedEnvironmentEnabled !== defaults.joinedEnvironmentEnabled) {
+    document.joinedEnvironmentEnabled = settings.joinedEnvironmentEnabled;
+  }
+  if (settings.joinedEnvironmentKeepRunning !== defaults.joinedEnvironmentKeepRunning) {
+    document.joinedEnvironmentKeepRunning = settings.joinedEnvironmentKeepRunning;
   }
 
   return document;
@@ -319,6 +339,18 @@ function setLocalEnvironmentEnabled(settings: DesktopSettings, enabled: boolean)
   return settings.localEnvironmentEnabled === enabled
     ? settings
     : { ...settings, localEnvironmentEnabled: enabled };
+}
+
+function setJoinedEnvironment(
+  settings: DesktopSettings,
+  input: { readonly enabled?: boolean; readonly keepRunning?: boolean },
+): DesktopSettings {
+  const enabled = input.enabled ?? settings.joinedEnvironmentEnabled;
+  const keepRunning = input.keepRunning ?? settings.joinedEnvironmentKeepRunning;
+  return settings.joinedEnvironmentEnabled === enabled &&
+    settings.joinedEnvironmentKeepRunning === keepRunning
+    ? settings
+    : { ...settings, joinedEnvironmentEnabled: enabled, joinedEnvironmentKeepRunning: keepRunning };
 }
 
 function applyWslWindowsFallback(settings: DesktopSettings): DesktopSettings {
@@ -507,6 +539,11 @@ export const make = Effect.gen(function* () {
         return yield* persist((settings) => setLocalEnvironmentEnabled(settings, enabled));
       },
     ),
+    setJoinedEnvironment: Effect.fn("desktop.settings.setJoinedEnvironment")(function* (input) {
+      yield* Effect.annotateCurrentSpan(input);
+
+      return yield* persist((settings) => setJoinedEnvironment(settings, input));
+    }),
     applyWslWindowsFallback: persist(applyWslWindowsFallback).pipe(
       Effect.withSpan("desktop.settings.applyWslWindowsFallback"),
     ),
@@ -565,6 +602,11 @@ export const layerTest = (initialSettings: DesktopSettings = DEFAULT_DESKTOP_SET
         setLocalEnvironmentEnabled: Effect.fn("DesktopAppSettings.setLocalEnvironmentEnabled")(
           function (enabled) {
             return update((settings) => setLocalEnvironmentEnabled(settings, enabled));
+          },
+        ),
+        setJoinedEnvironment: Effect.fn("DesktopAppSettings.setJoinedEnvironment")(
+          function (input) {
+            return update((settings) => setJoinedEnvironment(settings, input));
           },
         ),
         applyWslWindowsFallback: update(applyWslWindowsFallback),
