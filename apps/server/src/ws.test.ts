@@ -2425,6 +2425,110 @@ describe("Space visibility", () => {
     ),
   );
 
+  // Live: the shell tail batches deltas on a wall-clock window.
+  it.live(
+    "the Owner turns a Member's Personal space on and off; her open connection follows at once",
+    () =>
+      withHub(({ server, owner, grace, linus }) =>
+        Effect.gen(function* () {
+          const setPersonal = (cookie: string, granted: boolean) =>
+            server.request(`/api/installation/users/${grace.userId}/permissions`, {
+              cookie,
+              body: { permission: "personalSpace.create", granted },
+            });
+          // Only the Owner lists Users and grants or revokes their permissions.
+          assert.equal((yield* setPersonal(grace.cookie, true)).status, 403);
+          assert.equal(
+            (yield* server.request("/api/installation/users", { cookie: linus.cookie })).status,
+            403,
+          );
+          const users = yield* server.request("/api/installation/users", { cookie: owner });
+          assert.deepInclude(users.body.users as ReadonlyArray<unknown>, {
+            id: grace.userId,
+            displayName: "grace",
+            loginName: "grace",
+            isOwner: false,
+            installationPermissions: [],
+          });
+
+          const createNotes = (id: string) =>
+            server.request("/api/projects/mutate", {
+              cookie: grace.cookie,
+              body: {
+                type: "project.create",
+                commandId: `create-${id}`,
+                projectId: id,
+                title: id,
+                workspaceRoot: `/work/${id}`,
+              },
+            });
+          const spaceIds = (cookie: string) =>
+            server
+              .request("/api/spaces", { cookie })
+              .pipe(
+                Effect.map((response) =>
+                  (response.body.spaces as ReadonlyArray<{ id: string }>).map((space) => space.id),
+                ),
+              );
+          const personal = `personal:${grace.userId}`;
+          assert.notInclude(yield* spaceIds(grace.cookie), personal);
+          assert.equal((yield* createNotes("too-early")).status, 403);
+
+          // Grace's open shell, synchronized before anything changes.
+          const client = yield* connect(server, grace.userId);
+          const items = yield* Queue.unbounded<OrchestrationV2ShellStreamItem>();
+          yield* client[ORCHESTRATION_V2_WS_METHODS.subscribeShell]({
+            requestCompletionMarker: true,
+          }).pipe(
+            Stream.runForEach((item) => Queue.offer(items, item)),
+            Effect.forkScoped,
+          );
+          while ((yield* Queue.take(items)).kind !== "synchronized");
+
+          const granted = yield* setPersonal(owner, true);
+          assert.equal(granted.status, 200);
+          assert.deepEqual(granted.body.installationPermissions, ["personalSpace.create"]);
+          assert.include(yield* spaceIds(grace.cookie), personal);
+          const notes = yield* createNotes("notes");
+          assert.equal(notes.status, 200);
+          assert.equal(notes.body.spaceId, personal);
+          // The same connection shows it, with no resubscribe.
+          for (let item = yield* Queue.take(items); ; item = yield* Queue.take(items)) {
+            if (item.kind === "project.updated" && item.project.id === "notes") break;
+          }
+
+          // The Owner reads every Personal space; another Member reads none but her own.
+          const projectIds = (cookie: string) =>
+            server
+              .request("/api/projects", { cookie })
+              .pipe(
+                Effect.map((response) =>
+                  (response.body.projects as ReadonlyArray<{ id: string }>).map(
+                    (project) => project.id,
+                  ),
+                ),
+              );
+          assert.include(yield* projectIds(owner), "notes");
+          assert.include(yield* spaceIds(owner), personal);
+          assert.notInclude(yield* projectIds(linus.cookie), "notes");
+          assert.notInclude(yield* spaceIds(linus.cookie), personal);
+
+          // Revoking hides it again: the open shell gets a fresh snapshot without it.
+          assert.equal((yield* setPersonal(owner, false)).status, 200);
+          for (let item = yield* Queue.take(items); ; item = yield* Queue.take(items)) {
+            if (item.kind === "snapshot" && item.resolvedRepositoryIdentityRoots === undefined) {
+              assert.notInclude(shellIds(item.snapshot).projects, "notes");
+              break;
+            }
+          }
+          assert.notInclude(yield* spaceIds(grace.cookie), personal);
+          assert.notInclude(yield* projectIds(grace.cookie), "notes");
+          assert.equal((yield* createNotes("after-revoke")).status, 403);
+          assert.include(yield* projectIds(owner), "notes");
+        }),
+      ),
+  );
+
   it.effect("once an Owner exists, a request with no User changes nothing", () =>
     withTeam(({ server }) =>
       Effect.gen(function* () {

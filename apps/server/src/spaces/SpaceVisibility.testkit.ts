@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 
 import * as SpaceVisibility from "./SpaceVisibility.ts";
 
@@ -10,6 +11,7 @@ export const layerSeesEverything = Layer.merge(
     SpaceVisibility.SpaceVisibility.of({
       of: () => Effect.succeed(SpaceVisibility.everything),
       viewer: () => Effect.succeed(Effect.succeed(SpaceVisibility.everything)),
+      accessChanges: () => Stream.empty,
       visibleThreadIds: (_visibility, threadIds) => Effect.succeed(new Set(threadIds)),
       hiddenThreadIds: () => Effect.succeed(new Set<string>()),
       visibleProjectIds: (_visibility, projectIds) => Effect.succeed(new Set(projectIds)),

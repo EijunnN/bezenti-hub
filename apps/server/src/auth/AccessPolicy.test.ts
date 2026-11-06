@@ -79,7 +79,14 @@ const rows: ReadonlyArray<
   ["Owner views an Organization", owner, "space.view", organization, allow],
   ["Owner views another User's Personal space", owner, "space.view", personalOf("grace"), allow],
   ["Owner creates a Thread anywhere", owner, "thread.create", organization, allow],
-  ["Owner creates a Project anywhere", owner, "project.create", personalOf("grace"), allow],
+  ["Owner creates a Project in an Organization", owner, "project.create", organization, allow],
+  [
+    "Owner creates in their own Personal space",
+    owner,
+    "project.create",
+    personalOf("owner"),
+    allow,
+  ],
   ["Owner creates an Organization", owner, "organization.create", AccessPolicy.installation, allow],
 
   // Organizations, by Role.
@@ -124,8 +131,42 @@ const rows: ReadonlyArray<
     deny("owner-only"),
   ],
 
-  // Personal spaces: private to their User; creating in one is an Installation permission.
-  ["a User views their own Personal space", member, "space.view", personalOf("grace"), allow],
+  // Personal spaces: private to their User; using one at all is an Installation permission.
+  [
+    "with the permission a User views their own Personal space",
+    personalCreator,
+    "space.view",
+    personalOf("grace"),
+    allow,
+  ],
+  [
+    "without the permission a User's Personal space is hidden",
+    member,
+    "space.view",
+    personalOf("grace"),
+    deny("missing-installation-permission"),
+  ],
+  [
+    "a User's permission does not reach someone else's Personal space",
+    principal("ada", { permissions: ["personalSpace.create"] }),
+    "space.view",
+    personalOf("grace"),
+    deny("not-your-personal-space"),
+  ],
+  [
+    "the Owner reads another User's Personal space but starts no Thread there",
+    owner,
+    "thread.create",
+    personalOf("grace"),
+    deny("not-your-personal-space"),
+  ],
+  [
+    "the Owner creates no Project in another User's Personal space",
+    owner,
+    "project.create",
+    personalOf("grace"),
+    deny("not-your-personal-space"),
+  ],
   [
     "a User cannot view someone else's Personal space",
     admin,
@@ -396,21 +437,21 @@ const rows: ReadonlyArray<
   // A Personal space's User runs it; others (but the Owner) do not reach it.
   [
     "a User continues their Thread in their Personal space",
-    member,
+    personalCreator,
     "thread.continue",
     owned("thread", "grace", { space: personalOf("grace") }),
     allow,
   ],
   [
     "a User archives in their Personal space",
-    member,
+    personalCreator,
     "project.archive",
     owned("project", "grace", { space: personalOf("grace") }),
     allow,
   ],
   [
     "a User deletes what is archived in their Personal space",
-    member,
+    personalCreator,
     "thread.delete",
     owned("thread", "grace", { space: personalOf("grace"), archived: true }),
     allow,
@@ -421,6 +462,27 @@ const rows: ReadonlyArray<
     "thread.stop",
     owned("thread", "grace", { space: personalOf("grace") }),
     deny("not-your-personal-space"),
+  ],
+  [
+    "once the permission is revoked, what is in the Personal space is out of reach",
+    member,
+    "thread.continue",
+    owned("thread", "grace", { space: personalOf("grace") }),
+    deny("missing-installation-permission"),
+  ],
+  [
+    "the Owner archives in another User's Personal space",
+    owner,
+    "thread.archive",
+    owned("thread", "grace", { space: personalOf("grace") }),
+    allow,
+  ],
+  [
+    "the Owner does not continue a Thread in another User's Personal space",
+    owner,
+    "thread.continue",
+    owned("thread", "grace", { space: personalOf("grace") }),
+    deny("not-yours"),
   ],
   ["Thread rules need a Thread", member, "thread.continue", organization, deny("wrong-resource")],
 
@@ -455,11 +517,55 @@ const rows: ReadonlyArray<
     deny("wrong-resource"),
   ],
   [
+    "no guest link from a Personal space by its own User",
+    personalCreator,
+    "guestLink.create",
+    personalOf("grace"),
+    deny("wrong-resource"),
+  ],
+  [
+    "no Invitation into a Personal space by its own User",
+    personalCreator,
+    "invitation.create",
+    personalOf("grace"),
+    deny("wrong-resource"),
+  ],
+  [
+    "no Invitations to manage in a Personal space, not even the Owner's",
+    owner,
+    "invitation.manage",
+    personalOf("grace"),
+    deny("wrong-resource"),
+  ],
+  [
     "no guest link from an archived Organization",
     admin,
     "guestLink.create",
     archivedOrganization,
     deny("space-archived"),
+  ],
+
+  // Installation permissions: only the Owner lists Users and grants or revokes them.
+  [
+    "the Owner grants and revokes Installation permissions",
+    owner,
+    "installationPermission.manage",
+    AccessPolicy.installation,
+    allow,
+  ],
+  [
+    "an Admin cannot grant Installation permissions",
+    admin,
+    "installationPermission.manage",
+    AccessPolicy.installation,
+    deny("owner-only"),
+  ],
+  [
+    "a User holding a permission cannot grant it",
+    personalCreator,
+    "installationPermission.manage",
+    AccessPolicy.installation,
+    deny("owner-only"),
   ],
 ];
 

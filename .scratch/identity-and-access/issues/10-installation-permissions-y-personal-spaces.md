@@ -4,11 +4,11 @@
 
 **Blocked by:** 08
 
-**Status:** ready-for-agent
+**Status:** done
 
 Spec: ../spec.md
 
-- [ ] Vista de Owner para conceder y retirar Installation permissions.
-- [ ] Personal space oculto y sin creación para quien no tiene el permiso.
-- [ ] El Owner ve los Personal spaces de todos; nadie más ve uno ajeno.
-- [ ] Filas nuevas en la suite de `AccessPolicy` para estas reglas.
+- [x] Vista de Owner para conceder y retirar Installation permissions.
+- [x] Personal space oculto y sin creación para quien no tiene el permiso.
+- [x] El Owner ve los Personal spaces de todos; nadie más ve uno ajeno.
+- [x] Filas nuevas en la suite de `AccessPolicy` para estas reglas.

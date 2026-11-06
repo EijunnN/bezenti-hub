@@ -128,8 +128,8 @@ export function InvitationSurface({
       <div className="mt-6 space-y-4">
         <Alert>
           <AlertDescription>
-            Everyone also gets a Personal space. The Owner of this Installation can see what you
-            keep there; nothing in it is shared with anyone else.
+            You also have a Personal space, which opens once the Owner allows it. The Owner of this
+            Installation can see what you keep there; nothing in it is shared with anyone else.
           </AlertDescription>
         </Alert>
         {signedIn ? (

@@ -37,6 +37,7 @@ import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as SpacesHttp from "../spaces/http.ts";
 import * as InvitationService from "../spaces/InvitationService.ts";
 import * as InvitationsHttp from "../spaces/invitationsHttp.ts";
+import * as InstallationUsersHttp from "../spaces/installationUsersHttp.ts";
 import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as PullRequestHttp from "../pullRequest/http.ts";
@@ -60,6 +61,7 @@ class AuthTestApi extends HttpApi.make("environment")
   .add(EnvironmentHttpApi.groups.auth)
   .add(EnvironmentHttpApi.groups.spaces)
   .add(EnvironmentHttpApi.groups.invitations)
+  .add(EnvironmentHttpApi.groups.installationUsers)
   .add(EnvironmentHttpApi.groups.projects)
   .add(EnvironmentHttpApi.groups.orchestration)
   .add(EnvironmentHttpApi.groups.pullRequests)
@@ -176,6 +178,7 @@ export const serveAuthHttpWith = Effect.fn(function* (config: { readonly publicU
     Layer.provide(AuthHttp.layer),
     Layer.provide(SpacesHttp.layer),
     Layer.provide(InvitationsHttp.layer),
+    Layer.provide(InstallationUsersHttp.layer),
     Layer.provide(ProjectHttp.layer),
     Layer.provide(OrchestrationHttp.layer),
     Layer.provide(PullRequestHttp.layer),

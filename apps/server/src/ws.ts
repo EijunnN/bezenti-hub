@@ -998,7 +998,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
     const spaceVisibility = yield* SpaceVisibility.SpaceVisibility;
     // Read per batch, so a new Membership shows up in later deltas without resubscribing.
-    const { visibility: currentVisibility } = yield* SpaceVisibility.CurrentViewer;
+    const { visibility: currentVisibility, accessChanges } = yield* SpaceVisibility.CurrentViewer;
     const visibleProjects = (all: ReadonlyArray<OrchestrationProjectShell>) =>
       currentVisibility.pipe(
         Effect.map((visibility) =>
@@ -1291,7 +1291,15 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       ),
     );
 
+    // What the viewer was sent may be hidden now (a revoked Installation permission): a fresh
+    // authoritative snapshot replaces everything the client holds.
+    const accessResnapshots = accessChanges.pipe(
+      Stream.mapEffect(() => loadSnapshot()),
+      Stream.flatMap((loaded) => Stream.fromIterable(shellStreamItemsFromInitialSnapshot(loaded))),
+    );
+
     return stream.pipe(
+      Stream.merge(accessResnapshots, { haltStrategy: "left" }),
       dedupeShellEnrichment,
       Stream.mapError(
         (cause) =>
@@ -1314,7 +1322,7 @@ export const layerWsRpc = (
       const principal = yield* EnvironmentAuthenticatedPrincipal;
       const currentSessionId = principal.sessionId;
       // What this connection may see; every Project and Thread read below filters by it.
-      const { visibility: currentVisibility } = yield* SpaceVisibility.CurrentViewer;
+      const { visibility: currentVisibility, accessChanges } = yield* SpaceVisibility.CurrentViewer;
       const spaceVisibility = yield* SpaceVisibility.SpaceVisibility;
       const currentSpaceIds = Effect.map(currentVisibility, SpaceVisibility.spaceFilter);
       const sql = yield* SqlClient.SqlClient;
@@ -2265,6 +2273,31 @@ export const layerWsRpc = (
           Stream.unwrap(
             Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
               Effect.andThen(subscribeOrchestrationV2Thread(input)),
+            ),
+          ).pipe(
+            // The middleware checked the Thread when the stream opened; a later access change
+            // that hides it ends the stream as if the Thread were gone.
+            Stream.merge(
+              accessChanges.pipe(
+                Stream.mapEffect(() =>
+                  currentVisibility.pipe(
+                    Effect.flatMap((visibility) =>
+                      spaceVisibility.visibleThreadIds(visibility, [input.threadId]),
+                    ),
+                  ),
+                ),
+                Stream.filter((visible) => !visible.has(input.threadId)),
+                Stream.take(1),
+                Stream.flatMap(() =>
+                  Stream.fail(
+                    new OrchestrationV2GetThreadProjectionError({
+                      threadId: input.threadId,
+                      message: "That Project or Thread does not exist.",
+                    }),
+                  ),
+                ),
+              ),
+              { haltStrategy: "left" },
             ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.subscribeCommandOutput]: (input) =>

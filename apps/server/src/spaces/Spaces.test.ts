@@ -21,7 +21,11 @@ it.effect("lets only the Owner create Organizations, which then show in the Spac
     expect(ownerBefore.body).toMatchObject({
       canCreateOrganization: true,
       isOwner: true,
-      spaces: [{ kind: "personal", isOwn: true }],
+      // The Owner also lists every other Personal space, to read and not to create in.
+      spaces: [
+        { kind: "personal", isOwn: true, canCreateThreads: true },
+        { kind: "personal", isOwn: false, name: "Grace Hopper", canCreateThreads: false },
+      ],
     });
 
     const acme = yield* server.request("/api/spaces/organizations", {
@@ -40,15 +44,12 @@ it.effect("lets only the Owner create Organizations, which then show in the Spac
     expect((ownerAfter.body.spaces as ReadonlyArray<{ name: string }>).map((s) => s.name)).toEqual([
       "Personal",
       "Acme",
+      "Grace Hopper",
     ]);
-    // Not a Member of Acme, so Grace sees only her own Personal space.
+    // Not a Member of Acme and without `personalSpace.create`, Grace has no Space at all.
     const memberView = yield* server.request("/api/spaces", { cookie: member });
-    expect(memberView.body).toMatchObject({
-      canCreateOrganization: false,
-      isOwner: false,
-      spaces: [{ kind: "personal", isOwn: true }],
-    });
-    expect(memberView.body.spaces).toHaveLength(1);
+    expect(memberView.body).toMatchObject({ canCreateOrganization: false, isOwner: false });
+    expect(memberView.body.spaces).toEqual([]);
   }),
 );
 

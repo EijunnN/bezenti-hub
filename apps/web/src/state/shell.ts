@@ -49,6 +49,22 @@ export function useEnvironmentShellHasSnapshot(environmentId: EnvironmentId | nu
   );
 }
 
+const NO_SHELL_GENERATION_ATOM = Atom.make(0).pipe(
+  Atom.withLabel("web-environment-shell-generation:none"),
+);
+const shellGenerationAtom = Atom.family((environmentId: EnvironmentId) =>
+  Atom.make((get) => get(environmentShell.stateValueAtom(environmentId)).generation).pipe(
+    Atom.withLabel(`web-environment-shell-generation:${environmentId}`),
+  ),
+);
+
+/** Moves with each authoritative shell snapshot, such as the one an access change sends. */
+export function useEnvironmentShellGeneration(environmentId: EnvironmentId | null): number {
+  return useAtomValue(
+    environmentId === null ? NO_SHELL_GENERATION_ATOM : shellGenerationAtom(environmentId),
+  );
+}
+
 let previousLiveEnvironmentIds: ReadonlySet<EnvironmentId> = new Set();
 /** Environments whose threads reflect the server now, not a cache or a resync in flight. */
 export const liveShellEnvironmentIdsAtom = Atom.make((get) => {

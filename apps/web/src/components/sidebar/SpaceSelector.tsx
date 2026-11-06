@@ -7,10 +7,12 @@ import {
   RefreshCwIcon,
   UserIcon,
   UserPlusIcon,
+  UsersIcon,
 } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
 import { primaryEnvironmentIdAtom } from "../../state/primaryEnvironment";
+import { useEnvironmentShellGeneration } from "../../state/shell";
 import {
   createAndSelectOrganization,
   loadSpaces,
@@ -29,6 +31,7 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { InvitationsDialog } from "./InvitationsDialog";
+import { UsersDialog } from "./UsersDialog";
 import { Label } from "../ui/label";
 import {
   Menu,
@@ -51,10 +54,16 @@ export function SpaceSelector() {
   const loadFailed = useCurrentSpace((state) => state.loadFailed);
   const [creating, setCreating] = useState(false);
   const [inviting, setInviting] = useState(false);
+  const [managingUsers, setManagingUsers] = useState(false);
+  const shellGeneration = useEnvironmentShellGeneration(environmentId);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the signed-in User's Spaces from the server
   useEffect(() => {
     if (environmentId !== null) void loadSpaces(environmentId);
-  }, [environmentId]);
+  }, [
+    environmentId,
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- An access change (a granted or revoked Installation permission) sends a fresh shell snapshot, so the Spaces are read again.
+    shellGeneration,
+  ]);
   const reload = () => {
     if (environmentId !== null) void loadSpaces(environmentId);
   };
@@ -74,6 +83,17 @@ export function SpaceSelector() {
   }
   const current = view.spaces.find((space) => space.id === currentSpaceId) ?? view.spaces[0];
   const CurrentIcon = current?.kind === "organization" ? BuildingIcon : UserIcon;
+  // Only the Owner lists other Users' Personal spaces, to read them.
+  const ownSpaces = view.spaces.filter((space) => space.kind === "organization" || space.isOwn);
+  const othersPersonal = view.spaces.filter((space) => space.kind === "personal" && !space.isOwn);
+  const notice =
+    current === undefined
+      ? "Nothing to work in yet. The Owner can turn on your Personal space or invite you to an Organization."
+      : current.kind === "personal" && current.isOwn && view.isOwner !== true
+        ? "The Owner can see everything in your Personal space."
+        : current.kind === "personal" && !current.isOwn
+          ? `Reading ${current.name}'s Personal space. New Threads can't start here.`
+          : null;
 
   return (
     <SidebarMenu>
@@ -85,7 +105,7 @@ export function SpaceSelector() {
         >
           <MenuTrigger render={<SidebarMenuButton aria-label="Switch Space" />}>
             <CurrentIcon />
-            <span className="min-w-0 flex-1 truncate">{current?.name ?? "Personal"}</span>
+            <span className="min-w-0 flex-1 truncate">{current?.name ?? "No Space"}</span>
             <ChevronsUpDownIcon />
           </MenuTrigger>
           <MenuPopup align="start" side="top">
@@ -95,13 +115,31 @@ export function SpaceSelector() {
                 value={current?.id}
                 onValueChange={(value) => selectSpace(value as SpaceId)}
               >
-                {view.spaces.map((space) => (
+                {ownSpaces.map((space) => (
                   <MenuRadioItem key={space.id} value={space.id} closeOnClick>
                     {space.name}
                   </MenuRadioItem>
                 ))}
               </MenuRadioGroup>
             </MenuGroup>
+            {othersPersonal.length > 0 ? (
+              <>
+                <MenuSeparator />
+                <MenuGroup>
+                  <MenuGroupLabel>Personal spaces (read only)</MenuGroupLabel>
+                  <MenuRadioGroup
+                    value={current?.id}
+                    onValueChange={(value) => selectSpace(value as SpaceId)}
+                  >
+                    {othersPersonal.map((space) => (
+                      <MenuRadioItem key={space.id} value={space.id} closeOnClick>
+                        {space.name}
+                      </MenuRadioItem>
+                    ))}
+                  </MenuRadioGroup>
+                </MenuGroup>
+              </>
+            ) : null}
             {loadFailed ? (
               <>
                 <MenuSeparator />
@@ -129,11 +167,21 @@ export function SpaceSelector() {
                 </MenuItem>
               </>
             ) : null}
+            {view.isOwner === true ? (
+              <MenuItem onClick={() => setManagingUsers(true)}>
+                <UsersIcon />
+                Users and permissions
+              </MenuItem>
+            ) : null}
           </MenuPopup>
         </Menu>
         {creating ? <CreateOrganizationDialog onClose={() => setCreating(false)} /> : null}
         {inviting && current?.canInvite ? (
           <InvitationsDialog space={current} onClose={() => setInviting(false)} />
+        ) : null}
+        {managingUsers ? <UsersDialog onClose={() => setManagingUsers(false)} /> : null}
+        {notice !== null ? (
+          <p className="px-2 pt-1 text-muted-foreground text-xs">{notice}</p>
         ) : null}
       </SidebarMenuItem>
     </SidebarMenu>

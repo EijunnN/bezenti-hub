@@ -23,7 +23,10 @@ export const SpaceSummary = Schema.Struct({
   name: TrimmedNonEmptyString,
   /** The viewer's Role; null in a Personal space and for the Owner outside their memberships. */
   role: Schema.NullOr(SpaceRole),
-  /** True for the viewer's own Personal space. */
+  /**
+   * True for the viewer's own Personal space. The Owner also lists every other User's Personal
+   * space (kind `personal`, not own) to read it; they are named after their User.
+   */
   isOwn: Schema.Boolean,
   /** Whether the viewer may start Threads here. */
   canCreateThreads: Schema.Boolean,
@@ -47,3 +50,23 @@ export const CreateOrganizationRequest = Schema.Struct({
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(80)),
 });
 export type CreateOrganizationRequest = typeof CreateOrganizationRequest.Type;
+
+/** A User as the Owner sees them in the Users admin view. */
+export const InstallationUser = Schema.Struct({
+  id: UserId,
+  displayName: Schema.String,
+  loginName: Schema.NullOr(Schema.String),
+  isOwner: Schema.Boolean,
+  /** What the Owner granted them; the Owner holds every permission and lists none. */
+  installationPermissions: Schema.Array(InstallationPermission),
+});
+export type InstallationUser = typeof InstallationUser.Type;
+
+export const InstallationUserList = Schema.Struct({ users: Schema.Array(InstallationUser) });
+export type InstallationUserList = typeof InstallationUserList.Type;
+
+export const SetInstallationPermissionRequest = Schema.Struct({
+  permission: InstallationPermission,
+  granted: Schema.Boolean,
+});
+export type SetInstallationPermissionRequest = typeof SetInstallationPermissionRequest.Type;

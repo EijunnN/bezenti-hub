@@ -60,7 +60,14 @@ import {
   AuthTotpEnrollment,
   AuthTotpSignInRequest,
 } from "./userAccounts.ts";
-import { CreateOrganizationRequest, SpaceDirectoryView, SpaceSummary } from "./spaces.ts";
+import {
+  CreateOrganizationRequest,
+  InstallationUser,
+  InstallationUserList,
+  SetInstallationPermissionRequest,
+  SpaceDirectoryView,
+  SpaceSummary,
+} from "./spaces.ts";
 import {
   AcceptInvitationRequest,
   AcceptInvitationResult,
@@ -158,6 +165,7 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "orchestration_thread_history_failed",
   "spaces_failed",
   "invitations_failed",
+  "installation_users_failed",
   "internal_error",
 ]);
 export type EnvironmentInternalErrorReason = typeof EnvironmentInternalErrorReason.Type;
@@ -254,7 +262,10 @@ export class EnvironmentInternalError extends Schema.TaggedError<EnvironmentInte
   }
 }
 
-export const EnvironmentResourceNotFoundReason = Schema.Literals(["thread_not_found"]);
+export const EnvironmentResourceNotFoundReason = Schema.Literals([
+  "thread_not_found",
+  "user_not_found",
+]);
 export type EnvironmentResourceNotFoundReason = typeof EnvironmentResourceNotFoundReason.Type;
 
 export class EnvironmentResourceNotFoundError extends Schema.TaggedError<EnvironmentResourceNotFoundError>()(
@@ -821,6 +832,27 @@ class EnvironmentSpacesHttpApi extends HttpApiGroup.make("spaces")
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
+const InstallationUserParams = Schema.Struct({ userId: UserId });
+
+// The Owner's Users admin view: list Users and grant or revoke their Installation permissions.
+class EnvironmentInstallationUsersHttpApi extends HttpApiGroup.make("installationUsers")
+  .add(
+    HttpApiEndpoint.get("list", "/api/installation/users", {
+      headers: OptionalBearerHeaders,
+      success: InstallationUserList,
+      error: EnvironmentSpaceErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("setPermission", "/api/installation/users/:userId/permissions", {
+      headers: OptionalBearerHeaders,
+      params: InstallationUserParams,
+      payload: SetInstallationPermissionRequest,
+      success: InstallationUser,
+      error: [...EnvironmentSpaceErrors, EnvironmentResourceNotFoundError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  ) {}
+
 const EnvironmentInvitationManageErrors = [
   // The session has no User, or the policy refuses the change.
   EnvironmentHttpForbiddenError,
@@ -963,4 +995,5 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentProjectsHttpApi)
   .add(EnvironmentSpacesHttpApi)
   .add(EnvironmentInvitationsHttpApi)
+  .add(EnvironmentInstallationUsersHttpApi)
   .add(EnvironmentWebhooksHttpApi) {}

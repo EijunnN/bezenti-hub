@@ -1,8 +1,8 @@
 /**
  * Who may do what in which Space. Pure: callers load the principal and the resource, this
  * decides. Each rule of the Role table is one case here and one row in AccessPolicy.test.ts.
- * The Owner is allowed everything except creating in an archived or frozen Space and sharing
- * from a Personal space.
+ * The Owner is allowed everything except creating in an archived or frozen Space, creating in
+ * someone else's Personal space (which the Owner only reads) and sharing from a Personal space.
  */
 import type {
   InstallationPermission,
@@ -49,6 +49,8 @@ export type Action =
   | "thread.create"
   | "project.create"
   | "organization.create"
+  /** List Users and grant or revoke their Installation permissions. */
+  | "installationPermission.manage"
   /** Create an Invitation into an Organization. */
   | "invitation.create"
   /** List and revoke an Organization's Invitations. */
@@ -79,12 +81,14 @@ export type Action =
 const NON_CREATING: ReadonlySet<Action> = new Set([
   "space.view",
   "organization.create",
+  "installationPermission.manage",
   "invitation.manage",
 ]);
 
 /** Owner-only actions; ticket 09 lets Admins invite Members and Guests. */
 const OWNER_ONLY: ReadonlySet<Action> = new Set([
   "organization.create",
+  "installationPermission.manage",
   "invitation.create",
   "invitation.manage",
 ]);
@@ -133,9 +137,11 @@ const isOwned = (resource: Resource): resource is OwnedResource =>
 const ROLES_THAT_CREATE_PROJECTS: ReadonlySet<SpaceRole> = new Set(["admin", "member"]);
 const ADMIN_ONLY: ReadonlySet<SpaceRole> = new Set(["admin"]);
 
-const inPersonalSpace = (principal: Principal, space: SpaceResource, creates: boolean) => {
+// Without the permission a Personal space is hidden, not just closed to new work: what it holds
+// from before a revoke is out of reach too.
+const inPersonalSpace = (principal: Principal, space: SpaceResource) => {
   if (space.personalOwnerUserId !== principal.userId) return deny("not-your-personal-space");
-  if (creates && !principal.installationPermissions.has("personalSpace.create")) {
+  if (!principal.installationPermissions.has("personalSpace.create")) {
     return deny("missing-installation-permission");
   }
   return allow;
@@ -169,7 +175,8 @@ const decideOwned = (principal: Principal, action: Action, item: OwnedResource):
   if (space.archived) return deny("space-archived");
   const deletes = action === "thread.delete" || action === "project.delete";
   if (space.kind === "personal") {
-    if (space.personalOwnerUserId !== principal.userId) return deny("not-your-personal-space");
+    const reach = inPersonalSpace(principal, space);
+    if (reach._tag === "Deny") return reach;
     if (action === "thread.continue" && item.ownerUserId !== principal.userId) {
       return deny("not-yours");
     }
@@ -220,11 +227,19 @@ export const decide = (principal: Principal, action: Action, resource: Resource)
     if (resource.archived) return deny("space-archived");
     if (resource.frozen) return deny("space-frozen");
   }
-  if (principal.isOwner) return allow;
+  if (principal.isOwner) {
+    // The Owner reads every Personal space but adds nothing to another User's.
+    const othersPersonal =
+      creates &&
+      isSpace(resource) &&
+      resource.kind === "personal" &&
+      resource.personalOwnerUserId !== principal.userId;
+    return othersPersonal ? deny("not-your-personal-space") : allow;
+  }
   if (OWNER_ONLY.has(action)) return deny("owner-only");
   if (!isSpace(resource)) return deny("wrong-resource");
   if (resource.archived) return deny("space-archived");
-  if (resource.kind === "personal") return inPersonalSpace(principal, resource, creates);
+  if (resource.kind === "personal") return inPersonalSpace(principal, resource);
   switch (action) {
     case "space.view":
     case "thread.create":

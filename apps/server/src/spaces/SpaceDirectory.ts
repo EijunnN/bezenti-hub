@@ -1,4 +1,6 @@
 import {
+  InstallationPermission,
+  type InstallationUser,
   type ProjectId,
   SpaceId,
   SpaceResourceNotFoundError,
@@ -15,10 +17,12 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
+import * as Stream from "effect/Stream";
 
 import * as AccessPolicy from "../auth/AccessPolicy.ts";
 import * as CommandActor from "../auth/CommandActor.ts";
@@ -37,6 +41,7 @@ const DENIED_ACTION_LABELS: Record<string, string> = {
   "thread.create": "create Threads",
   "project.create": "create Projects",
   "organization.create": "create Organizations",
+  "installationPermission.manage": "grant Installation permissions",
   "invitation.create": "invite people",
   "invitation.manage": "manage Invitations",
   "guestLink.create": "create guest links",
@@ -58,6 +63,12 @@ const deniedMessage = (action: string, reason: string): string | undefined => {
     return `Only its creator or an Admin can ${DENIED_ACTION_LABELS[action] ?? "do that"}.`;
   }
   if (reason === "not-archived") return "Archive it before deleting it permanently.";
+  if (reason === "missing-installation-permission") {
+    return "Your Personal space is off. Ask the Owner to let you create in it.";
+  }
+  if (action === "installationPermission.manage") {
+    return "Only the Owner grants Installation permissions.";
+  }
   if (reason === "no-user") return "This session belongs to no User. Sign in again.";
   if (
     (action === "thread.delete" || action === "project.delete") &&
@@ -80,6 +91,15 @@ export class SpaceAccessDeniedError extends Schema.TaggedError<SpaceAccessDenied
     if (specific !== undefined) return specific;
     const what = DENIED_ACTION_LABELS[this.action] ?? "do that";
     return `You can't ${what} in this Space.`;
+  }
+}
+
+export class InstallationUserNotFoundError extends Schema.TaggedError<InstallationUserNotFoundError>()(
+  "InstallationUserNotFoundError",
+  { userId: UserId },
+) {
+  override get message(): string {
+    return `User ${this.userId} does not exist.`;
   }
 }
 
@@ -175,6 +195,31 @@ export class SpaceDirectory extends Context.Service<
     readonly view: (
       userId: UserId,
     ) => Effect.Effect<SpaceDirectoryView, SpaceDirectoryStorageError>;
+    /** Every User with what the Owner granted them; Owner only. */
+    readonly listUsers: (
+      actorUserId: UserId,
+    ) => Effect.Effect<
+      ReadonlyArray<InstallationUser>,
+      SpaceAccessDeniedError | SpaceDirectoryStorageError
+    >;
+    /**
+     * Grants or revokes one Installation permission; Owner only. Takes effect at once: cached
+     * principals go stale and the User's open connections hear it on `accessChanges`.
+     */
+    readonly setInstallationPermission: (input: {
+      readonly actorUserId: UserId;
+      readonly userId: UserId;
+      readonly permission: InstallationPermission;
+      readonly granted: boolean;
+    }) => Effect.Effect<
+      InstallationUser,
+      SpaceAccessDeniedError | InstallationUserNotFoundError | SpaceDirectoryStorageError
+    >;
+    /**
+     * Users whose access changed in a way a cached read cannot follow (a Space they saw is now
+     * hidden), so their open connections reload what they show.
+     */
+    readonly accessChanges: Stream.Stream<UserId>;
     readonly createOrganization: (
       userId: UserId,
       name: string,
@@ -253,6 +298,7 @@ const make = Effect.gen(function* () {
   const storageError = (cause: unknown) => new SpaceDirectoryStorageError({ cause });
   const revision = yield* Ref.make(0);
   const changed = Ref.update(revision, (current) => current + 1);
+  const accessChanged = yield* PubSub.unbounded<UserId>();
 
   const findSpace = SqlSchema.findOneOption({
     Request: SpaceId,
@@ -287,6 +333,61 @@ const make = Effect.gen(function* () {
       WHERE users.user_id = ${userId}
     `,
   });
+  const findPermissions = SqlSchema.findAll({
+    Request: UserId,
+    Result: Schema.Struct({ permission: InstallationPermission }),
+    execute: (userId) => sql`
+      SELECT permission FROM installation_permissions WHERE user_id = ${userId}
+    `,
+  });
+  const UserRow = Schema.Struct({
+    id: UserId,
+    displayName: Schema.String,
+    loginName: Schema.NullOr(Schema.String),
+    isOwner: Schema.BooleanFromBit,
+    permissions: Schema.NullOr(Schema.String),
+  });
+  const USER_COLUMNS = `users.user_id AS "id", users.display_name AS "displayName",
+    users.login_name AS "loginName", users.is_owner AS "isOwner",
+    (SELECT group_concat(permission, ' ') FROM installation_permissions p
+      WHERE p.user_id = users.user_id) AS "permissions"`;
+  const listUserRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: UserRow,
+    execute: () => sql`
+      SELECT ${sql.literal(USER_COLUMNS)} FROM users WHERE removed_at IS NULL
+      ORDER BY is_owner DESC, display_name COLLATE NOCASE ASC, user_id ASC
+    `,
+  });
+  const findUserRow = SqlSchema.findOneOption({
+    Request: UserId,
+    Result: UserRow,
+    execute: (userId) => sql`
+      SELECT ${sql.literal(USER_COLUMNS)} FROM users
+      WHERE user_id = ${userId} AND removed_at IS NULL
+    `,
+  });
+  // Other Users' Personal spaces, which only the Owner lists.
+  const listOthersPersonalSpaces = SqlSchema.findAll({
+    Request: UserId,
+    Result: Schema.Struct({ spaceId: SpaceId, displayName: Schema.String }),
+    execute: (userId) => sql`
+      SELECT s.space_id AS "spaceId", u.display_name AS "displayName"
+      FROM spaces s JOIN users u ON u.user_id = s.personal_owner_user_id
+      WHERE s.kind = 'personal' AND s.personal_owner_user_id <> ${userId}
+      ORDER BY u.display_name COLLATE NOCASE ASC, s.space_id ASC
+    `,
+  });
+  const isPermission = Schema.is(InstallationPermission);
+  const toInstallationUser = (row: typeof UserRow.Type): InstallationUser => ({
+    id: row.id,
+    displayName: row.displayName,
+    loginName: row.loginName,
+    isOwner: row.isOwner,
+    installationPermissions: row.isOwner
+      ? []
+      : (row.permissions ?? "").split(" ").filter(isPermission).toSorted(),
+  });
   const findOwnerId = SqlSchema.findOneOption({
     Request: Schema.Void,
     Result: Schema.Struct({ userId: UserId }),
@@ -301,15 +402,17 @@ const make = Effect.gen(function* () {
   });
 
   const principalOf = Effect.fn("SpaceDirectory.principalOf")(function* (userId: UserId) {
-    const rows = yield* findPrincipalRows(userId);
+    const [rows, permissions] = yield* Effect.all(
+      [findPrincipalRows(userId), findPermissions(userId)],
+      { concurrency: "unbounded" },
+    );
     const roles = new Map<SpaceId, SpaceRole>();
     for (const row of rows)
       if (row.spaceId !== null && row.role !== null) roles.set(row.spaceId, row.role);
     return {
       userId,
       isOwner: rows[0]?.isOwner ?? false,
-      // The Owner cannot grant Installation permissions yet, so non-Owners hold none.
-      installationPermissions: new Set(),
+      installationPermissions: new Set(permissions.map((row) => row.permission)),
       roles,
     } satisfies AccessPolicy.Principal;
   }, Effect.mapError(storageError));
@@ -326,6 +429,9 @@ const make = Effect.gen(function* () {
       [principalOf(userId), listOrganizations().pipe(Effect.mapError(storageError))],
       { concurrency: "unbounded" },
     );
+    const othersPersonal = principal.isOwner
+      ? yield* listOthersPersonalSpaces(userId).pipe(Effect.mapError(storageError))
+      : [];
     const personal: AccessPolicy.SpaceResource = {
       id: personalSpaceId,
       kind: "personal",
@@ -334,15 +440,20 @@ const make = Effect.gen(function* () {
       frozen: false,
     };
     const spaces: Array<SpaceSummary> = [
-      {
-        id: personalSpaceId,
-        kind: "personal",
-        name: "Personal",
-        role: null,
-        isOwn: true,
-        canCreateThreads: allows(principal, "thread.create", personal),
-        canInvite: false,
-      },
+      // Hidden, not just closed, while the User lacks `personalSpace.create`.
+      ...(allows(principal, "space.view", personal)
+        ? [
+            {
+              id: personalSpaceId,
+              kind: "personal" as const,
+              name: "Personal",
+              role: null,
+              isOwn: true,
+              canCreateThreads: allows(principal, "thread.create", personal),
+              canInvite: false,
+            },
+          ]
+        : []),
       ...organizations
         .filter((row) => allows(principal, "space.view", toResource(row)))
         .map((row) => ({
@@ -354,6 +465,16 @@ const make = Effect.gen(function* () {
           canCreateThreads: allows(principal, "thread.create", toResource(row)),
           canInvite: allows(principal, "invitation.create", toResource(row)),
         })),
+      // The Owner reads every other User's Personal space and adds nothing to it.
+      ...othersPersonal.map((row) => ({
+        id: row.spaceId,
+        kind: "personal" as const,
+        name: row.displayName.trim() || "Personal",
+        role: null,
+        isOwn: false,
+        canCreateThreads: false,
+        canInvite: false,
+      })),
     ];
     return {
       userId,
@@ -383,6 +504,49 @@ const make = Effect.gen(function* () {
       ? Effect.void
       : Effect.fail(new SpaceAccessDeniedError({ action, reason: decision.reason }));
   };
+
+  const listUsers = Effect.fn("SpaceDirectory.listUsers")(function* (actorUserId: UserId) {
+    const principal = yield* principalOf(actorUserId);
+    yield* requireAllowed(principal, "installationPermission.manage", AccessPolicy.installation);
+    const rows = yield* listUserRows().pipe(Effect.mapError(storageError));
+    return rows.map(toInstallationUser);
+  });
+
+  const setInstallationPermission = Effect.fn("SpaceDirectory.setInstallationPermission")(
+    function* (input: {
+      readonly actorUserId: UserId;
+      readonly userId: UserId;
+      readonly permission: InstallationPermission;
+      readonly granted: boolean;
+    }) {
+      const principal = yield* principalOf(input.actorUserId);
+      yield* requireAllowed(principal, "installationPermission.manage", AccessPolicy.installation);
+      const target = yield* findUserRow(input.userId).pipe(Effect.mapError(storageError));
+      if (Option.isNone(target)) {
+        return yield* new InstallationUserNotFoundError({ userId: input.userId });
+      }
+      // The Owner holds every permission; there is nothing to grant or revoke.
+      if (target.value.isOwner) return toInstallationUser(target.value);
+      const now = DateTime.formatIso(yield* DateTime.now);
+      yield* (
+        input.granted
+          ? sql`
+              INSERT INTO installation_permissions (user_id, permission, granted_by, granted_at)
+              VALUES (${input.userId}, ${input.permission}, ${input.actorUserId}, ${now})
+              ON CONFLICT (user_id, permission) DO NOTHING
+            `
+          : sql`
+              DELETE FROM installation_permissions
+              WHERE user_id = ${input.userId} AND permission = ${input.permission}
+            `
+      ).pipe(
+        Effect.mapError(storageError),
+        Effect.ensuring(Effect.andThen(changed, PubSub.publish(accessChanged, input.userId))),
+      );
+      const updated = yield* findUserRow(input.userId).pipe(Effect.mapError(storageError));
+      return toInstallationUser(Option.getOrElse(updated, () => target.value));
+    },
+  );
 
   const createOrganization = Effect.fn("SpaceDirectory.createOrganization")(function* (
     userId: UserId,
@@ -593,6 +757,9 @@ const make = Effect.gen(function* () {
   return SpaceDirectory.of({
     principalOf,
     view,
+    listUsers,
+    setInstallationPermission,
+    accessChanges: Stream.fromPubSub(accessChanged),
     createOrganization,
     claimCreation,
     authorize,

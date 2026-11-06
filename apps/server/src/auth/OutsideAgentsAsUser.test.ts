@@ -264,7 +264,7 @@ it.live("an MCP client Grace approves reads and creates as Grace, not as the Own
       workspaceRoot: "/work/side",
     });
     assert.isTrue(created.isFailure);
-    assert.include(JSON.stringify(created.result), "You can't create Projects in this Space.");
+    assert.include(JSON.stringify(created.result), "Your Personal space is off.");
     const rows = yield* server.sql<{ count: number }>`
       SELECT COUNT(*) AS count FROM projection_projects WHERE workspace_root = '/work/side'
     `;

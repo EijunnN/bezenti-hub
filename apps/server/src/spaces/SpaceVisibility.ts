@@ -18,6 +18,7 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import * as Stream from "effect/Stream";
 
 import * as SpaceDirectory from "./SpaceDirectory.ts";
 
@@ -85,6 +86,11 @@ export class SpaceVisibility extends Context.Service<
      * Membership changed.
      */
     readonly viewer: (userId: UserId | undefined) => Effect.Effect<Effect.Effect<Visibility>>;
+    /**
+     * Emits when the User's access changed so that what an open stream already sent may now be
+     * hidden; streams reload from scratch or close. Nothing for no User.
+     */
+    readonly accessChanges: (userId: UserId | undefined) => Stream.Stream<void>;
     /** The ids among `threadIds` the principal may see. Deleted threads keep their Space. */
     readonly visibleThreadIds: (
       visibility: Visibility,
@@ -166,6 +172,14 @@ const make = Effect.gen(function* () {
       return visibility;
     });
   });
+
+  const accessChanges = (userId: UserId | undefined) =>
+    userId === undefined
+      ? Stream.empty
+      : spaces.accessChanges.pipe(
+          Stream.filter((changed) => changed === userId),
+          Stream.as(undefined),
+        );
 
   const visibleThreadIds = Effect.fn("SpaceVisibility.visibleThreadIds")(function* (
     visibility: Visibility,
@@ -325,6 +339,7 @@ const make = Effect.gen(function* () {
   return SpaceVisibility.of({
     of,
     viewer,
+    accessChanges,
     visibleThreadIds,
     hiddenThreadIds,
     visibleProjectIds,
@@ -339,7 +354,11 @@ export const layer = Layer.effect(SpaceVisibility, make);
 /** What the current connection or request may see. */
 export class CurrentViewer extends Context.Service<
   CurrentViewer,
-  { readonly visibility: Effect.Effect<Visibility> }
+  {
+    readonly visibility: Effect.Effect<Visibility>;
+    /** `SpaceVisibility.accessChanges` for this connection's User. */
+    readonly accessChanges: Stream.Stream<void>;
+  }
 >()("t3/spaces/SpaceVisibility/CurrentViewer") {}
 
 /** One viewer per connection, for the principal of that connection. */
@@ -348,12 +367,15 @@ export const layerCurrentViewer = Layer.effect(
   Effect.gen(function* () {
     const principal = yield* EnvironmentAuthenticatedPrincipal;
     const visibility = yield* SpaceVisibility;
-    return CurrentViewer.of({ visibility: yield* visibility.viewer(principal.userId) });
+    return CurrentViewer.of({
+      visibility: yield* visibility.viewer(principal.userId),
+      accessChanges: visibility.accessChanges(principal.userId),
+    });
   }),
 );
 
 /** Sees everything: for tests and in-process callers that act as the Owner. */
 export const layerCurrentViewerOwner = Layer.succeed(
   CurrentViewer,
-  CurrentViewer.of({ visibility: Effect.succeed(everything) }),
+  CurrentViewer.of({ visibility: Effect.succeed(everything), accessChanges: Stream.empty }),
 );

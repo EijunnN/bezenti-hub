@@ -257,11 +257,25 @@ Every project and thread belongs to a Space: your Personal space or an
 organization. Pick the current Space from the selector at the bottom of the
 sidebar; new projects and threads go there, and a thread started in a project
 joins that project's Space. Each person's choice is remembered in their browser. The Owner creates organizations from the same
-selector with **Create organization**. The Owner can see every Personal space.
+selector with **Create organization**.
 
 You see the projects and threads of your Personal space and of every
 organization you belong to, whoever created them, and nothing else. Work in an
 archived organization disappears for its members. The Owner sees everything.
+
+### Personal spaces and Installation permissions
+
+A Personal space is yours alone, but it stays hidden until the Owner allows it.
+The Owner opens **Users and permissions** from the Space selector and turns on
+**Use their Personal space** for a person; it shows up in that person's selector
+at once, and turning it off hides it again, along with what is in it. **Register
+their own Environments** is stored for a later release and changes nothing yet.
+
+The Owner can see every Personal space: the selector lists them under **Personal
+spaces (read only)**, and the Owner reads them but starts nothing in them. The
+selector reminds you of this while your Personal space is the current Space.
+Nothing in a Personal space is shared with anyone else: no invitations, no guest
+links; to share work, it has to move to an organization.
 
 What you can change depends on your Role in the organization:
 
