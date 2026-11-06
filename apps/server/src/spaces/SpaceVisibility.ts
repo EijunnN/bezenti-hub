@@ -13,6 +13,7 @@ import {
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -66,6 +67,14 @@ export const threadInSpaces = (
         WHERE visible_project.project_id = ${sql.literal(alias)}.project_id
       )) IN (SELECT value FROM json_each(${encodeIds(spaceIds)}))`;
 
+const isWithin = (path: Path.Path, root: string, candidate: string) => {
+  const relative = path.relative(root, candidate);
+  return (
+    relative === "" ||
+    (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+  );
+};
+
 export class SpaceVisibility extends Context.Service<
   SpaceVisibility,
   {
@@ -96,13 +105,15 @@ export class SpaceVisibility extends Context.Service<
     ) => Effect.Effect<ReadonlySet<ProjectId>>;
     /**
      * Whether the User may work a Thread's terminals, previews, devices, attachments and
-     * worktree setup: an existing Thread only its owner (and the Owner) works; a draft, which has
-     * no row yet, belongs to the first User who works it, and is hidden from everyone else.
+     * worktree setup: an existing Thread only its creator works (not even the Owner works
+     * someone else's); a draft, which has no row yet, belongs to the first User who works it
+     * and is hidden from everyone else. `drafts: false` refuses ids with no Thread.
      */
     readonly claimWork: (
       visibility: Visibility,
       userId: UserId | undefined,
       threadId: string,
+      options?: { readonly drafts?: boolean },
     ) => Effect.Effect<WorkAccess>;
     /** The ids among `threadIds` the User may work, by the same rule, without claiming drafts. */
     readonly workableThreadIds: (
@@ -110,6 +121,15 @@ export class SpaceVisibility extends Context.Service<
       userId: UserId | undefined,
       threadIds: ReadonlyArray<string>,
     ) => Effect.Effect<ReadonlySet<string>>;
+    /**
+     * Whether the User may run a terminal in `directory`: the working folder of a Thread they
+     * created, or a Project in a Space where their Role creates Projects (not a Guest's).
+     */
+    readonly mayUseDirectory: (
+      visibility: Visibility,
+      userId: UserId | undefined,
+      directory: string,
+    ) => Effect.Effect<boolean>;
   }
 >()("t3/spaces/SpaceVisibility") {}
 
@@ -118,6 +138,7 @@ export type WorkAccess = "allowed" | "hidden" | "not-yours";
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const spaces = yield* SpaceDirectory.SpaceDirectory;
+  const path = yield* Path.Path;
 
   // A failed read must not widen what anyone sees, so it fails the request instead.
   const of = Effect.fn("SpaceVisibility.of")(function* (userId: UserId | undefined) {
@@ -190,41 +211,80 @@ const make = Effect.gen(function* () {
   // Drafts have no row to carry an owner, so the first User to work one holds it while the
   // server runs; their terminals and previews end with it. Bounded: the oldest claims go first.
   const draftOwners = new Map<string, UserId>();
-  const MAX_DRAFT_CLAIMS = 20_000;
+  const MAX_CLAIMS = 20_000;
+  // Terminal writes ask on every keystroke; a Thread's creator never changes, so an allowed
+  // answer holds until a Space or Membership change could hide the Thread.
+  const allowedWork = new Map<string, number>();
 
   const workOf = Effect.fn("SpaceVisibility.workOf")(function* (
     visibility: Visibility,
     userId: UserId,
-    threadId: string,
-    claim: boolean,
+    threadIds: ReadonlyArray<string>,
+    options: { readonly claim: boolean; readonly drafts: boolean },
   ) {
-    const owner = yield* spaces.threadOwner(ThreadId.make(threadId)).pipe(Effect.orDie);
-    if (Option.isSome(owner)) {
-      if (visibility.all || owner.value === userId) return "allowed" as const;
-      const hidden = yield* hiddenThreadIds(visibility, [threadId]);
-      return hidden.size > 0 ? ("hidden" as const) : ("not-yours" as const);
-    }
-    const holder = draftOwners.get(threadId);
-    if (holder === undefined && claim) {
-      if (draftOwners.size >= MAX_DRAFT_CLAIMS) {
-        const oldest = draftOwners.keys().next();
-        if (oldest.done !== true) draftOwners.delete(oldest.value);
+    const revision = yield* spaces.revision;
+    const result = new Map<string, WorkAccess>();
+    const unknown = [...new Set(threadIds)].filter((threadId) => {
+      if (allowedWork.get(`${userId}\n${threadId}`) !== revision) return true;
+      result.set(threadId, "allowed");
+      return false;
+    });
+    if (unknown.length === 0) return result;
+    const rows = yield* sql<{
+      readonly threadId: string;
+      readonly ownerUserId: string | null;
+      readonly visible: number;
+    }>`
+      SELECT t.thread_id AS "threadId",
+        COALESCE(t.owner_user_id, root.owner_user_id,
+          (SELECT user_id FROM users WHERE is_owner = 1)) AS "ownerUserId",
+        COALESCE((${threadInSpaces(sql, "t", spaceFilter(visibility))}), 0) AS "visible"
+      FROM orchestration_v2_projection_threads t
+      LEFT JOIN orchestration_v2_projection_threads root
+        ON root.thread_id = json_extract(t.payload_json, '$.lineage.rootThreadId')
+      WHERE t.thread_id IN (SELECT value FROM json_each(${encodeIds(unknown)}))
+    `.pipe(Effect.orDie);
+    const existing = new Map(rows.map((row) => [row.threadId, row]));
+    for (const threadId of unknown) {
+      const row = existing.get(threadId);
+      if (row !== undefined) {
+        const access: WorkAccess =
+          row.visible === 0 ? "hidden" : row.ownerUserId === userId ? "allowed" : "not-yours";
+        if (access === "allowed") allowedWork.set(`${userId}\n${threadId}`, revision);
+        result.set(threadId, access);
+        continue;
       }
-      draftOwners.set(threadId, userId);
-      return "allowed" as const;
+      const holder = draftOwners.get(threadId);
+      if (!options.drafts) result.set(threadId, "hidden");
+      else if (holder === userId) result.set(threadId, "allowed");
+      else if (holder === undefined && options.claim) {
+        if (draftOwners.size >= MAX_CLAIMS) {
+          const oldest = draftOwners.keys().next();
+          if (oldest.done !== true) draftOwners.delete(oldest.value);
+        }
+        draftOwners.set(threadId, userId);
+        result.set(threadId, "allowed");
+      } else {
+        // Someone else's draft looks like one that does not exist.
+        result.set(threadId, "hidden");
+      }
     }
-    if (holder === userId || visibility.all) return "allowed" as const;
-    // Someone else's draft looks like one that does not exist.
-    return "hidden" as const;
+    if (allowedWork.size > MAX_CLAIMS) allowedWork.clear();
+    return result;
   });
 
   const claimWork = Effect.fn("SpaceVisibility.claimWork")(function* (
     visibility: Visibility,
     userId: UserId | undefined,
     threadId: string,
+    options?: { readonly drafts?: boolean },
   ) {
     if (userId === undefined) return "allowed" as const;
-    return yield* workOf(visibility, userId, threadId, true);
+    const access = yield* workOf(visibility, userId, [threadId], {
+      claim: true,
+      drafts: options?.drafts ?? true,
+    });
+    return access.get(threadId) ?? "hidden";
   });
 
   const workableThreadIds = Effect.fn("SpaceVisibility.workableThreadIds")(function* (
@@ -232,12 +292,34 @@ const make = Effect.gen(function* () {
     userId: UserId | undefined,
     threadIds: ReadonlyArray<string>,
   ) {
-    if (userId === undefined) return new Set(threadIds);
-    const unique = [...new Set(threadIds)];
-    const access = yield* Effect.forEach(unique, (threadId) =>
-      workOf(visibility, userId, threadId, false),
-    );
-    return new Set(unique.filter((_, index) => access[index] === "allowed"));
+    if (userId === undefined || threadIds.length === 0) return new Set(threadIds);
+    const access = yield* workOf(visibility, userId, threadIds, { claim: false, drafts: true });
+    return new Set(threadIds.filter((threadId) => access.get(threadId) === "allowed"));
+  });
+
+  const mayUseDirectory = Effect.fn("SpaceVisibility.mayUseDirectory")(function* (
+    visibility: Visibility,
+    userId: UserId | undefined,
+    directory: string,
+  ) {
+    if (userId === undefined || visibility.all) return true;
+    const principal = yield* spaces.principalOf(userId).pipe(Effect.orDie);
+    const writable = visibility.spaceIds.filter((spaceId) => {
+      const role = principal.roles.get(spaceId);
+      return spaceId === `personal:${userId}` || role === "admin" || role === "member";
+    });
+    const roots = yield* sql<{ readonly root: string | null }>`
+      SELECT COALESCE(json_extract(t.payload_json, '$.worktreePath'), p.workspace_root) AS root
+      FROM orchestration_v2_projection_threads t
+      LEFT JOIN projection_projects p ON p.project_id = t.project_id
+      WHERE t.owner_user_id = ${userId} AND t.deleted_at IS NULL
+      UNION
+      SELECT workspace_root AS root FROM projection_projects
+      WHERE deleted_at IS NULL
+        AND space_id IN (SELECT value FROM json_each(${encodeIds(writable)}))
+    `.pipe(Effect.orDie);
+    const target = path.resolve(directory);
+    return roots.some((row) => row.root !== null && isWithin(path, path.resolve(row.root), target));
   });
 
   return SpaceVisibility.of({
@@ -248,6 +330,7 @@ const make = Effect.gen(function* () {
     visibleProjectIds,
     claimWork,
     workableThreadIds,
+    mayUseDirectory,
   });
 });
 

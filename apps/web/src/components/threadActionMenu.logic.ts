@@ -107,8 +107,21 @@ export interface ThreadActionMenuState {
   };
 }
 
+const ORGANIZE_ACTIONS: ReadonlySet<ThreadActionMenuId> = new Set([
+  "pin",
+  "unpin",
+  "settle",
+  "unsettle",
+  "snooze",
+  "unsnooze",
+  "auto-settle",
+  "auto-settle:enabled",
+  "auto-settle:disabled",
+]);
+
 /** Actions that only read, copy or navigate, which every viewer keeps. */
 const READ_ONLY_ACTIONS: ReadonlySet<ThreadActionMenuId> = new Set([
+  "mark-unread",
   "find",
   "new-thread-on-branch",
   "project-settings",
@@ -126,6 +139,8 @@ function roleAllows(role: ThreadActionMenuState["role"], action: ThreadActionMen
   if (action === "archive") return role.canArchive;
   if (action === "delete") return role.canDelete;
   if (action === "share-guest") return role.canCreateGuestLink;
+  // Pins, settling and snoozes are stored on the Thread for everyone: its creator's or an Admin's.
+  if (ORGANIZE_ACTIONS.has(action) || action.startsWith("snooze:")) return role.canArchive;
   return role.canContinue || READ_ONLY_ACTIONS.has(action);
 }
 

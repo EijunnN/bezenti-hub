@@ -185,9 +185,8 @@ export class SpaceDirectory extends Context.Service<
       claim: CreationClaim,
     ) => Effect.Effect<CreationStamp | undefined, SpaceClaimError>;
     /**
-     * Refuses the action on a Thread or Project the User may not take: not found when its Space
-     * is hidden from them, a permission error when they can see it. A missing item passes, so
-     * the command fails as it would without Spaces.
+     * Refuses the action on a Thread or Project the User may not take: not found when it is
+     * missing or its Space is hidden from them (alike), a permission error when they can see it.
      */
     readonly authorizeItem: (
       userId: UserId,
@@ -441,84 +440,109 @@ const make = Effect.gen(function* () {
     return { id: space.value.spaceId, name: space.value.name };
   });
 
+  // One read per check: the item, its Space (its own, its Project's, else the Owner's Personal
+  // space) and its owner (its own, its root's for a child the server made, else the Owner).
   const ItemRow = Schema.Struct({
-    spaceId: Schema.NullOr(SpaceId),
     ownerUserId: Schema.NullOr(UserId),
     archived: Schema.BooleanFromBit,
+    spaceId: Schema.NullOr(SpaceId),
+    kind: Schema.NullOr(SpaceKind),
+    personalOwnerUserId: Schema.NullOr(UserId),
+    spaceArchived: Schema.BooleanFromBit,
+    frozen: Schema.BooleanFromBit,
   });
-  // A child Thread the server made carries its root's owner; check the root's too.
+  const OWNER_ID = "(SELECT user_id FROM users WHERE is_owner = 1)";
+  const SPACE_OF_ITEM = `s.space_id AS "spaceId", s.kind AS "kind",
+    s.personal_owner_user_id AS "personalOwnerUserId",
+    COALESCE(s.archived_at IS NOT NULL, 0) AS "spaceArchived",
+    COALESCE(s.frozen_at IS NOT NULL, 0) AS "frozen"`;
   const findThreadItem = SqlSchema.findOneOption({
     Request: Schema.String,
     Result: ItemRow,
     execute: (threadId) => sql`
-      SELECT COALESCE(t.space_id, p.space_id) AS "spaceId",
-        COALESCE(t.owner_user_id, (
-          SELECT root.owner_user_id FROM orchestration_v2_projection_threads root
-          WHERE root.thread_id = json_extract(t.payload_json, '$.lineage.rootThreadId')
-        )) AS "ownerUserId",
-        t.archived_at IS NOT NULL AS "archived"
-      FROM orchestration_v2_projection_threads t
-      LEFT JOIN projection_projects p ON p.project_id = t.project_id
-      WHERE t.thread_id = ${threadId}
+      SELECT item.owner_user_id AS "ownerUserId", item.archived AS "archived",
+        ${sql.literal(SPACE_OF_ITEM)}
+      FROM (
+        SELECT COALESCE(t.owner_user_id, root.owner_user_id, ${sql.literal(OWNER_ID)}) AS owner_user_id,
+          t.archived_at IS NOT NULL AS archived,
+          COALESCE(t.space_id, p.space_id, 'personal:' || ${sql.literal(OWNER_ID)}) AS space_id
+        FROM orchestration_v2_projection_threads t
+        LEFT JOIN projection_projects p ON p.project_id = t.project_id
+        LEFT JOIN orchestration_v2_projection_threads root
+          ON root.thread_id = json_extract(t.payload_json, '$.lineage.rootThreadId')
+        WHERE t.thread_id = ${threadId}
+      ) item LEFT JOIN spaces s ON s.space_id = item.space_id
     `,
   });
   const findProjectItem = SqlSchema.findOneOption({
     Request: Schema.String,
     Result: ItemRow,
     execute: (projectId) => sql`
-      SELECT space_id AS "spaceId", owner_user_id AS "ownerUserId",
-        archived_at IS NOT NULL AS "archived"
-      FROM projection_projects WHERE project_id = ${projectId}
+      SELECT item.owner_user_id AS "ownerUserId", item.archived AS "archived",
+        ${sql.literal(SPACE_OF_ITEM)}
+      FROM (
+        SELECT COALESCE(owner_user_id, ${sql.literal(OWNER_ID)}) AS owner_user_id,
+          archived_at IS NOT NULL AS archived,
+          COALESCE(space_id, 'personal:' || ${sql.literal(OWNER_ID)}) AS space_id
+        FROM projection_projects WHERE project_id = ${projectId}
+      ) item LEFT JOIN spaces s ON s.space_id = item.space_id
     `,
+  });
+
+  // Checks run on every command, so the principal is kept until a Space or Membership changes.
+  const principals = new Map<
+    UserId,
+    { readonly revision: number; readonly principal: AccessPolicy.Principal }
+  >();
+  const currentPrincipal = Effect.fn("SpaceDirectory.currentPrincipal")(function* (userId: UserId) {
+    const at = yield* Ref.get(revision);
+    const cached = principals.get(userId);
+    if (cached !== undefined && cached.revision === at) return cached.principal;
+    const principal = yield* principalOf(userId);
+    principals.set(userId, { revision: at, principal });
+    return principal;
   });
 
   const threadOwner = Effect.fn("SpaceDirectory.threadOwner")(function* (threadId: ThreadId) {
     const row = yield* findThreadItem(threadId).pipe(Effect.mapError(storageError));
-    if (Option.isNone(row)) return Option.none<UserId>();
-    return Option.fromNullishOr(row.value.ownerUserId ?? Option.getOrUndefined(yield* ownerId));
+    return Option.flatMap(row, (found) => Option.fromNullishOr(found.ownerUserId));
   });
+
+  // A hidden item and a missing one fail alike, so no answer says what exists elsewhere.
+  const hiddenOrMissing = () =>
+    new SpaceResourceNotFoundError({ message: "That Project or Thread does not exist." });
 
   const authorizeItem = Effect.fn("SpaceDirectory.authorizeItem")(function* (
     userId: UserId,
     action: AccessPolicy.Action,
     item: ItemRef,
   ) {
+    const principal = yield* currentPrincipal(userId);
+    // The Owner sees everything; only what even the Owner may not do needs the item read.
+    if (principal.isOwner && action !== "thread.continue" && action !== "guestLink.create") return;
     const row = yield* (item.kind === "thread" ? findThreadItem : findProjectItem)(item.id).pipe(
       Effect.mapError(storageError),
     );
-    if (Option.isNone(row)) return;
-    const principal = yield* principalOf(userId);
-    // Only what even the Owner may not do needs the Space read.
-    if (principal.isOwner && action !== "thread.continue" && action !== "guestLink.create") return;
-    // Rows from before Spaces are the Owner's, in the Owner's Personal space.
-    const owner = Option.getOrUndefined(yield* ownerId);
-    const spaceId =
-      row.value.spaceId ?? (owner === undefined ? undefined : personalSpaceIdOf(owner));
-    const space =
-      spaceId === undefined
-        ? Option.none()
-        : yield* findSpace(spaceId).pipe(Effect.mapError(storageError));
-    if (Option.isNone(space)) {
-      if (principal.isOwner) return;
-      return yield* new SpaceResourceNotFoundError({
-        message: "That Project or Thread does not exist.",
-      });
+    if (Option.isNone(row) || row.value.spaceId === null || row.value.kind === null) {
+      return yield* hiddenOrMissing();
     }
-    const resource = toResource(space.value);
-    if (!allows(principal, "space.view", resource)) {
-      return yield* new SpaceResourceNotFoundError({
-        message: "That Project or Thread does not exist.",
-      });
-    }
-    // A Space-wide action (a guest link) is decided on the item's Space.
-    if (!AccessPolicy.isItemAction(action))
+    const resource: AccessPolicy.SpaceResource = {
+      id: row.value.spaceId,
+      kind: row.value.kind,
+      personalOwnerUserId: row.value.personalOwnerUserId,
+      archived: row.value.spaceArchived,
+      frozen: row.value.frozen,
+    };
+    if (!allows(principal, "space.view", resource)) return yield* hiddenOrMissing();
+    // A Space-wide action (viewing, a guest link) is decided on the item's Space.
+    if (!AccessPolicy.isItemAction(action)) {
       return yield* requireAllowed(principal, action, resource);
-    const itemOwner = row.value.ownerUserId ?? owner;
-    if (itemOwner === undefined) return;
+    }
+    if (row.value.ownerUserId === null) return yield* hiddenOrMissing();
     yield* requireAllowed(principal, action, {
       kind: item.kind,
       space: resource,
-      ownerUserId: itemOwner,
+      ownerUserId: row.value.ownerUserId,
       archived: row.value.archived,
     });
   });

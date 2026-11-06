@@ -31,7 +31,9 @@ const failProjectMutation = Effect.fn("environment.projects.failMutation")(funct
     cause._tag === "ProjectNotFoundError" ||
     cause._tag === "ProjectConflictError" ||
     cause._tag === "ProjectNotEmptyError" ||
-    cause._tag === "SpaceNotFoundError"
+    cause._tag === "SpaceNotFoundError" ||
+    // A hidden Project answers like a missing one.
+    cause._tag === "SpaceResourceNotFoundError"
   ) {
     return yield* failEnvironmentInvalidRequest("invalid_command");
   }

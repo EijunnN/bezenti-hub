@@ -13547,6 +13547,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
     if (Option.isSome(existingReceipt)) {
       const receipt = existingReceipt.value;
+      // A command id replays only for the User who sent it; server work has none.
+      if (actor !== undefined && receipt.actorUserId != null && receipt.actorUserId !== actor) {
+        return yield* new OrchestratorCommandIdConflictError({
+          commandId: command.commandId,
+          commandType: command.type,
+          receiptThreadId: commandThreadId(command),
+          commandThreadId: commandThreadId(command),
+        });
+      }
       if (receipt.status === "rejected") {
         return yield* new OrchestratorCommandPreviouslyRejectedError({
           commandId: command.commandId,

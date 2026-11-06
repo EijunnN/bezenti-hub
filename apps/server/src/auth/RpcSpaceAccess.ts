@@ -24,7 +24,8 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 /**
  * `thread`/`project`: refuse ids the session cannot see. `command`: what it acts on, not what it
  * creates. `named`: Projects at any depth, no hidden Thread. `work`: the session User's own
- * Thread or held draft (`claimWork`). `filtered`: the handler filters. `unscoped`: why not.
+ * Thread or held draft (`claimWork`). `owned`: every Thread named is the session User's own
+ * (no drafts). `filtered`: the handler filters. `unscoped`: why not.
  */
 export type RpcSpaceAccess =
   | "thread"
@@ -32,6 +33,7 @@ export type RpcSpaceAccess =
   | "command"
   | "named"
   | "work"
+  | "owned"
   | "filtered"
   | { readonly unscoped: string };
 
@@ -65,10 +67,11 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.peerLinksAnswerRequest]: "thread",
   [WS_METHODS.secretsAnswerRequest]: "thread",
   [WS_METHODS.projectsCreateFromThread]: "thread",
-  [WS_METHODS.mcpAppsCallTool]: "thread",
+  // An app acts inside its Thread's live session, so it is its creator's, like a message.
+  [WS_METHODS.mcpAppsCallTool]: "owned",
   [WS_METHODS.mcpAppsToolInfo]: "thread",
   [WS_METHODS.mcpAppsReadResource]: "thread",
-  [WS_METHODS.mcpAppsUpdateModelContext]: "thread",
+  [WS_METHODS.mcpAppsUpdateModelContext]: "owned",
   [WS_METHODS.providerUploadFeedback]: "thread",
   // Drafts use these before their Thread exists, so they also take a draft its User holds.
   [WS_METHODS.assetsPersistChatAttachments]: "work",
@@ -157,7 +160,12 @@ const notYours = () =>
     message: "Only the person who started this Thread can use its terminals, previews and files.",
   });
 
-const THREAD_KEYS = new Set(["threadId", "threadIds"]);
+const THREAD_KEYS = new Set(["threadId", "threadIds", "conversationThreadId"]);
+// A terminal runs in a folder the client names; it must be one the User may work in.
+const DIRECTORY_FIELDS: Partial<Record<string, ReadonlyArray<string>>> = {
+  [WS_METHODS.terminalOpen]: ["cwd", "worktreePath"],
+  [WS_METHODS.terminalAttach]: ["cwd", "worktreePath"],
+};
 const PROJECT_KEYS = new Set(["projectId", "projectIds"]);
 
 /** Every string under one of `keys`, at any depth of the payload. */
@@ -248,6 +256,35 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
     const work = yield* spaceVisibility.claimWork(visibility, userId, threadId);
     if (work === "hidden") return yield* notFound();
     if (work === "not-yours") return yield* notYours();
+    for (const field of DIRECTORY_FIELDS[method] ?? []) {
+      const directory = stringField(payload, field);
+      if (
+        directory !== undefined &&
+        !(yield* spaceVisibility.mayUseDirectory(visibility, userId, directory))
+      ) {
+        return yield* new SpaceActionDeniedError({
+          message:
+            "You can only open terminals in your own Threads' folders and your team's Projects.",
+        });
+      }
+    }
+    return;
+  }
+  if (access === "owned") {
+    const threads = idsUnder(payload, THREAD_KEYS);
+    if (threads.length === 0) return yield* notFound();
+    for (const threadId of threads) {
+      const work = yield* spaceVisibility.claimWork(visibility, userId, threadId, {
+        drafts: false,
+      });
+      if (work === "hidden") return yield* notFound();
+      if (work === "not-yours") {
+        return yield* new SpaceActionDeniedError({
+          message:
+            "Only the person who started this Thread can continue it. Start a new Thread to build on it.",
+        });
+      }
+    }
     return;
   }
   if (visibility.all) return;

@@ -70,14 +70,24 @@ describe("buildThreadActionMenuItems", () => {
       buildThreadActionMenuItems(role === undefined ? baseState : { ...baseState, role }).map(
         (item) => item.id,
       );
-    // A Member reading a teammate's Thread keeps only reading, copying and navigating.
+    // A Member reading a teammate's Thread keeps only reading markers, copying and navigating.
     expect(
       ids({ canContinue: false, canArchive: false, canDelete: false, canCreateGuestLink: false }),
-    ).toEqual(["copy", "project-settings"]);
-    // An Admin also archives and deletes it, but still cannot change it.
+    ).toEqual(["mark-unread", "copy", "project-settings"]);
+    // An Admin also organizes, archives and deletes it, but still cannot continue it.
     expect(
       ids({ canContinue: false, canArchive: true, canDelete: true, canCreateGuestLink: true }),
-    ).toEqual(["copy", "project-settings", "archive", "delete"]);
+    ).toEqual([
+      "pin",
+      "settle",
+      "snooze",
+      "mark-unread",
+      "auto-settle",
+      "copy",
+      "project-settings",
+      "archive",
+      "delete",
+    ]);
     // The creator keeps every action.
     expect(
       ids({ canContinue: true, canArchive: true, canDelete: false, canCreateGuestLink: false }),

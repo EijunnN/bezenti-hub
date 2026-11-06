@@ -262,21 +262,24 @@ archived organization disappears for its members. The Owner sees everything.
 
 What you can change depends on your Role in the organization:
 
-| Action                              | Admin | Member |    Guest     |
-| ----------------------------------- | :---: | :----: | :----------: |
-| Start threads and continue your own |  yes  |  yes   |     yes      |
-| Continue someone else's thread      |  no   |   no   |      no      |
-| Create projects                     |  yes  |  yes   |      no      |
-| Archive your own                    |  yes  |  yes   | threads only |
-| Archive or stop someone else's      |  yes  |   no   |      no      |
-| Permanently delete what is archived |  yes  |   no   |      no      |
-| Create guest links                  |  yes  |   no   |      no      |
+| Action                               | Admin | Member |    Guest     |
+| ------------------------------------ | :---: | :----: | :----------: |
+| Start threads and continue your own  |  yes  |  yes   |     yes      |
+| Continue someone else's thread       |  no   |   no   |      no      |
+| Create projects                      |  yes  |  yes   |      no      |
+| Archive your own                     |  yes  |  yes   | threads only |
+| Archive or stop someone else's       |  yes  |   no   |      no      |
+| Pin, settle or snooze someone else's |  yes  |   no   |      no      |
+| Permanently delete what is archived  |  yes  |   no   |      no      |
+| Create guest links                   |  yes  |   no   |      no      |
 
 On a teammate's thread the composer explains that only its creator can continue
-it; start a new thread in the same project to build on their work. A thread's
-terminals and previews are its creator's too. Agents act with the permissions of
-the person whose thread they run in. Guest links are never made from a Personal
-space. The Owner can do all of this everywhere.
+it, and that holds for the Owner too; start a new thread in the same project to
+build on their work. A thread's terminals, previews and app tools are its
+creator's too, and a Guest opens terminals only in their own threads' folders.
+Agents act with the permissions of the person whose thread they run in. Guest
+links are never made from a Personal space. Everything else here, the Owner can do
+everywhere.
 
 ### Invite people
 

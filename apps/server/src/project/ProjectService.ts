@@ -296,7 +296,13 @@ export const make = Effect.gen(function* () {
           : workspaceLocks.withLock(workspaceRoot, planAndCommit),
       )
       .pipe(Effect.mapError(dispatchError));
-    if (receipt.projectId !== projectId || receipt.commandType !== command.type) {
+    const actor = yield* CommandActor.current;
+    if (
+      receipt.projectId !== projectId ||
+      receipt.commandType !== command.type ||
+      // A command id replays only for the User who sent it.
+      (actor !== undefined && receipt.actorUserId != null && receipt.actorUserId !== actor)
+    ) {
       return yield* dispatchError(
         `Command ${command.commandId} was already used by ${receipt.commandType} for ${receipt.projectId}.`,
       );

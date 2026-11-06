@@ -97,6 +97,16 @@ const make = Effect.gen(function* () {
         "orchestration_v2.thread_id": input.threadId,
         "secret_request.answer": input.answer.type,
       });
+      // Before anything is stored: a refused answer must not write, or clear, the Thread's secret.
+      yield* threadManagement.authorizeThread(input.threadId, "thread.continue").pipe(
+        Effect.mapError(
+          (cause) =>
+            new SecretRequestError({
+              reason: cause._tag === "SpaceAccessDeniedError" ? "not_permitted" : "not_found",
+              cause,
+            }),
+        ),
+      );
       const records = yield* threadManagement
         .getThreadRecords(input.threadId, ["runs", "turnItems"], {
           turnItemTypes: ["secret_request"],

@@ -10,7 +10,7 @@ export interface ThreadRoleSubject {
 }
 
 export interface ThreadRolePermissions {
-  /** Send messages, answer questions and change the Thread's settings. */
+  /** Send messages, answer questions and change the Thread's settings. Never someone else's. */
   readonly canContinue: boolean;
   readonly canArchive: boolean;
   readonly canStop: boolean;
@@ -46,8 +46,18 @@ export function threadRolePermissions(
   const space = view.spaces.find((candidate) => candidate.id === thread.spaceId);
   // Nothing in a Personal space is shared directly, not even by the Owner.
   const inOrganization = space?.kind === "organization";
-  if (view.isOwner === true) return { ...EVERYTHING, canCreateGuestLink: inOrganization };
-  const own = thread.ownerUserId != null && thread.ownerUserId === view.userId;
+  // A Thread from before owners were recorded is the Owner's.
+  const own =
+    thread.ownerUserId == null ? view.isOwner === true : thread.ownerUserId === view.userId;
+  // The Owner archives, stops and deletes anything, but continues only their own Threads.
+  if (view.isOwner === true) {
+    return {
+      ...EVERYTHING,
+      canContinue: own,
+      canCreateGuestLink: inOrganization,
+      continueBlockedReason: own ? null : NOT_YOUR_THREAD_REASON,
+    };
+  }
   // A User runs their own Personal space as an Admin runs an Organization.
   const admin = space?.isOwn === true || space?.role === "admin";
   return {

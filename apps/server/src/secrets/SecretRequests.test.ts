@@ -98,6 +98,7 @@ const withService = <A, E>(
         }),
       ),
       Layer.mock(ThreadManagementService.ThreadManagementService)({
+        authorizeThread: () => Effect.void,
         getThreadRecords: () =>
           Effect.succeed({
             thread: { projectId },

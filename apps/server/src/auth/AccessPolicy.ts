@@ -59,6 +59,11 @@ export type Action =
   | "thread.continue"
   /** Archive or restore a Thread. */
   | "thread.archive"
+  /**
+   * Pin, settle, snooze or tag a Thread. That state is stored on the Thread and shared by every
+   * viewer, so it is its creator's or an Admin's, as archiving is.
+   */
+  | "thread.organize"
   /** Stop a running Thread. */
   | "thread.stop"
   /** Permanently delete an archived Thread. */
@@ -88,6 +93,7 @@ const OWNER_ONLY: ReadonlySet<Action> = new Set([
 const OWNED_ACTIONS: ReadonlySet<Action> = new Set([
   "thread.continue",
   "thread.archive",
+  "thread.organize",
   "thread.stop",
   "thread.delete",
   "project.archive",
@@ -147,15 +153,17 @@ const inOrganization = (
 };
 
 /**
- * Rules on one Thread or Project. Only its creator continues a Thread, not even an Admin; each
- * archives and stops their own; Admins also archive and stop others' and delete what is
- * archived. A Personal space's User runs their own space as an Admin runs an Organization.
+ * Rules on one Thread or Project. Only its creator continues a Thread, not even an Admin or the
+ * Owner; each archives and stops their own; Admins also archive and stop others' and delete what
+ * is archived. A Personal space's User runs their own space as an Admin runs an Organization.
  */
 const decideOwned = (principal: Principal, action: Action, item: OwnedResource): Decision => {
   const { space } = item;
   if (action === "thread.continue") {
     if (space.archived) return deny("space-archived");
     if (space.frozen) return deny("space-frozen");
+    // Nobody speaks in someone else's Thread: a new Thread in the same Project builds on it.
+    if (principal.isOwner) return item.ownerUserId === principal.userId ? allow : deny("not-yours");
   }
   if (principal.isOwner) return allow;
   if (space.archived) return deny("space-archived");
@@ -174,6 +182,7 @@ const decideOwned = (principal: Principal, action: Action, item: OwnedResource):
     case "thread.continue":
       return own ? allow : deny("not-yours");
     case "thread.archive":
+    case "thread.organize":
     case "thread.stop":
       return own || role === "admin" ? allow : deny("not-yours");
     case "project.archive":

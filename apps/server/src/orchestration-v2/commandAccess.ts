@@ -31,6 +31,24 @@ export function threadAccessOf(command: OrchestrationV2ServerCommand): ReadonlyA
     case "thread.archive":
     case "thread.unarchive":
       return on(command.threadId, "thread.archive");
+    // The read marker: anyone who sees the Thread opens it. It is one marker per Thread, so a
+    // viewer's visit also marks it read for its creator until it is stored per User.
+    case "thread.visit":
+    case "thread.mark-unread":
+      return on(command.threadId, "space.view");
+    // Shared Thread state, organized by its creator or an Admin.
+    case "thread.pin":
+    case "thread.unpin":
+    case "thread.pin.reorder":
+    case "thread.active.reorder":
+    case "thread.settle":
+    case "thread.unsettle":
+    case "thread.auto-settle":
+    case "thread.auto-settle.set":
+    case "thread.snooze":
+    case "thread.unsnooze":
+    case "thread.tag.set":
+      return on(command.threadId, "thread.organize");
     case "thread.delete":
       // Discarding a Thread that never got a message is its owner's cleanup, not a deletion.
       return on(

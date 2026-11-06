@@ -633,7 +633,11 @@ describe("Role permissions", () => {
       view("ada", "admin"),
       [false, true, true, true],
     ],
-    ["the Owner does everything", view("owner", null, true), [true, true, true, true]],
+    [
+      "the Owner archives, stops and deletes but never continues another's Thread",
+      view("owner", null, true),
+      [false, true, true, true],
+    ],
   ] as const)("%s", (_name, viewer, [canContinue, archive, stop, remove]) => {
     expect(allowed(threadRolePermissions(viewer, gracesThread))).toEqual({
       continue: canContinue,
@@ -660,6 +664,7 @@ describe("Role permissions", () => {
     );
     // A Thread from before Spaces is the Owner's.
     expect(threadRolePermissions(view("grace", "member"), {}).canContinue).toBe(false);
+    expect(threadRolePermissions(view("owner", null, true), {}).canContinue).toBe(true);
     // Without Users (before an Owner exists) and on drafts, nothing is held back.
     expect(threadRolePermissions(null, gracesThread).canContinue).toBe(true);
     expect(threadRolePermissions(view("linus", "member"), null).canContinue).toBe(true);

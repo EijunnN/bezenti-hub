@@ -31,7 +31,7 @@ Resuelto por grilling con el Owner (2026-11-04). Términos en `GLOSSARY.md`: Rol
 | Invitar como Member o Guest              |  sí   |   no   |      no      |
 | Cambiar Role o expulsar (salvo a Admins) |  sí   |   no   |      no      |
 
-4. Nadie continúa un Thread ajeno, ni un Admin: se abre un Thread nuevo en el mismo Project.
+4. Nadie continúa un Thread ajeno, ni un Admin ni el Owner: se abre un Thread nuevo en el mismo Project. El Owner sí archiva y borra definitivamente los de cualquiera (decisión del Owner, 2026-11-05).
 5. Solo el Owner nombra Admins; un Admin no puede tocar a otro Admin.
 6. Mover un Project entre Spaces exige ser Admin (o dueño del Personal space) en el origen y Admin en el destino; el Owner siempre puede.
 7. Guest links solo en Organizations y solo los crean Admins; nunca desde un Personal space.

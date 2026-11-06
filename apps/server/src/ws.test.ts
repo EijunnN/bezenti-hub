@@ -1483,6 +1483,10 @@ describe("Space visibility", () => {
     WS_METHODS.scheduledTasksSubscribe,
     WS_METHODS.subscribeTerminalMetadata,
     WS_METHODS.terminalWrite,
+    WS_METHODS.terminalOpen,
+    WS_METHODS.mcpAppsCallTool,
+    WS_METHODS.mcpAppsUpdateModelContext,
+    WS_METHODS.secretsAnswerRequest,
     ORCHESTRATION_V2_WS_METHODS.forceStopThread,
   ] as const;
   const group = WsRpcGroup.omit(
@@ -2049,7 +2053,19 @@ describe("Space visibility", () => {
         Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
           enqueueCommand: (effect) => effect,
         }),
-        Layer.mock(TerminalManager.TerminalManager)({ write: () => Effect.void }),
+        Layer.mock(TerminalManager.TerminalManager)({
+          write: () => Effect.void,
+          open: () => Effect.succeed({} as never),
+        }),
+        SecretRequests.layer.pipe(
+          Layer.provide(layerOrchestration(server)),
+          Layer.provide(
+            Layer.succeed(ServerSecretStore.ServerSecretStore, {
+              getOrCreateRandom: () => Effect.succeed(new Uint8Array(32)),
+            } as unknown as ServerSecretStore.ServerSecretStore["Service"]),
+          ),
+          Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+        ),
       ),
     );
   type Writer = Effect.Success<ReturnType<typeof connectWriter>>;
@@ -2247,6 +2263,149 @@ describe("Space visibility", () => {
         `;
         const personal = yield* open(UserId.make(ownerRow!.userId), "legacy-thread");
         assert.isTrue(Result.isFailure(personal));
+        // Off the WebSocket too (MCP, agents), a hidden Thread fails exactly like a missing one.
+        const archive = (threadId: string) =>
+          orchestrator
+            .dispatch({
+              type: "thread.archive",
+              commandId: CommandId.make(`archive-${threadId}`),
+              threadId: ThreadId.make(threadId),
+            })
+            .pipe(
+              CommandActor.actAs(grace.userId),
+              Effect.flip,
+              Effect.map((error) => error.cause),
+            );
+        assert.deepEqual(yield* archive("globex-thread"), yield* archive("no-such-thread"));
+      }),
+    ),
+  );
+  it.effect("not even the Owner continues someone else's Thread or works its live session", () =>
+    withTeam(({ server, grace }) =>
+      Effect.gen(function* () {
+        const [ownerRow] = yield* server.sql<{ userId: string }>`
+          SELECT user_id AS "userId" FROM users WHERE is_owner = 1
+        `;
+        const asOwner = yield* connectWriter(server, UserId.make(ownerRow!.userId));
+        const sent = yield* dispatch(asOwner, {
+          type: "message.dispatch",
+          threadId: "grace-thread",
+          messageId: MessageId.make("owner-speaks"),
+          text: "Hi",
+          attachments: [],
+          dispatchMode: { type: "queue_after_active" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        assert.equal(
+          refusal(sent),
+          "Only the person who started this Thread can continue it. Start a new Thread to build on it.",
+        );
+        // The Owner still archives it.
+        assert.isTrue(
+          Result.isSuccess(
+            yield* dispatch(asOwner, { type: "thread.archive", threadId: "grace-thread" }),
+          ),
+        );
+        // An MCP app acts in the Thread's live session, so it is Grace's alone.
+        const app = yield* asOwner[WS_METHODS.mcpAppsCallTool]({
+          threadId: ThreadId.make("grace-thread"),
+          itemId: "item",
+          name: "tool",
+          arguments: {},
+        } as never).pipe(Effect.flip);
+        assert.equal(app._tag, "SpaceActionDeniedError");
+        const asGrace = yield* connectWriter(server, grace.userId);
+        // Its model context may not name a Thread she cannot see either.
+        const context = yield* asGrace[WS_METHODS.mcpAppsUpdateModelContext]({
+          threadId: ThreadId.make("grace-thread"),
+          itemId: "item",
+          conversationThreadId: ThreadId.make("globex-thread"),
+        } as never).pipe(Effect.flip);
+        assert.equal(context._tag, "SpaceResourceNotFoundError");
+      }),
+    ),
+  );
+
+  it.effect("viewers open a Thread; only its creator or an Admin organizes it", () =>
+    withTeam(({ server, gus, ada }) =>
+      Effect.gen(function* () {
+        const asGus = yield* connectWriter(server, gus.userId);
+        const asAda = yield* connectWriter(server, ada.userId);
+        const visit = yield* dispatch(asGus, {
+          type: "thread.visit",
+          threadId: "grace-thread",
+          visitedAt: "2026-11-05T00:00:00.000Z",
+        });
+        assert.isTrue(Result.isSuccess(visit));
+        assert.match(
+          refusal(yield* dispatch(asGus, { type: "thread.pin", threadId: "grace-thread" })) ?? "",
+          /Only its creator or an Admin/,
+        );
+        assert.isTrue(
+          Result.isSuccess(
+            yield* dispatch(asAda, { type: "thread.pin", threadId: "grace-thread" }),
+          ),
+        );
+      }),
+    ),
+  );
+
+  it.effect("a command id replays only for the User who sent it", () =>
+    withTeam(({ server, grace, ada }) =>
+      Effect.gen(function* () {
+        const asGrace = yield* connectWriter(server, grace.userId);
+        const asAda = yield* connectWriter(server, ada.userId);
+        // Both may archive grace-thread, so only the replay rule tells them apart.
+        const pin = (client: Writer) =>
+          client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand]({
+            type: "thread.archive",
+            commandId: CommandId.make("shared-id"),
+            threadId: ThreadId.make("grace-thread"),
+          } as never).pipe(Effect.result);
+        assert.isTrue(Result.isSuccess(yield* pin(asGrace)));
+        assert.isTrue(Result.isSuccess(yield* pin(asGrace)));
+        assert.isTrue(Result.isFailure(yield* pin(asAda)));
+      }),
+    ),
+  );
+
+  it.effect("terminals open only in folders the User may work in", () =>
+    withTeam(({ server, grace, gus }) =>
+      Effect.gen(function* () {
+        const asGrace = yield* connectWriter(server, grace.userId);
+        const asGus = yield* connectWriter(server, gus.userId);
+        const open = (client: Writer, threadId: string, cwd: string) =>
+          client[WS_METHODS.terminalOpen]({ threadId, terminalId: "t", cwd } as never).pipe(
+            Effect.result,
+          );
+        const outcome = (result: Result.Result<unknown, unknown>) =>
+          Result.isSuccess(result) ? "opened" : (result.failure as { _tag: string })._tag;
+        // A Member works in her team's Projects, not in another Organization's.
+        assert.equal(outcome(yield* open(asGrace, "grace-draft", "/work/acme-app")), "opened");
+        assert.equal(
+          outcome(yield* open(asGrace, "grace-draft", "/work/globex-app/src")),
+          "SpaceActionDeniedError",
+        );
+        // A Guest works only in their own Threads' folders.
+        assert.equal(
+          outcome(yield* open(asGus, "gus-draft", "/work/acme-app")),
+          "SpaceActionDeniedError",
+        );
+      }),
+    ),
+  );
+
+  it.effect("answering a secret request is the Thread creator's, refused before storing", () =>
+    withTeam(({ server, gus }) =>
+      Effect.gen(function* () {
+        const asGus = yield* connectWriter(server, gus.userId);
+        const answered = yield* asGus[WS_METHODS.secretsAnswerRequest]({
+          threadId: ThreadId.make("grace-thread"),
+          turnItemId: "item",
+          answer: { type: "save", secret: "hunter2" },
+        } as never).pipe(Effect.flip);
+        assert.equal((answered as { reason?: string }).reason, "not_permitted");
       }),
     ),
   );

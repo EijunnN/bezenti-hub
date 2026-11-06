@@ -163,20 +163,28 @@ credential's User (an agent as its Thread's owner), and
 server's own work and goes unchecked. The receipt store stamps the actor on every
 command receipt (`actor_user_id`); nothing a client sends sets it.
 
-Only a Thread's creator speaks in it or changes it (not even an Admin); archiving,
-restoring and stopping are the creator's or an Admin's; permanent deletion is an
-Admin's and only from the archive. A command not named in `commandAccess` counts
-as continuing, so a new command is owner-only until someone decides otherwise. A
-refusal on something the User can see is a `SpaceAccessDeniedError` that says
-why; a hidden target still fails as not found. Refusals record no receipt, since
-a Role can change and the retry should pass.
+Only a Thread's creator speaks in it or changes it, not even an Admin or the Owner
+(MCP app calls and model context included); archiving, restoring and stopping are
+the creator's or an Admin's; permanent deletion is an Admin's and only from the
+archive. Pins, settling, snoozes and tags are stored once per Thread, so they are
+the creator's or an Admin's too; visits and unread marks are open to every viewer,
+and since that marker is per Thread a viewer's visit also marks it read for its
+creator until markers are kept per User. A command not named in `commandAccess`
+counts as continuing, so a new command is owner-only until someone decides
+otherwise. A refusal on something the User can see is a `SpaceAccessDeniedError`
+that says why; a hidden target and a missing one fail alike as not found on every
+path. Refusals record no receipt, since a Role can change and the retry should
+pass, and a command id replays only for the User who sent it.
 
 Terminals, previews, devices, chat attachments and worktree setup are `work` RPCs
-in `RpcSpaceAccess`: only the Thread's owner works them. A draft has no row to
+in `RpcSpaceAccess`: only the Thread's owner works them, and a terminal opens only in
+the folder of a Thread the User created or in a Project of a Space where their Role
+creates Projects (so not a Guest's). A draft has no row to
 carry an owner, so the first User to work it holds it in memory
 (`SpaceVisibility.claimWork`); it is hidden from everyone else, and the terminal
 and preview streams show each User only what they may work. A launch whose
-client-chosen id names a hidden Thread fails like any taken id, and Pull Request
+client-chosen id names an existing Thread fails before anything is provisioned,
+alike for hidden and visible Threads, and Pull Request
 calls routed by repository see only visible Projects (`RequestVisibility`).
 
 Spaces are read and Organizations created over HTTP (`/api/spaces`), beside the

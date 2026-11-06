@@ -51,6 +51,7 @@ import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as Orchestrator from "./Orchestrator.ts";
+import { OrchestratorThreadAlreadyExistsError } from "./Orchestrator.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
 import { DispatchModeLimit } from "./DispatchModeLimit.ts";
@@ -872,6 +873,27 @@ const make = Effect.gen(function* () {
       }
 
       const launchReceipt = yield* readReceipt(input, input.commandId);
+      // A client-chosen id that is taken fails before anything is provisioned, alike whether the
+      // Thread is visible or in a Space the launcher cannot see.
+      if (
+        input.threadId !== undefined &&
+        input.reuseExistingThread !== true &&
+        Option.isNone(launchReceipt) &&
+        (yield* threads
+          .getThreadShell(input.threadId)
+          .pipe(Effect.mapError(mapError(input, "create-thread", input.threadId)))) !== null
+      ) {
+        return yield* mapError(
+          input,
+          "create-thread",
+          input.threadId,
+        )(
+          new OrchestratorThreadAlreadyExistsError({
+            commandId: input.commandId,
+            threadId: input.threadId,
+          }),
+        );
+      }
       yield* threads.assertProviderInstanceEnabled({
         projectId: input.projectId,
         commandId: input.commandId,
