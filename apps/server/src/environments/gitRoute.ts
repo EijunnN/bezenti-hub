@@ -221,7 +221,7 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
       // Every ref is hidden from the machine, read and write, but those of Threads it runs.
       ["transfer.hideRefs", "refs/"],
       ["transfer.hideRefs", "HEAD"],
-      ...prefixes.map((prefix) => ["transfer.hideRefs", `!${prefix}`] as const),
+      ...prefixes.readable.map((prefix) => ["transfer.hideRefs", `!${prefix}`] as const),
     ]),
     GIT_PROJECT_ROOT: deps.repositories.root,
     GIT_HTTP_EXPORT_ALL: "1",
@@ -265,7 +265,7 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
       }
       const refusal =
         commands._tag === "parsed"
-          ? refuseUpdates(commands.updates, prefixes)
+          ? refuseUpdates(commands.updates, prefixes.writable)
           : "The push could not be read.";
       if (refusal !== undefined) return HttpServerResponse.text(refusal, { status: 403 });
       body = Stream.concat(
@@ -339,31 +339,50 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
 
 /**
  * The ref namespaces the machine may see and write in the Project's repository: those of the
- * Threads it is the Active environment of (a move makes the target active before it fetches).
+ * Threads it is the Active environment of. The target of a Thread's running move may also read
+ * them, to fetch what the Thread continues from, but writes none until the Thread is its own.
  */
 const refPrefixesFor = Effect.fn("HubRepositoryHttp.refPrefixesFor")(function* (
   deps: { readonly sql: SqlClient.SqlClient; readonly digest: Digest.Digest["Service"] },
   projectId: ProjectId,
   environmentId: EnvironmentId,
 ) {
-  const rows = yield* deps.sql<{ readonly threadId: string; readonly scopeId: string | null }>`
-    SELECT thread.thread_id AS "threadId", scope.scope_id AS "scopeId"
+  const rows = yield* deps.sql<{
+    readonly threadId: string;
+    readonly scopeId: string | null;
+    readonly active: number;
+  }>`
+    SELECT thread.thread_id AS "threadId", scope.scope_id AS "scopeId",
+      thread.active_environment_id IS ${environmentId} AS active
     FROM orchestration_v2_projection_threads thread
     LEFT JOIN orchestration_v2_projection_checkpoint_scopes scope
       ON scope.thread_id = thread.thread_id
-    WHERE thread.project_id = ${projectId} AND thread.active_environment_id = ${environmentId}
+    WHERE thread.project_id = ${projectId}
+      AND (
+        thread.active_environment_id = ${environmentId}
+        OR (
+          json_extract(thread.payload_json, '$.move.status') = 'running'
+          AND json_extract(thread.payload_json, '$.move.targetEnvironmentId') = ${environmentId}
+        )
+      )
   `;
-  const prefixes = new Set<string>();
+  const readable = new Set<string>();
+  const writable = new Set<string>();
   for (const row of rows) {
-    for (const prefix of HubRepository.threadRefPrefixes(row.threadId)) prefixes.add(prefix);
-    if (row.scopeId === null) continue;
-    const ref = yield* checkpointRefForScopeOrdinal({
-      scopeId: row.scopeId as never,
-      ordinalWithinScope: 0,
-    }).pipe(Effect.provideService(Digest.Digest, deps.digest));
-    prefixes.add(ref.slice(0, ref.length - "ordinal/0".length));
+    const prefixes: Array<string> = [...HubRepository.threadRefPrefixes(row.threadId)];
+    if (row.scopeId !== null) {
+      const ref = yield* checkpointRefForScopeOrdinal({
+        scopeId: row.scopeId as never,
+        ordinalWithinScope: 0,
+      }).pipe(Effect.provideService(Digest.Digest, deps.digest));
+      prefixes.push(ref.slice(0, ref.length - "ordinal/0".length));
+    }
+    for (const prefix of prefixes) {
+      readable.add(prefix);
+      if (row.active === 1) writable.add(prefix);
+    }
   }
-  return [...prefixes];
+  return { readable: [...readable], writable: [...writable] };
 });
 
 /** Registered where the server keeps Hub repositories; joined machines serve none. */

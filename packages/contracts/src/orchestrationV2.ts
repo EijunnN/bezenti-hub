@@ -443,6 +443,59 @@ const LenientThreadOpens = Schema.NullOr(OrchestrationV2ThreadOpens).pipe(
   Schema.catchDecoding(() => Effect.succeedSome(null)),
 );
 
+/** The steps of moving a Thread to another Environment, in order. */
+export const OrchestrationV2ThreadMoveStep = Schema.Literals([
+  "waiting-for-turn",
+  "final-checkpoint",
+  "fetching",
+  "preparing",
+  "handoff",
+  "switched",
+]);
+export type OrchestrationV2ThreadMoveStep = typeof OrchestrationV2ThreadMoveStep.Type;
+
+/** What a moved Thread's workspace continues from on its new Environment. */
+export const OrchestrationV2ThreadMoveCheckpoint = Schema.Struct({
+  /**
+   * `final`: captured on the source as the move began, manual changes included; `uploaded`: the
+   * last checkpoint the source uploaded (it was offline); `none`: nothing was ever uploaded.
+   */
+  kind: Schema.Literals(["final", "uploaded", "none"]),
+  ref: Schema.NullOr(CheckpointRef),
+  /** The turn whose checkpoint it is, for an uploaded one. */
+  appRunOrdinal: Schema.NullOr(NonNegativeInt),
+});
+export type OrchestrationV2ThreadMoveCheckpoint = typeof OrchestrationV2ThreadMoveCheckpoint.Type;
+
+/**
+ * A move of the Thread to another Environment (`thread.move`), persisted step by step. It stays
+ * on the Thread once done or failed, so clients show how it went; only one runs at a time.
+ */
+export const OrchestrationV2ThreadMove = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  /** Null for a Thread whose Environment was removed: it moves from nowhere. */
+  sourceEnvironmentId: Schema.NullOr(EnvironmentId),
+  targetEnvironmentId: EnvironmentId,
+  ifRunning: Schema.Literals(["wait", "stop"]),
+  actorUserId: Schema.optional(UserId),
+  step: OrchestrationV2ThreadMoveStep,
+  status: Schema.Literals(["running", "failed", "switched"]),
+  startedAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  /** The source was offline, so the move continues from the last checkpoint it uploaded. */
+  sourceOffline: Schema.optional(Schema.Boolean),
+  continuesFrom: Schema.optional(OrchestrationV2ThreadMoveCheckpoint),
+  /** Workspace state the target had and the move replaced, kept under these refs there. */
+  setAsideRefs: Schema.optional(Schema.Array(Schema.String)),
+  /** The worktree made on the target, for a Thread that works in one. */
+  targetWorktreePath: Schema.optional(Schema.String),
+  /** Why the move stopped; the Thread stays on its source. */
+  failure: Schema.optional(
+    Schema.Struct({ step: OrchestrationV2ThreadMoveStep, message: Schema.String }),
+  ),
+});
+export type OrchestrationV2ThreadMove = typeof OrchestrationV2ThreadMove.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
   id: ThreadId,
@@ -469,6 +522,8 @@ export const OrchestrationV2AppThread = Schema.Struct({
    * the Hub machine; null when its Environment was removed and it needs another one.
    */
   activeEnvironmentId: Schema.optional(Schema.NullOr(EnvironmentId)),
+  /** The Thread's latest move to another Environment, running or finished. */
+  move: Schema.optional(Schema.NullOr(OrchestrationV2ThreadMove)),
   lineage: OrchestrationV2AppThreadLineage,
   forkedFrom: Schema.NullOr(
     Schema.Union([
@@ -1779,6 +1834,20 @@ export const OrchestrationV2TurnItem = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
+    type: Schema.Literal("environment_move"),
+    moveId: TrimmedNonEmptyString,
+    sourceEnvironmentId: Schema.NullOr(EnvironmentId),
+    sourceEnvironmentName: Schema.String,
+    targetEnvironmentId: EnvironmentId,
+    targetEnvironmentName: Schema.String,
+    actorUserId: Schema.optional(UserId),
+    actorName: Schema.optional(Schema.String),
+    continuesFrom: OrchestrationV2ThreadMoveCheckpoint,
+    sourceOffline: Schema.Boolean,
+    setAsideRefs: Schema.optional(Schema.Array(Schema.String)),
+  }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("fork"),
     source: Schema.Union([
       Schema.Struct({ type: Schema.Literal("run"), threadId: ThreadId, runId: RunId }),
@@ -1911,6 +1980,7 @@ export const OrchestrationV2DomainEvent = Schema.Union([
       "thread.model-selection-updated",
       "thread.provider-switched",
       "thread.guest-share-updated",
+      "thread.move-updated",
     ]),
     payload: OrchestrationV2AppThread,
   }),
@@ -2116,6 +2186,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   spaceId: Schema.optional(SpaceId),
   ownerUserId: Schema.optional(UserId),
   activeEnvironmentId: Schema.optional(Schema.NullOr(EnvironmentId)),
+  move: Schema.optional(Schema.NullOr(OrchestrationV2ThreadMove)),
   latestRunId: Schema.NullOr(RunId),
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2616,6 +2687,20 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
+    type: Schema.Literal("environment_move"),
+    moveId: TrimmedNonEmptyString,
+    sourceEnvironmentId: Schema.NullOr(EnvironmentId),
+    sourceEnvironmentName: Schema.String,
+    targetEnvironmentId: EnvironmentId,
+    targetEnvironmentName: Schema.String,
+    actorUserId: Schema.optional(UserId),
+    actorName: Schema.optional(Schema.String),
+    continuesFrom: OrchestrationV2ThreadMoveCheckpoint,
+    sourceOffline: Schema.Boolean,
+    setAsideRefs: Schema.optional(Schema.Array(Schema.String)),
+  }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("fork"),
     source: Schema.Union([
       Schema.Struct({ type: Schema.Literal("run"), threadId: ThreadId, runId: RunId }),
@@ -2803,6 +2888,7 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
       "thread.model-selection-updated",
       "thread.provider-switched",
       "thread.guest-share-updated",
+      "thread.move-updated",
     ]),
     payload: OrchestrationV2AppThreadJson,
   }),
@@ -2968,6 +3054,17 @@ export const OrchestrationV2Command = Schema.Union([
         metadata: Schema.optional(OrchestrationV2ProviderThreadNativeMetadata),
       }),
     ),
+  }),
+  Schema.Struct({
+    /** Moves the Thread to another Environment (`docs/internals/overview.md`, «Moving a Thread»). */
+    type: Schema.Literal("thread.move"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    targetEnvironmentId: EnvironmentId,
+    /** A running turn: wait for it to finish (the default), or stop it. */
+    ifRunning: Schema.optional(Schema.Literals(["wait", "stop"])),
+    /** Only the server sets this, from the sender's session. */
+    ownerUserId: Schema.optional(UserId),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.archive"),

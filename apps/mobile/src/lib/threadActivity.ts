@@ -554,6 +554,7 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
       return "check";
     case "compaction":
     case "handoff":
+    case "environment_move":
     case "fork":
     case "thread_created":
       return "zap";
@@ -614,6 +615,8 @@ function itemSummary(
       return item.failure.class === "usage_limit" ? "Usage limit reached" : "Provider error";
     case "handoff":
       return "Context handed off";
+    case "environment_move":
+      return `Moved from ${item.sourceEnvironmentName} to ${item.targetEnvironmentName}`;
     case "fork":
       return "Thread forked";
     case "thread_created":
@@ -676,6 +679,8 @@ function itemPreview(item: OrchestrationV2TurnItem): string | null {
     case "compaction":
     case "handoff":
       return item.summary ?? null;
+    case "environment_move":
+      return item.actorName === undefined ? null : `by ${item.actorName}`;
     case "fork":
     case "thread_created":
       return item.targetThreadId;

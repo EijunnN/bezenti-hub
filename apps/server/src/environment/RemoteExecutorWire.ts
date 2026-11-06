@@ -70,6 +70,8 @@ import {
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Schema from "effect/Schema";
 
+import { MoveFetchResult, MovePrepareInput, MovePrepareResult } from "./MovedWorkspace.ts";
+
 const RuntimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy;
 const ProviderThread = OrchestrationV2ProviderThread;
 
@@ -376,6 +378,17 @@ export const REMOTE_OPERATIONS = {
   ),
   "checkpoint.push": checkpoint(HubRepositoryTransfer, Schema.Void),
   "checkpoint.fetch": checkpoint(HubRepositoryTransfer, Schema.Void),
+  // Moving a Thread here: the checkout (cloned when missing) fetches what the Thread continues
+  // from, then the Thread's branch or worktree is made over it and the setup script runs.
+  "move.fetch": checkpoint(
+    Schema.Struct({
+      checkout: WireCheckout,
+      projectId: ProjectId,
+      refs: Schema.Array(CheckpointRef),
+    }),
+    MoveFetchResult,
+  ),
+  "move.prepare": checkpoint(MovePrepareInput, MovePrepareResult),
   // Workspace calls name the Thread's workspace root on the machine and paths relative to it; the
   // machine refuses whatever resolves (symlinks included) outside the root. They carry the
   // contract's own errors, so the Hub hands a machine's answer to the client as it came.

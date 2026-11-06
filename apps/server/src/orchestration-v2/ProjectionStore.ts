@@ -97,7 +97,7 @@ import type * as Statement from "effect/sql/Statement";
 import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
 import { threadInSpaces } from "../spaces/SpaceVisibility.ts";
-import { hubMachineLocationJson } from "../environment/WorkspaceLocation.ts";
+import { hostLocationJson, hubMachineLocationJson } from "../environment/WorkspaceLocation.ts";
 import {
   isThreadHistoryUserTurn,
   isConversationHistoryItem,
@@ -868,6 +868,8 @@ export function applyToProjection(
       };
     case "thread.visited":
     case "thread.marked-unread":
+    // A move's progress is not activity: the Thread keeps its place.
+    case "thread.move-updated":
       return {
         ...projection,
         thread: event.payload,
@@ -1651,6 +1653,7 @@ export function threadShellFromProjection(
     ...(projection.thread.activeEnvironmentId === undefined
       ? {}
       : { activeEnvironmentId: projection.thread.activeEnvironmentId }),
+    ...(projection.thread.move == null ? {} : { move: projection.thread.move }),
     latestRunId: latestRun?.id ?? null,
     latestRunRequestedAt: latestRun?.requestedAt ?? null,
     latestRunStartedAt: latestRun?.startedAt ?? null,
@@ -1939,6 +1942,7 @@ function shellFromState(input: {
     ...(input.state.thread.activeEnvironmentId === undefined
       ? {}
       : { activeEnvironmentId: input.state.thread.activeEnvironmentId }),
+    ...(input.state.thread.move == null ? {} : { move: input.state.thread.move }),
     latestRunId: input.state.latestRunId,
     latestRunRequestedAt: input.state.latestRunRequestedAt,
     latestRunStartedAt: input.state.latestRunStartedAt,
@@ -2080,16 +2084,23 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             case "thread.interaction-mode-updated":
             case "thread.model-selection-updated":
             case "thread.provider-switched":
-            case "thread.guest-share-updated": {
+            case "thread.guest-share-updated":
+            case "thread.move-updated": {
               const payloadJson = yield* encodeThreadPayload(event.payload);
               const payload = parseEncodedPayload(payloadJson);
+              const activeEnvironmentId = event.payload.activeEnvironmentId;
               const worktreeLocationJson =
                 event.payload.worktreePath === null
                   ? null
-                  : hubMachineLocationJson(
-                      yield* hubMachineCheckout(event.payload.projectId),
-                      event.payload.worktreePath,
-                    );
+                  : activeEnvironmentId !== undefined &&
+                      activeEnvironmentId !== null &&
+                      activeEnvironmentId !== HUB_MACHINE_ENVIRONMENT_ID
+                    ? // Only a move gives a Thread elsewhere a worktree: it is that machine's path.
+                      hostLocationJson(activeEnvironmentId, event.payload.worktreePath)
+                    : hubMachineLocationJson(
+                        yield* hubMachineCheckout(event.payload.projectId),
+                        event.payload.worktreePath,
+                      );
               yield* sql`
               INSERT INTO orchestration_v2_projection_threads (
                 thread_id,
@@ -2938,7 +2949,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             event.type !== "thread.interaction-mode-updated" &&
             event.type !== "thread.model-selection-updated" &&
             event.type !== "thread.provider-switched" &&
-            event.type !== "thread.guest-share-updated"
+            event.type !== "thread.guest-share-updated" &&
+            event.type !== "thread.move-updated"
           ) {
             const updatedAt = yield* encodeThreadUpdatedAt(event.occurredAt);
             yield* sql`

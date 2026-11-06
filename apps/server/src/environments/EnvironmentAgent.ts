@@ -28,6 +28,7 @@ import {
   ProviderDriverKind,
   type ProviderInstanceId,
   type ThreadId,
+  VcsProcessExitError,
 } from "@t3tools/contracts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -728,6 +729,34 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
         return hubRepository.push(request as RemoteInput<"checkpoint.push">);
       case "checkpoint.fetch":
         return hubRepository.fetch(request as RemoteInput<"checkpoint.fetch">);
+      // A Thread moves here: its checkout (cloned when missing) fetches what it continues from.
+      case "move.fetch": {
+        const moved = request as RemoteInput<"move.fetch">;
+        return ensureCheckout(moved.checkout).pipe(
+          Effect.mapError(
+            (detail) =>
+              new VcsProcessExitError({
+                operation: "EnvironmentAgent.move.fetch",
+                command: "git clone",
+                cwd: moved.checkout.path,
+                exitCode: 1,
+                detail,
+              }),
+          ),
+          Effect.andThen(
+            moved.refs.length === 0
+              ? Effect.void
+              : hubRepository.fetch({
+                  cwd: moved.checkout.path,
+                  projectId: moved.projectId,
+                  checkpointRefs: moved.refs,
+                }),
+          ),
+          Effect.as({ checkout: moved.checkout.path }),
+        );
+      }
+      case "move.prepare":
+        return local.workspace.move.prepare(request as RemoteInput<"move.prepare">);
       // The Hub already authorized these and resolved their paths onto this machine.
       case "files.read": {
         const rooted = request as RemoteInput<"files.read">;

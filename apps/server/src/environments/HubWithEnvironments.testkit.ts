@@ -29,6 +29,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Exit from "effect/Exit";
+import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
@@ -190,6 +191,8 @@ export interface TestEnvironment {
   readonly workspaceRoot: string;
   /** The method of each request the Hub sent this machine, in order. */
   readonly requests: ReadonlyArray<string>;
+  /** Resolves once the Hub sent `method`, counting from request number `from`. */
+  readonly awaitRequest: (method: string, from: number) => Effect.Effect<void>;
   /** Opens a socket to the Hub; succeeds once the Hub welcomed it. */
   readonly connect: Effect.Effect<void>;
   /** Drops the socket. The machine keeps running: its sessions and unacknowledged events stay. */
@@ -213,6 +216,17 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
   const scope = yield* Effect.scope;
   const mcpConfigs: Array<McpProviderSessionConfig> = [];
   const requests: Array<string> = [];
+  const requested = yield* PubSub.unbounded<string>();
+  const awaitRequest = (method: string, from: number) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const subscription = yield* PubSub.subscribe(requested);
+        if (requests.slice(from).includes(method)) return;
+        while ((yield* PubSub.take(subscription)) !== method) {
+          // Another request: keep waiting for `method`.
+        }
+      }),
+    );
   const layerRecordingMcp = Layer.effect(
     McpProviderSessions.McpProviderSessions,
     Effect.map(McpProviderSessions.McpProviderSessions, (sessions) => ({
@@ -291,6 +305,9 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
             const request = frame as { readonly type?: unknown; readonly method?: unknown };
             if (request.type === "request" && typeof request.method === "string") {
               requests.push(request.method);
+              return PubSub.publish(requested, request.method).pipe(
+                Effect.andThen(served.receive(frame)),
+              );
             }
             return served.receive(frame);
           },
@@ -311,6 +328,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
     mcpConfigs,
     workspaceRoot: (yield* report).workspaceRoot,
     requests,
+    awaitRequest,
     connect,
     disconnect,
   } satisfies TestEnvironment;

@@ -1,10 +1,12 @@
 import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
+  type OrchestrationV2ThreadMove,
   type ScopedThreadRef,
   type ThreadId,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { ThreadMoveBadge } from "./MoveThreadDialog";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import {
   isAtomCommandInterrupted,
@@ -56,6 +58,8 @@ interface ChatHeaderProps {
   activeThreadLinkOrigin?: string | null | undefined;
   /** The Environment the Thread runs on, by name and live status. */
   activeEnvironment?: ActiveEnvironmentView | null | undefined;
+  /** The Thread's latest move to another Environment; shown while it runs. */
+  activeThreadMove?: OrchestrationV2ThreadMove | null | undefined;
   isServerThread: boolean;
   activeProject: EnvironmentProject | null;
   parentThreadLink: { threadId: ThreadId; title: string } | null;
@@ -84,6 +88,7 @@ export const ChatHeader = memo(function ChatHeader({
   activeThreadTitle,
   activeThreadLinkOrigin,
   activeEnvironment,
+  activeThreadMove,
   isServerThread,
   activeProject,
   parentThreadLink,
@@ -451,6 +456,7 @@ export const ChatHeader = memo(function ChatHeader({
               </TooltipPopup>
             </Tooltip>
           ) : null}
+          {renamingTitle === null ? <ThreadMoveBadge move={activeThreadMove ?? null} /> : null}
           {renamingTitle === null && activeThreadLinkOrigin ? (
             <Tooltip>
               <TooltipTrigger render={<Badge variant="info" size="sm" />}>

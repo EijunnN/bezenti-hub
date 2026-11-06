@@ -117,6 +117,7 @@ export const AUDIT_ACTION_LABELS: Record<AuditAction, string> = {
   "environment.register": "Registered an Environment",
   "environment.rename": "Renamed an Environment",
   "environment.remove": "Removed an Environment",
+  "thread.move": "Moved a Thread to another Environment",
 };
 
 export const INSTALLATION_PERMISSION_LABELS: Record<InstallationPermission, string> = {

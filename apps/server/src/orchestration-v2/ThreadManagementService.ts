@@ -96,6 +96,13 @@ export function withCreationProvenance(
       } = command;
       return { ...rest, ...provenance };
     }
+    case "thread.move": {
+      // Who moves it is the sender, never what a client claims.
+      const { ownerUserId: _ownerUserId, ...rest } = command;
+      return provenance.ownerUserId === undefined
+        ? rest
+        : { ...rest, ownerUserId: provenance.ownerUserId };
+    }
     case "message.dispatch":
     case "thread.fork":
     case "thread.merge_back":
@@ -848,9 +855,40 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
       );
   };
 
+  // A move's target must be one its sender may use, online, with the Thread's provider.
+  const checkMoveTarget = (
+    command: OrchestrationV2ServerCommand,
+  ): Effect.Effect<OrchestrationV2ServerCommand, Orchestrator.OrchestratorCommandRejectedError> => {
+    if (command.type !== "thread.move") return Effect.succeed(command);
+    const reject = (cause: unknown) =>
+      new Orchestrator.OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause,
+      });
+    if (Option.isNone(environments)) {
+      return Effect.fail(reject("Only the Hub machine runs Threads here."));
+    }
+    return orchestrator.getThreadRecords(command.threadId, []).pipe(
+      Effect.mapError(reject),
+      Effect.flatMap(({ thread }) =>
+        environments.value
+          .chooseForThread({
+            userId: command.ownerUserId,
+            requested: command.targetEnvironmentId,
+            projectId: thread.projectId,
+            providerInstanceId: thread.modelSelection.instanceId,
+          })
+          .pipe(Effect.mapError(reject)),
+      ),
+      Effect.as(command),
+    );
+  };
+
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
     claimThreadSpace(command).pipe(
       Effect.flatMap(placeThread),
+      Effect.flatMap(checkMoveTarget),
       Effect.flatMap((claimed) =>
         ensureCommandTranscripts(claimed).pipe(
           Effect.andThen(assertDispatchTargetEnabled(claimed)),

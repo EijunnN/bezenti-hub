@@ -37,6 +37,7 @@ export const AuditAction = Schema.Literals([
   "environment.register",
   "environment.rename",
   "environment.remove",
+  "thread.move",
 ]);
 export type AuditAction = typeof AuditAction.Type;
 
@@ -95,6 +96,8 @@ export const AUDIT_DETAIL_KEYS = {
   "environment.rename": ["from", "to"],
   /** `settings` from the Hub, `leave` from the machine, `userTurnedOff` with its owner. */
   "environment.remove": ["via"],
+  /** Environment ids, how it ended, the step that failed, and what the target continues from. */
+  "thread.move": ["from", "to", "outcome", "failedStep", "continuesFrom"],
 } as const satisfies Record<AuditAction, ReadonlyArray<string>>;
 
 export type AuditDetailOf<A extends AuditAction> = {

@@ -24,6 +24,7 @@ import {
   type ProviderDriverKind,
   type ProviderInstanceId,
   ThreadId,
+  VcsUnsupportedOperationError,
 } from "@t3tools/contracts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -53,6 +54,7 @@ import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterReg
 import * as RuntimePolicy from "../orchestration-v2/RuntimePolicy.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as EnvironmentExecutor from "./EnvironmentExecutor.ts";
+import type * as MovedWorkspace from "./MovedWorkspace.ts";
 import {
   type ExecutorCallResult,
   makeExecutorChannel,
@@ -319,7 +321,7 @@ const make = Effect.gen(function* () {
   const checkoutFor = Effect.fn("RemoteEnvironments.checkoutFor")(function* (
     link: Link,
     projectId: ProjectId,
-    threadId: ThreadId,
+    threadId: ThreadId | undefined,
   ) {
     const path = yield* pathsOf(link)
       .checkout(projectId)
@@ -345,11 +347,14 @@ const make = Effect.gen(function* () {
               ),
               Effect.orElseSucceed(() => null),
             );
-    const uploaded = yield* sql<{ readonly ref: string }>`
-      SELECT json_extract(payload_json, '$.ref') AS ref
-      FROM orchestration_v2_projection_checkpoints
-      WHERE thread_id = ${threadId} AND status = 'ready' AND uploaded_to_hub = 1
-    `.pipe(Effect.orElseSucceed(() => []));
+    const uploaded =
+      threadId === undefined
+        ? []
+        : yield* sql<{ readonly ref: string }>`
+            SELECT json_extract(payload_json, '$.ref') AS ref
+            FROM orchestration_v2_projection_checkpoints
+            WHERE thread_id = ${threadId} AND status = 'ready' AND uploaded_to_hub = 1
+          `.pipe(Effect.orElseSucceed(() => []));
     return {
       path: path.value,
       cloneUrl,
@@ -696,6 +701,26 @@ const make = Effect.gen(function* () {
         callCheckpoint<void>(link, "checkpoint.fetch", input),
       ),
     };
+    const move: EnvironmentExecutor.EnvironmentMoveWorkspace = {
+      fetch: Effect.fn("RemoteEnvironments.move.fetch")(function* (input) {
+        const checkout = yield* checkoutFor(link, input.projectId, undefined);
+        if (checkout === undefined) {
+          return yield* new VcsUnsupportedOperationError({
+            operation: "RemoteEnvironments.move.fetch",
+            kind: "git",
+            detail: `Project ${input.projectId} has no checkout on this machine.`,
+          });
+        }
+        return yield* callCheckpoint<MovedWorkspace.MoveFetchResult>(link, "move.fetch", {
+          checkout,
+          projectId: input.projectId,
+          refs: input.refs,
+        });
+      }),
+      prepare: Effect.fn("RemoteEnvironments.move.prepare")((input) =>
+        callCheckpoint<MovedWorkspace.MovePrepareResult>(link, "move.prepare", input),
+      ),
+    };
     // Resolved on the Hub from what the Environment reported: the Orchestrator asks while deciding.
     const runtimePolicy: RuntimePolicy.RuntimePolicyV2Shape = {
       resolve: Effect.fn("RemoteEnvironments.runtimePolicy.resolve")(function* (input) {
@@ -742,6 +767,7 @@ const make = Effect.gen(function* () {
         paths,
         checkpoints,
         hubRepository,
+        move,
         runtimePolicy,
         rpc: Option.none(),
         forward: Option.some({ call: forwardCall(link), stream: forwardStream(link) }),

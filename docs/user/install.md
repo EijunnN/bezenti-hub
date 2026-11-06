@@ -472,7 +472,7 @@ The machine works in its own copy of the Project, under its `projects` folder in
 the T3 home. The first Thread there clones it from the Project's `origin` remote
 on the Hub; a Project without one must already be checked out on the machine.
 New worktrees can't be made on a joined machine yet, so start such Threads in
-the Project's checkout. Each machine uses the provider sign-ins it already has.
+the Project's checkout (moving a Thread that has one, below, makes it there). Each machine uses the provider sign-ins it already has.
 **Settings → Environments** counts the Threads running on each machine.
 
 After each turn the machine uploads the turn's checkpoint, with your uncommitted
@@ -489,6 +489,31 @@ A Thread's terminals, its Files panel, file search and previews open on the
 machine it runs on, in that machine's copy of the Project. When the machine is
 off they say **Environment offline** instead; nothing you type or save is kept
 for later, so start the machine and try again.
+
+### Move a Thread to another machine
+
+To go on with a Thread elsewhere, open its menu (its title in the header, or
+right-click it in the sidebar) and choose **Move to another Environment**. The
+dialog lists the machines you can use with their status, and explains what will
+happen; pick one and choose **Move Thread**. If a turn is running you choose
+between **Wait for the turn to finish** (the default) and **Stop the turn**.
+
+The Thread's header and the dialog show each step: finishing the turn, uploading
+a final checkpoint, fetching it, preparing the workspace, and ready. When the
+machine it leaves is online it first uploads everything in the workspace,
+including changes you made by hand. The new machine fetches it, recreates the
+Thread's branch or worktree, and runs the Project's setup script, which also
+rebuilds ignored files such as dependencies. If the old machine is off, the move
+continues from the last checkpoint it uploaded and says which turn that was.
+Anything the new machine already had in its copy of the Project is kept under a
+`refs/t3/recovered/...` ref there and named in the dialog, never thrown away.
+
+The Thread's link stays the same, and its timeline shows **Moved from Laptop to
+Hub machine** (with who moved it and what it continues from). The next turn runs
+on the new machine in a fresh session; handing it the conversation so far comes in
+a later release. If a step fails, the Thread stays on the machine it was on and
+the dialog says which step failed and why. Only one move of a Thread runs at a
+time, only the Thread's creator can move it, and the audit log records each move.
 
 ## Next steps
 

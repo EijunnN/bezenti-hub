@@ -152,6 +152,8 @@ export interface EnvironmentThreadShell {
   readonly delegatedFrom: OrchestrationV2ThreadShell["delegatedFrom"] | null;
   /** The Hub Environment it runs on; absent means the Hub machine, null that it needs one. */
   readonly activeEnvironmentId?: OrchestrationV2ThreadShell["activeEnvironmentId"];
+  /** Its latest move to another Environment, running or finished. */
+  readonly move?: OrchestrationV2ThreadShell["move"];
   readonly activeProviderThreadId: OrchestrationV2ThreadShell["activeProviderThreadId"];
   readonly latestRun: ThreadRunSummary | null;
   readonly runtime: ThreadRuntimeSummary | null;
@@ -303,6 +305,7 @@ export function presentThreadShell(
     ...(thread.activeEnvironmentId === undefined
       ? {}
       : { activeEnvironmentId: thread.activeEnvironmentId }),
+    ...(thread.move == null ? {} : { move: thread.move }),
     activeProviderThreadId: thread.activeProviderThreadId,
     latestRun,
     runtime,

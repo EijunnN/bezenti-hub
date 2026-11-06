@@ -13,6 +13,7 @@ import {
   EnvironmentId,
   EventId,
   HUB_MACHINE_ENVIRONMENT_ID,
+  type OrchestrationV2AppThread,
   type OrchestrationV2Command,
   ProjectId,
   ProviderDriverKind,
@@ -39,6 +40,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -47,7 +49,8 @@ import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import * as CheckpointDiffQuery from "../checkpointing/CheckpointDiffQuery.ts";
 import * as HubRepository from "../checkpointing/HubRepository.ts";
-import { addMember } from "../auth/UserAuth.testkit.ts";
+import * as CommandActor from "../auth/CommandActor.ts";
+import { addMember, joinOrganization } from "../auth/UserAuth.testkit.ts";
 import * as ServerConfig from "../config.ts";
 import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
@@ -64,6 +67,7 @@ import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import type * as RuntimePolicy from "../orchestration-v2/RuntimePolicy.ts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { materializeFixtureInput } from "../orchestration-v2/testkit/fixtures/shared.ts";
 import {
   runOrchestratorV2Scenario,
@@ -1505,6 +1509,394 @@ describe("Hub con Environments: what a machine is trusted with", () => {
         (forward) => forward.call("terminal.close", { threadId: opened.threadId }),
       ).pipe(Effect.exit);
       assert.isTrue(Exit.isFailure(cleanup));
+    }).pipe(Effect.scoped),
+  );
+});
+
+/** A move as its sender dispatches it, through the Hub's checks. */
+const dispatchMove = (
+  hub: Hub,
+  input: {
+    readonly commandId: string;
+    readonly threadId: ThreadId;
+    readonly target: EnvironmentId;
+    readonly actor: UserId;
+    readonly ifRunning?: "wait" | "stop";
+  },
+) =>
+  hub
+    .service(ThreadManagementService.ThreadManagementService)
+    .dispatch({
+      type: "thread.move",
+      commandId: CommandId.make(input.commandId),
+      threadId: input.threadId,
+      targetEnvironmentId: input.target,
+      ...(input.ifRunning === undefined ? {} : { ifRunning: input.ifRunning }),
+      ownerUserId: input.actor,
+    })
+    .pipe(CommandActor.actAs(input.actor));
+
+/** The Thread once its move switched or failed, as its stream shows it. */
+const settledMove = Effect.fn(function* (hub: Hub, threadId: ThreadId) {
+  const orchestrator = hub.service(Orchestrator.OrchestratorV2);
+  const settled = (thread: OrchestrationV2AppThread) =>
+    thread.move != null && thread.move.status !== "running";
+  const afterSequence = yield* hub
+    .service(EventSink.EventSinkV2)
+    .latestSequence({ threadId })
+    .pipe(Effect.orDie);
+  const { thread } = yield* orchestrator.getThreadProjection(threadId).pipe(Effect.orDie);
+  if (settled(thread)) return thread;
+  const found = yield* orchestrator.streamStoredEventsFrom({ threadId, afterSequence }).pipe(
+    Stream.filterMap(({ event }) =>
+      event.type === "thread.move-updated" && settled(event.payload)
+        ? Result.succeed(event.payload)
+        : Result.failVoid,
+    ),
+    Stream.runHead,
+    Effect.orDie,
+  );
+  return Option.getOrThrow(found);
+});
+
+const readText = (path: string) => Effect.promise(() => NodeFSP.readFile(path, "utf8"));
+
+const checkoutOn = Effect.fn(function* (
+  hub: Hub,
+  environment: TestEnvironment,
+  projectId: ProjectId,
+) {
+  const registry = hub.service(EnvironmentExecutor.EnvironmentExecutorRegistry);
+  const executor = yield* registry.get(environment.environmentId).pipe(Effect.orDie);
+  return Option.getOrThrow(yield* executor.workspace.paths.checkout(projectId).pipe(Effect.orDie));
+});
+
+/** A recorded turn on the Laptop that writes `notes.md`, its checkpoint in the Hub repository. */
+const turnOnLaptop = Effect.fn(function* (input: { readonly desktop: boolean }) {
+  const loaded = yield* loadFixture("simple");
+  const hub = yield* makeHub();
+  const laptop = yield* hub.join({
+    name: "Laptop",
+    adapters: withEditingTurns(loaded.adapters, {
+      file: "notes.md",
+      content: "Written on the Laptop",
+    }),
+  });
+  const desktop = input.desktop
+    ? // It runs no recorded turn: a session opening there is all the next turn shows.
+      yield* hub.join({
+        name: "Desktop",
+        adapters: idleAdapters(loaded.variant.modelSelection.instanceId),
+      })
+    : undefined;
+  yield* replayOn(hub, laptop, loaded);
+  const [threadId] = loaded.materialized.projectionThreadIds;
+  assert.isDefined(threadId);
+  yield* awaitUploaded(hub, threadId, 1);
+  const { thread } = yield* hub
+    .service(Orchestrator.OrchestratorV2)
+    .getThreadProjection(threadId)
+    .pipe(Effect.orDie);
+  return {
+    hub,
+    laptop,
+    desktop,
+    threadId,
+    projectId: thread.projectId,
+    owner: yield* ownerIdOf(hub),
+    laptopCheckout: yield* checkoutOn(hub, laptop, thread.projectId),
+  };
+});
+
+describe("Hub con Environments: moving a Thread", () => {
+  it.live(
+    "its files, manual changes and next turn go to the target, and the timeline says so",
+    () =>
+      Effect.gen(function* () {
+        const { hub, laptop, desktop, threadId, projectId, owner, laptopCheckout } =
+          yield* turnOnLaptop({ desktop: true });
+        assert.isDefined(desktop);
+        const orchestrator = hub.service(Orchestrator.OrchestratorV2);
+        const before = yield* orchestrator.getThreadProjection(threadId);
+        const laptopSessions = before.providerSessions.map((session) => session.id);
+        assert.isNotEmpty(laptopSessions);
+        // Typed by hand after the turn: no checkpoint has it yet.
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(`${laptopCheckout}/manual.txt`, "typed by hand\n"),
+        );
+
+        yield* dispatchMove(hub, {
+          commandId: "command:move-to-desktop",
+          threadId,
+          target: desktop.environmentId,
+          actor: owner,
+        });
+        const moved = yield* settledMove(hub, threadId);
+        assert.equal(moved.move?.status, "switched", moved.move?.failure?.message);
+        assert.equal(moved.activeEnvironmentId, desktop.environmentId);
+        assert.equal(moved.move?.continuesFrom?.kind, "final");
+        assert.isNotTrue(moved.move?.sourceOffline);
+
+        // The Desktop's checkout has the turn's file and the change made by hand.
+        const desktopCheckout = yield* checkoutOn(hub, desktop, projectId);
+        assert.notEqual(desktopCheckout, laptopCheckout);
+        assert.equal(
+          yield* readText(`${desktopCheckout}/notes.md`),
+          "Written on the Laptop (turn 1)\n",
+        );
+        assert.equal(yield* readText(`${desktopCheckout}/manual.txt`), "typed by hand\n");
+
+        // The timeline names both machines, who moved it and what it continues from.
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        const entry = after.turnItems.find((item) => item.type === "environment_move");
+        assert.isDefined(entry);
+        assert.equal(entry.title, "Moved from Laptop to Desktop");
+        if (entry.type === "environment_move") {
+          assert.equal(entry.actorUserId, owner);
+          assert.equal(entry.continuesFrom.kind, "final");
+          assert.isFalse(entry.sourceOffline);
+        }
+        // The Laptop's sessions are retired; the audit log records the move.
+        for (const session of after.providerSessions) {
+          assert.notInclude(laptopSessions, session.id);
+        }
+        const audited = yield* hub.server.sql<{ readonly detail: string }>`
+          SELECT detail_json AS detail FROM audit_log WHERE action = 'thread.move'
+        `;
+        assert.deepEqual(
+          audited.map((row) => JSON.parse(row.detail)),
+          [
+            {
+              from: laptop.environmentId,
+              to: desktop.environmentId,
+              outcome: "switched",
+              continuesFrom: "final",
+            },
+          ],
+        );
+
+        // The next turn opens its session on the Desktop.
+        const asked = desktop.requests.length;
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:after-move"),
+          threadId,
+          messageId: MessageId.make("message:after-move"),
+          text: "Go on from here",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+        });
+        yield* desktop.awaitRequest("provider.openSession", asked);
+        assert.notInclude(
+          laptop.requests.slice(laptop.requests.lastIndexOf("checkpoint.push") + 1),
+          "provider.openSession",
+        );
+      }).pipe(Effect.scoped),
+  );
+
+  it.live("with its source offline, it continues from the last checkpoint uploaded", () =>
+    Effect.gen(function* () {
+      const { hub, laptop, desktop, threadId, projectId, owner } = yield* turnOnLaptop({
+        desktop: true,
+      });
+      assert.isDefined(desktop);
+      yield* laptop.disconnect;
+
+      yield* dispatchMove(hub, {
+        commandId: "command:move-offline",
+        threadId,
+        target: desktop.environmentId,
+        actor: owner,
+      });
+      const moved = yield* settledMove(hub, threadId);
+      assert.equal(moved.move?.status, "switched", moved.move?.failure?.message);
+      assert.isTrue(moved.move?.sourceOffline);
+      assert.equal(moved.move?.continuesFrom?.kind, "uploaded");
+      assert.equal(moved.move?.continuesFrom?.appRunOrdinal, 1);
+      const desktopCheckout = yield* checkoutOn(hub, desktop, projectId);
+      assert.equal(
+        yield* readText(`${desktopCheckout}/notes.md`),
+        "Written on the Laptop (turn 1)\n",
+      );
+      const { turnItems } = yield* hub
+        .service(Orchestrator.OrchestratorV2)
+        .getThreadProjection(threadId);
+      const entry = turnItems.find((item) => item.type === "environment_move");
+      assert.isTrue(entry?.type === "environment_move" && entry.sourceOffline);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a failed step leaves the Thread on its source, saying which step failed", () =>
+    Effect.gen(function* () {
+      const { hub, laptop, desktop, threadId, projectId, owner } = yield* turnOnLaptop({
+        desktop: true,
+      });
+      assert.isDefined(desktop);
+      // The Desktop has no checkout and the Project no remote to clone it from.
+      const project = Option.getOrThrow(
+        yield* hub.service(ProjectStore.ProjectStoreV2).get(projectId),
+      );
+      yield* git(project.workspaceRoot, ["remote", "remove", "origin"]);
+
+      yield* dispatchMove(hub, {
+        commandId: "command:move-fails",
+        threadId,
+        target: desktop.environmentId,
+        actor: owner,
+      });
+      const failed = yield* settledMove(hub, threadId);
+      assert.equal(failed.move?.status, "failed");
+      assert.equal(failed.move?.failure?.step, "fetching");
+      assert.include(failed.move?.failure?.message ?? "", "no remote to clone");
+      assert.equal(failed.activeEnvironmentId, laptop.environmentId);
+      const audited = yield* hub.server.sql<{ readonly detail: string }>`
+        SELECT detail_json AS detail FROM audit_log WHERE action = 'thread.move'
+      `;
+      assert.equal(JSON.parse(audited[0]?.detail ?? "{}").failedStep, "fetching");
+      // It can be moved again once the cause is gone; a running move is not stuck.
+      assert.equal(
+        (yield* hub.service(ProjectionStore.ProjectionStoreV2).getThread(threadId)).move?.status,
+        "failed",
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("only one move of a Thread runs at a time", () =>
+    Effect.gen(function* () {
+      const { hub, desktop, threadId, owner } = yield* turnOnLaptop({ desktop: true });
+      assert.isDefined(desktop);
+      const results = yield* Effect.forEach(
+        [1, 2],
+        (n) =>
+          dispatchMove(hub, {
+            commandId: `command:move-race-${n}`,
+            threadId,
+            target: desktop.environmentId,
+            actor: owner,
+          }).pipe(Effect.result),
+        { concurrency: "unbounded" },
+      );
+      const refused = results.filter((result) => result._tag === "Failure");
+      assert.equal(refused.length, 1);
+      assert.include(JSON.stringify(refused[0]), "already moving to another Environment");
+      const moved = yield* settledMove(hub, threadId);
+      assert.equal(moved.move?.status, "switched", moved.move?.failure?.message);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("only its own User moves a Thread, to a machine they may use and that is online", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const hub = yield* makeHub();
+      const owner = yield* ownerIdOf(hub);
+      const laptop = yield* hub.join({ name: "Laptop", adapters: idleAdapters(instanceId) });
+      const away = yield* hub.join({
+        name: "Away",
+        adapters: idleAdapters(instanceId),
+        connect: false,
+      });
+      const member = UserId.make("member-1");
+      yield* addMember(hub.server, { id: member, displayName: "Grace Hopper" });
+      const graceSpace = SpaceId.make("personal:member-1");
+      const projectId = ProjectId.make("project:graces");
+      yield* seedProject(hub.server, {
+        projectId,
+        title: "Grace's",
+        defaultModelSelection: null,
+        spaceId: graceSpace,
+      });
+      const orchestrator = hub.service(Orchestrator.OrchestratorV2);
+      const threadOf = (threadId: ThreadId, ownerUserId: UserId, spaceId?: SpaceId) =>
+        orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(`command:create:${threadId}`),
+          threadId,
+          projectId: spaceId === undefined ? ProjectId.make("project:owners") : projectId,
+          title: "A Thread",
+          modelSelection: { instanceId, model: "claude-sonnet-4-6" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          ...(spaceId === undefined ? {} : { spaceId }),
+          ownerUserId,
+        });
+      yield* seedProject(hub.server, {
+        projectId: ProjectId.make("project:owners"),
+        title: "Owner's",
+        defaultModelSelection: null,
+      });
+      const graces = ThreadId.make("thread:graces");
+      const owners = ThreadId.make("thread:owners");
+      yield* threadOf(graces, member, graceSpace);
+      yield* threadOf(owners, owner);
+      const refusal = <A, E>(result: Effect.Effect<A, E>): Effect.Effect<string> =>
+        result.pipe(
+          Effect.flip,
+          Effect.map((error) => JSON.stringify(error)),
+          Effect.orElseSucceed(() => "accepted"),
+        );
+
+      // The Owner cannot move another User's Thread, not even to the Owner's own machine.
+      const ownerMovesGraces = yield* refusal(
+        dispatchMove(hub, {
+          commandId: "command:owner-moves-graces",
+          threadId: graces,
+          target: laptop.environmentId,
+          actor: owner,
+        }),
+      );
+      assert.notEqual(ownerMovesGraces, "accepted");
+      // Grace cannot move hers onto the Owner's personal machine.
+      const graceToLaptop = yield* refusal(
+        dispatchMove(hub, {
+          commandId: "command:grace-to-laptop",
+          threadId: graces,
+          target: laptop.environmentId,
+          actor: member,
+        }),
+      );
+      assert.include(graceToLaptop, "not-usable");
+      // A Guest of the Owner's Space has no move either.
+      const guest = UserId.make("guest-1");
+      yield* addMember(hub.server, { id: guest, displayName: "Guest" });
+      const ownersSpace = (yield* hub.server.sql<{ readonly spaceId: string }>`
+        SELECT space_id AS "spaceId" FROM orchestration_v2_projection_threads
+        WHERE thread_id = ${owners}
+      `)[0]?.spaceId;
+      if (ownersSpace !== undefined && ownersSpace !== null) {
+        yield* joinOrganization(hub.server, ownersSpace, guest, "guest");
+      }
+      const guestMoves = yield* refusal(
+        dispatchMove(hub, {
+          commandId: "command:guest-moves",
+          threadId: owners,
+          target: laptop.environmentId,
+          actor: guest,
+        }),
+      );
+      assert.notEqual(guestMoves, "accepted");
+      // The Owner's own Thread does not go to a machine that is offline.
+      const toAway = yield* refusal(
+        dispatchMove(hub, {
+          commandId: "command:to-away",
+          threadId: owners,
+          target: away.environmentId,
+          actor: owner,
+        }),
+      );
+      assert.include(toAway, "offline");
+      // Nothing was recorded on either Thread.
+      for (const threadId of [graces, owners]) {
+        assert.isUndefined(
+          (yield* hub.service(ProjectionStore.ProjectionStoreV2).getThread(threadId)).move ??
+            undefined,
+        );
+      }
     }).pipe(Effect.scoped),
   );
 });

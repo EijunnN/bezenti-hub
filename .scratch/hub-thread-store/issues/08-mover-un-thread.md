@@ -10,7 +10,7 @@ El progreso se ve en el Thread, y el timeline muestra «Moved from A to B». Si 
 
 **Blocked by:** 06, 07.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Comando `thread.move { threadId, targetEnvironmentId, ifRunning }`.
   - [ ] Autorización: la de continuar el Thread, más destino online y que el User pueda usarlo.

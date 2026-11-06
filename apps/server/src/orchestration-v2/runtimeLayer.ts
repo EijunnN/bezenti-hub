@@ -57,6 +57,7 @@ import * as ResourceCleanupService from "./ResourceCleanupService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as ThreadMoveService from "./ThreadMoveService.ts";
 import * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import * as ThreadForkService from "./ThreadForkService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
@@ -421,10 +422,29 @@ const layerMcpAppRequestsProvided = McpAppRequests.layer.pipe(
   ),
 );
 
+// Moves Threads between Environments outside the effect lane, resuming after a restart.
+const layerThreadMovesProvided = ThreadMoveService.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      layerEnvironmentExecutorsProvided,
+      layerRemoteEnvironmentsProvided,
+      layerEventSink,
+      IdAllocator.layer,
+      ThreadCommandExecutor.layer,
+      ProjectionStore.layer,
+      ProjectStore.layer,
+      ProjectCheckouts.layer,
+      layerOrchestratorProvided,
+      layerProviderSessionManagerProvided,
+    ),
+  ),
+);
+
 export const layer = Layer.mergeAll(
   layerEnvironmentExecutorsProvided,
   layerRemoteEnvironmentsProvided,
   layerCheckpointUploadsProvided,
+  layerThreadMovesProvided,
   layerCommandOutputHubProvided,
   layerOrchestratorProvided,
   layerMcpAppRequestsProvided,

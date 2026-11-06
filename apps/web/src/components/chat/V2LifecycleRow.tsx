@@ -93,6 +93,26 @@ export function V2LifecycleRow(props: {
       />
     );
   }
+  if (item.type === "environment_move") {
+    const continuesFrom =
+      item.continuesFrom.kind === "final"
+        ? "continues from a final checkpoint"
+        : item.continuesFrom.kind === "uploaded"
+          ? `${item.sourceEnvironmentName} was offline: continues from the checkpoint of turn ${
+              item.continuesFrom.appRunOrdinal ?? "?"
+            }`
+          : `${item.sourceEnvironmentName} was offline: no checkpoint had been uploaded`;
+    return (
+      <TimelineSystemDivider
+        label={`Moved from ${item.sourceEnvironmentName} to ${item.targetEnvironmentName}`}
+        detail={[item.actorName === undefined ? null : `by ${item.actorName}`, continuesFrom]
+          .filter((part) => part !== null)
+          .join(" · ")}
+        icon={ArrowRightLeftIcon}
+        wrapDetail
+      />
+    );
+  }
   if (item.type === "fork") {
     const relatedThreadId = item.source.type === "run" ? item.source.threadId : item.targetThreadId;
     return (

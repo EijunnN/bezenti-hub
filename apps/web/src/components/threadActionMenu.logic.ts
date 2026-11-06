@@ -21,6 +21,7 @@ export type ThreadActionMenuId =
   | "regenerate-title"
   | "mark-unread"
   | "share-guest"
+  | "move-environment"
   | "copy"
   | "copy-path"
   | "copy-branch"
@@ -93,6 +94,8 @@ export interface ThreadActionMenuState {
   readonly snoozePresets: ReadonlyArray<SnoozePreset>;
   /** Guest links need their own grant, so the caller checks it instead of `canOperate`. */
   readonly canShareWithGuest?: boolean;
+  /** The Hub has another Environment the User may see, so the Thread can move there. */
+  readonly canMoveEnvironment?: boolean;
   /** A No project thread with its own folder, on a server that can promote it. */
   readonly canTurnIntoProject?: boolean;
   /**
@@ -227,6 +230,16 @@ export function buildThreadActionMenuItems(
     { id: "mark-unread", label: "Mark unread", icon: "mail-open" },
     ...(state.canShareWithGuest
       ? [{ id: "share-guest" as const, label: "Share with guest", icon: "user-plus" }]
+      : []),
+    // Moving continues the Thread elsewhere, so only a User who may continue it sees it.
+    ...(state.canMoveEnvironment
+      ? [
+          {
+            id: "move-environment" as const,
+            label: "Move to another Environment",
+            icon: "arrow-right-left",
+          },
+        ]
       : []),
     ...(state.projectFilter
       ? [

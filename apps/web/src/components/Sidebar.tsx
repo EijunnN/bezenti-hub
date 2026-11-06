@@ -163,6 +163,8 @@ import { readEnvironmentScope, useEnvironmentScope } from "../state/session";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { canShareWithGuestAtom } from "./chat/guestShareAvailability";
 import { openGuestShareDialog } from "./chat/guestShareDialogState";
+import { openMoveThreadDialog } from "./chat/MoveThreadDialog";
+import { readHubEnvironments } from "../environments/primary/useHubEnvironments";
 import {
   buildThreadRouteParams,
   resolveActiveThreadRouteRef,
@@ -2647,6 +2649,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 canShareWithGuestAtom(threadRef.environmentId),
               ),
               canTurnIntoProject: canTurnThreadIntoProject(threadRef),
+              canMoveEnvironment: readHubEnvironments().length > 1,
               role: readThreadRolePermissions(thread.environmentId, thread.source),
               supports: {
                 settlement: configLoaded,
@@ -2771,6 +2774,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             return;
           case "share-guest":
             openGuestShareDialog(threadRef);
+            return;
+          case "move-environment":
+            openMoveThreadDialog(threadRef);
             return;
           case "regenerate-title": {
             if (isRegeneratingTitle) return;

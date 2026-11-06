@@ -587,6 +587,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.pull-request.sync":
     case "thread.title.regeneration.complete":
     case "thread.project.adopt-folder":
+    case "thread.move":
     case "thread.runtime-mode.set":
     case "thread.interaction-mode.set":
     case "thread.model-selection.set":
@@ -4412,6 +4413,68 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       providerInstanceId: thread.providerInstanceId,
       occurredAt: now,
       payload: { ...thread, projectId: command.projectId, worktreePath: null, updatedAt: now },
+    });
+  });
+
+  /**
+   * Starts a move to another Environment: the move is recorded on the Thread at its first step
+   * and `ThreadMoveService` runs the rest. The caller checked the target (online, usable, with
+   * the Thread's provider); the Role rules were checked before deciding.
+   */
+  const dispatchThreadMove = Effect.fn("orchestrationV2.dispatch.threadMove")(function* (
+    command: Extract<OrchestrationV2ServerCommand, { readonly type: "thread.move" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const reject = (cause: string) =>
+      new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause,
+      });
+    const thread = yield* projectionStore
+      .getThread(command.threadId)
+      .pipe(
+        Effect.mapError(
+          (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+        ),
+      );
+    if (thread.deletedAt !== null) return yield* reject("This Thread was deleted.");
+    if (thread.move?.status === "running") {
+      return yield* reject(
+        "This Thread is already moving to another Environment. Wait for that move to finish.",
+      );
+    }
+    const source =
+      thread.activeEnvironmentId === undefined
+        ? HUB_MACHINE_ENVIRONMENT_ID
+        : thread.activeEnvironmentId;
+    if (source === command.targetEnvironmentId) {
+      return yield* reject("This Thread already runs on that Environment.");
+    }
+    const now = yield* DateTime.now;
+    const at = DateTime.formatIso(now);
+    yield* emit(
+      events,
+      command,
+    )({
+      type: "thread.move-updated",
+      threadId: command.threadId,
+      providerInstanceId: thread.providerInstanceId,
+      occurredAt: now,
+      payload: {
+        ...thread,
+        move: {
+          id: command.commandId,
+          sourceEnvironmentId: source,
+          targetEnvironmentId: command.targetEnvironmentId,
+          ifRunning: command.ifRunning ?? "wait",
+          ...(command.ownerUserId === undefined ? {} : { actorUserId: command.ownerUserId }),
+          step: "waiting-for-turn",
+          status: "running",
+          startedAt: at,
+          updatedAt: at,
+        },
+      },
     });
   });
 
@@ -13301,6 +13364,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.project.adopt-folder":
         yield* dispatchThreadProjectAdoptFolder(command, events);
         break;
+      case "thread.move":
+        yield* dispatchThreadMove(command, events);
+        break;
       case "message.dispatch": {
         // Providers own native subagent conversations; messages cannot target them, and adapters ask questions on the parent.
         const thread = yield* projectionStore
@@ -13314,6 +13380,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           return yield* new OrchestratorSubagentThreadReadOnlyError({
             commandId: command.commandId,
             threadId: command.threadId,
+          });
+        }
+        // Nothing starts while the Thread moves: it would run on the machine it is leaving.
+        if (thread.move?.status === "running") {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause:
+              "This Thread is moving to another Environment. Send your message once the move is done.",
           });
         }
         const guestSend =

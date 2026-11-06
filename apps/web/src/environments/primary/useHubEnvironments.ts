@@ -101,6 +101,11 @@ export function useActiveEnvironment(
   return JSON.parse(key) as ActiveEnvironmentView | null;
 }
 
+/** The last list, for event handlers (a menu being built); empty until something mounted it. */
+export function readHubEnvironments(): ReadonlyArray<HubEnvironmentSummary> {
+  return environments;
+}
+
 /** Whether the User sees more machines than the Hub machine, so a Thread's machine is news. */
 export function useHasJoinedEnvironments(): boolean {
   const read = () => environments.length > 1;

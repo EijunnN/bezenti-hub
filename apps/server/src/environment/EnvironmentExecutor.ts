@@ -6,6 +6,7 @@
 import {
   ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
   EnvironmentExecutorUnavailableError,
+  VcsUnsupportedOperationError,
   EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
   ProviderInstanceId,
@@ -18,14 +19,17 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -33,6 +37,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
+import * as ServerConfig from "../config.ts";
 import type { CheckpointStoreError } from "../checkpointing/Errors.ts";
 import * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -46,6 +51,7 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import * as MovedWorkspace from "./MovedWorkspace.ts";
 import * as ProjectCheckouts from "./ProjectCheckouts.ts";
 import type * as RemoteExecutorWire from "./RemoteExecutorWire.ts";
 import { locateInCheckout } from "./WorkspaceLocation.ts";
@@ -95,6 +101,18 @@ export interface EnvironmentHubRepository {
   ) => Effect.Effect<void, CheckpointStoreError>;
 }
 
+/** The machine's half of moving a Thread to it (`MovedWorkspace.ts`). */
+export interface EnvironmentMoveWorkspace {
+  /** Downloads what the Thread continues from into the Project's checkout, made if missing. */
+  readonly fetch: (
+    input: MovedWorkspace.MoveFetchInput,
+  ) => Effect.Effect<MovedWorkspace.MoveFetchResult, CheckpointStoreError>;
+  /** Makes the Thread's branch or worktree, lays the checkpoint over it, runs the setup script. */
+  readonly prepare: (
+    input: MovedWorkspace.MovePrepareInput,
+  ) => Effect.Effect<MovedWorkspace.MovePrepareResult, CheckpointStoreError>;
+}
+
 /**
  * Workspace calls carried to a joined Environment, with paths already resolved onto it. A call
  * never waits for a dropped socket: the machine being offline fails it at once, so nothing a User
@@ -134,6 +152,7 @@ export interface EnvironmentExecutor {
     readonly paths: ProjectCheckouts.EnvironmentWorkspacePaths;
     readonly checkpoints: CheckpointStore.CheckpointStore["Service"];
     readonly hubRepository: EnvironmentHubRepository;
+    readonly move: EnvironmentMoveWorkspace;
     /** Takes the Thread with its worktree already resolved onto this machine. */
     readonly runtimePolicy: RuntimePolicy.RuntimePolicyV2Shape;
     /** None where the server runs without the RPC services (orchestration-only tests). */
@@ -370,7 +389,83 @@ interface InProcessExecutorInput {
   readonly rpc: Option.Option<EnvironmentWorkspaceRpc>;
   readonly hostResources: Option.Option<HostResources.HostResources["Service"]>;
   readonly hubRepository: EnvironmentHubRepository;
+  readonly move: EnvironmentMoveWorkspace;
 }
+
+/** What a machine needs to prepare a moved Thread's workspace with its own git and files. */
+interface MoveWorkspaceDeps {
+  readonly vcs: Option.Option<VcsProcess.VcsProcess["Service"]>;
+  readonly fileSystem: Option.Option<FileSystem.FileSystem>;
+  readonly path: Option.Option<Path.Path>;
+  readonly config: Option.Option<ServerConfig.ServerConfig["Service"]>;
+  readonly platform: string;
+}
+
+const moveWorkspaceDeps: Effect.Effect<MoveWorkspaceDeps> = Effect.gen(function* () {
+  return {
+    vcs: yield* Effect.serviceOption(VcsProcess.VcsProcess),
+    fileSystem: yield* Effect.serviceOption(FileSystem.FileSystem),
+    path: yield* Effect.serviceOption(Path.Path),
+    config: yield* Effect.serviceOption(ServerConfig.ServerConfig),
+    platform: yield* HostProcess.Platform,
+  };
+});
+
+/**
+ * `move.fetch` and `move.prepare` on this machine: the checkout comes from `checkoutOf` (made
+ * there first when needed) and transfers go through the machine's side of the Hub repository.
+ */
+const makeMoveWorkspace = (input: {
+  readonly deps: MoveWorkspaceDeps;
+  readonly checkpoints: CheckpointStore.CheckpointStore["Service"];
+  readonly hubRepository: EnvironmentHubRepository;
+  readonly checkoutOf: (projectId: ProjectId) => Effect.Effect<string, CheckpointStoreError>;
+}): EnvironmentMoveWorkspace => {
+  const { vcs, fileSystem, path, config, platform } = input.deps;
+  return {
+    fetch: Effect.fn("EnvironmentExecutor.move.fetch")(function* (request) {
+      const checkout = yield* input.checkoutOf(request.projectId);
+      if (request.refs.length > 0) {
+        yield* input.hubRepository.fetch({
+          cwd: checkout,
+          projectId: request.projectId,
+          checkpointRefs: request.refs,
+        });
+      }
+      return { checkout };
+    }),
+    prepare: (request) =>
+      Option.isNone(vcs) ||
+      Option.isNone(fileSystem) ||
+      Option.isNone(path) ||
+      Option.isNone(config)
+        ? Effect.fail(
+            new VcsUnsupportedOperationError({
+              operation: "EnvironmentExecutor.move.prepare",
+              kind: "git",
+              detail: "This server cannot prepare a moved Thread's workspace.",
+            }),
+          )
+        : MovedWorkspace.prepareMovedWorkspace(
+            {
+              vcs: vcs.value,
+              checkpoints: input.checkpoints,
+              fileSystem: fileSystem.value,
+              path: path.value,
+              worktreesDir: config.value.worktreesDir,
+              platform,
+            },
+            request,
+          ),
+  };
+};
+
+const noCheckout = (projectId: ProjectId, detail?: string) =>
+  new VcsUnsupportedOperationError({
+    operation: "EnvironmentExecutor.move.fetch",
+    kind: "git",
+    detail: detail ?? `Project ${projectId} has no checkout on this machine.`,
+  });
 
 /**
  * The Hub machine's side of the Hub repository: a push to the bare repository on this disk, so
@@ -402,6 +497,7 @@ const makeInProcessExecutor = (input: InProcessExecutorInput): EnvironmentExecut
     paths: input.paths,
     checkpoints: input.checkpoints,
     hubRepository: input.hubRepository,
+    move: input.move,
     runtimePolicy: input.runtimePolicy,
     rpc: input.rpc,
     forward: Option.none(),
@@ -503,18 +599,37 @@ export const layerHubMachine: Layer.Layer<
   | ProjectStore.ProjectStoreV2
 > = Layer.effectContext(
   Effect.gen(function* () {
+    const paths = ProjectCheckouts.hubMachinePaths(yield* ProjectStore.ProjectStoreV2);
+    const checkpoints = yield* CheckpointStore.CheckpointStore;
+    const hubRepository = localHubRepository(
+      yield* Effect.serviceOption(HubRepository.HubRepositories),
+      yield* Effect.serviceOption(VcsProcess.VcsProcess),
+    );
     const hubMachine = makeInProcessExecutor({
       environmentId: HUB_MACHINE_ENVIRONMENT_ID,
       adapters: yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2,
-      paths: ProjectCheckouts.hubMachinePaths(yield* ProjectStore.ProjectStoreV2),
-      checkpoints: yield* CheckpointStore.CheckpointStore,
+      paths,
+      checkpoints,
       runtimePolicy: yield* RuntimePolicy.RuntimePolicyV2,
       rpc: yield* optionalWorkspaceRpc,
       hostResources: yield* Effect.serviceOption(HostResources.HostResources),
-      hubRepository: localHubRepository(
-        yield* Effect.serviceOption(HubRepository.HubRepositories),
-        yield* Effect.serviceOption(VcsProcess.VcsProcess),
-      ),
+      hubRepository,
+      // The Hub machine's checkout of a Project is its workspace root, which always exists.
+      move: makeMoveWorkspace({
+        deps: yield* moveWorkspaceDeps,
+        checkpoints,
+        hubRepository,
+        checkoutOf: (projectId) =>
+          paths.checkout(projectId).pipe(
+            Effect.mapError((cause) => noCheckout(projectId, cause.message)),
+            Effect.flatMap(
+              Option.match({
+                onNone: () => Effect.fail(noCheckout(projectId)),
+                onSome: Effect.succeed,
+              }),
+            ),
+          ),
+      }),
     });
     const registry = yield* makeRegistry(hubMachine);
     const cache = yield* makeCapabilityCache(

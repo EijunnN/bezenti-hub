@@ -149,7 +149,7 @@ on its own in-process executor. Constraints that span both halves:
   there; when the Hub repository has the Thread's checkpoints, the session's open names them and
   the checkout fetches the ones it lacks. New worktrees are still made on the Hub machine only, so
   placing a Thread that asks for one (a launch strategy, or a `thread.create` with a worktree) on
-  another Environment is refused.
+  another Environment is refused; only a move (below) makes one elsewhere.
 
 ### Hub repository
 
@@ -177,7 +177,8 @@ loses access at once, and serves only Projects where the machine's owner may sta
 one, a machine sees and writes only the refs of Threads it is the Active environment of (their
 checkpoint scopes, `refs/t3/threads/<id>/`, `refs/t3/recovered/<id>/`, the id percent-encoded):
 `transfer.hideRefs` hides the rest, and the ref updates of a push are read and checked before git
-sees them. Nobody deletes a ref; an update need not fast-forward, since a rollback reuses its own
+sees them. The target of a Thread's running move also reads (never writes) that Thread's refs, so
+it can fetch what the Thread continues from before the Thread is its own. Nobody deletes a ref; an update need not fast-forward, since a rollback reuses its own
 checkpoint refs. Transfers always name the Hub repository by URL or path, never a remote of the
 checkout, so nothing reaches `origin`.
 
@@ -185,6 +186,45 @@ Turn and Thread diffs read the Hub repository once both checkpoints are marked u
 there may be an older capture of a reused ordinal), so they work with the machine offline; until
 then they run on the Thread's Active environment. A restore whose ref is missing in the workspace
 (a move, or refs dropped there) fetches it from the Hub repository first.
+
+### Moving a Thread
+
+`thread.move { threadId, targetEnvironmentId, ifRunning }` is a client command. The Hub checks the
+target first (`ThreadManagementService`: the sender may use it, it is online and has the Thread's
+provider, as for placing a new Thread), then the Orchestrator applies the Role rules of continuing
+the Thread (`commandAccess.ts`), refuses a second move while one runs, and records the move on the
+Thread (`thread.move-updated`, field `move`) at its first step. Everything else is
+[ThreadMoveService](../../apps/server/src/orchestration-v2/ThreadMoveService.ts), outside the
+effect lane: each step is written to the Thread under its lock, so clients show it and a restart
+resumes from the recorded step.
+
+1. `waiting-for-turn`: until the Thread has no unfinished run; with `stop` it sends `thread.stop`
+   once. New messages are refused while a move runs, since they would start on the source.
+2. `final-checkpoint`: only with the source online. The source captures its workspace (manual
+   changes included) to `refs/t3/threads/<id>/moves/<moveId>`, one ref per move so a fetch never
+   sees a stale one, and pushes it. An offline source (or one that drops here) skips the step.
+3. `fetching`: the move records what it continues from (`continuesFrom`: that final checkpoint,
+   else the newest checkpoint marked uploaded, else nothing) and the target fetches it into the
+   Project's checkout, cloning it first when the machine has none (`move.fetch`).
+4. `preparing` (`move.prepare`, [MovedWorkspace](../../apps/server/src/environment/MovedWorkspace.ts)):
+   the Thread's branch is made or moved to the commit the checkpoint was captured on, a Thread
+   with a worktree gets one in the machine's worktrees folder, the checkpoint's files are laid
+   over it, and the Project's setup script runs. Whatever the target's workspace had that HEAD
+   lacks, and branch commits the source never had, are kept under `refs/t3/recovered/<id>/` on
+   that machine first (`setAsideRefs`), never discarded.
+5. `handoff`: empty for now; ticket 09 hands the agent on the target the conversation here.
+6. `switched`: one batch sets `activeEnvironmentId` (and the worktree, stored as the target's
+   host path), clears `activeProviderThreadId` so the next turn opens a new native conversation on
+   the target, detaches the Thread's provider sessions (`provider-session.detached`) and adds the
+   timeline entry (`environment_move`: source, target, actor, `continuesFrom`). Then
+   `RemoteEnvironments.threadMoved` drops the cached Active environment, so the source's late events
+   are refused, and each source session is detached outside the effect lane (an offline source
+   drops it on reconnect, when the Hub no longer has it). The audit log records `thread.move` when
+   it switches or fails.
+
+A failure before `switched` marks the move `failed` with the step and git's or the script's
+message; the Thread never left its source. Scope cwds recorded before a move are still the source
+machine's paths, so rolling back to a turn from before the move is not supported yet.
 
 ### Workspace RPCs
 

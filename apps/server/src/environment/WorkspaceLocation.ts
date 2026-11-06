@@ -99,6 +99,11 @@ export function hubMachineLocationJson(checkout: string | null, absolute: string
       );
 }
 
+/** The stored form of an absolute path only `environmentId` can resolve. */
+export function hostLocationJson(environmentId: EnvironmentId, absolute: string): string {
+  return encodeWorkspaceLocationJson({ base: "host", environmentId, path: absolute });
+}
+
 /** Joins `/`-separated segments onto a root in that root's own separator style. */
 export function joinUnderRoot(root: string, relative: string): string {
   if (relative === ".") return trimTrailingSeparators(root);

@@ -97,6 +97,12 @@ export interface ThreadCommandInput extends CommandMetadata {
   readonly threadId: ThreadId;
 }
 
+export interface MoveThreadInput extends ThreadCommandInput {
+  readonly targetEnvironmentId: EnvironmentId;
+  /** A running turn: wait for it (the default) or stop it. */
+  readonly ifRunning?: "wait" | "stop";
+}
+
 export interface DeleteThreadInput extends ThreadCommandInput {
   /** The server deletes only a thread with no runs and no messages. */
   readonly onlyIfUnused?: boolean;
@@ -495,6 +501,19 @@ export const resolveGuestMessage = Effect.fn("EnvironmentCommands.resolveGuestMe
     dispatchMode: { type: "queue_after_active" },
     createdBy: "user",
     creationSource: input.creationSource ?? "web",
+  });
+});
+
+/** Moves the Thread to another Environment; the Thread shows the move's steps as they run. */
+export const moveThread = Effect.fn("EnvironmentCommands.moveThread")(function* (
+  input: MoveThreadInput,
+) {
+  return yield* dispatch({
+    type: "thread.move",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+    targetEnvironmentId: input.targetEnvironmentId,
+    ...(input.ifRunning === undefined ? {} : { ifRunning: input.ifRunning }),
   });
 });
 
