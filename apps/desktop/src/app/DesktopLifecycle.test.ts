@@ -303,4 +303,48 @@ describe("DesktopLifecycle", () => {
       ).pipe(Effect.provide(layer));
     }),
   );
+
+  it.effect("stays open with no window while the joined Environment keeps the app running", () =>
+    Effect.gen(function* () {
+      const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
+      let quits = 0;
+      const quit = yield* Deferred.make<void>();
+      const layer = DesktopLifecycle.layer.pipe(
+        Layer.provideMerge(
+          layerElectronApp(
+            appListeners,
+            Effect.sync(() => {
+              quits += 1;
+            }).pipe(Effect.andThen(Deferred.succeed(quit, undefined))),
+          ),
+        ),
+        Layer.provideMerge(layerElectronTheme),
+        Layer.provideMerge(layerElectronWindow()),
+        Layer.provideMerge(layerDesktopWindow()),
+        Layer.provideMerge(
+          Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
+            platform: "linux",
+            isDevelopment: false,
+          } as DesktopEnvironment.DesktopEnvironment["Service"]),
+        ),
+        Layer.provideMerge(DesktopShutdown.layer),
+        Layer.provideMerge(DesktopState.layer),
+      );
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+          const state = yield* DesktopState.DesktopState;
+          yield* lifecycle.register;
+
+          // Each close is handled in order; only the second one quits.
+          yield* Ref.set(state.keepRunningWithoutWindows, true);
+          appListeners.get("window-all-closed")?.();
+          yield* Ref.set(state.keepRunningWithoutWindows, false);
+          appListeners.get("window-all-closed")?.();
+          yield* Deferred.await(quit);
+          assert.equal(quits, 1);
+        }),
+      ).pipe(Effect.provide(layer));
+    }),
+  );
 });

@@ -38,6 +38,7 @@ import { AccountSettingsSection } from "./AccountSettingsSection";
 import { AuditLogSettingsSection } from "./AuditLogSettingsSection";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { HubEnvironmentsSettings } from "./HubEnvironmentsSettings";
+import { JoinedEnvironmentSetting } from "./JoinedEnvironmentSetting";
 import { LinkedEnvironmentsSettings } from "./LinkedEnvironmentsSettings";
 import { usePeerLinkHosts } from "~/state/peerLinks";
 import { PullRequestRoutingSettings } from "./PullRequestRoutingSettings";
@@ -1392,6 +1393,7 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
       {desktopBridge ? (
         <SettingsSection id="this-app" title="This app">
           <LocalEnvironmentSetting />
+          <JoinedEnvironmentSetting />
         </SettingsSection>
       ) : null}
       <SettingsSection

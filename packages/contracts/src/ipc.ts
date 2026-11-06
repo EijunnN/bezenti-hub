@@ -451,6 +451,36 @@ export const DesktopWslStateSchema = Schema.Struct({
   preflightError: Schema.NullOr(Schema.String),
 });
 
+/**
+ * «Use this computer as an Environment»: a joined-mode server the desktop app runs as its own
+ * child process, in a base dir of its own, beside the app's local backend.
+ */
+export const DesktopJoinedEnvironmentStateSchema = Schema.Struct({
+  /** The Hub this computer joined, from the joined server's `joined-hub.json`; null when not joined. */
+  hub: Schema.NullOr(Schema.Struct({ url: Schema.String, name: Schema.String })),
+  /** The joined server should run: it starts with the app and stops when this is turned off. */
+  enabled: Schema.Boolean,
+  /** On Windows and Linux, closing the last window leaves the app (and the server) running. */
+  keepRunningWhenClosed: Schema.Boolean,
+  process: Schema.Literals(["stopped", "starting", "running", "failed"]),
+  /** The running server's connection to the Hub, from its loopback `/health`. */
+  connection: Schema.NullOr(
+    Schema.Struct({
+      status: Schema.Literals(["connecting", "connected", "refused"]),
+      detail: Schema.NullOr(Schema.String),
+    }),
+  ),
+  /** A `t3 join` in progress: the approval page opens in the system browser. */
+  joining: Schema.NullOr(
+    Schema.Struct({ hubUrl: Schema.String, approvalUrl: Schema.NullOr(Schema.String) }),
+  ),
+  /** What the last join, start or leave said when it did not go as asked. */
+  error: Schema.NullOr(Schema.String),
+  /** The joined server's T3 home, apart from the app's own. */
+  baseDir: Schema.String,
+});
+export type DesktopJoinedEnvironmentState = typeof DesktopJoinedEnvironmentStateSchema.Type;
+
 export type DesktopPreviewNavStatus =
   | { kind: "Idle" }
   | { kind: "Loading"; url: string; title: string }
@@ -979,6 +1009,17 @@ export interface DesktopBridge {
   setWslBackendEnabled: (enabled: boolean) => Promise<DesktopWslState>;
   setWslDistro: (distro: string | null) => Promise<DesktopWslState>;
   setWslOnly: (enabled: boolean) => Promise<DesktopWslState>;
+  getJoinedEnvironmentState: () => Promise<DesktopJoinedEnvironmentState>;
+  /** Starts the same flow as `t3 join`; resolves at once, with `joining` set. */
+  joinAsEnvironment: (input: {
+    readonly hubUrl: string;
+    readonly name?: string;
+  }) => Promise<DesktopJoinedEnvironmentState>;
+  cancelJoinAsEnvironment: () => Promise<DesktopJoinedEnvironmentState>;
+  setJoinedEnvironmentEnabled: (enabled: boolean) => Promise<DesktopJoinedEnvironmentState>;
+  setJoinedEnvironmentKeepRunning: (keep: boolean) => Promise<DesktopJoinedEnvironmentState>;
+  /** Stops the joined server and runs `t3 leave`, which removes this computer from its Hub. */
+  leaveJoinedEnvironment: () => Promise<DesktopJoinedEnvironmentState>;
   pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
   pickProjectFavicon: (initialPath?: string) => Promise<string | null>;
   pickThemeFiles: () => Promise<readonly PickedThemeFile[] | null>;
