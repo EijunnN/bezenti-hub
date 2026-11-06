@@ -13,6 +13,7 @@ import {
   type EnvironmentExecutorTransport,
   type EnvironmentProviderCapabilitySnapshot,
   type EnvironmentUnavailableProvider,
+  type OrchestrationV2AppThread,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -30,6 +31,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as RuntimePolicy from "../orchestration-v2/RuntimePolicy.ts";
 import * as PreviewManager from "../preview/Manager.ts";
@@ -39,6 +41,8 @@ import * as HostResources from "../resourceTelemetry/HostResources.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
+import * as ProjectCheckouts from "./ProjectCheckouts.ts";
+import { locateInCheckout } from "./WorkspaceLocation.ts";
 
 export { EnvironmentExecutorUnavailableError } from "@t3tools/contracts";
 
@@ -87,7 +91,10 @@ export interface EnvironmentExecutor {
     ) => Effect.Effect<EnvironmentProviderCapabilitySnapshot, EnvironmentCapabilityReadError>;
   };
   readonly workspace: {
+    /** Project checkouts on this machine, and logical workspace paths resolved against them. */
+    readonly paths: ProjectCheckouts.EnvironmentWorkspacePaths;
     readonly checkpoints: CheckpointStore.CheckpointStore["Service"];
+    /** Takes the Thread with its worktree already resolved onto this machine. */
     readonly runtimePolicy: RuntimePolicy.RuntimePolicyV2Shape;
     /** None where the server runs without the RPC services (orchestration-only tests). */
     readonly rpc: Option.Option<EnvironmentWorkspaceRpc>;
@@ -288,6 +295,7 @@ const optionalWorkspaceRpc: Effect.Effect<Option.Option<EnvironmentWorkspaceRpc>
 interface InProcessExecutorInput {
   readonly environmentId: EnvironmentId;
   readonly adapters: ProviderAdapterRegistry.ProviderAdapterRegistryV2Shape;
+  readonly paths: ProjectCheckouts.EnvironmentWorkspacePaths;
   readonly checkpoints: CheckpointStore.CheckpointStore["Service"];
   readonly runtimePolicy: RuntimePolicy.RuntimePolicyV2Shape;
   readonly rpc: Option.Option<EnvironmentWorkspaceRpc>;
@@ -303,6 +311,7 @@ const makeInProcessExecutor = (input: InProcessExecutorInput): EnvironmentExecut
     capabilities: (instanceId) => readLocalProvider(input.adapters, instanceId),
   },
   workspace: {
+    paths: input.paths,
     checkpoints: input.checkpoints,
     runtimePolicy: input.runtimePolicy,
     rpc: input.rpc,
@@ -386,11 +395,13 @@ export const layerHubMachine: Layer.Layer<
   | RuntimePolicy.RuntimePolicyV2
   | CheckpointStore.CheckpointStore
   | ProviderInstanceRegistry.ProviderInstanceRegistry
+  | ProjectStore.ProjectStoreV2
 > = Layer.effectContext(
   Effect.gen(function* () {
     const hubMachine = makeInProcessExecutor({
       environmentId: HUB_MACHINE_ENVIRONMENT_ID,
       adapters: yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+      paths: ProjectCheckouts.hubMachinePaths(yield* ProjectStore.ProjectStoreV2),
       checkpoints: yield* CheckpointStore.CheckpointStore,
       runtimePolicy: yield* RuntimePolicy.RuntimePolicyV2,
       rpc: yield* optionalWorkspaceRpc,
@@ -496,6 +507,27 @@ export const layerProviderAdapterRegistry: Layer.Layer<
   }),
 );
 
+/**
+ * A Thread's worktree as the executor's machine sees it. The projection records it as the Hub
+ * machine resolves it; its logical form, against the Hub machine's checkout, resolves anywhere.
+ * Null keeps the executor's own checkout of the Project.
+ */
+const worktreeOn = Effect.fn("EnvironmentExecutor.worktreeOn")(function* (
+  hubMachine: EnvironmentExecutor,
+  executor: EnvironmentExecutor,
+  thread: OrchestrationV2AppThread,
+) {
+  const recorded = thread.worktreePath;
+  if (recorded === null) return null;
+  const checkout = yield* hubMachine.workspace.paths.checkout(thread.projectId);
+  const location = locateInCheckout({
+    environmentId: hubMachine.environmentId,
+    checkout: Option.getOrNull(checkout),
+    absolute: recorded,
+  });
+  return yield* executor.workspace.paths.resolve({ projectId: thread.projectId, location });
+});
+
 /** `RuntimePolicyV2` (cwd and sandbox resolution) on the Thread's Active environment. */
 export const layerRuntimePolicy: Layer.Layer<
   RuntimePolicy.RuntimePolicyV2,
@@ -505,19 +537,25 @@ export const layerRuntimePolicy: Layer.Layer<
   RuntimePolicy.RuntimePolicyV2,
   Effect.gen(function* () {
     const registry = yield* EnvironmentExecutorRegistry;
+    const hubMachine = yield* registry.get(registry.hubMachineEnvironmentId).pipe(Effect.orDie);
     return RuntimePolicy.RuntimePolicyV2.of({
       resolve: Effect.fn("EnvironmentExecutor.runtimePolicy.resolve")(function* (input) {
-        const executor = yield* registry.forThread(input.thread.id).pipe(
-          Effect.mapError(
-            (cause) =>
-              new RuntimePolicy.RuntimePolicyResolveError({
-                projectId: input.thread.projectId,
-                providerInstanceId: input.modelSelection.instanceId,
-                cause,
-              }),
-          ),
+        const resolveError = (cause: unknown) =>
+          new RuntimePolicy.RuntimePolicyResolveError({
+            projectId: input.thread.projectId,
+            providerInstanceId: input.modelSelection.instanceId,
+            cause,
+          });
+        const executor = yield* registry
+          .forThread(input.thread.id)
+          .pipe(Effect.mapError(resolveError));
+        const worktreePath = yield* worktreeOn(hubMachine, executor, input.thread).pipe(
+          Effect.mapError(resolveError),
         );
-        return yield* executor.workspace.runtimePolicy.resolve(input);
+        return yield* executor.workspace.runtimePolicy.resolve({
+          ...input,
+          thread: { ...input.thread, worktreePath },
+        });
       }),
     });
   }),

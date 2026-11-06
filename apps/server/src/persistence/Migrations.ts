@@ -98,6 +98,7 @@ import Migration0091 from "./Migrations/091_SpaceDeleting.ts";
 import Migration0092 from "./Migrations/092_InactiveUsers.ts";
 import Migration0093 from "./Migrations/093_AuditLog.ts";
 import Migration0094 from "./Migrations/094_Environments.ts";
+import Migration0095 from "./Migrations/095_ProjectCheckouts.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -195,6 +196,7 @@ const migrationEntries = [
   [92, "InactiveUsers", Migration0092],
   [93, "AuditLog", Migration0093],
   [94, "Environments", Migration0094],
+  [95, "ProjectCheckouts", Migration0095],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

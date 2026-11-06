@@ -101,6 +101,27 @@ reads the live adapter, as before. A remote executor answers from its last snaps
 startup, when provider instances change, and on every heartbeat; instances it cannot describe are
 listed with the reason.
 
+### Logical workspace paths
+
+A Project's checkout is a per-Environment fact. The Hub machine's checkout is always the Project's
+`workspaceRoot`; another Environment uses the checkout chosen there
+(`environment_project_checkouts`) or `<its workspace root>/<Project slug>`
+([ProjectCheckouts](../../apps/server/src/environment/ProjectCheckouts.ts)). A path the projection
+records (a Thread's `worktreePath`, a checkpoint scope's `cwd`) is still the Hub machine's absolute
+path, which every Hub-local reader keeps using. Beside it the projection stores its
+[logical form](../../apps/server/src/environment/WorkspaceLocation.ts): relative to the checkout,
+or, when the path is not plainly inside it (a managed worktree, `..`, another folder), absolute and
+bound to the Environment that recorded it. Only a form that resolves back to the identical string
+is relative, so the Hub machine sees no change.
+
+`RuntimePolicyV2` turns the Thread's worktree into its logical form against the Hub machine's
+checkout and resolves it on the Active environment's executor, which then picks the cwd. A
+host-bound path on another Environment is a `RuntimePolicyResolveError`, never a wrong directory.
+Scope cwds are stored in logical form but still reach `CheckpointStore` as recorded; a Thread that
+runs or moves elsewhere must resolve them the same way. The stored form is computed when its row is
+written; after a Project's root changes, it follows the new root while the recorded path does not.
+The runtime policy derives from the recorded path, as the rest of the Hub does.
+
 ## Turn completion and checkpoints
 
 A provider turn ending and its follow-up work settling are separate milestones. Orchestration

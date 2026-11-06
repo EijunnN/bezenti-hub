@@ -72,8 +72,8 @@ const layerEnvironmentExecutorsProvided = EnvironmentExecutor.layerHubMachine.pi
   Layer.provide(
     Layer.mergeAll(
       ProviderAdapterRegistry.layerFromProviderInstanceRegistry,
-      RuntimePolicy.layerFromProjectStore.pipe(Layer.provide(ProjectStore.layer)),
-    ),
+      RuntimePolicy.layerFromProjectStore,
+    ).pipe(Layer.provideMerge(ProjectStore.layer)),
   ),
 );
 export const layerProviderAdaptersProvided = EnvironmentExecutor.layerProviderAdapterRegistry.pipe(

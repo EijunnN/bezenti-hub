@@ -13,6 +13,7 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as TestClock from "effect/testing/TestClock";
@@ -20,10 +21,12 @@ import * as TestClock from "effect/testing/TestClock";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as RuntimePolicy from "../orchestration-v2/RuntimePolicy.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as EnvironmentExecutor from "./EnvironmentExecutor.ts";
+import * as ProjectCheckouts from "./ProjectCheckouts.ts";
 
 const LAPTOP = EnvironmentId.make("environment:laptop");
 const NOWHERE = EnvironmentId.make("environment:nowhere");
@@ -40,8 +43,21 @@ const policyAt = (cwd: string): ProviderAdapter.ProviderAdapterV2RuntimePolicy =
   cwd,
 });
 
-const threadRecord = (id: ThreadId) =>
-  ({ id, projectId: ProjectId.make("project") }) as unknown as OrchestrationV2AppThread;
+const PROJECT = ProjectId.make("project");
+const HUB_CHECKOUT = "/srv/hub/web";
+
+const threadRecord = (id: ThreadId, worktreePath: string | null = null) =>
+  ({ id, projectId: PROJECT, worktreePath }) as unknown as OrchestrationV2AppThread;
+
+const projects = {
+  get: (projectId: ProjectId) =>
+    Effect.succeed(
+      projectId === PROJECT
+        ? Option.some({ workspaceRoot: HUB_CHECKOUT } as ProjectStore.ProjectRow)
+        : Option.none(),
+    ),
+} as unknown as ProjectStore.ProjectStoreV2["Service"];
+const layerProjects = Layer.succeed(ProjectStore.ProjectStoreV2, projects);
 
 interface AdapterProbe {
   readonly reads: { count: number };
@@ -95,12 +111,13 @@ const makeLayer = (hubAdapter: ProviderAdapter.ProviderAdapterV2["Service"]) => 
       Layer.mergeAll(
         ProviderAdapterRegistry.layerFromAdapters([hubAdapter]),
         Layer.mock(RuntimePolicy.RuntimePolicyV2)({
-          resolve: () => Effect.succeed(policyAt("/hub")),
+          resolve: ({ thread }) => Effect.succeed(policyAt(thread.worktreePath ?? "/hub")),
         }),
         Layer.mock(CheckpointStore.CheckpointStore)({
           isGitRepository: () => Effect.succeed(true),
         }),
         layerInstances,
+        layerProjects,
       ),
     ),
   );
@@ -364,5 +381,61 @@ it.effect("a remote Environment's capabilities come from its last snapshot", () 
     const gone = yield* Effect.flip(cache.snapshotProvider(LAPTOP, instanceId));
     assert.equal(gone._tag, "EnvironmentCapabilitiesUnavailableError");
     assert.equal(gone.reason, "codex is not installed");
+  }).pipe(Effect.provide(makeLayer(makeAdapter("hub", newProbe())))),
+);
+
+it.effect("the same Thread resolves to each Environment's own checkout", () =>
+  Effect.gen(function* () {
+    const registry = yield* EnvironmentExecutor.EnvironmentExecutorRegistry;
+    const policies = yield* RuntimePolicy.RuntimePolicyV2;
+    const hubMachine = yield* registry.get(HUB_MACHINE_ENVIRONMENT_ID);
+    const chosen = new Map<string, string>();
+    const paths = ProjectCheckouts.environmentPaths({
+      environmentId: LAPTOP,
+      workspaceRoot: "/home/ana/work",
+      checkouts: {
+        chosen: ({ projectId }) => Effect.succeed(Option.fromUndefinedOr(chosen.get(projectId))),
+        choose: () => Effect.void,
+      },
+      projects,
+    });
+    yield* registry.register({
+      ...hubMachine,
+      environmentId: LAPTOP,
+      transport: "remote",
+      workspace: {
+        ...hubMachine.workspace,
+        paths,
+        runtimePolicy: {
+          resolve: ({ thread }) =>
+            (thread.worktreePath === null
+              ? paths.checkout(thread.projectId).pipe(Effect.map(Option.getOrThrow))
+              : Effect.succeed(thread.worktreePath)
+            ).pipe(Effect.map(policyAt), Effect.orDie),
+        },
+      },
+    });
+
+    const cwdOn = (threadId: ThreadId, worktreePath: string | null) =>
+      withResolver(
+        policies.resolve({ thread: threadRecord(threadId, worktreePath), modelSelection }),
+      ).pipe(Effect.map((policy) => policy.cwd));
+    const inCheckout = `${HUB_CHECKOUT}/packages/app`;
+    assert.equal(yield* cwdOn(THREAD_ON_HUB, inCheckout), inCheckout);
+    assert.equal(yield* cwdOn(THREAD_ON_LAPTOP, inCheckout), "/home/ana/work/web/packages/app");
+    assert.equal(yield* cwdOn(THREAD_ON_HUB, null), "/hub");
+    assert.equal(yield* cwdOn(THREAD_ON_LAPTOP, null), "/home/ana/work/web");
+
+    chosen.set(PROJECT, "/home/ana/src/web-checkout");
+    assert.equal(
+      yield* cwdOn(THREAD_ON_LAPTOP, inCheckout),
+      "/home/ana/src/web-checkout/packages/app",
+    );
+
+    // A managed worktree lives outside the checkout: only the machine that made it has it.
+    const worktree = "/srv/hub/.t3/worktrees/web/feature";
+    assert.equal(yield* cwdOn(THREAD_ON_HUB, worktree), worktree);
+    const elsewhere = yield* Effect.flip(cwdOn(THREAD_ON_LAPTOP, worktree));
+    assert.equal(elsewhere._tag, "RuntimePolicyResolveError");
   }).pipe(Effect.provide(makeLayer(makeAdapter("hub", newProbe())))),
 );

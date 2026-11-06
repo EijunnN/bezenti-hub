@@ -9,7 +9,6 @@ import {
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
 
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
@@ -32,7 +31,7 @@ const adapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
 const capabilityReads: Array<ThreadId> = [];
 const snapshotCapabilities = EnvironmentExecutor.EnvironmentCapabilityCache.of({
   publish: () => Effect.void,
-  snapshot: () => Effect.succeed(Option.none()),
+  snapshot: () => Effect.succeedNone,
   snapshotProvider: () => Effect.die("unused"),
   forThread: ({ threadId, providerInstanceId }) =>
     Effect.sync(() => {

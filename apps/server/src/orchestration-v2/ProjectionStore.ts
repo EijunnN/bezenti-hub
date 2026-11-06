@@ -97,6 +97,7 @@ import type * as Statement from "effect/sql/Statement";
 import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
 import { threadInSpaces } from "../spaces/SpaceVisibility.ts";
+import { hubMachineLocationJson } from "../environment/WorkspaceLocation.ts";
 import {
   isThreadHistoryUserTurn,
   isConversationHistoryItem,
@@ -1974,6 +1975,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       OR item.payload_json LIKE '%"viewedImagePath"%'
       OR item.payload_json LIKE '%"toolName":"%delegate_task"%')`;
 
+    // The Hub machine's checkout of a Project is its workspace root (see WorkspaceLocation.ts).
+    const hubMachineCheckout = (projectId: ProjectId) =>
+      sql<{ readonly checkout: string }>`
+        SELECT workspace_root AS checkout FROM projection_projects WHERE project_id = ${projectId}
+      `.pipe(Effect.map((rows) => rows[0]?.checkout ?? null));
+    const threadHubMachineCheckout = (threadId: ThreadId) =>
+      sql<{ readonly checkout: string }>`
+        SELECT p.workspace_root AS checkout
+        FROM orchestration_v2_projection_threads t
+        JOIN projection_projects p ON p.project_id = t.project_id
+        WHERE t.thread_id = ${threadId}
+      `.pipe(Effect.map((rows) => rows[0]?.checkout ?? null));
+
     const keepRecordedRunField = (payload: Statement.Fragment, path: string) => sql`
       CASE
         WHEN json_type(excluded.payload_json, ${path}) IS NULL
@@ -2026,6 +2040,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             case "thread.guest-share-updated": {
               const payloadJson = yield* encodeThreadPayload(event.payload);
               const payload = parseEncodedPayload(payloadJson);
+              const worktreeLocationJson =
+                event.payload.worktreePath === null
+                  ? null
+                  : hubMachineLocationJson(
+                      yield* hubMachineCheckout(event.payload.projectId),
+                      event.payload.worktreePath,
+                    );
               yield* sql`
               INSERT INTO orchestration_v2_projection_threads (
                 thread_id,
@@ -2042,6 +2063,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 deleted_at,
                 space_id,
                 owner_user_id,
+                worktree_location_json,
                 payload_json
               )
               VALUES (
@@ -2059,6 +2081,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ${nullableStringField(payload, "deletedAt")},
                 ${event.payload.spaceId ?? null},
                 ${event.payload.ownerUserId ?? null},
+                ${worktreeLocationJson},
                 ${payloadJson}
               )
               ON CONFLICT(thread_id)
@@ -2076,6 +2099,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 deleted_at = excluded.deleted_at,
                 space_id = excluded.space_id,
                 owner_user_id = excluded.owner_user_id,
+                worktree_location_json = excluded.worktree_location_json,
                 payload_json = excluded.payload_json
             `;
               break;
@@ -2662,6 +2686,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             case "checkpoint-scope.created": {
               const payloadJson = yield* encodeCheckpointScopePayload(event.payload);
               const payload = parseEncodedPayload(payloadJson);
+              const cwdLocationJson = hubMachineLocationJson(
+                yield* threadHubMachineCheckout(event.payload.threadId),
+                event.payload.cwd,
+              );
               yield* sql`
               INSERT INTO orchestration_v2_projection_checkpoint_scopes (
                 scope_id,
@@ -2673,6 +2701,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ordinal_within_parent,
                 advances_app_run_count,
                 created_at,
+                cwd_location_json,
                 payload_json
               )
               VALUES (
@@ -2685,6 +2714,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ${event.payload.ordinalWithinParent},
                 ${booleanInt(event.payload.advancesAppRunCount)},
                 ${stringField(payload, "createdAt")},
+                ${cwdLocationJson},
                 ${payloadJson}
               )
               ON CONFLICT(scope_id)
@@ -2697,6 +2727,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ordinal_within_parent = excluded.ordinal_within_parent,
                 advances_app_run_count = excluded.advances_app_run_count,
                 created_at = excluded.created_at,
+                cwd_location_json = excluded.cwd_location_json,
                 payload_json = excluded.payload_json
             `;
               break;
