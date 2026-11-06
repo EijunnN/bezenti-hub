@@ -1,10 +1,9 @@
 /**
  * The machine's half of moving a Thread to it (`docs/internals/overview.md`, «Moving a Thread»):
- * fetch what the Thread continues from out of the Hub repository, then make the Thread's branch
- * or worktree there, lay the checkpoint's files over it and run the Project's setup script. Both
- * the Hub machine's executor and a joined machine's agent run these, so there is one path.
+ * fetch what the Thread continues from, then give the Thread its own worktree there, never the
+ * Project's shared checkout. Both the Hub machine's executor and a joined machine's agent run it.
  */
-import { CheckpointRef, ProjectId, VcsProcessExitError } from "@t3tools/contracts";
+import { CheckpointRef, ProjectId, ThreadId, VcsProcessExitError } from "@t3tools/contracts";
 import { projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -17,7 +16,7 @@ import type { CheckpointStoreError } from "../checkpointing/Errors.ts";
 import type * as VcsProcess from "../vcs/VcsProcess.ts";
 
 const SETUP_SCRIPT_TIMEOUT_MS = 15 * 60_000;
-const OUTPUT_TAIL_CHARS = 1_500;
+const OUTPUT_TAIL_CHARS = 4_000;
 
 /** Downloads `refs` from the Hub repository into the Project's checkout on the machine. */
 export const MoveFetchInput = Schema.Struct({
@@ -33,32 +32,35 @@ export const MoveFetchResult = Schema.Struct({
 export type MoveFetchResult = typeof MoveFetchResult.Type;
 
 export const MovePrepareInput = Schema.Struct({
-  /** The Project's checkout on the machine, as `move.fetch` answered it. */
+  /** The Project's checkout on the machine, as `move.fetch` answered it. It is never changed. */
   checkout: Schema.String,
-  /** The checkpoint whose files the workspace takes; none keeps the checkout as it is. */
+  projectId: ProjectId,
+  threadId: ThreadId,
+  /** The checkpoint whose files the worktree takes; none starts it at the checkout's HEAD. */
   ref: Schema.NullOr(CheckpointRef),
-  /** The Thread's branch: made, or moved, to the commit the checkpoint was captured on. */
+  /** The Thread's branch, made or moved to the commit the checkpoint was captured on. */
   branch: Schema.NullOr(Schema.String),
-  /**
-   * The Thread works in a worktree: at `path` when the machine already has it there (it ran
-   * here before), else a new one named `name` in this machine's worktrees folder.
-   */
-  worktree: Schema.NullOr(
-    Schema.Struct({ name: Schema.String, path: Schema.NullOr(Schema.String) }),
-  ),
-  /** Where state the workspace had is kept before it is replaced (`refs/t3/recovered/<id>/`). */
+  /** A worktree the Thread had on this machine before; reused only if this checkout lists it. */
+  knownWorktree: Schema.NullOr(Schema.String),
+  /** Where state the machine had is kept before it is replaced (`refs/t3/recovered/<id>/`). */
   setAsidePrefix: Schema.String,
-  /** The Project's setup script, run in the workspace once it is ready. */
+  /** The Project's setup script, run in a new worktree once it is ready. */
   setupScript: Schema.NullOr(Schema.Struct({ name: Schema.String, command: Schema.String })),
 });
 export type MovePrepareInput = typeof MovePrepareInput.Type;
 
 export const MovePrepareResult = Schema.Struct({
-  /** The Thread's workspace on the machine: its worktree, else the Project's checkout. */
+  /** The Thread's worktree on the machine. */
   cwd: Schema.String,
-  /** Refs holding what the workspace had before, so nothing there is lost. */
+  /** Refs holding what the machine had before (a branch, a reused worktree's changes). */
   setAsideRefs: Schema.Array(Schema.String),
-  setupScript: Schema.Literals(["none", "succeeded"]),
+  /** The Thread's branch is checked out elsewhere on the machine, so its worktree is detached. */
+  detached: Schema.Boolean,
+  setupScript: Schema.Struct({
+    status: Schema.Literals(["none", "skipped", "succeeded"]),
+    name: Schema.optionalKey(Schema.String),
+    output: Schema.optionalKey(Schema.String),
+  }),
 });
 export type MovePrepareResult = typeof MovePrepareResult.Type;
 
@@ -68,9 +70,47 @@ const failed = (operation: string, cwd: string, detail: string, exitCode = 1) =>
 const tail = (text: string) =>
   text.length <= OUTPUT_TAIL_CHARS ? text : `…${text.slice(text.length - OUTPUT_TAIL_CHARS)}`;
 
-/** A file-system- and git-ref-safe name for a worktree folder. */
+/** A file-system- and git-ref-safe name. */
 const safeName = (name: string) =>
-  name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+/, "") || "thread";
+  name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[.-]+/, "") || "x";
+
+/** Distinct for ids that read alike once made safe. */
+const shortHash = (value: string) => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+};
+
+/** `<worktrees>/<project>/<thread>`, from ids, so two Projects in folders alike never collide. */
+export const movedWorktreePath = (
+  path: Path.Path,
+  worktreesDir: string,
+  projectId: string,
+  threadId: string,
+) =>
+  path.join(
+    worktreesDir,
+    `${safeName(projectId).slice(0, 48)}-${shortHash(projectId)}`,
+    `${safeName(threadId).slice(-24)}-${shortHash(threadId)}`,
+  );
+
+interface ListedWorktree {
+  readonly path: string;
+  readonly branch: string | null;
+}
+
+const parseWorktrees = (porcelain: string): ReadonlyArray<ListedWorktree> =>
+  porcelain
+    .split("\n\n")
+    .map((block) => block.split("\n"))
+    .flatMap((lines) => {
+      const path = lines.find((line) => line.startsWith("worktree "))?.slice("worktree ".length);
+      if (path === undefined) return [];
+      const branch = lines.find((line) => line.startsWith("branch "))?.slice("branch ".length);
+      return [{ path, branch: branch ?? null }];
+    });
 
 export const prepareMovedWorkspace = Effect.fn("MovedWorkspace.prepare")(function* (
   deps: {
@@ -81,6 +121,8 @@ export const prepareMovedWorkspace = Effect.fn("MovedWorkspace.prepare")(functio
     /** Where this machine keeps the worktrees it makes. */
     readonly worktreesDir: string;
     readonly platform: string;
+    /** The environment the setup script gets, as a terminal's (normal setup runs in one). */
+    readonly scriptEnv: (runtimeEnv: Record<string, string>) => NodeJS.ProcessEnv;
   },
   input: MovePrepareInput,
 ): Effect.fn.Return<MovePrepareResult, CheckpointStoreError> {
@@ -102,134 +144,149 @@ export const prepareMovedWorkspace = Effect.fn("MovedWorkspace.prepare")(functio
     }
     return output.stdout.trim();
   });
+  const revision = (cwd: string, name: string) =>
+    git(cwd, ["rev-parse", "--verify", "--quiet", `${name}^{commit}`]).pipe(
+      Effect.map((output) => (output.exitCode === 0 ? output.stdout.trim() : null)),
+    );
   const exists = (target: string) =>
     deps.fileSystem.exists(target).pipe(Effect.orElseSucceed(() => false));
+  const normalize = (target: string) => deps.path.resolve(target);
 
-  if (!(yield* exists(input.checkout))) {
+  const checkout = input.checkout;
+  if (!(yield* exists(checkout))) {
+    return yield* failed(operation, checkout, "The Project's checkout is not on this machine.");
+  }
+  // The commit the checkpoint was captured on (its parent), else the checkout's HEAD.
+  const base =
+    (input.ref === null ? null : yield* revision(checkout, `${input.ref}^1`)) ??
+    (yield* revision(checkout, "HEAD"));
+  if (base === null) {
     return yield* failed(
       operation,
-      input.checkout,
-      "The Project's checkout is not on this machine.",
+      checkout,
+      "The Project's checkout has no commit to start from.",
     );
   }
-  // The commit the checkpoint was captured on (its parent): the Thread's branch points there.
-  const base =
-    input.ref === null
-      ? null
-      : yield* git(input.checkout, ["rev-parse", "--verify", "--quiet", `${input.ref}^1`]).pipe(
-          Effect.map((output) => (output.exitCode === 0 ? output.stdout.trim() : null)),
-        );
   const stamp = DateTime.formatIso(yield* DateTime.now).replace(/[:.]/g, "-");
   const setAsideRefs: Array<string> = [];
 
-  let cwd = input.checkout;
-  let fresh = false;
-  if (input.worktree !== null) {
-    const known = input.worktree.path;
-    if (known !== null && (yield* exists(known))) {
-      cwd = known;
+  // Only a worktree this checkout itself lists is ever reused.
+  const listed = parseWorktrees(yield* gitOk(checkout, ["worktree", "list", "--porcelain"]));
+  const isListed = (target: string) =>
+    listed.some((worktree) => normalize(worktree.path) === normalize(target));
+  const planned = movedWorktreePath(deps.path, deps.worktreesDir, input.projectId, input.threadId);
+  const reuse =
+    input.knownWorktree !== null && isListed(input.knownWorktree)
+      ? input.knownWorktree
+      : isListed(planned)
+        ? planned
+        : null;
+  const cwd = reuse ?? planned;
+  if (reuse === null && (yield* exists(planned))) {
+    return yield* failed(
+      operation,
+      planned,
+      `${planned} already exists and is not a worktree of this Project's checkout.`,
+    );
+  }
+
+  // A branch the machine had that the source's commit does not contain is kept first.
+  let detached = false;
+  if (input.branch !== null) {
+    const tip = yield* revision(checkout, `refs/heads/${input.branch}`);
+    if (tip !== null && tip !== base) {
+      const contained = yield* git(checkout, ["merge-base", "--is-ancestor", tip, base]);
+      if (contained.exitCode !== 0) {
+        const ref = `${input.setAsidePrefix}${stamp}/branch/${input.branch}`;
+        yield* gitOk(checkout, ["update-ref", ref, tip]);
+        setAsideRefs.push(ref);
+      }
+    }
+    // A branch checked out in another worktree (the shared checkout's own) cannot move here.
+    detached = listed.some(
+      (worktree) =>
+        worktree.branch === `refs/heads/${input.branch}` &&
+        normalize(worktree.path) !== normalize(cwd),
+    );
+  }
+  const branchArgs = input.branch === null || detached ? ["--detach"] : ["-B", input.branch];
+
+  const created = reuse === null;
+  const work = Effect.gen(function* () {
+    if (created) {
+      yield* deps.fileSystem
+        .makeDirectory(deps.path.dirname(cwd), { recursive: true })
+        .pipe(
+          Effect.mapError((cause) =>
+            failed(operation, cwd, `Could not create ${deps.path.dirname(cwd)}: ${cause.message}`),
+          ),
+        );
+      yield* gitOk(checkout, ["worktree", "add", "--quiet", ...branchArgs, cwd, base]);
     } else {
-      const repository = deps.path.basename(input.checkout);
-      cwd = deps.path.join(deps.worktreesDir, safeName(repository), safeName(input.worktree.name));
-      if (yield* exists(cwd)) {
-        // A folder of that name from before: use it if it is a worktree of this checkout.
-        const inside = yield* git(cwd, ["rev-parse", "--is-inside-work-tree"]);
-        if (inside.exitCode !== 0) {
-          return yield* failed(operation, cwd, `${cwd} already exists and is not a git worktree.`);
-        }
-      } else {
-        yield* deps.fileSystem
-          .makeDirectory(deps.path.dirname(cwd), { recursive: true })
-          .pipe(
-            Effect.mapError((cause) =>
-              failed(
-                operation,
-                cwd,
-                `Could not create ${deps.path.dirname(cwd)}: ${cause.message}`,
-              ),
-            ),
-          );
-        const start = base ?? "HEAD";
-        const added = yield* git(input.checkout, [
-          "worktree",
-          "add",
-          ...(input.branch === null ? ["--detach", cwd, start] : ["-B", input.branch, cwd, start]),
-        ]);
-        if (added.exitCode !== 0) {
-          // The branch may be checked out elsewhere on this machine: the worktree goes detached.
-          yield* gitOk(input.checkout, ["worktree", "add", "--detach", cwd, start]);
-        }
-        fresh = true;
+      // What the reused worktree holds that its HEAD does not is kept before it is replaced.
+      const status = yield* gitOk(cwd, ["status", "--porcelain", "--untracked-files=normal"]);
+      if (status.length > 0) {
+        const ref = CheckpointRef.make(`${input.setAsidePrefix}${stamp}/workspace`);
+        yield* deps.checkpoints.captureCheckpoint({ cwd, checkpointRef: ref });
+        setAsideRefs.push(ref);
       }
-    }
-  }
-
-  if (!fresh) {
-    // Whatever the workspace holds that HEAD does not is kept in a ref before it is replaced.
-    const status = yield* gitOk(cwd, ["status", "--porcelain", "--untracked-files=normal"]);
-    if (status.length > 0) {
-      const ref = CheckpointRef.make(`${input.setAsidePrefix}${stamp}`);
-      yield* deps.checkpoints.captureCheckpoint({ cwd, checkpointRef: ref });
-      setAsideRefs.push(ref);
-    }
-    if (input.branch !== null && base !== null) {
-      const tip = yield* git(cwd, [
-        "rev-parse",
-        "--verify",
+      yield* gitOk(cwd, [
+        "checkout",
+        "--force",
         "--quiet",
-        `refs/heads/${input.branch}`,
-      ]).pipe(Effect.map((output) => (output.exitCode === 0 ? output.stdout.trim() : null)));
-      if (tip !== null && tip !== base) {
-        const contained = yield* git(cwd, ["merge-base", "--is-ancestor", tip, base]);
-        if (contained.exitCode !== 0) {
-          // The branch has commits here the source never had: keep them before moving it.
-          const ref = `${input.setAsidePrefix}${stamp}-branch`;
-          yield* gitOk(cwd, ["update-ref", ref, tip]);
-          setAsideRefs.push(ref);
-        }
+        ...(branchArgs[0] === "-B" ? branchArgs : ["--detach"]),
+        base,
+      ]);
+    }
+    if (input.ref !== null) {
+      const restored = yield* deps.checkpoints.restoreCheckpoint({ cwd, checkpointRef: input.ref });
+      if (!restored) {
+        return yield* failed(
+          operation,
+          cwd,
+          `The checkpoint ${input.ref} is not in this checkout.`,
+        );
       }
-      yield* gitOk(cwd, ["checkout", "--force", "-B", input.branch, base]);
     }
-  }
-
-  if (input.ref !== null) {
-    const restored = yield* deps.checkpoints.restoreCheckpoint({ cwd, checkpointRef: input.ref });
-    if (!restored) {
-      return yield* failed(operation, cwd, `The checkpoint ${input.ref} is not in this checkout.`);
-    }
-  }
-
-  if (input.setupScript === null) return { cwd, setAsideRefs, setupScript: "none" as const };
-  const shell =
-    deps.platform === "win32"
-      ? { command: "cmd.exe", args: ["/d", "/s", "/c", input.setupScript.command] }
-      : { command: "sh", args: ["-c", input.setupScript.command] };
-  const ran = yield* deps.vcs.run({
-    operation: "MovedWorkspace.setupScript",
-    command: shell.command,
-    args: shell.args,
-    cwd,
-    env: {
-      ...process.env,
-      ...projectScriptRuntimeEnv({
-        project: { cwd: input.checkout },
-        worktreePath: cwd === input.checkout ? null : cwd,
-      }),
-    },
-    allowNonZeroExit: true,
-    timeoutMs: SETUP_SCRIPT_TIMEOUT_MS,
-  });
-  if (ran.exitCode !== 0) {
-    const output = `${ran.stdout}\n${ran.stderr}`.trim();
-    return yield* new VcsProcessExitError({
+    // A worktree the Thread already had here was set up when it was made.
+    if (input.setupScript === null) return { status: "none" as const };
+    if (!created) return { status: "skipped" as const, name: input.setupScript.name };
+    const shell =
+      deps.platform === "win32"
+        ? { command: "cmd.exe", args: ["/d", "/s", "/c", input.setupScript.command] }
+        : { command: "sh", args: ["-c", input.setupScript.command] };
+    const ran = yield* deps.vcs.run({
       operation: "MovedWorkspace.setupScript",
-      command: input.setupScript.name,
+      command: shell.command,
+      args: shell.args,
       cwd,
-      exitCode: ran.exitCode,
-      detail: `The setup script "${input.setupScript.name}" failed with exit code ${ran.exitCode}${
-        output.length === 0 ? "." : `:\n${tail(output)}`
-      }`,
+      env: deps.scriptEnv(
+        projectScriptRuntimeEnv({ project: { cwd: checkout }, worktreePath: cwd }),
+      ),
+      allowNonZeroExit: true,
+      timeoutMs: SETUP_SCRIPT_TIMEOUT_MS,
     });
-  }
-  return { cwd, setAsideRefs, setupScript: "succeeded" as const };
+    const output = tail(`${ran.stdout}\n${ran.stderr}`.trim());
+    if (ran.exitCode !== 0) {
+      return yield* new VcsProcessExitError({
+        operation: "MovedWorkspace.setupScript",
+        command: input.setupScript.name,
+        cwd,
+        exitCode: ran.exitCode,
+        detail: `The setup script "${input.setupScript.name}" failed with exit code ${ran.exitCode}${
+          output.length === 0 ? "." : `:\n${output}`
+        }`,
+      });
+    }
+    return { status: "succeeded" as const, name: input.setupScript.name, output };
+  });
+  // A worktree this move made goes again if anything after it fails.
+  const setupScript = yield* work.pipe(
+    Effect.tapError(() =>
+      created
+        ? git(checkout, ["worktree", "remove", "--force", cwd]).pipe(Effect.ignore)
+        : Effect.void,
+    ),
+  );
+  return { cwd, setAsideRefs, detached, setupScript };
 });

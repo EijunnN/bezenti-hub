@@ -479,7 +479,9 @@ export const OrchestrationV2ThreadMove = Schema.Struct({
   ifRunning: Schema.Literals(["wait", "stop"]),
   actorUserId: Schema.optional(UserId),
   step: OrchestrationV2ThreadMoveStep,
-  status: Schema.Literals(["running", "failed", "switched"]),
+  status: Schema.Literals(["running", "failed", "switched", "cancelled"]),
+  /** While it waits for the turn: on the turn itself, or on the User (an approval, a question). */
+  waitingOn: Schema.optional(Schema.Literals(["turn", "user"])),
   startedAt: IsoDateTime,
   updatedAt: IsoDateTime,
   /** The source was offline, so the move continues from the last checkpoint it uploaded. */
@@ -487,8 +489,12 @@ export const OrchestrationV2ThreadMove = Schema.Struct({
   continuesFrom: Schema.optional(OrchestrationV2ThreadMoveCheckpoint),
   /** Workspace state the target had and the move replaced, kept under these refs there. */
   setAsideRefs: Schema.optional(Schema.Array(Schema.String)),
-  /** The worktree made on the target, for a Thread that works in one. */
+  /** The Project's checkout on the target, as the fetch found or made it. */
+  targetCheckout: Schema.optional(Schema.String),
+  /** The worktree prepared for the Thread on the target. */
   targetWorktreePath: Schema.optional(Schema.String),
+  /** The worktree the Thread had on each Environment it ran on, to reuse when it returns. */
+  knownWorktrees: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   /** Why the move stopped; the Thread stays on its source. */
   failure: Schema.optional(
     Schema.Struct({ step: OrchestrationV2ThreadMoveStep, message: Schema.String }),
@@ -1845,6 +1851,8 @@ export const OrchestrationV2TurnItem = Schema.Union([
     continuesFrom: OrchestrationV2ThreadMoveCheckpoint,
     sourceOffline: Schema.Boolean,
     setAsideRefs: Schema.optional(Schema.Array(Schema.String)),
+    /** Absent means it moved. */
+    outcome: Schema.optional(Schema.Literals(["moved", "cancelled"])),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -2698,6 +2706,8 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     continuesFrom: OrchestrationV2ThreadMoveCheckpoint,
     sourceOffline: Schema.Boolean,
     setAsideRefs: Schema.optional(Schema.Array(Schema.String)),
+    /** Absent means it moved. */
+    outcome: Schema.optional(Schema.Literals(["moved", "cancelled"])),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
@@ -3054,6 +3064,12 @@ export const OrchestrationV2Command = Schema.Union([
         metadata: Schema.optional(OrchestrationV2ProviderThreadNativeMetadata),
       }),
     ),
+  }),
+  Schema.Struct({
+    /** Stops the Thread's running move before it switches; the Thread stays where it was. */
+    type: Schema.Literal("thread.move.cancel"),
+    commandId: CommandId,
+    threadId: ThreadId,
   }),
   Schema.Struct({
     /** Moves the Thread to another Environment (`docs/internals/overview.md`, «Moving a Thread»). */
@@ -3534,6 +3550,17 @@ const OrchestrationV2InternalCommand = Schema.Union([
     guestMessageId: GuestMessageId,
     text: Schema.String,
     attachments: Schema.optional(Schema.Array(ChatAttachment)),
+  }),
+  /**
+   * A move leaves `waiting-for-turn`, decided with the Thread's runs so no run starts between
+   * the check and the step: refused while one is unfinished.
+   */
+  Schema.Struct({
+    type: Schema.Literal("thread.move.advance"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    moveId: TrimmedNonEmptyString,
+    sourceOnline: Schema.Boolean,
   }),
   /** Moves a thread to a project rooted at the folder it already works in, so its cwd never changes. */
   Schema.Struct({

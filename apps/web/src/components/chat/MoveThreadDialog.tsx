@@ -80,16 +80,48 @@ const nameOf = (
         ? "Hub machine"
         : "another Environment"));
 
-/** «Moving to Desktop · Fetching the checkpoint» in the Thread's header while a move runs. */
-export function ThreadMoveBadge({ move }: { readonly move: OrchestrationV2ThreadMove | null }) {
+/** What the move is doing now; a turn waiting on the User says so, since the move waits too. */
+const stepLabel = (move: OrchestrationV2ThreadMove) =>
+  move.step === "waiting-for-turn" && move.waitingOn === "user"
+    ? "Waiting for your answer in the running turn"
+    : MOVE_STEP_LABELS[move.step];
+
+/** Cancels the Thread's running move; resolves to an error message, or null when it went. */
+function useCancelMove(threadRef: ScopedThreadRef) {
+  const cancel = useOrchestrationCommand(threadEnvironment.cancelMove, { reportFailure: false });
+  return async (): Promise<string | null> => {
+    const result = await cancel({
+      environmentId: threadRef.environmentId,
+      input: { threadId: threadRef.threadId },
+    });
+    if (result._tag === "Success" || isAtomCommandInterrupted(result)) return null;
+    const error = squashAtomCommandFailure(result);
+    return error instanceof Error ? error.message : "The move could not be cancelled.";
+  };
+}
+
+/** «Moving to Desktop: Fetching the checkpoint» in the Thread's header while a move runs. */
+export function ThreadMoveBadge({
+  move,
+  threadRef,
+}: {
+  readonly move: OrchestrationV2ThreadMove | null;
+  readonly threadRef: ScopedThreadRef;
+}) {
   const environments = useHubEnvironments();
+  const cancel = useCancelMove(threadRef);
   if (move === null || move.status !== "running") return null;
-  const label = `Moving to ${nameOf(environments, move.targetEnvironmentId)}: ${MOVE_STEP_LABELS[move.step]}`;
+  const label = `Moving to ${nameOf(environments, move.targetEnvironmentId)}: ${stepLabel(move)}`;
   return (
-    <Badge variant="info" size="sm" role="status" aria-label={label} data-move-step={move.step}>
-      <ArrowRightLeftIcon aria-hidden className="size-3" />
-      {label}
-    </Badge>
+    <span className="inline-flex items-center gap-1">
+      <Badge variant="info" size="sm" role="status" aria-label={label} data-move-step={move.step}>
+        <ArrowRightLeftIcon aria-hidden className="size-3" />
+        {label}
+      </Badge>
+      <Button size="xs" variant="ghost" onClick={() => void cancel()}>
+        Cancel move
+      </Button>
+    </span>
   );
 }
 
@@ -121,6 +153,8 @@ function MoveThreadDialog({
   const thread = useThreadShell(threadRef);
   const environments = useHubEnvironments();
   const move = useOrchestrationCommand(threadEnvironment.move, { reportFailure: false });
+  const cancelMove = useCancelMove(threadRef);
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const [target, setTarget] = useState<EnvironmentId | null>(null);
   const [ifRunning, setIfRunning] = useState<"wait" | "stop">("wait");
   const [send, setSend] = useState<SendState>({ status: "idle" });
@@ -188,10 +222,10 @@ function MoveThreadDialog({
           <DialogDescription>
             The Thread keeps its history and goes on running on the machine you choose. If{" "}
             {movedFromName} is online, it first uploads a final checkpoint with any changes made by
-            hand. The new machine fetches it, recreates the Thread&apos;s branch or worktree and
-            runs the Project&apos;s setup script, which also rebuilds ignored files such as
-            dependencies. If {movedFromName} is offline, the Thread continues from the last
-            checkpoint it uploaded.
+            hand. The new machine fetches it into a worktree of the Thread&apos;s own, with its
+            branch, and runs the Project&apos;s setup script there, which also rebuilds ignored
+            files such as dependencies. If {movedFromName} is offline, the Thread continues from the
+            last checkpoint it uploaded.
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
@@ -268,7 +302,14 @@ function MoveThreadDialog({
                 ) : null}
               </>
             ) : (
-              <MoveProgress move={shownMove} sourceName={movedFromName} targetName={targetName} />
+              <>
+                <MoveProgress move={shownMove} sourceName={movedFromName} targetName={targetName} />
+                {cancelError === null ? null : (
+                  <p role="alert" className="text-destructive text-sm">
+                    {cancelError}
+                  </p>
+                )}
+              </>
             )}
           </div>
         </DialogPanel>
@@ -287,9 +328,19 @@ function MoveThreadDialog({
               </Button>
             </>
           ) : (
-            <Button variant={running ? "outline" : "default"} onClick={onClose}>
-              {running ? "Hide" : "Done"}
-            </Button>
+            <>
+              {running ? (
+                <Button
+                  variant="destructive-outline"
+                  onClick={() => void cancelMove().then(setCancelError)}
+                >
+                  Cancel move
+                </Button>
+              ) : null}
+              <Button variant={running ? "outline" : "default"} onClick={onClose}>
+                {running ? "Hide" : "Done"}
+              </Button>
+            </>
           )}
         </DialogFooter>
       </DialogPopup>
@@ -314,7 +365,9 @@ function MoveProgress({
       ? `Moved to ${targetName}.`
       : move.status === "failed"
         ? `The move stopped at «${MOVE_STEP_LABELS[move.failure?.step ?? move.step]}». The Thread stays on ${sourceName}.`
-        : `Moving to ${targetName}: ${MOVE_STEP_LABELS[move.step]}`;
+        : move.status === "cancelled"
+          ? `The move was cancelled. The Thread stays on ${sourceName}.`
+          : `Moving to ${targetName}: ${stepLabel(move)}`;
   const continuesFrom =
     move.continuesFrom === undefined
       ? null

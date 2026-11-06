@@ -456,7 +456,12 @@ export const ChatHeader = memo(function ChatHeader({
               </TooltipPopup>
             </Tooltip>
           ) : null}
-          {renamingTitle === null ? <ThreadMoveBadge move={activeThreadMove ?? null} /> : null}
+          {renamingTitle === null ? (
+            <ThreadMoveBadge
+              move={activeThreadMove ?? null}
+              threadRef={scopeThreadRef(activeThreadEnvironmentId, activeThreadId)}
+            />
+          ) : null}
           {renamingTitle === null && activeThreadLinkOrigin ? (
             <Tooltip>
               <TooltipTrigger render={<Badge variant="info" size="sm" />}>

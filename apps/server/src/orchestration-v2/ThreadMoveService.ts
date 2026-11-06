@@ -15,12 +15,14 @@ import {
   type OrchestrationV2ThreadMoveCheckpoint,
   type OrchestrationV2ThreadMoveStep,
   type OrchestrationV2TurnItem,
+  type ProviderSessionId,
+  type RunId,
   ThreadId,
   TurnItemId,
   type UserId,
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import { setupProjectScript } from "@t3tools/shared/projectScripts";
+import { resolveProjectScripts, setupProjectScript } from "@t3tools/shared/projectScripts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -28,6 +30,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
@@ -37,6 +40,7 @@ import * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as ProjectCheckouts from "../environment/ProjectCheckouts.ts";
 import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -44,10 +48,12 @@ import * as ProjectStore from "./ProjectStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 
-/** How often a move waiting for the turn looks again. */
-const TURN_POLL = Duration.millis(500);
 const DETACH_TIMEOUT = Duration.seconds(30);
-const UNFINISHED_RUN_STATUSES = new Set(["preparing", "queued", "starting", "running", "waiting"]);
+/** How long a machine may take to say hello again before the move treats it as away. */
+const RECONNECT_GRACE = Duration.seconds(60);
+/** A change to the Thread's runs wakes a move waiting for its turn; this only bounds the wait. */
+const TURN_RECHECK = Duration.seconds(30);
+const AUDIT_MESSAGE_CHARS = 300;
 
 const decodeCheckpoint = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2CheckpointJson),
@@ -62,8 +68,14 @@ class MoveStepFailure extends Schema.TaggedError<MoveStepFailure>()("MoveStepFai
 class SourceOffline extends Schema.TaggedError<SourceOffline>()("SourceOffline", {}) {}
 
 export interface ThreadMovesShape {
-  /** Runs (or resumes) the Thread's move, if one is running, in the background. */
-  readonly resume: (threadId: ThreadId) => Effect.Effect<void>;
+  /**
+   * Runs (or resumes) the Thread's move, if one is running, in the background. After a restart
+   * its machines may not have said hello yet: they get a grace period before counting as away.
+   */
+  readonly resume: (
+    threadId: ThreadId,
+    options?: { readonly restarted?: boolean },
+  ) => Effect.Effect<void>;
 }
 
 export class ThreadMoves extends Context.Service<ThreadMoves, ThreadMovesShape>()(
@@ -90,15 +102,22 @@ const isUnavailable = Schema.is(EnvironmentExecutor.EnvironmentExecutorUnavailab
 const isMoveStepFailure = Schema.is(MoveStepFailure);
 const isSourceOffline = Schema.is(SourceOffline);
 
-/** The last folder name of a path from any machine. */
-const baseName = (path: string) => path.split(/[\\/]/).findLast((part) => part.length > 0) ?? path;
-
 const asFailure = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
     Effect.mapError((error) =>
       isMoveStepFailure(error) ? error : new MoveStepFailure({ message: messageOf(error) }),
     ),
   );
+
+/** The first line of a message, trimmed, for the audit log (never a whole script's output). */
+const auditMessage = (message: string) =>
+  (message.split("\n")[0] ?? "").trim().slice(0, AUDIT_MESSAGE_CHARS);
+
+const RUN_EVENTS: ReadonlySet<OrchestrationV2DomainEvent["type"]> = new Set([
+  "run.created",
+  "run.updated",
+  "thread.move-updated",
+]);
 
 export const layer: Layer.Layer<
   ThreadMoves,
@@ -129,6 +148,7 @@ export const layer: Layer.Layer<
     // The server provides these; orchestration-only hosts have no joined machines or audit log.
     const remote = yield* Effect.serviceOption(RemoteEnvironments.RemoteEnvironments);
     const audit = yield* Effect.serviceOption(AuditLog.AuditLog);
+    const settings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
     const scope = yield* Effect.scope;
     const running = new Set<ThreadId>();
 
@@ -153,12 +173,57 @@ export const layer: Layer.Layer<
       return rows[0]?.name;
     });
 
+    /**
+     * The Environment's executor once it is connected; with a grace, waits for it to say hello
+     * (after a restart, or for a target), none when it does not in time.
+     */
+    const awaitExecutor = Effect.fn("ThreadMoves.awaitExecutor")(function* (
+      environmentId: EnvironmentId,
+      grace: Duration.Duration | null,
+    ) {
+      const now = yield* Effect.option(registry.get(environmentId));
+      if (Option.isSome(now) || grace === null) return now;
+      return yield* Effect.scoped(
+        Effect.gen(function* () {
+          const changes = yield* registry.changes;
+          while (true) {
+            const found = yield* Effect.option(registry.get(environmentId));
+            if (Option.isSome(found)) return found;
+            yield* PubSub.take(changes);
+          }
+        }),
+      ).pipe(Effect.timeoutOption(grace), Effect.map(Option.flatten));
+    });
+
+    /** Waits, within the grace, for the Environment to connect again after it dropped. */
+    const awaitReconnect = Effect.fn("ThreadMoves.awaitReconnect")(function* (
+      environmentId: EnvironmentId,
+    ) {
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const changes = yield* registry.changes;
+          while (true) {
+            yield* PubSub.take(changes);
+            if (Option.isSome(yield* Effect.option(registry.get(environmentId)))) return;
+          }
+        }),
+      ).pipe(Effect.timeoutOption(RECONNECT_GRACE));
+    });
+
     /** The Thread and its move as the projection has them now; none once no move runs. */
     const current = Effect.fn("ThreadMoves.current")(function* (threadId: ThreadId) {
       const thread = yield* projections.getThread(threadId);
       const move = thread.move;
       if (move == null || move.status !== "running") return Option.none();
       return Option.some({ thread, move });
+    });
+
+    /** The latest run of the Thread: a move's timeline items go after its last turn. */
+    const latestRunOf = Effect.fn("ThreadMoves.latestRunOf")(function* (threadId: ThreadId) {
+      const { runs } = yield* projections
+        .getThreadRecords(threadId, ["runs"], { turnItemTypes: [] })
+        .pipe(Effect.orDie);
+      return runs.toSorted((a, b) => b.ordinal - a.ordinal)[0];
     });
 
     /**
@@ -206,53 +271,125 @@ export const layer: Layer.Layer<
     const advance = (
       threadId: ThreadId,
       moveId: string,
-      changes: Partial<OrchestrationV2ThreadMove> & {
-        readonly step: OrchestrationV2ThreadMoveStep;
-      },
+      changes: Partial<OrchestrationV2ThreadMove>,
+      extra?: (now: DateTime.Utc) => Effect.Effect<ReadonlyArray<OrchestrationV2DomainEvent>>,
     ) =>
       update(threadId, moveId, ({ thread, move, now }) =>
-        Effect.succeed({
-          thread: { ...thread, move: { ...move, ...changes, updatedAt: DateTime.formatIso(now) } },
+        Effect.gen(function* () {
+          return {
+            thread: {
+              ...thread,
+              move: { ...move, ...changes, updatedAt: DateTime.formatIso(now) },
+            },
+            ...(extra === undefined ? {} : { extra: yield* extra(now) }),
+          };
         }),
       );
+
+    /** A timeline item after the Thread's last turn. */
+    const timelineEvent = Effect.fn("ThreadMoves.timelineEvent")(function* (
+      thread: OrchestrationV2AppThread,
+      now: DateTime.Utc,
+      runId: RunId | null,
+      item: (base: {
+        readonly threadId: ThreadId;
+        readonly runId: RunId | null;
+        readonly nodeId: null;
+        readonly providerThreadId: null;
+        readonly providerTurnId: null;
+        readonly nativeItemRef: null;
+        readonly parentItemId: null;
+        readonly ordinal: 0;
+        readonly startedAt: DateTime.Utc;
+        readonly completedAt: DateTime.Utc;
+        readonly updatedAt: DateTime.Utc;
+      }) => OrchestrationV2TurnItem,
+    ) {
+      return {
+        id: yield* ids.allocate.event({ threadId: thread.id }).pipe(Effect.orDie),
+        type: "turn-item.updated",
+        threadId: thread.id,
+        ...(runId === null ? {} : { runId }),
+        providerInstanceId: thread.providerInstanceId,
+        occurredAt: now,
+        payload: item({
+          threadId: thread.id,
+          runId,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 0,
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+        }),
+      } satisfies OrchestrationV2DomainEvent;
+    });
 
     const recordAudit = (
       thread: OrchestrationV2AppThread,
       move: OrchestrationV2ThreadMove,
-      outcome: "switched" | "failed",
-      failedStep?: OrchestrationV2ThreadMoveStep,
+      outcome: "started" | "switched" | "failed" | "cancelled",
     ) =>
       Option.match(audit, {
         onNone: () => Effect.void,
         onSome: (log) =>
-          log
-            .record({
-              actor:
-                move.actorUserId === undefined
-                  ? { source: "system" }
-                  : AuditLog.userActor(move.actorUserId),
-              action: "thread.move",
-              target: { kind: "thread", id: thread.id, name: thread.title },
-              ...(thread.spaceId === undefined ? {} : { spaceId: thread.spaceId }),
-              detail: {
-                from: move.sourceEnvironmentId,
-                to: move.targetEnvironmentId,
-                outcome,
-                ...(failedStep === undefined ? {} : { failedStep }),
-                ...(move.continuesFrom === undefined
-                  ? {}
-                  : { continuesFrom: move.continuesFrom.kind }),
-              },
-            })
-            .pipe(
-              Effect.catchCause((cause) =>
-                Effect.logWarning("Could not record a Thread move in the audit log", {
-                  threadId: thread.id,
-                  cause: Cause.pretty(cause),
-                }),
-              ),
-            ),
+          // A move always has its User (the Orchestrator refuses one without).
+          move.actorUserId === undefined
+            ? Effect.logWarning("A Thread move without its User was not audited", {
+                threadId: thread.id,
+              })
+            : log
+                .record({
+                  actor: AuditLog.userActor(move.actorUserId),
+                  action: "thread.move",
+                  target: { kind: "thread", id: thread.id, name: thread.title },
+                  ...(thread.spaceId === undefined ? {} : { spaceId: thread.spaceId }),
+                  detail: {
+                    from: move.sourceEnvironmentId,
+                    to: move.targetEnvironmentId,
+                    outcome,
+                    ...(move.failure === undefined
+                      ? {}
+                      : {
+                          failedStep: move.failure.step,
+                          failureMessage: auditMessage(move.failure.message),
+                        }),
+                    ...(move.continuesFrom === undefined
+                      ? {}
+                      : {
+                          continuesFrom: move.continuesFrom.kind,
+                          continuesFromRef: move.continuesFrom.ref,
+                        }),
+                    ...(move.sourceOffline === undefined
+                      ? {}
+                      : { sourceOffline: move.sourceOffline }),
+                    ...(move.setAsideRefs === undefined || move.setAsideRefs.length === 0
+                      ? {}
+                      : { setAside: move.setAsideRefs.join(" ").slice(0, 1_000) }),
+                  },
+                })
+                .pipe(
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning("Could not record a Thread move in the audit log", {
+                      threadId: thread.id,
+                      cause: Cause.pretty(cause),
+                    }),
+                  ),
+                ),
       });
+
+    /** The move ended without a switch, or with one: queued messages start where it now runs. */
+    const resumeQueue = orchestrator.resumeQueuedRuns.pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Could not resume queued runs after a Thread move", {
+          cause: Cause.pretty(cause),
+        }),
+      ),
+      Effect.asVoid,
+    );
 
     const fail = Effect.fn("ThreadMoves.fail")(function* (
       threadId: ThreadId,
@@ -269,25 +406,59 @@ export const layer: Layer.Layer<
           ...move,
           status: "failed",
           updatedAt: DateTime.formatIso(now),
-          failure: { step, message: message.slice(0, 2_000) },
+          failure: { step, message: message.slice(0, 4_000) },
         };
         failed = { thread, move: next };
         return Effect.succeed({ thread: { ...thread, move: next } });
       });
-      if (failed !== undefined) yield* recordAudit(failed.thread, failed.move, "failed", step);
+      if (failed !== undefined) yield* recordAudit(failed.thread, failed.move, "failed");
+      yield* resumeQueue;
     });
 
-    /** Waits until the Thread has no unfinished run; with `stop`, stops its work once. */
+    /**
+     * Leaves `waiting-for-turn` through the Orchestrator, which decides it with the Thread's runs
+     * (`thread.move.advance`), so no run starts between the check and the step. Until then it
+     * wakes on each change to the Thread's runs; with `stop` it stops the turn once.
+     */
     const waitForTurn = Effect.fn("ThreadMoves.waitForTurn")(function* (
       threadId: ThreadId,
       move: OrchestrationV2ThreadMove,
+      restarted: boolean,
     ) {
       let stopped = false;
-      while (true) {
+      for (let attempt = 1; ; attempt += 1) {
+        const afterSequence = yield* eventSink.latestSequence({ threadId });
+        const sourceOnline =
+          move.sourceEnvironmentId !== null &&
+          Option.isSome(
+            yield* awaitExecutor(move.sourceEnvironmentId, restarted ? RECONNECT_GRACE : null),
+          );
+        const advanced = yield* orchestrator
+          .dispatch({
+            type: "thread.move.advance",
+            commandId: CommandId.make(`${move.id}:advance:${attempt}`),
+            threadId,
+            moveId: move.id,
+            sourceOnline,
+          })
+          .pipe(Effect.result);
+        if (advanced._tag === "Success") return;
+        const still = yield* current(threadId);
+        if (
+          Option.isNone(still) ||
+          still.value.move.id !== move.id ||
+          still.value.move.step !== "waiting-for-turn"
+        ) {
+          return;
+        }
+        // Say what it waits on: a turn that asks the User something waits for their answer.
         const { runs } = yield* projections.getThreadRecords(threadId, ["runs"], {
           turnItemTypes: [],
         });
-        if (!runs.some((run) => UNFINISHED_RUN_STATUSES.has(run.status))) return;
+        const waitingOn = runs.some((run) => run.status === "waiting") ? "user" : "turn";
+        if (still.value.move.waitingOn !== waitingOn) {
+          yield* advance(threadId, move.id, { waitingOn });
+        }
         if (move.ifRunning === "stop" && !stopped) {
           stopped = true;
           yield* orchestrator
@@ -306,7 +477,11 @@ export const layer: Layer.Layer<
               ),
             );
         }
-        yield* Effect.sleep(TURN_POLL);
+        yield* orchestrator.streamStoredEventsFrom({ threadId, afterSequence }).pipe(
+          Stream.filter(({ event }) => RUN_EVENTS.has(event.type)),
+          Stream.runHead,
+          Effect.timeoutOption(TURN_RECHECK),
+        );
       }
     });
 
@@ -330,11 +505,15 @@ export const layer: Layer.Layer<
     const finalCheckpoint = Effect.fn("ThreadMoves.finalCheckpoint")(function* (
       thread: OrchestrationV2AppThread,
       move: OrchestrationV2ThreadMove,
+      restarted: boolean,
     ) {
       if (move.sourceEnvironmentId === null) return yield* new SourceOffline();
-      const executor = yield* registry
-        .get(move.sourceEnvironmentId)
-        .pipe(Effect.mapError(() => new SourceOffline()));
+      // After a restart the source may just not have said hello yet: it is unknown, not offline.
+      const executor = yield* awaitExecutor(
+        move.sourceEnvironmentId,
+        restarted ? RECONNECT_GRACE : null,
+      );
+      if (Option.isNone(executor)) return yield* new SourceOffline();
       const ref = finalCheckpointRef(thread.id, move.id);
       const asStep = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
         effect.pipe(
@@ -346,10 +525,11 @@ export const layer: Layer.Layer<
                 : new MoveStepFailure({ message: messageOf(error) }),
           ),
         );
-      const cwd = yield* asStep(workspaceOn(executor, thread));
-      yield* asStep(executor.workspace.checkpoints.captureCheckpoint({ cwd, checkpointRef: ref }));
+      const source = executor.value;
+      const cwd = yield* asStep(workspaceOn(source, thread));
+      yield* asStep(source.workspace.checkpoints.captureCheckpoint({ cwd, checkpointRef: ref }));
       yield* asStep(
-        executor.workspace.hubRepository.push({
+        source.workspace.hubRepository.push({
           cwd,
           projectId: thread.projectId,
           checkpointRefs: [ref],
@@ -389,18 +569,42 @@ export const layer: Layer.Layer<
         : ({ kind: "uploaded", ref: best.ref, appRunOrdinal: best.appRunOrdinal } as const);
     });
 
+    /** The target's executor; a target that is not connected yet gets the grace to say hello. */
     const targetOf = (move: OrchestrationV2ThreadMove) =>
-      registry
-        .get(move.targetEnvironmentId)
-        .pipe(
-          Effect.catch(() =>
-            nameOf(move.targetEnvironmentId).pipe(
-              Effect.flatMap((name) =>
-                Effect.fail(new MoveStepFailure({ message: `${name} went offline.` })),
+      awaitExecutor(move.targetEnvironmentId, RECONNECT_GRACE).pipe(
+        Effect.flatMap(
+          Option.match({
+            onSome: Effect.succeed,
+            onNone: () =>
+              nameOf(move.targetEnvironmentId).pipe(
+                Effect.flatMap((name) =>
+                  Effect.fail(new MoveStepFailure({ message: `${name} is offline.` })),
+                ),
               ),
+          }),
+        ),
+      );
+
+    /** The Project's setup script as normal setup resolves it, with the User's settings. */
+    const setupScriptOf = Effect.fn("ThreadMoves.setupScriptOf")(function* (
+      thread: OrchestrationV2AppThread,
+    ) {
+      const project = Option.flatten(yield* projects.get(thread.projectId).pipe(Effect.option));
+      if (Option.isNone(project)) return null;
+      const scripts = Option.isSome(settings)
+        ? yield* settings.value.getSettings.pipe(
+            Effect.map((current) =>
+              resolveProjectScripts(current, {
+                id: project.value.projectId,
+                scripts: project.value.scripts,
+              }),
             ),
-          ),
-        );
+            Effect.orElseSucceed(() => project.value.scripts),
+          )
+        : project.value.scripts;
+      const script = setupProjectScript(scripts);
+      return script === null ? null : { name: script.name, command: script.command };
+    });
 
     /** Puts the Thread on its target in one batch; then the source's sessions let go of it. */
     const switchOver = Effect.fn("ThreadMoves.switchOver")(function* (
@@ -411,7 +615,7 @@ export const layer: Layer.Layer<
         | {
             readonly thread: OrchestrationV2AppThread;
             readonly move: OrchestrationV2ThreadMove;
-            readonly sessionIds: ReadonlyArray<OrchestrationV2DomainEvent["threadId"] | string>;
+            readonly sessionIds: ReadonlyArray<ProviderSessionId>;
           }
         | undefined;
       yield* update(threadId, moveId, ({ thread, move, now }) =>
@@ -444,41 +648,13 @@ export const layer: Layer.Layer<
             ...(move.targetEnvironmentId === HUB_MACHINE_ENVIRONMENT_ID
               ? {}
               : { activeEnvironmentId: move.targetEnvironmentId }),
-            ...(thread.worktreePath !== null && move.targetWorktreePath !== undefined
-              ? { worktreePath: move.targetWorktreePath }
-              : {}),
+            // A moved Thread always works in its own worktree on the target.
+            ...(move.targetWorktreePath === undefined
+              ? {}
+              : { worktreePath: move.targetWorktreePath }),
             // The source's native conversation stays there; the target starts its own.
             activeProviderThreadId: null,
             move: next,
-          };
-          const item: OrchestrationV2TurnItem = {
-            id: TurnItemId.make(`turn-item:environment-move:${moveId}`),
-            threadId,
-            runId: latestRun?.id ?? null,
-            nodeId: null,
-            providerThreadId: null,
-            providerTurnId: null,
-            nativeItemRef: null,
-            parentItemId: null,
-            ordinal: 0,
-            status: "completed",
-            title: `Moved from ${sourceName} to ${targetName}`,
-            startedAt: now,
-            completedAt: now,
-            updatedAt: now,
-            type: "environment_move",
-            moveId,
-            sourceEnvironmentId: move.sourceEnvironmentId,
-            sourceEnvironmentName: sourceName,
-            targetEnvironmentId: move.targetEnvironmentId,
-            targetEnvironmentName: targetName,
-            ...(move.actorUserId === undefined ? {} : { actorUserId: move.actorUserId }),
-            ...(actorName === undefined ? {} : { actorName }),
-            continuesFrom,
-            sourceOffline: move.sourceOffline === true,
-            ...(move.setAsideRefs === undefined || move.setAsideRefs.length === 0
-              ? {}
-              : { setAsideRefs: move.setAsideRefs }),
           };
           const extra: Array<OrchestrationV2DomainEvent> = [];
           for (const session of live) {
@@ -496,15 +672,27 @@ export const layer: Layer.Layer<
               },
             });
           }
-          extra.push({
-            id: yield* ids.allocate.event({ threadId }).pipe(Effect.orDie),
-            type: "turn-item.updated",
-            threadId,
-            ...(latestRun === undefined ? {} : { runId: latestRun.id }),
-            providerInstanceId: thread.providerInstanceId,
-            occurredAt: now,
-            payload: item,
-          });
+          extra.push(
+            yield* timelineEvent(thread, now, latestRun?.id ?? null, (base) => ({
+              ...base,
+              id: TurnItemId.make(`turn-item:environment-move:${moveId}`),
+              status: "completed",
+              title: `Moved from ${sourceName} to ${targetName}`,
+              type: "environment_move",
+              moveId,
+              sourceEnvironmentId: move.sourceEnvironmentId,
+              sourceEnvironmentName: sourceName,
+              targetEnvironmentId: move.targetEnvironmentId,
+              targetEnvironmentName: targetName,
+              ...(move.actorUserId === undefined ? {} : { actorUserId: move.actorUserId }),
+              ...(actorName === undefined ? {} : { actorName }),
+              continuesFrom,
+              sourceOffline: move.sourceOffline === true,
+              ...(move.setAsideRefs === undefined || move.setAsideRefs.length === 0
+                ? {}
+                : { setAsideRefs: move.setAsideRefs }),
+            })),
+          );
           switched = { thread: moved, move: next, sessionIds: live.map((session) => session.id) };
           return { thread: moved, extra };
         }),
@@ -514,13 +702,14 @@ export const layer: Layer.Layer<
       // Calls and events are checked anew: the source's late events are refused from now on.
       if (Option.isSome(remote)) yield* remote.value.threadMoved(threadId);
       yield* recordAudit(done.thread, done.move, "switched");
+      yield* resumeQueue;
       // The source's sessions let go of the Thread; an offline source drops them when it returns.
       yield* Effect.forEach(
         done.sessionIds,
         (providerSessionId) =>
           sessions
             .detach({
-              providerSessionId: providerSessionId as never,
+              providerSessionId,
               threadId,
               detail: "The Thread moved to another Environment.",
             })
@@ -538,36 +727,69 @@ export const layer: Layer.Layer<
       ).pipe(Effect.forkIn(scope));
     });
 
+    /** A cancelled move: its timeline entry and audit, then the queue goes on where it runs. */
+    const cancelled = Effect.fn("ThreadMoves.cancelled")(function* (
+      thread: OrchestrationV2AppThread,
+      move: OrchestrationV2ThreadMove,
+    ) {
+      const now = yield* DateTime.now;
+      const latestRun = yield* latestRunOf(thread.id);
+      const sourceName = yield* nameOf(move.sourceEnvironmentId);
+      const targetName = yield* nameOf(move.targetEnvironmentId);
+      const actorName = yield* actorNameOf(move.actorUserId);
+      yield* eventSink.write({
+        events: [
+          yield* timelineEvent(thread, now, latestRun?.id ?? null, (base) => ({
+            ...base,
+            id: TurnItemId.make(`turn-item:environment-move:${move.id}`),
+            status: "completed",
+            title: `Move to ${targetName} cancelled`,
+            type: "environment_move",
+            moveId: move.id,
+            sourceEnvironmentId: move.sourceEnvironmentId,
+            sourceEnvironmentName: sourceName,
+            targetEnvironmentId: move.targetEnvironmentId,
+            targetEnvironmentName: targetName,
+            ...(move.actorUserId === undefined ? {} : { actorUserId: move.actorUserId }),
+            ...(actorName === undefined ? {} : { actorName }),
+            continuesFrom: move.continuesFrom ?? { kind: "none", ref: null, appRunOrdinal: null },
+            sourceOffline: move.sourceOffline === true,
+            outcome: "cancelled",
+          })),
+        ],
+      });
+      yield* recordAudit(thread, move, "cancelled");
+      yield* resumeQueue;
+    });
+
     const prepare = Effect.fn("ThreadMoves.prepare")(function* (
       thread: OrchestrationV2AppThread,
       move: OrchestrationV2ThreadMove,
     ) {
       const target = yield* targetOf(move);
-      const { checkout } = yield* asFailure(
-        target.workspace.move.fetch({ projectId: thread.projectId, refs: [] }),
-      );
-      const project = yield* projects.get(thread.projectId).pipe(Effect.option);
-      const script = Option.match(Option.flatten(project), {
-        onNone: () => null,
-        onSome: (found) => setupProjectScript(found.scripts),
-      });
+      const checkout =
+        move.targetCheckout ??
+        (yield* asFailure(target.workspace.move.fetch({ projectId: thread.projectId, refs: [] })))
+          .checkout;
       return yield* asFailure(
         target.workspace.move.prepare({
           checkout,
+          projectId: thread.projectId,
+          threadId: thread.id,
           ref: move.continuesFrom?.ref ?? null,
           branch: thread.branch,
-          worktree:
-            thread.worktreePath === null
-              ? null
-              : { name: baseName(thread.worktreePath), path: null },
+          knownWorktree: move.knownWorktrees?.[move.targetEnvironmentId] ?? null,
           setAsidePrefix: HubRepository.threadRefPrefixes(thread.id)[1],
-          setupScript: script === null ? null : { name: script.name, command: script.command },
+          setupScript: yield* setupScriptOf(thread),
         }),
       );
     });
 
     /** The workflow from the step the Thread records, to the switch or a failure. */
-    const runMove = Effect.fn("ThreadMoves.run")(function* (threadId: ThreadId) {
+    const runMove = Effect.fn("ThreadMoves.run")(function* (
+      threadId: ThreadId,
+      restarted: boolean,
+    ) {
       while (true) {
         const found = yield* current(threadId);
         if (Option.isNone(found)) return;
@@ -575,20 +797,22 @@ export const layer: Layer.Layer<
         const failed = (error: MoveStepFailure) =>
           fail(threadId, move.id, move.step, error.message);
         switch (move.step) {
-          case "waiting-for-turn": {
-            yield* waitForTurn(threadId, move);
-            const online =
-              move.sourceEnvironmentId !== null &&
-              Option.isSome(yield* Effect.option(registry.get(move.sourceEnvironmentId)));
-            yield* advance(
-              threadId,
-              move.id,
-              online ? { step: "final-checkpoint" } : { step: "fetching", sourceOffline: true },
-            );
+          case "waiting-for-turn":
+            yield* waitForTurn(threadId, move, restarted);
             break;
-          }
           case "final-checkpoint": {
-            const outcome = yield* Effect.result(finalCheckpoint(thread, move));
+            let outcome = yield* Effect.result(finalCheckpoint(thread, move, restarted));
+            // After a restart the source's old socket may still be closing when the move asks:
+            // it gets the grace to come back before the move goes on without it.
+            if (
+              restarted &&
+              outcome._tag === "Failure" &&
+              isSourceOffline(outcome.failure) &&
+              move.sourceEnvironmentId !== null
+            ) {
+              yield* awaitReconnect(move.sourceEnvironmentId);
+              outcome = yield* Effect.result(finalCheckpoint(thread, move, restarted));
+            }
             if (outcome._tag === "Success") {
               yield* advance(threadId, move.id, {
                 step: "fetching",
@@ -611,7 +835,7 @@ export const layer: Layer.Layer<
               ));
             if (move.continuesFrom === undefined) {
               // Recorded before it is fetched, so the Thread shows what it will continue from.
-              yield* advance(threadId, move.id, { step: "fetching", continuesFrom });
+              yield* advance(threadId, move.id, { continuesFrom });
             }
             const fetched = yield* Effect.result(
               targetOf(move).pipe(
@@ -626,19 +850,46 @@ export const layer: Layer.Layer<
               ),
             );
             if (fetched._tag === "Failure") return yield* failed(fetched.failure);
-            yield* advance(threadId, move.id, { step: "preparing" });
+            yield* advance(threadId, move.id, {
+              step: "preparing",
+              targetCheckout: fetched.success.checkout,
+            });
             break;
           }
           case "preparing": {
             const prepared = yield* Effect.result(prepare(thread, move));
             if (prepared._tag === "Failure") return yield* failed(prepared.failure);
-            yield* advance(threadId, move.id, {
-              step: "handoff",
-              ...(prepared.success.setAsideRefs.length === 0
-                ? {}
-                : { setAsideRefs: prepared.success.setAsideRefs }),
-              ...(thread.worktreePath === null ? {} : { targetWorktreePath: prepared.success.cwd }),
-            });
+            const { setupScript } = prepared.success;
+            yield* advance(
+              threadId,
+              move.id,
+              {
+                step: "handoff",
+                targetWorktreePath: prepared.success.cwd,
+                ...(prepared.success.setAsideRefs.length === 0
+                  ? {}
+                  : { setAsideRefs: prepared.success.setAsideRefs }),
+              },
+              // The setup script's output shows in the Thread, as normal setup's does.
+              setupScript.status !== "succeeded"
+                ? undefined
+                : (now) =>
+                    latestRunOf(threadId).pipe(
+                      Effect.flatMap((latestRun) =>
+                        timelineEvent(thread, now, latestRun?.id ?? null, (base) => ({
+                          ...base,
+                          id: TurnItemId.make(`turn-item:environment-move-setup:${move.id}`),
+                          status: "completed",
+                          title: `Setup script: ${setupScript.name ?? "setup"}`,
+                          type: "command_execution",
+                          input: `Setup script: ${setupScript.name ?? "setup"}`,
+                          output: setupScript.output ?? "",
+                          exitCode: 0,
+                        })),
+                      ),
+                      Effect.map((event) => [event]),
+                    ),
+            );
             break;
           }
           // Ticket 09 hands the agent on the target the conversation here.
@@ -652,11 +903,11 @@ export const layer: Layer.Layer<
       }
     });
 
-    const resume: ThreadMovesShape["resume"] = (threadId) =>
+    const resume: ThreadMovesShape["resume"] = (threadId, options) =>
       Effect.suspend(() => {
         if (running.has(threadId)) return Effect.void;
         running.add(threadId);
-        return runMove(threadId).pipe(
+        return runMove(threadId, options?.restarted === true).pipe(
           Effect.catchCause((cause) =>
             Cause.hasInterruptsOnly(cause)
               ? Effect.void
@@ -680,15 +931,28 @@ export const layer: Layer.Layer<
         );
       });
 
-    // A move starts as soon as the Orchestrator records it.
+    // A move starts as soon as the Orchestrator records it; a cancelled one is noted.
     yield* orchestrator.streamDomainEvents.pipe(
-      Stream.filter(
-        (event) =>
-          event.type === "thread.move-updated" &&
-          event.payload.move?.status === "running" &&
-          event.payload.move.step === "waiting-for-turn",
-      ),
-      Stream.runForEach((event) => resume(event.threadId)),
+      Stream.runForEach((event) => {
+        if (event.type !== "thread.move-updated") return Effect.void;
+        const move = event.payload.move;
+        if (move == null) return Effect.void;
+        if (move.status === "cancelled") {
+          return cancelled(event.payload, move).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Could not note a cancelled Thread move", {
+                cause: Cause.pretty(cause),
+              }),
+            ),
+          );
+        }
+        if (move.status !== "running" || move.step !== "waiting-for-turn" || move.waitingOn) {
+          return Effect.void;
+        }
+        return recordAudit(event.payload, move, "started").pipe(
+          Effect.andThen(resume(event.threadId)),
+        );
+      }),
       Effect.catchCause((cause) =>
         Effect.logWarning("Thread moves stopped following the orchestration", {
           cause: Cause.pretty(cause),
@@ -697,13 +961,16 @@ export const layer: Layer.Layer<
       Effect.forkIn(scope),
     );
 
-    // Moves a previous run left in progress go on from the step they recorded.
+    // Moves a previous run left in progress go on from the step they recorded, once their
+    // machines had the chance to say hello again.
     yield* sql<{ readonly threadId: string }>`
       SELECT thread_id AS "threadId" FROM orchestration_v2_projection_threads
       WHERE json_extract(payload_json, '$.move.status') = 'running'
     `.pipe(
       Effect.flatMap((rows) =>
-        Effect.forEach(rows, (row) => resume(ThreadId.make(row.threadId)), { discard: true }),
+        Effect.forEach(rows, (row) => resume(ThreadId.make(row.threadId), { restarted: true }), {
+          discard: true,
+        }),
       ),
       Effect.catchCause((cause) =>
         Effect.logWarning("Could not list the Thread moves left in progress", { cause }),

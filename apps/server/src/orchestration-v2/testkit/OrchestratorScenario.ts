@@ -137,6 +137,7 @@ function commandThreadIds(command: OrchestrationV2Command): ReadonlyArray<Thread
     case "thread.create":
     case "thread.stop":
     case "thread.move":
+    case "thread.move.cancel":
     case "thread.archive":
     case "thread.unarchive":
     case "thread.delete":

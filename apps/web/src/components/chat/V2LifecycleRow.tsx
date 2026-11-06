@@ -94,6 +94,15 @@ export function V2LifecycleRow(props: {
     );
   }
   if (item.type === "environment_move") {
+    if (item.outcome === "cancelled") {
+      return (
+        <TimelineSystemDivider
+          label={`Move to ${item.targetEnvironmentName} cancelled`}
+          detail={item.actorName === undefined ? null : `by ${item.actorName}`}
+          icon={ArrowRightLeftIcon}
+        />
+      );
+    }
     const continuesFrom =
       item.continuesFrom.kind === "final"
         ? "continues from a final checkpoint"

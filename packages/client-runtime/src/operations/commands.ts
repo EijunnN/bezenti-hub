@@ -517,6 +517,17 @@ export const moveThread = Effect.fn("EnvironmentCommands.moveThread")(function* 
   });
 });
 
+/** Stops the Thread's running move before it switches; the Thread stays where it was. */
+export const cancelThreadMove = Effect.fn("EnvironmentCommands.cancelThreadMove")(function* (
+  input: ThreadCommandInput,
+) {
+  return yield* dispatch({
+    type: "thread.move.cancel",
+    commandId: yield* allocateCommandId(input),
+    threadId: input.threadId,
+  });
+});
+
 export const archiveThread = Effect.fn("EnvironmentCommands.archiveThread")(function* (
   input: ArchiveThreadInput,
 ) {

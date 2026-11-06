@@ -192,39 +192,54 @@ then they run on the Thread's Active environment. A restore whose ref is missing
 `thread.move { threadId, targetEnvironmentId, ifRunning }` is a client command. The Hub checks the
 target first (`ThreadManagementService`: the sender may use it, it is online and has the Thread's
 provider, as for placing a new Thread), then the Orchestrator applies the Role rules of continuing
-the Thread (`commandAccess.ts`), refuses a second move while one runs, and records the move on the
-Thread (`thread.move-updated`, field `move`) at its first step. Everything else is
+the Thread (`commandAccess.ts`), refuses a move without its User or while one runs, and records the
+move on the Thread (`thread.move-updated`, field `move`) at its first step. Everything else is
 [ThreadMoveService](../../apps/server/src/orchestration-v2/ThreadMoveService.ts), outside the
 effect lane: each step is written to the Thread under its lock, so clients show it and a restart
-resumes from the recorded step.
+resumes from the recorded step. While a move runs, the Orchestrator refuses whatever would start or
+continue work on the source (`BLOCKED_WHILE_MOVING`: messages, the queue, prepared-run retries,
+rollbacks, forks, provider switches; answering the running turn's requests stays allowed while the
+move waits for it) and holds the queue, which resumes on wherever the Thread runs once the move ends.
 
-1. `waiting-for-turn`: until the Thread has no unfinished run; with `stop` it sends `thread.stop`
-   once. New messages are refused while a move runs, since they would start on the source.
+1. `waiting-for-turn`: the service asks the Orchestrator to leave it (`thread.move.advance`),
+   which decides with the Thread's runs, so no run starts between the check and the step. It wakes
+   on each change to the Thread's runs, says when the turn waits on the User (`waitingOn`), and
+   with `stop` sends `thread.stop` once.
 2. `final-checkpoint`: only with the source online. The source captures its workspace (manual
    changes included) to `refs/t3/threads/<id>/moves/<moveId>`, one ref per move so a fetch never
    sees a stale one, and pushes it. An offline source (or one that drops here) skips the step.
 3. `fetching`: the move records what it continues from (`continuesFrom`: that final checkpoint,
    else the newest checkpoint marked uploaded, else nothing) and the target fetches it into the
-   Project's checkout, cloning it first when the machine has none (`move.fetch`).
+   Project's checkout, cloning it first when the machine has none (`move.fetch`); the checkout is
+   recorded (`targetCheckout`).
 4. `preparing` (`move.prepare`, [MovedWorkspace](../../apps/server/src/environment/MovedWorkspace.ts)):
-   the Thread's branch is made or moved to the commit the checkpoint was captured on, a Thread
-   with a worktree gets one in the machine's worktrees folder, the checkpoint's files are laid
-   over it, and the Project's setup script runs. Whatever the target's workspace had that HEAD
-   lacks, and branch commits the source never had, are kept under `refs/t3/recovered/<id>/` on
-   that machine first (`setAsideRefs`), never discarded.
+   the Thread always gets a worktree of its own on the target,
+   `<worktrees>/<project id>/<thread id>`, never the Project's shared checkout. One is reused only
+   if that checkout's `git worktree list` names it (a worktree it had there before, kept in
+   `knownWorktrees`); a folder there that it does not name is refused. A branch the target had
+   that the source's commit does not contain is kept under
+   `refs/t3/recovered/<id>/<time>/branch/<branch>` first, a reused worktree's changes under
+   `.../workspace`; a branch checked out in another worktree leaves this one detached. The
+   checkpoint's files are laid over it and, in a new worktree only, the Project's setup script
+   runs (resolved with the User's settings, with a terminal's environment); its output is a
+   timeline item. A worktree the move made is removed if a later part fails.
 5. `handoff`: empty for now; ticket 09 hands the agent on the target the conversation here.
-6. `switched`: one batch sets `activeEnvironmentId` (and the worktree, stored as the target's
-   host path), clears `activeProviderThreadId` so the next turn opens a new native conversation on
-   the target, detaches the Thread's provider sessions (`provider-session.detached`) and adds the
-   timeline entry (`environment_move`: source, target, actor, `continuesFrom`). Then
-   `RemoteEnvironments.threadMoved` drops the cached Active environment, so the source's late events
-   are refused, and each source session is detached outside the effect lane (an offline source
-   drops it on reconnect, when the Hub no longer has it). The audit log records `thread.move` when
-   it switches or fails.
+6. `switched`: one batch sets `activeEnvironmentId` and the Thread's worktree (stored as the
+   target's host path), clears `activeProviderThreadId` so the next turn opens a new native
+   conversation on the target, detaches the Thread's provider sessions
+   (`provider-session.detached`) and adds the timeline entry (`environment_move`: source, target,
+   actor, `continuesFrom`). Then `RemoteEnvironments.threadMoved` drops the cached Active
+   environment, so the source's late events are refused, and each source session is detached
+   outside the effect lane (an offline source drops it on reconnect).
 
-A failure before `switched` marks the move `failed` with the step and git's or the script's
-message; the Thread never left its source. Scope cwds recorded before a move are still the source
-machine's paths, so rolling back to a turn from before the move is not supported yet.
+`thread.move.cancel` (same rule as moving) ends a running move before `switched`; the Thread stays
+where it was and the timeline says «Move to X cancelled». A failure before `switched` marks the
+move `failed` with the step and git's or the script's message. The audit log records `thread.move`
+when it starts, switches, fails or is cancelled, with the allow-listed detail. After a restart a
+machine that has not said hello yet is unknown, not offline: the move gives each one a minute
+(`RECONNECT_GRACE`) before going on without the source or failing for the target. Scope cwds
+recorded before a move are still the source machine's paths, so rolling back to a turn from before
+the move is not supported yet.
 
 ### Workspace RPCs
 

@@ -554,6 +554,26 @@ const STARTS_WORK: ReadonlySet<OrchestrationV2ServerCommand["type"]> = new Set([
   "delegated_task.remote.request",
 ]);
 
+/**
+ * Commands that start or continue work on the Thread's machine: refused while the Thread moves,
+ * since they would run on the machine it is leaving. Answering a request of the running turn is
+ * still allowed while the move waits for that turn.
+ */
+const BLOCKED_WHILE_MOVING: ReadonlySet<OrchestrationV2ServerCommand["type"]> = new Set([
+  "message.dispatch",
+  "queue.resume",
+  "queued-run.start",
+  "queued-message.promote-to-steer",
+  "prepared-run.retry",
+  "prepared-run.release",
+  "notification.delivery.accept",
+  "runtime-request.respond",
+  "checkpoint.rollback",
+  "provider.switch",
+  "thread.fork",
+  "thread.merge_back",
+]);
+
 function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   switch (command.type) {
     case "thread.create":
@@ -588,6 +608,8 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.title.regeneration.complete":
     case "thread.project.adopt-folder":
     case "thread.move":
+    case "thread.move.cancel":
+    case "thread.move.advance":
     case "thread.runtime-mode.set":
     case "thread.interaction-mode.set":
     case "thread.model-selection.set":
@@ -1679,7 +1701,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (
         projection.thread.archivedAt !== null ||
         projection.thread.deletedAt !== null ||
-        projection.runs.some(isActiveRun)
+        projection.runs.some(isActiveRun) ||
+        // The queue starts where the Thread runs once its move ends (`ThreadMoveService`).
+        projection.thread.move?.status === "running"
       ) {
         return;
       }
@@ -4439,6 +4463,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ),
       );
     if (thread.deletedAt !== null) return yield* reject("This Thread was deleted.");
+    // The audit log names who moved it: a move without its User is refused, never anonymous.
+    if (command.ownerUserId === undefined) {
+      return yield* reject("Only a signed-in User can move a Thread.");
+    }
     if (thread.move?.status === "running") {
       return yield* reject(
         "This Thread is already moving to another Environment. Wait for that move to finish.",
@@ -4453,6 +4481,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     const now = yield* DateTime.now;
     const at = DateTime.formatIso(now);
+    // Where the Thread's worktree was on each machine, so returning to one reuses it.
+    const knownWorktrees = {
+      ...thread.move?.knownWorktrees,
+      ...(source === null || thread.worktreePath === null ? {} : { [source]: thread.worktreePath }),
+    };
     yield* emit(
       events,
       command,
@@ -4468,15 +4501,110 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           sourceEnvironmentId: source,
           targetEnvironmentId: command.targetEnvironmentId,
           ifRunning: command.ifRunning ?? "wait",
-          ...(command.ownerUserId === undefined ? {} : { actorUserId: command.ownerUserId }),
+          actorUserId: command.ownerUserId,
           step: "waiting-for-turn",
           status: "running",
           startedAt: at,
           updatedAt: at,
+          ...(Object.keys(knownWorktrees).length === 0 ? {} : { knownWorktrees }),
         },
       },
     });
   });
+
+  /** Stops a running move before it switches; `ThreadMoveService` notes it in the timeline. */
+  const dispatchThreadMoveCancel = Effect.fn("orchestrationV2.dispatch.threadMoveCancel")(
+    function* (
+      command: Extract<OrchestrationV2ServerCommand, { readonly type: "thread.move.cancel" }>,
+      events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    ) {
+      const thread = yield* projectionStore
+        .getThread(command.threadId)
+        .pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+          ),
+        );
+      const move = thread.move;
+      if (move == null || move.status !== "running") {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "This Thread has no move running.",
+        });
+      }
+      const now = yield* DateTime.now;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.move-updated",
+        threadId: command.threadId,
+        providerInstanceId: thread.providerInstanceId,
+        occurredAt: now,
+        payload: {
+          ...thread,
+          move: { ...move, status: "cancelled", updatedAt: DateTime.formatIso(now) },
+        },
+      });
+    },
+  );
+
+  /** The move leaves `waiting-for-turn` only while no run is unfinished, decided with the runs. */
+  const dispatchThreadMoveAdvance = Effect.fn("orchestrationV2.dispatch.threadMoveAdvance")(
+    function* (
+      command: Extract<OrchestrationV2ServerCommand, { readonly type: "thread.move.advance" }>,
+      events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    ) {
+      const reject = (cause: string) =>
+        new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause,
+        });
+      const projection = yield* projectionStore
+        .getThreadRecords(command.threadId, ["runs"], { turnItemTypes: [] })
+        .pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+          ),
+        );
+      const { thread } = projection;
+      const move = thread.move;
+      if (
+        move == null ||
+        move.id !== command.moveId ||
+        move.status !== "running" ||
+        move.step !== "waiting-for-turn"
+      ) {
+        return yield* reject("The move is no longer waiting for the turn.");
+      }
+      if (projection.runs.some(isActiveRun)) {
+        return yield* reject("The Thread's turn has not finished.");
+      }
+      const now = yield* DateTime.now;
+      const { waitingOn: _waitingOn, ...rest } = move;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.move-updated",
+        threadId: command.threadId,
+        providerInstanceId: thread.providerInstanceId,
+        occurredAt: now,
+        payload: {
+          ...thread,
+          move: {
+            ...rest,
+            ...(command.sourceOnline
+              ? { step: "final-checkpoint" as const }
+              : { step: "fetching" as const, sourceOffline: true }),
+            updatedAt: DateTime.formatIso(now),
+          },
+        },
+      });
+    },
+  );
 
   const refuseAboveDispatchModeLimit = Effect.fn("orchestrationV2.dispatch.refuseAboveModeLimit")(
     function* (
@@ -13367,6 +13495,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.move":
         yield* dispatchThreadMove(command, events);
         break;
+      case "thread.move.cancel":
+        yield* dispatchThreadMoveCancel(command, events);
+        break;
+      case "thread.move.advance":
+        yield* dispatchThreadMoveAdvance(command, events);
+        break;
       case "message.dispatch": {
         // Providers own native subagent conversations; messages cannot target them, and adapters ask questions on the parent.
         const thread = yield* projectionStore
@@ -13678,6 +13812,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
           );
         }
+      }
+    }
+
+    // Nothing starts or goes on on the machine a Thread is leaving, whoever asks.
+    if (BLOCKED_WHILE_MOVING.has(command.type)) {
+      const movingThreadId =
+        command.type === "thread.fork" ? command.sourceThreadId : commandThreadId(command);
+      const moving = yield* projectionStore.getThread(movingThreadId).pipe(Effect.option);
+      const move = Option.isSome(moving) ? moving.value.move : null;
+      if (
+        move != null &&
+        move.status === "running" &&
+        // The running turn's own questions are answered so it can finish.
+        !(command.type === "runtime-request.respond" && move.step === "waiting-for-turn")
+      ) {
+        return yield* rejected(
+          "This Thread is moving to another Environment. Try again once the move is done.",
+        );
       }
     }
 

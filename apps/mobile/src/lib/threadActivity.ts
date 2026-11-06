@@ -616,7 +616,9 @@ function itemSummary(
     case "handoff":
       return "Context handed off";
     case "environment_move":
-      return `Moved from ${item.sourceEnvironmentName} to ${item.targetEnvironmentName}`;
+      return item.outcome === "cancelled"
+        ? `Move to ${item.targetEnvironmentName} cancelled`
+        : `Moved from ${item.sourceEnvironmentName} to ${item.targetEnvironmentName}`;
     case "fork":
       return "Thread forked";
     case "thread_created":

@@ -498,15 +498,20 @@ dialog lists the machines you can use with their status, and explains what will
 happen; pick one and choose **Move Thread**. If a turn is running you choose
 between **Wait for the turn to finish** (the default) and **Stop the turn**.
 
-The Thread's header and the dialog show each step: finishing the turn, uploading
-a final checkpoint, fetching it, preparing the workspace, and ready. When the
-machine it leaves is online it first uploads everything in the workspace,
-including changes you made by hand. The new machine fetches it, recreates the
-Thread's branch or worktree, and runs the Project's setup script, which also
-rebuilds ignored files such as dependencies. If the old machine is off, the move
-continues from the last checkpoint it uploaded and says which turn that was.
-Anything the new machine already had in its copy of the Project is kept under a
-`refs/t3/recovered/...` ref there and named in the dialog, never thrown away.
+The Thread's header and the dialog show each step: finishing the turn (or waiting
+for your answer, when the turn asked you something), uploading a final checkpoint,
+fetching it, preparing the workspace, and ready. **Cancel move**, in the header or
+the dialog, stops it before it switches; the Thread stays where it was. While a
+Thread moves it takes no new messages, and messages already queued start on the
+new machine. When the machine it leaves is online it first uploads everything in
+the workspace, including changes you made by hand. On the new machine the Thread
+gets a worktree of its own (your shared copy of the Project there is never
+changed), with its branch, the files from the checkpoint, and the Project's setup
+script run in it, which also rebuilds ignored files such as dependencies; the
+script's output shows in the Thread. If the old machine is off, the move continues
+from the last checkpoint it uploaded and says which turn that was. A branch the
+new machine had with commits of its own is kept under a `refs/t3/recovered/...`
+ref there and named in the dialog, never thrown away.
 
 The Thread's link stays the same, and its timeline shows **Moved from Laptop to
 Hub machine** (with who moved it and what it continues from). The next turn runs

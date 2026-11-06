@@ -96,8 +96,21 @@ export const AUDIT_DETAIL_KEYS = {
   "environment.rename": ["from", "to"],
   /** `settings` from the Hub, `leave` from the machine, `userTurnedOff` with its owner. */
   "environment.remove": ["via"],
-  /** Environment ids, how it ended, the step that failed, and what the target continues from. */
-  "thread.move": ["from", "to", "outcome", "failedStep", "continuesFrom"],
+  /**
+   * Environment ids; `started`, `switched`, `failed` or `cancelled`; the failed step and its
+   * trimmed message; what the target continues from; whether the source was offline; set-aside refs.
+   */
+  "thread.move": [
+    "from",
+    "to",
+    "outcome",
+    "failedStep",
+    "failureMessage",
+    "continuesFrom",
+    "continuesFromRef",
+    "sourceOffline",
+    "setAside",
+  ],
 } as const satisfies Record<AuditAction, ReadonlyArray<string>>;
 
 export type AuditDetailOf<A extends AuditAction> = {

@@ -948,7 +948,9 @@ function turnItemText(item: OrchestrationV2TurnItem): string | null {
     case "fork":
       return `Forked to thread ${item.targetThreadId}.`;
     case "environment_move":
-      return `Moved from ${item.sourceEnvironmentName} to ${item.targetEnvironmentName}.`;
+      return item.outcome === "cancelled"
+        ? `Move to ${item.targetEnvironmentName} cancelled.`
+        : `Moved from ${item.sourceEnvironmentName} to ${item.targetEnvironmentName}.`;
     case "thread_created":
       return `Created thread ${item.targetThreadId} with ${item.targetProviderInstanceId} (${item.targetModel}).`;
     case "secret_request":

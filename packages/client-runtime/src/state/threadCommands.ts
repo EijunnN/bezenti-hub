@@ -32,6 +32,7 @@ import {
   markThreadUnread,
   mergeThreadBack,
   moveThread,
+  cancelThreadMove,
   promoteQueuedRun,
   resumeThreadQueue,
   retryWorkspacePreparation,
@@ -219,6 +220,12 @@ export function createThreadEnvironmentAtoms<R, E>(
     markUnread: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:mark-unread",
       execute: markThreadUnread,
+      scheduler,
+      concurrency,
+    }),
+    cancelMove: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:cancel-move",
+      execute: cancelThreadMove,
       scheduler,
       concurrency,
     }),

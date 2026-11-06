@@ -399,6 +399,7 @@ interface MoveWorkspaceDeps {
   readonly path: Option.Option<Path.Path>;
   readonly config: Option.Option<ServerConfig.ServerConfig["Service"]>;
   readonly platform: string;
+  readonly home: string;
 }
 
 const moveWorkspaceDeps: Effect.Effect<MoveWorkspaceDeps> = Effect.gen(function* () {
@@ -408,6 +409,7 @@ const moveWorkspaceDeps: Effect.Effect<MoveWorkspaceDeps> = Effect.gen(function*
     path: yield* Effect.serviceOption(Path.Path),
     config: yield* Effect.serviceOption(ServerConfig.ServerConfig),
     platform: yield* HostProcess.Platform,
+    home: yield* HostProcess.HomeDirectory,
   };
 });
 
@@ -421,7 +423,7 @@ const makeMoveWorkspace = (input: {
   readonly hubRepository: EnvironmentHubRepository;
   readonly checkoutOf: (projectId: ProjectId) => Effect.Effect<string, CheckpointStoreError>;
 }): EnvironmentMoveWorkspace => {
-  const { vcs, fileSystem, path, config, platform } = input.deps;
+  const { vcs, fileSystem, path, config, platform, home } = input.deps;
   return {
     fetch: Effect.fn("EnvironmentExecutor.move.fetch")(function* (request) {
       const checkout = yield* input.checkoutOf(request.projectId);
@@ -454,6 +456,14 @@ const makeMoveWorkspace = (input: {
               path: path.value,
               worktreesDir: config.value.worktreesDir,
               platform,
+              // The policy a terminal's shell gets, where the normal setup script runs.
+              scriptEnv: (runtimeEnv) =>
+                TerminalManager.createTerminalSpawnEnv(
+                  process.env,
+                  runtimeEnv,
+                  platform as NodeJS.Platform,
+                  home,
+                ),
             },
             request,
           ),
