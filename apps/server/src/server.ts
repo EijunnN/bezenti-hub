@@ -467,7 +467,7 @@ const layerAuth = Layer.mergeAll(
   MembershipService.layer,
   SpaceVisibility.layer,
 ).pipe(
-  Layer.provideMerge(Layer.merge(EnvironmentAuth.layer, SpaceDirectory.layer)),
+  Layer.provideMerge(EnvironmentAuth.layer.pipe(Layer.provideMerge(SpaceDirectory.layer))),
   Layer.provideMerge(layerPersistence),
   Layer.provide(layerServerEnvironment),
   Layer.provide(ServerSecretStore.layer),

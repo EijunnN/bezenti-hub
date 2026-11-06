@@ -51,6 +51,7 @@ import {
   AuthPasswordSignInRequest,
   AuthPasswordSignInResult,
   AuthRecoveryCodeSignInRequest,
+  AuthResetLinkPasswordRequest,
   AuthResetLinkRedeemRequest,
   AuthResetLinkRequest,
   AuthResetLinkStatus,
@@ -683,6 +684,19 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       payload: AuthResetLinkRedeemRequest,
       success: AuthBrowserSessionResult,
       error: EnvironmentUserSignInErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("redeemResetLinkWithPassword", "/api/auth/reset/password", {
+      payload: AuthResetLinkPasswordRequest,
+      success: AuthBrowserSessionResult,
+      error: [
+        ...EnvironmentUserSignInErrors,
+        // The sign-in name belongs to another User.
+        EnvironmentHttpConflictError,
+        // The Owner's account resets with a passkey.
+        EnvironmentHttpForbiddenError,
+      ],
     }),
   ) {}
 

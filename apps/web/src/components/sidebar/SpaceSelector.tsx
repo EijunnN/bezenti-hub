@@ -6,9 +6,11 @@ import {
   PlusIcon,
   RefreshCwIcon,
   SettingsIcon,
+  ShieldIcon,
   UserIcon,
   UserPlusIcon,
 } from "lucide-react";
+import { Link } from "@tanstack/react-router";
 import { useEffect, useId, useState } from "react";
 
 import { primaryEnvironmentIdAtom } from "../../state/primaryEnvironment";
@@ -81,6 +83,16 @@ export function SpaceSelector() {
 
   return (
     <SidebarMenu>
+      {current?.pendingAdmin === true ? (
+        <SidebarMenuItem>
+          <SidebarMenuButton render={<Link to="/settings/access" />}>
+            <ShieldIcon />
+            <span className="min-w-0 flex-1 truncate">
+              Set up an authenticator app to become Admin
+            </span>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+      ) : null}
       <SidebarMenuItem>
         <Menu
           onOpenChange={(open) => {

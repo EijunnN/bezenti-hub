@@ -8,6 +8,8 @@ import {
   type CreationOptions,
   isSignedIn,
   makeAuthenticator,
+  passkeyReauth,
+  type RequestOptions,
   type Server,
   serveAuthHttp,
   totpCode,
@@ -78,18 +80,33 @@ const membersOf = (server: Server, cookie: string, spaceId: string) =>
       ),
     );
 
-/** Signs in with a password, setting up the authenticator app the account now needs. */
-const signInSettingUpTotp = Effect.fn(function* (server: Server, loginName: string) {
-  const started = yield* server.request("/api/auth/password/sign-in", {
-    body: { loginName, password: PASSWORD },
+/** Adds an authenticator app from a signed-in session, proving the password first. */
+const enrollTotp = Effect.fn(function* (server: Server, cookie: string) {
+  const enrollment = yield* server.request("/api/auth/account/totp/enrollment", {
+    body: {},
+    cookie,
   });
-  expect(started.body).toMatchObject({ authenticated: false, secondFactor: "totp-setup" });
-  const code = yield* totpCode(started.body.secret as string, yield* Clock.currentTimeMillis);
-  const finished = yield* server.request("/api/auth/password/totp", {
-    body: { challengeId: started.body.challengeId, code },
+  const confirmed = yield* server.request("/api/auth/account/totp", {
+    body: {
+      enrollmentId: enrollment.body.enrollmentId,
+      code: yield* totpCode(enrollment.body.secret as string, yield* Clock.currentTimeMillis),
+      reauth: { method: "password", password: PASSWORD },
+    },
+    cookie,
   });
-  expect(finished.status).toBe(200);
-  return finished.cookie ?? "";
+  expect(confirmed.body).toMatchObject({ totpEnrolled: true });
+});
+
+/** A password-only User made Admin by the Owner, who then adds an authenticator app. */
+const promotedAdmin = Effect.fn(function* (
+  server: Server,
+  owner: string,
+  spaceId: string,
+  member: { readonly cookie: string; readonly userId: string },
+) {
+  expect((yield* roleChange(server, owner, spaceId, member.userId, "admin")).status).toBe(200);
+  yield* enrollTotp(server, member.cookie);
+  return member.cookie;
 });
 
 it.effect("an Admin invites Members and Guests and manages them, but never an Admin", () =>
@@ -97,9 +114,8 @@ it.effect("an Admin invites Members and Guests and manages them, but never an Ad
     const { server, owner, acmeId } = yield* ownerWithOrganization;
     const ada = yield* invited(server, owner, acmeId, "ada");
     const hedy = yield* invited(server, owner, acmeId, "hedy");
-    expect((yield* roleChange(server, owner, acmeId, ada.userId, "admin")).status).toBe(200);
-    expect((yield* roleChange(server, owner, acmeId, hedy.userId, "admin")).status).toBe(200);
-    const admin = yield* signInSettingUpTotp(server, "ada");
+    const admin = yield* promotedAdmin(server, owner, acmeId, ada);
+    yield* promotedAdmin(server, owner, acmeId, hedy);
 
     const grace = yield* invited(server, admin, acmeId, "grace");
     const linus = yield* invited(server, admin, acmeId, "linus", "guest");
@@ -167,50 +183,127 @@ it.effect("an Admin invites Members and Guests and manages them, but never an Ad
   }),
 );
 
-it.effect("becoming an Admin needs a passkey or an authenticator app from the next sign-in", () =>
+it.effect("a password-only User becomes Admin only once they add an authenticator app", () =>
   Effect.gen(function* () {
     const { server, owner, acmeId } = yield* ownerWithOrganization;
     const grace = yield* invited(server, owner, acmeId, "grace");
+    const linus = yield* invited(server, owner, acmeId, "linus");
 
     const promoted = yield* roleChange(server, owner, acmeId, grace.userId, "admin");
     expect(promoted.body).toMatchObject({
-      member: { role: "admin" },
-      mustSetUpStrongSignIn: true,
+      member: { role: "admin", pendingAdmin: true },
+      pendingAdmin: true,
     });
-    // Her password-only session ends; signing in again sets up the app before letting her in.
-    expect(yield* isSignedIn(server, grace.cookie)).toBe(false);
-    const started = yield* server.request("/api/auth/password/sign-in", {
+    // Until then she keeps a Member's rights and her session, and her password alone signs in.
+    expect(yield* isSignedIn(server, grace.cookie)).toBe(true);
+    expect((yield* removal(server, grace.cookie, acmeId, linus.userId)).status).toBe(403);
+    const spaces = yield* server.request("/api/spaces", { cookie: grace.cookie });
+    expect(spaces.body.spaces).toContainEqual(
+      expect.objectContaining({ id: acmeId, role: "member", pendingAdmin: true }),
+    );
+    // Signing in never sets an app up: a stolen password alone makes no Admin.
+    const passwordOnly = yield* server.request("/api/auth/password/sign-in", {
       body: { loginName: "grace", password: PASSWORD },
     });
-    expect(started.body).toMatchObject({ authenticated: false, secondFactor: "totp-setup" });
-    const wrong = yield* server.request("/api/auth/password/totp", {
-      body: { challengeId: started.body.challengeId, code: "000000" },
-    });
-    expect(wrong.status).toBe(401);
-    const code = yield* totpCode(started.body.secret as string, yield* Clock.currentTimeMillis);
-    const finished = yield* server.request("/api/auth/password/totp", {
-      body: { challengeId: started.body.challengeId, code },
-    });
-    expect(finished.status).toBe(200);
-    expect(yield* isSignedIn(server, finished.cookie)).toBe(true);
-    // From now on she signs in with the code, like any Admin.
+    expect(passwordOnly.status).toBe(200);
+    expect(passwordOnly.body).not.toHaveProperty("secondFactor");
+
+    // From her signed-in session, proving her password, she adds the app and is an Admin.
+    yield* enrollTotp(server, grace.cookie);
+    expect((yield* removal(server, grace.cookie, acmeId, linus.userId)).status).toBe(200);
     const again = yield* server.request("/api/auth/password/sign-in", {
       body: { loginName: "grace", password: PASSWORD },
     });
     expect(again.body).toMatchObject({ authenticated: false, secondFactor: "totp" });
-    // A wrong password learns nothing about the setup.
-    const guessed = yield* server.request("/api/auth/password/sign-in", {
-      body: { loginName: "grace", password: "wrong password" },
-    });
-    expect(guessed.body).toMatchObject({ secondFactor: "totp" });
+  }),
+);
 
-    // Demoting keeps her signed in; promoting someone who already has a second factor does too.
-    const demoted = yield* roleChange(server, owner, acmeId, grace.userId, "member");
-    expect(demoted.body).toMatchObject({ mustSetUpStrongSignIn: false });
-    expect((yield* roleChange(server, owner, acmeId, grace.userId, "admin")).body).toMatchObject({
-      mustSetUpStrongSignIn: false,
+it.effect("a User with a passkey is an Admin at once, and their password then needs a code", () =>
+  Effect.gen(function* () {
+    const { server, owner, acmeId } = yield* ownerWithOrganization;
+    const linus = yield* invited(server, owner, acmeId, "linus");
+    const invitation = yield* server.request(`/api/spaces/${acmeId}/invitations`, {
+      body: { role: "member" },
+      cookie: owner,
     });
-    expect(yield* isSignedIn(server, finished.cookie)).toBe(true);
+    const token = invitation.body.token as string;
+    const authenticator = yield* makeAuthenticator();
+    const ceremony = yield* server.request("/api/invitations/registration", {
+      body: { token, displayName: "Grace" },
+    });
+    const accepted = yield* server.request("/api/invitations/accept", {
+      body: {
+        token,
+        method: "passkey",
+        ceremonyId: ceremony.body.ceremonyId,
+        response: yield* Effect.promise(() =>
+          authenticator.create(ceremony.body.options as CreationOptions),
+        ),
+      },
+    });
+    const userId = accepted.body.userId as string;
+    const withPassword = yield* server.request("/api/auth/account/password", {
+      body: {
+        loginName: "grace",
+        password: PASSWORD,
+        reauth: yield* passkeyReauth(server, authenticator),
+      },
+      cookie: accepted.cookie ?? "",
+    });
+    expect(withPassword.status).toBe(200);
+
+    const promoted = yield* roleChange(server, owner, acmeId, userId, "admin");
+    expect(promoted.body).toMatchObject({ member: { pendingAdmin: false }, pendingAdmin: false });
+    // Her sessions may have come from the password alone, so they end; the passkey signs in.
+    expect(yield* isSignedIn(server, accepted.cookie)).toBe(false);
+    const passwordAlone = yield* server.request("/api/auth/password/sign-in", {
+      body: { loginName: "grace", password: PASSWORD },
+    });
+    expect(passwordAlone.status).toBe(403);
+    expect(passwordAlone.body.message).toContain("authenticator app");
+    const challenge = yield* server.request("/api/auth/passkey/challenge", { body: {} });
+    const signedIn = yield* server.request("/api/auth/passkey/sign-in", {
+      body: {
+        ceremonyId: challenge.body.ceremonyId,
+        response: yield* Effect.promise(() =>
+          authenticator.get(challenge.body.options as RequestOptions),
+        ),
+      },
+    });
+    expect(signedIn.status).toBe(200);
+    expect((yield* removal(server, signedIn.cookie ?? "", acmeId, linus.userId)).status).toBe(200);
+  }),
+);
+
+it.effect("changing someone to the Role they have changes nothing", () =>
+  Effect.gen(function* () {
+    const { server, owner, acmeId } = yield* ownerWithOrganization;
+    const grace = yield* invited(server, owner, acmeId, "grace");
+    expect((yield* roleChange(server, owner, acmeId, grace.userId, "member")).status).toBe(200);
+    expect(yield* isSignedIn(server, grace.cookie)).toBe(true);
+  }),
+);
+
+it.effect("removing an Admin revokes the Invitations they made there", () =>
+  Effect.gen(function* () {
+    const { server, owner, acmeId } = yield* ownerWithOrganization;
+    const ada = yield* invited(server, owner, acmeId, "ada");
+    const admin = yield* promotedAdmin(server, owner, acmeId, ada);
+    const adasInvite = yield* server.request(`/api/spaces/${acmeId}/invitations`, {
+      body: { role: "member" },
+      cookie: admin,
+    });
+    const ownersInvite = yield* server.request(`/api/spaces/${acmeId}/invitations`, {
+      body: { role: "guest" },
+      cookie: owner,
+    });
+    expect((yield* removal(server, owner, acmeId, ada.userId)).status).toBe(200);
+    const preview = (token: unknown) =>
+      server
+        .request("/api/invitations/preview", { body: { token } })
+        .pipe(Effect.map((response) => response.body.status));
+    expect(yield* preview(adasInvite.body.token)).toBe("invalid");
+    expect(yield* preview(ownersInvite.body.token)).toBe("valid");
   }),
 );
 
@@ -282,44 +375,82 @@ it.effect(
     }),
 );
 
-it.effect("a Member's reset link from an Admin works once and expires", () =>
-  Effect.gen(function* () {
-    const { server, owner, acmeId } = yield* ownerWithOrganization;
-    const grace = yield* invited(server, owner, acmeId, "grace");
+it.effect(
+  "only the Owner issues reset links; one works once, expires and resets every way in",
+  () =>
+    Effect.gen(function* () {
+      const { server, owner, acmeId } = yield* ownerWithOrganization;
+      const grace = yield* invited(server, owner, acmeId, "grace");
+      const ada = yield* invited(server, owner, acmeId, "ada");
+      const admin = yield* promotedAdmin(server, owner, acmeId, ada);
+      // A reset link takes the account over, so no Admin issues one, nor any Member.
+      expect((yield* resetLink(server, admin, acmeId, grace.userId)).status).toBe(403);
+      expect((yield* resetLink(server, grace.cookie, acmeId, ada.userId)).status).toBe(403);
+      yield* enrollTotp(server, grace.cookie);
 
-    const issued = yield* resetLink(server, owner, acmeId, grace.userId);
-    expect(issued.status).toBe(200);
-    const token = issued.body.token as string;
-    const status = yield* server.request("/api/auth/reset/status", { body: { token } });
-    expect(status.body).toEqual({ status: "valid", displayName: "grace" });
-    const authenticator = yield* makeAuthenticator();
-    const ceremony = yield* server.request("/api/auth/reset/registration", { body: { token } });
-    const response = yield* Effect.promise(() =>
-      authenticator.create(ceremony.body.options as CreationOptions),
-    );
-    const redeemed = yield* server.request("/api/auth/reset", {
-      body: { token, ceremonyId: ceremony.body.ceremonyId, response },
-    });
-    expect(redeemed.status).toBe(200);
-    const session = yield* server.request("/api/auth/session", { cookie: redeemed.cookie ?? "" });
-    expect(session.body).toMatchObject({
-      authenticated: true,
-      userId: grace.userId,
-      isOwner: false,
-    });
-    // Her old sessions end: whoever had them may be who she is locking out.
-    expect(yield* isSignedIn(server, grace.cookie)).toBe(false);
-    const reused = yield* server.request("/api/auth/reset/registration", { body: { token } });
-    expect(reused.status).toBe(401);
+      const issued = yield* resetLink(server, owner, acmeId, grace.userId);
+      expect(issued.status).toBe(200);
+      const token = issued.body.token as string;
+      const status = yield* server.request("/api/auth/reset/status", { body: { token } });
+      expect(status.body).toEqual({
+        status: "valid",
+        displayName: "grace",
+        loginName: "grace",
+        passwordAllowed: true,
+      });
+      // A password-only Member recovers by setting a new password.
+      const redeemed = yield* server.request("/api/auth/reset/password", {
+        body: { token, loginName: "grace", password: "a brand new password" },
+      });
+      expect(redeemed.status).toBe(200);
+      const session = yield* server.request("/api/auth/session", { cookie: redeemed.cookie ?? "" });
+      expect(session.body).toMatchObject({
+        authenticated: true,
+        userId: grace.userId,
+        isOwner: false,
+      });
+      // Her old sessions, password and authenticator app all stop working.
+      expect(yield* isSignedIn(server, grace.cookie)).toBe(false);
+      const oldPassword = yield* server.request("/api/auth/password/sign-in", {
+        body: { loginName: "grace", password: PASSWORD },
+      });
+      expect(oldPassword.status).toBe(401);
+      const newPassword = yield* server.request("/api/auth/password/sign-in", {
+        body: { loginName: "grace", password: "a brand new password" },
+      });
+      expect(newPassword.status).toBe(200);
+      expect(newPassword.body).not.toHaveProperty("secondFactor");
+      const reused = yield* server.request("/api/auth/reset/password", {
+        body: { token, loginName: "grace", password: "yet another password" },
+      });
+      expect(reused.status).toBe(401);
 
-    const expiring = yield* resetLink(server, owner, acmeId, grace.userId);
-    yield* TestClock.adjust("61 minutes");
-    const expired = yield* server.request("/api/auth/reset/status", {
-      body: { token: expiring.body.token },
-    });
-    expect(expired.body).toEqual({ status: "invalid" });
-    // A Member issues none.
-    const linus = yield* invited(server, owner, acmeId, "linus");
-    expect((yield* resetLink(server, linus.cookie, acmeId, grace.userId)).status).toBe(403);
-  }),
+      // Or with a passkey, which ends her password too.
+      const second = (yield* resetLink(server, owner, acmeId, grace.userId)).body.token as string;
+      const authenticator = yield* makeAuthenticator();
+      const ceremony = yield* server.request("/api/auth/reset/registration", {
+        body: { token: second },
+      });
+      const withPasskey = yield* server.request("/api/auth/reset", {
+        body: {
+          token: second,
+          ceremonyId: ceremony.body.ceremonyId,
+          response: yield* Effect.promise(() =>
+            authenticator.create(ceremony.body.options as CreationOptions),
+          ),
+        },
+      });
+      expect(withPasskey.status).toBe(200);
+      const afterPasskey = yield* server.request("/api/auth/password/sign-in", {
+        body: { loginName: "grace", password: "a brand new password" },
+      });
+      expect(afterPasskey.status).toBe(401);
+
+      const expiring = yield* resetLink(server, owner, acmeId, grace.userId);
+      yield* TestClock.adjust("61 minutes");
+      const expired = yield* server.request("/api/auth/reset/status", {
+        body: { token: expiring.body.token },
+      });
+      expect(expired.body).toEqual({ status: "invalid" });
+    }),
 );

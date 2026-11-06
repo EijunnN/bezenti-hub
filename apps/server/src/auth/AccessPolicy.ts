@@ -71,7 +71,7 @@ export type Action =
   | "membership.remove"
   /** Leave the Organization oneself. */
   | "membership.leave"
-  /** Issue a one-time link that lets the Member register a new passkey. */
+  /** Issue a one-time link that resets the Member's sign-in. It takes the account over: Owner only. */
   | "membership.resetLink"
   /** Create or close a guest link (read one Thread for 24h). */
   | "guestLink.create"
@@ -226,8 +226,8 @@ const decideOwned = (principal: Principal, action: Action, item: OwnedResource):
 };
 
 /**
- * Rules on someone's Membership. Anyone leaves; Admins change and remove Members and Guests and
- * issue their reset links, but never touch an Admin or make one: only the Owner does.
+ * Rules on someone's Membership. Anyone leaves; Admins change and remove Members and Guests, but
+ * never touch an Admin or make one, and issue no reset links: only the Owner does.
  */
 const decideMembership = (
   principal: Principal,
@@ -245,6 +245,7 @@ const decideMembership = (
   if (role === undefined) return deny("not-a-member");
   if (role !== "admin") return deny("role-not-allowed");
   if (space.archived) return deny("space-archived");
+  if (action === "membership.resetLink") return deny("owner-only");
   if (target.role === "admin" || target.nextRole === "admin") return deny("owner-only");
   return allow;
 };

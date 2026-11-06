@@ -8,6 +8,7 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
   TrimmedString,
+  UserId,
 } from "./baseSchemas.ts";
 
 /**
@@ -48,6 +49,8 @@ export const ThreadGuestShare = Schema.Struct({
   expiresAt: IsoDateTime,
   /** Set once, when the guest redeems the link. */
   guestName: Schema.NullOr(TrimmedNonEmptyString),
+  /** The User who made the link; it stops working once they may no longer share the Thread. */
+  createdByUserId: Schema.optional(UserId),
   messages: Schema.Array(ThreadGuestMessage),
 });
 export type ThreadGuestShare = typeof ThreadGuestShare.Type;

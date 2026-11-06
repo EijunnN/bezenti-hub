@@ -314,17 +314,20 @@ open device, and what they created stays in the organization. To come back they
 need a new invitation. **Leave organization** at the bottom of the dialog lets
 anyone but the Owner leave.
 
-Someone who becomes an Admin and signs in with only a password is signed out. On
-their next sign-in, after the password, they scan a QR code with an authenticator
-app and enter its code; from then on they sign in with the password and a code,
-or with a passkey.
+An Admin needs a passkey, or a password together with an authenticator app.
+Someone made Admin who signs in with only a password stays a Member until they
+add an app: the sidebar shows **Set up an authenticator app to become Admin**,
+which opens **Settings → Access**. Someone with a passkey is an Admin at once,
+signs in with the passkey, and their password works only once they add an app.
+Invitations an Admin made end when they are removed or are no longer an Admin,
+and so do the guest links they created.
 
-A Member or Guest who can't sign in anymore can ask an Admin or the Owner for a
-reset link: **Reset link** next to their name in **Organization settings**
-creates one. It works once and expires after an hour, lets them register a new
-passkey, and signs out their other devices. Anyone holding the link can take over
-the account, so send it only to them. The Owner also creates reset links for
-Admins.
+Someone who can't sign in anymore can ask the Owner for a reset link: **Reset
+link** next to their name in **Organization settings** creates one. It works once
+and expires after an hour. Opening it lets them register a new passkey, or choose
+**Set a new password instead**; either way their old passkeys, password and
+authenticator app stop working and every device is signed out. Anyone holding the
+link can take over the account, so send it only to them.
 
 ## Next steps
 

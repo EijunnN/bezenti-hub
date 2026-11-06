@@ -28,8 +28,8 @@ import {
   type AuthPasskeySignInRequest,
   type AuthPasswordSignInRequest,
   type AuthResetLinkRedeemRequest,
+  type AuthResetLinkPasswordRequest,
   type AuthSecondFactorRequired,
-  type AuthTotpSetupRequired,
   type AuthTotpSignInRequest,
   type AuthUser,
   DpopFailureReason,
@@ -660,9 +660,10 @@ export class EnvironmentAuth extends Context.Service<
       input: AuthPasswordSignInRequest,
       requestMetadata: AuthRequestMetadata,
     ) => Effect.Effect<
-      UserBrowserSession | { readonly response: AuthSecondFactorRequired | AuthTotpSetupRequired },
+      UserBrowserSession | { readonly response: AuthSecondFactorRequired },
       | ServerAuthInvalidCredentialError
       | ServerAuthInsecureTransportError
+      | UserDirectory.SecondFactorMissingError
       | UserDirectory.SignInThrottledError
       | ServerAuthInternalError
     >;
@@ -695,6 +696,19 @@ export class EnvironmentAuth extends Context.Service<
       | ServerAuthInvalidOriginError
       | ServerAuthInvalidCredentialError
       | ServerAuthInsecureTransportError
+      | ServerAuthInternalError
+    >;
+    /** Spends a reset link on a new password; every old credential and session ends. */
+    readonly redeemResetLinkWithPassword: (
+      request: HttpServerRequest.HttpServerRequest,
+      input: AuthResetLinkPasswordRequest,
+      requestMetadata: AuthRequestMetadata,
+    ) => Effect.Effect<
+      UserBrowserSession,
+      | ServerAuthInvalidCredentialError
+      | ServerAuthInsecureTransportError
+      | UserDirectory.AccountChangeRefusedError
+      | UserDirectory.LoginNameTakenError
       | ServerAuthInternalError
     >;
     /** The page origin a passkey ceremony from this request is bound to. */
@@ -1015,6 +1029,19 @@ export const make = Effect.gen(function* () {
     );
   };
 
+  // The Owner is never replaced, so once read their id is kept for every session check.
+  let cachedOwnerId: UserId | undefined;
+  const knownOwnerId = Effect.suspend(() =>
+    cachedOwnerId !== undefined
+      ? Effect.succeed(cachedOwnerId)
+      : userDirectory.ownerId().pipe(
+          Effect.map((owner) => {
+            if (Option.isSome(owner)) cachedOwnerId = owner.value;
+            return Option.getOrUndefined(owner);
+          }),
+        ),
+  );
+
   const getSessionState: EnvironmentAuth["Service"]["getSessionState"] = Effect.fn(
     "EnvironmentAuth.getSessionState",
   )(function* (request) {
@@ -1027,13 +1054,14 @@ export const make = Effect.gen(function* () {
         ),
       ),
     );
-    // Only the Owner sets the Installation up; clients skip that welcome for everyone else.
+    // Only the Owner sets the Installation up; clients skip that welcome for everyone else. On a
+    // failed read nobody is the Owner, so an invited User never sees the Owner's setup.
     const isOwnerOf = (userId: UserId) =>
-      userDirectory.findUser(userId).pipe(
-        Effect.map((user) => ({ isOwner: Option.isSome(user) && user.value.isOwner })),
+      knownOwnerId.pipe(
+        Effect.map((ownerId) => ({ isOwner: ownerId === userId })),
         Effect.catch((cause) =>
-          Effect.logWarning("Could not read whether this User is the Owner.", { cause }).pipe(
-            Effect.as({}),
+          Effect.logWarning("Could not read who the Owner is.", { cause }).pipe(
+            Effect.as({ isOwner: false }),
           ),
         ),
       );
@@ -2006,17 +2034,6 @@ export const make = Effect.gen(function* () {
         response: { authenticated: false, secondFactor: "totp", challengeId: checked.challengeId },
       } as const;
     }
-    if (checked._tag === "totp-setup") {
-      return {
-        response: {
-          authenticated: false,
-          secondFactor: "totp-setup",
-          challengeId: checked.challengeId,
-          secret: checked.secret,
-          otpauthUri: checked.otpauthUri,
-        },
-      } as const;
-    }
     return yield* issueUserBrowserSession(request, checked.user, requestMetadata);
   });
 
@@ -2058,15 +2075,47 @@ export const make = Effect.gen(function* () {
           const user = yield* userDirectory
             .redeemResetLink({ token: input.token, pending })
             .pipe(Effect.catchTags(resetLinkFailures));
-          return yield* issueUserBrowserSession(request, user, requestMetadata);
+          return { user, session: yield* issueUserBrowserSession(request, user, requestMetadata) };
         }),
       )
       .pipe(
         Effect.catchTags({
           SqlError: (cause) => Effect.fail(new ServerAuthUserDirectoryError({ cause })),
         }),
+        // After the commit: their Admin rights may have changed with their credentials.
+        Effect.tap(({ user }) => userDirectory.credentialsChanged(user.id)),
+        Effect.map(({ session }) => session),
       );
   });
+
+  const redeemResetLinkWithPassword: EnvironmentAuth["Service"]["redeemResetLinkWithPassword"] =
+    Effect.fn("EnvironmentAuth.redeemResetLinkWithPassword")(
+      function* (request, input, requestMetadata) {
+        // Spending the link, replacing the credentials and issuing the session succeed or fail together.
+        return yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              const user = yield* userDirectory.redeemResetLinkWithPassword(input).pipe(
+                Effect.catchTags({
+                  ResetLinkRejectedError: resetLinkFailures.ResetLinkRejectedError,
+                  UserDirectoryStorageError: resetLinkFailures.UserDirectoryStorageError,
+                }),
+              );
+              return {
+                user,
+                session: yield* issueUserBrowserSession(request, user, requestMetadata),
+              };
+            }),
+          )
+          .pipe(
+            Effect.catchTags({
+              SqlError: (cause) => Effect.fail(new ServerAuthUserDirectoryError({ cause })),
+            }),
+            Effect.tap(({ user }) => userDirectory.credentialsChanged(user.id)),
+            Effect.map(({ session }) => session),
+          );
+      },
+    );
 
   const signOut: EnvironmentAuth["Service"]["signOut"] = (request) =>
     authenticateBrowserSession(request).pipe(
@@ -2136,6 +2185,7 @@ export const make = Effect.gen(function* () {
     signInWithTotp,
     beginResetLinkRegistration,
     redeemResetLink,
+    redeemResetLinkWithPassword,
     passkeyOrigin: resolvePasskeyOrigin,
     startUserBrowserSession: issueUserBrowserSession,
     issueOwnerResetLink: userDirectory.issueOwnerResetLink,

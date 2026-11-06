@@ -24,6 +24,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
 
+import * as AccessChanges from "../auth/AccessChanges.ts";
 import * as AccessPolicy from "../auth/AccessPolicy.ts";
 import * as CommandActor from "../auth/CommandActor.ts";
 
@@ -339,9 +340,12 @@ const make = Effect.gen(function* () {
       isOwner: Schema.BooleanFromBit,
       spaceId: Schema.NullOr(SpaceId),
       role: Schema.NullOr(SpaceRole),
+      strongSignIn: Schema.BooleanFromBit,
     }),
     execute: (userId) => sql`
-      SELECT users.is_owner AS "isOwner", m.space_id AS "spaceId", m.role AS role
+      SELECT users.is_owner AS "isOwner", m.space_id AS "spaceId", m.role AS role,
+        (EXISTS (SELECT 1 FROM user_passkeys WHERE user_id = users.user_id)
+        OR EXISTS (SELECT 1 FROM user_totp WHERE user_id = users.user_id)) AS "strongSignIn"
       FROM users LEFT JOIN space_memberships AS m ON m.user_id = users.user_id
       WHERE users.user_id = ${userId}
     `,
@@ -359,19 +363,34 @@ const make = Effect.gen(function* () {
     `,
   });
 
-  const principalOf = Effect.fn("SpaceDirectory.principalOf")(function* (userId: UserId) {
+  /**
+   * The principal, and the Organizations where they were made Admin but act as a Member until
+   * they have a passkey or an authenticator app: a stolen password alone makes no Admin.
+   */
+  const membershipsOf = Effect.fn("SpaceDirectory.membershipsOf")(function* (userId: UserId) {
     const rows = yield* findPrincipalRows(userId);
     const roles = new Map<SpaceId, SpaceRole>();
-    for (const row of rows)
-      if (row.spaceId !== null && row.role !== null) roles.set(row.spaceId, row.role);
-    return {
+    const storedRoles = new Map<SpaceId, SpaceRole>();
+    const pendingAdmin = new Set<SpaceId>();
+    for (const row of rows) {
+      if (row.spaceId === null || row.role === null) continue;
+      storedRoles.set(row.spaceId, row.role);
+      const pending = row.role === "admin" && !row.strongSignIn;
+      if (pending) pendingAdmin.add(row.spaceId);
+      roles.set(row.spaceId, pending ? "member" : row.role);
+    }
+    const principal = {
       userId,
       isOwner: rows[0]?.isOwner ?? false,
       // The Owner cannot grant Installation permissions yet, so non-Owners hold none.
       installationPermissions: new Set(),
       roles,
     } satisfies AccessPolicy.Principal;
+    return { principal, storedRoles, pendingAdmin };
   }, Effect.mapError(storageError));
+
+  const principalOf = (userId: UserId) =>
+    Effect.map(membershipsOf(userId), (found) => found.principal);
 
   const allows = (
     principal: AccessPolicy.Principal,
@@ -381,8 +400,8 @@ const make = Effect.gen(function* () {
 
   const view = Effect.fn("SpaceDirectory.view")(function* (userId: UserId) {
     const personalSpaceId = personalSpaceIdOf(userId);
-    const [principal, organizations] = yield* Effect.all(
-      [principalOf(userId), listOrganizations().pipe(Effect.mapError(storageError))],
+    const [{ principal, pendingAdmin }, organizations] = yield* Effect.all(
+      [membershipsOf(userId), listOrganizations().pipe(Effect.mapError(storageError))],
       { concurrency: "unbounded" },
     );
     const personal: AccessPolicy.SpaceResource = {
@@ -412,6 +431,7 @@ const make = Effect.gen(function* () {
           isOwn: false,
           canCreateThreads: allows(principal, "thread.create", toResource(row)),
           canInvite: allows(principal, "invitation.create", toResource(row)),
+          ...(pendingAdmin.has(row.spaceId) ? { pendingAdmin: true } : {}),
         })),
     ];
     return {
@@ -651,9 +671,16 @@ const make = Effect.gen(function* () {
 
   const listMemberRows = SqlSchema.findAll({
     Request: SpaceId,
-    Result: Schema.Struct({ userId: UserId, displayName: Schema.String, role: SpaceRole }),
+    Result: Schema.Struct({
+      userId: UserId,
+      displayName: Schema.String,
+      role: SpaceRole,
+      strongSignIn: Schema.BooleanFromBit,
+    }),
     execute: (spaceId) => sql`
-      SELECT m.user_id AS "userId", u.display_name AS "displayName", m.role AS role
+      SELECT m.user_id AS "userId", u.display_name AS "displayName", m.role AS role,
+        (EXISTS (SELECT 1 FROM user_passkeys WHERE user_id = m.user_id)
+        OR EXISTS (SELECT 1 FROM user_totp WHERE user_id = m.user_id)) AS "strongSignIn"
       FROM space_memberships AS m JOIN users AS u ON u.user_id = m.user_id
       WHERE m.space_id = ${spaceId} AND u.removed_at IS NULL
       ORDER BY CASE m.role WHEN 'admin' THEN 0 WHEN 'member' THEN 1 ELSE 2 END,
@@ -703,6 +730,7 @@ const make = Effect.gen(function* () {
         userId: row.userId,
         displayName: row.displayName,
         role: row.role,
+        pendingAdmin: row.role === "admin" && !row.strongSignIn,
         isYou: row.userId === viewer,
         canChangeRole:
           row.userId !== viewer &&
@@ -735,7 +763,8 @@ const make = Effect.gen(function* () {
     readonly nextRole?: SpaceRole;
   }) {
     const { principal, space } = yield* visibleOrganization(input.actor, input.spaceId);
-    const role = (yield* principalOf(input.target)).roles.get(input.spaceId);
+    // Decided on the Role they were given: a pending Admin is the Owner's to change too.
+    const role = (yield* membershipsOf(input.target)).storedRoles.get(input.spaceId);
     if (role === undefined) {
       return yield* new SpaceAccessDeniedError({ action: input.action, reason: "no-such-member" });
     }
@@ -758,8 +787,24 @@ const make = Effect.gen(function* () {
       UPDATE space_memberships SET role = ${input.role}
       WHERE space_id = ${input.spaceId} AND user_id = ${input.userId}
       RETURNING user_id AS "userId"
-    `.pipe(Effect.mapError(storageError));
+    `;
+    // Only Admins invite, so a former Admin's pending Invitations end with their Role.
+    if (updated.length > 0 && input.role !== "admin") {
+      yield* revokeInvitationsBy(input.spaceId, input.userId);
+    }
     return updated.length > 0;
+  }, Effect.mapError(storageError));
+
+  const revokeInvitationsBy = Effect.fn("SpaceDirectory.revokeInvitationsBy")(function* (
+    spaceId: SpaceId,
+    userId: UserId,
+  ) {
+    const now = DateTime.formatIso(yield* DateTime.now);
+    yield* sql`
+      UPDATE space_invitations SET revoked_at = ${now}
+      WHERE space_id = ${spaceId} AND created_by = ${userId}
+        AND accepted_at IS NULL AND revoked_at IS NULL
+    `;
   });
 
   const removeMembership = Effect.fn("SpaceDirectory.removeMembership")(function* (input: {
@@ -772,6 +817,7 @@ const make = Effect.gen(function* () {
       RETURNING user_id AS "userId"
     `;
     if (removed.length === 0) return false;
+    yield* revokeInvitationsBy(input.spaceId, input.userId);
     yield* sql`
       UPDATE users
       SET access_narrowed_through = (SELECT COALESCE(MAX(sequence), 0) FROM orchestration_events)
@@ -831,4 +877,13 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(SpaceDirectory, make);
+export const layer = Layer.effect(
+  AccessChanges.AccessChanges,
+  Effect.gen(function* () {
+    const spaces = yield* SpaceDirectory;
+    return AccessChanges.AccessChanges.of({
+      changed: spaces.membershipsChanged,
+      widened: spaces.changed,
+    });
+  }),
+).pipe(Layer.provideMerge(Layer.effect(SpaceDirectory, make)));

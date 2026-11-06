@@ -1931,6 +1931,12 @@ describe("Space visibility", () => {
           threads: ["acme-child", "acme-thread"],
         });
 
+        // A change to the Role someone already has changes nothing, so their sockets stay.
+        const unchanged = yield* server.request(`/api/spaces/${acme}/members/role`, {
+          body: { userId: hedy, role: "member" },
+          cookie: owner,
+        });
+        assert.equal(unchanged.status, 200);
         const removed = yield* server.request(`/api/spaces/${acme}/members/remove`, {
           body: { userId: grace.userId },
           cookie: owner,
@@ -2131,6 +2137,10 @@ describe("Space visibility", () => {
         });
         const adaCookie = yield* addMember(server, { id: "ada", displayName: "Ada" });
         yield* joinOrganization(server, acme, "ada", "admin");
+        // An Admin's rights need a passkey or an authenticator app.
+        yield* server.sql`INSERT INTO user_passkeys (credential_id, user_id, public_key, sign_count,
+            transports, rp_id, created_at)
+          VALUES ('ada-key', 'ada', 'key', 0, '[]', '127.0.0.1', '2026-01-01T00:00:00.000Z')`;
         const gusCookie = yield* addMember(server, { id: "gus", displayName: "Gus" });
         yield* joinOrganization(server, acme, "gus", "guest");
         return {

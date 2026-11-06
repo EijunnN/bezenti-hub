@@ -28,6 +28,7 @@ import { useEffect, useId, useState } from "react";
 import { requestConfirmDialog } from "../../confirmDialog";
 import { PrimaryEnvironmentHttpClient } from "../../environments/primary/httpClient";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { readHubLinkOrigin } from "../../hubLinks";
 import { errorMessageOf as messageOf } from "../../lib/errorMessage";
 import { runPrimaryHttp } from "../../lib/runtime";
 import { Button } from "../ui/button";
@@ -46,6 +47,9 @@ import { Label } from "../ui/label";
 type Client = Effect.Success<typeof PrimaryEnvironmentHttpClient>;
 const withClient = <A, E>(use: (client: Client) => Effect.Effect<A, E>) =>
   runPrimaryHttp(PrimaryEnvironmentHttpClient.pipe(Effect.flatMap(use)));
+
+// Links point at the Hub's public URL, so they work wherever they are opened.
+const linkOrigin = () => readHubLinkOrigin() ?? window.location.origin;
 
 const formatDay = (date: DateTime.Utc) => DateTime.toDate(date).toLocaleDateString();
 
@@ -140,9 +144,13 @@ export function OrganizationSettingsDialog({
         changeMemberRole(client, space.id, member.userId, role),
       );
       await reload();
-      if (result.mustSetUpStrongSignIn) {
+      if (result.pendingAdmin) {
         setNotice(
-          `${member.displayName} was signed out. Their next sign-in asks for a passkey, or sets up an authenticator app for their password.`,
+          `${member.displayName} becomes an Admin once they add an authenticator app in Settings → Access. Until then they act as a Member.`,
+        );
+      } else if (result.signedOut) {
+        setNotice(
+          `${member.displayName} was signed out. As an Admin they sign in with their passkey, or with their password and an authenticator app.`,
         );
       }
     }, "Could not change the Role.");
@@ -162,7 +170,7 @@ export function OrganizationSettingsDialog({
       const issued = await withClient((client) =>
         issueMemberResetLink(client, space.id, member.userId),
       );
-      setLink({ name: member.displayName, url: resetLink(window.location.origin, issued.token) });
+      setLink({ name: member.displayName, url: resetLink(linkOrigin(), issued.token) });
     }, "Could not create the reset link.");
 
   const leave = async () => {
@@ -217,7 +225,7 @@ export function OrganizationSettingsDialog({
                 <OneTimeLink
                   label={`Reset link for ${link.name}`}
                   link={link.url}
-                  note="Works once and expires in an hour. It lets them register a new passkey and signs out their other devices. Shown only now."
+                  note="Works once and expires in an hour. It lets them set a new password or passkey, ends their old ones and signs out their devices. Shown only now."
                 />
               ) : null}
               {notice ? <p className="text-sm text-muted-foreground">{notice}</p> : null}
@@ -276,6 +284,9 @@ function MemberRow({
       <span className="min-w-0 truncate">
         {member.displayName}
         {member.isYou ? <span className="text-muted-foreground"> (you)</span> : null}
+        {member.pendingAdmin && member.canChangeRole ? (
+          <span className="text-muted-foreground"> · Admin once they add an authenticator app</span>
+        ) : null}
       </span>
       <span className="flex shrink-0 items-center gap-1">
         {member.canChangeRole ? (
@@ -293,7 +304,10 @@ function MemberRow({
             ))}
           </select>
         ) : (
-          <span className="text-xs text-muted-foreground">{SPACE_ROLE_LABELS[member.role]}</span>
+          <span className="text-xs text-muted-foreground">
+            {SPACE_ROLE_LABELS[member.role]}
+            {member.pendingAdmin ? " (pending)" : ""}
+          </span>
         )}
         {member.canIssueResetLink ? (
           <Button
@@ -369,7 +383,7 @@ function InvitationsSection({
     setError(null);
     try {
       const created = await withClient((client) => createInvitation(client, space.id, role));
-      setLink(invitationLink(window.location.origin, created.token));
+      setLink(invitationLink(linkOrigin(), created.token));
       await reload();
     } catch (cause) {
       setError(messageOf(cause, "Could not create the invitation."));

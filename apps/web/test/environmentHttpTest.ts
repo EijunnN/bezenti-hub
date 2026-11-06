@@ -132,7 +132,10 @@ export async function installEnvironmentHttpTest(scenario: EnvironmentHttpTestSc
             .handle("confirmTotpEnrollment", () => unexpectedEndpoint("auth.confirmTotpEnrollment"))
             .handle("resetLinkStatus", () => unexpectedEndpoint("auth.resetLinkStatus"))
             .handle("resetLinkRegistration", () => unexpectedEndpoint("auth.resetLinkRegistration"))
-            .handle("redeemResetLink", () => unexpectedEndpoint("auth.redeemResetLink")),
+            .handle("redeemResetLink", () => unexpectedEndpoint("auth.redeemResetLink"))
+            .handle("redeemResetLinkWithPassword", () =>
+              unexpectedEndpoint("auth.redeemResetLinkWithPassword"),
+            ),
         ),
       ]),
       Effect.provideService(EnvironmentAuthenticatedAuth, authenticatedAuth),

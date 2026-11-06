@@ -171,7 +171,9 @@ resumes its shell from its last sequence, and a resume would send only new
 events, so removing a Membership also stamps `users.access_narrowed_through`
 with the current event sequence; a resume from at or before it gets a full
 snapshot instead (`CurrentViewer.lostAccessSince`). Every other stream re-checks
-visibility when the client resubscribes.
+visibility when the client resubscribes. The socket subscribes to Membership
+changes before it resolves its viewer, so a change in between is not missed, and
+a write that changes nothing publishes nothing.
 
 #### Who changes what
 
@@ -261,16 +263,29 @@ leaving delete only the Membership row; Projects and Threads keep their Space an
 creator. Members of an Organization see its member list; anyone else gets the
 same answer as for a missing Organization.
 
-Becoming an Admin tightens `passwordRequiresTotp`, so a password-only account
-would keep an open session that no longer meets the sign-in rule. The promotion
-therefore revokes that User's sessions and pairing links in the same
-transaction. Their next password sign-in answers `secondFactor: "totp-setup"`
-with a fresh secret, only once the password was right; the code sent to
-`/api/auth/password/totp` stores that secret and signs them in.
+An Admin Membership counts only for a User with a passkey or TOTP: until then
+`SpaceDirectory` gives them a Member's Role (`pendingAdmin` in the directory and
+member list), and the credentials row's `isAdmin`, which feeds
+`passwordRequiresTotp`, is false. A phished password therefore never yields Admin
+rights, and nothing enrolls TOTP from the sign-in form: a pending Admin adds it
+under Settings → Access with a step-up. Promoting a User who has a passkey and a
+password but no TOTP revokes their sessions in the same transaction, since any of
+them may have come from the password; their password then answers
+`SecondFactorMissingError`. Credential changes that start or end Admin rights call
+`AccessChanges` (provided by SpaceDirectory, so account code need not depend on
+Spaces) after they commit.
 
-Owner and Admin reset links for Members and Guests use the Owner's reset-link
-table and redemption (`UserDirectory.issueResetLink`); the Owner also issues
-them for Admins. `created_by` names who issued it.
+Removing someone, or changing an Admin to another Role, revokes the pending
+Invitations they created in that Organization in the same transaction. A guest
+link records its creator and stops working once that User may no longer create
+guest links on its Thread (checked on every guest request), which covers removal
+and demotion without a write to the Thread.
+
+Reset links are the Owner's alone (`UserDirectory.issueResetLink`; `created_by`
+names the issuer), since a link takes the account over. Redeeming one registers a
+passkey or, for anyone but the Owner, sets a new password; either way it removes
+every other passkey, the password and TOTP and ends every session, in one
+transaction.
 
 ### Sign-in rules
 
@@ -278,9 +293,9 @@ Which accounts may use a password without a second factor is one function,
 `passwordRequiresTotp` in UserDirectory: true for the Owner and for an Admin of
 any Organization. Extend that function rather than checking roles at call sites.
 It applies three times: setting a password needs TOTP enrolled first, removing
-TOTP needs the password gone first, and password sign-in makes an account the
-rule covers set TOTP up before it signs in. The last check catches an account
-whose rule changed after it set a password. An Admin Invitation therefore takes a passkey,
+TOTP needs the password gone first, and password sign-in refuses an account the
+rule covers when it has no TOTP. The last check catches an account whose rule
+changed after it set a password. An Admin Invitation therefore takes a passkey,
 or a password together with a TOTP enrollment confirmed in the same accept.
 
 Any account with TOTP gets the code step: the password step answers

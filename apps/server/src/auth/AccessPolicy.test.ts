@@ -312,8 +312,21 @@ const rows: ReadonlyArray<
     allow,
   ],
   ["nobody leaves for someone else", admin, "membership.leave", grace(), deny("not-yours")],
-  ["Admin issues a Member's reset link", admin, "membership.resetLink", grace(), allow],
-  ["Admin issues a Guest's reset link", admin, "membership.resetLink", linusAs(), allow],
+  // A reset link takes the account over, so only the Owner issues one.
+  [
+    "Admin cannot issue a Member's reset link",
+    admin,
+    "membership.resetLink",
+    grace(),
+    deny("owner-only"),
+  ],
+  [
+    "Admin cannot issue a Guest's reset link",
+    admin,
+    "membership.resetLink",
+    linusAs(),
+    deny("owner-only"),
+  ],
   [
     "Admin cannot issue another Admin's reset link",
     admin,

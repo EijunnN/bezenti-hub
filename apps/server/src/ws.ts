@@ -3478,6 +3478,9 @@ export const layer = Layer.unwrap(
             failEnvironmentInternal("internal_error", error),
           ),
         );
+        // Subscribed before the connection reads what it may see, so no Membership change between
+        // the two is missed.
+        const ends = yield* connectionEnds(session);
         const reportProfiles = yield* serverBrowser.profileReporter;
         const rpcWebSocketHttpEffect = yield* Effect.gen(function* () {
           const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
@@ -3527,7 +3530,6 @@ export const layer = Layer.unwrap(
             ),
           ),
         );
-        const ends = yield* connectionEnds(session);
         return yield* Effect.acquireUseRelease(
           sessions.markConnected(session.sessionId),
           () =>

@@ -146,28 +146,28 @@ export async function resetPasskey(token: string): Promise<void> {
   );
 }
 
-/** Signed in, or the TOTP challenge to answer with `signInWithTotp`. */
-/** The code step of a password sign-in; `setup` when the account must add an authenticator app first. */
-export interface TotpStep {
-  readonly totpChallengeId: string;
-  readonly setup?: { readonly secret: string; readonly otpauthUri: string };
+/** Sets a new password from a reset link, which is then spent, and signs this browser in. */
+export async function resetPassword(input: {
+  readonly token: string;
+  readonly loginName: string;
+  readonly password: string;
+}): Promise<void> {
+  await request(
+    (client) => client.auth.redeemResetLinkWithPassword({ payload: input }),
+    "This reset link expired or was already used. Ask the Owner for a new one.",
+  );
 }
 
+/** Signed in, or the TOTP challenge to answer with `signInWithTotp`. */
 export async function signInWithPassword(input: {
   readonly loginName: string;
   readonly password: string;
-}): Promise<TotpStep | "signed-in"> {
+}): Promise<{ readonly totpChallengeId: string } | "signed-in"> {
   const result = await request(
     (client) => client.auth.passwordSignIn({ payload: input }),
     "That sign-in name or password is not right.",
   );
-  if (result.authenticated) return "signed-in";
-  return result.secondFactor === "totp-setup"
-    ? {
-        totpChallengeId: result.challengeId,
-        setup: { secret: result.secret, otpauthUri: result.otpauthUri },
-      }
-    : { totpChallengeId: result.challengeId };
+  return result.authenticated ? "signed-in" : { totpChallengeId: result.challengeId };
 }
 
 export async function signInWithTotp(input: {

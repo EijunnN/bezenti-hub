@@ -228,7 +228,7 @@ it.effect("lets a Member sign in with a password alone", () =>
   }),
 );
 
-it.effect("lets an Admin in with a password only by setting up an authenticator app", () =>
+it.effect("refuses a password alone for an Admin with a passkey, as for the Owner", () =>
   Effect.gen(function* () {
     const server = yield* serveAuthHttp;
     const cookie = yield* addMember(server);
@@ -239,14 +239,18 @@ it.effect("lets an Admin in with a password only by setting up an authenticator 
     yield* server.sql`INSERT INTO spaces (space_id, kind, name, created_at)
       VALUES ('org-acme', 'organization', 'Acme', '2026-01-01T00:00:00.000Z')`;
     yield* joinOrganization(server, "org-acme", "member-1", "admin");
+    // Without a passkey or an app she would act as a Member, whose password alone is enough.
+    yield* server.sql`INSERT INTO user_passkeys (credential_id, user_id, public_key, sign_count,
+        transports, rp_id, created_at)
+      VALUES ('grace-key', 'member-1', 'key', 0, '[]', '127.0.0.1', '2026-01-01T00:00:00.000Z')`;
 
-    // The right password is asked to set up an app, and is not counted as a guess.
+    // The right password gets told why, and is not counted as a guess.
     for (let attempt = 0; attempt < 6; attempt += 1) {
       const signIn = yield* server.request("/api/auth/password/sign-in", {
         body: { loginName: "grace", password: "correct horse battery" },
       });
-      expect(signIn.body).toMatchObject({ authenticated: false, secondFactor: "totp-setup" });
-      expect(signIn.cookie).toBeUndefined();
+      expect(signIn.status).toBe(403);
+      expect(signIn.body.message).toContain("authenticator app");
     }
     const wrong = yield* server.request("/api/auth/password/sign-in", {
       body: { loginName: "grace", password: "wrong horse battery" },
@@ -445,7 +449,7 @@ it.effect("lets the Owner register a new passkey once from a reset link that exp
     expect(supersededStatus.body).toEqual({ status: "invalid" });
 
     const status = yield* server.request("/api/auth/reset/status", { body: { token } });
-    expect(status.body).toEqual({ status: "valid", displayName: "Ada Lovelace" });
+    expect(status.body).toMatchObject({ status: "valid", displayName: "Ada Lovelace" });
     const newAuthenticator = yield* makeAuthenticator();
     const ceremony = yield* server.request("/api/auth/reset/registration", { body: { token } });
     const response = yield* Effect.promise(() =>

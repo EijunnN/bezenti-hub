@@ -99,10 +99,14 @@ const make = Effect.gen(function* () {
     }
   };
 
-  /** Runs the writes in one transaction, then tells the Users' connections once it committed. */
+  /**
+   * Runs the writes in one transaction. Once it committed, and only if `changed` says something
+   * did, tells the Users' connections.
+   */
   const commit = <A>(
     userIds: ReadonlyArray<UserId>,
     writes: Effect.Effect<A, MembershipError | SpaceDirectory.SpaceDirectoryStorageError>,
+    changed: (result: A) => boolean,
   ) =>
     sql.withTransaction(writes).pipe(
       Effect.mapError((error): MembershipError =>
@@ -110,7 +114,7 @@ const make = Effect.gen(function* () {
           ? error
           : storageError(error),
       ),
-      Effect.tap(() => spaces.membershipsChanged(userIds)),
+      Effect.tap((result) => (changed(result) ? spaces.membershipsChanged(userIds) : Effect.void)),
     );
 
   const list: MembershipService["Service"]["list"] = Effect.fn("MembershipService.list")(
@@ -138,7 +142,7 @@ const make = Effect.gen(function* () {
       });
     }
     // The check and the writes share one transaction, so a concurrent change cannot slip between.
-    const mustSetUpStrongSignIn = yield* commit(
+    const outcome = yield* commit(
       [userId],
       Effect.gen(function* () {
         const current = yield* spaces
@@ -150,15 +154,23 @@ const make = Effect.gen(function* () {
             nextRole: role,
           })
           .pipe(Effect.mapError(refusal));
-        if (current === role) return false;
+        const unchanged = { changed: false, pendingAdmin: false, signedOut: false };
+        if (current === role) return unchanged;
         yield* spaces.setRole({ spaceId, userId, role });
-        // Admins sign in with a passkey, or a password plus an authenticator app.
-        return role === "admin"
-          ? yield* users.requireStrongSignInNext(userId).pipe(Effect.mapError(storageError))
-          : false;
+        // Admin rights need a passkey or an authenticator app; until then they act as a Member.
+        const promotion =
+          role === "admin"
+            ? yield* users.onPromotedToAdmin(userId).pipe(Effect.mapError(storageError))
+            : { pending: false, signedOut: false };
+        return { changed: true, pendingAdmin: promotion.pending, signedOut: promotion.signedOut };
       }),
+      (result) => result.changed,
     );
-    return { member: yield* memberOrFail(actor, spaceId, userId), mustSetUpStrongSignIn };
+    return {
+      member: yield* memberOrFail(actor, spaceId, userId),
+      pendingAdmin: outcome.pendingAdmin,
+      signedOut: outcome.signedOut,
+    };
   });
 
   const remove: MembershipService["Service"]["remove"] = Effect.fn("MembershipService.remove")(
@@ -176,6 +188,7 @@ const make = Effect.gen(function* () {
             Effect.mapError(refusal),
             Effect.andThen(spaces.removeMembership({ spaceId, userId })),
           ),
+        (removed) => removed,
       );
       return yield* list(actor, spaceId);
     },
@@ -196,6 +209,7 @@ const make = Effect.gen(function* () {
             ),
             Effect.andThen(spaces.removeMembership({ spaceId, userId: actor })),
           ),
+        (removed) => removed,
       );
       return yield* spaces.view(actor).pipe(Effect.mapError(storageError));
     },

@@ -210,24 +210,9 @@ export const AuthSecondFactorRequired = Schema.Struct({
 });
 export type AuthSecondFactorRequired = typeof AuthSecondFactorRequired.Type;
 
-/**
- * The password was right, but the account now needs an authenticator app with it (it became an
- * Admin). Add the secret to an app, then send a code with `challengeId` to `/api/auth/password/totp`.
- */
-export const AuthTotpSetupRequired = Schema.Struct({
-  authenticated: Schema.Literal(false),
-  secondFactor: Schema.Literal("totp-setup"),
-  challengeId: TrimmedNonEmptyString,
-  /** Base32, for authenticator apps that cannot scan the QR code. */
-  secret: TrimmedNonEmptyString,
-  otpauthUri: TrimmedNonEmptyString,
-});
-export type AuthTotpSetupRequired = typeof AuthTotpSetupRequired.Type;
-
 export const AuthPasswordSignInResult = Schema.Union([
   AuthBrowserSessionResult,
   AuthSecondFactorRequired,
-  AuthTotpSetupRequired,
 ]);
 export type AuthPasswordSignInResult = typeof AuthPasswordSignInResult.Type;
 
@@ -241,7 +226,14 @@ export const AuthResetLinkRequest = Schema.Struct({ token: TrimmedNonEmptyString
 export type AuthResetLinkRequest = typeof AuthResetLinkRequest.Type;
 
 export const AuthResetLinkStatus = Schema.Union([
-  Schema.Struct({ status: Schema.Literal("valid"), displayName: Schema.String }),
+  Schema.Struct({
+    status: Schema.Literal("valid"),
+    displayName: Schema.String,
+    /** The account's sign-in name, if it has one, to keep when setting a new password. */
+    loginName: Schema.optional(Schema.NullOr(Schema.String)),
+    /** Whether the link may set a password instead of a passkey (not for the Owner). */
+    passwordAllowed: Schema.optional(Schema.Boolean),
+  }),
   Schema.Struct({ status: Schema.Literal("invalid") }),
 ]);
 export type AuthResetLinkStatus = typeof AuthResetLinkStatus.Type;
@@ -252,3 +244,10 @@ export const AuthResetLinkRedeemRequest = Schema.Struct({
   response: AuthPasskeyRegistrationResponse,
 });
 export type AuthResetLinkRedeemRequest = typeof AuthResetLinkRedeemRequest.Type;
+
+export const AuthResetLinkPasswordRequest = Schema.Struct({
+  token: TrimmedNonEmptyString,
+  loginName: AuthLoginName,
+  password: AuthPassword,
+});
+export type AuthResetLinkPasswordRequest = typeof AuthResetLinkPasswordRequest.Type;

@@ -153,7 +153,9 @@ const makeLayerServices = (config: { readonly publicUrl?: URL }) =>
           }),
         ),
       ),
-    ).pipe(Layer.provideMerge(Layer.merge(EnvironmentAuth.layer, SpaceDirectory.layer))),
+    ).pipe(
+      Layer.provideMerge(EnvironmentAuth.layer.pipe(Layer.provideMerge(SpaceDirectory.layer))),
+    ),
     layerProjects,
     layerThreads,
   ).pipe(
