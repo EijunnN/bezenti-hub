@@ -9,7 +9,7 @@ El `cwd` de los scopes de checkpoint y el `worktreePath` del Thread se guardan r
 
 **Blocked by:** 01.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Hay un mapa de Project a checkout por Environment, consultable por el executor. En el Hub machine conserva la ruta actual de cada Project.
 - [ ] Los scopes de checkpoint y el worktree del Thread se guardan relativos al checkout. Una migración convierte las filas existentes.
