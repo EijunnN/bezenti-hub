@@ -1,5 +1,6 @@
 import {
   type ApplicationProjectEvent,
+  EnvironmentId,
   IsoDateTime,
   ModelSelection,
   type OrchestrationProjectShell,
@@ -45,6 +46,7 @@ export const ProjectRow = Schema.Struct({
   archivedAt: Schema.NullOr(IsoDateTime),
   spaceId: Schema.NullOr(SpaceId),
   ownerUserId: Schema.NullOr(UserId),
+  preferredEnvironmentId: Schema.NullOr(EnvironmentId),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   deletedAt: Schema.NullOr(IsoDateTime),
@@ -75,6 +77,7 @@ function toShell(row: ProjectRow): OrchestrationProjectShell {
     archivedAt: row.archivedAt,
     spaceId: row.spaceId,
     ownerUserId: row.ownerUserId,
+    preferredEnvironmentId: row.preferredEnvironmentId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -134,6 +137,7 @@ export const make = Effect.gen(function* () {
         archived_at AS "archivedAt",
         space_id AS "spaceId",
         owner_user_id AS "ownerUserId",
+        preferred_environment_id AS "preferredEnvironmentId",
         created_at AS "createdAt",
         updated_at AS "updatedAt",
         deleted_at AS "deletedAt"
@@ -168,6 +172,7 @@ export const make = Effect.gen(function* () {
             archived_at,
             space_id,
             owner_user_id,
+            preferred_environment_id,
             created_at,
             updated_at,
             deleted_at
@@ -186,6 +191,7 @@ export const make = Effect.gen(function* () {
             ${encoded.archivedAt},
             ${encoded.spaceId},
             ${encoded.ownerUserId},
+            ${encoded.preferredEnvironmentId},
             ${encoded.createdAt},
             ${encoded.updatedAt},
             ${encoded.deletedAt}
@@ -204,6 +210,7 @@ export const make = Effect.gen(function* () {
             archived_at = excluded.archived_at,
             space_id = excluded.space_id,
             owner_user_id = excluded.owner_user_id,
+            preferred_environment_id = excluded.preferred_environment_id,
             created_at = excluded.created_at,
             updated_at = excluded.updated_at,
             deleted_at = excluded.deleted_at
@@ -256,6 +263,7 @@ export const make = Effect.gen(function* () {
           archivedAt: null,
           spaceId: payload.spaceId ?? null,
           ownerUserId: payload.ownerUserId ?? null,
+          preferredEnvironmentId: null,
           createdAt: payload.createdAt,
           updatedAt: payload.updatedAt,
           deletedAt: null,
@@ -289,6 +297,9 @@ export const make = Effect.gen(function* () {
         ...(payload.pinnedAt === undefined ? {} : { pinnedAt: payload.pinnedAt }),
         ...(payload.archivedAt === undefined ? {} : { archivedAt: payload.archivedAt }),
         ...(payload.spaceId === undefined ? {} : { spaceId: payload.spaceId }),
+        ...(payload.preferredEnvironmentId === undefined
+          ? {}
+          : { preferredEnvironmentId: payload.preferredEnvironmentId }),
         updatedAt: payload.updatedAt,
       }).pipe(mapError("apply"));
     },

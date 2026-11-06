@@ -489,7 +489,7 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
     }
     if (activeThreadRef && openSideChatTab(activeThreadRef, shell)) return;
     void navigate({
-      to: "/$environmentId/$threadId",
+      to: "/$threadId",
       params: buildThreadRouteParams(threadRef),
     });
   };

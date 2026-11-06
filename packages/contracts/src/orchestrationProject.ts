@@ -1,6 +1,13 @@
 import * as Schema from "effect/Schema";
 
-import { IsoDateTime, ProjectId, SpaceId, TrimmedNonEmptyString, UserId } from "./baseSchemas.ts";
+import {
+  EnvironmentId,
+  IsoDateTime,
+  ProjectId,
+  SpaceId,
+  TrimmedNonEmptyString,
+  UserId,
+} from "./baseSchemas.ts";
 import { RepositoryIdentity, ThreadEnvMode } from "./environment.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import { ProjectScript, ReceivedProjectIcon } from "./project.ts";
@@ -23,6 +30,8 @@ export const OrchestrationProjectShell = Schema.Struct({
   /** Null for Projects from before Spaces, which belong to the Owner's Personal space. */
   spaceId: Schema.optional(Schema.NullOr(SpaceId)),
   ownerUserId: Schema.optional(Schema.NullOr(UserId)),
+  /** Where its new Threads start when nobody chooses; null or absent for the Hub machine. */
+  preferredEnvironmentId: Schema.optional(Schema.NullOr(EnvironmentId)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });

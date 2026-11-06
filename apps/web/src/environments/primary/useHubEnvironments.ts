@@ -1,15 +1,21 @@
 import {
+  type EnvironmentConnectionStatus,
   type EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
   type HubEnvironmentSummary,
   type ProviderInstanceId,
+  previewThreadPlacement,
+  type UserId,
 } from "@t3tools/contracts";
 import { useSyncExternalStore } from "react";
 
 import { fetchHubEnvironments } from "./hubEnvironments";
 
-/** Status and providers change on heartbeats, every ten seconds on the Hub. */
-const REFRESH_MS = 10_000;
+/**
+ * Status and providers change on heartbeats, every ten seconds on the Hub; a machine that drops
+ * shows «Reconnecting» at once and «Offline» a minute later, so a short poll keeps rows live.
+ */
+const REFRESH_MS = 5000;
 
 // One list for every component that shows where Threads run, fetched while any of them is mounted.
 let environments: ReadonlyArray<HubEnvironmentSummary> = [];
@@ -19,6 +25,8 @@ let timer: ReturnType<typeof setInterval> | undefined;
 const refresh = () => {
   void fetchHubEnvironments().then(
     (list) => {
+      // Every Thread row reads this list: an unchanged answer must not re-render them all.
+      if (JSON.stringify(list.environments) === JSON.stringify(environments)) return;
       environments = list.environments;
       for (const listener of listeners) listener();
     },
@@ -49,14 +57,87 @@ export function useHubEnvironments(): ReadonlyArray<HubEnvironmentSummary> {
   return useSyncExternalStore(subscribe, snapshot, snapshot);
 }
 
-/** A Thread's Active environment by name; a Thread that names none runs on the Hub machine. */
-export function activeEnvironmentName(
+/** What a Thread's header and row say about where it runs. */
+export interface ActiveEnvironmentView {
+  readonly name: string;
+  readonly status: EnvironmentConnectionStatus;
+  readonly isHubMachine: boolean;
+}
+
+export const ENVIRONMENT_STATUS_LABELS: Record<EnvironmentConnectionStatus, string> = {
+  online: "Online",
+  reconnecting: "Reconnecting",
+  offline: "Offline",
+};
+
+/**
+ * A Thread's Active environment, a field of the Thread from the stream, by name and live status;
+ * a Thread that names none runs on the Hub machine. Null when the User can't see the machine.
+ */
+function activeEnvironmentOf(
   list: ReadonlyArray<HubEnvironmentSummary>,
   environmentId: EnvironmentId | null | undefined,
-): string | null {
+): ActiveEnvironmentView | null {
   if (environmentId === null) return null;
   const id = environmentId ?? HUB_MACHINE_ENVIRONMENT_ID;
-  return list.find((environment) => environment.id === id)?.name ?? null;
+  const environment = list.find((entry) => entry.id === id);
+  if (environment === undefined) return null;
+  return {
+    name: environment.name,
+    status: environment.kind === "hub" ? "online" : environment.status,
+    isHubMachine: environment.kind === "hub",
+  };
+}
+
+/**
+ * One Thread's Active environment, kept live. Re-renders only when its name or status changes,
+ * not on every heartbeat of every machine, since each sidebar row asks.
+ */
+export function useActiveEnvironment(
+  environmentId: EnvironmentId | null | undefined,
+): ActiveEnvironmentView | null {
+  const read = () => JSON.stringify(activeEnvironmentOf(environments, environmentId));
+  const key = useSyncExternalStore(subscribe, read, read);
+  return JSON.parse(key) as ActiveEnvironmentView | null;
+}
+
+/** Whether the User sees more machines than the Hub machine, so a Thread's machine is news. */
+export function useHasJoinedEnvironments(): boolean {
+  const read = () => environments.length > 1;
+  return useSyncExternalStore(subscribe, read, read);
+}
+
+/** "Laptop" while online, "Laptop, offline" otherwise: the words an accessible name ends with. */
+export function activeEnvironmentLabel(environment: ActiveEnvironmentView): string {
+  return environment.status === "online"
+    ? environment.name
+    : `${environment.name}, ${ENVIRONMENT_STATUS_LABELS[environment.status].toLowerCase()}`;
+}
+
+/**
+ * Where the Hub will start a new Thread nobody placed, by the Hub's own rule: the Project's
+ * preferred Environment when this User may use it (the Hub machine, or their own machine), it is
+ * online and it has the provider; otherwise the Hub machine.
+ */
+export function previewDefaultEnvironment(input: {
+  readonly environments: ReadonlyArray<HubEnvironmentSummary>;
+  readonly preferredEnvironmentId: EnvironmentId | null;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly userId: UserId | null;
+}): EnvironmentId {
+  const preferred = input.environments.find(
+    (environment) => environment.id === input.preferredEnvironmentId,
+  );
+  return previewThreadPlacement({
+    preferred:
+      preferred === undefined
+        ? undefined
+        : {
+            ...preferred,
+            usable: preferred.kind === "hub" || preferred.ownerUserId === input.userId,
+          },
+    providerInstanceId: input.providerInstanceId,
+  });
 }
 
 /** Why a new Thread could not run on the Environment, or null when it can. */

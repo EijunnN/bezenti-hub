@@ -76,6 +76,7 @@ import * as PreviewManager from "./preview/Manager.ts";
 import * as PreviewPasskeys from "./preview/Passkeys.ts";
 import * as DesktopWindow from "./window/DesktopWindow.ts";
 import * as DesktopWslBackend from "./wsl/DesktopWslBackend.ts";
+import * as DesktopJoinedEnvironment from "./joinedEnvironment/DesktopJoinedEnvironment.ts";
 import * as DesktopWslEnvironment from "./wsl/DesktopWslEnvironment.ts";
 import * as DesktopWslServerTree from "./wsl/DesktopWslServerTree.ts";
 
@@ -206,6 +207,10 @@ const layerDesktopWslBackend = DesktopWslBackend.layer.pipe(
   Layer.provideMerge(layerDesktopBackend),
 );
 
+const layerDesktopJoinedEnvironment = DesktopJoinedEnvironment.layer.pipe(
+  Layer.provideMerge(layerDesktopBackend),
+);
+
 const layerDesktopLocalEnvironmentAuth = DesktopLocalEnvironmentAuth.layer.pipe(
   Layer.provideMerge(layerDesktopBackend),
 );
@@ -221,6 +226,7 @@ const layerDesktopApplication = Layer.mergeAll(
 ).pipe(
   Layer.provideMerge(layerDesktopSnapShot),
   Layer.provideMerge(layerDesktopWslBackend),
+  Layer.provideMerge(layerDesktopJoinedEnvironment),
   Layer.provideMerge(layerDesktopLocalEnvironmentAuth),
 );
 

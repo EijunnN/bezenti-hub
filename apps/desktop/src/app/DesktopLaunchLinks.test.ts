@@ -25,6 +25,7 @@ import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronShell from "../electron/ElectronShell.ts";
+import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopLaunchLinks from "./DesktopLaunchLinks.ts";
 import * as DesktopWebLinks from "./DesktopWebLinks.ts";
@@ -192,6 +193,42 @@ describe("DesktopLaunchLinks", () => {
         ),
         Effect.provideService(ElectronApp.ElectronApp, electronApp),
         Effect.provideService(ElectronWindow.ElectronWindow, electronWindow),
+        Effect.provideService(DesktopWebLinks.DesktopWebLinks, ignoreWebLinks),
+      );
+    },
+  );
+
+  it.effect(
+    "opens a window when a second launch finds none, as after closing it to keep running",
+    () => {
+      const listeners = new Map<string, (...args: unknown[]) => void>();
+      const activated = Promise.withResolvers<void>();
+      const electronApp = {
+        quit: Effect.void,
+        on: (eventName: string, listener: (...args: unknown[]) => void) =>
+          Effect.sync(() => {
+            listeners.set(eventName, listener);
+          }),
+      } as unknown as ElectronApp.ElectronApp["Service"];
+      const electronWindow = {
+        currentMainOrFirst: Effect.succeedNone,
+        reveal: () => Effect.die("no window to reveal"),
+      } as unknown as ElectronWindow.ElectronWindow["Service"];
+      const desktopWindow = {
+        activate: Effect.sync(() => activated.resolve()),
+      } as unknown as DesktopWindow.DesktopWindow["Service"];
+
+      return Effect.gen(function* () {
+        const launchLinks = yield* DesktopLaunchLinks.DesktopLaunchLinks;
+        yield* launchLinks.configure;
+        listeners.get("second-instance")!({}, ["t3"]);
+        yield* Effect.promise(() => activated.promise);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(layerDesktopLaunchLinks(true, [], "linux", undefined, undefined, listeners)),
+        Effect.provideService(ElectronApp.ElectronApp, electronApp),
+        Effect.provideService(ElectronWindow.ElectronWindow, electronWindow),
+        Effect.provideService(DesktopWindow.DesktopWindow, desktopWindow),
         Effect.provideService(DesktopWebLinks.DesktopWebLinks, ignoreWebLinks),
       );
     },

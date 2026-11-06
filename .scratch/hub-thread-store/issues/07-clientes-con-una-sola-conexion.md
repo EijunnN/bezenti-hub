@@ -4,7 +4,7 @@
 
 **Blocked by:** 04.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Client-runtime usa una sola conexión, la del Hub. `ScopedThreadRef` deja de depender del Environment de conexión y el Active environment pasa a ser un campo del Thread.
 - [ ] El sidebar, la cabecera y las listas muestran el nombre y el estado del Active environment, actualizados en vivo.

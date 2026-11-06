@@ -47,6 +47,9 @@ export const projectMutationOperation = Effect.fn("projectMutationOperation")(fu
         ...(mutation.scripts === undefined ? {} : { scripts: mutation.scripts }),
         ...(mutation.pinned === undefined ? {} : { pinned: mutation.pinned }),
         ...(mutation.archived === undefined ? {} : { archived: mutation.archived }),
+        ...(mutation.preferredEnvironmentId === undefined
+          ? {}
+          : { preferredEnvironmentId: mutation.preferredEnvironmentId }),
       });
 
     case "project.move":

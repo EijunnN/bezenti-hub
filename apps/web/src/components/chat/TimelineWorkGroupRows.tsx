@@ -562,11 +562,7 @@ export function LiveWorkEntryTimelineRow({
               extraRemarkPlugins={row.active ? THINKING_PREVIEW_PLUGINS : THOUGHT_PREVIEW_PLUGINS}
             />
           ) : threadLabel ? (
-            <ThreadReadLabel
-              label={threadLabel}
-              environmentId={ctx.activeThreadEnvironmentId}
-              linked={false}
-            />
+            <ThreadReadLabel label={threadLabel} linked={false} />
           ) : (
             label
           )

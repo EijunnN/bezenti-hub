@@ -111,8 +111,8 @@ export function AssistantCitationChip({
     : undefined;
   const label = assistantCitationLabel(citation);
   const sourceLinkProps = {
-    to: "/$environmentId/$threadId" as const,
-    params: { environmentId: citation.environmentId, threadId: citation.threadId },
+    to: "/$threadId" as const,
+    params: { threadId: citation.threadId },
     hash: assistantCitationHash(citation),
     "data-markdown-copy": serializeAssistantCitation(citation),
     resetScroll: false,

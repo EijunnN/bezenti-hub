@@ -26,7 +26,7 @@ const citation: AssistantCitation = {
 
 function createCitationRouter(initialEntry = "/environment-one/thread-one") {
   const root = createRootRoute();
-  const thread = createRoute({ getParentRoute: () => root, path: "/$environmentId/$threadId" });
+  const thread = createRoute({ getParentRoute: () => root, path: "/$threadId" });
   return createRouter({
     routeTree: root.addChildren([thread]),
     history: createMemoryHistory({ initialEntries: [initialEntry] }),
@@ -44,8 +44,8 @@ describe("assistant citation navigation", () => {
       const reloaded = createCitationRouter(href);
       await reloaded.load();
       await reloaded.navigate({
-        to: "/$environmentId/$threadId",
-        params: { environmentId: citation.environmentId, threadId: citation.threadId },
+        to: "/$threadId",
+        params: { threadId: citation.threadId },
         hash: true,
         replace: true,
       });

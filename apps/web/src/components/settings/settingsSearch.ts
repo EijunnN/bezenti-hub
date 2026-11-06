@@ -1050,6 +1050,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     desktopOnly: true,
   },
   {
+    id: "joined-environment",
+    title: "Use this computer as an Environment",
+    to: "/settings/connections",
+    searchTerms: ["join hub machine laptop pc run threads here leave t3 join background"],
+    desktopOnly: true,
+  },
+  {
     id: "network-access",
     title: "Network access",
     to: "/settings/access",

@@ -6,6 +6,7 @@ import {
   resolveThreadRouteTarget,
   type ThreadRouteTarget,
 } from "../threadRoutes";
+import { useHubEnvironmentId } from "../state/hubEnvironment";
 
 function useThreadRouteIds() {
   const environmentId = useParams({ strict: false, select: (params) => params.environmentId });
@@ -16,9 +17,10 @@ function useThreadRouteIds() {
 export function useThreadRouteTarget(): ThreadRouteTarget | null {
   const { environmentId, threadId } = useThreadRouteIds();
   const draftId = useParams({ strict: false, select: (params) => params.draftId });
-  return resolveThreadRouteTarget({ environmentId, threadId, draftId });
+  const hubEnvironmentId = useHubEnvironmentId();
+  return resolveThreadRouteTarget({ environmentId, threadId, draftId }, hubEnvironmentId);
 }
 
 export function useThreadRouteRef(): ScopedThreadRef | null {
-  return resolveThreadRouteRef(useThreadRouteIds());
+  return resolveThreadRouteRef(useThreadRouteIds(), useHubEnvironmentId());
 }

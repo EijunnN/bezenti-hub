@@ -4,6 +4,7 @@ import {
   ApprovalRequestId,
   ClientSurface,
   CommandId,
+  EnvironmentId,
   EventId,
   IsoDateTime,
   NonNegativeInt,
@@ -68,6 +69,7 @@ export const ApplicationProjectMetaUpdatedPayload = Schema.Struct({
   archivedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   /** The Space the Project moved to. */
   spaceId: Schema.optional(SpaceId),
+  preferredEnvironmentId: Schema.optional(Schema.NullOr(EnvironmentId)),
   updatedAt: IsoDateTime,
 });
 export type ApplicationProjectMetaUpdatedPayload = typeof ApplicationProjectMetaUpdatedPayload.Type;

@@ -368,7 +368,7 @@ export function useThreadActions() {
     if (opts.navigate) {
       return settlePromise(() =>
         router.navigate({
-          to: "/$environmentId/$threadId",
+          to: "/$threadId",
           params: buildThreadRouteParams(target),
         }),
       );
@@ -581,7 +581,7 @@ export function useThreadActions() {
       await navigateAfterThreadDeletion(() =>
         fallbackThread
           ? router.navigate({
-              to: "/$environmentId/$threadId",
+              to: "/$threadId",
               params: buildThreadRouteParams(
                 scopeThreadRef(fallbackThread.environmentId, fallbackThread.id),
               ),

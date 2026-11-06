@@ -79,7 +79,7 @@ export function DevReplayHost() {
     });
     if (result._tag === "Failure") throw squashAtomCommandFailure(result);
     await navigate({
-      to: "/$environmentId/$threadId",
+      to: "/$threadId",
       params: buildThreadRouteParams(scopeThreadRef(environmentId, threadId)),
     });
     return threadId;

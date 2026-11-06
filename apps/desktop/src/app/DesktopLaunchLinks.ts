@@ -18,6 +18,7 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopUserData from "./DesktopUserData.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopWebLinks from "./DesktopWebLinks.ts";
+import * as DesktopWindow from "../window/DesktopWindow.ts";
 
 /**
  * Claims the single-instance lock and routes launch links (pairing, prompt, provider sign-in
@@ -82,6 +83,8 @@ export const make = Effect.gen(function* () {
       const webLinks = yield* DesktopWebLinks.DesktopWebLinks;
       const context = yield* Effect.context<ElectronWindow.ElectronWindow>();
       const runPromise = Effect.runPromiseWith(context);
+      // With no window left (the app kept running for its joined Environment), open one.
+      const desktopWindow = yield* Effect.serviceOption(DesktopWindow.DesktopWindow);
 
       const startProviderAuthHandoff = (value: string | undefined) => {
         if (!value) return false;
@@ -162,7 +165,17 @@ export const make = Effect.gen(function* () {
         void runPromise(
           Effect.gen(function* () {
             const mainWindow = yield* electronWindow.currentMainOrFirst;
-            if (Option.isSome(mainWindow)) yield* electronWindow.reveal(mainWindow.value);
+            if (Option.isSome(mainWindow)) {
+              yield* electronWindow.reveal(mainWindow.value);
+              return;
+            }
+            if (Option.isSome(desktopWindow)) {
+              yield* desktopWindow.value.activate.pipe(
+                Effect.catch((error) =>
+                  Effect.logWarning("Could not open a window for a second launch", error),
+                ),
+              );
+            }
           }),
         );
       };

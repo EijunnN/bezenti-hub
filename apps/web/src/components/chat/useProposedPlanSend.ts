@@ -354,11 +354,8 @@ export function useImplementPlanInNewThread(input: ImplementPlanInNewThreadInput
     if (failure === null) {
       const navigateResult = await settlePromise(() =>
         navigate({
-          to: "/$environmentId/$threadId",
-          params: {
-            environmentId: activeThread.environmentId,
-            threadId: nextThreadId,
-          },
+          to: "/$threadId",
+          params: { threadId: nextThreadId },
         }),
       );
       failure = navigateResult._tag === "Failure" ? navigateResult : null;

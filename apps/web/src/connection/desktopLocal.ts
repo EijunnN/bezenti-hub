@@ -7,10 +7,6 @@ import {
 
 const DESKTOP_LOCAL_CONNECTION_ID_PREFIX = "local:";
 
-export function desktopLocalConnectionId(backendId: string): string {
-  return `${DESKTOP_LOCAL_CONNECTION_ID_PREFIX}${backendId}`;
-}
-
 export function isDesktopLocalConnectionTarget(
   target: ConnectionTarget,
 ): target is Extract<ConnectionTarget, { readonly _tag: "BearerConnectionTarget" }> {
@@ -92,10 +88,6 @@ export function createDesktopSecondaryBootstrapsReader(
 const desktopSecondaryBootstrapsReader = createDesktopSecondaryBootstrapsReader(
   () => window.desktopBridge,
 );
-
-export function readDesktopSecondaryBootstrapsResult(): DesktopSecondaryBootstrapsRead {
-  return desktopSecondaryBootstrapsReader.readResult();
-}
 
 export function readDesktopSecondaryBootstraps(): ReadonlyArray<DesktopEnvironmentBootstrap> {
   return desktopSecondaryBootstrapsReader.readSnapshot();

@@ -206,8 +206,8 @@ describe("archive Undo", () => {
     });
     expect(router.navigate).toHaveBeenCalledWith(
       expect.objectContaining({
-        to: "/$environmentId/$threadId",
-        params: { environmentId: target.environmentId, threadId: target.threadId },
+        to: "/$threadId",
+        params: { threadId: target.threadId },
       }),
     );
   });

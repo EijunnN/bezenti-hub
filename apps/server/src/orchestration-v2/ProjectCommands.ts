@@ -1,5 +1,6 @@
 import {
   type CommandId,
+  type EnvironmentId,
   type EventId,
   MAX_SCRIPT_ID_LENGTH,
   type ModelSelection,
@@ -43,6 +44,8 @@ export interface ProjectMetaUpdateCommand {
   readonly scripts?: ReadonlyArray<ProjectScript>;
   readonly pinned?: boolean;
   readonly archived?: boolean;
+  /** Checked by the caller: an Environment the acting User may use. */
+  readonly preferredEnvironmentId?: EnvironmentId | null;
   /** Another Space, once the move was authorized and its Threads are idle. */
   readonly spaceId?: SpaceId;
 }
@@ -226,6 +229,9 @@ export function planProjectCommand(input: {
             ? {}
             : { archivedAt: command.archived ? (project.archivedAt ?? occurredAt) : null }),
           ...(command.spaceId === undefined ? {} : { spaceId: command.spaceId }),
+          ...(command.preferredEnvironmentId === undefined
+            ? {}
+            : { preferredEnvironmentId: command.preferredEnvironmentId }),
           updatedAt: occurredAt,
         },
       });

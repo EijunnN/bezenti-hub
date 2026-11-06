@@ -1462,7 +1462,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       setOpenMobile(false);
     }
     return router.navigate({
-      to: "/$environmentId/$threadId",
+      to: "/$threadId",
       params: buildThreadRouteParams(threadRef),
     });
   };
@@ -1471,7 +1471,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     const dropId = queuePendingFileDrop({ threadRef, files });
     const landedBefore =
       router.buildLocation({
-        to: "/$environmentId/$threadId",
+        to: "/$threadId",
         params: buildThreadRouteParams(threadRef),
       }).pathname === router.state.location.pathname;
     if (landedBefore) return;
@@ -1480,7 +1480,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       await navigateToThread(threadRef);
       const landed =
         router.buildLocation({
-          to: "/$environmentId/$threadId",
+          to: "/$threadId",
           params: buildThreadRouteParams(threadRef),
         }).pathname === router.state.location.pathname;
       if (!landed) clearPendingFileDrop(dropId);

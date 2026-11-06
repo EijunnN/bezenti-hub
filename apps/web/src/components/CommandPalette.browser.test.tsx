@@ -89,6 +89,6 @@ describe("CommandPalette open intents", () => {
     openCommandPalette({ query: "Acme" });
     await page.getByRole("option", { name: /Acme/ }).first().click();
 
-    await vi.waitFor(() => expect(screen.router?.state.location.pathname).toBe("/local/parent"));
+    await vi.waitFor(() => expect(screen.router?.state.location.pathname).toBe("/parent"));
   });
 });

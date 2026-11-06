@@ -65,6 +65,7 @@ import {
 } from "./ProjectFaviconPickerDialog";
 import { ProjectActionsSettings } from "./ProjectActionsSettings";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
+import { ProjectPreferredEnvironmentSettings } from "./ProjectPreferredEnvironmentSettings";
 import {
   defaultProjectIcon,
   hasDefaultProjectIcon,
@@ -751,6 +752,7 @@ function ProjectDetail({
           ) : null}
         </SettingsSection>
         <ProjectSpaceSettings group={group} />
+        <ProjectPreferredEnvironmentSettings group={group} canEdit={canEditGroup} />
         <ProjectDefaultsSettings category="project" />
         <ProjectActionsSettings />
         {checkoutChoices}
