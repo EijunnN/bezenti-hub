@@ -195,23 +195,25 @@ const toSummary = (row: InvitationRow, nowIso: string): InvitationSummary => {
   };
 };
 
+const ADMINS_INVITE = "Only an Admin or the Owner invites people to this Organization.";
+
 const DENIED_REASONS: Record<AccessPolicy.DenyReason, string> = {
-  "owner-only": "Only the Owner invites people to this Organization.",
-  "not-a-member": "Only the Owner invites people to this Organization.",
-  "role-not-allowed": "Only the Owner invites people to this Organization.",
+  "owner-only": "Only the Owner invites Admins.",
+  "not-a-member": ADMINS_INVITE,
+  "role-not-allowed": ADMINS_INVITE,
   "not-your-personal-space": "Nothing is shared from a Personal space.",
-  "missing-installation-permission": "Only the Owner invites people to this Organization.",
+  "missing-installation-permission": ADMINS_INVITE,
   "space-archived": "This Organization is archived.",
   "space-frozen": "This Space is frozen.",
   "wrong-resource": "Only Organizations take Invitations; nothing is shared from a Personal space.",
-  "not-yours": "Only the Owner invites people to this Organization.",
-  "not-archived": "Only the Owner invites people to this Organization.",
+  "not-yours": ADMINS_INVITE,
+  "not-archived": ADMINS_INVITE,
 };
 
 const deniedReason = (reason: string) =>
   Object.hasOwn(DENIED_REASONS, reason)
     ? DENIED_REASONS[reason as AccessPolicy.DenyReason]
-    : DENIED_REASONS["owner-only"];
+    : ADMINS_INVITE;
 
 // Not found and not allowed answer alike, so a revoke never confirms an Invitation exists.
 const NOT_YOURS_TO_REVOKE = "You can't revoke that Invitation.";
@@ -306,6 +308,9 @@ const make = Effect.gen(function* () {
   const create: InvitationService["Service"]["create"] = Effect.fn("InvitationService.create")(
     function* (actor, spaceId, role) {
       const space = yield* spaces.authorize(actor, "invitation.create", spaceId).pipe(refuseDenied);
+      if (role === "admin") {
+        yield* spaces.authorize(actor, "admin.manage", spaceId).pipe(refuseDenied);
+      }
       const token = isoBase64URL.fromBuffer(
         new Uint8Array(yield* random.randomBytes(32).pipe(storage)),
       );
@@ -345,14 +350,21 @@ const make = Effect.gen(function* () {
       if (Option.isNone(found)) {
         return yield* new InvitationRefusedError({ reason: NOT_YOURS_TO_REVOKE });
       }
-      yield* spaces.authorize(actor, "invitation.manage", found.value.spaceId).pipe(
-        Effect.catchTags({
-          SpaceAccessDeniedError: () =>
-            Effect.fail(new InvitationRefusedError({ reason: NOT_YOURS_TO_REVOKE })),
-          SpaceNotFoundError: () =>
-            Effect.fail(new InvitationRefusedError({ reason: NOT_YOURS_TO_REVOKE })),
-        }),
-      );
+      const notYours = {
+        SpaceAccessDeniedError: () =>
+          Effect.fail(new InvitationRefusedError({ reason: NOT_YOURS_TO_REVOKE })),
+        SpaceNotFoundError: () =>
+          Effect.fail(new InvitationRefusedError({ reason: NOT_YOURS_TO_REVOKE })),
+      };
+      yield* spaces
+        .authorize(actor, "invitation.manage", found.value.spaceId)
+        .pipe(Effect.catchTags(notYours));
+      // An Admin never touches an Admin, not even one still invited.
+      if (found.value.role === "admin") {
+        yield* spaces
+          .authorize(actor, "admin.manage", found.value.spaceId)
+          .pipe(Effect.catchTags(notYours));
+      }
       const now = yield* nowIso;
       const revoked = yield* sql<{ readonly invitationId: string }>`
         UPDATE space_invitations SET revoked_at = ${now}

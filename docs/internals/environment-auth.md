@@ -163,9 +163,15 @@ place this is answered, and every read of Projects or Threads asks it:
 
 Each WebSocket connection resolves its viewer once (`CurrentViewer`) and again
 only when `SpaceDirectory.revision` moves, which every Space or Membership write
-bumps, so a new Membership shows on the next read without reconnecting. An open
-shell keeps rows it already sent when a Membership ends; removing Members
-(ticket 09) must close or resubscribe those connections.
+bumps, so a new Membership shows on the next read without reconnecting. A
+Membership that ends or changes instead closes the User's sockets
+(`connectionEnds` in `ws.ts`, fed by `SpaceDirectory.membershipsChanged`),
+because rows already sent cannot be filtered back out. The client reconnects and
+resumes its shell from its last sequence, and a resume would send only new
+events, so removing a Membership also stamps `users.access_narrowed_through`
+with the current event sequence; a resume from at or before it gets a full
+snapshot instead (`CurrentViewer.lostAccessSince`). Every other stream re-checks
+visibility when the client resubscribes.
 
 #### Who changes what
 
@@ -222,9 +228,10 @@ People join an Organization only through an Invitation
 ([InvitationService](../../apps/server/src/spaces/InvitationService.ts)), which
 carries the Role and is created, listed and revoked over HTTP
 (`/api/spaces/:spaceId/invitations`, `/api/invitations/revoke`). The policy's
-`invitation.create` and `invitation.manage` actions allow only the Owner for now,
-only in an Organization (nothing is shared from a Personal space), and creating
-needs a live one. The link is `<origin>/invite#token=…`; the token is 32 random
+`invitation.create` and `invitation.manage` actions allow the Owner and the
+Organization's Admins, only in an Organization (nothing is shared from a Personal
+space), and creating needs a live one. An Admin Invitation, to create or to
+revoke, also needs `admin.manage`, which is the Owner's alone. The link is `<origin>/invite#token=…`; the token is 32 random
 bytes shown once, and only its SHA-256 is stored, so looking it up leaks nothing
 through timing. The web app's startup pairing leaves `#token=` alone on `/invite`,
 as on `/reset`.
@@ -242,15 +249,38 @@ a taken sign-in name, leaves the link unspent. A signed-in User accepts through
 refuses the Owner, an existing Member, and an Admin Invitation for an account
 that signs in with a password alone.
 
+### Memberships
+
+[MembershipService](../../apps/server/src/spaces/MembershipService.ts) lists,
+changes, removes and leaves over `/api/spaces/:spaceId/members…` and `/leave`.
+The policy decides each on a `MembershipResource` (the target's current Role and
+the one asked for): an Admin acts on Members and Guests only, and anything that
+starts or ends at Admin is the Owner's. The check and the write share one
+transaction, and the target's connections close after it commits. Removing and
+leaving delete only the Membership row; Projects and Threads keep their Space and
+creator. Members of an Organization see its member list; anyone else gets the
+same answer as for a missing Organization.
+
+Becoming an Admin tightens `passwordRequiresTotp`, so a password-only account
+would keep an open session that no longer meets the sign-in rule. The promotion
+therefore revokes that User's sessions and pairing links in the same
+transaction. Their next password sign-in answers `secondFactor: "totp-setup"`
+with a fresh secret, only once the password was right; the code sent to
+`/api/auth/password/totp` stores that secret and signs them in.
+
+Owner and Admin reset links for Members and Guests use the Owner's reset-link
+table and redemption (`UserDirectory.issueResetLink`); the Owner also issues
+them for Admins. `created_by` names who issued it.
+
 ### Sign-in rules
 
 Which accounts may use a password without a second factor is one function,
 `passwordRequiresTotp` in UserDirectory: true for the Owner and for an Admin of
 any Organization. Extend that function rather than checking roles at call sites.
 It applies three times: setting a password needs TOTP enrolled first, removing
-TOTP needs the password gone first, and password sign-in refuses an account the
-rule covers when it has no TOTP. The last check catches an account whose rule
-changed after it set a password. An Admin Invitation therefore takes a passkey,
+TOTP needs the password gone first, and password sign-in makes an account the
+rule covers set TOTP up before it signs in. The last check catches an account
+whose rule changed after it set a password. An Admin Invitation therefore takes a passkey,
 or a password together with a TOTP enrollment confirmed in the same accept.
 
 Any account with TOTP gets the code step: the password step answers

@@ -5,10 +5,12 @@ import {
   signInWithPassword,
   signInWithRecoveryCode,
   signInWithTotp,
+  type TotpStep,
 } from "../../environments/primary/userAccounts";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { QRCodeSvg } from "../ui/qr-code";
 import { StandalonePage, StandalonePageHeader } from "../ui/standalone-page";
 
 type Method = "passkey" | "password" | "recovery";
@@ -26,16 +28,16 @@ export function SignInSurface({
   const [method, setMethod] = useState<Method>("passkey");
   const [loginName, setLoginName] = useState("");
   const [password, setPassword] = useState("");
-  const [totpChallengeId, setTotpChallengeId] = useState<string | null>(null);
-  const needsTotp = totpChallengeId !== null;
+  const [totpStep, setTotpStep] = useState<TotpStep | null>(null);
+  const totpChallengeId = totpStep?.totpChallengeId ?? null;
+  const needsTotp = totpStep !== null;
+  const setup = totpStep?.setup;
   const [totpCode, setTotpCode] = useState("");
   const [recoveryCode, setRecoveryCode] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const attempt = async (
-    signIn: () => Promise<{ readonly totpChallengeId: string } | "signed-in" | void>,
-  ) => {
+  const attempt = async (signIn: () => Promise<TotpStep | "signed-in" | void>) => {
     setIsSubmitting(true);
     setErrorMessage("");
     const outcome = await signIn().then(
@@ -49,12 +51,12 @@ export function SignInSurface({
     if (!outcome.ok) {
       setErrorMessage(outcome.message);
       // A code step that failed may be spent; the password step starts a new one.
-      setTotpChallengeId(null);
+      setTotpStep(null);
       setTotpCode("");
       return;
     }
     if (typeof outcome.result === "object") {
-      setTotpChallengeId(outcome.result.totpChallengeId);
+      setTotpStep(outcome.result);
       return;
     }
     onSignedIn();
@@ -62,7 +64,7 @@ export function SignInSurface({
 
   const choose = (next: Method) => {
     setMethod(next);
-    setTotpChallengeId(null);
+    setTotpStep(null);
     setTotpCode("");
     setErrorMessage("");
   };
@@ -119,6 +121,28 @@ export function SignInSurface({
               type="password"
               value={password}
             />
+            {setup !== undefined ? (
+              <div className="flex flex-col gap-2 pt-2">
+                <p className="text-sm font-medium">Set up an authenticator app</p>
+                <p className="text-sm text-muted-foreground">
+                  You're now an Admin, so your password needs a code from an authenticator app. Scan
+                  this with the app, then enter the code it shows. You can add a passkey in Settings
+                  → Access afterwards.
+                </p>
+                <div className="self-start rounded-lg bg-white p-1.5">
+                  <QRCodeSvg
+                    value={setup.otpauthUri}
+                    size={160}
+                    level="M"
+                    marginSize={1}
+                    title="Authenticator app setup code"
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Can't scan? Enter this key: <code className="select-all">{setup.secret}</code>
+                </p>
+              </div>
+            ) : null}
             {needsTotp ? (
               <>
                 <label className="block text-sm font-medium" htmlFor="sign-in-totp">
@@ -147,7 +171,7 @@ export function SignInSurface({
               size="sm"
               type="submit"
             >
-              {needsTotp ? "Verify code" : "Sign in"}
+              {setup !== undefined ? "Finish setup" : needsTotp ? "Verify code" : "Sign in"}
             </Button>
           </form>
         ) : null}

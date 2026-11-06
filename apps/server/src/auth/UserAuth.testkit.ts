@@ -36,6 +36,7 @@ import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as SpacesHttp from "../spaces/http.ts";
 import * as InvitationService from "../spaces/InvitationService.ts";
+import * as MembershipService from "../spaces/MembershipService.ts";
 import * as InvitationsHttp from "../spaces/invitationsHttp.ts";
 import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
@@ -142,6 +143,7 @@ const makeLayerServices = (config: { readonly publicUrl?: URL }) =>
     // Outside MCP clients: OAuth approval and the bearer check /mcp runs.
     Layer.mergeAll(
       InvitationService.layer,
+      MembershipService.layer,
       SpaceVisibility.layer,
       Layer.merge(McpOAuth.layer, McpOAuth.layerMcpClientAuthenticator).pipe(
         Layer.provide(ServerSettings.layerTest()),

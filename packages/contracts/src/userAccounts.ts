@@ -210,9 +210,24 @@ export const AuthSecondFactorRequired = Schema.Struct({
 });
 export type AuthSecondFactorRequired = typeof AuthSecondFactorRequired.Type;
 
+/**
+ * The password was right, but the account now needs an authenticator app with it (it became an
+ * Admin). Add the secret to an app, then send a code with `challengeId` to `/api/auth/password/totp`.
+ */
+export const AuthTotpSetupRequired = Schema.Struct({
+  authenticated: Schema.Literal(false),
+  secondFactor: Schema.Literal("totp-setup"),
+  challengeId: TrimmedNonEmptyString,
+  /** Base32, for authenticator apps that cannot scan the QR code. */
+  secret: TrimmedNonEmptyString,
+  otpauthUri: TrimmedNonEmptyString,
+});
+export type AuthTotpSetupRequired = typeof AuthTotpSetupRequired.Type;
+
 export const AuthPasswordSignInResult = Schema.Union([
   AuthBrowserSessionResult,
   AuthSecondFactorRequired,
+  AuthTotpSetupRequired,
 ]);
 export type AuthPasswordSignInResult = typeof AuthPasswordSignInResult.Type;
 

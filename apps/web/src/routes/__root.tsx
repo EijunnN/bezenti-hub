@@ -189,7 +189,12 @@ function RootRouteBranch() {
     <>
       <ChatGptWelcomeCoordinator />
       <FirstRunGate
-        enabled={primaryEnvironmentAuthenticated}
+        // Connecting computers and providers is the Owner's setup; invited Users start in their
+        // Organization.
+        enabled={
+          primaryEnvironmentAuthenticated &&
+          !(authGateState.status === "authenticated" && authGateState.invitedUser === true)
+        }
         hostedStatic={authGateState.status === "hosted-static"}
       >
         {primaryEnvironmentAuthenticated ? <DesktopAppActivationCoordinator /> : null}

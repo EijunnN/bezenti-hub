@@ -29,6 +29,7 @@ import {
   type AuthPasswordSignInRequest,
   type AuthResetLinkRedeemRequest,
   type AuthSecondFactorRequired,
+  type AuthTotpSetupRequired,
   type AuthTotpSignInRequest,
   type AuthUser,
   DpopFailureReason,
@@ -659,10 +660,9 @@ export class EnvironmentAuth extends Context.Service<
       input: AuthPasswordSignInRequest,
       requestMetadata: AuthRequestMetadata,
     ) => Effect.Effect<
-      UserBrowserSession | { readonly response: AuthSecondFactorRequired },
+      UserBrowserSession | { readonly response: AuthSecondFactorRequired | AuthTotpSetupRequired },
       | ServerAuthInvalidCredentialError
       | ServerAuthInsecureTransportError
-      | UserDirectory.SecondFactorMissingError
       | UserDirectory.SignInThrottledError
       | ServerAuthInternalError
     >;
@@ -1027,16 +1027,31 @@ export const make = Effect.gen(function* () {
         ),
       ),
     );
+    // Only the Owner sets the Installation up; clients skip that welcome for everyone else.
+    const isOwnerOf = (userId: UserId) =>
+      userDirectory.findUser(userId).pipe(
+        Effect.map((user) => ({ isOwner: Option.isSome(user) && user.value.isOwner })),
+        Effect.catch((cause) =>
+          Effect.logWarning("Could not read whether this User is the Owner.", { cause }).pipe(
+            Effect.as({}),
+          ),
+        ),
+      );
     return yield* authenticateRequest(request).pipe(
-      Effect.map((session): AuthSessionState => ({
-        authenticated: true,
-        auth: descriptor,
-        ...authScopeResponse(session.scopes),
-        sessionMethod: session.method,
-        ...(session.expiresAt ? { expiresAt: DateTime.toUtc(session.expiresAt) } : {}),
-        ...(session.userId ? { userId: session.userId } : {}),
-        ownerExists: session.userId !== undefined,
-      })),
+      Effect.flatMap((session) =>
+        (session.userId === undefined ? Effect.succeed({}) : isOwnerOf(session.userId)).pipe(
+          Effect.map((owner): AuthSessionState => ({
+            authenticated: true,
+            auth: descriptor,
+            ...authScopeResponse(session.scopes),
+            sessionMethod: session.method,
+            ...(session.expiresAt ? { expiresAt: DateTime.toUtc(session.expiresAt) } : {}),
+            ...(session.userId ? { userId: session.userId } : {}),
+            ownerExists: session.userId !== undefined,
+            ...owner,
+          })),
+        ),
+      ),
       Effect.catchIf(isServerAuthCredentialError, () =>
         ownerExists.pipe(
           Effect.map((owner): AuthSessionState => ({
@@ -1989,6 +2004,17 @@ export const make = Effect.gen(function* () {
     if (checked._tag === "totp-required") {
       return {
         response: { authenticated: false, secondFactor: "totp", challengeId: checked.challengeId },
+      } as const;
+    }
+    if (checked._tag === "totp-setup") {
+      return {
+        response: {
+          authenticated: false,
+          secondFactor: "totp-setup",
+          challengeId: checked.challengeId,
+          secret: checked.secret,
+          otpauthUri: checked.otpauthUri,
+        },
       } as const;
     }
     return yield* issueUserBrowserSession(request, checked.user, requestMetadata);

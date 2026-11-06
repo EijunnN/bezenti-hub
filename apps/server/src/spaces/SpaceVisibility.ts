@@ -339,7 +339,14 @@ export const layer = Layer.effect(SpaceVisibility, make);
 /** What the current connection or request may see. */
 export class CurrentViewer extends Context.Service<
   CurrentViewer,
-  { readonly visibility: Effect.Effect<Visibility> }
+  {
+    readonly visibility: Effect.Effect<Visibility>;
+    /**
+     * Whether the viewer lost a Membership at or after event `sequence`, so a client resuming
+     * from there may hold rows it can no longer see and needs a fresh snapshot instead.
+     */
+    readonly lostAccessSince: (sequence: number) => Effect.Effect<boolean>;
+  }
 >()("t3/spaces/SpaceVisibility/CurrentViewer") {}
 
 /** One viewer per connection, for the principal of that connection. */
@@ -348,12 +355,27 @@ export const layerCurrentViewer = Layer.effect(
   Effect.gen(function* () {
     const principal = yield* EnvironmentAuthenticatedPrincipal;
     const visibility = yield* SpaceVisibility;
-    return CurrentViewer.of({ visibility: yield* visibility.viewer(principal.userId) });
+    const spaces = yield* SpaceDirectory.SpaceDirectory;
+    const userId = principal.userId;
+    return CurrentViewer.of({
+      visibility: yield* visibility.viewer(userId),
+      lostAccessSince: Effect.fn("CurrentViewer.lostAccessSince")(function* (sequence: number) {
+        if (userId === undefined) return false;
+        // A failed read must not let a stale client keep what it may no longer see.
+        const through = yield* spaces
+          .accessNarrowedThrough(userId)
+          .pipe(Effect.orElseSucceed(() => Number.MAX_SAFE_INTEGER));
+        return through > 0 && sequence <= through;
+      }),
+    });
   }),
 );
 
 /** Sees everything: for tests and in-process callers that act as the Owner. */
 export const layerCurrentViewerOwner = Layer.succeed(
   CurrentViewer,
-  CurrentViewer.of({ visibility: Effect.succeed(everything) }),
+  CurrentViewer.of({
+    visibility: Effect.succeed(everything),
+    lostAccessSince: Effect.fn("CurrentViewer.lostAccessSince")(() => Effect.succeed(false)),
+  }),
 );

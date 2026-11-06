@@ -1,7 +1,8 @@
 # Welcome wizard
 
 T3 Code shows a setup flow when you open a new installation. Existing
-workspaces skip this flow.
+workspaces skip this flow. Only the Owner sees it: people the Owner invites start
+in their organization.
 
 Close setup while no import is running to go straight to the app. You can connect
 computers and agents later from Settings, or open `/welcome` to run setup again.

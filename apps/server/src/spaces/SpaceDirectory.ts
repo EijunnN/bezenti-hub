@@ -1,4 +1,6 @@
 import {
+  type MemberList,
+  type MemberSummary,
   type ProjectId,
   SpaceId,
   SpaceResourceNotFoundError,
@@ -15,7 +17,9 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
+import type * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
@@ -40,6 +44,11 @@ const DENIED_ACTION_LABELS: Record<string, string> = {
   "invitation.create": "invite people",
   "invitation.manage": "manage Invitations",
   "guestLink.create": "create guest links",
+  "admin.manage": "name or remove Admins",
+  "membership.changeRole": "change this person's Role",
+  "membership.remove": "remove this person",
+  "membership.leave": "leave for someone else",
+  "membership.resetLink": "give this person a reset link",
   "thread.continue": "continue this Thread",
   "thread.archive": "archive or restore this Thread",
   "thread.stop": "stop this Thread",
@@ -58,6 +67,10 @@ const deniedMessage = (action: string, reason: string): string | undefined => {
     return `Only its creator or an Admin can ${DENIED_ACTION_LABELS[action] ?? "do that"}.`;
   }
   if (reason === "not-archived") return "Archive it before deleting it permanently.";
+  if (reason === "no-such-member") return "That person is not in this Organization.";
+  if (action.startsWith("membership.") && reason === "owner-only") {
+    return "Only the Owner names, changes or removes Admins.";
+  }
   if (reason === "no-user") return "This session belongs to no User. Sign in again.";
   if (
     (action === "thread.delete" || action === "project.delete") &&
@@ -224,6 +237,52 @@ export class SpaceDirectory extends Context.Service<
       readonly userId: UserId;
       readonly role: SpaceRole;
     }) => Effect.Effect<boolean, SpaceDirectoryStorageError>;
+    /**
+     * The Organization's Members with what the viewer may do to each. An Organization the viewer
+     * cannot see fails exactly like one that does not exist.
+     */
+    readonly members: (
+      viewer: UserId,
+      spaceId: SpaceId,
+    ) => Effect.Effect<MemberList, SpaceNotFoundError | SpaceDirectoryStorageError>;
+    /**
+     * Refuses a Membership action the policy denies, and returns the target's current Role. A
+     * hidden Organization answers like a missing one; a target who is not a Member is refused.
+     */
+    readonly authorizeMembership: (input: {
+      readonly actor: UserId;
+      readonly action: AccessPolicy.Action;
+      readonly spaceId: SpaceId;
+      readonly target: UserId;
+      readonly nextRole?: SpaceRole;
+    }) => Effect.Effect<SpaceRole, SpaceClaimError>;
+    /** Gives a Member another Role; false when they are not one. Run it in the caller's transaction. */
+    readonly setRole: (input: {
+      readonly spaceId: SpaceId;
+      readonly userId: UserId;
+      readonly role: SpaceRole;
+    }) => Effect.Effect<boolean, SpaceDirectoryStorageError>;
+    /**
+     * Ends a Membership (what they created stays in the Organization) and marks when the User lost
+     * access; false when they were not a Member. Run it in the caller's transaction.
+     */
+    readonly removeMembership: (input: {
+      readonly spaceId: SpaceId;
+      readonly userId: UserId;
+    }) => Effect.Effect<boolean, SpaceDirectoryStorageError>;
+    /**
+     * After a transaction that changed these Users' Memberships commits: bumps `revision` and
+     * tells each User's open connections, which close so their client reloads what it may see.
+     */
+    readonly membershipsChanged: (userIds: ReadonlyArray<UserId>) => Effect.Effect<void>;
+    /** Subscribes now; the returned effect completes at the User's next Membership change. */
+    readonly nextMembershipChange: (
+      userId: UserId,
+    ) => Effect.Effect<Effect.Effect<void>, never, Scope.Scope>;
+    /** The event sequence when the User last lost a Membership; 0 when never. */
+    readonly accessNarrowedThrough: (
+      userId: UserId,
+    ) => Effect.Effect<number, SpaceDirectoryStorageError>;
     /**
      * The Spaces whose content the User may see (the policy's `space.view`), or "all" for the
      * Owner. Read on the writer connection, so a change committed before the call is seen.
@@ -590,7 +649,173 @@ const make = Effect.gen(function* () {
     return inserted.length > 0;
   });
 
+  const listMemberRows = SqlSchema.findAll({
+    Request: SpaceId,
+    Result: Schema.Struct({ userId: UserId, displayName: Schema.String, role: SpaceRole }),
+    execute: (spaceId) => sql`
+      SELECT m.user_id AS "userId", u.display_name AS "displayName", m.role AS role
+      FROM space_memberships AS m JOIN users AS u ON u.user_id = m.user_id
+      WHERE m.space_id = ${spaceId} AND u.removed_at IS NULL
+      ORDER BY CASE m.role WHEN 'admin' THEN 0 WHEN 'member' THEN 1 ELSE 2 END,
+        u.display_name COLLATE NOCASE, m.user_id
+    `,
+  });
+
+  /** The Organization, when the User may see it; a hidden one is reported as missing. */
+  const visibleOrganization = Effect.fn("SpaceDirectory.visibleOrganization")(function* (
+    userId: UserId,
+    spaceId: SpaceId,
+  ) {
+    const [space, principal] = yield* Effect.all(
+      [findSpace(spaceId).pipe(Effect.mapError(storageError)), currentPrincipal(userId)],
+      { concurrency: "unbounded" },
+    );
+    if (
+      Option.isNone(space) ||
+      space.value.kind !== "organization" ||
+      !allows(principal, "space.view", toResource(space.value))
+    ) {
+      return yield* new SpaceNotFoundError({ spaceId });
+    }
+    return { principal, space: toResource(space.value) };
+  });
+
+  const ASSIGNABLE_ROLES: ReadonlyArray<SpaceRole> = ["admin", "member", "guest"];
+
+  const members = Effect.fn("SpaceDirectory.members")(function* (viewer: UserId, spaceId: SpaceId) {
+    const { principal, space } = yield* visibleOrganization(viewer, spaceId);
+    const rows = yield* listMemberRows(spaceId).pipe(Effect.mapError(storageError));
+    const may = (
+      action: AccessPolicy.Action,
+      userId: UserId,
+      role: SpaceRole,
+      nextRole?: SpaceRole,
+    ) =>
+      allows(principal, action, {
+        kind: "membership",
+        space,
+        userId,
+        role,
+        ...(nextRole === undefined ? {} : { nextRole }),
+      });
+    return {
+      members: rows.map((row): MemberSummary => ({
+        userId: row.userId,
+        displayName: row.displayName,
+        role: row.role,
+        isYou: row.userId === viewer,
+        canChangeRole:
+          row.userId !== viewer &&
+          ASSIGNABLE_ROLES.some(
+            (role) => role !== row.role && may("membership.changeRole", row.userId, row.role, role),
+          ),
+        canRemove: row.userId !== viewer && may("membership.remove", row.userId, row.role),
+        canIssueResetLink:
+          row.userId !== viewer && may("membership.resetLink", row.userId, row.role),
+      })),
+      // The Roles an Admin may give a Member, which are the ones they may invite as.
+      assignableRoles: ASSIGNABLE_ROLES.filter((role) =>
+        allows(principal, "membership.changeRole", {
+          kind: "membership",
+          space,
+          userId: viewer,
+          role: "guest",
+          nextRole: role,
+        }),
+      ),
+      canLeave: may("membership.leave", viewer, principal.roles.get(spaceId) ?? "guest"),
+    } satisfies MemberList;
+  });
+
+  const authorizeMembership = Effect.fn("SpaceDirectory.authorizeMembership")(function* (input: {
+    readonly actor: UserId;
+    readonly action: AccessPolicy.Action;
+    readonly spaceId: SpaceId;
+    readonly target: UserId;
+    readonly nextRole?: SpaceRole;
+  }) {
+    const { principal, space } = yield* visibleOrganization(input.actor, input.spaceId);
+    const role = (yield* principalOf(input.target)).roles.get(input.spaceId);
+    if (role === undefined) {
+      return yield* new SpaceAccessDeniedError({ action: input.action, reason: "no-such-member" });
+    }
+    yield* requireAllowed(principal, input.action, {
+      kind: "membership",
+      space,
+      userId: input.target,
+      role,
+      ...(input.nextRole === undefined ? {} : { nextRole: input.nextRole }),
+    });
+    return role;
+  });
+
+  const setRole = Effect.fn("SpaceDirectory.setRole")(function* (input: {
+    readonly spaceId: SpaceId;
+    readonly userId: UserId;
+    readonly role: SpaceRole;
+  }) {
+    const updated = yield* sql<{ readonly userId: string }>`
+      UPDATE space_memberships SET role = ${input.role}
+      WHERE space_id = ${input.spaceId} AND user_id = ${input.userId}
+      RETURNING user_id AS "userId"
+    `.pipe(Effect.mapError(storageError));
+    return updated.length > 0;
+  });
+
+  const removeMembership = Effect.fn("SpaceDirectory.removeMembership")(function* (input: {
+    readonly spaceId: SpaceId;
+    readonly userId: UserId;
+  }) {
+    const removed = yield* sql<{ readonly userId: string }>`
+      DELETE FROM space_memberships
+      WHERE space_id = ${input.spaceId} AND user_id = ${input.userId}
+      RETURNING user_id AS "userId"
+    `;
+    if (removed.length === 0) return false;
+    yield* sql`
+      UPDATE users
+      SET access_narrowed_through = (SELECT COALESCE(MAX(sequence), 0) FROM orchestration_events)
+      WHERE user_id = ${input.userId}
+    `;
+    return true;
+  }, Effect.mapError(storageError));
+
+  const membershipChanges = yield* PubSub.unbounded<UserId>();
+  const membershipsChanged = (userIds: ReadonlyArray<UserId>) =>
+    changed.pipe(Effect.andThen(PubSub.publishAll(membershipChanges, userIds)), Effect.asVoid);
+
+  const nextMembershipChange = Effect.fn("SpaceDirectory.nextMembershipChange")(function* (
+    userId: UserId,
+  ) {
+    const subscription = yield* PubSub.subscribe(membershipChanges);
+    const next: Effect.Effect<void> = PubSub.take(subscription).pipe(
+      Effect.flatMap((changedUserId) => (changedUserId === userId ? Effect.void : next)),
+    );
+    return next;
+  });
+
+  const findAccessNarrowed = SqlSchema.findOneOption({
+    Request: UserId,
+    Result: Schema.Struct({ through: Schema.NullOr(Schema.Number) }),
+    execute: (userId) => sql`
+      SELECT access_narrowed_through AS "through" FROM users WHERE user_id = ${userId}
+    `,
+  });
+  const accessNarrowedThrough = Effect.fn("SpaceDirectory.accessNarrowedThrough")(function* (
+    userId: UserId,
+  ) {
+    const row = yield* findAccessNarrowed(userId).pipe(Effect.mapError(storageError));
+    return Option.match(row, { onNone: () => 0, onSome: (found) => found.through ?? 0 });
+  });
+
   return SpaceDirectory.of({
+    members,
+    authorizeMembership,
+    setRole,
+    removeMembership,
+    membershipsChanged,
+    nextMembershipChange,
+    accessNarrowedThrough,
     principalOf,
     view,
     createOrganization,

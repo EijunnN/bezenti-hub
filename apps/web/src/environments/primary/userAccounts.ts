@@ -147,15 +147,27 @@ export async function resetPasskey(token: string): Promise<void> {
 }
 
 /** Signed in, or the TOTP challenge to answer with `signInWithTotp`. */
+/** The code step of a password sign-in; `setup` when the account must add an authenticator app first. */
+export interface TotpStep {
+  readonly totpChallengeId: string;
+  readonly setup?: { readonly secret: string; readonly otpauthUri: string };
+}
+
 export async function signInWithPassword(input: {
   readonly loginName: string;
   readonly password: string;
-}): Promise<{ readonly totpChallengeId: string } | "signed-in"> {
+}): Promise<TotpStep | "signed-in"> {
   const result = await request(
     (client) => client.auth.passwordSignIn({ payload: input }),
     "That sign-in name or password is not right.",
   );
-  return result.authenticated ? "signed-in" : { totpChallengeId: result.challengeId };
+  if (result.authenticated) return "signed-in";
+  return result.secondFactor === "totp-setup"
+    ? {
+        totpChallengeId: result.challengeId,
+        setup: { secret: result.secret, otpauthUri: result.otpauthUri },
+      }
+    : { totpChallengeId: result.challengeId };
 }
 
 export async function signInWithTotp(input: {

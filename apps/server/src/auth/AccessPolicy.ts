@@ -42,17 +42,37 @@ export interface OwnedResource {
   readonly archived: boolean;
 }
 
-export type Resource = SpaceResource | InstallationResource | OwnedResource;
+/** One User's Membership of an Organization, as someone acts on it. */
+export interface MembershipResource {
+  readonly kind: "membership";
+  readonly space: SpaceResource;
+  readonly userId: UserId;
+  readonly role: SpaceRole;
+  /** For `membership.changeRole`: the Role asked for. */
+  readonly nextRole?: SpaceRole;
+}
+
+export type Resource = SpaceResource | InstallationResource | OwnedResource | MembershipResource;
 
 export type Action =
   | "space.view"
   | "thread.create"
   | "project.create"
   | "organization.create"
-  /** Create an Invitation into an Organization. */
+  /** Create an Invitation into an Organization as a Member or Guest. */
   | "invitation.create"
   /** List and revoke an Organization's Invitations. */
   | "invitation.manage"
+  /** Invite as an Admin or revoke such an Invitation; checked beside the Invitation action. */
+  | "admin.manage"
+  /** Give a Member another Role. */
+  | "membership.changeRole"
+  /** Remove someone from the Organization. */
+  | "membership.remove"
+  /** Leave the Organization oneself. */
+  | "membership.leave"
+  /** Issue a one-time link that lets the Member register a new passkey. */
+  | "membership.resetLink"
   /** Create or close a guest link (read one Thread for 24h). */
   | "guestLink.create"
   /** Anything that speaks in or changes a Thread: messages, turns, settings, metadata. */
@@ -80,13 +100,17 @@ const NON_CREATING: ReadonlySet<Action> = new Set([
   "space.view",
   "organization.create",
   "invitation.manage",
+  // Checked beside `invitation.create`, which refuses archived Organizations.
+  "admin.manage",
 ]);
 
-/** Owner-only actions; ticket 09 lets Admins invite Members and Guests. */
-const OWNER_ONLY: ReadonlySet<Action> = new Set([
-  "organization.create",
-  "invitation.create",
-  "invitation.manage",
+const OWNER_ONLY: ReadonlySet<Action> = new Set(["organization.create", "admin.manage"]);
+
+const MEMBERSHIP_ACTIONS: ReadonlySet<Action> = new Set([
+  "membership.changeRole",
+  "membership.remove",
+  "membership.leave",
+  "membership.resetLink",
 ]);
 
 /** Actions on one Thread or Project, decided against an `OwnedResource`. */
@@ -129,6 +153,8 @@ const isSpace = (resource: Resource): resource is SpaceResource =>
   resource.kind === "organization" || resource.kind === "personal";
 const isOwned = (resource: Resource): resource is OwnedResource =>
   resource.kind === "thread" || resource.kind === "project";
+const isMembership = (resource: Resource): resource is MembershipResource =>
+  resource.kind === "membership";
 
 const ROLES_THAT_CREATE_PROJECTS: ReadonlySet<SpaceRole> = new Set(["admin", "member"]);
 const ADMIN_ONLY: ReadonlySet<SpaceRole> = new Set(["admin"]);
@@ -199,7 +225,36 @@ const decideOwned = (principal: Principal, action: Action, item: OwnedResource):
   }
 };
 
+/**
+ * Rules on someone's Membership. Anyone leaves; Admins change and remove Members and Guests and
+ * issue their reset links, but never touch an Admin or make one: only the Owner does.
+ */
+const decideMembership = (
+  principal: Principal,
+  action: Action,
+  target: MembershipResource,
+): Decision => {
+  const { space } = target;
+  if (space.kind !== "organization") return deny("wrong-resource");
+  if (action === "membership.leave") {
+    if (target.userId !== principal.userId) return deny("not-yours");
+    return principal.roles.has(space.id) ? allow : deny("not-a-member");
+  }
+  if (principal.isOwner) return allow;
+  const role = principal.roles.get(space.id);
+  if (role === undefined) return deny("not-a-member");
+  if (role !== "admin") return deny("role-not-allowed");
+  if (space.archived) return deny("space-archived");
+  if (target.role === "admin" || target.nextRole === "admin") return deny("owner-only");
+  return allow;
+};
+
 export const decide = (principal: Principal, action: Action, resource: Resource): Decision => {
+  if (MEMBERSHIP_ACTIONS.has(action) || isMembership(resource)) {
+    return MEMBERSHIP_ACTIONS.has(action) && isMembership(resource)
+      ? decideMembership(principal, action, resource)
+      : deny("wrong-resource");
+  }
   if (OWNED_ACTIONS.has(action) || isOwned(resource)) {
     return OWNED_ACTIONS.has(action) && isOwned(resource)
       ? decideOwned(principal, action, resource)
@@ -210,6 +265,7 @@ export const decide = (principal: Principal, action: Action, resource: Resource)
   if (
     (action === "invitation.create" ||
       action === "invitation.manage" ||
+      action === "admin.manage" ||
       action === "guestLink.create") &&
     (!isSpace(resource) || resource.kind !== "organization")
   ) {
@@ -232,6 +288,8 @@ export const decide = (principal: Principal, action: Action, resource: Resource)
     case "project.create":
       return inOrganization(principal, resource, ROLES_THAT_CREATE_PROJECTS);
     case "guestLink.create":
+    case "invitation.create":
+    case "invitation.manage":
       return inOrganization(principal, resource, ADMIN_ONLY);
     default:
       return deny("owner-only");

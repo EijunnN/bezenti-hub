@@ -170,6 +170,7 @@ import { makePersistedServerRuntimeState } from "./serverRuntimeState.ts";
 import { acceptsHubConnection, loopbackUrlHostForAddress } from "./startupAccess.ts";
 import * as OrchestrationHttp from "./orchestration-v2/http.ts";
 import * as ProjectHttp from "./project/http.ts";
+import * as MembershipService from "./spaces/MembershipService.ts";
 import * as SpaceDirectory from "./spaces/SpaceDirectory.ts";
 import * as SpaceVisibility from "./spaces/SpaceVisibility.ts";
 import * as SpacesHttp from "./spaces/http.ts";
@@ -461,7 +462,11 @@ const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
 
 const layerServerEnvironment = ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer));
 
-const layerAuth = Layer.merge(InvitationService.layer, SpaceVisibility.layer).pipe(
+const layerAuth = Layer.mergeAll(
+  InvitationService.layer,
+  MembershipService.layer,
+  SpaceVisibility.layer,
+).pipe(
   Layer.provideMerge(Layer.merge(EnvironmentAuth.layer, SpaceDirectory.layer)),
   Layer.provideMerge(layerPersistence),
   Layer.provide(layerServerEnvironment),

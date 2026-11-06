@@ -62,6 +62,27 @@ const adasProject = owned("project", "ada");
 const archivedGracesThread = owned("thread", "grace", { archived: true });
 const archivedGracesProject = owned("project", "grace", { archived: true });
 
+const membership = (
+  userId: string,
+  role: SpaceRole,
+  options: { readonly nextRole?: SpaceRole; readonly space?: AccessPolicy.SpaceResource } = {},
+): AccessPolicy.MembershipResource => ({
+  kind: "membership",
+  space: options.space ?? organization,
+  userId: UserId.make(userId),
+  role,
+  ...(options.nextRole === undefined ? {} : { nextRole: options.nextRole }),
+});
+// Grace the Member, Linus the Guest and Hedy, a second Admin, as targets.
+const grace = (nextRole?: SpaceRole | { readonly space: AccessPolicy.SpaceResource }) =>
+  typeof nextRole === "object"
+    ? membership("grace", "member", nextRole)
+    : membership("grace", "member", nextRole === undefined ? {} : { nextRole });
+const linusAs = (nextRole?: SpaceRole) =>
+  membership("linus", "guest", nextRole === undefined ? {} : { nextRole });
+const otherAdmin = (nextRole?: SpaceRole) =>
+  membership("hedy", "admin", nextRole === undefined ? {} : { nextRole });
+
 const allow = AccessPolicy.allow;
 const deny = AccessPolicy.deny;
 
@@ -199,11 +220,14 @@ const rows: ReadonlyArray<
     deny("space-frozen"),
   ],
 
-  // Invitations: only the Owner invites, and only into a live Organization (ticket 09 adds Admins).
+  // Invitations: Admins invite Members and Guests; only the Owner invites Admins.
   ["Owner invites to an Organization", owner, "invitation.create", organization, allow],
-  ["Admin cannot invite yet", admin, "invitation.create", organization, deny("owner-only")],
-  ["Member cannot invite", member, "invitation.create", organization, deny("owner-only")],
-  ["Guest cannot invite", guest, "invitation.create", organization, deny("owner-only")],
+  ["Admin invites Members and Guests", admin, "invitation.create", organization, allow],
+  ["Member cannot invite", member, "invitation.create", organization, deny("role-not-allowed")],
+  ["Guest cannot invite", guest, "invitation.create", organization, deny("role-not-allowed")],
+  ["non-Member cannot invite", outsider, "invitation.create", organization, deny("not-a-member")],
+  ["Owner names Admins", owner, "admin.manage", organization, allow],
+  ["Admin cannot name Admins", admin, "admin.manage", organization, deny("owner-only")],
   [
     "nobody invites into a Personal space, not even the Owner",
     owner,
@@ -225,12 +249,92 @@ const rows: ReadonlyArray<
     archivedOrganization,
     allow,
   ],
+  ["Admin lists and revokes Invitations", admin, "invitation.manage", organization, allow],
   [
-    "Admin cannot list or revoke Invitations yet",
-    admin,
+    "Member cannot list or revoke Invitations",
+    member,
     "invitation.manage",
     organization,
+    deny("role-not-allowed"),
+  ],
+
+  // Memberships: Admins manage Members and Guests, never Admins; only the Owner names Admins.
+  ["Admin makes a Member a Guest", admin, "membership.changeRole", grace("guest"), allow],
+  ["Admin makes a Guest a Member", admin, "membership.changeRole", linusAs("member"), allow],
+  [
+    "Admin cannot make anyone an Admin",
+    admin,
+    "membership.changeRole",
+    grace("admin"),
     deny("owner-only"),
+  ],
+  [
+    "Admin cannot demote another Admin",
+    admin,
+    "membership.changeRole",
+    otherAdmin("member"),
+    deny("owner-only"),
+  ],
+  ["Owner names an Admin", owner, "membership.changeRole", grace("admin"), allow],
+  ["Owner demotes an Admin", owner, "membership.changeRole", otherAdmin("member"), allow],
+  [
+    "Member cannot change Roles",
+    member,
+    "membership.changeRole",
+    linusAs("member"),
+    deny("role-not-allowed"),
+  ],
+  ["Admin removes a Member", admin, "membership.remove", grace(), allow],
+  [
+    "Admin cannot remove another Admin",
+    admin,
+    "membership.remove",
+    otherAdmin(),
+    deny("owner-only"),
+  ],
+  ["Owner removes an Admin", owner, "membership.remove", otherAdmin(), allow],
+  ["Guest cannot remove anyone", guest, "membership.remove", grace(), deny("role-not-allowed")],
+  ["non-Member cannot remove anyone", outsider, "membership.remove", grace(), deny("not-a-member")],
+  [
+    "nobody changes Roles in an archived Organization but the Owner",
+    admin,
+    "membership.remove",
+    grace({ space: archivedOrganization }),
+    deny("space-archived"),
+  ],
+  ["a Member leaves", member, "membership.leave", grace(), allow],
+  ["an Admin leaves", admin, "membership.leave", membership("ada", "admin"), allow],
+  [
+    "a Member leaves even an archived Organization",
+    member,
+    "membership.leave",
+    grace({ space: archivedOrganization }),
+    allow,
+  ],
+  ["nobody leaves for someone else", admin, "membership.leave", grace(), deny("not-yours")],
+  ["Admin issues a Member's reset link", admin, "membership.resetLink", grace(), allow],
+  ["Admin issues a Guest's reset link", admin, "membership.resetLink", linusAs(), allow],
+  [
+    "Admin cannot issue another Admin's reset link",
+    admin,
+    "membership.resetLink",
+    otherAdmin(),
+    deny("owner-only"),
+  ],
+  ["Owner issues anyone's reset link", owner, "membership.resetLink", otherAdmin(), allow],
+  [
+    "Member cannot issue reset links",
+    member,
+    "membership.resetLink",
+    linusAs(),
+    deny("role-not-allowed"),
+  ],
+  [
+    "Memberships exist only in Organizations",
+    owner,
+    "membership.remove",
+    grace({ space: personalOf("grace") }),
+    deny("wrong-resource"),
   ],
 
   // Role table, Threads: only the creator continues one, not even an Admin.

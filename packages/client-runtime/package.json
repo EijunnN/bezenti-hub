@@ -519,6 +519,10 @@
       "types": "./src/spaces/rolePermissions.ts",
       "default": "./src/spaces/rolePermissions.ts"
     },
+    "./spaces/memberships": {
+      "types": "./src/spaces/memberships.ts",
+      "default": "./src/spaces/memberships.ts"
+    },
     "./spaces/invitations": {
       "types": "./src/spaces/invitations.ts",
       "default": "./src/spaces/invitations.ts"

@@ -429,6 +429,8 @@ export const AuthSessionState = Schema.Struct({
   userId: Schema.optionalKey(UserId),
   /** Once an Owner exists, signing in with an account is the way in; pairing links are optional. */
   ownerExists: Schema.optionalKey(Schema.Boolean),
+  /** Whether this session's User is the Owner, who alone sets the Installation up. */
+  isOwner: Schema.optionalKey(Schema.Boolean),
 });
 export type AuthSessionState = typeof AuthSessionState.Type;
 

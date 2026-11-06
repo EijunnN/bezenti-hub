@@ -47,3 +47,47 @@ export const CreateOrganizationRequest = Schema.Struct({
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(80)),
 });
 export type CreateOrganizationRequest = typeof CreateOrganizationRequest.Type;
+
+/** Someone in an Organization, with what the viewer may do to them. */
+export const MemberSummary = Schema.Struct({
+  userId: UserId,
+  displayName: Schema.String,
+  role: SpaceRole,
+  isYou: Schema.Boolean,
+  canChangeRole: Schema.Boolean,
+  canRemove: Schema.Boolean,
+  /** Whether the viewer may give them a one-time link to register a new passkey. */
+  canIssueResetLink: Schema.Boolean,
+});
+export type MemberSummary = typeof MemberSummary.Type;
+
+export const MemberList = Schema.Struct({
+  members: Schema.Array(MemberSummary),
+  /** The Roles the viewer may give, in Invitations and Role changes: Admin only for the Owner. */
+  assignableRoles: Schema.Array(SpaceRole),
+  canLeave: Schema.Boolean,
+});
+export type MemberList = typeof MemberList.Type;
+
+export const MemberRequest = Schema.Struct({ userId: UserId });
+export type MemberRequest = typeof MemberRequest.Type;
+
+export const ChangeMemberRoleRequest = Schema.Struct({ userId: UserId, role: SpaceRole });
+export type ChangeMemberRoleRequest = typeof ChangeMemberRoleRequest.Type;
+
+export const ChangeMemberRoleResult = Schema.Struct({
+  member: MemberSummary,
+  /**
+   * A new Admin who signs in with only a password: their sessions ended, and their next sign-in
+   * sets up an authenticator app.
+   */
+  mustSetUpStrongSignIn: Schema.Boolean,
+});
+export type ChangeMemberRoleResult = typeof ChangeMemberRoleResult.Type;
+
+/** Shown once: the server keeps only its hash. The link is `<origin>/reset#token=<token>`. */
+export const MemberResetLink = Schema.Struct({
+  token: TrimmedNonEmptyString,
+  expiresAt: Schema.DateTimeUtc,
+});
+export type MemberResetLink = typeof MemberResetLink.Type;

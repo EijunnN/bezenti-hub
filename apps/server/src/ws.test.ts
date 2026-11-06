@@ -140,6 +140,7 @@ import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as ProjectEnrichment from "./project/ProjectEnrichmentService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import {
+  connectionEnds,
   layerWsRpc,
   resolveOpenDiscoveryForConfig,
   subscribeOrchestrationV2Shell,
@@ -155,6 +156,7 @@ import * as SpaceVisibility from "./spaces/SpaceVisibility.ts";
 import {
   addMember,
   bootstrapOwner,
+  isSignedIn,
   joinOrganization,
   makeAuthenticator,
   serveAuthHttp,
@@ -1857,6 +1859,115 @@ describe("Space visibility", () => {
         ),
       ),
     );
+
+  // Live: the shell tail batches deltas on a wall-clock window.
+  it.live(
+    "removing a Member closes their sockets, and their shell resumes without the Organization",
+    () =>
+      Effect.gen(function* () {
+        const { server, owner, acme, grace } = yield* hub;
+        const graceAgain = yield* server.request("/api/auth/password/sign-in", {
+          body: { loginName: "grace", password: PASSWORD },
+        });
+        // A second Member of Acme, whose access does not change.
+        const invitation = yield* server.request(`/api/spaces/${acme}/invitations`, {
+          body: { role: "member" },
+          cookie: owner,
+        });
+        yield* server.request("/api/invitations/accept", {
+          body: {
+            token: invitation.body.token,
+            method: "password",
+            displayName: "hedy",
+            loginName: "hedy",
+            password: PASSWORD,
+          },
+        });
+        const [hedyRow] = yield* server.sql<{ userId: string }>`
+        SELECT user_id AS "userId" FROM users WHERE display_name = 'hedy'
+      `;
+        const hedy = UserId.make(hedyRow!.userId);
+        const sessionOf = Effect.fn(function* (userId: UserId) {
+          const [row] = yield* server.sql<{ sessionId: string }>`
+          SELECT session_id AS "sessionId" FROM auth_sessions
+          WHERE user_id = ${userId} AND revoked_at IS NULL LIMIT 1
+        `;
+          return {
+            sessionId: AuthSessionId.make(row!.sessionId),
+            subject: "user-sign-in",
+            userId,
+            method: "browser-session-cookie" as const,
+            scopes: [],
+          };
+        });
+        const socketEnds = (userId: UserId) =>
+          sessionOf(userId).pipe(
+            Effect.flatMap(connectionEnds),
+            Effect.provide(Layer.succeedContext(server.services)),
+          );
+        const graceSocket = yield* (yield* socketEnds(grace.userId)).pipe(Effect.forkScoped);
+        const hedySocket = yield* (yield* socketEnds(hedy)).pipe(Effect.forkScoped);
+
+        const firstShell = Effect.fn(function* (
+          userId: UserId,
+          input: { readonly afterSequence?: number },
+        ) {
+          const client = yield* connect(server, userId);
+          const items = yield* Queue.unbounded<OrchestrationV2ShellStreamItem>();
+          yield* client[ORCHESTRATION_V2_WS_METHODS.subscribeShell]({
+            ...input,
+            requestCompletionMarker: true,
+          }).pipe(
+            Stream.runForEach((item) => Queue.offer(items, item)),
+            Effect.forkScoped,
+          );
+          return yield* Queue.take(items);
+        });
+        const before = yield* firstShell(grace.userId, {});
+        assert.equal(before.kind, "snapshot");
+        if (before.kind !== "snapshot") return;
+        assert.deepEqual(shellIds(before.snapshot), {
+          projects: ["acme-app"],
+          threads: ["acme-child", "acme-thread"],
+        });
+
+        const removed = yield* server.request(`/api/spaces/${acme}/members/remove`, {
+          body: { userId: grace.userId },
+          cookie: owner,
+        });
+        assert.equal(removed.status, 200);
+        // Every socket of hers closes, whichever browser opened it; Hedy's stays open.
+        yield* Fiber.join(graceSocket);
+        assert.isUndefined(hedySocket.pollUnsafe());
+        assert.equal(yield* isSignedIn(server, graceAgain.cookie), true);
+
+        // Reconnecting from where her shell was, she gets a fresh snapshot without Acme.
+        const resumed = yield* firstShell(grace.userId, {
+          afterSequence: before.snapshot.snapshotSequence,
+        });
+        assert.equal(resumed.kind, "snapshot");
+        if (resumed.kind !== "snapshot") return;
+        assert.isUndefined(resumed.resolvedRepositoryIdentityRoots);
+        assert.deepEqual(shellIds(resumed.snapshot), { projects: [], threads: [] });
+        // Others resume as before: no authoritative snapshot.
+        const hedyResumed = yield* firstShell(hedy, {
+          afterSequence: before.snapshot.snapshotSequence,
+        });
+        assert.isFalse(
+          hedyResumed.kind === "snapshot" &&
+            hedyResumed.resolvedRepositoryIdentityRoots === undefined,
+        );
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(
+            Layer.fresh(layerConfigSources),
+            Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+            Layer.mock(ServerBrowser.ServerBrowser)({}),
+          ),
+        ),
+      ),
+  );
 
   it.effect("a command on a hidden Thread or Project fails exactly like one on a missing one", () =>
     withHub(({ server, grace }) =>

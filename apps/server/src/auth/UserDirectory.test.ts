@@ -228,7 +228,7 @@ it.effect("lets a Member sign in with a password alone", () =>
   }),
 );
 
-it.effect("refuses a password alone for an Admin, as for the Owner", () =>
+it.effect("lets an Admin in with a password only by setting up an authenticator app", () =>
   Effect.gen(function* () {
     const server = yield* serveAuthHttp;
     const cookie = yield* addMember(server);
@@ -240,13 +240,13 @@ it.effect("refuses a password alone for an Admin, as for the Owner", () =>
       VALUES ('org-acme', 'organization', 'Acme', '2026-01-01T00:00:00.000Z')`;
     yield* joinOrganization(server, "org-acme", "member-1", "admin");
 
-    // The right password gets told why, and is not counted as a guess.
+    // The right password is asked to set up an app, and is not counted as a guess.
     for (let attempt = 0; attempt < 6; attempt += 1) {
       const signIn = yield* server.request("/api/auth/password/sign-in", {
         body: { loginName: "grace", password: "correct horse battery" },
       });
-      expect(signIn.status).toBe(403);
-      expect(signIn.body.message).toContain("authenticator app");
+      expect(signIn.body).toMatchObject({ authenticated: false, secondFactor: "totp-setup" });
+      expect(signIn.cookie).toBeUndefined();
     }
     const wrong = yield* server.request("/api/auth/password/sign-in", {
       body: { loginName: "grace", password: "wrong horse battery" },

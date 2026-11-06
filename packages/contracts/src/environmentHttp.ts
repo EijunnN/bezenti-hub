@@ -60,7 +60,16 @@ import {
   AuthTotpEnrollment,
   AuthTotpSignInRequest,
 } from "./userAccounts.ts";
-import { CreateOrganizationRequest, SpaceDirectoryView, SpaceSummary } from "./spaces.ts";
+import {
+  ChangeMemberRoleRequest,
+  ChangeMemberRoleResult,
+  CreateOrganizationRequest,
+  MemberList,
+  MemberRequest,
+  MemberResetLink,
+  SpaceDirectoryView,
+  SpaceSummary,
+} from "./spaces.ts";
 import {
   AcceptInvitationRequest,
   AcceptInvitationResult,
@@ -804,6 +813,8 @@ const EnvironmentSpaceErrors = [
   EnvironmentInternalError,
 ] as const;
 
+const SpaceParams = Schema.Struct({ spaceId: SpaceId });
+
 class EnvironmentSpacesHttpApi extends HttpApiGroup.make("spaces")
   .add(
     HttpApiEndpoint.get("list", "/api/spaces", {
@@ -817,6 +828,50 @@ class EnvironmentSpacesHttpApi extends HttpApiGroup.make("spaces")
       headers: OptionalBearerHeaders,
       payload: CreateOrganizationRequest,
       success: SpaceSummary,
+      error: EnvironmentSpaceErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  // An Organization the viewer cannot see answers exactly like one that does not exist.
+  .add(
+    HttpApiEndpoint.get("members", "/api/spaces/:spaceId/members", {
+      headers: OptionalBearerHeaders,
+      params: SpaceParams,
+      success: MemberList,
+      error: EnvironmentSpaceErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("changeMemberRole", "/api/spaces/:spaceId/members/role", {
+      headers: OptionalBearerHeaders,
+      params: SpaceParams,
+      payload: ChangeMemberRoleRequest,
+      success: ChangeMemberRoleResult,
+      error: EnvironmentSpaceErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("removeMember", "/api/spaces/:spaceId/members/remove", {
+      headers: OptionalBearerHeaders,
+      params: SpaceParams,
+      payload: MemberRequest,
+      success: MemberList,
+      error: EnvironmentSpaceErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("issueMemberResetLink", "/api/spaces/:spaceId/members/reset-link", {
+      headers: OptionalBearerHeaders,
+      params: SpaceParams,
+      payload: MemberRequest,
+      success: MemberResetLink,
+      error: EnvironmentSpaceErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("leave", "/api/spaces/:spaceId/leave", {
+      headers: OptionalBearerHeaders,
+      params: SpaceParams,
+      success: SpaceDirectoryView,
       error: EnvironmentSpaceErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}

@@ -109,16 +109,6 @@ export class PasswordRejectedError extends Schema.TaggedError<PasswordRejectedEr
   }
 }
 
-/** The right password for an account that may use one only with TOTP, which it has not set up. */
-export class SecondFactorMissingError extends Schema.TaggedError<SecondFactorMissingError>()(
-  "SecondFactorMissingError",
-  {},
-) {
-  override get message(): string {
-    return "This account needs an authenticator app with its password. Sign in with your passkey, then add one under Settings → Access.";
-  }
-}
-
 export class ResetLinkRejectedError extends Schema.TaggedError<ResetLinkRejectedError>()(
   "ResetLinkRejectedError",
   {},
@@ -172,7 +162,14 @@ export interface PendingResetPasskey {
 
 export type PasswordCheck =
   | { readonly _tag: "verified"; readonly user: AuthUser }
-  | { readonly _tag: "totp-required"; readonly challengeId: string };
+  | { readonly _tag: "totp-required"; readonly challengeId: string }
+  /** The password was right but the account needs TOTP it has not set up: enroll it now. */
+  | {
+      readonly _tag: "totp-setup";
+      readonly challengeId: string;
+      readonly secret: string;
+      readonly otpauthUri: string;
+    };
 
 /** A signed-in User changing their own credentials, from one session and page origin. */
 export interface AccountActor {
@@ -343,10 +340,7 @@ export class UserDirectory extends Context.Service<
       clientIp: string | undefined,
     ) => Effect.Effect<
       PasswordCheck,
-      | PasswordRejectedError
-      | SecondFactorMissingError
-      | SignInThrottledError
-      | UserDirectoryStorageError
+      PasswordRejectedError | SignInThrottledError | UserDirectoryStorageError
     >;
     readonly checkTotp: (
       input: AuthTotpSignInRequest,
@@ -360,6 +354,24 @@ export class UserDirectory extends Context.Service<
       { readonly token: string; readonly expiresAt: DateTime.Utc; readonly user: AuthUser },
       NoOwnerError | UserDirectoryStorageError
     >;
+    /**
+     * The same link for an active User, issued by `createdBy` (the Owner or an Admin); only the
+     * newest link works. None when the User is disabled or removed.
+     */
+    readonly issueResetLink: (input: {
+      readonly userId: UserId;
+      readonly createdBy: UserId;
+    }) => Effect.Effect<
+      Option.Option<{ readonly token: string; readonly expiresAt: DateTime.Utc }>,
+      UserDirectoryStorageError
+    >;
+    /**
+     * For a User who just became an Admin: when they sign in with only a password, ends their
+     * sessions and links so their next sign-in sets up an authenticator app. True when it did.
+     */
+    readonly requireStrongSignInNext: (
+      userId: UserId,
+    ) => Effect.Effect<boolean, UserDirectoryStorageError>;
     readonly getResetLinkStatus: (
       token: string,
     ) => Effect.Effect<AuthResetLinkStatus, UserDirectoryStorageError>;
@@ -497,6 +509,8 @@ const make = Effect.gen(function* () {
     readonly clientIp: string | undefined;
     attempts: number;
     readonly expiresAt: DateTime.DateTime;
+    /** A secret the account is enrolling as it signs in; the first matching code stores it. */
+    readonly enrolling?: Uint8Array;
   }>(MAX_PENDING_TOTP);
   const throttle = makeSignInThrottle();
   const sessions = yield* SessionStore.SessionStore;
@@ -1051,12 +1065,60 @@ const make = Effect.gen(function* () {
       return yield* new PasswordRejectedError({});
     }
     // A rule change (becoming an Admin) can leave a password-only account that now needs TOTP.
-    // The password was right, so say why instead of counting a guess.
+    // The password was right, so this sign-in sets the app up instead of counting a guess.
     if (passwordRequiresTotp(user, credentials)) {
-      return yield* new SecondFactorMissingError({});
+      const secret = yield* AccountCredentials.generateTotpSecret.pipe(withCrypto);
+      const challengeId = yield* random.uuidV4();
+      const now = yield* DateTime.now;
+      yield* totpChallenges.put(
+        challengeId,
+        {
+          userId: user.userId,
+          passwordOk: true,
+          clientIp,
+          attempts: 0,
+          expiresAt: ceremonyExpiry(now),
+          enrolling: secret,
+        },
+        now,
+      );
+      const enrollment = AccountCredentials.totpEnrollment(
+        secret,
+        user.loginName ?? user.displayName,
+      );
+      return {
+        _tag: "totp-setup",
+        challengeId,
+        secret: enrollment.secret,
+        otpauthUri: enrollment.otpauthUri,
+      } as const;
     }
     throttle.reset(keys);
     return { _tag: "verified", user: toAuthUser(user) } as const;
+  });
+
+  /** Stores the secret enrolled during a sign-in once a code from it matches; spends that step. */
+  const enrollAtSignIn = Effect.fn("UserDirectory.enrollAtSignIn")(function* (
+    userId: UserId,
+    secret: Uint8Array,
+    code: string,
+    now: DateTime.DateTime,
+  ) {
+    const step = yield* AccountCredentials.matchTotpStep(
+      secret,
+      code,
+      DateTime.toEpochMillis(now),
+    ).pipe(withCrypto);
+    if (step === undefined) return false;
+    const secretCiphertext = yield* credentialKey.pipe(
+      Effect.flatMap((key) => AccountCredentials.seal(key, secret, userId)),
+      withCrypto,
+      storage,
+    );
+    yield* users
+      .setTotp({ userId, secretCiphertext, step, enrolledAt: DateTime.toUtc(now) })
+      .pipe(storage);
+    return true;
   });
 
   const checkTotp: UserDirectory["Service"]["checkTotp"] = Effect.fn("UserDirectory.checkTotp")(
@@ -1077,8 +1139,10 @@ const make = Effect.gen(function* () {
       const accepted =
         challenge.passwordOk &&
         Option.isSome(user) &&
-        credentials.totpSecretCiphertext !== null &&
-        (yield* acceptTotpCode(challenge.userId, credentials.totpSecretCiphertext, input.code));
+        (challenge.enrolling === undefined
+          ? credentials.totpSecretCiphertext !== null &&
+            (yield* acceptTotpCode(challenge.userId, credentials.totpSecretCiphertext, input.code))
+          : yield* enrollAtSignIn(challenge.userId, challenge.enrolling, input.code, now));
       if (!accepted || Option.isNone(user)) {
         yield* recordFailure(keys);
         return yield* new PasswordRejectedError({});
@@ -1092,6 +1156,30 @@ const make = Effect.gen(function* () {
   const hashResetToken = (token: string) =>
     digest.digestHex(Digest.sha256, new TextEncoder().encode(token));
 
+  const createResetLink = Effect.fn("UserDirectory.createResetLink")(function* (
+    userId: UserId,
+    createdBy: UserId | null,
+  ) {
+    const token = yield* randomBase64Url(32);
+    const now = DateTime.toUtc(yield* DateTime.now);
+    const expiresAt = DateTime.toUtc(
+      DateTime.add(now, { milliseconds: Duration.toMillis(RESET_LINK_TTL) }),
+    );
+    // Only the newest link works, so an older one left in a terminal's history is harmless.
+    yield* users.expireResetLinks({ userId, now }).pipe(storage);
+    yield* users
+      .createResetLink({
+        linkId: yield* random.uuidV4(),
+        userId,
+        tokenHash: yield* hashResetToken(token),
+        createdBy,
+        createdAt: now,
+        expiresAt,
+      })
+      .pipe(storage);
+    return { token, expiresAt };
+  });
+
   const issueOwnerResetLink: UserDirectory["Service"]["issueOwnerResetLink"] = Effect.fn(
     "UserDirectory.issueOwnerResetLink",
   )(function* () {
@@ -1099,25 +1187,27 @@ const make = Effect.gen(function* () {
     if (Option.isNone(owner)) {
       return yield* new NoOwnerError({});
     }
-    const token = yield* randomBase64Url(32);
-    const now = DateTime.toUtc(yield* DateTime.now);
-    const expiresAt = DateTime.toUtc(
-      DateTime.add(now, { milliseconds: Duration.toMillis(RESET_LINK_TTL) }),
-    );
-    // Only the newest link works, so an older one left in a terminal's history is harmless.
-    yield* users.expireResetLinks({ userId: owner.value.userId, now }).pipe(storage);
-    yield* users
-      .createResetLink({
-        linkId: yield* random.uuidV4(),
-        userId: owner.value.userId,
-        tokenHash: yield* hashResetToken(token),
-        // Issued from the Hub's shell, not by a signed-in User.
-        createdBy: null,
-        createdAt: now,
-        expiresAt,
-      })
-      .pipe(storage);
-    return { token, expiresAt, user: toAuthUser(owner.value) };
+    // Issued from the Hub's shell, not by a signed-in User.
+    const link = yield* createResetLink(owner.value.userId, null);
+    return { ...link, user: toAuthUser(owner.value) };
+  });
+
+  const issueResetLink: UserDirectory["Service"]["issueResetLink"] = Effect.fn(
+    "UserDirectory.issueResetLink",
+  )(function* ({ userId, createdBy }) {
+    const user = yield* activeUser(userId);
+    if (Option.isNone(user)) return Option.none();
+    return Option.some(yield* createResetLink(userId, createdBy));
+  });
+
+  const requireStrongSignInNext: UserDirectory["Service"]["requireStrongSignInNext"] = Effect.fn(
+    "UserDirectory.requireStrongSignInNext",
+  )(function* (userId) {
+    const credentials = yield* users.getCredentials(userId).pipe(storage);
+    if (credentials.hasPasskey || credentials.totpSecretCiphertext !== null) return false;
+    yield* sessions.revokeAllForUser(userId).pipe(storage);
+    yield* pairingLinks.revokeAllForUser(userId).pipe(storage);
+    return true;
   });
 
   const liveResetLinkUser = Effect.fn("UserDirectory.liveResetLinkUser")(function* (token: string) {
@@ -1335,6 +1425,8 @@ const make = Effect.gen(function* () {
     prepareInviteePassword,
     createInvitedUser,
     hasStrongSignIn,
+    issueResetLink,
+    requireStrongSignInNext,
     hasOwner: Effect.fn("UserDirectory.hasOwner")(function () {
       return users.hasOwner().pipe(storage);
     }),

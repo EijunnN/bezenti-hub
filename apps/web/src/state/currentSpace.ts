@@ -15,12 +15,15 @@ import {
   currentSpaceStorageKey,
   fetchSpaceDirectory,
 } from "@t3tools/client-runtime/spaces/space-directory";
+import { useAtomValue } from "@effect/atom-react";
 import * as Effect from "effect/Effect";
+import { Atom } from "effect/reactivity";
 import * as Schema from "effect/Schema";
 import { create } from "zustand";
 
 import { PrimaryEnvironmentHttpClient } from "../environments/primary/httpClient";
 import { runPrimaryHttp } from "../lib/runtime";
+import { environmentShell } from "./shell";
 
 const isForbidden = Schema.is(EnvironmentHttpForbiddenError);
 
@@ -85,6 +88,24 @@ export async function loadSpaces(environmentId: EnvironmentId): Promise<void> {
   const previous = useCurrentSpace.getState().currentSpaceId;
   useCurrentSpace.setState({ environmentId, view, loadFailed: false });
   selectSpace(chooseCurrentSpace(view, previous ?? readStoredSpace(view)));
+}
+
+const NO_GENERATION = Atom.make(0).pipe(Atom.withLabel("web-shell-generation:none"));
+const generationAtoms = new Map<EnvironmentId, Atom.Atom<number>>();
+const shellGenerationAtom = (environmentId: EnvironmentId) => {
+  let atom = generationAtoms.get(environmentId);
+  if (atom === undefined) {
+    atom = Atom.make((get) => get(environmentShell.stateValueAtom(environmentId)).generation).pipe(
+      Atom.withLabel(`web-shell-generation:${environmentId}`),
+    );
+    generationAtoms.set(environmentId, atom);
+  }
+  return atom;
+};
+
+/** Changes with each authoritative shell snapshot of the environment, such as after a reconnect. */
+export function useShellGeneration(environmentId: EnvironmentId | null): number {
+  return useAtomValue(environmentId === null ? NO_GENERATION : shellGenerationAtom(environmentId));
 }
 
 export async function createAndSelectOrganization(name: string): Promise<void> {

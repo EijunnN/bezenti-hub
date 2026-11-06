@@ -68,7 +68,7 @@ export function ResetPasskeySurface({ onFinished }: { onFinished: () => void }) 
       <StandalonePage>
         <StandalonePageHeader
           title="This reset link no longer works"
-          description="Reset links work once and expire after an hour. Run `t3 auth owner-reset` in the Hub's shell for a new one."
+          description="Reset links work once and expire after an hour. Ask an Admin of your Organization, or the Owner, for a new one. The Owner runs `t3 auth owner-reset` in the Hub's shell."
         />
         {errorMessage ? (
           <div className="mt-6">

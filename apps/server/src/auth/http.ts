@@ -393,8 +393,6 @@ export const layer = HttpApiBuilder.group(
                   userSignInFailures.ServerAuthInvalidCredentialError,
                 ServerAuthInsecureTransportError:
                   userSignInFailures.ServerAuthInsecureTransportError,
-                SecondFactorMissingError: (error) =>
-                  Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
                 SignInThrottledError: failThrottled,
               }),
               Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, failUserSignInInternal),
