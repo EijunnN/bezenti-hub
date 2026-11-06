@@ -285,10 +285,47 @@ client-chosen id names an existing Thread fails before anything is provisioned,
 alike for hidden and visible Threads, and Pull Request
 calls routed by repository see only visible Projects (`RequestVisibility`).
 
+An Organization's lifecycle is the Owner's
+([OrganizationLifecycle](../../apps/server/src/spaces/OrganizationLifecycle.ts)).
+Archiving sets `archived_at` and, like a removal, marks its Members'
+`access_narrowed_through` and closes their sockets, so their shells resume without
+it; it then stops, as the Owner, every Thread with live work: unfinished runs, open
+requests, background commands and delegated tasks (`threadHasLiveWork`; the Sandbox
+stop of spec 3 goes there too). Nothing starts there afterwards: the policy refuses
+Users' creates and continues, and the orchestrator refuses any `message.dispatch`,
+fork or delegated task in an archived or frozen Space whoever sends it, the server's
+own resumes and continuations included (`SpaceDirectory.workBlocked`). Scheduled
+tasks run only in an open Space: archived, frozen or deleted ones skip their runs,
+and a failed read skips the tick. Restoring clears `archived_at` and
+publishes on the Members' access-change hubs, so open shells reload with it. Delete
+is refused unless archived and first sets `deleting_at` (migration 091) in the same
+transaction as the check, so the Organization is never restored half-deleted: it deletes the Organization's Projects (with their
+Threads) and leftover Threads through `ProjectService`'s event-sourced delete paths,
+with command ids fixed per Organization so a retry replays, then removes its
+scheduled tasks, Memberships, Invitations and row in one transaction.
+
+Moving a Project (`project.move` in the project mutation) is decided on both
+Spaces: the mover runs the origin and the destination (Admin of an Organization, or
+the User of a Personal space). The Owner moves anything except into or out of
+another User's Personal space, other than out of a removed User's frozen one.
+Nothing moves into an archived or frozen Space. `ProjectService.move` marks the Project
+moving (`whileProjectMoves`: no Thread is created or started in it meanwhile), checks
+each Thread idle under its lock and refuses with `ProjectMoveBlockedError` (HTTP 409)
+naming the busy ones, records the Project's new `spaceId` on a `project.meta-updated`
+event, then lists its Threads again and gives each the new Space with a
+`thread.metadata-updated` event under its lock, each checked as a move out of the
+Thread's own Space (so a stray Thread stamped elsewhere needs that Space's rights too). Afterwards `SpaceDirectory.projectMoved` bumps
+`revision`, marks who lost it as narrowed and publishes on every viewer's
+access-change hub, so the origin's open shells drop it and the destination's gain
+it, also after a move that failed part way. A rerun of an interrupted move finishes
+its Threads.
+
 Spaces are read and Organizations created over HTTP (`/api/spaces`), beside the
 account endpoints, rather than as guarded WS commands: creating an Organization
 depends on who the User is, not on a session scope, so clients show controls from
-the server's `canCreateOrganization`, `canCreateThreads` and `canInvite` answers.
+the server's `canCreateOrganization`, `canCreateThreads`, `canInvite`,
+`canMoveProjectsOut` and `canMoveProjectsIn` answers; archived Organizations are
+listed (marked `archived`) only to the Owner.
 Per-Thread controls come from `threadRolePermissions` in the client runtime, which
 mirrors the policy from the directory's Roles and `isOwner`; the server stays the
 judge.
@@ -375,7 +412,8 @@ codes need no revocation since their exchange checks the User. Sign-in
 (passkey, password, the TOTP step, recovery code) says the account is disabled
 or removed only after the credential verified, so it is no oracle, and spends
 nothing. The User row stays as a tombstone for names. A frozen Personal space
-is read-only for everyone; the Owner may only stop its running Threads and
+is read-only for everyone; the Owner may only stop its running Threads, move its
+Projects out (`ProjectService.move`) and
 delete from it, archived or not.
 
 Reset links are the Owner's alone (`UserDirectory.issueResetLink`; `created_by`

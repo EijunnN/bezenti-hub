@@ -231,6 +231,7 @@ it.effect(
           },
         });
       assert.equal((yield* project(grace.cookie, "notes")).status, 200);
+      assert.equal((yield* project(grace.cookie, "drafts")).status, 200);
       const [browser] = yield* server.sql<{ sessionId: string }>`
         SELECT session_id AS "sessionId" FROM auth_sessions
         WHERE user_id = ${grace.userId} AND revoked_at IS NULL LIMIT 1
@@ -277,6 +278,8 @@ it.effect(
         canCreateThreads: false,
         canInvite: false,
         frozen: true,
+        canMoveProjectsOut: true,
+        canMoveProjectsIn: false,
       });
       const projectIds = (cookie: string) =>
         server
@@ -288,7 +291,19 @@ it.effect(
           );
       assert.include(yield* projectIds(owner), "notes");
       assert.notInclude(yield* projectIds(linus.cookie), "notes");
-      // Read-only, even for the Owner, who may only delete what is in it.
+      // The Owner may move what is in it into an Organization.
+      const moved = yield* server.request("/api/projects/mutate", {
+        cookie: owner,
+        body: {
+          type: "project.move",
+          commandId: "move-drafts",
+          projectId: "drafts",
+          spaceId: acmeId,
+        },
+      });
+      assert.equal(moved.status, 200);
+      assert.include(yield* projectIds(linus.cookie), "drafts");
+      // Otherwise read-only, even for the Owner, who may only delete what is in it.
       assert.equal((yield* project(owner, "notes", "project.update")).status, 403);
       const deleted = yield* server.request("/api/projects/mutate", {
         cookie: owner,

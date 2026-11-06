@@ -38,6 +38,7 @@ import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as SpacesHttp from "../spaces/http.ts";
 import * as InvitationService from "../spaces/InvitationService.ts";
 import * as MembershipService from "../spaces/MembershipService.ts";
+import * as OrganizationLifecycle from "../spaces/OrganizationLifecycle.ts";
 import * as InvitationsHttp from "../spaces/invitationsHttp.ts";
 import * as InstallationUsersHttp from "../spaces/installationUsersHttp.ts";
 import * as InstallationUserService from "../spaces/InstallationUserService.ts";
@@ -143,28 +144,32 @@ const layerPullRequests = Layer.mock(PullRequestService.PullRequestService)({
 });
 
 const makeLayerServices = (config: { readonly publicUrl?: URL }) =>
-  Layer.mergeAll(
-    layerPullRequests,
-    // Outside MCP clients: OAuth approval and the bearer check /mcp runs.
-    Layer.mergeAll(
-      InvitationService.layer,
-      MembershipService.layer,
-      InstallationUserService.layer,
-      SpaceVisibility.layer,
-      Layer.merge(McpOAuth.layer, McpOAuth.layerMcpClientAuthenticator).pipe(
-        Layer.provide(ServerSettings.layerTest()),
-        Layer.provide(
-          Layer.mock(ServerEnvironment.ServerEnvironment)({
-            getEnvironmentId: Effect.succeed(EnvironmentId.make("environment-test")),
-          }),
+  // Archive and delete reach Projects and Thread reads; no Thread in these tests runs.
+  OrganizationLifecycle.layer.pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(
+        layerPullRequests,
+        // Outside MCP clients: OAuth approval and the bearer check /mcp runs.
+        Layer.mergeAll(
+          InvitationService.layer,
+          MembershipService.layer,
+          InstallationUserService.layer,
+          SpaceVisibility.layer,
+          Layer.merge(McpOAuth.layer, McpOAuth.layerMcpClientAuthenticator).pipe(
+            Layer.provide(ServerSettings.layerTest()),
+            Layer.provide(
+              Layer.mock(ServerEnvironment.ServerEnvironment)({
+                getEnvironmentId: Effect.succeed(EnvironmentId.make("environment-test")),
+              }),
+            ),
+          ),
+        ).pipe(
+          Layer.provideMerge(EnvironmentAuth.layer.pipe(Layer.provideMerge(SpaceDirectory.layer))),
         ),
+        layerProjects,
+        layerThreads,
       ),
-    ).pipe(
-      Layer.provideMerge(EnvironmentAuth.layer.pipe(Layer.provideMerge(SpaceDirectory.layer))),
     ),
-    layerProjects,
-    layerThreads,
-  ).pipe(
     Layer.provide(ManagedPolicy.layerTest()),
     Layer.provideMerge(OwnerPresence.layer),
     Layer.provideMerge(SqlitePersistence.layerMemory),

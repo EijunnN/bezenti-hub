@@ -803,6 +803,28 @@ export const layer = Layer.effect(
       if (paused.length > 0) yield* notifyChanged;
     });
 
+    // A task runs only in an open Space: not in an archived or frozen one, nor once its Space
+    // is gone. A failed read counts as closed ("unknown"), so this tick skips it and the next
+    // poll asks again.
+    const spaceOfTask = (task: ScheduledTask) =>
+      Option.isNone(spaces)
+        ? Effect.succeed("open" as const)
+        : spaces.value
+            .spaceState(
+              task.threadId === null
+                ? { kind: "project", id: task.projectId }
+                : { kind: "thread", id: ThreadId.make(task.threadId) },
+            )
+            .pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("Could not read a scheduled task's Space; skipping it", {
+                  taskId: task.id,
+                  cause,
+                }).pipe(Effect.as("unknown" as const)),
+              ),
+            );
+    const CLOSED_SPACE = "Its Space is archived or gone, so nothing runs in it.";
+
     const runTask = Effect.fn("ScheduledTaskService.runTask")(function* (
       task: ScheduledTask,
       trigger: "scheduled" | "manual" | "webhook",
@@ -878,6 +900,12 @@ export const layer = Layer.effect(
                     ? "The task was paused before this delivery ran."
                     : null;
           if (reason !== null) return yield* new WebhookDeliverySkipped({ reason });
+        }
+        if (trigger !== "scheduled" && (yield* spaceOfTask(active)) !== "open") {
+          if (webhook !== undefined) {
+            return yield* new WebhookDeliverySkipped({ reason: CLOSED_SPACE });
+          }
+          return yield* taskError(CLOSED_SPACE, { taskId: task.id });
         }
 
         if (webhook === undefined) yield* markRunning(active.id, startedAtIso);
@@ -1144,7 +1172,15 @@ export const layer = Layer.effect(
           Effect.suspend(() =>
             isMissedFixedTimeRun(task.schedule, dueAt, now)
               ? rescheduleMissedRun(task, now)
-              : runTask(task, "scheduled"),
+              : spaceOfTask(task).pipe(
+                  Effect.flatMap((state) =>
+                    state === "open"
+                      ? runTask(task, "scheduled")
+                      : state === "unknown"
+                        ? Effect.void
+                        : rescheduleMissedRun(task, now),
+                  ),
+                ),
           ).pipe(
             Effect.catch((cause) =>
               Effect.logWarning("Scheduled task run failed", { taskId: task.id, cause }),

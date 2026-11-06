@@ -38,6 +38,15 @@ export const SpaceSummary = Schema.Struct({
    */
   pendingAdmin: Schema.optional(Schema.Boolean),
   /**
+   * An archived Organization: only the Owner lists it, to restore or delete it. Nothing runs or
+   * starts in it. Optional so older servers decode.
+   */
+  archived: Schema.optional(Schema.Boolean),
+  /** Whether the viewer may move a Project out of this Space. Optional so older servers decode. */
+  canMoveProjectsOut: Schema.optional(Schema.Boolean),
+  /** Whether the viewer may move a Project into this Space. Optional so older servers decode. */
+  canMoveProjectsIn: Schema.optional(Schema.Boolean),
+  /**
    * A removed User's Personal space, which the Owner keeps read-only and may only delete content
    * from. Optional so older servers decode.
    */

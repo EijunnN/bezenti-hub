@@ -70,6 +70,7 @@ describe("V2 preview upgrade", () => {
         [88, "ScheduledTaskOwner"],
         [89, "UserAccessNarrowed"],
         [90, "InstallationPermissions"],
+        [91, "SpaceDeleting"],
         [92, "InactiveUsers"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
@@ -184,6 +185,7 @@ describe("V2 preview upgrade", () => {
         [88, "ScheduledTaskOwner"],
         [89, "UserAccessNarrowed"],
         [90, "InstallationPermissions"],
+        [91, "SpaceDeleting"],
         [92, "InactiveUsers"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),

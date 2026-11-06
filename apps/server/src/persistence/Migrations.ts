@@ -94,6 +94,7 @@ import Migration0087 from "./Migrations/087_CommandReceiptActor.ts";
 import Migration0088 from "./Migrations/088_ScheduledTaskOwner.ts";
 import Migration0089 from "./Migrations/089_UserAccessNarrowed.ts";
 import Migration0090 from "./Migrations/090_InstallationPermissions.ts";
+import Migration0091 from "./Migrations/091_SpaceDeleting.ts";
 import Migration0092 from "./Migrations/092_InactiveUsers.ts";
 
 const migrationEntries = [
@@ -188,6 +189,7 @@ const migrationEntries = [
   [88, "ScheduledTaskOwner", Migration0088],
   [89, "UserAccessNarrowed", Migration0089],
   [90, "InstallationPermissions", Migration0090],
+  [91, "SpaceDeleting", Migration0091],
   [92, "InactiveUsers", Migration0092],
 ] as const;
 

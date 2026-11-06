@@ -1,8 +1,7 @@
 /**
  * Who may do what in which Space. Pure; each rule is one row in AccessPolicy.test.ts. The Owner
- * may do everything except create in an archived or frozen Space, change anything in another
- * User's Personal space (only read it, and delete from a frozen one), share from a Personal space
- * and disable or remove themselves. A disabled or removed User may do nothing.
+ * may do everything but create in archived or frozen Spaces, change another User's Personal space
+ * (bar moving, stopping and deleting in a removed User's), share from one, or turn themselves off.
  */
 import type {
   InstallationPermission,
@@ -61,12 +60,20 @@ export interface UserResource {
   readonly isOwner: boolean;
 }
 
+/** A Project moving from one Space to another, decided on both. */
+export interface MoveResource {
+  readonly kind: "move";
+  readonly from: SpaceResource;
+  readonly to: SpaceResource;
+}
+
 export type Resource =
   | SpaceResource
   | InstallationResource
   | OwnedResource
   | MembershipResource
-  | UserResource;
+  | UserResource
+  | MoveResource;
 
 export type Action =
   | "space.view"
@@ -113,7 +120,15 @@ export type Action =
   /** Change a Project's settings. */
   | "project.manage"
   /** Permanently delete an archived Project. */
-  | "project.delete";
+  | "project.delete"
+  /** Move a Project, with its Threads, to another Space (`MoveResource`). */
+  | "project.move"
+  /** Hide an Organization from its Members and stop everything in it. */
+  | "organization.archive"
+  /** Bring an archived Organization back. */
+  | "organization.restore"
+  /** Permanently delete an archived Organization with everything in it. */
+  | "organization.delete";
 
 /** Actions that read or manage rather than add something to the Space. */
 const NON_CREATING: ReadonlySet<Action> = new Set([
@@ -132,6 +147,12 @@ const OWNER_ONLY: ReadonlySet<Action> = new Set([
 ]);
 
 const USER_ACTIONS: ReadonlySet<Action> = new Set(["user.disable", "user.remove"]);
+/** The Owner's, on an Organization in any state; it is deleted only once archived. */
+const ORGANIZATION_LIFECYCLE: ReadonlySet<Action> = new Set([
+  "organization.archive",
+  "organization.restore",
+  "organization.delete",
+]);
 
 const MEMBERSHIP_ACTIONS: ReadonlySet<Action> = new Set([
   "membership.changeRole",
@@ -189,6 +210,7 @@ const isOwned = (resource: Resource): resource is OwnedResource =>
 const isMembership = (resource: Resource): resource is MembershipResource =>
   resource.kind === "membership";
 const isUser = (resource: Resource): resource is UserResource => resource.kind === "user";
+const isMove = (resource: Resource): resource is MoveResource => resource.kind === "move";
 
 const ROLES_THAT_CREATE_PROJECTS: ReadonlySet<SpaceRole> = new Set(["admin", "member"]);
 const ADMIN_ONLY: ReadonlySet<SpaceRole> = new Set(["admin"]);
@@ -297,12 +319,61 @@ const decideMembership = (
   return allow;
 };
 
+/**
+ * Moving a Project takes running both Spaces (Admin of an Organization, User of a Personal space).
+ * The Owner moves anything but into or out of another User's Personal space (out of a frozen one
+ * is allowed). Nothing enters an archived or frozen Space; only the Owner leaves an archived one.
+ */
+const runsSpace = (principal: Principal, space: SpaceResource) =>
+  space.kind === "personal"
+    ? inPersonalSpace(principal, space)
+    : inOrganization(principal, space, ADMIN_ONLY);
+
+/** The origin half of `project.move`: whether a Project may leave `from`. */
+export const mayMoveOut = (principal: Principal, from: SpaceResource): Decision => {
+  if (principal.isOwner) {
+    return othersPersonalSpace(principal, from) && !from.frozen
+      ? deny("personal-space-read-only")
+      : allow;
+  }
+  if (from.archived) return deny("space-archived");
+  if (from.frozen) return deny("space-frozen");
+  return runsSpace(principal, from);
+};
+
+/** The destination half of `project.move`: whether a Project may arrive in `to`. */
+export const mayMoveIn = (principal: Principal, to: SpaceResource): Decision => {
+  if (to.archived) return deny("space-archived");
+  if (to.frozen) return deny("space-frozen");
+  if (principal.isOwner) {
+    return othersPersonalSpace(principal, to) ? deny("personal-space-read-only") : allow;
+  }
+  return runsSpace(principal, to);
+};
+
+const decideMove = (principal: Principal, { from, to }: MoveResource): Decision => {
+  if (from.id === to.id) return deny("wrong-resource");
+  const destination = mayMoveIn(principal, to);
+  if (destination._tag === "Deny") return destination;
+  return mayMoveOut(principal, from);
+};
+
 export const decide = (principal: Principal, action: Action, resource: Resource): Decision => {
   if (principal.inactive === true) return deny("user-inactive");
   if (USER_ACTIONS.has(action) || isUser(resource)) {
     if (!USER_ACTIONS.has(action) || !isUser(resource)) return deny("wrong-resource");
     if (!principal.isOwner) return deny("owner-only");
     return resource.isOwner ? deny("owner-protected") : allow;
+  }
+  if (action === "project.move" || isMove(resource)) {
+    return action === "project.move" && isMove(resource)
+      ? decideMove(principal, resource)
+      : deny("wrong-resource");
+  }
+  if (ORGANIZATION_LIFECYCLE.has(action)) {
+    if (!isSpace(resource) || resource.kind !== "organization") return deny("wrong-resource");
+    if (!principal.isOwner) return deny("owner-only");
+    return action === "organization.delete" && !resource.archived ? deny("not-archived") : allow;
   }
   if (MEMBERSHIP_ACTIONS.has(action) || isMembership(resource)) {
     return MEMBERSHIP_ACTIONS.has(action) && isMembership(resource)

@@ -293,8 +293,8 @@ resumes the tasks that were paused.
 disabling, it takes them out of every organization (what they made there stays)
 and freezes their Personal space: it is listed for the Owner as "name (removed)"
 under **Personal spaces (read only)**, nobody can add to or change it, and the
-Owner can only read it or delete what is in it. Moving its projects to an
-organization is not available yet. Their name stays on what they did. The Owner
+Owner can only read it, move its projects to an organization, or delete what is
+in it. Their name stays on what they did. The Owner
 cannot be disabled or removed.
 
 What you can change depends on your Role in the organization:
@@ -362,6 +362,28 @@ and expires after an hour. Opening it lets them register a new passkey, or choos
 **Set a new password instead**; either way their old passkeys, password and
 authenticator app stop working and every device is signed out. Anyone holding the
 link can take over the account, so send it only to them.
+
+### Archive, restore or delete an organization
+
+The Owner can pause an organization: in **Organization settings**, **Archive
+organization** hides it from its Members at once, on every open device, stops its
+running threads and keeps its scheduled tasks from running. Nothing new starts in
+it, not even from the Owner. The Owner still sees it in the Space selector under
+**Archived**, where **Restore organization** brings it back as it was. Only an
+archived organization can be deleted: **Delete organization** asks you to type its
+name, then deletes its projects, threads, members and invitations for good.
+
+### Move a project to another Space
+
+In **Settings → Projects**, a project you may move shows **Move to another Space**
+with a **Move to…** list of the Spaces it can go to. You need to be an Admin where
+the project is (or its owner, for your Personal space) and an Admin where it goes.
+The Owner can move any project, except into or out of someone else's Personal
+space, which the Owner only reads; a removed user's frozen Personal space is the
+exception, and the Owner can move projects out of it. All its threads move with it,
+and who can see it changes at once. Stop its running threads first: the move is
+refused while any of them runs, and says which. In the new Space the project uses
+that Space's vaults and AI accounts.
 
 ## Next steps
 

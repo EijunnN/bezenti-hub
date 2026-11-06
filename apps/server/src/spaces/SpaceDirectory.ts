@@ -64,6 +64,10 @@ const DENIED_ACTION_LABELS: Record<string, string> = {
   "project.archive": "archive or restore this Project",
   "project.manage": "change this Project",
   "project.delete": "permanently delete this Project",
+  "project.move": "move this Project",
+  "organization.archive": "archive this Organization",
+  "organization.restore": "restore this Organization",
+  "organization.delete": "permanently delete this Organization",
 };
 
 /** What to tell someone who can see the item but may not act on it. */
@@ -74,7 +78,36 @@ const deniedMessage = (action: string, reason: string): string | undefined => {
   if (reason === "not-yours") {
     return `Only its creator or an Admin can ${DENIED_ACTION_LABELS[action] ?? "do that"}.`;
   }
+  if (action.startsWith("organization.") && reason === "owner-only") {
+    return "Only the Owner archives, restores or deletes an Organization.";
+  }
+  if (action === "organization.delete" && reason === "not-archived") {
+    return "Archive the Organization before deleting it permanently.";
+  }
   if (reason === "not-archived") return "Archive it before deleting it permanently.";
+  if (reason === "project-moving") {
+    return "This Project is moving to another Space. Try again in a moment.";
+  }
+  if (reason === "space-deleting") {
+    return "This Organization is being deleted. Delete it again to finish.";
+  }
+  if (action === "thread.continue" && reason === "space-archived") {
+    return "This Organization is archived: nothing runs or starts in it.";
+  }
+  if (
+    action === "project.move" &&
+    (reason === "role-not-allowed" ||
+      reason === "not-a-member" ||
+      reason === "not-your-personal-space")
+  ) {
+    return "Moving a Project takes being an Admin where it is and where it goes (or the User of the Personal space it leaves or enters).";
+  }
+  if (action === "project.move" && reason === "space-archived") {
+    return "Nothing moves into an archived Organization, and only the Owner moves out of one.";
+  }
+  if (action === "project.move" && reason === "space-frozen") {
+    return "Nothing moves into a removed User's Personal space.";
+  }
   if (reason === "personal-space-read-only") {
     return "This is someone else's Personal space: you can read it but not change anything in it.";
   }
@@ -172,6 +205,18 @@ export type ItemAccessError =
   | SpaceDirectoryStorageError;
 
 /** The Space a new Project or Thread belongs to and the User who owns it. */
+/** Where a Project moves from and to, once the policy allowed it. */
+export interface ProjectMove {
+  readonly from: SpaceId;
+  readonly to: SpaceId;
+}
+
+export type ProjectMoveError =
+  | SpaceAccessDeniedError
+  | SpaceNotFoundError
+  | SpaceResourceNotFoundError
+  | SpaceDirectoryStorageError;
+
 export interface CreationStamp {
   readonly spaceId: SpaceId;
   readonly ownerUserId: UserId;
@@ -298,6 +343,66 @@ export class SpaceDirectory extends Context.Service<
       userId: UserId,
       name: string,
     ) => Effect.Effect<SpaceSummary, SpaceAccessDeniedError | SpaceDirectoryStorageError>;
+    /**
+     * Archives or restores an Organization (the Owner's). Archiving hides it from its Members at
+     * once, like a removal: their connections close and resume without it. Restoring shows it
+     * again on their open connections. False when it already was in that state.
+     */
+    readonly setOrganizationArchived: (input: {
+      readonly actor: UserId;
+      readonly spaceId: SpaceId;
+      readonly archived: boolean;
+    }) => Effect.Effect<boolean, SpaceClaimError>;
+    /**
+     * Removes an archived Organization's Memberships, Invitations and row in one transaction.
+     * Its Projects and Threads go first, through their own delete paths; refused unless archived.
+     */
+    readonly removeArchivedOrganization: (
+      spaceId: SpaceId,
+    ) => Effect.Effect<void, SpaceAccessDeniedError | SpaceDirectoryStorageError>;
+    /**
+     * Checks that the User may move the Project to `spaceId` (`project.move`, on its Space and
+     * the destination). A hidden Project or destination answers like a missing one. No User is the
+     * server's own work, checked only for existence.
+     */
+    readonly authorizeProjectMove: (input: {
+      readonly actor: UserId | undefined;
+      /** The Project, or one of its Threads, whose own Space is the origin. */
+      readonly item: ItemRef;
+      readonly spaceId: SpaceId;
+    }) => Effect.Effect<ProjectMove, ProjectMoveError>;
+    /**
+     * Starts an archived Organization's deletion (`organization.delete`): from here on it is
+     * never restored, so nothing comes back half-deleted.
+     */
+    readonly beginOrganizationDeletion: (input: {
+      readonly actor: UserId;
+      readonly spaceId: SpaceId;
+    }) => Effect.Effect<void, SpaceClaimError>;
+    /** Runs `effect` with the Project marked moving: no Thread is created or started in it. */
+    readonly whileProjectMoves: <A, E, R>(
+      projectId: ProjectId,
+      effect: Effect.Effect<A, E, R>,
+    ) => Effect.Effect<A, E, R>;
+    /**
+     * After a Project and its Threads moved: the Users who see either Space reload what their
+     * open connections show (the origin's lose it, the destination's gain it).
+     */
+    readonly projectMoved: (move: ProjectMove) => Effect.Effect<void, SpaceDirectoryStorageError>;
+    /** The state of the Thread's or Project's Space; work runs only in an open one. */
+    readonly spaceState: (
+      item: ItemRef,
+    ) => Effect.Effect<"open" | "archived" | "frozen" | "missing", SpaceDirectoryStorageError>;
+    /**
+     * Why nothing may start in the Thread, whoever asks (the server's own work included): its
+     * Space is archived or frozen, or its Project is moving. Undefined when work may start.
+     */
+    readonly workBlocked: (
+      threadId: ThreadId,
+    ) => Effect.Effect<
+      "space-archived" | "space-frozen" | "project-moving" | undefined,
+      SpaceDirectoryStorageError
+    >;
     /**
      * Where a new Project or Thread belongs, once the policy allows it. A Thread joins its
      * Project's Space (the Owner's Personal space for a Project from before Spaces); otherwise
@@ -586,6 +691,11 @@ const make = Effect.gen(function* () {
     resource: AccessPolicy.Resource,
   ) => AccessPolicy.isAllowed(AccessPolicy.decide(principal, action, resource));
 
+  const movesOf = (principal: AccessPolicy.Principal, space: AccessPolicy.SpaceResource) => ({
+    canMoveProjectsOut: AccessPolicy.isAllowed(AccessPolicy.mayMoveOut(principal, space)),
+    canMoveProjectsIn: AccessPolicy.isAllowed(AccessPolicy.mayMoveIn(principal, space)),
+  });
+
   const view = Effect.fn("SpaceDirectory.view")(function* (userId: UserId) {
     const personalSpaceId = personalSpaceIdOf(userId);
     const [{ principal, pendingAdmin }, organizations] = yield* Effect.all(
@@ -614,6 +724,7 @@ const make = Effect.gen(function* () {
               isOwn: true,
               canCreateThreads: allows(principal, "thread.create", personal),
               canInvite: false,
+              ...movesOf(principal, personal),
             },
           ]
         : []),
@@ -628,6 +739,8 @@ const make = Effect.gen(function* () {
           canCreateThreads: allows(principal, "thread.create", toResource(row)),
           canInvite: allows(principal, "invitation.create", toResource(row)),
           ...(pendingAdmin.has(row.spaceId) ? { pendingAdmin: true } : {}),
+          ...(row.archived ? { archived: true } : {}),
+          ...movesOf(principal, toResource(row)),
         })),
       // The Owner reads every other User's Personal space and adds nothing to it.
       ...othersPersonal.map((row) => {
@@ -641,6 +754,13 @@ const make = Effect.gen(function* () {
           canCreateThreads: false,
           canInvite: false,
           ...(row.frozen ? { frozen: true } : {}),
+          ...movesOf(principal, {
+            id: row.spaceId,
+            kind: "personal",
+            personalOwnerUserId: null,
+            archived: false,
+            frozen: row.frozen,
+          }),
         };
       }),
     ];
@@ -819,6 +939,9 @@ const make = Effect.gen(function* () {
   );
 
   const claimCreation = Effect.fn("SpaceDirectory.claimCreation")(function* (claim: CreationClaim) {
+    if (claim.projectId !== undefined && moving.has(claim.projectId)) {
+      return yield* new SpaceAccessDeniedError({ action: claim.action, reason: "project-moving" });
+    }
     const actor = claim.actorUserId ?? Option.getOrUndefined(yield* ownerId);
     if (actor === undefined) return undefined;
     const project =
@@ -860,6 +983,9 @@ const make = Effect.gen(function* () {
   // space) and its owner (its own, its root's for a child the server made, else the Owner).
   const ItemRow = Schema.Struct({
     ownerUserId: Schema.NullOr(UserId),
+    projectId: Schema.NullOr(Schema.String),
+    /** The Space the item names, even when that Space is gone. */
+    itemSpaceId: Schema.NullOr(Schema.String),
     archived: Schema.BooleanFromBit,
     spaceId: Schema.NullOr(SpaceId),
     kind: Schema.NullOr(SpaceKind),
@@ -876,10 +1002,11 @@ const make = Effect.gen(function* () {
     Request: Schema.String,
     Result: ItemRow,
     execute: (threadId) => sql`
-      SELECT item.owner_user_id AS "ownerUserId", item.archived AS "archived",
-        ${sql.literal(SPACE_OF_ITEM)}
+      SELECT item.owner_user_id AS "ownerUserId", item.project_id AS "projectId",
+        item.space_id AS "itemSpaceId", item.archived AS "archived", ${sql.literal(SPACE_OF_ITEM)}
       FROM (
         SELECT COALESCE(t.owner_user_id, root.owner_user_id, ${sql.literal(OWNER_ID)}) AS owner_user_id,
+          t.project_id AS project_id,
           t.archived_at IS NOT NULL AS archived,
           COALESCE(t.space_id, p.space_id, 'personal:' || ${sql.literal(OWNER_ID)}) AS space_id
         FROM orchestration_v2_projection_threads t
@@ -894,10 +1021,10 @@ const make = Effect.gen(function* () {
     Request: Schema.String,
     Result: ItemRow,
     execute: (projectId) => sql`
-      SELECT item.owner_user_id AS "ownerUserId", item.archived AS "archived",
-        ${sql.literal(SPACE_OF_ITEM)}
+      SELECT item.owner_user_id AS "ownerUserId", item.project_id AS "projectId",
+        item.space_id AS "itemSpaceId", item.archived AS "archived", ${sql.literal(SPACE_OF_ITEM)}
       FROM (
-        SELECT COALESCE(owner_user_id, ${sql.literal(OWNER_ID)}) AS owner_user_id,
+        SELECT COALESCE(owner_user_id, ${sql.literal(OWNER_ID)}) AS owner_user_id, project_id,
           archived_at IS NOT NULL AS archived,
           COALESCE(space_id, 'personal:' || ${sql.literal(OWNER_ID)}) AS space_id
         FROM projection_projects WHERE project_id = ${projectId}
@@ -1189,7 +1316,243 @@ const make = Effect.gen(function* () {
     return Option.match(row, { onNone: () => 0, onSome: (found) => found.through ?? 0 });
   });
 
+  // Who sees a Space's content besides the Owner, who sees everything.
+  const listViewers = SqlSchema.findAll({
+    Request: Schema.Array(SpaceId),
+    Result: Schema.Struct({ userId: UserId }),
+    execute: (spaceIds) => sql`
+      SELECT user_id AS "userId" FROM space_memberships
+      WHERE space_id IN (SELECT value FROM json_each(${JSON.stringify(spaceIds)}))
+      UNION
+      SELECT personal_owner_user_id AS "userId" FROM spaces
+      WHERE personal_owner_user_id IS NOT NULL
+        AND space_id IN (SELECT value FROM json_each(${JSON.stringify(spaceIds)}))
+    `,
+  });
+  const viewersOf = (spaceIds: ReadonlyArray<SpaceId>) =>
+    listViewers(spaceIds).pipe(
+      Effect.map((rows) => rows.map((row) => row.userId)),
+      Effect.mapError(storageError),
+    );
+  // A client resuming from before this event holds rows it may no longer see.
+  const markAccessNarrowed = (userIds: ReadonlyArray<UserId>) =>
+    userIds.length === 0
+      ? Effect.void
+      : sql`
+          UPDATE users
+          SET access_narrowed_through = (SELECT COALESCE(MAX(sequence), 0) FROM orchestration_events)
+          WHERE user_id IN (SELECT value FROM json_each(${JSON.stringify(userIds)}))
+        `.pipe(Effect.asVoid, Effect.mapError(storageError));
+
+  const isDeleting = (spaceId: SpaceId) =>
+    sql<{ readonly deleting: number }>`
+      SELECT deleting_at IS NOT NULL AS deleting FROM spaces WHERE space_id = ${spaceId}
+    `.pipe(
+      Effect.map((rows) => rows[0]?.deleting === 1),
+      Effect.mapError(storageError),
+    );
+
+  const setOrganizationArchived = Effect.fn("SpaceDirectory.setOrganizationArchived")(
+    function* (input: {
+      readonly actor: UserId;
+      readonly spaceId: SpaceId;
+      readonly archived: boolean;
+    }) {
+      const action = input.archived ? "organization.archive" : "organization.restore";
+      const outcome = yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const { principal, space } = yield* visibleOrganization(input.actor, input.spaceId);
+            yield* requireAllowed(principal, action, space);
+            const now = DateTime.formatIso(yield* DateTime.now);
+            const written = yield* (
+              input.archived
+                ? sql<{ readonly spaceId: string }>`
+                    UPDATE spaces SET archived_at = ${now}
+                    WHERE space_id = ${input.spaceId} AND archived_at IS NULL
+                    RETURNING space_id AS "spaceId"
+                  `
+                : // Once its deletion started it is never restored, so nothing comes back half-deleted.
+                  sql<{ readonly spaceId: string }>`
+                    UPDATE spaces SET archived_at = NULL
+                    WHERE space_id = ${input.spaceId} AND archived_at IS NOT NULL
+                      AND deleting_at IS NULL
+                    RETURNING space_id AS "spaceId"
+                  `
+            ).pipe(Effect.mapError(storageError));
+            if (!input.archived && written.length === 0 && (yield* isDeleting(input.spaceId))) {
+              return yield* new SpaceAccessDeniedError({ action, reason: "space-deleting" });
+            }
+            const members = written.length === 0 ? [] : yield* viewersOf([input.spaceId]);
+            if (input.archived) yield* markAccessNarrowed(members);
+            return { changed: written.length > 0, members };
+          }),
+        )
+        .pipe(
+          Effect.mapError((error) => (error._tag === "SqlError" ? storageError(error) : error)),
+        );
+      if (!outcome.changed) return false;
+      // Archived: its Members lose it as on a removal. Restored: their streams reload with it.
+      yield* input.archived
+        ? membershipsChanged(outcome.members)
+        : Effect.andThen(
+            changed,
+            Effect.forEach(outcome.members, accessChanged, { discard: true }),
+          );
+      return true;
+    },
+  );
+
+  const beginOrganizationDeletion = Effect.fn("SpaceDirectory.beginOrganizationDeletion")(
+    function* (input: { readonly actor: UserId; readonly spaceId: SpaceId }) {
+      yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const { principal, space } = yield* visibleOrganization(input.actor, input.spaceId);
+            yield* requireAllowed(principal, "organization.delete", space);
+            const now = DateTime.formatIso(yield* DateTime.now);
+            yield* sql`
+              UPDATE spaces SET deleting_at = COALESCE(deleting_at, ${now})
+              WHERE space_id = ${input.spaceId} AND archived_at IS NOT NULL
+            `.pipe(Effect.mapError(storageError));
+          }),
+        )
+        .pipe(
+          Effect.mapError((error) => (error._tag === "SqlError" ? storageError(error) : error)),
+        );
+    },
+  );
+
+  const removeArchivedOrganization = Effect.fn("SpaceDirectory.removeArchivedOrganization")(
+    function* (spaceId: SpaceId) {
+      yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const space = yield* findSpace(spaceId);
+            if (Option.isNone(space)) return;
+            if (space.value.kind !== "organization" || !space.value.archived) {
+              return yield* new SpaceAccessDeniedError({
+                action: "organization.delete",
+                reason: space.value.kind === "organization" ? "not-archived" : "wrong-resource",
+              });
+            }
+            // Its scheduled tasks go with it, those bound to a Project as well as to a Thread.
+            yield* sql`
+              DELETE FROM scheduled_tasks
+              WHERE project_id IN (
+                SELECT project_id FROM projection_projects WHERE space_id = ${spaceId}
+              ) OR thread_id IN (
+                SELECT thread_id FROM orchestration_v2_projection_threads WHERE space_id = ${spaceId}
+              )
+            `;
+            yield* sql`DELETE FROM space_invitations WHERE space_id = ${spaceId}`;
+            yield* sql`DELETE FROM space_memberships WHERE space_id = ${spaceId}`;
+            yield* sql`DELETE FROM spaces WHERE space_id = ${spaceId}`;
+          }),
+        )
+        .pipe(
+          Effect.mapError((error) =>
+            error._tag === "SpaceAccessDeniedError" ? error : storageError(error),
+          ),
+          Effect.ensuring(changed),
+        );
+    },
+  );
+
+  const findItem = (item: ItemRef) =>
+    (item.kind === "thread" ? findThreadItem : findProjectItem)(item.id).pipe(
+      Effect.mapError(storageError),
+    );
+
+  const authorizeProjectMove = Effect.fn("SpaceDirectory.authorizeProjectMove")(function* (input: {
+    readonly actor: UserId | undefined;
+    readonly item: ItemRef;
+    readonly spaceId: SpaceId;
+  }) {
+    const [row, destination] = yield* Effect.all(
+      [findItem(input.item), findSpace(input.spaceId).pipe(Effect.mapError(storageError))],
+      { concurrency: "unbounded" },
+    );
+    if (Option.isNone(row) || row.value.spaceId === null || row.value.kind === null) {
+      return yield* hiddenOrMissing();
+    }
+    const from: AccessPolicy.SpaceResource = {
+      id: row.value.spaceId,
+      kind: row.value.kind,
+      personalOwnerUserId: row.value.personalOwnerUserId,
+      archived: row.value.spaceArchived,
+      frozen: row.value.frozen,
+    };
+    if (input.actor === undefined) {
+      if (Option.isNone(destination)) {
+        return yield* new SpaceNotFoundError({ spaceId: input.spaceId });
+      }
+      return { from: from.id, to: destination.value.spaceId };
+    }
+    const principal = yield* currentPrincipal(input.actor);
+    if (!allows(principal, "space.view", from)) return yield* hiddenOrMissing();
+    // A destination the User may not see answers like one that does not exist; their own
+    // Personal space, when it is off, says why.
+    const to = yield* requireAllowedInSpace(principal, "space.view", input.spaceId, destination);
+    if (to.spaceId === from.id) return { from: from.id, to: from.id };
+    yield* requireAllowed(principal, "project.move", { kind: "move", from, to: toResource(to) });
+    return { from: from.id, to: to.spaceId };
+  });
+
+  const projectMoved = Effect.fn("SpaceDirectory.projectMoved")(function* (move: ProjectMove) {
+    const [before, after] = yield* Effect.all([viewersOf([move.from]), viewersOf([move.to])], {
+      concurrency: "unbounded",
+    });
+    const kept = new Set(after);
+    yield* markAccessNarrowed(before.filter((userId) => !kept.has(userId)));
+    yield* changed;
+    yield* Effect.forEach(new Set([...before, ...after]), accessChanged, { discard: true });
+  });
+
+  // Projects being moved, so nothing starts in them until every Thread has followed.
+  const moving = new Map<string, number>();
+  const whileProjectMoves = <A, E, R>(projectId: ProjectId, effect: Effect.Effect<A, E, R>) =>
+    Effect.acquireUseRelease(
+      Effect.sync(() => void moving.set(projectId, (moving.get(projectId) ?? 0) + 1)),
+      () => effect,
+      () =>
+        Effect.sync(() => {
+          const left = (moving.get(projectId) ?? 1) - 1;
+          if (left === 0) moving.delete(projectId);
+          else moving.set(projectId, left);
+        }),
+    );
+
+  const spaceState = Effect.fn("SpaceDirectory.spaceState")(function* (item: ItemRef) {
+    const row = yield* findItem(item);
+    if (Option.isNone(row)) return "missing" as const;
+    // No Owner yet: a row from before Spaces is the Installation's, and open.
+    if (row.value.itemSpaceId === null) return "open" as const;
+    if (row.value.kind === null) return "missing" as const;
+    if (row.value.spaceArchived) return "archived" as const;
+    return row.value.frozen ? ("frozen" as const) : ("open" as const);
+  });
+
+  const workBlocked = Effect.fn("SpaceDirectory.workBlocked")(function* (threadId: ThreadId) {
+    const row = yield* findThreadItem(threadId).pipe(Effect.mapError(storageError));
+    if (Option.isNone(row)) return undefined;
+    if (row.value.spaceArchived) return "space-archived" as const;
+    if (row.value.frozen) return "space-frozen" as const;
+    if (row.value.projectId !== null && moving.has(row.value.projectId)) {
+      return "project-moving" as const;
+    }
+    return undefined;
+  });
+
   return SpaceDirectory.of({
+    setOrganizationArchived,
+    beginOrganizationDeletion,
+    removeArchivedOrganization,
+    authorizeProjectMove,
+    projectMoved,
+    whileProjectMoves,
+    spaceState,
+    workBlocked,
     members,
     authorizeMembership,
     setRole,

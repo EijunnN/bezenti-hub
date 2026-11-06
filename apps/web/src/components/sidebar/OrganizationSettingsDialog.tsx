@@ -14,6 +14,11 @@ import {
   removeMember,
   resetLink,
 } from "@t3tools/client-runtime/spaces/memberships";
+import {
+  archiveOrganization,
+  deleteOrganization,
+  restoreOrganization,
+} from "@t3tools/client-runtime/spaces/space-directory";
 import type {
   InvitationSummary,
   MemberList,
@@ -93,10 +98,16 @@ function OneTimeLink({ label, link, note }: { label: string; link: string; note:
  */
 export function OrganizationSettingsDialog({
   space,
+  isOwner,
+  onChanged,
   onClose,
   onLeft,
 }: {
   readonly space: SpaceSummary;
+  /** Only the Owner archives, restores and deletes an Organization. */
+  readonly isOwner: boolean;
+  /** After the Organization was archived, restored or deleted, so the Spaces reload. */
+  readonly onChanged: () => void;
   readonly onClose: () => void;
   /** After the viewer left the Organization. */
   readonly onLeft: () => void;
@@ -238,6 +249,17 @@ export function OrganizationSettingsDialog({
               />
             ) : null}
 
+            {isOwner ? (
+              <LifecycleSection
+                space={space}
+                onChanged={onChanged}
+                onDeleted={() => {
+                  onChanged();
+                  onClose();
+                }}
+              />
+            ) : null}
+
             {error ? <p className="text-destructive text-sm">{error}</p> : null}
           </div>
         </DialogPanel>
@@ -333,6 +355,133 @@ function MemberRow({
         ) : null}
       </span>
     </li>
+  );
+}
+
+/**
+ * Archive (hidden from Members, nothing runs) and restore; permanent deletion only once archived,
+ * after typing the name.
+ */
+function LifecycleSection({
+  space,
+  onChanged,
+  onDeleted,
+}: {
+  readonly space: SpaceSummary;
+  readonly onChanged: () => void;
+  readonly onDeleted: () => void;
+}) {
+  const id = useId();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [typedName, setTypedName] = useState("");
+  const archived = space.archived === true;
+
+  const run = async (action: () => Promise<unknown>, failure: string, after: () => void) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+      after();
+    } catch (cause) {
+      setError(messageOf(cause, failure));
+    }
+    setBusy(false);
+  };
+
+  const archive = async () => {
+    const confirmed = await confirmDestructive(
+      `Archive ${space.name}?
+Its Members stop seeing it, running Threads stop and scheduled tasks in it don't run. You can restore it later.`,
+    );
+    if (!confirmed) return;
+    await run(
+      () => withClient((client) => archiveOrganization(client, space.id)),
+      "Could not archive the organization.",
+      onChanged,
+    );
+  };
+
+  return (
+    <section className="flex flex-col gap-2" aria-labelledby={`${id}-heading`}>
+      <h3 id={`${id}-heading`} className="text-sm font-medium">
+        {archived ? "Archived" : "Archive"}
+      </h3>
+      <p className="text-xs text-muted-foreground">
+        {archived
+          ? "Its Members can't see it and nothing runs in it. Restore it to bring it back, or delete it with all its Projects and Threads."
+          : "Hides it from its Members and stops everything that runs in it, until you restore it."}
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {archived ? (
+          <>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy}
+              onClick={() =>
+                void run(
+                  () => withClient((client) => restoreOrganization(client, space.id)),
+                  "Could not restore the organization.",
+                  onChanged,
+                )
+              }
+            >
+              Restore organization
+            </Button>
+            <Button
+              size="sm"
+              variant="destructive-outline"
+              disabled={busy}
+              onClick={() => setConfirmingDelete(true)}
+            >
+              Delete organization
+            </Button>
+          </>
+        ) : (
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => void archive()}>
+            Archive organization
+          </Button>
+        )}
+      </div>
+      {archived && confirmingDelete ? (
+        <form
+          className="flex flex-col gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void run(
+              () => withClient((client) => deleteOrganization(client, space.id)),
+              "Could not delete the organization.",
+              onDeleted,
+            );
+          }}
+        >
+          <Label htmlFor={`${id}-confirm`}>Type {space.name} to delete it permanently</Label>
+          <p className="text-xs text-muted-foreground">
+            Deletes its Projects, Threads, Members and Invitations. This can't be undone.
+          </p>
+          <div className="flex gap-2">
+            <Input
+              id={`${id}-confirm`}
+              autoComplete="off"
+              className="flex-1"
+              value={typedName}
+              onChange={(event) => setTypedName(event.currentTarget.value)}
+            />
+            <Button
+              type="submit"
+              size="sm"
+              variant="destructive"
+              disabled={busy || typedName.trim() !== space.name}
+            >
+              Delete permanently
+            </Button>
+          </div>
+        </form>
+      ) : null}
+      {error ? <p className="text-destructive text-sm">{error}</p> : null}
+    </section>
   );
 }
 

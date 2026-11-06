@@ -10,6 +10,8 @@ import {
   EventId,
   GuestShareId,
   MessageId,
+  NodeId,
+  RunId,
   SpaceId,
   type OrchestrationV2AppThread,
   type OrchestrationV2ShellStreamItem,
@@ -2806,5 +2808,411 @@ describe("Space visibility", () => {
         );
       }),
     ),
+  );
+
+  it.effect("the server's own work starts nothing in an archived Organization", () =>
+    withTeam(({ server, owner, acme }) =>
+      Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        assert.equal(
+          (yield* server.request(`/api/spaces/${acme}/archive`, { body: {}, cookie: owner }))
+            .status,
+          200,
+        );
+        // A recovery or continuation worker resuming a Thread acts as no User.
+        const resumed = yield* orchestrator
+          .dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("server-resumes"),
+            threadId: ThreadId.make("grace-thread"),
+            messageId: MessageId.make("server-resume-message"),
+            text: "Continue",
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "user",
+            creationSource: "web",
+          } as never)
+          .pipe(Effect.flip);
+        assert.equal(resumed._tag, "OrchestratorCommandRejectedError");
+        assert.match(String((resumed as { cause?: unknown }).cause), /archived/);
+      }).pipe(Effect.provide(layerOrchestration(server))),
+    ),
+  );
+
+  it.effect("once its deletion started, an Organization is not restored", () =>
+    withHub(({ server, owner, acme }) =>
+      Effect.gen(function* () {
+        assert.equal(
+          (yield* server.request(`/api/spaces/${acme}/archive`, { body: {}, cookie: owner }))
+            .status,
+          200,
+        );
+        // A deletion cut short (a crash, or a restore racing it) left the mark behind.
+        yield* server.sql`
+          UPDATE spaces SET deleting_at = '2026-11-02T00:00:00.000Z' WHERE space_id = ${acme}
+        `;
+        const restored = yield* server.request(`/api/spaces/${acme}/restore`, {
+          body: {},
+          cookie: owner,
+        });
+        assert.equal(restored.status, 403);
+        assert.equal(
+          restored.body.message,
+          "This Organization is being deleted. Delete it again to finish.",
+        );
+        // A Project-level scheduled task goes with the Organization.
+        yield* server.sql`
+          INSERT INTO scheduled_tasks (task_id, title, prompt, enabled, schedule_json, project_id,
+            workspace_strategy_json, model_selection_json, runtime_mode, interaction_mode,
+            created_by, creation_source, created_at, updated_at, last_run_status, run_count)
+          VALUES ('acme-task', 'Check in', 'Check', 1, '{"type":"interval","everyMs":60000}',
+            'acme-app', '{"type":"root"}', '{"instanceId":"codex","model":"gpt-5"}',
+            'full-access', 'default', 'user', 'web', '2026-11-01T00:00:00.000Z',
+            '2026-11-01T00:00:00.000Z', 'never', 0)
+        `;
+        assert.equal(
+          (yield* server.request(`/api/spaces/${acme}/delete`, { body: {}, cookie: owner })).status,
+          200,
+        );
+        const tasks = yield* server.sql`SELECT task_id FROM scheduled_tasks`;
+        assert.deepEqual(tasks, []);
+      }),
+    ),
+  );
+
+  it.effect("while a Project moves, nothing is created or started in it", () =>
+    withTeam(({ server, acme, ada }) =>
+      Effect.gen(function* () {
+        yield* server.eventSink.write({
+          events: [
+            threadCreated({
+              id: "ada-thread",
+              projectId: "acme-app",
+              spaceId: acme,
+              ownerUserId: "ada",
+            }),
+          ],
+        });
+        const spaces = Context.get(server.services, SpaceDirectory.SpaceDirectory);
+        const during = yield* spaces.whileProjectMoves(
+          ProjectId.make("acme-app"),
+          Effect.all([
+            spaces
+              .claimCreation({
+                action: "thread.create",
+                actorUserId: ada.userId,
+                projectId: ProjectId.make("acme-app"),
+              })
+              .pipe(Effect.flip),
+            spaces.workBlocked(ThreadId.make("ada-thread")),
+          ]),
+        );
+        assert.equal(
+          during[0].message,
+          "This Project is moving to another Space. Try again in a moment.",
+        );
+        // The orchestrator refuses any start in such a Thread, whoever asks.
+        assert.equal(during[1], "project-moving");
+        assert.isUndefined(yield* spaces.workBlocked(ThreadId.make("ada-thread")));
+      }),
+    ),
+  );
+
+  it.effect("a move restamps only Threads whose Space the mover may move them out of", () =>
+    withTeam(({ server, globex, ada }) =>
+      Effect.gen(function* () {
+        // A Thread of Acme's Project stamped with Globex, which Ada does not run.
+        yield* server.eventSink.write({
+          events: [threadCreated({ id: "stray", projectId: "acme-app", spaceId: globex })],
+        });
+        const [acmeSpace] = yield* server.sql<{ spaceId: string }>`
+          SELECT space_id AS "spaceId" FROM projection_projects WHERE project_id = 'acme-app'
+        `;
+        const sameSpace = yield* server.request("/api/projects/mutate", {
+          cookie: ada.cookie,
+          body: {
+            type: "project.move",
+            commandId: "move-in-place",
+            projectId: "acme-app",
+            spaceId: acmeSpace!.spaceId,
+          },
+        });
+        assert.notEqual(sameSpace.status, 200);
+        const [stray] = yield* server.sql<{ spaceId: string }>`
+          SELECT space_id AS "spaceId" FROM orchestration_v2_projection_threads
+          WHERE thread_id = 'stray'
+        `;
+        assert.equal(stray?.spaceId, globex);
+      }),
+    ),
+  );
+
+  // A User's shell over WebSocket, and the next authoritative snapshot it is sent.
+  const watchShell = Effect.fn(function* (
+    server: Effect.Success<typeof serveAuthHttp>,
+    userId: UserId,
+  ) {
+    const client = yield* connect(server, userId);
+    const items = yield* Queue.unbounded<OrchestrationV2ShellStreamItem>();
+    yield* client[ORCHESTRATION_V2_WS_METHODS.subscribeShell]({
+      requestCompletionMarker: true,
+    }).pipe(
+      Stream.runForEach((item) => Queue.offer(items, item)),
+      Effect.forkScoped,
+    );
+    return items;
+  });
+  /** Skips deltas and enrichment refreshes until a snapshot shows exactly `expected`. */
+  const snapshotShowing = Effect.fn(function* (
+    items: Queue.Queue<OrchestrationV2ShellStreamItem>,
+    expected: { readonly projects: ReadonlyArray<string>; readonly threads: ReadonlyArray<string> },
+  ) {
+    for (;;) {
+      const item = yield* Queue.take(items);
+      if (item.kind !== "snapshot") continue;
+      const shown = shellIds(item.snapshot);
+      if (JSON.stringify(shown) === JSON.stringify(expected)) return shown;
+    }
+  });
+  const spaceNamesOf = (server: Effect.Success<typeof serveAuthHttp>, cookie: string) =>
+    server
+      .request("/api/spaces", { cookie })
+      .pipe(
+        Effect.map((response) =>
+          (response.body.spaces as ReadonlyArray<{ name: string; archived?: boolean }>).map(
+            (space) => `${space.name}${space.archived === true ? " (archived)" : ""}`,
+          ),
+        ),
+      );
+
+  // Live: the shell tail batches deltas on a wall-clock window.
+  it.live(
+    "archiving an Organization hides it from its Members at once and stops new work; restore brings it back",
+    () =>
+      withHub(({ server, owner, acme, grace }) =>
+        Effect.gen(function* () {
+          const lifecycle = (action: "archive" | "restore" | "delete", cookie: string) =>
+            server.request(`/api/spaces/${acme}/${action}`, { body: {}, cookie });
+          const acmeWork = { projects: ["acme-app"], threads: ["acme-child", "acme-thread"] };
+          const shell = yield* watchShell(server, grace.userId);
+          yield* snapshotShowing(shell, acmeWork);
+
+          // Only the Owner archives.
+          const byMember = yield* lifecycle("archive", grace.cookie);
+          assert.equal(byMember.status, 403);
+          assert.equal(
+            byMember.body.message,
+            "Only the Owner archives, restores or deletes an Organization.",
+          );
+
+          const archived = yield* lifecycle("archive", owner);
+          assert.equal(archived.status, 200);
+          // The Owner keeps it, marked archived; Grace's open shell reloads without it.
+          assert.include(yield* spaceNamesOf(server, owner), "Acme (archived)");
+          yield* snapshotShowing(shell, { projects: [], threads: [] });
+          assert.notInclude(yield* spaceNamesOf(server, grace.cookie), "Acme");
+          // To her it no longer exists, so she cannot restore it either.
+          const restoreByMember = yield* lifecycle("restore", grace.cookie);
+          assert.equal(restoreByMember.body.message, "That Organization does not exist.");
+
+          // Nothing new starts in it, not even from the Owner.
+          const created = yield* server.request("/api/projects/mutate", {
+            cookie: owner,
+            body: {
+              type: "project.create",
+              commandId: "create-in-archived",
+              projectId: "late-app",
+              title: "late-app",
+              workspaceRoot: "/work/late-app",
+              spaceId: acme,
+            },
+          });
+          assert.equal(created.status, 403);
+          // Archiving twice changes nothing.
+          assert.equal((yield* lifecycle("archive", owner)).status, 200);
+
+          assert.equal((yield* lifecycle("restore", owner)).status, 200);
+          yield* snapshotShowing(shell, acmeWork);
+          assert.include(yield* spaceNamesOf(server, grace.cookie), "Acme");
+          assert.include(yield* spaceNamesOf(server, owner), "Acme");
+        }),
+      ),
+  );
+
+  it.effect("an Organization is deleted for good only once archived, with everything in it", () =>
+    withHub(({ server, owner, acme, grace }) =>
+      Effect.gen(function* () {
+        const lifecycle = (action: "archive" | "delete", cookie: string) =>
+          server.request(`/api/spaces/${acme}/${action}`, { body: {}, cookie });
+        // A pending Invitation, which goes with the Organization.
+        yield* server.request(`/api/spaces/${acme}/invitations`, {
+          body: { role: "member" },
+          cookie: owner,
+        });
+
+        const early = yield* lifecycle("delete", owner);
+        assert.equal(early.status, 403);
+        assert.equal(
+          early.body.message,
+          "Archive the Organization before deleting it permanently.",
+        );
+        assert.equal((yield* lifecycle("archive", owner)).status, 200);
+
+        const deleted = yield* lifecycle("delete", owner);
+        assert.equal(deleted.status, 200);
+        assert.notInclude(
+          (deleted.body.spaces as ReadonlyArray<{ name: string }>).map((space) => space.name),
+          "Acme",
+        );
+        // Its Projects and Threads went through their delete paths; Globex's work stays.
+        const shell = yield* server.request("/api/orchestration/shell", { cookie: owner });
+        assert.deepEqual(shellIds(shell.body as never), {
+          projects: ["globex-app", "legacy-app"],
+          threads: ["globex-thread", "legacy-thread"],
+        });
+        const [left] = yield* server.sql<{
+          memberships: number;
+          invitations: number;
+          spaces: number;
+        }>`
+          SELECT
+            (SELECT COUNT(*) FROM space_memberships WHERE space_id = ${acme}) AS memberships,
+            (SELECT COUNT(*) FROM space_invitations WHERE space_id = ${acme}) AS invitations,
+            (SELECT COUNT(*) FROM spaces WHERE space_id = ${acme}) AS spaces
+        `;
+        assert.deepEqual(left, { memberships: 0, invitations: 0, spaces: 0 });
+        assert.equal(yield* isSignedIn(server, grace.cookie), true);
+        assert.equal(
+          (yield* lifecycle("delete", owner)).body.message,
+          "That Organization does not exist.",
+        );
+      }),
+    ),
+  );
+
+  const runEvent = (threadId: string, status: "running" | "completed") => {
+    const at = DateTime.makeUnsafe("2026-11-01T00:01:00.000Z");
+    const id = ThreadId.make(threadId);
+    const runId = RunId.make(`run-${threadId}`);
+    const nodeId = NodeId.make(`node-${threadId}`);
+    const instanceId = ProviderInstanceId.make("codex");
+    return {
+      id: EventId.make(`run-${threadId}-${status}`),
+      type: status === "running" ? "run.created" : "run.updated",
+      threadId: id,
+      runId,
+      nodeId,
+      driver: ProviderDriverKind.make("codex"),
+      occurredAt: at,
+      payload: {
+        id: runId,
+        threadId: id,
+        ordinal: 1,
+        providerInstanceId: instanceId,
+        modelSelection: { instanceId, model: "gpt-5" },
+        providerThreadId: null,
+        userMessageId: MessageId.make(`message-${threadId}`),
+        rootNodeId: nodeId,
+        activeAttemptId: null,
+        status,
+        requestedAt: at,
+        startedAt: at,
+        completedAt: status === "running" ? null : at,
+        checkpointId: null,
+        contextHandoffId: null,
+      },
+    } as const;
+  };
+
+  // Live: the shell tail batches deltas on a wall-clock window.
+  it.live(
+    "a Project moves only for an Admin of both Spaces, never while a Thread runs, and its Threads and viewers follow",
+    () =>
+      withTeam(({ server, owner, globex, grace, linus, ada }) =>
+        Effect.gen(function* () {
+          const spaces = Context.get(server.services, SpaceDirectory.SpaceDirectory);
+          let moves = 0;
+          const move = (cookie: string, spaceId: string) =>
+            server.request("/api/projects/mutate", {
+              cookie,
+              body: {
+                type: "project.move",
+                commandId: `move-${(moves += 1)}`,
+                projectId: "acme-app",
+                spaceId,
+              },
+            });
+          // Ada runs Acme but is not in Globex, which answers like a Space that does not exist.
+          const hidden = yield* move(ada.cookie, globex);
+          const missing = yield* move(ada.cookie, "no-such-space");
+          assert.equal(hidden.status, 400);
+          const { traceId: _hiddenTrace, ...hiddenBody } = hidden.body;
+          const { traceId: _missingTrace, ...missingBody } = missing.body;
+          assert.deepEqual([hidden.status, hiddenBody], [missing.status, missingBody]);
+          // As a Member of Globex she still may not; nor may Grace, a Member of Acme.
+          yield* joinOrganization(server, globex, "ada", "member");
+          yield* spaces.changed;
+          const asMember = yield* move(ada.cookie, globex);
+          assert.equal(asMember.status, 403);
+          assert.match(String(asMember.body.message), /Admin where it is and where it goes/);
+          assert.equal((yield* move(grace.cookie, globex)).status, 400);
+          yield* server.sql`
+            UPDATE space_memberships SET role = 'admin' WHERE space_id = ${globex} AND user_id = 'ada'
+          `;
+          yield* spaces.changed;
+
+          // A running Thread blocks the move, and the message says which.
+          yield* server.eventSink.write({ events: [runEvent("acme-thread", "running")] as never });
+          const blocked = yield* move(ada.cookie, globex);
+          assert.equal(blocked.status, 409);
+          assert.equal(
+            blocked.body.message,
+            'Stop the running Threads of this Project before moving it: "acme-thread".',
+          );
+          yield* server.eventSink.write({
+            events: [runEvent("acme-thread", "completed")] as never,
+          });
+
+          const graceShell = yield* watchShell(server, grace.userId);
+          const linusShell = yield* watchShell(server, linus.userId);
+          const acmeWork = {
+            projects: ["acme-app"],
+            threads: ["acme-child", "acme-thread", "grace-thread"],
+          };
+          yield* snapshotShowing(graceShell, acmeWork);
+          yield* snapshotShowing(linusShell, {
+            projects: ["globex-app"],
+            threads: ["globex-thread"],
+          });
+
+          const moved = yield* move(ada.cookie, globex);
+          assert.equal(moved.status, 200);
+          assert.equal(moved.body.spaceId, globex);
+          // Every Thread follows, the unstamped child too.
+          const threadSpaces = yield* server.sql<{ threadId: string; spaceId: string | null }>`
+            SELECT thread_id AS "threadId", space_id AS "spaceId"
+            FROM orchestration_v2_projection_threads WHERE project_id = 'acme-app'
+            ORDER BY thread_id
+          `;
+          assert.deepEqual(
+            threadSpaces.map((row) => row.spaceId),
+            threadSpaces.map(() => globex),
+          );
+          // Acme's viewers lose it live; Globex's gain it.
+          yield* snapshotShowing(graceShell, { projects: [], threads: [] });
+          yield* snapshotShowing(linusShell, {
+            projects: ["acme-app", "globex-app"],
+            threads: ["acme-child", "acme-thread", "globex-thread", "grace-thread"],
+          });
+
+          // Not even the Owner moves it into someone else's Personal space.
+          const intoPersonal = yield* move(owner, `personal:${grace.userId}`);
+          assert.equal(intoPersonal.status, 403);
+          assert.equal(
+            intoPersonal.body.message,
+            "This is someone else's Personal space: you can read it but not change anything in it.",
+          );
+        }),
+      ),
   );
 });
