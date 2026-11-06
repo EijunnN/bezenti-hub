@@ -59,6 +59,7 @@ const ENVIRONMENT_EXECUTOR_OPERATIONS = {
     "provider.unloadThread",
     "provider.hasPendingBackgroundWork",
     "provider.detach",
+    "textGeneration.threadHandoff",
   ],
   workspace: [
     "checkpoint.isGitRepository",

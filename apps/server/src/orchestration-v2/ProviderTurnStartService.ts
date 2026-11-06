@@ -34,6 +34,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import { makeIsManagedWorktreePath } from "../worktreesDirectory.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
+import * as MoveHandoff from "./MoveHandoff.ts";
 import { isActiveRun } from "./CommandPolicy.ts";
 import {
   DEFAULT_HANDOFF_TOKEN_CAP,
@@ -831,6 +832,67 @@ export const layer: Layer.Layer<
         return undefined;
       });
       let effectiveHandoffs = handoffs;
+      // A Thread that moved to another Environment starts its first turn there (a new native
+      // session: the source's stayed behind) with the move's handoff: the summary, then the
+      // recent messages, within the budget below. Its id makes it go once per move; a Thread
+      // that stays where it is resumes natively and never gets one.
+      const moved = projection.thread.move;
+      if (
+        moved?.status === "switched" &&
+        moved.handoff !== undefined &&
+        nativeForkTransfer === undefined &&
+        !projection.contextHandoffs.some(
+          (handoff) => handoff.id === MoveHandoff.moveContextHandoffId(moved.id),
+        )
+      ) {
+        const recentIds = new Set(moved.handoff.recentItemIds);
+        const messages = MoveHandoff.inConversationOrder(
+          (yield* projectionStore.getTurnStartHistory(input.threadId)).filter((item) =>
+            recentIds.has(item.id),
+          ),
+          projection.runs,
+        ).flatMap((item) => {
+          const historical = historicalMessage(item);
+          return historical === null ? [] : [historical];
+        });
+        const createdAt = yield* DateTime.now;
+        const moveHandoff: OrchestrationV2ContextHandoff = {
+          id: MoveHandoff.moveContextHandoffId(moved.id),
+          transferId: null,
+          threadId: projection.thread.id,
+          targetRunId: run.id,
+          fromProviderThreadIds: [],
+          toProviderThreadId: providerThread.id,
+          coveredRunOrdinals: { from: 1, to: Math.max(1, run.ordinal - 1) },
+          strategy: "full_thread_summary",
+          status: "ready",
+          summaryMessageId: null,
+          summaryText: moved.handoff.context,
+          history: {
+            messages,
+            coverage: moved.handoff.context,
+            omittedItems: 0,
+            omittedItemIds: [],
+          },
+          createdByProviderInstanceId: null,
+          createdAt,
+          updatedAt: createdAt,
+        };
+        yield* eventSink.write({
+          events: [
+            {
+              id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
+              type: "context-handoff.updated",
+              threadId: projection.thread.id,
+              runId: run.id,
+              providerInstanceId: run.providerInstanceId,
+              occurredAt: createdAt,
+              payload: moveHandoff,
+            },
+          ],
+        });
+        effectiveHandoffs = [...effectiveHandoffs, moveHandoff];
+      }
       let resumeFellBack = false;
       const userText = projectComposerContextForProvider({
         text: message.text,

@@ -555,6 +555,7 @@ function itemIcon(item: OrchestrationV2TurnItem): ThreadFeedActivity["icon"] {
     case "compaction":
     case "handoff":
     case "environment_move":
+    case "environment_handoff":
     case "fork":
     case "thread_created":
       return "zap";
@@ -619,6 +620,8 @@ function itemSummary(
       return item.outcome === "cancelled"
         ? `Move to ${item.targetEnvironmentName} cancelled`
         : `Moved from ${item.sourceEnvironmentName} to ${item.targetEnvironmentName}`;
+    case "environment_handoff":
+      return `Handoff to ${item.targetEnvironmentName}`;
     case "fork":
       return "Thread forked";
     case "thread_created":
@@ -683,6 +686,8 @@ function itemPreview(item: OrchestrationV2TurnItem): string | null {
       return item.summary ?? null;
     case "environment_move":
       return item.actorName === undefined ? null : `by ${item.actorName}`;
+    case "environment_handoff":
+      return item.summary;
     case "fork":
     case "thread_created":
       return item.targetThreadId;

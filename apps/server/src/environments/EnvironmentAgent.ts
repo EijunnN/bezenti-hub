@@ -27,6 +27,7 @@ import {
   type EnvironmentOrchestrationCapabilities,
   ProviderDriverKind,
   type ProviderInstanceId,
+  TextGenerationError,
   type ThreadId,
   VcsProcessExitError,
 } from "@t3tools/contracts";
@@ -706,6 +707,18 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
           const session = sessions.get(providerSessionId);
           return session === undefined ? Effect.void : forgetSession(providerSessionId, session);
         });
+      }
+      // The Hub asks this machine's provider to write a moved Thread's handoff summary.
+      case "textGeneration.threadHandoff": {
+        const textGeneration = local.textGeneration;
+        return textGeneration === undefined
+          ? Effect.fail(
+              new TextGenerationError({
+                operation: "generateThreadHandoff",
+                detail: "This machine has no text generation.",
+              }),
+            )
+          : textGeneration.threadHandoff(request as RemoteInput<"textGeneration.threadHandoff">);
       }
       case "checkpoint.isGitRepository":
         return checkpoints.isGitRepository(

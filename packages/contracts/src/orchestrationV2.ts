@@ -468,6 +468,47 @@ export const OrchestrationV2ThreadMoveCheckpoint = Schema.Struct({
 export type OrchestrationV2ThreadMoveCheckpoint = typeof OrchestrationV2ThreadMoveCheckpoint.Type;
 
 /**
+ * Who wrote a moved Thread's handoff summary: the Thread's provider on the source, or on the Hub
+ * machine (the source was offline), or nobody (`fallback`: the text generation failed, so the
+ * summary was assembled from the Thread's history).
+ */
+export const OrchestrationV2ThreadHandoffWriter = Schema.Literals(["source", "hub", "fallback"]);
+export type OrchestrationV2ThreadHandoffWriter = typeof OrchestrationV2ThreadHandoffWriter.Type;
+
+/**
+ * What the agent on the target of a move is told when its new native session starts: `context`
+ * (the summary, framed) followed by the Thread's recent messages, `recentItemIds`.
+ */
+export const OrchestrationV2ThreadMoveHandoff = Schema.Struct({
+  writtenBy: OrchestrationV2ThreadHandoffWriter,
+  /** The machine whose provider wrote the summary; null when it was assembled. */
+  writerEnvironmentName: Schema.NullOr(Schema.String),
+  summary: Schema.String,
+  context: Schema.String,
+  recentItemIds: Schema.Array(Schema.String),
+  /** Why no summary could be written, for an assembled one. */
+  fallbackReason: Schema.optional(Schema.String),
+});
+export type OrchestrationV2ThreadMoveHandoff = typeof OrchestrationV2ThreadMoveHandoff.Type;
+
+/** The timeline entry of a move's handoff: what the agent on the target was told. */
+const OrchestrationV2EnvironmentHandoffItemFields = {
+  type: Schema.Literal("environment_handoff"),
+  moveId: TrimmedNonEmptyString,
+  writtenBy: OrchestrationV2ThreadHandoffWriter,
+  /** The machine whose provider wrote the summary; null when it was assembled. */
+  writerEnvironmentName: Schema.NullOr(Schema.String),
+  sourceEnvironmentName: Schema.String,
+  targetEnvironmentName: Schema.String,
+  summary: Schema.String,
+  /** The text the agent receives ahead of the recent messages. */
+  context: Schema.String,
+  recentMessageCount: NonNegativeInt,
+  /** Why no summary could be written, for an assembled one. */
+  fallbackReason: Schema.optional(Schema.String),
+};
+
+/**
  * A move of the Thread to another Environment (`thread.move`), persisted step by step. It stays
  * on the Thread once done or failed, so clients show how it went; only one runs at a time.
  */
@@ -499,6 +540,8 @@ export const OrchestrationV2ThreadMove = Schema.Struct({
   failure: Schema.optional(
     Schema.Struct({ step: OrchestrationV2ThreadMoveStep, message: Schema.String }),
   ),
+  /** Written at `handoff`; the first new native session on the target receives it. */
+  handoff: Schema.optional(OrchestrationV2ThreadMoveHandoff),
 });
 export type OrchestrationV2ThreadMove = typeof OrchestrationV2ThreadMove.Type;
 
@@ -1856,6 +1899,10 @@ export const OrchestrationV2TurnItem = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
+    ...OrchestrationV2EnvironmentHandoffItemFields,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("fork"),
     source: Schema.Union([
       Schema.Struct({ type: Schema.Literal("run"), threadId: ThreadId, runId: RunId }),
@@ -2708,6 +2755,10 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     setAsideRefs: Schema.optional(Schema.Array(Schema.String)),
     /** Absent means it moved. */
     outcome: Schema.optional(Schema.Literals(["moved", "cancelled"])),
+  }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemJsonBaseFields,
+    ...OrchestrationV2EnvironmentHandoffItemFields,
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,

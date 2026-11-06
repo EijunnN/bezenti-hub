@@ -27,23 +27,32 @@ import {
   RunAttemptId,
   RunId,
   SpaceId,
+  TextGenerationError,
   ThreadId,
   UserId,
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import type {
+  ProviderTextGeneration,
+  ThreadHandoffGenerationInput,
+} from "@t3tools/provider-core/server/textGeneration";
 import { makeProviderReplayGate } from "@t3tools/provider-testing/replayGate";
+import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import { McpSchema, McpServer } from "effect/ai";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 
 import { resolveAttachmentPath } from "../attachmentStore.ts";
@@ -55,6 +64,8 @@ import * as ServerConfig from "../config.ts";
 import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as ProjectCheckouts from "../environment/ProjectCheckouts.ts";
+import * as McpHttpServer from "../mcp/McpHttpServer.ts";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as ThreadWorkspace from "../environment/ThreadWorkspace.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ResourceCleanupService from "../orchestration-v2/ResourceCleanupService.ts";
@@ -1573,21 +1584,34 @@ const checkoutOn = Effect.fn(function* (
 });
 
 /** A recorded turn on the Laptop that writes `notes.md`, its checkpoint in the Hub repository. */
-const turnOnLaptop = Effect.fn(function* (input: { readonly desktop: boolean }) {
+const turnOnLaptop = Effect.fn(function* (input: {
+  readonly desktop: boolean;
+  readonly laptopTextGeneration?: ProviderTextGeneration;
+  readonly hubTextGeneration?: ProviderTextGeneration;
+  /** The Desktop's provider; by default one that runs no turn. */
+  readonly desktopAdapters?: (
+    instanceId: ProviderInstanceId,
+  ) => Layer.Layer<ProviderAdapterRegistry.ProviderAdapterRegistryV2>;
+}) {
   const loaded = yield* loadFixture("simple");
-  const hub = yield* makeHub();
+  const hub = yield* makeHub(
+    input.hubTextGeneration === undefined ? {} : { textGeneration: input.hubTextGeneration },
+  );
   const laptop = yield* hub.join({
     name: "Laptop",
     adapters: withEditingTurns(loaded.adapters, {
       file: "notes.md",
       content: "Written on the Laptop",
     }),
+    ...(input.laptopTextGeneration === undefined
+      ? {}
+      : { textGeneration: input.laptopTextGeneration }),
   });
   const desktop = input.desktop
     ? // It runs no recorded turn: a session opening there is all the next turn shows.
       yield* hub.join({
         name: "Desktop",
-        adapters: idleAdapters(loaded.variant.modelSelection.instanceId),
+        adapters: (input.desktopAdapters ?? idleAdapters)(loaded.variant.modelSelection.instanceId),
       })
     : undefined;
   yield* replayOn(hub, laptop, loaded);
@@ -2073,5 +2097,346 @@ describe("Hub con Environments: moving a Thread, the edges", () => {
         assert.equal(moved.move?.continuesFrom?.kind, "final");
         assert.isNotTrue(moved.move?.sourceOffline);
       }).pipe(Effect.scoped),
+  );
+});
+
+const EPOCH = DateTime.makeUnsafe("2026-01-01T00:00:00.000Z");
+
+/** Text generation that answers the handoff summary (or fails) and records what it was asked. */
+const recordingTextGeneration = (
+  asked: Array<ThreadHandoffGenerationInput>,
+  answer: { readonly summary: string } | { readonly failure: string },
+): ProviderTextGeneration => {
+  const unused = () => Effect.die("only the handoff summary is written in these tests");
+  return {
+    generateCommitMessage: unused,
+    generatePrContent: unused,
+    generateBranchName: unused,
+    generateThreadTitle: unused,
+    generateReviewGuide: unused,
+    generateThreadHandoff: (input) =>
+      Effect.suspend(() => {
+        asked.push(input);
+        return "summary" in answer
+          ? Effect.succeed({ summary: answer.summary })
+          : Effect.fail(
+              new TextGenerationError({
+                operation: "generateThreadHandoff",
+                detail: answer.failure,
+              }),
+            );
+      }),
+  };
+};
+
+/** A provider that opens sessions and records each turn it is given, without running it. */
+const recordingAdapters =
+  (turns: Queue.Queue<ProviderAdapter.ProviderAdapterV2TurnInput>) =>
+  (instanceId: ProviderInstanceId) =>
+    ProviderAdapterRegistry.layerFromAdapters([
+      {
+        instanceId,
+        driver: CLAUDE,
+        getCapabilities: () => Effect.succeed(ClaudeProviderCapabilitiesV2),
+        planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
+        openSession: (open) =>
+          Effect.succeed({
+            instanceId,
+            driver: CLAUDE,
+            providerSessionId: open.providerSessionId,
+            providerSession: {
+              id: open.providerSessionId,
+              driver: CLAUDE,
+              providerInstanceId: instanceId,
+              status: "ready",
+              cwd: open.runtimePolicy.cwd ?? "/desktop",
+              model: null,
+              capabilities: ClaudeProviderCapabilitiesV2,
+              createdAt: EPOCH,
+              updatedAt: EPOCH,
+              lastError: null,
+            },
+            events: Stream.never,
+            ensureThread: (thread) =>
+              thread.existingProviderThread === undefined
+                ? Effect.die("the Hub always passes the provider thread it stored")
+                : Effect.succeed({
+                    ...thread.existingProviderThread,
+                    nativeThreadRef: {
+                      driver: CLAUDE,
+                      nativeId: `native:desktop:${thread.existingProviderThread.id}`,
+                      strength: "strong" as const,
+                    },
+                  }),
+            resumeThread: ({ providerThread }) => Effect.succeed(providerThread),
+            startTurn: (turn) => Queue.offer(turns, turn).pipe(Effect.asVoid),
+            steerTurn: () => Effect.void,
+            interruptTurn: () => Effect.void,
+            respondToRuntimeRequest: () => Effect.void,
+            readThreadSnapshot: () => Effect.die("unused"),
+            rollbackThread: () => Effect.die("unused"),
+            forkThread: () => Effect.die("unused"),
+          }),
+      },
+    ]);
+
+/** Sends a message after the move and returns the first turn the Desktop's provider got. */
+const firstTurnAfterMove = Effect.fn(function* (
+  hub: Hub,
+  desktop: TestEnvironment,
+  threadId: ThreadId,
+  turns: Queue.Queue<ProviderAdapter.ProviderAdapterV2TurnInput>,
+) {
+  const asked = desktop.requests.length;
+  yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
+    type: "message.dispatch",
+    createdBy: "user",
+    creationSource: "web",
+    commandId: CommandId.make("command:after-move"),
+    threadId,
+    messageId: MessageId.make("message:after-move"),
+    text: "Go on from here",
+    attachments: [],
+    dispatchMode: { type: "start_immediately" },
+  });
+  yield* desktop.awaitRequest("provider.startTurn", asked);
+  return yield* Queue.take(turns);
+});
+
+const handoffItemOf = Effect.fn(function* (hub: Hub, threadId: ThreadId) {
+  const { turnItems } = yield* hub
+    .service(Orchestrator.OrchestratorV2)
+    .getThreadProjection(threadId)
+    .pipe(Effect.orDie);
+  const item = turnItems.find((candidate) => candidate.type === "environment_handoff");
+  assert.isDefined(item, "the timeline has no handoff entry");
+  assert(item.type === "environment_handoff");
+  return { item, turnItems };
+});
+
+describe("Hub con Environments: the agent's memory after a move", () => {
+  it.live(
+    "the source's provider writes the summary, and the target's first turn starts with it and the recent messages",
+    () =>
+      Effect.gen(function* () {
+        const laptopAsked: Array<ThreadHandoffGenerationInput> = [];
+        const hubAsked: Array<ThreadHandoffGenerationInput> = [];
+        const turns = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2TurnInput>();
+        const { hub, desktop, threadId, owner } = yield* turnOnLaptop({
+          desktop: true,
+          laptopTextGeneration: recordingTextGeneration(laptopAsked, {
+            summary: "The Laptop wrote notes.md; next, review it.",
+          }),
+          hubTextGeneration: recordingTextGeneration(hubAsked, { summary: "unused" }),
+          desktopAdapters: recordingAdapters(turns),
+        });
+        assert.isDefined(desktop);
+        yield* dispatchMove(hub, {
+          commandId: "command:move-with-memory",
+          threadId,
+          target: desktop.environmentId,
+          actor: owner,
+        });
+        const moved = yield* settledMove(hub, threadId);
+        assert.equal(moved.move?.status, "switched", moved.move?.failure?.message);
+
+        // One model call, on the source, with the Thread's provider and its history.
+        assert.lengthOf(laptopAsked, 1);
+        assert.lengthOf(hubAsked, 0);
+        const [asked] = laptopAsked;
+        assert.equal(asked?.modelSelection.instanceId, moved.modelSelection.instanceId);
+        assert.equal(asked?.sourceEnvironmentName, "Laptop");
+        assert.equal(asked?.targetEnvironmentName, "Desktop");
+        const { item, turnItems } = yield* handoffItemOf(hub, threadId);
+        const lastUserMessage = turnItems.findLast(
+          (candidate) => candidate.type === "user_message",
+        );
+        assert(lastUserMessage?.type === "user_message");
+        assert.include(asked?.transcript ?? "", lastUserMessage.text.trim().slice(0, 40));
+
+        // The timeline shows what the new agent is told, and who wrote it.
+        assert.equal(item.writtenBy, "source");
+        assert.equal(item.writerEnvironmentName, "Laptop");
+        assert.equal(item.summary, "The Laptop wrote notes.md; next, review it.");
+        assert.include(item.context, "The Laptop wrote notes.md; next, review it.");
+        assert.include(item.context, "thread_history");
+        assert.isAbove(item.recentMessageCount, 0);
+
+        // The Desktop's new session starts with the summary, then the recent messages.
+        const turn = yield* firstTurnAfterMove(hub, desktop, threadId, turns);
+        const text = turn.message.text;
+        assert.include(text, "This Thread moved from Laptop to Desktop.");
+        assert.include(text, "The Laptop wrote notes.md; next, review it.");
+        assert.include(text, lastUserMessage.text.trim().slice(0, 40));
+        assert.isTrue(text.trimEnd().endsWith("Go on from here"), text.slice(-200));
+      }).pipe(Effect.scoped),
+  );
+
+  it.live("with the source offline, the Hub machine writes the summary", () =>
+    Effect.gen(function* () {
+      const laptopAsked: Array<ThreadHandoffGenerationInput> = [];
+      const hubAsked: Array<ThreadHandoffGenerationInput> = [];
+      const { hub, laptop, desktop, threadId, owner } = yield* turnOnLaptop({
+        desktop: true,
+        laptopTextGeneration: recordingTextGeneration(laptopAsked, { summary: "unused" }),
+        hubTextGeneration: recordingTextGeneration(hubAsked, {
+          summary: "Written on the Hub from the history.",
+        }),
+      });
+      assert.isDefined(desktop);
+      yield* laptop.disconnect;
+      yield* dispatchMove(hub, {
+        commandId: "command:move-offline-memory",
+        threadId,
+        target: desktop.environmentId,
+        actor: owner,
+      });
+      const moved = yield* settledMove(hub, threadId);
+      assert.equal(moved.move?.status, "switched", moved.move?.failure?.message);
+      assert.lengthOf(laptopAsked, 0);
+      assert.lengthOf(hubAsked, 1);
+      const { item } = yield* handoffItemOf(hub, threadId);
+      assert.equal(item.writtenBy, "hub");
+      assert.equal(item.summary, "Written on the Hub from the history.");
+      assert.equal(moved.move?.handoff?.summary, "Written on the Hub from the history.");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a failed summary never fails the move: one is assembled and the timeline says so", () =>
+    Effect.gen(function* () {
+      const laptopAsked: Array<ThreadHandoffGenerationInput> = [];
+      const hubAsked: Array<ThreadHandoffGenerationInput> = [];
+      const turns = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2TurnInput>();
+      const { hub, desktop, threadId, owner } = yield* turnOnLaptop({
+        desktop: true,
+        laptopTextGeneration: recordingTextGeneration(laptopAsked, {
+          failure: "The model is out of quota.",
+        }),
+        hubTextGeneration: recordingTextGeneration(hubAsked, { summary: "unused" }),
+        desktopAdapters: recordingAdapters(turns),
+      });
+      assert.isDefined(desktop);
+      yield* dispatchMove(hub, {
+        commandId: "command:move-summary-fails",
+        threadId,
+        target: desktop.environmentId,
+        actor: owner,
+      });
+      const moved = yield* settledMove(hub, threadId);
+      assert.equal(moved.move?.status, "switched", moved.move?.failure?.message);
+      // Still at most one model call: the Hub does not try again.
+      assert.lengthOf(laptopAsked, 1);
+      assert.lengthOf(hubAsked, 0);
+      const { item } = yield* handoffItemOf(hub, threadId);
+      assert.equal(item.writtenBy, "fallback");
+      assert.isNull(item.writerEnvironmentName);
+      assert.include(item.fallbackReason ?? "", "The model is out of quota.");
+      assert.include(item.summary, "Files changed: notes.md");
+      assert.include(item.context, "assembled from the Thread's history");
+      const turn = yield* firstTurnAfterMove(hub, desktop, threadId, turns);
+      assert.include(turn.message.text, "Files changed: notes.md");
+    }).pipe(Effect.scoped),
+  );
+});
+
+const mcpClient = McpSchema.McpServerClient.of({
+  clientId: 1,
+  protocolVersion: "2025-06-18",
+  clientCapabilities: {},
+  clientInfo: { name: "thread-history-test", version: "1.0.0" },
+  initializePayload: {
+    protocolVersion: "2025-06-18",
+    capabilities: {},
+    clientInfo: { name: "thread-history-test", version: "1.0.0" },
+  },
+  getClient: Effect.die("unused"),
+});
+
+/** `thread_history` as the Thread's agent calls it, with its per-Thread credential's scope. */
+const callThreadHistory = Effect.fn(function* (
+  hub: Hub,
+  caller: { readonly threadId: ThreadId; readonly userId: UserId },
+  args: Record<string, unknown>,
+) {
+  const services = yield* Layer.build(
+    McpHttpServer.layerThreadHistoryToolkit.pipe(
+      Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+      Layer.provide(Layer.succeedContext(hub.server.services)),
+    ),
+  );
+  const server = Context.get(services, McpServer.McpServer);
+  return yield* server.callTool({ name: "thread_history", arguments: args }).pipe(
+    Effect.provideService(McpInvocationContext.McpInvocationContext, {
+      environmentId: EnvironmentId.make("environment-test"),
+      requestNamespace: `mcp-thread-history:${caller.threadId}`,
+      thread: {
+        threadId: caller.threadId,
+        providerSessionId: `provider-session:${caller.threadId}`,
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      },
+      client: undefined,
+      capabilities: new Set<McpInvocationContext.McpCapability>(["orchestration"]),
+      issuedAt: 1,
+      userId: caller.userId,
+    }),
+    Effect.provideService(McpSchema.McpServerClient, mcpClient),
+  );
+});
+
+describe("Hub con Environments: thread_history", () => {
+  it.live("an agent searches and reads its own Thread's history, and never another's", () =>
+    Effect.gen(function* () {
+      const { hub, laptop, threadId, projectId, owner } = yield* turnOnLaptop({ desktop: false });
+      const { turnItems } = yield* hub
+        .service(Orchestrator.OrchestratorV2)
+        .getThreadProjection(threadId)
+        .pipe(Effect.orDie);
+      const firstRequest = turnItems.find((item) => item.type === "user_message");
+      assert(firstRequest?.type === "user_message");
+      const word = firstRequest.text.trim().split(/\s+/)[0] ?? "";
+
+      // Its own Thread: read in order and search.
+      const read = yield* callThreadHistory(hub, { threadId, userId: owner }, { action: "read" });
+      assert.isFalse(read.isError, JSON.stringify(read.content));
+      const page = read.structuredContent as {
+        readonly threadId: string;
+        readonly total: number;
+        readonly entries: ReadonlyArray<{ readonly itemId: string; readonly text: string }>;
+      };
+      assert.equal(page.threadId, threadId);
+      assert.isAbove(page.total, 0);
+      assert.include(page.entries[0]?.text ?? "", firstRequest.text.trim().slice(0, 40));
+      const found = yield* callThreadHistory(
+        hub,
+        { threadId, userId: owner },
+        { action: "search", query: word },
+      );
+      assert.isFalse(found.isError, JSON.stringify(found.content));
+      assert.isNotEmpty((found.structuredContent as { entries: ReadonlyArray<unknown> }).entries);
+
+      // Another Thread of the same User and Project: refused.
+      const other = ThreadId.make("thread:another");
+      yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("command:another-thread"),
+        threadId: other,
+        projectId,
+        title: "Another Thread",
+        modelSelection: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "x" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        activeEnvironmentId: laptop.environmentId,
+      });
+      const refused = yield* callThreadHistory(
+        hub,
+        { threadId, userId: owner },
+        { action: "read", threadId: other },
+      );
+      assert.isTrue(refused.isError, JSON.stringify(refused.structuredContent));
+    }).pipe(Effect.scoped),
   );
 });

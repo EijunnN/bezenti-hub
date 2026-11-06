@@ -951,6 +951,8 @@ function turnItemText(item: OrchestrationV2TurnItem): string | null {
       return item.outcome === "cancelled"
         ? `Move to ${item.targetEnvironmentName} cancelled.`
         : `Moved from ${item.sourceEnvironmentName} to ${item.targetEnvironmentName}.`;
+    case "environment_handoff":
+      return item.context;
     case "thread_created":
       return `Created thread ${item.targetThreadId} with ${item.targetProviderInstanceId} (${item.targetModel}).`;
     case "secret_request":

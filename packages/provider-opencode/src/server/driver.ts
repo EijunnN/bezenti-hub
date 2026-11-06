@@ -155,6 +155,15 @@ function selectOpenCodeRuntimeTextGeneration(
         v1: v1.generateReviewGuide(input),
         v2: v2.generateReviewGuide(input),
       }),
+    ...(v1.generateThreadHandoff === undefined || v2.generateThreadHandoff === undefined
+      ? {}
+      : {
+          generateThreadHandoff: (input) =>
+            byOpenCodeRuntime(probe.get, {
+              v1: v1.generateThreadHandoff!(input),
+              v2: v2.generateThreadHandoff!(input),
+            }),
+        }),
   };
 }
 

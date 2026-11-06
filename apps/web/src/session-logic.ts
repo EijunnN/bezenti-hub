@@ -298,6 +298,7 @@ const STANDALONE_V2_ITEM_TYPES = new Set<OrchestrationV2ProjectedTurnItem["item"
   "fork",
   "handoff",
   "environment_move",
+  "environment_handoff",
   "run_interrupt_request",
   "run_interrupt_result",
   "secret_request",

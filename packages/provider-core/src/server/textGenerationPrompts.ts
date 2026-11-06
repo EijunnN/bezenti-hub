@@ -482,3 +482,45 @@ export function buildThreadTitlePrompt(input: ThreadTitlePromptInput) {
 
   return { prompt, outputSchema };
 }
+
+export interface ThreadHandoffPromptInput {
+  threadTitle: string;
+  transcript: string;
+  changedFiles: ReadonlyArray<string>;
+  sourceEnvironmentName: string;
+  targetEnvironmentName: string;
+}
+
+/** The longest summary a moved Thread's handoff keeps; the agent reads the rest with a tool. */
+export const THREAD_HANDOFF_SUMMARY_MAX_CHARS = 2_000;
+
+/** One model call: the summary a moved Thread's agent on the new Environment starts from. */
+export function buildThreadHandoffPrompt(input: ThreadHandoffPromptInput) {
+  const files =
+    input.changedFiles.length === 0
+      ? "(none recorded)"
+      : input.changedFiles
+          .slice(0, 50)
+          .map((file) => `- ${file}`)
+          .join("\n");
+  const prompt = [
+    `A coding agent's conversation is moving from the machine "${input.sourceEnvironmentName}" to "${input.targetEnvironmentName}". A new agent session on "${input.targetEnvironmentName}" continues it and receives your summary together with the most recent messages.`,
+    "",
+    "Write the handoff summary for that agent. Cover, in this order:",
+    "- the goal of the conversation and what the user asked for;",
+    "- what was done so far, with the files changed and decisions taken;",
+    "- what is still open or next, and anything the user is waiting on.",
+    `Be concrete and brief: at most 250 words, plain text, no preamble. Do not invent work that the conversation does not show.`,
+    "",
+    'Return a JSON object with a single key: "summary".',
+    "",
+    `Thread title: ${input.threadTitle}`,
+    "",
+    "Files changed:",
+    files,
+    "",
+    "Conversation (oldest first):",
+    limitSection(input.transcript, 40_000),
+  ].join("\n");
+  return { prompt, outputSchema: Schema.Struct({ summary: Schema.String }) };
+}

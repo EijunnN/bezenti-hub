@@ -223,12 +223,13 @@ move waits for it) and holds the queue, which resumes on wherever the Thread run
    checkpoint's files are laid over it and, in a new worktree only, the Project's setup script
    runs (resolved with the User's settings, with a terminal's environment); its output is a
    timeline item. A worktree the move made is removed if a later part fails.
-5. `handoff`: empty for now; ticket 09 hands the agent on the target the conversation here.
+5. `handoff`: writes what the agent on the target is told (`move.handoff`, below).
 6. `switched`: one batch sets `activeEnvironmentId` and the Thread's worktree (stored as the
    target's host path), clears `activeProviderThreadId` so the next turn opens a new native
    conversation on the target, detaches the Thread's provider sessions
-   (`provider-session.detached`) and adds the timeline entry (`environment_move`: source, target,
-   actor, `continuesFrom`). Then `RemoteEnvironments.threadMoved` drops the cached Active
+   (`provider-session.detached`) and adds the timeline entries (`environment_move`: source, target,
+   actor, `continuesFrom`; then `environment_handoff`: who wrote the summary and the exact
+   `context` the agent receives, with how many recent messages follow). Then `RemoteEnvironments.threadMoved` drops the cached Active
    environment, so the source's late events are refused, and each source session is detached
    outside the effect lane (an offline source drops it on reconnect).
 
@@ -240,6 +241,36 @@ machine that has not said hello yet is unknown, not offline: the move gives each
 (`RECONNECT_GRACE`) before going on without the source or failing for the target. Scope cwds
 recorded before a move are still the source machine's paths, so rolling back to a turn from before
 the move is not supported yet.
+
+#### The agent's memory after a move
+
+A Thread that stays on its Environment resumes its native session (`nativeThreadRef`), as always.
+A moved one starts a new native session on the target, so the `handoff` step
+([MoveHandoff](../../apps/server/src/orchestration-v2/MoveHandoff.ts)) prepares what it is told:
+
+- **Summary:** one model call through the machine's own text generation
+  (`EnvironmentExecutor.textGeneration.threadHandoff`, wire operation
+  `textGeneration.threadHandoff`; `TextGeneration.generateThreadHandoff`, with the Thread's
+  provider instance, or the machine's text generation model when it lacks that instance). The
+  source writes it when online, else the Hub machine. It reads the Thread's visible history in
+  conversation order (at most 40,000 characters, newest kept) and the files its file changes and
+  checkpoints touched. A failure, an empty answer or more than three minutes never fails the move:
+  the summary is then assembled from the history (`mechanicalSummary`: title, turns, last requests
+  and reply, changed files) and `writtenBy` is `fallback`, with the reason. No second call is made.
+- **Recent messages:** the newest history messages, at most 12 and 12,000 bytes, kept by item id.
+- **`context`:** the framed summary, pointing at the `thread_history` MCP tool.
+
+`move.handoff` holds all of it; `switched` writes the `environment_handoff` timeline item. The
+first turn on the target whose provider thread has no native ref yet
+(`ProviderTurnStartService`) turns it into a context handoff record (`context-handoff:move:<id>`,
+`full_thread_summary`, `history.coverage` = `context`, the recent messages re-read from the
+projection), which the usual delivery budgets, injects or prepends to the prompt, and marks
+delivered; the record's id makes it go once per move.
+
+`thread_history` (`apps/server/src/mcp/toolkits/threadHistory/`) is a Thread caller's tool:
+`search` (case-insensitive substring, snippets) and `read` (paged, cut per item) over the visible
+history of the caller's own Thread, read with its User's Space visibility (`readThread`). Naming any
+other Thread is refused (`capability_denied`).
 
 ### Workspace RPCs
 

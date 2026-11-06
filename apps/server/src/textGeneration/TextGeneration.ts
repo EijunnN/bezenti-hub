@@ -33,6 +33,8 @@ export type {
   ReviewGuideGenerationResult,
   ThreadTitleGenerationInput,
   ThreadTitleGenerationResult,
+  ThreadHandoffGenerationInput,
+  ThreadHandoffGenerationResult,
 } from "@t3tools/provider-core/server/textGeneration";
 
 export class TextGeneration extends Context.Service<TextGeneration, ProviderTextGeneration>()(
@@ -44,7 +46,8 @@ type TextGenerationOp =
   | "generatePrContent"
   | "generateBranchName"
   | "generateThreadTitle"
-  | "generateReviewGuide";
+  | "generateReviewGuide"
+  | "generateThreadHandoff";
 
 const resolveInstance = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],
@@ -167,6 +170,34 @@ export const make = Effect.gen(function* () {
               modelSelection,
             });
           }),
+      );
+    }),
+    // The Thread's provider writes a moved Thread's summary; a machine without that instance (the
+    // Hub machine, writing for an offline source) uses its own text generation model instead.
+    generateThreadHandoff: Effect.fn("TextGeneration.generateThreadHandoff")(function* (input) {
+      const own = yield* registry.getInstance(input.modelSelection.instanceId);
+      const selection =
+        own !== undefined
+          ? input.modelSelection
+          : (yield* serverSettings.getSettings.pipe(
+              Effect.mapError(
+                (cause) =>
+                  new TextGenerationError({
+                    operation: "generateThreadHandoff",
+                    detail: "Could not read the text generation model settings.",
+                    cause,
+                  }),
+              ),
+            )).textGenerationModelSelection;
+      return yield* generate("generateThreadHandoff", selection, (service, modelSelection) =>
+        service.generateThreadHandoff === undefined
+          ? Effect.fail(
+              new TextGenerationError({
+                operation: "generateThreadHandoff",
+                detail: `Provider instance '${modelSelection.instanceId}' cannot write a handoff summary.`,
+              }),
+            )
+          : service.generateThreadHandoff({ ...input, modelSelection }),
       );
     }),
   });

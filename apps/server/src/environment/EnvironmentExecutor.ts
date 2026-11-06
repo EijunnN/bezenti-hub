@@ -16,6 +16,7 @@ import {
   type EnvironmentUnavailableProvider,
   type OrchestrationV2AppThread,
   type ProjectId,
+  type TextGenerationError,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -48,6 +49,7 @@ import * as PortScanner from "../preview/PortScanner.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as HostResources from "../resourceTelemetry/HostResources.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -136,6 +138,17 @@ export interface EnvironmentWorkspaceForward {
   >;
 }
 
+/** The machine's own text generation, with its provider instances and settings. */
+export interface EnvironmentTextGeneration {
+  /** A moved Thread's handoff summary: one model call. */
+  readonly threadHandoff: (
+    input: TextGeneration.ThreadHandoffGenerationInput,
+  ) => Effect.Effect<
+    TextGeneration.ThreadHandoffGenerationResult,
+    TextGenerationError | EnvironmentExecutorUnavailableError
+  >;
+}
+
 export interface EnvironmentExecutor {
   readonly environmentId: EnvironmentId;
   readonly transport: EnvironmentExecutorTransport;
@@ -164,6 +177,8 @@ export interface EnvironmentExecutor {
     /** Host resources and provider capabilities, as published in a hello or heartbeat. */
     readonly describe: Effect.Effect<EnvironmentExecutorSnapshot>;
   };
+  /** None where the server runs without text generation (orchestration-only hosts). */
+  readonly textGeneration?: EnvironmentTextGeneration;
 }
 
 /**
@@ -390,6 +405,7 @@ interface InProcessExecutorInput {
   readonly hostResources: Option.Option<HostResources.HostResources["Service"]>;
   readonly hubRepository: EnvironmentHubRepository;
   readonly move: EnvironmentMoveWorkspace;
+  readonly textGeneration: Option.Option<TextGeneration.TextGeneration["Service"]>;
 }
 
 /** What a machine needs to prepare a moved Thread's workspace with its own git and files. */
@@ -512,6 +528,19 @@ const makeInProcessExecutor = (input: InProcessExecutorInput): EnvironmentExecut
     rpc: input.rpc,
     forward: Option.none(),
   },
+  ...Option.match(input.textGeneration, {
+    onNone: () => ({}),
+    onSome: (textGeneration) => ({
+      textGeneration: {
+        threadHandoff: (request: TextGeneration.ThreadHandoffGenerationInput) =>
+          textGeneration.generateThreadHandoff === undefined
+            ? Effect.fail(
+                new EnvironmentExecutorUnavailableError({ environmentId: input.environmentId }),
+              )
+            : textGeneration.generateThreadHandoff(request),
+      },
+    }),
+  }),
   host: {
     describe: Effect.gen(function* () {
       const described = yield* describeLocalProviders(input.environmentId, input.adapters);
@@ -624,6 +653,7 @@ export const layerHubMachine: Layer.Layer<
       rpc: yield* optionalWorkspaceRpc,
       hostResources: yield* Effect.serviceOption(HostResources.HostResources),
       hubRepository,
+      textGeneration: yield* Effect.serviceOption(TextGeneration.TextGeneration),
       // The Hub machine's checkout of a Project is its workspace root, which always exists.
       move: makeMoveWorkspace({
         deps: yield* moveWorkspaceDeps,
