@@ -10,7 +10,7 @@ El Hub elige el Environment, no el cliente. Ver spec, «Arquitectura», «Protoc
 
 **Blocked by:** 01, 02, 03.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] El Thread tiene `activeEnvironmentId`. Al crearlo, el Hub elige en este orden: la elección del User, el preferido del Project, el Hub machine.
 - [ ] El Hub valida que el User pueda usar ese Environment, que esté online y que tenga el provider. Si no, el error dice el motivo.
