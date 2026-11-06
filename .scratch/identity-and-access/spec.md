@@ -1,6 +1,6 @@
 # Spec: Identidad y acceso
 
-Status: ready-for-agent
+Status: done
 Map: ../multi-user-hub/map.md (spec 1 de 6)
 Decisiones de origen: «Organizaciones y espacio personal», «Roles y permisos», «Inicio de sesión en el Hub», «Cierre del mapa» (`../multi-user-hub/issues/07`, `08`, `09`, `16`)
 ADRs: 0001 (instalación autoalojada de un solo Owner), 0003 (Hub público con cuentas locales)
