@@ -21,6 +21,7 @@ export type WorkspaceLocation = typeof WorkspaceLocation.Type;
 const WorkspaceLocationJson = Schema.fromJsonString(WorkspaceLocation);
 const encodeWorkspaceLocationJson = Schema.encodeSync(WorkspaceLocationJson);
 export const decodeWorkspaceLocationJson = Schema.decodeUnknownSync(WorkspaceLocationJson);
+export const decodeWorkspaceLocationJsonEffect = Schema.decodeUnknownEffect(WorkspaceLocationJson);
 
 export class WorkspaceLocationUnavailableError extends Schema.TaggedError<WorkspaceLocationUnavailableError>()(
   "WorkspaceLocationUnavailableError",
@@ -86,12 +87,16 @@ export function locateInCheckout(input: {
 
 /**
  * The stored form of a path the projection records today: every recorded path comes from the Hub
- * machine, whose checkout of a Project is the Project's workspace root.
+ * machine, whose checkout of a Project is the Project's workspace root. Null while that checkout is
+ * unknown (the Thread or Project row is not projected yet), so no row freezes as host-bound by
+ * accident; readers compute the form then.
  */
-export function hubMachineLocationJson(checkout: string | null, absolute: string): string {
-  return encodeWorkspaceLocationJson(
-    locateInCheckout({ environmentId: HUB_MACHINE_ENVIRONMENT_ID, checkout, absolute }),
-  );
+export function hubMachineLocationJson(checkout: string | null, absolute: string): string | null {
+  return checkout === null
+    ? null
+    : encodeWorkspaceLocationJson(
+        locateInCheckout({ environmentId: HUB_MACHINE_ENVIRONMENT_ID, checkout, absolute }),
+      );
 }
 
 /** Joins `/`-separated segments onto a root in that root's own separator style. */

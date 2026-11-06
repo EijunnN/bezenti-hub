@@ -509,22 +509,35 @@ export const layerProviderAdapterRegistry: Layer.Layer<
 
 /**
  * A Thread's worktree as the executor's machine sees it. The projection records it as the Hub
- * machine resolves it; its logical form, against the Hub machine's checkout, resolves anywhere.
- * Null keeps the executor's own checkout of the Project.
+ * machine resolves it, so the Hub machine takes it as is; another machine resolves its logical
+ * form, the stored one when it matches the recorded path, else one computed against the Hub
+ * machine's checkout. Null keeps the executor's own checkout of the Project.
  */
 const worktreeOn = Effect.fn("EnvironmentExecutor.worktreeOn")(function* (
-  hubMachine: EnvironmentExecutor,
+  registry: EnvironmentExecutorRegistryShape,
+  checkouts: ProjectCheckouts.ProjectCheckouts["Service"],
   executor: EnvironmentExecutor,
   thread: OrchestrationV2AppThread,
 ) {
   const recorded = thread.worktreePath;
-  if (recorded === null) return null;
-  const checkout = yield* hubMachine.workspace.paths.checkout(thread.projectId);
-  const location = locateInCheckout({
-    environmentId: hubMachine.environmentId,
-    checkout: Option.getOrNull(checkout),
-    absolute: recorded,
-  });
+  if (recorded === null || executor.environmentId === registry.hubMachineEnvironmentId) {
+    return recorded;
+  }
+  const stored = yield* checkouts.storedWorktree(thread.id);
+  const location =
+    Option.isSome(stored) &&
+    stored.value.worktreePath === recorded &&
+    stored.value.location !== null
+      ? stored.value.location
+      : locateInCheckout({
+          environmentId: registry.hubMachineEnvironmentId,
+          checkout: Option.getOrNull(
+            yield* (yield* registry.get(registry.hubMachineEnvironmentId)).workspace.paths.checkout(
+              thread.projectId,
+            ),
+          ),
+          absolute: recorded,
+        });
   return yield* executor.workspace.paths.resolve({ projectId: thread.projectId, location });
 });
 
@@ -532,12 +545,12 @@ const worktreeOn = Effect.fn("EnvironmentExecutor.worktreeOn")(function* (
 export const layerRuntimePolicy: Layer.Layer<
   RuntimePolicy.RuntimePolicyV2,
   never,
-  EnvironmentExecutorRegistry
+  EnvironmentExecutorRegistry | ProjectCheckouts.ProjectCheckouts
 > = Layer.effect(
   RuntimePolicy.RuntimePolicyV2,
   Effect.gen(function* () {
     const registry = yield* EnvironmentExecutorRegistry;
-    const hubMachine = yield* registry.get(registry.hubMachineEnvironmentId).pipe(Effect.orDie);
+    const checkouts = yield* ProjectCheckouts.ProjectCheckouts;
     return RuntimePolicy.RuntimePolicyV2.of({
       resolve: Effect.fn("EnvironmentExecutor.runtimePolicy.resolve")(function* (input) {
         const resolveError = (cause: unknown) =>
@@ -549,7 +562,7 @@ export const layerRuntimePolicy: Layer.Layer<
         const executor = yield* registry
           .forThread(input.thread.id)
           .pipe(Effect.mapError(resolveError));
-        const worktreePath = yield* worktreeOn(hubMachine, executor, input.thread).pipe(
+        const worktreePath = yield* worktreeOn(registry, checkouts, executor, input.thread).pipe(
           Effect.mapError(resolveError),
         );
         return yield* executor.workspace.runtimePolicy.resolve({

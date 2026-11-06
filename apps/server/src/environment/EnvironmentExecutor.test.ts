@@ -27,6 +27,7 @@ import * as RuntimePolicy from "../orchestration-v2/RuntimePolicy.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as EnvironmentExecutor from "./EnvironmentExecutor.ts";
 import * as ProjectCheckouts from "./ProjectCheckouts.ts";
+import type { WorkspaceLocation } from "./WorkspaceLocation.ts";
 
 const LAPTOP = EnvironmentId.make("environment:laptop");
 const NOWHERE = EnvironmentId.make("environment:nowhere");
@@ -97,7 +98,23 @@ class InstanceChanges extends Context.Service<InstanceChanges, PubSub.PubSub<voi
   "t3/environment/EnvironmentExecutor.test/InstanceChanges",
 ) {}
 
-const makeLayer = (hubAdapter: ProviderAdapter.ProviderAdapterV2["Service"]) => {
+interface FakeCheckouts {
+  readonly chosen: Map<ProjectId, string>;
+  readonly stored: Map<ThreadId, { worktreePath: string | null; location: WorkspaceLocation }>;
+}
+
+const fakeCheckouts = (state: FakeCheckouts) =>
+  ProjectCheckouts.ProjectCheckouts.of({
+    chosen: ({ projectId }) => Effect.succeed(Option.fromUndefinedOr(state.chosen.get(projectId))),
+    choose: () => Effect.void,
+    storedWorktree: (threadId) =>
+      Effect.succeed(Option.fromUndefinedOr(state.stored.get(threadId))),
+  });
+
+const makeLayer = (
+  hubAdapter: ProviderAdapter.ProviderAdapterV2["Service"],
+  checkouts: FakeCheckouts = { chosen: new Map(), stored: new Map() },
+) => {
   const layerInstances = Layer.unwrap(
     Effect.gen(function* () {
       const changes = yield* InstanceChanges;
@@ -127,6 +144,7 @@ const makeLayer = (hubAdapter: ProviderAdapter.ProviderAdapterV2["Service"]) => 
     EnvironmentExecutor.layerCheckpointStore,
   ).pipe(
     Layer.provideMerge(layerHubMachine),
+    Layer.provideMerge(Layer.succeed(ProjectCheckouts.ProjectCheckouts, fakeCheckouts(checkouts))),
     Layer.provideMerge(Layer.effect(InstanceChanges, PubSub.unbounded<void>({ replay: 1 }))),
   );
 };
@@ -384,19 +402,16 @@ it.effect("a remote Environment's capabilities come from its last snapshot", () 
   }).pipe(Effect.provide(makeLayer(makeAdapter("hub", newProbe())))),
 );
 
-it.effect("the same Thread resolves to each Environment's own checkout", () =>
-  Effect.gen(function* () {
+it.effect("the same Thread resolves to each Environment's own checkout", () => {
+  const state: FakeCheckouts = { chosen: new Map(), stored: new Map() };
+  return Effect.gen(function* () {
     const registry = yield* EnvironmentExecutor.EnvironmentExecutorRegistry;
     const policies = yield* RuntimePolicy.RuntimePolicyV2;
     const hubMachine = yield* registry.get(HUB_MACHINE_ENVIRONMENT_ID);
-    const chosen = new Map<string, string>();
     const paths = ProjectCheckouts.environmentPaths({
       environmentId: LAPTOP,
       workspaceRoot: "/home/ana/work",
-      checkouts: {
-        chosen: ({ projectId }) => Effect.succeed(Option.fromUndefinedOr(chosen.get(projectId))),
-        choose: () => Effect.void,
-      },
+      checkouts: fakeCheckouts(state),
       projects,
     });
     yield* registry.register({
@@ -426,7 +441,7 @@ it.effect("the same Thread resolves to each Environment's own checkout", () =>
     assert.equal(yield* cwdOn(THREAD_ON_HUB, null), "/hub");
     assert.equal(yield* cwdOn(THREAD_ON_LAPTOP, null), "/home/ana/work/web");
 
-    chosen.set(PROJECT, "/home/ana/src/web-checkout");
+    state.chosen.set(PROJECT, "/home/ana/src/web-checkout");
     assert.equal(
       yield* cwdOn(THREAD_ON_LAPTOP, inCheckout),
       "/home/ana/src/web-checkout/packages/app",
@@ -437,5 +452,18 @@ it.effect("the same Thread resolves to each Environment's own checkout", () =>
     assert.equal(yield* cwdOn(THREAD_ON_HUB, worktree), worktree);
     const elsewhere = yield* Effect.flip(cwdOn(THREAD_ON_LAPTOP, worktree));
     assert.equal(elsewhere._tag, "RuntimePolicyResolveError");
-  }).pipe(Effect.provide(makeLayer(makeAdapter("hub", newProbe())))),
-);
+
+    // The stored logical form wins while it matches the recorded path, so a Project root that
+    // moved since does not make the worktree host-bound.
+    const moved = "/srv/old/web/packages/app";
+    state.chosen.clear();
+    state.stored.set(THREAD_ON_LAPTOP, {
+      worktreePath: moved,
+      location: { base: "checkout", path: "packages/app" },
+    });
+    assert.equal(yield* cwdOn(THREAD_ON_LAPTOP, moved), "/home/ana/work/web/packages/app");
+    assert.equal(yield* cwdOn(THREAD_ON_HUB, moved), moved);
+    // A recorded path newer than the stored row is located afresh.
+    assert.equal(yield* cwdOn(THREAD_ON_LAPTOP, `${HUB_CHECKOUT}/docs`), "/home/ana/work/web/docs");
+  }).pipe(Effect.provide(makeLayer(makeAdapter("hub", newProbe()), state)));
+});

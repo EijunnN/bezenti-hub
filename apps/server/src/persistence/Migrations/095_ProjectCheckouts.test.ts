@@ -147,7 +147,8 @@ layer("095_ProjectCheckouts", (it) => {
           sibling: onHubMachine(`${ROOT}-old/app`),
           dotted: onHubMachine(`${ROOT}/../etc`),
           local: null,
-          orphan: onHubMachine("/tmp/orphan"),
+          // No checkout known yet: left for a reader to compute, never frozen as host-bound.
+          orphan: null,
         });
         // The recorded path itself is untouched: the Hub machine reads it as before.
         const nested = threadRows.find((row) => row.id === "nested");
@@ -162,7 +163,7 @@ layer("095_ProjectCheckouts", (it) => {
           {
             "scope-nested": inCheckout("packages/app"),
             "scope-worktree": onHubMachine("/home/ana/.t3/worktrees/web/feature"),
-            "scope-unknown-thread": onHubMachine(`${ROOT}/x`),
+            "scope-unknown-thread": null,
           },
         );
 
@@ -171,6 +172,32 @@ layer("095_ProjectCheckouts", (it) => {
         const store = yield* ProjectionStore.ProjectionStoreV2;
         const now = yield* DateTime.now;
         const threadId = ThreadId.make("fresh");
+        yield* store.apply({
+          id: EventId.make("event:fresh:scope"),
+          type: "checkpoint-scope.created",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: CheckpointScopeId.make("scope-fresh"),
+            threadId,
+            runId: RunId.make("run:fresh"),
+            nodeId: NodeId.make("node:fresh"),
+            parentScopeId: null,
+            providerThreadId: null,
+            kind: "root_run",
+            ordinalWithinParent: 0,
+            advancesAppRunCount: true,
+            cwd: `${ROOT}/docs/guide`,
+            createdAt: now,
+          },
+        });
+        const scopeLocation = (id: string) =>
+          sql<{ readonly location: string | null }>`
+            SELECT cwd_location_json AS location FROM orchestration_v2_projection_checkpoint_scopes
+            WHERE scope_id = ${id}
+          `.pipe(Effect.map((rows) => decode(rows[0]?.location ?? null)));
+        // A scope projected before its Thread row waits for it instead of turning host-bound.
+        assert.isNull(yield* scopeLocation("scope-fresh"));
         yield* store.apply({
           id: EventId.make("event:fresh:created"),
           type: "thread.created",
@@ -200,13 +227,14 @@ layer("095_ProjectCheckouts", (it) => {
             deletedAt: null,
           },
         });
+        assert.deepEqual(yield* scopeLocation("scope-fresh"), inCheckout("docs/guide"));
         yield* store.apply({
-          id: EventId.make("event:fresh:scope"),
+          id: EventId.make("event:fresh:scope-late"),
           type: "checkpoint-scope.created",
           threadId,
           occurredAt: now,
           payload: {
-            id: CheckpointScopeId.make("scope-fresh"),
+            id: CheckpointScopeId.make("scope-late"),
             threadId,
             runId: RunId.make("run:fresh"),
             nodeId: NodeId.make("node:fresh"),
@@ -224,11 +252,13 @@ layer("095_ProjectCheckouts", (it) => {
           WHERE thread_id = 'fresh'
         `;
         assert.deepEqual(decode(fresh?.location ?? null), inCheckout("docs"));
-        const [freshScope] = yield* sql<{ readonly location: string | null }>`
-          SELECT cwd_location_json AS location FROM orchestration_v2_projection_checkpoint_scopes
-          WHERE scope_id = 'scope-fresh'
-        `;
-        assert.deepEqual(decode(freshScope?.location ?? null), onHubMachine("/elsewhere"));
+        assert.deepEqual(yield* scopeLocation("scope-late"), onHubMachine("/elsewhere"));
+        const checkouts = yield* ProjectCheckouts.ProjectCheckouts;
+        assert.deepEqual(
+          yield* checkouts.storedWorktree(threadId),
+          Option.some({ worktreePath: `${ROOT}/docs`, location: inCheckout("docs") }),
+        );
+        assert.isTrue(Option.isNone(yield* checkouts.storedWorktree(ThreadId.make("missing"))));
       }),
   );
 

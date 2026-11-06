@@ -26,6 +26,7 @@ import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
+import * as ProjectCheckouts from "../environment/ProjectCheckouts.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
@@ -80,7 +81,7 @@ export const layerProviderAdaptersProvided = EnvironmentExecutor.layerProviderAd
   Layer.provide(layerEnvironmentExecutorsProvided),
 );
 const layerRuntimePolicyProvided = EnvironmentExecutor.layerRuntimePolicy.pipe(
-  Layer.provide(layerEnvironmentExecutorsProvided),
+  Layer.provide(Layer.merge(layerEnvironmentExecutorsProvided, ProjectCheckouts.layer)),
 );
 export const layerCheckpointStoreProvided = EnvironmentExecutor.layerCheckpointStore.pipe(
   Layer.provide(layerEnvironmentExecutorsProvided),

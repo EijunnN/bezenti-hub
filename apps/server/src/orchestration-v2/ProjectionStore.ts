@@ -1988,6 +1988,29 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         WHERE t.thread_id = ${threadId}
       `.pipe(Effect.map((rows) => rows[0]?.checkout ?? null));
 
+    // Scopes projected before their Thread row have no stored form yet; fill them once it exists.
+    // Untraced: it runs inside apply, per event, whose enclosing operation owns the span.
+    const locatePendingScopes = Effect.fnUntraced(function* (
+      threadId: ThreadId,
+      projectId: ProjectId,
+    ) {
+      const pending = yield* sql<{ readonly scopeId: string; readonly cwd: string }>`
+          SELECT scope_id AS "scopeId", json_extract(payload_json, '$.cwd') AS cwd
+          FROM orchestration_v2_projection_checkpoint_scopes
+          WHERE thread_id = ${threadId} AND cwd_location_json IS NULL
+        `;
+      if (pending.length === 0) return;
+      const checkout = yield* hubMachineCheckout(projectId);
+      if (checkout === null) return;
+      for (const scope of pending) {
+        yield* sql`
+            UPDATE orchestration_v2_projection_checkpoint_scopes
+            SET cwd_location_json = ${hubMachineLocationJson(checkout, scope.cwd)}
+            WHERE scope_id = ${scope.scopeId}
+          `;
+      }
+    });
+
     const keepRecordedRunField = (payload: Statement.Fragment, path: string) => sql`
       CASE
         WHEN json_type(excluded.payload_json, ${path}) IS NULL
@@ -2102,6 +2125,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 worktree_location_json = excluded.worktree_location_json,
                 payload_json = excluded.payload_json
             `;
+              yield* locatePendingScopes(event.payload.id, event.payload.projectId);
               break;
             }
             case "run.created":

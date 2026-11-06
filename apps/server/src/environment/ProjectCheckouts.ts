@@ -3,7 +3,12 @@
  * migration 095). An Environment's executor answers from it, so a logical workspace path resolves
  * against that machine's own checkout (`docs/internals/overview.md`, «Logical workspace paths»).
  */
-import { EnvironmentId, HUB_MACHINE_ENVIRONMENT_ID, ProjectId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  HUB_MACHINE_ENVIRONMENT_ID,
+  ProjectId,
+  type ThreadId,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -14,6 +19,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import {
+  decodeWorkspaceLocationJsonEffect,
   joinUnderRoot,
   projectCheckoutSlug,
   resolveOnEnvironment,
@@ -44,6 +50,17 @@ export class ProjectCheckouts extends Context.Service<
       readonly projectId: ProjectId;
       readonly checkoutPath: string;
     }) => Effect.Effect<void, ProjectCheckoutsError>;
+    /**
+     * The Thread's projected worktree path with its stored logical form. The form is null while
+     * it is not computed yet, and the whole answer is None for a Thread not projected.
+     */
+    readonly storedWorktree: (threadId: ThreadId) => Effect.Effect<
+      Option.Option<{
+        readonly worktreePath: string | null;
+        readonly location: WorkspaceLocation | null;
+      }>,
+      ProjectCheckoutsError
+    >;
   }
 >()("t3/environment/ProjectCheckouts") {}
 
@@ -78,6 +95,27 @@ export const layer: Layer.Layer<ProjectCheckouts, never, SqlClient.SqlClient> = 
           ON CONFLICT(environment_id, project_id)
           DO UPDATE SET checkout_path = excluded.checkout_path, chosen_at = excluded.chosen_at
         `.pipe(mapError("choose"));
+      }),
+      storedWorktree: Effect.fn("ProjectCheckouts.storedWorktree")(function* (threadId) {
+        const rows = yield* sql<{
+          readonly worktreePath: string | null;
+          readonly location: string | null;
+        }>`
+          SELECT
+            json_extract(payload_json, '$.worktreePath') AS "worktreePath",
+            worktree_location_json AS location
+          FROM orchestration_v2_projection_threads
+          WHERE thread_id = ${threadId}
+        `.pipe(mapError("storedWorktree"));
+        const row = rows[0];
+        if (row === undefined) return Option.none();
+        const location =
+          row.location === null
+            ? null
+            : yield* decodeWorkspaceLocationJsonEffect(row.location).pipe(
+                mapError("storedWorktree"),
+              );
+        return Option.some({ worktreePath: row.worktreePath, location });
       }),
     });
   }),

@@ -114,13 +114,14 @@ or, when the path is not plainly inside it (a managed worktree, `..`, another fo
 bound to the Environment that recorded it. Only a form that resolves back to the identical string
 is relative, so the Hub machine sees no change.
 
-`RuntimePolicyV2` turns the Thread's worktree into its logical form against the Hub machine's
-checkout and resolves it on the Active environment's executor, which then picks the cwd. A
-host-bound path on another Environment is a `RuntimePolicyResolveError`, never a wrong directory.
-Scope cwds are stored in logical form but still reach `CheckpointStore` as recorded; a Thread that
-runs or moves elsewhere must resolve them the same way. The stored form is computed when its row is
-written; after a Project's root changes, it follows the new root while the recorded path does not.
-The runtime policy derives from the recorded path, as the rest of the Hub does.
+`RuntimePolicyV2` passes the recorded worktree through on the Hub machine. On another Environment
+it resolves the stored logical form on that executor, or, when the row has none or its recorded
+path has changed since, one computed against the Hub machine's checkout. A host-bound path on
+another Environment is a `RuntimePolicyResolveError`, never a wrong directory. Scope cwds are
+stored in logical form but still reach `CheckpointStore` as recorded; a Thread that runs or moves
+elsewhere must resolve them the same way. A form is stored only once its Project's checkout is
+known: a row projected before its Thread or Project stays null (a scope is filled when its Thread
+row is written), so a missed join never freezes a path as host-bound.
 
 ## Turn completion and checkpoints
 
