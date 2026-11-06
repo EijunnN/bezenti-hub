@@ -1008,8 +1008,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       </span>
     ) : null;
 
+  // Where it runs, when that is not the Hub machine, where every Thread ran before Environments.
+  const environmentName =
+    thread.activeEnvironmentId === undefined ||
+    thread.activeEnvironmentId === HUB_MACHINE_ENVIRONMENT_ID
+      ? null
+      : activeEnvironmentName(hubEnvironments, thread.activeEnvironmentId);
   const accessibility = resolveSidebarRowAccessibility({
-    title: thread.title,
+    title: environmentName === null ? thread.title : `${thread.title}, runs on ${environmentName}`,
     statusLabel: topStatus?.label ?? null,
     projectDisplayName: props.projectDisplayName,
     isActive: props.isActive,
@@ -1054,12 +1060,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       {thread.title}
     </span>
   );
-  // Where it runs, when that is not the Hub machine, where every Thread ran before Environments.
-  const environmentName =
-    thread.activeEnvironmentId === undefined ||
-    thread.activeEnvironmentId === HUB_MACHINE_ENVIRONMENT_ID
-      ? null
-      : activeEnvironmentName(hubEnvironments, thread.activeEnvironmentId);
   const title =
     environmentName === null || isRenaming ? (
       titleText
@@ -1071,12 +1071,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         </span>
       </>
     );
-  const accessibleTitle = isRenaming ? null : (
-    <span className="sr-only">
-      {thread.title}
-      {environmentName === null ? null : `, runs on ${environmentName}`}
-    </span>
-  );
+  const accessibleTitle = isRenaming ? null : <span className="sr-only">{thread.title}</span>;
 
   const prBadgeShape = supportsMultiplePullRequests
     ? resolveThreadPullRequestBadge(thread.pullRequests)
