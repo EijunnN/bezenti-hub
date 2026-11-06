@@ -19,7 +19,7 @@ import {
   EnvironmentUnavailableProvider,
 } from "./environmentConnection.ts";
 
-export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 5;
+export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 6;
 
 /**
  * The Hub machine's Environment id. It is a constant so the `environments` table can seed the
@@ -212,7 +212,17 @@ export const ENVIRONMENT_EXECUTOR_FRAME_METHODS = {
   workspaceStreamItem: "workspace.stream",
   workspaceStreamEnd: "workspace.streamEnd",
   workspaceStreamCancel: "workspace.streamCancel",
+  textGenerationCancel: "textGeneration.cancel",
 } as const;
+
+/**
+ * Hub → Environment (frame method `textGeneration.cancel`): stop the text generation the Hub asked
+ * for under `generationId` (a move's handoff summary that took too long).
+ */
+export const EnvironmentTextGenerationCancel = Schema.Struct({
+  generationId: TrimmedNonEmptyString,
+});
+export type EnvironmentTextGenerationCancel = typeof EnvironmentTextGenerationCancel.Type;
 
 /**
  * Environment → Hub (frame method `workspace.stream`): one item of a stream the Hub opened with a

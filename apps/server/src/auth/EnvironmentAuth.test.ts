@@ -736,7 +736,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
           serverAuth.authenticateWebSocketUpgrade(
             {
               method: "GET",
-              url: `/ws?orchestrationProtocol=2&wsTicket=${ticket}${proof ? `&dpop=${proof}` : ""}`,
+              url: `/ws?orchestrationProtocol=3&wsTicket=${ticket}${proof ? `&dpop=${proof}` : ""}`,
               cookies: {},
               headers: { host },
             } as never,

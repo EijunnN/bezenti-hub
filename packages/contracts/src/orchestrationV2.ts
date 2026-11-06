@@ -476,37 +476,21 @@ export const OrchestrationV2ThreadHandoffWriter = Schema.Literals(["source", "hu
 export type OrchestrationV2ThreadHandoffWriter = typeof OrchestrationV2ThreadHandoffWriter.Type;
 
 /**
- * What the agent on the target of a move is told when its new native session starts: `context`
- * (the summary, framed) followed by the Thread's recent messages, `recentItemIds`.
+ * A move's handoff as the Thread's shell carries it to every client: who wrote it and a short
+ * preview. The text itself is in the `environment_handoff` timeline item, fetched on demand.
  */
 export const OrchestrationV2ThreadMoveHandoff = Schema.Struct({
   writtenBy: OrchestrationV2ThreadHandoffWriter,
   /** The machine whose provider wrote the summary; null when it was assembled. */
   writerEnvironmentName: Schema.NullOr(Schema.String),
-  summary: Schema.String,
-  context: Schema.String,
-  recentItemIds: Schema.Array(Schema.String),
+  /** The provider instance that wrote it; null when it was assembled. */
+  writerProviderInstanceId: Schema.NullOr(Schema.String),
+  /** The summary's first characters, secrets redacted. */
+  preview: Schema.String,
   /** Why no summary could be written, for an assembled one. */
   fallbackReason: Schema.optional(Schema.String),
 });
 export type OrchestrationV2ThreadMoveHandoff = typeof OrchestrationV2ThreadMoveHandoff.Type;
-
-/** The timeline entry of a move's handoff: what the agent on the target was told. */
-const OrchestrationV2EnvironmentHandoffItemFields = {
-  type: Schema.Literal("environment_handoff"),
-  moveId: TrimmedNonEmptyString,
-  writtenBy: OrchestrationV2ThreadHandoffWriter,
-  /** The machine whose provider wrote the summary; null when it was assembled. */
-  writerEnvironmentName: Schema.NullOr(Schema.String),
-  sourceEnvironmentName: Schema.String,
-  targetEnvironmentName: Schema.String,
-  summary: Schema.String,
-  /** The text the agent receives ahead of the recent messages. */
-  context: Schema.String,
-  recentMessageCount: NonNegativeInt,
-  /** Why no summary could be written, for an assembled one. */
-  fallbackReason: Schema.optional(Schema.String),
-};
 
 /**
  * A move of the Thread to another Environment (`thread.move`), persisted step by step. It stays
@@ -1234,6 +1218,30 @@ export const OrchestrationV2HistoricalMessage = Schema.Struct({
   kind: Schema.String,
 });
 export type OrchestrationV2HistoricalMessage = typeof OrchestrationV2HistoricalMessage.Type;
+
+/** The timeline entry of a move's handoff: what the agent on the target was told. */
+const OrchestrationV2EnvironmentHandoffItemFields = {
+  type: Schema.Literal("environment_handoff"),
+  moveId: TrimmedNonEmptyString,
+  writtenBy: OrchestrationV2ThreadHandoffWriter,
+  /** The machine whose provider wrote the summary; null when it was assembled. */
+  writerEnvironmentName: Schema.NullOr(Schema.String),
+  /** The provider instance that wrote it; null when it was assembled. */
+  writerProviderInstanceId: Schema.optional(Schema.NullOr(Schema.String)),
+  sourceEnvironmentName: Schema.String,
+  targetEnvironmentName: Schema.String,
+  /** Secrets redacted. On the wire a preview; whole in the item's detail. */
+  summary: Schema.String,
+  /** The text the agent receives ahead of the recent messages; empty on the wire. */
+  context: Schema.String,
+  recentMessageCount: NonNegativeInt,
+  /** The recent messages that follow it (redacted, long ones cut); left out on the wire. */
+  recentMessages: Schema.optional(Schema.Array(OrchestrationV2HistoricalMessage)),
+  /** Why no summary could be written, for an assembled one. */
+  fallbackReason: Schema.optional(Schema.String),
+  /** The wire left out `context` and cut `summary`: fetch the item's detail to read them. */
+  detailOmitted: Schema.optional(Schema.Literal(true)),
+};
 
 export const OrchestrationV2ContextHandoff = Schema.Struct({
   id: ContextHandoffId,

@@ -29,6 +29,7 @@ import {
   SpaceId,
   TextGenerationError,
   ThreadId,
+  TurnItemId,
   UserId,
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -68,6 +69,7 @@ import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as ThreadWorkspace from "../environment/ThreadWorkspace.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import { projectTurnItemForWire } from "../orchestration-v2/WireProjection.ts";
 import * as ResourceCleanupService from "../orchestration-v2/ResourceCleanupService.ts";
 import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { ClaudeOrchestratorReplayHarness } from "../orchestration-v2/Adapters/ClaudeAdapterV2.testkit.ts";
@@ -2298,7 +2300,7 @@ describe("Hub con Environments: the agent's memory after a move", () => {
       const { item } = yield* handoffItemOf(hub, threadId);
       assert.equal(item.writtenBy, "hub");
       assert.equal(item.summary, "Written on the Hub from the history.");
-      assert.equal(moved.move?.handoff?.summary, "Written on the Hub from the history.");
+      assert.equal(moved.move?.handoff?.preview, "Written on the Hub from the history.");
     }).pipe(Effect.scoped),
   );
 
@@ -2412,7 +2414,23 @@ describe("Hub con Environments: thread_history", () => {
         { action: "search", query: word },
       );
       assert.isFalse(found.isError, JSON.stringify(found.content));
-      assert.isNotEmpty((found.structuredContent as { entries: ReadonlyArray<unknown> }).entries);
+      type Page = {
+        readonly total: number;
+        readonly nextPosition: number | null;
+        readonly entries: ReadonlyArray<{ readonly text: string; readonly truncated: boolean }>;
+      };
+      const matches = found.structuredContent as Page;
+      assert.isNotEmpty(matches.entries);
+      // Case-insensitive on the text itself: the snippet shows the word as it was written.
+      assert.include(matches.entries[0]?.text ?? "", word);
+      const upper = (yield* callThreadHistory(
+        hub,
+        { threadId, userId: owner },
+        { action: "search", query: word.toUpperCase(), limit: 1, order: "newest" },
+      )).structuredContent as Page;
+      assert.equal(upper.total, matches.total);
+      assert.include(upper.entries[0]?.text ?? "", word);
+      if (upper.total > 1) assert.equal(upper.nextPosition, 0);
 
       // Another Thread of the same User and Project: refused.
       const other = ThreadId.make("thread:another");
@@ -2437,6 +2455,181 @@ describe("Hub con Environments: thread_history", () => {
         { action: "read", threadId: other },
       );
       assert.isTrue(refused.isError, JSON.stringify(refused.structuredContent));
+    }).pipe(Effect.scoped),
+  );
+});
+
+/** A command the agent ran on the Laptop that printed a key, as its timeline records it. */
+const commandWithSecret = Effect.fn(function* (hub: Hub, threadId: ThreadId, output: string) {
+  const { runs } = yield* hub
+    .service(Orchestrator.OrchestratorV2)
+    .getThreadProjection(threadId)
+    .pipe(Effect.orDie);
+  const run = runs.toSorted((a, b) => b.ordinal - a.ordinal)[0];
+  assert.isDefined(run);
+  const now = yield* DateTime.now;
+  yield* hub
+    .service(EventSink.EventSinkV2)
+    .write({
+      events: [
+        {
+          id: EventId.make("event:printed-a-key"),
+          type: "turn-item.updated",
+          threadId,
+          runId: run.id,
+          providerInstanceId: run.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make("turn-item:printed-a-key"),
+            threadId,
+            runId: run.id,
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 9_999,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            status: "completed",
+            title: "cat .env",
+            type: "command_execution",
+            input: "cat .env",
+            output,
+            exitCode: 0,
+          },
+        },
+      ],
+    })
+    .pipe(Effect.orDie);
+});
+
+describe("Hub con Environments: what a handoff may carry", () => {
+  it.live(
+    "secrets are redacted from what is sent, stored and shown, and clients get a preview",
+    () =>
+      Effect.gen(function* () {
+        const laptopAsked: Array<ThreadHandoffGenerationInput> = [];
+        const leakedByModel = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        const fileKey = "sk-proj-abcdefghijklmnopqrstuvwxyz123456";
+        const laptopTextGeneration: ProviderTextGeneration = {
+          ...recordingTextGeneration(laptopAsked, { summary: "unused" }),
+          // A model that repeats what it read, and a token of its own.
+          generateThreadHandoff: (input) =>
+            Effect.sync(() => {
+              laptopAsked.push(input);
+              return { summary: `${input.transcript.slice(-300)} and ${leakedByModel}` };
+            }),
+        };
+        const { hub, desktop, threadId, owner } = yield* turnOnLaptop({
+          desktop: true,
+          laptopTextGeneration,
+        });
+        assert.isDefined(desktop);
+        yield* commandWithSecret(hub, threadId, `OPENAI_API_KEY=${fileKey}\nPORT=3000\n`);
+        yield* dispatchMove(hub, {
+          commandId: "command:move-with-secret",
+          threadId,
+          target: desktop.environmentId,
+          actor: owner,
+        });
+        const moved = yield* settledMove(hub, threadId);
+        assert.equal(moved.move?.status, "switched", moved.move?.failure?.message);
+        assert.lengthOf(laptopAsked, 1);
+        assert.notInclude(laptopAsked[0]?.transcript ?? "", fileKey);
+        assert.include(laptopAsked[0]?.transcript ?? "", "PORT=3000");
+        const { item } = yield* handoffItemOf(hub, threadId);
+        for (const text of [item.summary, item.context, JSON.stringify(moved.move)]) {
+          assert.notInclude(text, fileKey);
+          assert.notInclude(text, leakedByModel);
+        }
+        // The Thread's shell (sent to every client) carries a short preview, not the handoff.
+        const shellHandoff = moved.move?.handoff as Record<string, unknown> | undefined;
+        assert.isDefined(shellHandoff);
+        assert.notProperty(shellHandoff, "context");
+        assert.notProperty(shellHandoff, "summary");
+        assert.isAtMost(String(shellHandoff.preview).length, 300);
+        // The timeline item reaches clients without its text; whoever may read it fetches it.
+        const wire = projectTurnItemForWire(item);
+        assert(wire.type === "environment_handoff");
+        assert.equal(wire.context, "");
+        assert.isTrue(wire.detailOmitted);
+        const detail = yield* hub
+          .service(ThreadManagementService.ThreadManagementService)
+          .getTurnItem({ threadId, itemId: item.id })
+          .pipe(Effect.orDie);
+        assert(detail.item?.type === "environment_handoff");
+        assert.equal(detail.item.context, item.context);
+      }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "with the source offline, the Hub never writes a summary from another User's Thread",
+    () =>
+      Effect.gen(function* () {
+        const hubAsked: Array<ThreadHandoffGenerationInput> = [];
+        const { hub, laptop, desktop, threadId } = yield* turnOnLaptop({
+          desktop: true,
+          hubTextGeneration: recordingTextGeneration(hubAsked, { summary: "Owner's account" }),
+        });
+        assert.isDefined(desktop);
+        const member = UserId.make("member-1");
+        yield* addMember(hub.server, { id: member, displayName: "Grace Hopper" });
+        yield* hub.server.sql`
+        UPDATE orchestration_v2_projection_threads
+        SET payload_json = json_set(payload_json, '$.ownerUserId', ${member})
+        WHERE thread_id = ${threadId}
+      `;
+        yield* laptop.disconnect;
+        yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
+          type: "thread.move",
+          commandId: CommandId.make("command:move-member-thread"),
+          threadId,
+          targetEnvironmentId: desktop.environmentId,
+          ownerUserId: member,
+        });
+        const moved = yield* settledMove(hub, threadId);
+        assert.equal(moved.move?.status, "switched", moved.move?.failure?.message);
+        assert.lengthOf(hubAsked, 0);
+        const { item } = yield* handoffItemOf(hub, threadId);
+        assert.equal(item.writtenBy, "fallback");
+        assert.include(item.fallbackReason ?? "", "another User's history");
+      }).pipe(Effect.scoped),
+  );
+
+  it.live("a summary that takes too long is cancelled on the source and assembled instead", () =>
+    Effect.gen(function* () {
+      const previous = process.env.T3CODE_MOVE_HANDOFF_TIMEOUT_MS;
+      process.env.T3CODE_MOVE_HANDOFF_TIMEOUT_MS = "1500";
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => {
+          if (previous === undefined) delete process.env.T3CODE_MOVE_HANDOFF_TIMEOUT_MS;
+          else process.env.T3CODE_MOVE_HANDOFF_TIMEOUT_MS = previous;
+        }),
+      );
+      const cancelled = yield* Deferred.make<void>();
+      const { hub, desktop, threadId, owner } = yield* turnOnLaptop({
+        desktop: true,
+        laptopTextGeneration: {
+          ...recordingTextGeneration([], { summary: "unused" }),
+          generateThreadHandoff: () =>
+            Effect.never.pipe(Effect.onInterrupt(() => Deferred.succeed(cancelled, undefined))),
+        },
+      });
+      assert.isDefined(desktop);
+      yield* dispatchMove(hub, {
+        commandId: "command:move-slow-summary",
+        threadId,
+        target: desktop.environmentId,
+        actor: owner,
+      });
+      const moved = yield* settledMove(hub, threadId).pipe(Effect.timeout("60 seconds"));
+      assert.equal(moved.move?.status, "switched", moved.move?.failure?.message);
+      const { item } = yield* handoffItemOf(hub, threadId);
+      assert.equal(item.writtenBy, "fallback");
+      assert.include(item.fallbackReason ?? "", "too long");
+      yield* Deferred.await(cancelled).pipe(Effect.timeout("30 seconds"));
     }).pipe(Effect.scoped),
   );
 });

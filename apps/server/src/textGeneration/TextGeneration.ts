@@ -197,7 +197,13 @@ export const make = Effect.gen(function* () {
                 detail: `Provider instance '${modelSelection.instanceId}' cannot write a handoff summary.`,
               }),
             )
-          : service.generateThreadHandoff({ ...input, modelSelection }),
+          : service.generateThreadHandoff({ ...input, modelSelection }).pipe(
+              // Say which instance wrote it: the fallback model, a usage-limit fallback, or its own.
+              Effect.map((result) => ({
+                ...result,
+                providerInstanceId: modelSelection.instanceId,
+              })),
+            ),
       );
     }),
   });

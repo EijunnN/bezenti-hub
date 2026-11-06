@@ -3,6 +3,8 @@ import { AgentElapsed } from "./AgentElapsed";
 import { projectedSubagentsToRuntime } from "@t3tools/client-runtime/state/subagentRuntime";
 import { useState, type ReactNode } from "react";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
+import { turnItemDetailRevision } from "@t3tools/client-runtime/work-log/item-detail";
+import { useTurnItemDetail } from "../../state/queries";
 import { useThreadShell, useProject } from "../../state/entities";
 import { useEnvironment } from "../../state/environments";
 import { buildThreadRouteParams } from "../../threadRoutes";
@@ -124,7 +126,7 @@ export function V2LifecycleRow(props: {
     );
   }
   if (item.type === "environment_handoff") {
-    return <MoveHandoffRow item={item} />;
+    return <MoveHandoffRow item={item} environmentId={props.environmentId} />;
   }
   if (item.type === "fork") {
     const relatedThreadId = item.source.type === "run" ? item.source.threadId : item.targetThreadId;
@@ -203,13 +205,27 @@ export function V2LifecycleRow(props: {
 /** A move's handoff: who wrote the summary, and on request exactly what the new agent was told. */
 function MoveHandoffRow(props: {
   readonly item: Extract<OrchestrationV2TurnItem, { readonly type: "environment_handoff" }>;
+  readonly environmentId: EnvironmentId;
 }) {
   const { item } = props;
   const [open, setOpen] = useState(false);
-  const detail =
+  // The text reaches the client only when it is opened, and only for who may read the Thread.
+  const detail = useTurnItemDetail(
+    open && item.detailOmitted === true
+      ? {
+          environmentId: props.environmentId,
+          threadId: item.threadId,
+          itemId: item.id,
+          revision: turnItemDetailRevision(item),
+        }
+      : null,
+  );
+  const fetched = detail.data?.item;
+  const full = fetched?.type === "environment_handoff" ? fetched : item.detailOmitted ? null : item;
+  const writer =
     item.writtenBy === "fallback"
-      ? `summary assembled from the history${item.fallbackReason === undefined ? "" : ` (${item.fallbackReason})`}`
-      : `summary written on ${item.writerEnvironmentName ?? item.sourceEnvironmentName}`;
+      ? `notes assembled from the history${item.fallbackReason === undefined ? "" : ` (${item.fallbackReason})`}`
+      : `notes written by ${item.writerProviderInstanceId ?? "a provider"} on ${item.writerEnvironmentName ?? item.sourceEnvironmentName}`;
   return (
     <Collapsible open={open} onOpenChange={setOpen} data-v2-item-type={item.type}>
       <div className="flex min-w-0 items-center gap-2 py-2 text-2xs text-muted-foreground">
@@ -220,7 +236,7 @@ function MoveHandoffRow(props: {
         >
           <ChevronRightIcon className="size-3 shrink-0 transition-transform" aria-hidden />
           <span className="font-medium">{`Handoff to ${item.targetEnvironmentName}`}</span>
-          <span className="max-w-80 truncate opacity-70">{`· ${detail}`}</span>
+          <span className="max-w-80 truncate opacity-70">{`· ${writer}`}</span>
         </CollapsibleTrigger>
         <span aria-hidden="true" className="h-px flex-1 bg-border/70" />
       </div>
@@ -228,13 +244,20 @@ function MoveHandoffRow(props: {
         <div
           role="region"
           aria-label="Handoff given to the agent"
+          aria-busy={full === null && detail.isPending}
           className="mx-auto mb-2 max-w-2xl rounded-lg border border-border/60 bg-muted/30 p-3 text-xs text-foreground/90"
         >
-          <p className="whitespace-pre-wrap">{item.context}</p>
+          <p className="whitespace-pre-wrap">
+            {full !== null
+              ? full.context
+              : detail.isPending
+                ? "Loading what the agent was told…"
+                : "What the agent was told could not be loaded."}
+          </p>
           <p className="mt-2 text-muted-foreground">
             {item.recentMessageCount === 0
               ? "No recent messages were included."
-              : `Followed by the Thread's ${item.recentMessageCount} most recent messages, word for word.`}
+              : `Followed by the Thread's ${item.recentMessageCount} most recent messages (long ones cut, secrets redacted).`}
           </p>
         </div>
       </CollapsiblePanel>

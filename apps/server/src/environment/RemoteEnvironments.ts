@@ -726,10 +726,22 @@ const make = Effect.gen(function* () {
     const textGeneration: EnvironmentExecutor.EnvironmentTextGeneration = {
       threadHandoff: Effect.fn("RemoteEnvironments.textGeneration.threadHandoff")(
         function* (input) {
-          const outcome = yield* invoke(link, "textGeneration.threadHandoff", input);
+          const outcome = yield* invoke(link, "textGeneration.threadHandoff", input).pipe(
+            // The Hub gave up (a timeout): the machine stops the generation instead of paying on.
+            Effect.onInterrupt(() =>
+              input.generationId === undefined || link.channel === undefined
+                ? Effect.void
+                : link.channel.event(ENVIRONMENT_EXECUTOR_FRAME_METHODS.textGenerationCancel, {
+                    generationId: input.generationId,
+                  }),
+            ),
+          );
           switch (outcome._tag) {
             case "ok":
-              return outcome.value as { readonly summary: string };
+              return outcome.value as {
+                readonly summary: string;
+                readonly providerInstanceId?: string;
+              };
             case "unavailable":
               return yield* offline(link);
             case "failed":

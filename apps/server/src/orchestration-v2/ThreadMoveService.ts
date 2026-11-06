@@ -11,9 +11,9 @@ import {
   OrchestrationV2CheckpointJson,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2HistoricalMessage,
   type OrchestrationV2ThreadMove,
   type OrchestrationV2ThreadMoveCheckpoint,
-  type OrchestrationV2ThreadMoveHandoff,
   type OrchestrationV2ThreadMoveStep,
   type OrchestrationV2TurnItem,
   type ProviderSessionId,
@@ -58,7 +58,12 @@ const RECONNECT_GRACE = Duration.seconds(60);
 const TURN_RECHECK = Duration.seconds(30);
 const AUDIT_MESSAGE_CHARS = 300;
 /** The one model call that writes a handoff summary; past it, the summary is assembled instead. */
-const HANDOFF_TIMEOUT = Duration.minutes(3);
+const HANDOFF_TIMEOUT_MS = 180_000;
+/** Read at each move (not once at startup), so it can be lowered without a restart. */
+const handoffTimeoutMs = () => {
+  const configured = Number.parseInt(process.env.T3CODE_MOVE_HANDOFF_TIMEOUT_MS ?? "", 10);
+  return Number.isFinite(configured) ? Math.max(1_000, configured) : HANDOFF_TIMEOUT_MS;
+};
 
 const decodeCheckpoint = Schema.decodeUnknownEffect(
   Schema.fromJsonString(OrchestrationV2CheckpointJson),
@@ -396,6 +401,10 @@ export const layer: Layer.Layer<
       Effect.asVoid,
     );
 
+    /** A move's written handoff is kept only until its switch (or its end without one). */
+    const dropHandoff = (moveId: string) =>
+      sql`DELETE FROM orchestration_v2_move_handoffs WHERE move_id = ${moveId}`.pipe(Effect.ignore);
+
     const fail = Effect.fn("ThreadMoves.fail")(function* (
       threadId: ThreadId,
       moveId: string,
@@ -417,6 +426,7 @@ export const layer: Layer.Layer<
         return Effect.succeed({ thread: { ...thread, move: next } });
       });
       if (failed !== undefined) yield* recordAudit(failed.thread, failed.move, "failed");
+      yield* dropHandoff(moveId);
       yield* resumeQueue;
     });
 
@@ -698,30 +708,35 @@ export const layer: Layer.Layer<
                 : { setAsideRefs: move.setAsideRefs }),
             })),
           );
-          // What the agent on the target was told, so the User can read it.
-          const handoff = move.handoff;
-          if (handoff !== undefined) {
+          // What the agent on the target is told, so the User can read it; its first turn
+          // there reads it from this item.
+          const handoff = yield* storedHandoff(moveId);
+          if (Option.isSome(handoff)) {
+            const written = handoff.value;
             extra.push(
               yield* timelineEvent(thread, now, latestRun?.id ?? null, (base) => ({
                 ...base,
-                id: TurnItemId.make(`turn-item:environment-handoff:${moveId}`),
+                id: TurnItemId.make(MoveHandoff.moveHandoffItemId(moveId)),
                 status: "completed",
-                title:
-                  handoff.writtenBy === "fallback"
-                    ? `Handoff to ${targetName}: summary assembled from the history`
-                    : `Handoff to ${targetName}: summary written on ${handoff.writerEnvironmentName ?? sourceName}`,
+                title: `Handoff to ${targetName}: notes ${MoveHandoff.writerLabel({
+                  writtenBy: written.writtenBy,
+                  writerName: written.writerEnvironmentName,
+                  writerProviderInstanceId: written.writerProviderInstanceId,
+                })}`,
                 type: "environment_handoff",
                 moveId,
-                writtenBy: handoff.writtenBy,
-                writerEnvironmentName: handoff.writerEnvironmentName,
+                writtenBy: written.writtenBy,
+                writerEnvironmentName: written.writerEnvironmentName,
+                writerProviderInstanceId: written.writerProviderInstanceId,
                 sourceEnvironmentName: sourceName,
                 targetEnvironmentName: targetName,
-                summary: handoff.summary,
-                context: handoff.context,
-                recentMessageCount: handoff.recentItemIds.length,
-                ...(handoff.fallbackReason === undefined
+                summary: written.summary,
+                context: written.context,
+                recentMessageCount: written.recentMessages.length,
+                recentMessages: written.recentMessages,
+                ...(written.fallbackReason === undefined
                   ? {}
-                  : { fallbackReason: handoff.fallbackReason }),
+                  : { fallbackReason: written.fallbackReason }),
               })),
             );
           }
@@ -731,6 +746,8 @@ export const layer: Layer.Layer<
       );
       if (switched === undefined) return;
       const done = switched;
+      // The timeline item has it now.
+      yield* dropHandoff(moveId);
       // Calls and events are checked anew: the source's late events are refused from now on.
       if (Option.isSome(remote)) yield* remote.value.threadMoved(threadId);
       yield* recordAudit(done.thread, done.move, "switched");
@@ -791,6 +808,7 @@ export const layer: Layer.Layer<
         ],
       });
       yield* recordAudit(thread, move, "cancelled");
+      yield* dropHandoff(move.id);
       yield* resumeQueue;
     });
 
@@ -817,127 +835,204 @@ export const layer: Layer.Layer<
       );
     });
 
+    /** The handoff written for the move, if its step already ran (before a restart, say). */
+    const storedHandoff = Effect.fn("ThreadMoves.storedHandoff")(function* (moveId: string) {
+      const rows = yield* sql<{ readonly payload: string }>`
+        SELECT payload_json AS payload FROM orchestration_v2_move_handoffs WHERE move_id = ${moveId}
+      `.pipe(Effect.orElseSucceed(() => []));
+      const row = rows[0];
+      if (row === undefined) return Option.none<MoveHandoff.StoredHandoff>();
+      return yield* MoveHandoff.decodeStoredHandoff(row.payload).pipe(Effect.option);
+    });
+
+    const storeHandoff = Effect.fn("ThreadMoves.storeHandoff")(function* (
+      threadId: ThreadId,
+      moveId: string,
+      handoff: MoveHandoff.StoredHandoff,
+    ) {
+      const payload = yield* MoveHandoff.encodeStoredHandoff(handoff).pipe(Effect.orDie);
+      const now = DateTime.formatIso(yield* DateTime.now);
+      yield* sql`
+        INSERT INTO orchestration_v2_move_handoffs (move_id, thread_id, payload_json, created_at)
+        VALUES (${moveId}, ${threadId}, ${payload}, ${now})
+        ON CONFLICT (move_id) DO UPDATE SET payload_json = excluded.payload_json
+      `;
+    });
+
     /**
-     * The handoff the target's new session starts from: a summary the Thread's provider writes
-     * (on the source if it is online, else on the Hub machine; one model call), then the Thread's
-     * recent messages. A failed or slow call never fails the move: the summary is then assembled
-     * from the history, and the timeline says so.
+     * Whether the Hub machine may write this Thread's summary: its provider sign-ins are the
+     * Owner's, so only for the Owner's own Threads (and Threads from before Users).
+     */
+    const hubMayWriteFor = Effect.fn("ThreadMoves.hubMayWriteFor")(function* (
+      thread: OrchestrationV2AppThread,
+    ) {
+      if (thread.ownerUserId === undefined) return true;
+      const rows = yield* sql<{ readonly isOwner: number }>`
+        SELECT is_owner AS "isOwner" FROM users WHERE user_id = ${thread.ownerUserId}
+      `.pipe(Effect.orElseSucceed(() => []));
+      return rows[0]?.isOwner === 1;
+    });
+
+    /**
+     * The notes the target's new session starts from: one model call on the source, or on the Hub
+     * machine for the Owner's Threads, secrets redacted, then the recent messages. Any failure
+     * (reads included, or a call past its time, then cancelled) assembles them instead.
      */
     const writeHandoff = Effect.fn("ThreadMoves.writeHandoff")(function* (
       thread: OrchestrationV2AppThread,
       move: OrchestrationV2ThreadMove,
     ) {
-      const { runs, attempts, turnItems } = yield* projections
-        .getThreadRecords(thread.id, ["runs", "attempts", "turnItems"], {
-          turnItemTypes: ["checkpoint"],
-        })
-        .pipe(Effect.orDie);
-      const items = yield* projections.getTurnStartHistory(thread.id).pipe(Effect.orDie);
-      const history = MoveHandoff.moveHistory(
-        MoveHandoff.inConversationOrder(
-          visibleConversationItems({ runs, attempts }, [...items, ...turnItems]),
-          runs,
-        ),
-        runs.filter((run) => run.status === "completed").length,
-      );
-      const recent = MoveHandoff.recentMessages(history.messages);
       const sourceName = yield* nameOf(move.sourceEnvironmentId);
       const targetName = yield* nameOf(move.targetEnvironmentId);
+      const assembled = (
+        history: MoveHandoff.MoveHistory,
+        recent: ReadonlyArray<OrchestrationV2HistoricalMessage>,
+        reason: string,
+      ): MoveHandoff.StoredHandoff => {
+        const summary = MoveHandoff.redactSecrets(
+          MoveHandoff.mechanicalSummary({ threadTitle: thread.title, history }),
+        );
+        return {
+          writtenBy: "fallback",
+          writerEnvironmentName: null,
+          writerProviderInstanceId: null,
+          summary,
+          context: MoveHandoff.handoffContext({
+            sourceName,
+            targetName,
+            writtenBy: "fallback",
+            writerName: null,
+            writerProviderInstanceId: null,
+            summary,
+            recentCount: recent.length,
+            historyCount: history.messages.length,
+          }),
+          recentMessages: recent,
+          fallbackReason: auditMessage(reason),
+        };
+      };
+      const written = Effect.gen(function* () {
+        const { runs, attempts, turnItems } = yield* projections.getThreadRecords(
+          thread.id,
+          ["runs", "attempts", "turnItems"],
+          { turnItemTypes: ["checkpoint"] },
+        );
+        const items = yield* projections.getTurnStartHistory(thread.id);
+        const history = MoveHandoff.moveHistory(
+          MoveHandoff.inConversationOrder(
+            visibleConversationItems({ runs, attempts }, [...items, ...turnItems]),
+            runs,
+          ),
+          runs.filter((run) => run.status === "completed").length,
+        );
+        const recent = MoveHandoff.recentMessages(history.messages);
 
-      // The source writes it while it is online; otherwise the Hub machine does.
-      const source =
-        move.sourceOffline === true || move.sourceEnvironmentId === null
-          ? Option.none<EnvironmentExecutor.EnvironmentExecutor>()
-          : yield* awaitExecutor(move.sourceEnvironmentId, null);
-      const writer = Option.isSome(source)
-        ? { executor: source.value, writtenBy: "source" as const, name: sourceName }
-        : yield* registry.get(registry.hubMachineEnvironmentId).pipe(
-            Effect.flatMap((executor) =>
-              nameOf(executor.environmentId).pipe(
-                Effect.map((name) => ({ executor, writtenBy: "hub" as const, name })),
-              ),
-            ),
-            Effect.option,
-            Effect.map(Option.getOrUndefined),
+        // The source writes it while it is online; otherwise the Hub machine, for the Owner only.
+        const source =
+          move.sourceOffline === true || move.sourceEnvironmentId === null
+            ? Option.none<EnvironmentExecutor.EnvironmentExecutor>()
+            : yield* awaitExecutor(move.sourceEnvironmentId, null);
+        if (Option.isNone(source) && !(yield* hubMayWriteFor(thread))) {
+          return assembled(
+            history,
+            recent,
+            "the Hub doesn't write summaries with another User's history",
           );
-      const textGeneration = writer?.executor.textGeneration;
-      const generated: { readonly summary: string } | { readonly failure: string } =
-        writer === undefined || textGeneration === undefined
-          ? {
-              failure:
-                writer === undefined
-                  ? "The Hub machine is not available."
-                  : `${writer.name} has no text generation.`,
-            }
-          : yield* Effect.gen(function* () {
-              // The source runs it in the Thread's workspace; the Hub machine in its checkout.
-              const cwd = yield* (
-                writer.writtenBy === "source"
-                  ? workspaceOn(writer.executor, thread)
-                  : writer.executor.workspace.paths
-                      .checkout(thread.projectId)
-                      .pipe(Effect.map(Option.getOrElse(() => process.cwd())))
-              ).pipe(Effect.orElseSucceed(() => process.cwd()));
-              return yield* textGeneration.threadHandoff({
-                cwd,
-                threadTitle: thread.title,
-                transcript: MoveHandoff.renderTranscript(history.messages),
-                changedFiles: history.changedFiles,
-                sourceEnvironmentName: sourceName,
-                targetEnvironmentName: targetName,
-                modelSelection: thread.modelSelection,
-              });
-            }).pipe(
-              Effect.mapError(messageOf),
-              Effect.timeoutOrElse({
-                duration: HANDOFF_TIMEOUT,
-                orElse: () => Effect.fail("Writing the summary took too long."),
-              }),
-              Effect.flatMap(({ summary }) =>
-                summary.trim().length === 0
-                  ? Effect.fail("The summary came back empty.")
-                  : Effect.succeed({ summary: summary.trim() }),
-              ),
-              // Whatever went wrong, the summary is assembled instead: the move goes on.
-              Effect.catchCauseIf(
-                (cause) => !Cause.hasInterruptsOnly(cause),
-                (cause) =>
-                  Effect.succeed({
-                    failure: Option.getOrElse(Cause.findErrorOption(cause), () =>
-                      auditMessage(Cause.pretty(cause)),
-                    ),
-                  }),
+        }
+        const writer = Option.isSome(source)
+          ? { executor: source.value, writtenBy: "source" as const, name: sourceName }
+          : yield* registry
+              .get(registry.hubMachineEnvironmentId)
+              .pipe(
+                Effect.flatMap((executor) =>
+                  nameOf(executor.environmentId).pipe(
+                    Effect.map((name) => ({ executor, writtenBy: "hub" as const, name })),
+                  ),
+                ),
+              );
+        const textGeneration = writer.executor.textGeneration;
+        if (textGeneration === undefined) {
+          return assembled(history, recent, `${writer.name} has no text generation.`);
+        }
+        // The source runs it in the Thread's workspace; the Hub machine in its checkout.
+        const cwd = yield* (
+          writer.writtenBy === "source"
+            ? workspaceOn(writer.executor, thread)
+            : writer.executor.workspace.paths
+                .checkout(thread.projectId)
+                .pipe(Effect.map(Option.getOrElse(() => process.cwd())))
+        ).pipe(Effect.orElseSucceed(() => process.cwd()));
+        const timeout = handoffTimeoutMs();
+        const generated = yield* textGeneration
+          .threadHandoff({
+            cwd,
+            threadTitle: thread.title,
+            transcript: MoveHandoff.renderTranscript(history.messages),
+            changedFiles: history.changedFiles,
+            sourceEnvironmentName: sourceName,
+            targetEnvironmentName: targetName,
+            modelSelection: thread.modelSelection,
+            generationId: `move:${move.id}`,
+          })
+          .pipe(
+            // One key per move: after a restart the machine answers from the call it already ran.
+            EnvironmentExecutor.withEffectAttempt({ effectId: `move:${move.id}:handoff` }),
+            Effect.mapError(messageOf),
+            // Past its time the call is interrupted, which cancels it on the machine.
+            Effect.timeoutOrElse({
+              duration: Duration.millis(timeout),
+              orElse: () => Effect.fail("Writing the summary took too long."),
+            }),
+            Effect.result,
+          );
+        if (generated._tag === "Failure") return assembled(history, recent, generated.failure);
+        const summary = MoveHandoff.redactSecrets(generated.success.summary.trim());
+        if (summary.length === 0) return assembled(history, recent, "The summary came back empty.");
+        const writerProviderInstanceId =
+          generated.success.providerInstanceId ?? thread.modelSelection.instanceId;
+        return {
+          writtenBy: writer.writtenBy,
+          writerEnvironmentName: writer.name,
+          writerProviderInstanceId,
+          summary,
+          context: MoveHandoff.handoffContext({
+            sourceName,
+            targetName,
+            writtenBy: writer.writtenBy,
+            writerName: writer.name,
+            writerProviderInstanceId,
+            summary,
+            recentCount: recent.length,
+            historyCount: history.messages.length,
+          }),
+          recentMessages: recent,
+        } satisfies MoveHandoff.StoredHandoff;
+      });
+      const handoff = yield* written.pipe(
+        Effect.catchCauseIf(
+          (cause) => !Cause.hasInterruptsOnly(cause),
+          (cause) => {
+            const reason = Option.getOrElse(Cause.findErrorOption(cause), () =>
+              Cause.pretty(cause),
+            );
+            return Effect.succeed(
+              assembled(
+                { messages: [], changedFiles: [], completedTurns: 0 },
+                [],
+                `The history could not be read: ${messageOf(reason)}`,
               ),
             );
-      if ("failure" in generated) {
-        yield* Effect.logWarning("A moved Thread's handoff summary was assembled instead", {
+          },
+        ),
+      );
+      if (handoff.writtenBy === "fallback") {
+        yield* Effect.logWarning("A moved Thread's handoff notes were assembled instead", {
           threadId: thread.id,
           moveId: move.id,
-          reason: generated.failure,
+          reason: handoff.fallbackReason,
         });
       }
-      const writtenBy =
-        "summary" in generated && writer !== undefined ? writer.writtenBy : "fallback";
-      const writerName = writtenBy === "fallback" ? null : (writer?.name ?? null);
-      const summary =
-        "summary" in generated
-          ? generated.summary
-          : MoveHandoff.mechanicalSummary({ threadTitle: thread.title, history });
-      return {
-        writtenBy,
-        writerEnvironmentName: writerName,
-        summary,
-        context: MoveHandoff.handoffContext({
-          sourceName,
-          targetName,
-          writtenBy,
-          writerName,
-          summary,
-          recentCount: recent.length,
-        }),
-        recentItemIds: recent.map((message) => message.itemId),
-        ...("failure" in generated ? { fallbackReason: auditMessage(generated.failure) } : {}),
-      } satisfies OrchestrationV2ThreadMoveHandoff;
+      return handoff;
     });
 
     /** The workflow from the step the Thread records, to the switch or a failure. */
@@ -1049,8 +1144,27 @@ export const layer: Layer.Layer<
           }
           // What the agent on the target is told; the switch delivers it to its first session.
           case "handoff": {
-            const handoff = move.handoff ?? (yield* writeHandoff(thread, move));
-            yield* advance(threadId, move.id, { step: "switched", handoff });
+            // Kept as soon as it is written: a restart after this reuses it, never pays again.
+            const stored = yield* storedHandoff(move.id);
+            const handoff = Option.isSome(stored)
+              ? stored.value
+              : yield* writeHandoff(thread, move);
+            if (Option.isNone(stored)) yield* storeHandoff(threadId, move.id, handoff);
+            // Every client gets the Thread's shell: it carries who wrote it and a preview only.
+            yield* advance(threadId, move.id, {
+              step: "switched",
+              handoff: {
+                writtenBy: handoff.writtenBy,
+                writerEnvironmentName: handoff.writerEnvironmentName,
+                writerProviderInstanceId: handoff.writerProviderInstanceId,
+                preview: Array.from(handoff.summary)
+                  .slice(0, MoveHandoff.HANDOFF_PREVIEW_CHARS)
+                  .join(""),
+                ...(handoff.fallbackReason === undefined
+                  ? {}
+                  : { fallbackReason: handoff.fallbackReason }),
+              },
+            });
             break;
           }
           case "switched":

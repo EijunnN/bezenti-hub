@@ -16,9 +16,10 @@ const HistoryEntry = Schema.Struct({
 
 const ThreadHistoryTool = Tool.make("thread_history", {
   description:
-    "Search or read THIS thread's full history, also from before it moved machines. search: entries containing `query`. read: entries from `afterPosition`, `limit` at a time, cut at `maxCharsPerItem`; page with `afterPosition=nextPosition`.",
+    "Search or read THIS thread's full history, also from before it moved machines. search: entries containing `query`, `total` matches. read: entries cut at `maxCharsPerItem`. Both page `limit` at a time with `afterPosition=nextPosition`; `order:'newest'` starts at the end.",
   parameters: Schema.Struct({
     action: Schema.Literals(["search", "read"]),
+    order: Schema.optional(Schema.Literals(["oldest", "newest"])),
     query: Schema.optional(Schema.String.check(Schema.isMaxLength(500))),
     /** Only this thread; any other is refused. */
     threadId: Schema.optional(ThreadId),

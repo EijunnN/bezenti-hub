@@ -837,24 +837,24 @@ export const layer: Layer.Layer<
       // recent messages, within the budget below. Its id makes it go once per move; a Thread
       // that stays where it is resumes natively and never gets one.
       const moved = projection.thread.move;
-      if (
+      const movedHandoff =
         moved?.status === "switched" &&
         moved.handoff !== undefined &&
         nativeForkTransfer === undefined &&
         !projection.contextHandoffs.some(
           (handoff) => handoff.id === MoveHandoff.moveContextHandoffId(moved.id),
         )
-      ) {
-        const recentIds = new Set(moved.handoff.recentItemIds);
-        const messages = MoveHandoff.inConversationOrder(
-          (yield* projectionStore.getTurnStartHistory(input.threadId)).filter((item) =>
-            recentIds.has(item.id),
-          ),
-          projection.runs,
-        ).flatMap((item) => {
-          const historical = historicalMessage(item);
-          return historical === null ? [] : [historical];
-        });
+          ? (yield* projectionStore.getThreadRecords(input.threadId, ["turnItems"], {
+              turnItemTypes: ["environment_handoff"],
+            })).turnItems.find(
+              (item) =>
+                item.type === "environment_handoff" &&
+                item.id === MoveHandoff.moveHandoffItemId(moved.id),
+            )
+          : undefined;
+      if (moved != null && movedHandoff?.type === "environment_handoff") {
+        // The messages as the move redacted and cut them, not as the projection has them.
+        const messages = movedHandoff.recentMessages ?? [];
         const createdAt = yield* DateTime.now;
         const moveHandoff: OrchestrationV2ContextHandoff = {
           id: MoveHandoff.moveContextHandoffId(moved.id),
@@ -867,10 +867,10 @@ export const layer: Layer.Layer<
           strategy: "full_thread_summary",
           status: "ready",
           summaryMessageId: null,
-          summaryText: moved.handoff.context,
+          summaryText: movedHandoff.context,
           history: {
             messages,
-            coverage: moved.handoff.context,
+            coverage: movedHandoff.context,
             omittedItems: 0,
             omittedItemIds: [],
           },

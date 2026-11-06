@@ -515,16 +515,21 @@ ref there and named in the dialog, never thrown away.
 
 The Thread's link stays the same, and its timeline shows **Moved from Laptop to
 Hub machine** (with who moved it and what it continues from). The next turn runs
-on the new machine in a fresh session, which starts with a handoff: a short summary
-of what was done and what is next, written by the Thread's provider on the old
-machine (or on the Hub machine when the old one is off), followed by the Thread's
-most recent messages word for word. The agent there can also search and read the
-whole conversation with its `thread_history` tool, which reads only this Thread.
-The timeline shows **Handoff to Desktop**; open it to read exactly what the new
-agent was told. Writing the summary is one model call; if it fails, the move still
-goes on and the handoff is assembled from the Thread's history instead (its last
-requests and reply and the files it changed), and the timeline says so. A Thread
-that stays on its machine resumes its own session as always, with no handoff. If a
+on the new machine in a fresh session, which starts with a handoff: short notes on
+what was done and what is next, written by the Thread's provider on the old machine,
+followed by the Thread's most recent messages (long ones cut). When the old machine
+is off, the Hub machine writes the notes for the Owner's own Threads; for anyone
+else's Thread the notes are assembled from the history instead, so your
+conversation is never sent with another person's provider account. Keys, tokens
+and passwords that look like ones are blanked out first. The agent is told the
+notes may be wrong and to check them, and it can search and read the whole
+conversation with its `thread_history` tool, which reads only this Thread. The
+timeline shows **Handoff to Desktop** with who wrote the notes; open it to read
+exactly what the new agent was told. Writing the notes is one model call; if it
+fails or takes over three minutes, the move still goes on with notes assembled
+from the Thread's history (its last requests and reply and the files it changed),
+and the timeline says why. A Thread that stays on its machine resumes its own
+session as always, with no handoff. If a
 step fails, the Thread stays on the machine it was on and
 the dialog says which step failed and why. Only one move of a Thread runs at a
 time, only the Thread's creator can move it, and the audit log records each move.

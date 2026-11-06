@@ -111,6 +111,8 @@ export interface ThreadHandoffGenerationInput {
 
 export interface ThreadHandoffGenerationResult {
   summary: string;
+  /** The provider instance that wrote it, when the caller's selection was not the one used. */
+  providerInstanceId?: string | undefined;
 }
 
 export interface ProviderTextGeneration {

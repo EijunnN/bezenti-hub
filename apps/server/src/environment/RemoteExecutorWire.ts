@@ -357,8 +357,13 @@ export const REMOTE_OPERATIONS = {
       sourceEnvironmentName: Schema.String,
       targetEnvironmentName: Schema.String,
       modelSelection: ModelSelection,
+      /** Names the call for `textGeneration.cancel`, which stops it when the Hub gives up. */
+      generationId: Schema.optionalKey(Schema.String),
     }),
-    output: Schema.Struct({ summary: Schema.String }),
+    output: Schema.Struct({
+      summary: Schema.String,
+      providerInstanceId: Schema.optionalKey(Schema.String),
+    }),
     error: Schema.Union([TextGenerationError, EnvironmentExecutorUnavailableError]),
   },
   "checkpoint.isGitRepository": checkpoint(Schema.Struct({ cwd: Schema.String }), Schema.Boolean),

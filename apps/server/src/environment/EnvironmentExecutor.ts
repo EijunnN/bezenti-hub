@@ -140,9 +140,12 @@ export interface EnvironmentWorkspaceForward {
 
 /** The machine's own text generation, with its provider instances and settings. */
 export interface EnvironmentTextGeneration {
-  /** A moved Thread's handoff summary: one model call. */
+  /**
+   * A moved Thread's handoff summary: one model call. Interrupting it stops the generation on the
+   * machine (a joined one is told with `textGeneration.cancel` under `generationId`).
+   */
   readonly threadHandoff: (
-    input: TextGeneration.ThreadHandoffGenerationInput,
+    input: TextGeneration.ThreadHandoffGenerationInput & { readonly generationId?: string },
   ) => Effect.Effect<
     TextGeneration.ThreadHandoffGenerationResult,
     TextGenerationError | EnvironmentExecutorUnavailableError
@@ -532,7 +535,10 @@ const makeInProcessExecutor = (input: InProcessExecutorInput): EnvironmentExecut
     onNone: () => ({}),
     onSome: (textGeneration) => ({
       textGeneration: {
-        threadHandoff: (request: TextGeneration.ThreadHandoffGenerationInput) =>
+        threadHandoff: ({
+          generationId: _generationId,
+          ...request
+        }: TextGeneration.ThreadHandoffGenerationInput & { readonly generationId?: string }) =>
           textGeneration.generateThreadHandoff === undefined
             ? Effect.fail(
                 new EnvironmentExecutorUnavailableError({ environmentId: input.environmentId }),

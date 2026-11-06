@@ -678,7 +678,10 @@ const make = Effect.gen(function* () {
     const { item } = yield* threadItem(session, itemId);
     return {
       item:
-        item.type === "file_change" ? projectTurnItemForWire(item) : projectTurnItemForDetail(item),
+        // What a moved Thread's agent was told stays with the Thread's members.
+        item.type === "file_change" || item.type === "environment_handoff"
+          ? projectTurnItemForWire(item)
+          : projectTurnItemForDetail(item),
     };
   });
 
