@@ -68,7 +68,6 @@ import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
-import * as CommandActor from "../auth/CommandActor.ts";
 import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
@@ -783,11 +782,12 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
   ): Effect.Effect<OrchestrationV2ServerCommand, Orchestrator.OrchestratorCommandRejectedError> => {
     if (command.type !== "thread.create" || Option.isNone(spaces)) return Effect.succeed(command);
     const { spaceId, ownerUserId, ...rest } = command;
-    return CommandActor.current.pipe(
+    // A request with no User is refused here rather than created as the Owner's.
+    return spaces.value.actingUser.pipe(
       Effect.flatMap((actor) =>
         spaces.value.claimCreation({
           action: "thread.create",
-          actorUserId: ownerUserId ?? actor,
+          actorUserId: ownerUserId ?? Option.getOrUndefined(actor),
           spaceId,
           projectId: command.projectId,
         }),
@@ -1173,9 +1173,10 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
   const authorizeThread: ThreadManagementServiceShape["authorizeThread"] = Effect.fn(
     "ThreadManagementService.authorizeThread",
   )(function* (threadId, action) {
-    const actor = yield* CommandActor.current;
-    if (actor === undefined || Option.isNone(spaces)) return;
-    yield* spaces.value.authorizeItem(actor, action, { kind: "thread", id: threadId });
+    if (Option.isNone(spaces)) return;
+    const actor = yield* spaces.value.actingUser;
+    if (Option.isNone(actor)) return;
+    yield* spaces.value.authorizeItem(actor.value, action, { kind: "thread", id: threadId });
   });
 
   // Stopping kills the agent before any command is dispatched, so the Role rule is checked first.

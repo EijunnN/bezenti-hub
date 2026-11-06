@@ -1608,7 +1608,7 @@ describe("Space visibility", () => {
   // The production RPC layer and authorization middleware for one connection of this User.
   const connect = Effect.fn(function* (
     server: Effect.Success<typeof serveAuthHttp>,
-    userId: UserId,
+    userId: UserId | undefined,
     overrides: Layer.Layer<never> = Layer.empty,
   ) {
     const browser = yield* ServerBrowser.ServerBrowser;
@@ -1623,7 +1623,7 @@ describe("Space visibility", () => {
             CurrentPrincipal.layer({
               sessionId: AuthSessionId.make(`session-${userId}`),
               subject: "user-sign-in",
-              userId,
+              ...(userId === undefined ? {} : { userId }),
               method: "browser-session-cookie",
               scopes: [
                 AuthOrchestrationReadScope,
@@ -2044,7 +2044,10 @@ describe("Space visibility", () => {
         ),
       ),
     );
-  const connectWriter = (server: Effect.Success<typeof serveAuthHttp>, userId: UserId) =>
+  const connectWriter = (
+    server: Effect.Success<typeof serveAuthHttp>,
+    userId: UserId | undefined,
+  ) =>
     connect(
       server,
       userId,
@@ -2406,6 +2409,18 @@ describe("Space visibility", () => {
           answer: { type: "save", secret: "hunter2" },
         } as never).pipe(Effect.flip);
         assert.equal((answered as { reason?: string }).reason, "not_permitted");
+      }),
+    ),
+  );
+
+  it.effect("once an Owner exists, a request with no User changes nothing", () =>
+    withTeam(({ server }) =>
+      Effect.gen(function* () {
+        const anonymous = yield* connectWriter(server, undefined);
+        assert.equal(
+          refusal(yield* dispatch(anonymous, { type: "thread.archive", threadId: "acme-thread" })),
+          "This session belongs to no User. Sign in again.",
+        );
       }),
     ),
   );

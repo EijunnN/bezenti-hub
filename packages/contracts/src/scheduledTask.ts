@@ -9,6 +9,7 @@ import {
   SecretRef,
   ThreadId,
   TrimmedNonEmptyString,
+  UserId,
 } from "./baseSchemas.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import {
@@ -238,6 +239,8 @@ export const ScheduledTask = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,
+  /** The User the task speaks as; only the server sets it. Absent on tasks from before Users. */
+  ownerUserId: Schema.optional(UserId),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   nextRunAt: Schema.NullOr(IsoDateTime),

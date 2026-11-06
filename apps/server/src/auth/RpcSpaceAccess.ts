@@ -96,7 +96,7 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.gitPreparePullRequestThread]: BY_DIRECTORY,
   [WS_METHODS.projectsMutate]: "command",
   [WS_METHODS.scheduledTasksUpsert]: {
-    unscoped: "scheduled tasks run as the Owner until ticket 13",
+    unscoped: "ScheduledTaskService checks it as its creator: hidden like missing, then the Role",
   },
   [WS_METHODS.projectCloneStart]: { unscoped: "creates the Project it clones into" },
   [WS_METHODS.projectCloneCancel]: { unscoped: "a clone in progress has no Project row yet" },

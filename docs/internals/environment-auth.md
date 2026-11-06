@@ -111,9 +111,9 @@ User (a client's `ownerUserId` is replaced). MCP tools pass the invocation
 scope's `userId`, so an agent creates as the Thread's owner and an outside client
 as the User who approved it; a refusal reaches the agent as the app's message.
 Only callers with no User at all act as the Owner: work before an Owner exists,
-`t3 project`, and server-made effects. A scheduled task records no creator yet, so its
-runs act as the Owner whoever scheduled it; that stays the one Owner fallback for
-work a User started. A Thread joins its Project's Space, and a
+`t3 project`, and server-made effects. A scheduled task records its creator
+(`owner_user_id`), only they change or run it, and its runs act as them; tasks from
+before Users keep running as the server. A Thread joins its Project's Space, and a
 Project from before Spaces counts as the Owner's Personal space, so a client's
 requested Space applies only to new Projects and to Threads in unknown Projects.
 Clients send their current Space only to the environment it came from. Archived
@@ -177,8 +177,11 @@ command to an action), Project changes in `ProjectService`, and Force stop in
 [CommandActor](../../apps/server/src/auth/CommandActor.ts): the RPC middleware sets
 it to the session's User, the HTTP mutate route likewise, an MCP call acts as its
 credential's User (an agent as its Thread's owner), and
-`ServerRuntimeStartup.enqueueCommand` carries it into its worker. No actor is the
-server's own work and goes unchecked. The receipt store stamps the actor on every
+`ServerRuntimeStartup.enqueueCommand` carries it into its worker. Only the server's
+own work (effect worker, reactors, tasks from before Users) has no actor and goes
+unchecked; once an Owner exists, a request whose session names no User is refused
+(`SpaceDirectory.actingUser`), and an agent in a Thread from before owners acts as
+the Owner. The receipt store stamps the actor on every
 command receipt (`actor_user_id`); nothing a client sends sets it.
 
 Only a Thread's creator speaks in it or changes it, not even an Admin or the Owner

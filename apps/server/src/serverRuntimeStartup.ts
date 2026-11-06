@@ -122,10 +122,10 @@ export const makeCommandGate = Effect.gen(function* () {
 
     const result = yield* Deferred.make<A, E | ServerRuntimeStartupError>();
     // The worker fiber runs it, so it keeps acting for the User who sent it.
-    const actor = yield* CommandActor.current;
+    const actor = yield* CommandActor.resolve;
     yield* Queue.offer(commandQueue, {
       run: Deferred.await(commandReady).pipe(
-        Effect.flatMap(() => effect.pipe(CommandActor.actAs(actor))),
+        Effect.flatMap(() => effect.pipe(CommandActor.actAsResolved(actor))),
         Effect.exit,
         Effect.flatMap((exit) => settleQueuedCommand(result, exit)),
       ),

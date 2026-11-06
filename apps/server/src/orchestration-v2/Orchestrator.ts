@@ -192,7 +192,6 @@ import {
 import { planThreadDeletion } from "./ThreadDeletion.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
-import * as CommandActor from "../auth/CommandActor.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import { threadAccessOf } from "./commandAccess.ts";
 
@@ -13516,7 +13515,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
     // Every command passes here whatever its transport, so the Role rules hold for WS, HTTP,
     // MCP and agents alike. Refusals record no receipt: a Role can change and the retry pass.
-    const actor = yield* CommandActor.current;
+    const rejected = (cause: unknown) =>
+      new OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause,
+      });
+    const actor = Option.isNone(spaces)
+      ? undefined
+      : Option.getOrUndefined(yield* spaces.value.actingUser.pipe(Effect.mapError(rejected)));
     if (actor !== undefined && Option.isSome(spaces)) {
       for (const access of threadAccessOf(command)) {
         yield* spaces.value

@@ -53,6 +53,8 @@ import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as Metrics from "../observability/Metrics.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as CommandActor from "../auth/CommandActor.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as DueHint from "../scheduling/DueHint.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
@@ -189,6 +191,7 @@ interface ScheduledTaskRow {
   readonly run_count: number;
   readonly webhook_token: string | null;
   readonly webhook_secret: string | null;
+  readonly owner_user_id?: string | null;
 }
 
 interface WebhookDeliveryRow {
@@ -352,6 +355,7 @@ const decodeRow = Effect.fnUntraced(
       interactionMode: row.interaction_mode,
       createdBy: row.created_by,
       creationSource: row.creation_source,
+      ...(row.owner_user_id == null ? {} : { ownerUserId: row.owner_user_id }),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       nextRunAt: row.next_run_at,
@@ -417,6 +421,8 @@ export const layer = Layer.effect(
     const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
+    // The server provides it; tests without Spaces leave tasks unchecked.
+    const spaces = yield* Effect.serviceOption(SpaceDirectory.SpaceDirectory);
     const secretRequests = yield* SecretRequests.SecretRequests;
     const scheduler = yield* Scheduler.Scheduler;
     const managedPolicy = yield* ManagedPolicy.ManagedPolicy;
@@ -481,7 +487,8 @@ export const layer = Layer.effect(
         last_run_error,
         run_count,
         webhook_token,
-        webhook_secret
+        webhook_secret,
+        owner_user_id
       FROM scheduled_tasks
       -- Not updated_at: toggles, runs and edits rewrite it, and clients render
       -- this order as-is, so rows would move under the pointer.
@@ -519,7 +526,8 @@ export const layer = Layer.effect(
         last_run_error,
         run_count,
         webhook_token,
-        webhook_secret
+        webhook_secret,
+        owner_user_id
       FROM scheduled_tasks
       WHERE task_id = ${id}
     `.pipe(NodeSqliteClient.readOnly);
@@ -596,7 +604,8 @@ export const layer = Layer.effect(
           last_run_error,
           run_count,
           webhook_token,
-          webhook_secret
+          webhook_secret,
+          owner_user_id
         )
         SELECT
           ${task.id},
@@ -620,7 +629,8 @@ export const layer = Layer.effect(
           ${task.lastRunError},
           ${task.runCount},
           ${webhook.token},
-          ${webhook.secret}
+          ${webhook.secret},
+          ${task.ownerUserId ?? null}
         WHERE ${requireExisting ? 0 : 1} = 1
            OR EXISTS (SELECT 1 FROM scheduled_tasks WHERE task_id = ${task.id})
         ON CONFLICT (task_id)
@@ -892,6 +902,12 @@ export const layer = Layer.effect(
               }),
             );
 
+        // The run speaks as the task's creator, so the Role rules hold for it as for them.
+        const creator = active.ownerUserId;
+        const runAsCreator = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+          creator === undefined
+            ? effect
+            : effect.pipe(CommandActor.actAsResolved({ _tag: "User", userId: creator }));
         // Capture defects and interrupts too so dispatch failures still reach markCompleted.
         const result =
           active.threadId === null
@@ -914,13 +930,17 @@ export const layer = Layer.effect(
                     createdBy: active.createdBy,
                     creationSource: active.creationSource,
                   })
-                  .pipe(Effect.map((launched) => launched.threadId)),
+                  .pipe(
+                    Effect.map((launched) => launched.threadId),
+                    runAsCreator,
+                  ),
               )
             : yield* Effect.exit(
                 // The stored selection only seeds fresh threads. A bound run
                 // follows the thread's current provider, so it passes none.
                 sendBound(ThreadId.make(active.threadId), active.projectId, 2).pipe(
                   Effect.as(ThreadId.make(active.threadId)),
+                  runAsCreator,
                 ),
               );
 
@@ -1167,6 +1187,41 @@ export const layer = Layer.effect(
         }),
       );
 
+    /**
+     * A task speaks as the User who created it, so only that User changes or runs it, and only
+     * where they may start Threads (or continue the one it is bound to). Returns that User.
+     */
+    const requireTaskRights = Effect.fn("ScheduledTaskService.requireTaskRights")(function* (
+      task: Pick<ScheduledTask, "id" | "projectId" | "threadId">,
+      existing: Pick<ScheduledTask, "ownerUserId"> | undefined,
+    ) {
+      if (Option.isNone(spaces)) return undefined;
+      const refused = (cause: unknown) =>
+        taskError(
+          SpaceDirectory.spaceRefusalMessage(cause) ?? "That Project or Thread does not exist.",
+          { taskId: task.id, cause },
+        );
+      const actor = yield* spaces.value.actingUser.pipe(Effect.mapError(refused));
+      if (Option.isNone(actor)) return existing?.ownerUserId;
+      if (existing?.ownerUserId !== undefined && existing.ownerUserId !== actor.value) {
+        return yield* taskError("Only the person who created this task can change or run it.", {
+          taskId: task.id,
+        });
+      }
+      yield* (
+        task.threadId === null
+          ? spaces.value.authorizeItem(actor.value, "thread.create", {
+              kind: "project",
+              id: task.projectId,
+            })
+          : spaces.value.authorizeItem(actor.value, "thread.continue", {
+              kind: "thread",
+              id: task.threadId,
+            })
+      ).pipe(Effect.mapError(refused));
+      return actor.value;
+    });
+
     const upsert: ScheduledTaskService["Service"]["upsert"] = Effect.fn(
       "ScheduledTaskService.upsert",
     )(function* (input) {
@@ -1207,6 +1262,10 @@ export const layer = Layer.effect(
       // keep their run history, and so real load failures propagate instead
       // of silently resetting an existing row.
       const existingTask = yield* findTask(id);
+      const ownerUserId = yield* requireTaskRights(
+        { id, projectId: input.projectId, threadId: input.threadId ?? null },
+        existingTask ?? undefined,
+      );
       // Keep the existing next_run_at when the schedule itself is untouched:
       // editing a title or prompt must not postpone (or resurrect) a due
       // run — only schedule/enabled changes restart the clock.
@@ -1301,6 +1360,7 @@ export const layer = Layer.effect(
         runtimeMode: input.runtimeMode,
         interactionMode: input.interactionMode,
         createdBy: existingTask?.createdBy ?? input.createdBy ?? "user",
+        ...(ownerUserId === undefined ? {} : { ownerUserId }),
         creationSource: input.creationSource ?? "web",
         createdAt: existingTask?.createdAt ?? iso(now),
         updatedAt: iso(now),
@@ -1326,6 +1386,7 @@ export const layer = Layer.effect(
       "ScheduledTaskService.setEnabled",
     )(function* (input) {
       const existing = yield* loadTask(input.id);
+      yield* requireTaskRights(existing, existing);
       if (existing.enabled === input.enabled) return { task: existing };
       if (
         input.enabled &&
@@ -1404,7 +1465,11 @@ export const layer = Layer.effect(
       );
 
     const deleteTask: ScheduledTaskService["Service"]["delete"] = (input) =>
-      deleteRow(input.id).pipe(
+      findTask(input.id).pipe(
+        Effect.flatMap((existing) =>
+          existing == null ? Effect.void : Effect.asVoid(requireTaskRights(existing, existing)),
+        ),
+        Effect.andThen(deleteRow(input.id)),
         Effect.andThen(forgetWebhookTask(input.id)),
         Effect.andThen(notifyChanged),
         Effect.as({ id: input.id }),
@@ -1458,6 +1523,7 @@ export const layer = Layer.effect(
       "ScheduledTaskService.runNow",
     )(function* (input: ScheduledTaskRunNowInput) {
       const task = yield* loadTask(input.id);
+      yield* requireTaskRights(task, task);
       if (task.schedule.type === "webhook") {
         return yield* taskError("Webhook tasks run when their URL receives a request.", {
           taskId: input.id,

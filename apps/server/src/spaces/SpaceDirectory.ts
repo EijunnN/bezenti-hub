@@ -21,6 +21,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
 
 import * as AccessPolicy from "../auth/AccessPolicy.ts";
+import * as CommandActor from "../auth/CommandActor.ts";
 
 export class SpaceDirectoryStorageError extends Schema.TaggedError<SpaceDirectoryStorageError>()(
   "SpaceDirectoryStorageError",
@@ -57,6 +58,7 @@ const deniedMessage = (action: string, reason: string): string | undefined => {
     return `Only its creator or an Admin can ${DENIED_ACTION_LABELS[action] ?? "do that"}.`;
   }
   if (reason === "not-archived") return "Archive it before deleting it permanently.";
+  if (reason === "no-user") return "This session belongs to no User. Sign in again.";
   if (
     (action === "thread.delete" || action === "project.delete") &&
     reason === "role-not-allowed"
@@ -195,6 +197,15 @@ export class SpaceDirectory extends Context.Service<
       item: ItemRef,
     ) => Effect.Effect<void, ItemAccessError>;
     /** The User who created the Thread (its root's for a child, the Owner's from before Spaces). */
+    /**
+     * The User the current command acts for (`CommandActor`), None for the server's own work.
+     * A request whose session names no User is refused once an Owner exists; an agent in a
+     * Thread from before owners were recorded acts as the Owner.
+     */
+    readonly actingUser: Effect.Effect<
+      Option.Option<UserId>,
+      SpaceAccessDeniedError | SpaceDirectoryStorageError
+    >;
     readonly threadOwner: (
       threadId: ThreadId,
     ) => Effect.Effect<Option.Option<UserId>, SpaceDirectoryStorageError>;
@@ -504,6 +515,22 @@ const make = Effect.gen(function* () {
     return principal;
   });
 
+  const actingUser = Effect.gen(function* () {
+    const actor = yield* CommandActor.resolve;
+    switch (actor._tag) {
+      case "Server":
+        return Option.none<UserId>();
+      case "User":
+        return Option.some(actor.userId);
+      case "ThreadOwner":
+        return yield* ownerId;
+      case "NoUser": {
+        if (Option.isNone(yield* ownerId)) return Option.none<UserId>();
+        return yield* new SpaceAccessDeniedError({ action: "act", reason: "no-user" });
+      }
+    }
+  });
+
   const threadOwner = Effect.fn("SpaceDirectory.threadOwner")(function* (threadId: ThreadId) {
     const row = yield* findThreadItem(threadId).pipe(Effect.mapError(storageError));
     return Option.flatMap(row, (found) => Option.fromNullishOr(found.ownerUserId));
@@ -570,6 +597,7 @@ const make = Effect.gen(function* () {
     claimCreation,
     authorize,
     authorizeItem,
+    actingUser,
     threadOwner,
     addMembership,
     viewableSpaces,

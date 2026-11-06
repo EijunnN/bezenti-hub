@@ -9,6 +9,7 @@ import {
   ScheduledTaskError,
   ScheduledTaskId,
   ThreadId,
+  UserId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -30,6 +31,8 @@ import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
+import * as CommandActor from "../auth/CommandActor.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 
 const isScheduledTaskError = Schema.is(ScheduledTaskError);
@@ -615,6 +618,85 @@ it.effect("a run interrupted right after it reserves the task does not block the
       const second = yield* service.runNow({ id: task.id });
       assert.equal(second.threadId, ThreadId.make("thread:launched"));
       assert.equal(yield* Ref.get(launches), 1);
+    }).pipe(Effect.provide(layer));
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect("a task acts as the User who created it, and only they change or run it", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const at = "2026-01-01T00:00:00.000Z";
+    for (const [id, isOwner] of [
+      ["owner", 1],
+      ["grace", 0],
+      ["gus", 0],
+    ] as const) {
+      yield* sql`INSERT INTO users (user_id, display_name, is_owner, created_at)
+        VALUES (${id}, ${id}, ${isOwner}, ${at})`;
+    }
+    for (const space of ["acme", "globex"]) {
+      yield* sql`INSERT INTO spaces (space_id, kind, name, created_at)
+        VALUES (${space}, 'organization', ${space}, ${at})`;
+      yield* sql`INSERT INTO projection_projects
+        (project_id, title, workspace_root, scripts_json, created_at, updated_at, space_id)
+        VALUES (${`${space}-app`}, ${space}, ${`/work/${space}`}, '[]', ${at}, ${at}, ${space})`;
+    }
+    yield* sql`INSERT INTO space_memberships (space_id, user_id, role, created_at)
+      VALUES ('acme', 'grace', 'member', ${at}), ('acme', 'gus', 'member', ${at})`;
+    const launchedAs = yield* Ref.make<ReadonlyArray<string | undefined>>([]);
+    const layer = ScheduledTaskService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          ManagedPolicy.layerTest(),
+          Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+            launch: () =>
+              CommandActor.current.pipe(
+                Effect.flatMap((actor) => Ref.update(launchedAs, (all) => [...all, actor])),
+                Effect.andThen(Effect.die("launch observed")),
+              ),
+          }),
+          Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+            namedProjectsRoot: "/projects",
+            isScratchProject: () => Effect.succeed(false),
+          }),
+          SpaceDirectory.layer.pipe(Layer.provide(NodeCrypto.layer)),
+          NodeCrypto.layer,
+          Scheduler.layer,
+        ),
+      ),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ScheduledTaskService.ScheduledTaskService;
+      const taskIn = (projectId: string) => ({
+        id: ScheduledTaskId.make(`task:${projectId}`),
+        title: "Check in",
+        prompt: "Check progress",
+        enabled: false,
+        schedule: { type: "interval" as const, everyMs: 60_000 },
+        projectId: ProjectId.make(projectId),
+        threadId: null,
+        workspaceStrategy: { type: "root" as const },
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+      });
+      const asGrace = CommandActor.actAs(UserId.make("grace"));
+      const asGus = CommandActor.actAs(UserId.make("gus"));
+      const { task } = yield* service.upsert(taskIn("acme-app")).pipe(asGrace);
+      assert.equal(task.ownerUserId, "grace");
+      // A Project in a Space Grace cannot see is refused like a missing one.
+      const hidden = yield* service.upsert(taskIn("globex-app")).pipe(asGrace, Effect.flip);
+      assert.include(hidden.message, "does not exist");
+      // A teammate may not run or rewrite it: it would speak as Grace.
+      const run = yield* service.runNow({ id: task.id }).pipe(asGus, Effect.flip);
+      assert.include(run.message, "Only the person who created this task");
+      const rewrite = yield* service.upsert(taskIn("acme-app")).pipe(asGus, Effect.flip);
+      assert.include(rewrite.message, "Only the person who created this task");
+      // When it runs, it acts as Grace, whoever triggers the run.
+      yield* service.runNow({ id: task.id }).pipe(Effect.exit);
+      assert.deepEqual(yield* Ref.get(launchedAs), ["grace"]);
     }).pipe(Effect.provide(layer));
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );

@@ -292,6 +292,8 @@ const layerScheduledTaskProvided = ScheduledTaskService.layer.pipe(
       layerThreadManagementProvided,
       layerManagedProjectFoldersProvided,
       layerSecretRequestsProvided,
+      // A task acts as its creator and is checked as them.
+      SpaceDirectory.layer,
     ),
   ),
 );

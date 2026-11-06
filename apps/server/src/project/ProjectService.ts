@@ -370,7 +370,7 @@ export const make = Effect.gen(function* () {
       // Before touching the workspace, which may create its folder.
       const stamp = yield* spaces.claimCreation({
         action: "project.create",
-        actorUserId: input.actorUserId ?? (yield* CommandActor.current),
+        actorUserId: input.actorUserId ?? Option.getOrUndefined(yield* spaces.actingUser),
         spaceId: input.spaceId,
       });
       const workspaceRoot = yield* normalizeWorkspaceRoot({
@@ -397,10 +397,10 @@ export const make = Effect.gen(function* () {
     projectId: ProjectId,
     actions: ReadonlyArray<AccessPolicy.Action>,
   ) {
-    const actor = yield* CommandActor.current;
-    if (actor === undefined) return;
+    const actor = yield* spaces.actingUser;
+    if (Option.isNone(actor)) return;
     for (const action of actions) {
-      yield* spaces.authorizeItem(actor, action, { kind: "project", id: projectId });
+      yield* spaces.authorizeItem(actor.value, action, { kind: "project", id: projectId });
     }
   });
 
