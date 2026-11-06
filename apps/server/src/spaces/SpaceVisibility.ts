@@ -16,6 +16,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import type * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
@@ -87,10 +88,12 @@ export class SpaceVisibility extends Context.Service<
      */
     readonly viewer: (userId: UserId | undefined) => Effect.Effect<Effect.Effect<Visibility>>;
     /**
-     * Emits when the User's access changed so that what an open stream already sent may now be
-     * hidden; streams reload from scratch or close. Nothing for no User.
+     * Subscribes now to changes of the User's access that may hide what an open stream already
+     * sent; streams reload from scratch or close. Never emits for no User.
      */
-    readonly accessChanges: (userId: UserId | undefined) => Stream.Stream<void>;
+    readonly subscribeAccessChanges: (
+      userId: UserId | undefined,
+    ) => Effect.Effect<Stream.Stream<void>, never, Scope.Scope>;
     /** The ids among `threadIds` the principal may see. Deleted threads keep their Space. */
     readonly visibleThreadIds: (
       visibility: Visibility,
@@ -173,13 +176,8 @@ const make = Effect.gen(function* () {
     });
   });
 
-  const accessChanges = (userId: UserId | undefined) =>
-    userId === undefined
-      ? Stream.empty
-      : spaces.accessChanges.pipe(
-          Stream.filter((changed) => changed === userId),
-          Stream.as(undefined),
-        );
+  const subscribeAccessChanges = (userId: UserId | undefined) =>
+    userId === undefined ? Effect.succeed(Stream.empty) : spaces.subscribeAccessChanges(userId);
 
   const visibleThreadIds = Effect.fn("SpaceVisibility.visibleThreadIds")(function* (
     visibility: Visibility,
@@ -327,6 +325,7 @@ const make = Effect.gen(function* () {
       FROM orchestration_v2_projection_threads t
       LEFT JOIN projection_projects p ON p.project_id = t.project_id
       WHERE t.owner_user_id = ${userId} AND t.deleted_at IS NULL
+        AND ${threadInSpaces(sql, "t", visibility.spaceIds)}
       UNION
       SELECT workspace_root AS root FROM projection_projects
       WHERE deleted_at IS NULL
@@ -339,7 +338,7 @@ const make = Effect.gen(function* () {
   return SpaceVisibility.of({
     of,
     viewer,
-    accessChanges,
+    subscribeAccessChanges,
     visibleThreadIds,
     hiddenThreadIds,
     visibleProjectIds,
@@ -356,8 +355,8 @@ export class CurrentViewer extends Context.Service<
   CurrentViewer,
   {
     readonly visibility: Effect.Effect<Visibility>;
-    /** `SpaceVisibility.accessChanges` for this connection's User. */
-    readonly accessChanges: Stream.Stream<void>;
+    /** `SpaceVisibility.subscribeAccessChanges` for this connection's User. */
+    readonly subscribeAccessChanges: Effect.Effect<Stream.Stream<void>, never, Scope.Scope>;
   }
 >()("t3/spaces/SpaceVisibility/CurrentViewer") {}
 
@@ -369,7 +368,7 @@ export const layerCurrentViewer = Layer.effect(
     const visibility = yield* SpaceVisibility;
     return CurrentViewer.of({
       visibility: yield* visibility.viewer(principal.userId),
-      accessChanges: visibility.accessChanges(principal.userId),
+      subscribeAccessChanges: visibility.subscribeAccessChanges(principal.userId),
     });
   }),
 );
@@ -377,5 +376,8 @@ export const layerCurrentViewer = Layer.effect(
 /** Sees everything: for tests and in-process callers that act as the Owner. */
 export const layerCurrentViewerOwner = Layer.succeed(
   CurrentViewer,
-  CurrentViewer.of({ visibility: Effect.succeed(everything), accessChanges: Stream.empty }),
+  CurrentViewer.of({
+    visibility: Effect.succeed(everything),
+    subscribeAccessChanges: Effect.succeed(Stream.empty),
+  }),
 );

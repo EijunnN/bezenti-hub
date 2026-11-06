@@ -55,10 +55,11 @@ export const useCurrentSpace = create<CurrentSpaceState>(() => ({
   loadFailed: false,
 }));
 
-export function selectSpace(spaceId: SpaceId) {
+/** Null when the User has no Space to work in yet. */
+export function selectSpace(spaceId: SpaceId | null) {
   const { environmentId, view } = useCurrentSpace.getState();
   if (environmentId !== null) setCurrentSpace(environmentId, spaceId);
-  if (view !== null) storeSpace(view, spaceId);
+  if (view !== null && spaceId !== null) storeSpace(view, spaceId);
   useCurrentSpace.setState({ currentSpaceId: spaceId });
 }
 

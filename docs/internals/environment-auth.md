@@ -127,10 +127,12 @@ Using a Personal space at all needs the `personalSpace.create` Installation
 permission: without it the space is hidden (`space.view` is denied, so what it
 holds from before a revoke reads as missing too). The Owner grants and revokes
 permissions (`installation_permissions` rows) over HTTP
-(`/api/installation/users`) through `SpaceDirectory.setInstallationPermission`,
-the one place ticket 14 audits. `environments.registerOwn` is only stored. The
-Owner reads every Personal space and lists them in the selector, but creates
-nothing in another User's.
+(`/api/installation/users`, which also needs the `access:read`/`access:write`
+scope) through `SpaceDirectory.setInstallationPermission`, the one place ticket
+14 audits. `environments.registerOwn` is only stored. The Owner reads every
+Personal space and lists them in the selector, but changes nothing in another
+User's (`personal-space-read-only`). Naming a Space one cannot see, a
+`personal:<id>` included, answers exactly like naming a missing one.
 
 #### Who sees what
 
@@ -170,12 +172,16 @@ place this is answered, and every read of Projects or Threads asks it:
 Each WebSocket connection resolves its viewer once (`CurrentViewer`) and again
 only when `SpaceDirectory.revision` moves, which every Space or Membership write
 bumps, so a new Membership shows on the next read without reconnecting. A change
-that can hide what a connection already holds publishes the User on
-`SpaceDirectory.accessChanges` (`CurrentViewer.accessChanges` per connection):
-the shell stream answers with a fresh authoritative snapshot, which replaces the
-client's rows (web reloads its Spaces on it), and an open Thread stream that is
-now hidden fails as not found. Granting and revoking Installation permissions
-publish it; removing Members (ticket 09) should too.
+that can hide what a connection already holds wakes that User's connections
+(`SpaceDirectory.subscribeAccessChanges`, one hub per User, only when a row
+changed). The shell stream restarts: the old round ends and a fresh
+authoritative snapshot and its live tail replace it (web reloads its Spaces on
+it). Streams on one Thread (Thread, command output, worktree setup, terminals)
+go through `untilAccessLost` in
+[RpcSpaceAccess](../../apps/server/src/auth/RpcSpaceAccess.ts): it subscribes,
+then reruns the middleware's guard once and on each change, and ends the stream
+when the guard refuses. Granting and revoking Installation permissions wake it;
+removing Members (ticket 09) should too.
 
 #### Who changes what
 

@@ -15,6 +15,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Predicate from "effect/Predicate";
+import * as Stream from "effect/Stream";
 import type * as RpcGroup from "effect/rpc/RpcGroup";
 
 import type * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
@@ -326,3 +327,37 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
     if (hidden.size > 0) return yield* notFound();
   }
 });
+
+export type AccessLost = SpaceResourceNotFoundError | SpaceActionDeniedError;
+
+/**
+ * Keeps a stream the middleware let open only while its payload still passes the same guard: it
+ * subscribes to the User's access changes first, re-checks once (a revoke between the
+ * middleware's check and the subscription is not missed), then again on each change. When the
+ * guard refuses, `onLost` ends the stream (succeeds) or fails it with the RPC's own error.
+ */
+export const untilAccessLost =
+  <E2>(
+    method: string,
+    payload: unknown,
+    viewer: SpaceVisibility.CurrentViewer["Service"],
+    spaceVisibility: SpaceVisibility.SpaceVisibility["Service"],
+    userId: UserId | undefined,
+    onLost: (lost: AccessLost) => Effect.Effect<void, E2>,
+  ) =>
+  <A, E, R>(stream: Stream.Stream<A, E, R>): Stream.Stream<A, E | E2, R> =>
+    Stream.unwrap(
+      Effect.gen(function* () {
+        const changes = yield* viewer.subscribeAccessChanges;
+        const lost = Stream.concat(Stream.succeed(undefined), changes).pipe(
+          Stream.runForEach(() =>
+            Effect.flatMap(viewer.visibility, (visibility) =>
+              guardRpcPayload(method, payload, visibility, spaceVisibility, userId),
+            ),
+          ),
+          Effect.andThen(Effect.never),
+          Effect.catch(onLost),
+        );
+        return Stream.interruptWhen(stream, lost);
+      }),
+    );

@@ -833,6 +833,11 @@ class EnvironmentSpacesHttpApi extends HttpApiGroup.make("spaces")
   ) {}
 
 const InstallationUserParams = Schema.Struct({ userId: UserId });
+// The session must be the Owner's and carry the access scope.
+const EnvironmentInstallationUserErrors = [
+  ...EnvironmentSpaceErrors,
+  EnvironmentScopeRequiredError,
+] as const;
 
 // The Owner's Users admin view: list Users and grant or revoke their Installation permissions.
 class EnvironmentInstallationUsersHttpApi extends HttpApiGroup.make("installationUsers")
@@ -840,7 +845,7 @@ class EnvironmentInstallationUsersHttpApi extends HttpApiGroup.make("installatio
     HttpApiEndpoint.get("list", "/api/installation/users", {
       headers: OptionalBearerHeaders,
       success: InstallationUserList,
-      error: EnvironmentSpaceErrors,
+      error: EnvironmentInstallationUserErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -849,7 +854,7 @@ class EnvironmentInstallationUsersHttpApi extends HttpApiGroup.make("installatio
       params: InstallationUserParams,
       payload: SetInstallationPermissionRequest,
       success: InstallationUser,
-      error: [...EnvironmentSpaceErrors, EnvironmentResourceNotFoundError],
+      error: [...EnvironmentInstallationUserErrors, EnvironmentResourceNotFoundError],
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 

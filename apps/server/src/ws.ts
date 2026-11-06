@@ -54,6 +54,7 @@ import {
   ORCHESTRATION_PROTOCOL_VERSION,
   OrchestrationV2DispatchCommandError,
   OrchestrationV2GetShellSnapshotError,
+  OrchestrationV2CommandOutputError,
   OrchestrationV2GetThreadProjectionError,
   OrchestrationV2ThreadLaunchError,
   type OrchestrationProjectShell,
@@ -94,6 +95,8 @@ import {
   type PullRequestRef,
   WS_METHODS,
   WsRpcGroup,
+  type TerminalAttachStreamEvent,
+  type TerminalError,
 } from "@t3tools/contracts";
 import {
   HttpRouter,
@@ -222,6 +225,7 @@ import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import { requiredScopeForDeviceList, rpcAuthorizationError } from "./auth/RpcAuthorization.ts";
 import * as RpcAuthorization from "./auth/RpcAuthorization.ts";
+import { type AccessLost, untilAccessLost } from "./auth/RpcSpaceAccess.ts";
 import * as CurrentPrincipal from "./auth/CurrentPrincipal.ts";
 import * as SpaceDirectory from "./spaces/SpaceDirectory.ts";
 import * as SpaceVisibility from "./spaces/SpaceVisibility.ts";
@@ -983,6 +987,12 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
   },
 );
 
+/** The same shell subscription from a fresh snapshot instead of a resume cursor. */
+const withoutResumeCursor = <I extends { readonly afterSequence?: number }>({
+  afterSequence: _afterSequence,
+  ...rest
+}: I): Omit<I, "afterSequence"> => rest;
+
 export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subscribeShell")(
   function* (input: {
     readonly afterSequence?: number;
@@ -998,7 +1008,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
     const spaceVisibility = yield* SpaceVisibility.SpaceVisibility;
     // Read per batch, so a new Membership shows up in later deltas without resubscribing.
-    const { visibility: currentVisibility, accessChanges } = yield* SpaceVisibility.CurrentViewer;
+    const { visibility: currentVisibility } = yield* SpaceVisibility.CurrentViewer;
     const visibleProjects = (all: ReadonlyArray<OrchestrationProjectShell>) =>
       currentVisibility.pipe(
         Effect.map((visibility) =>
@@ -1291,15 +1301,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       ),
     );
 
-    // What the viewer was sent may be hidden now (a revoked Installation permission): a fresh
-    // authoritative snapshot replaces everything the client holds.
-    const accessResnapshots = accessChanges.pipe(
-      Stream.mapEffect(() => loadSnapshot()),
-      Stream.flatMap((loaded) => Stream.fromIterable(shellStreamItemsFromInitialSnapshot(loaded))),
-    );
-
     return stream.pipe(
-      Stream.merge(accessResnapshots, { haltStrategy: "left" }),
       dedupeShellEnrichment,
       Stream.mapError(
         (cause) =>
@@ -1322,7 +1324,14 @@ export const layerWsRpc = (
       const principal = yield* EnvironmentAuthenticatedPrincipal;
       const currentSessionId = principal.sessionId;
       // What this connection may see; every Project and Thread read below filters by it.
-      const { visibility: currentVisibility, accessChanges } = yield* SpaceVisibility.CurrentViewer;
+      const viewer = yield* SpaceVisibility.CurrentViewer;
+      const { visibility: currentVisibility } = viewer;
+      // Streams on one Thread end, as if it were gone, once an access change hides it.
+      const whileAllowed = <E2 = never>(
+        method: string,
+        payload: unknown,
+        onLost: (lost: AccessLost) => Effect.Effect<void, E2> = () => Effect.void,
+      ) => untilAccessLost(method, payload, viewer, spaceVisibility, principal.userId, onLost);
       const spaceVisibility = yield* SpaceVisibility.SpaceVisibility;
       const currentSpaceIds = Effect.map(currentVisibility, SpaceVisibility.spaceFilter);
       const sql = yield* SqlClient.SqlClient;
@@ -2267,43 +2276,48 @@ export const layerWsRpc = (
                 ),
             ),
           ),
+        // What the shell already sent may be hidden after an access change (a revoked
+        // Installation permission), so the stream restarts: the old one ends before a fresh
+        // authoritative snapshot, and its live tail, take over. Subscribed before the first round.
         [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: (input) =>
-          Stream.unwrap(subscribeOrchestrationV2Shell(input)),
+          Stream.unwrap(
+            Effect.map(viewer.subscribeAccessChanges, (changes) =>
+              Stream.concat(
+                Stream.succeed(input),
+                Stream.as(changes, withoutResumeCursor(input)),
+              ).pipe(
+                Stream.switchMap((round) => Stream.unwrap(subscribeOrchestrationV2Shell(round))),
+              ),
+            ),
+          ),
         [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input) =>
           Stream.unwrap(
             Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
               Effect.andThen(subscribeOrchestrationV2Thread(input)),
             ),
           ).pipe(
-            // The middleware checked the Thread when the stream opened; a later access change
-            // that hides it ends the stream as if the Thread were gone.
-            Stream.merge(
-              accessChanges.pipe(
-                Stream.mapEffect(() =>
-                  currentVisibility.pipe(
-                    Effect.flatMap((visibility) =>
-                      spaceVisibility.visibleThreadIds(visibility, [input.threadId]),
-                    ),
-                  ),
-                ),
-                Stream.filter((visible) => !visible.has(input.threadId)),
-                Stream.take(1),
-                Stream.flatMap(() =>
-                  Stream.fail(
-                    new OrchestrationV2GetThreadProjectionError({
-                      threadId: input.threadId,
-                      message: "That Project or Thread does not exist.",
-                    }),
-                  ),
-                ),
+            whileAllowed(ORCHESTRATION_V2_WS_METHODS.subscribeThread, input, (lost) =>
+              Effect.fail(
+                new OrchestrationV2GetThreadProjectionError({
+                  threadId: input.threadId,
+                  message: lost.message,
+                }),
               ),
-              { haltStrategy: "left" },
             ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.subscribeCommandOutput]: (input) =>
           Stream.unwrap(
             Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
               Effect.as(commandOutputHub.subscribe(input)),
+            ),
+          ).pipe(
+            whileAllowed(ORCHESTRATION_V2_WS_METHODS.subscribeCommandOutput, input, (lost) =>
+              Effect.fail(
+                new OrchestrationV2CommandOutputError({
+                  threadId: input.threadId,
+                  message: lost.message,
+                }),
+              ),
             ),
           ),
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
@@ -3061,7 +3075,10 @@ export const layerWsRpc = (
         [WS_METHODS.assetsPersistChatAttachments]: (input) =>
           persistChatAttachments(input).pipe(Effect.map((attachments) => ({ attachments }))),
         [WS_METHODS.subscribeVcsStatus]: (input) => vcsStatusBroadcaster.streamStatus(input),
-        [WS_METHODS.subscribeWorktreeSetup]: (input) => worktreeSetupTracker.stream(input.threadId),
+        [WS_METHODS.subscribeWorktreeSetup]: (input) =>
+          worktreeSetupTracker
+            .stream(input.threadId)
+            .pipe(whileAllowed(WS_METHODS.subscribeWorktreeSetup, input)),
         [WS_METHODS.worktreeSetupCancel]: (input) =>
           worktreeSetupTracker
             .cancel(input.threadId)
@@ -3137,19 +3154,21 @@ export const layerWsRpc = (
         [WS_METHODS.reviewGetDiffFileContents]: (input) => review.getDiffFileContents(input),
         [WS_METHODS.terminalOpen]: (input) => terminalManager.open(input),
         [WS_METHODS.terminalAttach]: (input, metadata) =>
-          terminalManager.attachOutputStream(input, terminalViewerId(metadata)),
+          terminalManager
+            .attachOutputStream(input, terminalViewerId(metadata))
+            .pipe(whileAllowed(WS_METHODS.terminalAttach, input)),
         [WS_METHODS.terminalWrite]: (input) => terminalManager.write(input),
         [WS_METHODS.terminalResize]: (input, metadata) =>
           terminalManager.resize(input, terminalViewerId(metadata)),
         [WS_METHODS.terminalClear]: (input) => terminalManager.clear(input),
         [WS_METHODS.terminalClose]: (input) => terminalManager.close(input),
         [WS_METHODS.terminalObserve]: (input) =>
-          terminalOutputStream(
+          terminalOutputStream<TerminalAttachStreamEvent, TerminalError>(
             (listener, registerCleanup) =>
               terminalManager.observeStream(input, listener, registerCleanup),
             (listener, registerCleanup) =>
               terminalManager.resyncStream(input, listener, registerCleanup),
-          ),
+          ).pipe(whileAllowed(WS_METHODS.terminalObserve, input)),
         [WS_METHODS.subscribeTerminalMetadata]: (_input) =>
           Stream.callback<TerminalMetadataStreamEvent>((queue) =>
             Effect.acquireRelease(

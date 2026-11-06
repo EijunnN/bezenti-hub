@@ -1,8 +1,7 @@
 /**
- * Who may do what in which Space. Pure: callers load the principal and the resource, this
- * decides. Each rule of the Role table is one case here and one row in AccessPolicy.test.ts.
- * The Owner is allowed everything except creating in an archived or frozen Space, creating in
- * someone else's Personal space (which the Owner only reads) and sharing from a Personal space.
+ * Who may do what in which Space. Pure; each rule is one row in AccessPolicy.test.ts. The Owner
+ * may do everything except create in an archived or frozen Space, change anything in another
+ * User's Personal space (only read it) and share from a Personal space.
  */
 import type {
   InstallationPermission,
@@ -113,6 +112,8 @@ export type DenyReason =
   | "not-a-member"
   | "role-not-allowed"
   | "not-your-personal-space"
+  /** The Owner reads another User's Personal space and changes nothing in it. */
+  | "personal-space-read-only"
   | "missing-installation-permission"
   | "space-archived"
   | "space-frozen"
@@ -163,8 +164,14 @@ const inOrganization = (
  * Owner; each archives and stops their own; Admins also archive and stop others' and delete what
  * is archived. A Personal space's User runs their own space as an Admin runs an Organization.
  */
+const othersPersonalSpace = (principal: Principal, space: SpaceResource) =>
+  space.kind === "personal" && space.personalOwnerUserId !== principal.userId;
+
 const decideOwned = (principal: Principal, action: Action, item: OwnedResource): Decision => {
   const { space } = item;
+  if (principal.isOwner && othersPersonalSpace(principal, space)) {
+    return deny("personal-space-read-only");
+  }
   if (action === "thread.continue") {
     if (space.archived) return deny("space-archived");
     if (space.frozen) return deny("space-frozen");
@@ -229,12 +236,9 @@ export const decide = (principal: Principal, action: Action, resource: Resource)
   }
   if (principal.isOwner) {
     // The Owner reads every Personal space but adds nothing to another User's.
-    const othersPersonal =
-      creates &&
-      isSpace(resource) &&
-      resource.kind === "personal" &&
-      resource.personalOwnerUserId !== principal.userId;
-    return othersPersonal ? deny("not-your-personal-space") : allow;
+    return creates && isSpace(resource) && othersPersonalSpace(principal, resource)
+      ? deny("personal-space-read-only")
+      : allow;
   }
   if (OWNER_ONLY.has(action)) return deny("owner-only");
   if (!isSpace(resource)) return deny("wrong-resource");

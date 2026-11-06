@@ -25,6 +25,9 @@ export interface ThreadRolePermissions {
 export const NOT_YOUR_THREAD_REASON =
   "Only the person who started this Thread can continue it. Start a new Thread to build on it.";
 
+const READ_ONLY_PERSONAL_SPACE_REASON =
+  "This is someone else's Personal space: you can read it but not change anything in it.";
+
 const EVERYTHING: ThreadRolePermissions = {
   canContinue: true,
   canArchive: true,
@@ -49,6 +52,17 @@ export function threadRolePermissions(
   // A Thread from before owners were recorded is the Owner's.
   const own =
     thread.ownerUserId == null ? view.isOwner === true : thread.ownerUserId === view.userId;
+  // The Owner only reads another User's Personal space.
+  if (view.isOwner === true && space?.kind === "personal" && !space.isOwn) {
+    return {
+      canContinue: false,
+      canArchive: false,
+      canStop: false,
+      canDelete: false,
+      canCreateGuestLink: false,
+      continueBlockedReason: READ_ONLY_PERSONAL_SPACE_REASON,
+    };
+  }
   // The Owner archives, stops and deletes anything, but continues only their own Threads.
   if (view.isOwner === true) {
     return {

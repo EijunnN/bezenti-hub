@@ -19,6 +19,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
+import type * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
@@ -63,6 +64,9 @@ const deniedMessage = (action: string, reason: string): string | undefined => {
     return `Only its creator or an Admin can ${DENIED_ACTION_LABELS[action] ?? "do that"}.`;
   }
   if (reason === "not-archived") return "Archive it before deleting it permanently.";
+  if (reason === "personal-space-read-only") {
+    return "This is someone else's Personal space: you can read it but not change anything in it.";
+  }
   if (reason === "missing-installation-permission") {
     return "Your Personal space is off. Ask the Owner to let you create in it.";
   }
@@ -204,7 +208,7 @@ export class SpaceDirectory extends Context.Service<
     >;
     /**
      * Grants or revokes one Installation permission; Owner only. Takes effect at once: cached
-     * principals go stale and the User's open connections hear it on `accessChanges`.
+     * principals go stale and the User's open connections hear it on `subscribeAccessChanges`.
      */
     readonly setInstallationPermission: (input: {
       readonly actorUserId: UserId;
@@ -216,10 +220,13 @@ export class SpaceDirectory extends Context.Service<
       SpaceAccessDeniedError | InstallationUserNotFoundError | SpaceDirectoryStorageError
     >;
     /**
-     * Users whose access changed in a way a cached read cannot follow (a Space they saw is now
-     * hidden), so their open connections reload what they show.
+     * Subscribes now (so nothing published after it returns is missed) to changes of the
+     * User's access that a cached read cannot follow (a Space they saw is now hidden), so their
+     * open connections reload what they show. Bursts coalesce into one.
      */
-    readonly accessChanges: Stream.Stream<UserId>;
+    readonly subscribeAccessChanges: (
+      userId: UserId,
+    ) => Effect.Effect<Stream.Stream<void>, never, Scope.Scope>;
     readonly createOrganization: (
       userId: UserId,
       name: string,
@@ -298,7 +305,21 @@ const make = Effect.gen(function* () {
   const storageError = (cause: unknown) => new SpaceDirectoryStorageError({ cause });
   const revision = yield* Ref.make(0);
   const changed = Ref.update(revision, (current) => current + 1);
-  const accessChanged = yield* PubSub.unbounded<UserId>();
+  // One hub per User who has a connection open, so a change reaches only that User's streams.
+  const accessHubs = new Map<UserId, PubSub.PubSub<void>>();
+  const subscribeAccessChanges = Effect.fn("SpaceDirectory.subscribeAccessChanges")(function* (
+    userId: UserId,
+  ) {
+    const created = yield* PubSub.sliding<void>(1);
+    const hub = accessHubs.get(userId) ?? created;
+    accessHubs.set(userId, hub);
+    return Stream.fromSubscription(yield* PubSub.subscribe(hub));
+  });
+  const accessChanged = (userId: UserId) =>
+    Effect.suspend(() => {
+      const hub = accessHubs.get(userId);
+      return hub === undefined ? Effect.void : PubSub.publish(hub, undefined);
+    });
 
   const findSpace = SqlSchema.findOneOption({
     Request: SpaceId,
@@ -528,25 +549,49 @@ const make = Effect.gen(function* () {
       // The Owner holds every permission; there is nothing to grant or revoke.
       if (target.value.isOwner) return toInstallationUser(target.value);
       const now = DateTime.formatIso(yield* DateTime.now);
-      yield* (
+      const written = yield* (
         input.granted
-          ? sql`
+          ? sql<{ readonly userId: string }>`
               INSERT INTO installation_permissions (user_id, permission, granted_by, granted_at)
               VALUES (${input.userId}, ${input.permission}, ${input.actorUserId}, ${now})
               ON CONFLICT (user_id, permission) DO NOTHING
+              RETURNING user_id AS "userId"
             `
-          : sql`
+          : sql<{ readonly userId: string }>`
               DELETE FROM installation_permissions
               WHERE user_id = ${input.userId} AND permission = ${input.permission}
+              RETURNING user_id AS "userId"
             `
-      ).pipe(
-        Effect.mapError(storageError),
-        Effect.ensuring(Effect.andThen(changed, PubSub.publish(accessChanged, input.userId))),
-      );
+      ).pipe(Effect.mapError(storageError));
+      // Only a row that changed moves caches and wakes the User's connections.
+      if (written.length > 0) yield* Effect.andThen(changed, accessChanged(input.userId));
       const updated = yield* findUserRow(input.userId).pipe(Effect.mapError(storageError));
       return toInstallationUser(Option.getOrElse(updated, () => target.value));
     },
   );
+
+  /**
+   * A Space the User may not see answers exactly like one that does not exist, so naming
+   * `personal:<id>` or an Organization id says nothing about what is there. Their own hidden
+   * Personal space still says why.
+   */
+  const requireAllowedInSpace = Effect.fnUntraced(function* (
+    principal: AccessPolicy.Principal,
+    action: AccessPolicy.Action,
+    spaceId: SpaceId,
+    space: Option.Option<SpaceRow>,
+  ): Effect.fn.Return<SpaceRow, SpaceAccessDeniedError | SpaceNotFoundError> {
+    if (Option.isNone(space)) return yield* new SpaceNotFoundError({ spaceId });
+    const resource = toResource(space.value);
+    if (
+      resource.personalOwnerUserId !== principal.userId &&
+      !allows(principal, "space.view", resource)
+    ) {
+      return yield* new SpaceNotFoundError({ spaceId });
+    }
+    yield* requireAllowed(principal, action, resource);
+    return space.value;
+  });
 
   const createOrganization = Effect.fn("SpaceDirectory.createOrganization")(function* (
     userId: UserId,
@@ -597,8 +642,7 @@ const make = Effect.gen(function* () {
       [findSpace(spaceId).pipe(Effect.mapError(storageError)), principalOf(actor)],
       { concurrency: "unbounded" },
     );
-    if (Option.isNone(space)) return yield* new SpaceNotFoundError({ spaceId });
-    yield* requireAllowed(principal, claim.action, toResource(space.value));
+    yield* requireAllowedInSpace(principal, claim.action, spaceId, space);
     return { spaceId, ownerUserId: actor } satisfies CreationStamp;
   });
 
@@ -611,9 +655,8 @@ const make = Effect.gen(function* () {
       [findSpace(spaceId).pipe(Effect.mapError(storageError)), principalOf(userId)],
       { concurrency: "unbounded" },
     );
-    if (Option.isNone(space)) return yield* new SpaceNotFoundError({ spaceId });
-    yield* requireAllowed(principal, action, toResource(space.value));
-    return { id: space.value.spaceId, name: space.value.name };
+    const row = yield* requireAllowedInSpace(principal, action, spaceId, space);
+    return { id: row.spaceId, name: row.name };
   });
 
   // One read per check: the item, its Space (its own, its Project's, else the Owner's Personal
@@ -710,8 +753,6 @@ const make = Effect.gen(function* () {
     item: ItemRef,
   ) {
     const principal = yield* currentPrincipal(userId);
-    // The Owner sees everything; only what even the Owner may not do needs the item read.
-    if (principal.isOwner && action !== "thread.continue" && action !== "guestLink.create") return;
     const row = yield* (item.kind === "thread" ? findThreadItem : findProjectItem)(item.id).pipe(
       Effect.mapError(storageError),
     );
@@ -759,7 +800,7 @@ const make = Effect.gen(function* () {
     view,
     listUsers,
     setInstallationPermission,
-    accessChanges: Stream.fromPubSub(accessChanged),
+    subscribeAccessChanges,
     createOrganization,
     claimCreation,
     authorize,

@@ -47,17 +47,13 @@ export const currentSpaceStorageKey = (userId: UserId) => `t3code:current-space:
 /**
  * The Space to start in: the stored one while it is still listed, otherwise the first the User
  * can create in (their Personal space is listed only once they hold that permission), else the
- * first listed, else their hidden Personal space, where the server refuses new work.
+ * first listed, else none: a hidden Personal space is never chosen.
  */
 export function chooseCurrentSpace(
   view: SpaceDirectoryView,
   stored: string | null,
-): SpaceSummary["id"] {
+): SpaceSummary["id"] | null {
   const kept = view.spaces.find((space) => space.id === stored);
   if (kept !== undefined) return kept.id;
-  return (
-    view.spaces.find((space) => space.canCreateThreads)?.id ??
-    view.spaces[0]?.id ??
-    view.personalSpaceId
-  );
+  return view.spaces.find((space) => space.canCreateThreads)?.id ?? view.spaces[0]?.id ?? null;
 }

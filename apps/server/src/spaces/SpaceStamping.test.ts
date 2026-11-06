@@ -110,16 +110,17 @@ it.effect("puts a Thread in a Project from before Spaces into the Owner's Person
 
     yield* threads.dispatch(threadCreate("owner", { projectId, spaceId: acme }));
     expect(stampOf(dispatched[0])).toEqual(["personal:owner", "owner"]);
-    // Grace's Organization does not make the Owner's Project hers.
+    // Grace's Organization does not make the Owner's Project hers, and a Space she cannot see
+    // answers like a missing one.
     const refused = yield* threads
       .dispatch(
         threadCreate("member", { projectId, spaceId: acme, ownerUserId: UserId.make("member-1") }),
       )
       .pipe(Effect.flip);
     expect(SpaceDirectory.spaceRefusalMessage(refused)).toBe(
-      "You can't create Threads in this Space.",
+      "Space personal:owner does not exist.",
     );
-    // An archived Organization takes no new Threads.
+    // An archived Organization takes no new Threads; it is gone for its Members.
     const archived = yield* threads
       .dispatch(
         threadCreate("archived", {
@@ -128,9 +129,7 @@ it.effect("puts a Thread in a Project from before Spaces into the Owner's Person
         }),
       )
       .pipe(Effect.flip);
-    expect(SpaceDirectory.spaceRefusalMessage(archived)).toBe(
-      "You can't create Threads in this Space.",
-    );
+    expect(SpaceDirectory.spaceRefusalMessage(archived)).toBe("Space org-old does not exist.");
     expect(dispatched).toHaveLength(1);
   }).pipe(Effect.provide(makeLayer(dispatched)));
 });

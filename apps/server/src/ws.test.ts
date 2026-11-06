@@ -15,6 +15,7 @@ import {
   type OrchestrationV2ShellStreamItem,
   AuthSessionId,
   CommandId,
+  EnvironmentAuthenticatedPrincipal,
   EnvironmentId,
   ORCHESTRATION_V2_WS_METHODS,
   type OrchestrationV2Command,
@@ -160,6 +161,7 @@ import {
   serveAuthHttp,
 } from "./auth/UserAuth.testkit.ts";
 import * as CommandActor from "./auth/CommandActor.ts";
+import { untilAccessLost } from "./auth/RpcSpaceAccess.ts";
 import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
 import * as McpSessionRegistryTestkit from "./mcp/McpSessionRegistry.testkit.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
@@ -1503,6 +1505,7 @@ describe("Space visibility", () => {
     readonly projectId: string;
     readonly spaceId?: string;
     readonly ownerUserId?: string;
+    readonly worktreePath?: string;
   }) => {
     const id = ThreadId.make(input.id);
     const at = DateTime.makeUnsafe("2026-11-01T00:00:00.000Z");
@@ -1518,7 +1521,7 @@ describe("Space visibility", () => {
       runtimeMode: "full-access",
       interactionMode: "default",
       branch: null,
-      worktreePath: "/wt/shared",
+      worktreePath: input.worktreePath ?? "/wt/shared",
       activeProviderThreadId: null,
       ...(input.spaceId === undefined ? {} : { spaceId: SpaceId.make(input.spaceId) }),
       ...(input.ownerUserId === undefined ? {} : { ownerUserId: UserId.make(input.ownerUserId) }),
@@ -2492,9 +2495,12 @@ describe("Space visibility", () => {
           const notes = yield* createNotes("notes");
           assert.equal(notes.status, 200);
           assert.equal(notes.body.spaceId, personal);
-          // The same connection shows it, with no resubscribe.
+          // The same connection shows it, with no resubscribe: as a delta, or in the fresh
+          // snapshot the grant restarts the stream with.
           for (let item = yield* Queue.take(items); ; item = yield* Queue.take(items)) {
             if (item.kind === "project.updated" && item.project.id === "notes") break;
+            if (item.kind === "snapshot" && shellIds(item.snapshot).projects.includes("notes"))
+              break;
           }
 
           // The Owner reads every Personal space; another Member reads none but her own.
@@ -2525,6 +2531,145 @@ describe("Space visibility", () => {
           assert.notInclude(yield* projectIds(grace.cookie), "notes");
           assert.equal((yield* createNotes("after-revoke")).status, 403);
           assert.include(yield* projectIds(owner), "notes");
+        }),
+      ),
+  );
+
+  it.effect("the Owner's Users endpoints need the access scopes, not just the Owner", () =>
+    withHub(({ server, grace }) =>
+      Effect.gen(function* () {
+        const [ownerRow] = yield* server.sql<{ userId: string }>`
+          SELECT user_id AS "userId" FROM users WHERE is_owner = 1
+        `;
+        // A narrowed session of the Owner's, such as a read-only client paired by the Owner.
+        const narrow = yield* server.sessions.issue({
+          method: "browser-session-cookie",
+          subject: "user-sign-in",
+          userId: UserId.make(ownerRow!.userId),
+          scopes: ["orchestration:read"],
+        });
+        const cookie = `${server.sessions.cookieName}=${narrow.token}`;
+        assert.equal((yield* server.request("/api/installation/users", { cookie })).status, 403);
+        const set = yield* server.request(`/api/installation/users/${grace.userId}/permissions`, {
+          cookie,
+          body: { permission: "personalSpace.create", granted: true },
+        });
+        assert.equal(set.status, 403);
+        const [granted] = yield* server.sql<{ count: number }>`
+          SELECT COUNT(*) AS count FROM installation_permissions
+        `;
+        assert.equal(granted?.count, 0);
+      }),
+    ),
+  );
+
+  it.effect("naming someone else's Personal space answers like naming a missing one", () =>
+    withHub(({ server, grace, linus }) =>
+      Effect.gen(function* () {
+        const create = (spaceId: string) =>
+          server
+            .request("/api/projects/mutate", {
+              cookie: grace.cookie,
+              body: {
+                type: "project.create",
+                commandId: `probe-${spaceId}`,
+                projectId: `probe-${spaceId}`,
+                title: "probe",
+                workspaceRoot: "/work/probe",
+                spaceId,
+              },
+            })
+            .pipe(
+              Effect.map((response) => {
+                const { traceId: _traceId, ...body } = response.body;
+                return [response.status, JSON.stringify(body).replaceAll(spaceId, "<space>")];
+              }),
+            );
+        assert.deepEqual(
+          yield* create(`personal:${linus.userId}`),
+          yield* create("personal:no-such-user"),
+        );
+      }),
+    ),
+  );
+
+  it.effect(
+    "revoking a Personal space ends its streams, closes its folders and the Owner only reads it",
+    () =>
+      withTeam(({ server, owner, grace }) =>
+        Effect.gen(function* () {
+          const setPersonal = (granted: boolean) =>
+            server.request(`/api/installation/users/${grace.userId}/permissions`, {
+              cookie: owner,
+              body: { permission: "personalSpace.create", granted },
+            });
+          assert.equal((yield* setPersonal(true)).status, 200);
+          yield* server.eventSink.write({
+            events: [
+              threadCreated({
+                id: "notes-thread",
+                projectId: "acme-app",
+                spaceId: `personal:${grace.userId}`,
+                ownerUserId: grace.userId,
+                worktreePath: "/wt/notes",
+              }),
+            ],
+          });
+          const visibility = Context.get(server.services, SpaceVisibility.SpaceVisibility);
+          const mayUseNotes = Effect.flatMap(visibility.of(grace.userId), (seen) =>
+            visibility.mayUseDirectory(seen, grace.userId, "/wt/notes"),
+          );
+          assert.isTrue(yield* mayUseNotes);
+
+          // The Owner reads it but changes nothing in it.
+          const services = yield* Layer.build(layerOrchestration(server));
+          const orchestrator = Context.get(services, Orchestrator.OrchestratorV2);
+          const [ownerRow] = yield* server.sql<{ userId: string }>`
+            SELECT user_id AS "userId" FROM users WHERE is_owner = 1
+          `;
+          const archived = yield* orchestrator
+            .dispatch({
+              type: "thread.archive",
+              commandId: CommandId.make("owner-archive-notes"),
+              threadId: ThreadId.make("notes-thread"),
+            })
+            .pipe(CommandActor.actAs(UserId.make(ownerRow!.userId)), Effect.result);
+          assert.isTrue(Result.isFailure(archived));
+
+          // A stream the middleware let open on that Thread, such as its command output.
+          const viewer = yield* SpaceVisibility.CurrentViewer.pipe(
+            Effect.provide(
+              SpaceVisibility.layerCurrentViewer.pipe(
+                Layer.provide(
+                  Layer.succeed(EnvironmentAuthenticatedPrincipal, {
+                    sessionId: AuthSessionId.make("session-grace"),
+                    subject: "user-sign-in",
+                    userId: grace.userId,
+                    method: "browser-session-cookie",
+                    scopes: new Set([AuthOrchestrationReadScope]),
+                  } as never),
+                ),
+                Layer.provide(Layer.succeedContext(server.services)),
+              ),
+            ),
+          );
+          const open = yield* Stream.never.pipe(
+            untilAccessLost(
+              ORCHESTRATION_V2_WS_METHODS.subscribeCommandOutput,
+              { threadId: "notes-thread", itemId: "item-1" },
+              viewer,
+              visibility,
+              grace.userId,
+              (lost) => Effect.fail(lost),
+            ),
+            Stream.runDrain,
+            Effect.flip,
+            Effect.forkScoped,
+          );
+
+          assert.equal((yield* setPersonal(false)).status, 200);
+          assert.equal((yield* Fiber.join(open))._tag, "SpaceResourceNotFoundError");
+          assert.isFalse(yield* mayUseNotes);
         }),
       ),
   );

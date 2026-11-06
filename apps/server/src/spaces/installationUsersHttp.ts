@@ -1,5 +1,7 @@
 import {
-  EnvironmentAuthenticatedPrincipal,
+  AuthAccessReadScope,
+  AuthAccessWriteScope,
+  type AuthEnvironmentScope,
   EnvironmentHttpApi,
   EnvironmentHttpForbiddenError,
 } from "@t3tools/contracts";
@@ -10,11 +12,14 @@ import {
   annotateEnvironmentRequest,
   failEnvironmentInternal,
   failEnvironmentNotFound,
+  requireEnvironmentScope,
 } from "../auth/http.ts";
 import * as SpaceDirectory from "./SpaceDirectory.ts";
 
-const requireUser = Effect.gen(function* () {
-  const principal = yield* EnvironmentAuthenticatedPrincipal;
+// Being the Owner is not enough: a narrowed session of the Owner's (a read-only client, an
+// outside agent) also needs the access scope, as every other access endpoint does.
+const requireUser = Effect.fn(function* (scope: AuthEnvironmentScope) {
+  const principal = yield* requireEnvironmentScope(scope);
   if (principal.userId === undefined) {
     return yield* new EnvironmentHttpForbiddenError({ message: "Sign in with an account first." });
   }
@@ -36,7 +41,7 @@ export const layer = HttpApiBuilder.group(
         "list",
         Effect.fn("environment.installationUsers.list")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          const users = yield* spaces.listUsers(yield* requireUser).pipe(
+          const users = yield* spaces.listUsers(yield* requireUser(AuthAccessReadScope)).pipe(
             Effect.catchTags({
               SpaceAccessDeniedError: failDenied,
               SpaceDirectoryStorageError: failStorage,
@@ -51,7 +56,7 @@ export const layer = HttpApiBuilder.group(
           yield* annotateEnvironmentRequest(args.endpoint.name);
           return yield* spaces
             .setInstallationPermission({
-              actorUserId: yield* requireUser,
+              actorUserId: yield* requireUser(AuthAccessWriteScope),
               userId: args.params.userId,
               permission: args.payload.permission,
               granted: args.payload.granted,

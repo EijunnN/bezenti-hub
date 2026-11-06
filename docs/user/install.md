@@ -272,7 +272,7 @@ at once, and turning it off hides it again, along with what is in it. **Register
 their own Environments** is stored for a later release and changes nothing yet.
 
 The Owner can see every Personal space: the selector lists them under **Personal
-spaces (read only)**, and the Owner reads them but starts nothing in them. The
+spaces (read only)**, and the Owner reads them but changes nothing in them. The
 selector reminds you of this while your Personal space is the current Space.
 Nothing in a Personal space is shared with anyone else: no invitations, no guest
 links; to share work, it has to move to an organization.

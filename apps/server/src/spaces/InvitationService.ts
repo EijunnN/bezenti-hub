@@ -200,6 +200,7 @@ const DENIED_REASONS: Record<AccessPolicy.DenyReason, string> = {
   "not-a-member": "Only the Owner invites people to this Organization.",
   "role-not-allowed": "Only the Owner invites people to this Organization.",
   "not-your-personal-space": "Nothing is shared from a Personal space.",
+  "personal-space-read-only": "Nothing is shared from a Personal space.",
   "missing-installation-permission": "Only the Owner invites people to this Organization.",
   "space-archived": "This Organization is archived.",
   "space-frozen": "This Space is frozen.",

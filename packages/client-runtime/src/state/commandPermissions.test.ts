@@ -658,6 +658,33 @@ describe("Role permissions", () => {
     );
   });
 
+  it("leaves the Owner only reading another User's Personal space", () => {
+    const owner = view("owner", null, true);
+    const gracesPersonal = SpaceId.make("personal:grace");
+    const listed: SpaceDirectoryView = {
+      ...owner,
+      spaces: [
+        ...owner.spaces,
+        {
+          id: gracesPersonal,
+          kind: "personal",
+          name: "Grace",
+          role: null,
+          isOwn: false,
+          canCreateThreads: false,
+          canInvite: false,
+        },
+      ],
+    };
+    const thread = { spaceId: gracesPersonal, ownerUserId: UserId.make("grace") };
+    expect(allowed(threadRolePermissions(listed, thread))).toEqual({
+      continue: false,
+      archive: false,
+      stop: false,
+      delete: false,
+    });
+  });
+
   it("explains why the composer is disabled on someone else's Thread", () => {
     expect(threadRolePermissions(view("ada", "admin"), gracesThread).continueBlockedReason).toBe(
       NOT_YOUR_THREAD_REASON,

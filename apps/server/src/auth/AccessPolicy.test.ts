@@ -158,14 +158,14 @@ const rows: ReadonlyArray<
     owner,
     "thread.create",
     personalOf("grace"),
-    deny("not-your-personal-space"),
+    deny("personal-space-read-only"),
   ],
   [
     "the Owner creates no Project in another User's Personal space",
     owner,
     "project.create",
     personalOf("grace"),
-    deny("not-your-personal-space"),
+    deny("personal-space-read-only"),
   ],
   [
     "a User cannot view someone else's Personal space",
@@ -470,19 +470,41 @@ const rows: ReadonlyArray<
     owned("thread", "grace", { space: personalOf("grace") }),
     deny("missing-installation-permission"),
   ],
+  // The Owner only reads another User's Personal space: nothing there is theirs to change.
+  ...(
+    [
+      ["thread.continue", owned("thread", "grace", { space: personalOf("grace") })],
+      ["thread.archive", owned("thread", "grace", { space: personalOf("grace") })],
+      ["thread.organize", owned("thread", "grace", { space: personalOf("grace") })],
+      ["thread.stop", owned("thread", "grace", { space: personalOf("grace") })],
+      ["thread.delete", owned("thread", "grace", { space: personalOf("grace"), archived: true })],
+      ["project.archive", owned("project", "grace", { space: personalOf("grace") })],
+      ["project.manage", owned("project", "grace", { space: personalOf("grace") })],
+      ["project.delete", owned("project", "grace", { space: personalOf("grace"), archived: true })],
+    ] as const
+  ).map(
+    ([action, item]) =>
+      [
+        `the Owner cannot ${action} in another User's Personal space`,
+        owner,
+        action,
+        item,
+        deny("personal-space-read-only"),
+      ] as const,
+  ),
   [
-    "the Owner archives in another User's Personal space",
+    "the Owner archives in their own Personal space",
     owner,
     "thread.archive",
-    owned("thread", "grace", { space: personalOf("grace") }),
+    owned("thread", "grace", { space: personalOf("owner") }),
     allow,
   ],
   [
-    "the Owner does not continue a Thread in another User's Personal space",
+    "the Owner deletes in their own Personal space",
     owner,
-    "thread.continue",
-    owned("thread", "grace", { space: personalOf("grace") }),
-    deny("not-yours"),
+    "project.delete",
+    owned("project", "owner", { space: personalOf("owner") }),
+    allow,
   ],
   ["Thread rules need a Thread", member, "thread.continue", organization, deny("wrong-resource")],
 
