@@ -93,7 +93,7 @@ export const AUDIT_DETAIL_KEYS = {
   "secret.edit": ["vault"],
   "environment.register": ["kind", "os"],
   "environment.rename": ["from", "to"],
-  /** `settings` from the Hub, `leave` from the machine itself. */
+  /** `settings` from the Hub, `leave` from the machine, `userTurnedOff` with its owner. */
   "environment.remove": ["via"],
 } as const satisfies Record<AuditAction, ReadonlyArray<string>>;
 

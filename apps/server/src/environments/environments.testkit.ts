@@ -1,4 +1,6 @@
+import { formatEnvironmentCredential } from "@t3tools/shared/environmentJoin";
 import { assert } from "@effect/vitest";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
 import {
@@ -9,14 +11,15 @@ import {
   type Server,
   serveAuthHttpWith,
 } from "../auth/UserAuth.testkit.ts";
+import * as EnvironmentRegistry from "./EnvironmentRegistry.ts";
 
-export const REDIRECT = "http://127.0.0.1:51234/callback";
-export const VERIFIER = "a-code-verifier-that-is-long-enough-for-pkce-0123456789";
+const REDIRECT = "http://127.0.0.1:51234/callback";
+const VERIFIER = "a-code-verifier-that-is-long-enough-for-pkce-0123456789";
 const STATE = "state-0123456789abcdef";
 
-const challengeOf = (verifier: string) =>
+const sha256 = (value: string) =>
   Effect.promise(async () =>
-    Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))).toString(
+    Buffer.from(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))).toString(
       "base64url",
     ),
   );
@@ -30,57 +33,80 @@ export const hubWithOwner = (options: { readonly listen?: boolean } = {}) =>
     return { server, authenticator, owner: created.cookie ?? "" };
   });
 
-/** What the «Register this machine» page posts, as `t3 join` asked for it. */
+/** What `t3 join` does first: a credential of its own, known to the Hub only by its hash. */
+export const startJoin = Effect.fn(function* (
+  server: Server,
+  options: { readonly loopback?: boolean } = {},
+) {
+  const hubId = Context.get(server.services, EnvironmentRegistry.EnvironmentRegistry).hubId;
+  const credential = formatEnvironmentCredential(
+    hubId,
+    Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url"),
+  );
+  const started = yield* server.request("/api/environments/join/start", {
+    body: {
+      codeChallenge: yield* sha256(VERIFIER),
+      codeChallengeMethod: "S256",
+      credentialHash: yield* sha256(credential),
+      name: "ada-laptop",
+      os: "linux",
+      hostname: "ada-laptop",
+      ...(options.loopback === true ? { redirectUri: REDIRECT, state: STATE } : {}),
+    },
+  });
+  assert.equal(started.status, 200);
+  return { requestId: started.body.requestId as string, credential };
+});
+
+/** What the «Register this machine» page posts. */
 export const approveJoin = Effect.fn(function* (
   server: Server,
   cookie: string,
+  requestId: string,
   input: { readonly reauth?: unknown; readonly name?: string } = {},
 ) {
   return yield* server.request("/api/environments/join/approve", {
     cookie,
     body: {
-      redirectUri: REDIRECT,
-      codeChallenge: yield* challengeOf(VERIFIER),
-      codeChallengeMethod: "S256",
-      state: STATE,
+      requestId,
       name: input.name ?? "Laptop",
-      os: "linux",
-      hostname: "ada-laptop",
       ...(input.reauth === undefined ? {} : { reauth: input.reauth }),
     },
   });
 });
 
-export const codeOf = (redirectTo: unknown) => {
-  const url = new URL(String(redirectTo));
-  assert.equal(`${url.origin}${url.pathname}`, REDIRECT);
-  assert.equal(url.searchParams.get("state"), STATE);
-  return url.searchParams.get("code") ?? "";
-};
+export const joinStatus = (server: Server, requestId: string, codeVerifier = VERIFIER) =>
+  server.request("/api/environments/join/status", { body: { requestId, codeVerifier } });
 
-/** Approves with a passkey and redeems the code: the machine's credential, as `t3 join` gets it. */
+/** The whole of `t3 join`, approved with a passkey: the machine's own credential and id. */
 export const joinMachine = Effect.fn(function* (
   server: Server,
   authenticator: Authenticator,
   owner: string,
   name = "Laptop",
 ) {
-  const approved = yield* approveJoin(server, owner, {
+  const { requestId, credential } = yield* startJoin(server);
+  const approved = yield* approveJoin(server, owner, requestId, {
     name,
     reauth: yield* passkeyReauth(server, authenticator),
   });
   assert.equal(approved.status, 200);
-  const redeemed = yield* server.request("/api/environments/join/token", {
-    body: { code: codeOf(approved.body.redirectTo), codeVerifier: VERIFIER, redirectUri: REDIRECT },
-  });
-  assert.equal(redeemed.status, 200);
-  return redeemed.body as {
-    environmentId: string;
-    hubEnvironmentId: string;
-    name: string;
-    credential: string;
+  const status = yield* joinStatus(server, requestId);
+  assert.equal(status.body.status, "approved");
+  return {
+    requestId,
+    credential,
+    environmentId: status.body.environmentId as string,
+    hubEnvironmentId: status.body.hubEnvironmentId as string,
+    name: status.body.name as string,
   };
 });
+
+export const loopbackStateOf = (redirectTo: unknown) => {
+  const url = new URL(String(redirectTo));
+  assert.equal(`${url.origin}${url.pathname}`, REDIRECT);
+  return url.searchParams.get("state");
+};
 
 export const listEnvironments = Effect.fn(function* (server: Server, cookie: string) {
   const listed = yield* server.request("/api/environments", { cookie });

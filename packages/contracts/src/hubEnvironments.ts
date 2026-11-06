@@ -57,40 +57,70 @@ export const RemoveHubEnvironmentRequest = Schema.Struct({ environmentId: Enviro
 export type RemoveHubEnvironmentRequest = typeof RemoveHubEnvironmentRequest.Type;
 
 /**
- * The Owner's approval on the Hub's «Register this machine» page. Name, operating system and
- * hostname come from `t3 join` on the machine and are only labels; the name may be edited.
+ * `t3 join` asks to join. It made the credential itself and sends only its SHA-256, so the
+ * credential never leaves the machine; the PKCE challenge binds the request to that `t3 join`.
  */
-export const EnvironmentJoinApproveRequest = Schema.Struct({
-  redirectUri: TrimmedNonEmptyString,
+export const EnvironmentJoinStartRequest = Schema.Struct({
   codeChallenge: TrimmedNonEmptyString,
   codeChallengeMethod: Schema.Literal("S256"),
-  state: TrimmedNonEmptyString,
+  credentialHash: TrimmedNonEmptyString,
   name: HubEnvironmentName,
   os: TrimmedNonEmptyString.check(Schema.isMaxLength(64)),
   hostname: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
-  /** A passkey, or a password with a code: required, checked by the Hub. */
+  /** A loopback port `t3 join` listens on, so a browser on the machine returns at once. */
+  redirectUri: Schema.optionalKey(TrimmedNonEmptyString),
+  state: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type EnvironmentJoinStartRequest = typeof EnvironmentJoinStartRequest.Type;
+
+export const EnvironmentJoinStartResult = Schema.Struct({ requestId: TrimmedNonEmptyString });
+export type EnvironmentJoinStartResult = typeof EnvironmentJoinStartResult.Type;
+
+export const EnvironmentJoinRequestRef = Schema.Struct({ requestId: TrimmedNonEmptyString });
+export type EnvironmentJoinRequestRef = typeof EnvironmentJoinRequestRef.Type;
+
+/** What «Register this machine» shows. The labels come from `t3 join` on the machine. */
+export const EnvironmentJoinRequestView = Schema.Struct({
+  requestId: TrimmedNonEmptyString,
+  name: HubEnvironmentName,
+  os: TrimmedNonEmptyString,
+  hostname: TrimmedNonEmptyString,
+  requestedAt: IsoDateTime,
+  status: Schema.Literals(["pending", "approved", "denied"]),
+});
+export type EnvironmentJoinRequestView = typeof EnvironmentJoinRequestView.Type;
+
+/** The Owner's approval, with a passkey or a password and code in the same request. */
+export const EnvironmentJoinApproveRequest = Schema.Struct({
+  requestId: TrimmedNonEmptyString,
+  name: HubEnvironmentName,
   reauth: Schema.optionalKey(AuthReauth),
 });
 export type EnvironmentJoinApproveRequest = typeof EnvironmentJoinApproveRequest.Type;
 
-export const EnvironmentJoinApproveResult = Schema.Struct({ redirectTo: TrimmedNonEmptyString });
-export type EnvironmentJoinApproveResult = typeof EnvironmentJoinApproveResult.Type;
+/** Where the browser goes next: the machine's loopback port, or nowhere when there is none. */
+export const EnvironmentJoinDecisionResult = Schema.Struct({
+  redirectTo: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type EnvironmentJoinDecisionResult = typeof EnvironmentJoinDecisionResult.Type;
 
-export const EnvironmentJoinTokenRequest = Schema.Struct({
-  code: TrimmedNonEmptyString,
+export const EnvironmentJoinStatusRequest = Schema.Struct({
+  requestId: TrimmedNonEmptyString,
   codeVerifier: TrimmedNonEmptyString,
-  redirectUri: TrimmedNonEmptyString,
 });
-export type EnvironmentJoinTokenRequest = typeof EnvironmentJoinTokenRequest.Type;
+export type EnvironmentJoinStatusRequest = typeof EnvironmentJoinStatusRequest.Type;
 
-/** The only time the credential leaves the Hub; the Hub keeps its hash. */
-export const EnvironmentJoinTokenResult = Schema.Struct({
-  environmentId: EnvironmentId,
-  hubEnvironmentId: EnvironmentId,
-  name: HubEnvironmentName,
-  credential: TrimmedNonEmptyString,
-});
-export type EnvironmentJoinTokenResult = typeof EnvironmentJoinTokenResult.Type;
+/** Asked again until it is not `pending`; the same approval answers every time. */
+export const EnvironmentJoinStatus = Schema.Union([
+  Schema.Struct({ status: Schema.Literals(["pending", "denied", "expired"]) }),
+  Schema.Struct({
+    status: Schema.Literal("approved"),
+    environmentId: EnvironmentId,
+    hubEnvironmentId: EnvironmentId,
+    name: HubEnvironmentName,
+  }),
+]);
+export type EnvironmentJoinStatus = typeof EnvironmentJoinStatus.Type;
 
 export const EnvironmentLeaveResult = Schema.Struct({ removed: Schema.Boolean });
 export type EnvironmentLeaveResult = typeof EnvironmentLeaveResult.Type;

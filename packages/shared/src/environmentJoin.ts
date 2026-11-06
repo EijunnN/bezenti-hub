@@ -1,11 +1,13 @@
-// `t3 join`: the machine opens the Hub's «Register this machine» page with a PKCE challenge and
-// the labels it shows, and the page sends a one-time code back to the loopback port `t3 join`
-// listens on, the same way app sign-in does. See docs/internals/environment-auth.md.
-import { appSignInRedirectKind, isAppSignInCodeChallenge, isAppSignInState } from "./appSignIn.ts";
+// `t3 join`: the machine starts a join request on the Hub, the Owner approves it on the Hub's
+// «Register this machine» page, and the machine asks the Hub until it is decided. A browser on the
+// machine itself also returns to a loopback port, so `t3 join` finishes at once. See
+// docs/internals/environment-auth.md#joined-environments.
 import { isLocalLoopbackHost } from "./hostClassification.ts";
 
 const REGISTER_PAGE_PATH = "/register-environment";
-const MAX_LABEL_LENGTH = 64;
+const CREDENTIAL_PREFIX = "t3env";
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+const CREDENTIAL_HASH_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 /**
  * The Environment credential and everything it opens travel to this address, so it must be
@@ -22,63 +24,49 @@ export function assertEnvironmentHubUrl(hubUrl: string): URL {
   throw new Error("The Hub's address must start with https:// (plain http only for localhost).");
 }
 
-export interface EnvironmentJoinPageRequest {
-  /** A loopback `http://127.0.0.1:<port>/callback`, as app sign-in uses. */
-  readonly redirectUri: string;
-  readonly codeChallenge: string;
-  readonly state: string;
-  /** Suggested name: the machine's hostname. The Owner may change it on the page. */
-  readonly name: string;
-  readonly os: string;
-  readonly hostname: string;
-  /** ISO time `t3 join` started, shown so the Owner recognises the request. */
-  readonly requestedAt: string;
-}
+const base64Url = (text: string) =>
+  btoa(String.fromCharCode(...new TextEncoder().encode(text)))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/u, "");
 
-const label = (value: string | null) => value?.trim().slice(0, MAX_LABEL_LENGTH) ?? "";
-
-export function environmentJoinPageUrl(hubUrl: string, request: EnvironmentJoinPageRequest) {
-  const url = new URL(REGISTER_PAGE_PATH, hubUrl);
-  url.searchParams.set("redirect_uri", request.redirectUri);
-  url.searchParams.set("code_challenge", request.codeChallenge);
-  url.searchParams.set("code_challenge_method", "S256");
-  url.searchParams.set("state", request.state);
-  url.searchParams.set("name", request.name);
-  url.searchParams.set("os", request.os);
-  url.searchParams.set("hostname", request.hostname);
-  url.searchParams.set("requested_at", request.requestedAt);
-  return url.toString();
-}
-
-/** The page's request read back from its URL; null when a part is missing or malformed. */
-export function readEnvironmentJoinPageRequest(pageUrl: string): EnvironmentJoinPageRequest | null {
-  if (!URL.canParse(pageUrl)) return null;
-  const params = new URL(pageUrl).searchParams;
-  const redirectUri = params.get("redirect_uri") ?? "";
-  const codeChallenge = params.get("code_challenge") ?? "";
-  const state = params.get("state") ?? "";
-  const hostname = label(params.get("hostname"));
-  const os = label(params.get("os"));
-  const requestedAt = params.get("requested_at") ?? "";
-  if (
-    // Only `t3 join` on the machine itself receives the code: never a scheme or another site.
-    appSignInRedirectKind(redirectUri) !== "this-computer" ||
-    params.get("code_challenge_method") !== "S256" ||
-    !isAppSignInCodeChallenge(codeChallenge) ||
-    !isAppSignInState(state) ||
-    hostname === "" ||
-    os === "" ||
-    Number.isNaN(Date.parse(requestedAt))
-  ) {
-    return null;
+const fromBase64Url = (text: string) => {
+  try {
+    const bytes = Uint8Array.from(atob(text.replaceAll("-", "+").replaceAll("_", "/")), (char) =>
+      char.charCodeAt(0),
+    );
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return undefined;
   }
-  return {
-    redirectUri,
-    codeChallenge,
-    state,
-    name: label(params.get("name")) || hostname,
-    os,
-    hostname,
-    requestedAt,
-  };
+};
+
+/**
+ * `t3env.<issuing Hub's id>.<secret>`, made on the machine: the Hub's id lets another Hub tell
+ * whose it is. The Hub only ever learns its SHA-256.
+ */
+export const formatEnvironmentCredential = (hubId: string, secret: string) =>
+  `${CREDENTIAL_PREFIX}.${base64Url(hubId)}.${secret}`;
+
+/** The Hub that issued a credential, or undefined when it is not one. */
+export const environmentCredentialIssuer = (credential: string): string | undefined => {
+  const [prefix, hub, secret, ...rest] = credential.split(".");
+  if (prefix !== CREDENTIAL_PREFIX || !hub || !secret || rest.length > 0) return undefined;
+  return fromBase64Url(hub);
+};
+
+export const isEnvironmentCredentialHash = (value: string) => CREDENTIAL_HASH_PATTERN.test(value);
+const isEnvironmentJoinRequestId = (value: string) => REQUEST_ID_PATTERN.test(value);
+
+export const environmentJoinPageUrl = (hubUrl: string, requestId: string) => {
+  const url = new URL(REGISTER_PAGE_PATH, hubUrl);
+  url.searchParams.set("request", requestId);
+  return url.toString();
+};
+
+/** The join request a page URL names; null when it names none. */
+export function readEnvironmentJoinPageRequest(pageUrl: string): string | null {
+  if (!URL.canParse(pageUrl)) return null;
+  const requestId = new URL(pageUrl).searchParams.get("request") ?? "";
+  return isEnvironmentJoinRequestId(requestId) ? requestId : null;
 }

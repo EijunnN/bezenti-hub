@@ -1,10 +1,13 @@
-import type { AuthAccount } from "@t3tools/contracts";
-import { appSignInCancelledUrl } from "@t3tools/shared/appSignIn";
+import type { AuthAccount, EnvironmentJoinRequestView } from "@t3tools/contracts";
 import { readEnvironmentJoinPageRequest } from "@t3tools/shared/environmentJoin";
 import { useEffect, useState } from "react";
 
 import { usePrimarySessionState } from "~/environments/primary";
-import { approveEnvironmentJoin } from "~/environments/primary/hubEnvironments";
+import {
+  approveEnvironmentJoin,
+  denyEnvironmentJoin,
+  fetchEnvironmentJoinRequest,
+} from "~/environments/primary/hubEnvironments";
 import { fetchAccount } from "~/environments/primary/userAccounts";
 import { errorMessageOf } from "~/lib/errorMessage";
 import { emptyStepUp, StepUpFields, toStepUp } from "../settings/AccountSettingsSection";
@@ -14,53 +17,62 @@ import { Input } from "../ui/input";
 import { StandalonePage, StandalonePageHeader } from "../ui/standalone-page";
 import { SignInSurface } from "./SignInSurface";
 
+type Outcome = "approved" | "cancelled" | null;
+
 /**
- * The page `t3 join` opens on the Hub. The Owner checks the machine, may rename it, and confirms
- * with a passkey or password and code; the one-time code then goes back to `t3 join` on a port of
- * that machine, never anywhere else.
+ * The page `t3 join` links to, from any device. The Owner checks the machine, may rename it, and
+ * confirms with a passkey or password and code. `t3 join` learns the outcome by asking the Hub;
+ * a browser on that machine is also sent back to it.
  */
 export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: boolean }) {
-  const [request] = useState(() => readEnvironmentJoinPageRequest(window.location.href));
+  const [requestId] = useState(() => readEnvironmentJoinPageRequest(window.location.href));
   const session = usePrimarySessionState();
   const isOwner = session.data?.authenticated === true && session.data.isOwner === true;
+  const [request, setRequest] = useState<EnvironmentJoinRequestView | null>(null);
   const [account, setAccount] = useState<AuthAccount | null>(null);
-  const [name, setName] = useState(request?.name ?? "");
+  const [name, setName] = useState("");
   const [stepUp, setStepUp] = useState<ReturnType<typeof emptyStepUp> | null>(null);
   const [pending, setPending] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
-  const [cancelled, setCancelled] = useState(false);
+  const [outcome, setOutcome] = useState<Outcome>(null);
 
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the account's sign-in methods from the server for the step-up.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the join request and the account's sign-in methods from the server.
   useEffect(() => {
-    if (!signedIn || !isOwner) return;
+    if (!signedIn || !isOwner || requestId === null) return;
     let current = true;
-    void fetchAccount().then(
-      (loaded) => {
+    void Promise.all([fetchEnvironmentJoinRequest(requestId), fetchAccount()]).then(
+      ([loaded, loadedAccount]) => {
         if (!current) return;
-        setAccount(loaded);
-        setStepUp(emptyStepUp(loaded));
+        setRequest(loaded);
+        setName(loaded.name);
+        setAccount(loadedAccount);
+        setStepUp(emptyStepUp(loadedAccount));
       },
       (cause: unknown) => {
-        if (current) setErrorMessage(errorMessageOf(cause, "Could not load your account."));
+        if (current) setErrorMessage(errorMessageOf(cause, "Could not load this registration."));
       },
     );
     return () => {
       current = false;
     };
-  }, [signedIn, isOwner]);
+  }, [signedIn, isOwner, requestId]);
 
-  if (request === null) {
-    return (
-      <StandalonePage>
-        <StandalonePageHeader
-          context="Register this machine"
-          title="This registration cannot continue"
-          description="The link is incomplete or does not come from `t3 join`. Run `t3 join` on the machine again."
-        />
-      </StandalonePage>
+  const ended = (title: string, description: string) => (
+    <StandalonePage>
+      <StandalonePageHeader
+        context="Register this machine"
+        title={title}
+        description={description}
+      />
+    </StandalonePage>
+  );
+
+  if (requestId === null) {
+    return ended(
+      "This registration cannot continue",
+      "The link is incomplete or does not come from `t3 join`. Run `t3 join` on the machine again.",
     );
   }
-
   if (!signedIn) {
     return (
       <SignInSurface
@@ -68,57 +80,49 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
         onSignedIn={() => window.location.reload()}
         description={
           <>
-            Sign in as the Owner to add{" "}
-            <span className="font-medium text-foreground">{request.hostname}</span> to{" "}
+            Sign in as the Owner to add a machine to{" "}
             <span className="font-medium text-foreground">{window.location.host}</span>.
           </>
         }
       />
     );
   }
-
-  if (cancelled) {
-    return (
-      <StandalonePage>
-        <StandalonePageHeader
-          context="Register this machine"
-          title="Registration cancelled"
-          description="The machine was not added. You can close this tab."
-        />
-      </StandalonePage>
-    );
-  }
-
   if (session.data !== undefined && !isOwner) {
-    return (
-      <StandalonePage>
-        <StandalonePageHeader
-          context="Register this machine"
-          title="Only the Owner adds machines"
-          description="Ask this Hub's Owner to run `t3 join` and approve the machine."
-        />
-      </StandalonePage>
+    return ended(
+      "Only the Owner adds machines",
+      "Ask this Hub's Owner to run `t3 join` and approve the machine.",
+    );
+  }
+  if (outcome === "approved") {
+    return ended(
+      "Machine registered",
+      "Return to its terminal: `t3 join` finishes there. You can close this tab.",
+    );
+  }
+  if (outcome === "cancelled") {
+    return ended("Registration cancelled", "The machine was not added. You can close this tab.");
+  }
+  if (request !== null && request.status !== "pending") {
+    return ended(
+      request.status === "approved" ? "Machine registered" : "Registration cancelled",
+      "This registration was already decided. You can close this tab.",
     );
   }
 
-  const approve = async () => {
-    if (account === null || stepUp === null) return;
+  const decide = async (decision: () => Promise<string | null>, next: Outcome) => {
     setPending(true);
     setErrorMessage("");
     try {
-      const redirectTo = await approveEnvironmentJoin({
-        request,
-        name: name.trim(),
-        stepUp: toStepUp(account, stepUp),
-      });
-      window.location.replace(redirectTo);
+      const redirectTo = await decision();
+      // A browser on the machine itself goes back to `t3 join`; elsewhere this page says so.
+      if (redirectTo !== null) window.location.replace(redirectTo);
+      setOutcome(next);
     } catch (cause) {
-      setPending(false);
       setErrorMessage(errorMessageOf(cause, "The machine could not be registered."));
     }
+    setPending(false);
   };
 
-  const requestedAt = new Date(request.requestedAt).toLocaleString();
   return (
     <StandalonePage>
       <StandalonePageHeader
@@ -126,57 +130,64 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
         title="Register this machine"
         description="It becomes one of your personal Environments: only you run work on it. Only continue with a `t3 join` you just started."
       />
-      <form
-        className="mt-6 flex max-w-sm flex-col gap-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void approve();
-        }}
-      >
-        <label className="text-xs font-medium" htmlFor="register-environment-name">
-          Name
-        </label>
-        <Input
-          id="register-environment-name"
-          disabled={pending}
-          maxLength={64}
-          nativeInput
-          onChange={(event) => setName(event.currentTarget.value)}
-          value={name}
-        />
-        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-          <dt className="text-muted-foreground">Operating system</dt>
-          <dd>{request.os}</dd>
-          <dt className="text-muted-foreground">Hostname</dt>
-          <dd>{request.hostname}</dd>
-          <dt className="text-muted-foreground">Requested</dt>
-          <dd>{requestedAt}</dd>
-        </dl>
-        {account !== null && stepUp !== null ? (
-          <StepUpFields account={account} disabled={pending} value={stepUp} onChange={setStepUp} />
-        ) : null}
-        {errorMessage ? (
-          <Alert variant="error">
-            <AlertDescription>{errorMessage}</AlertDescription>
-          </Alert>
-        ) : null}
-        <div className="flex flex-wrap gap-2">
-          <Button disabled={pending || account === null || name.trim() === ""} type="submit">
-            {pending ? "Registering…" : "Register this machine"}
-          </Button>
-          <Button
+      {request === null && errorMessage === "" ? (
+        <p className="mt-4 text-sm text-muted-foreground">Loading…</p>
+      ) : null}
+      {request !== null && account !== null && stepUp !== null ? (
+        <form
+          className="mt-6 flex max-w-sm flex-col gap-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void decide(
+              () =>
+                approveEnvironmentJoin({
+                  requestId,
+                  name: name.trim(),
+                  stepUp: toStepUp(account, stepUp),
+                }),
+              "approved",
+            );
+          }}
+        >
+          <label className="text-xs font-medium" htmlFor="register-environment-name">
+            Name
+          </label>
+          <Input
+            id="register-environment-name"
             disabled={pending}
-            onClick={() => {
-              setCancelled(true);
-              // Tell `t3 join`, so it stops waiting; the redirect was validated with the request.
-              window.location.replace(appSignInCancelledUrl(request.redirectUri, request.state));
-            }}
-            variant="outline"
-          >
-            Cancel
-          </Button>
-        </div>
-      </form>
+            maxLength={64}
+            nativeInput
+            onChange={(event) => setName(event.currentTarget.value)}
+            value={name}
+          />
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+            <dt className="text-muted-foreground">Operating system</dt>
+            <dd>{request.os}</dd>
+            <dt className="text-muted-foreground">Hostname</dt>
+            <dd>{request.hostname}</dd>
+            <dt className="text-muted-foreground">Requested</dt>
+            <dd>{new Date(request.requestedAt).toLocaleString()}</dd>
+          </dl>
+          <StepUpFields account={account} disabled={pending} value={stepUp} onChange={setStepUp} />
+          <div className="flex flex-wrap gap-2">
+            <Button disabled={pending || name.trim() === ""} type="submit">
+              {pending ? "Registering…" : "Register this machine"}
+            </Button>
+            <Button
+              disabled={pending}
+              onClick={() => void decide(() => denyEnvironmentJoin(requestId), "cancelled")}
+              variant="outline"
+            >
+              Cancel
+            </Button>
+          </div>
+        </form>
+      ) : null}
+      {errorMessage ? (
+        <Alert className="mt-4" variant="error">
+          <AlertDescription>{errorMessage}</AlertDescription>
+        </Alert>
+      ) : null}
     </StandalonePage>
   );
 }

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   assertEnvironmentHubUrl,
+  environmentCredentialIssuer,
   environmentJoinPageUrl,
+  formatEnvironmentCredential,
   readEnvironmentJoinPageRequest,
 } from "./environmentJoin.ts";
 
@@ -31,30 +33,22 @@ describe("assertEnvironmentHubUrl", () => {
   });
 });
 
-describe("readEnvironmentJoinPageRequest", () => {
-  const request = {
-    redirectUri: "http://127.0.0.1:51234/callback",
-    codeChallenge: "DeB41nTVkPwpbbYecrnqtVq7VXLezustdHAK4SWt13c",
-    state: "state-0123456789abcdef",
-    name: "laptop",
-    os: "linux",
-    hostname: "laptop",
-    requestedAt: "2026-11-06T10:00:00.000Z",
-  };
-
-  it("reads back what `t3 join` put in the page URL", () => {
-    expect(
-      readEnvironmentJoinPageRequest(environmentJoinPageUrl("https://hub.example.com", request)),
-    ).toEqual(request);
+describe("environment credentials", () => {
+  it("name the Hub that issued them", () => {
+    const credential = formatEnvironmentCredential("hub:é-1", "secret");
+    expect(environmentCredentialIssuer(credential)).toBe("hub:é-1");
+    expect(environmentCredentialIssuer("Bearer nonsense")).toBeUndefined();
   });
+});
 
-  it("refuses to send the code anywhere but a loopback port", () => {
-    for (const redirectUri of ["t3code://auth/callback", "https://evil.example.com/callback"]) {
-      expect(
-        readEnvironmentJoinPageRequest(
-          environmentJoinPageUrl("https://hub.example.com", { ...request, redirectUri }),
-        ),
-      ).toBeNull();
-    }
+describe("readEnvironmentJoinPageRequest", () => {
+  it("reads back the request `t3 join` started", () => {
+    const requestId = "request-0123456789abcdef";
+    expect(
+      readEnvironmentJoinPageRequest(environmentJoinPageUrl("https://hub.example.com", requestId)),
+    ).toBe(requestId);
+    expect(readEnvironmentJoinPageRequest("https://hub.example.com/register-environment")).toBe(
+      null,
+    );
   });
 });

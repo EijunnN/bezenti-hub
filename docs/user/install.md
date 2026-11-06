@@ -407,13 +407,17 @@ work can later run there. On that machine, run:
 t3 join https://hub.example.com
 ```
 
-It opens the Hub's **Register this machine** page (or prints its link; add
-`--no-browser` on a machine without one). Sign in as the Owner, check the
-operating system, hostname and request time, change the name if you like, and
-confirm with your passkey, or your password and authenticator code. Only the
-Owner can add machines, and each one is yours alone: Members of your
-Organizations never see it. The Hub's address must be `https://`; plain
+It prints a link to the Hub's **Register this machine** page and opens it in a
+browser on that machine; add `--no-browser` to only print it, and open the link
+on any device, your phone included. Sign in as the Owner, check the operating
+system, hostname and request time, change the name if you like, and confirm with
+your passkey, or your password and authenticator code. `t3 join` finishes by
+itself once you approve. Only the Owner can add machines, and each one is its
+owner's: Members never see it. The Hub's address must be `https://`; plain
 `http://` is accepted only for a Hub on the same machine.
+
+Joining a server that already has its own users or threads cuts them off, since
+a joined machine serves no sign-in; `t3 join` refuses unless you add `--force`.
 
 Then start the joined machine's server with `t3 serve` (or restart it). A
 joined machine serves no web app and no sign-in of its own: it keeps one

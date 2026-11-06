@@ -60,7 +60,8 @@ const makeHandler = Effect.fnUntraced(function* (
           .pipe(Effect.ignore);
 
       if (!isSecureEnvironmentTransport(request)) return yield* closeWith("insecure-transport");
-      const check = yield* registry.checkCredential(bearerOf(request.headers.authorization));
+      const credential = bearerOf(request.headers.authorization);
+      const check = yield* registry.checkCredential(credential);
       if (check._tag === "refused") return yield* closeWith(check.reason);
       const { environmentId } = check;
 
@@ -83,6 +84,14 @@ const makeHandler = Effect.fnUntraced(function* (
       if (Option.isNone(hello) || hello.value.type !== "hello") {
         return yield* closeWith("protocol-error");
       }
+      const closeRequested = yield* Deferred.make<EnvironmentCloseReason>();
+      yield* connections.attach(environmentId, (reason) =>
+        Deferred.succeed(closeRequested, reason).pipe(Effect.asVoid),
+      );
+      // Asked again once the socket is tracked: a removal since the upgrade found nothing to
+      // close, and one from now on closes it.
+      const current = yield* registry.checkCredential(credential);
+      if (current._tag === "refused") return yield* closeWith(current.reason);
       yield* registry.recordHello(environmentId, hello.value);
       yield* writer.write(
         encodeWelcome({
@@ -90,13 +99,8 @@ const makeHandler = Effect.fnUntraced(function* (
           protocolVersion: ENVIRONMENT_CONNECTION_PROTOCOL_VERSION,
           hubEnvironmentId: registry.hubId,
           environmentId,
-          name: check.name,
+          name: current.name,
         }),
-      );
-
-      const closeRequested = yield* Deferred.make<EnvironmentCloseReason>();
-      yield* connections.attach(environmentId, (reason) =>
-        Deferred.succeed(closeRequested, reason).pipe(Effect.asVoid),
       );
       const end = yield* Effect.raceFirst(
         Deferred.await(closeRequested),

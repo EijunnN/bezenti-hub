@@ -81,9 +81,13 @@ import {
 import { AuditLogPage, AuditLogQuery } from "./audit.ts";
 import {
   EnvironmentJoinApproveRequest,
-  EnvironmentJoinApproveResult,
-  EnvironmentJoinTokenRequest,
-  EnvironmentJoinTokenResult,
+  EnvironmentJoinDecisionResult,
+  EnvironmentJoinRequestRef,
+  EnvironmentJoinRequestView,
+  EnvironmentJoinStartRequest,
+  EnvironmentJoinStartResult,
+  EnvironmentJoinStatus,
+  EnvironmentJoinStatusRequest,
   EnvironmentLeaveResult,
   HubEnvironmentList,
   HubEnvironmentSummary,
@@ -296,6 +300,7 @@ export const EnvironmentResourceNotFoundReason = Schema.Literals([
   "thread_not_found",
   "user_not_found",
   "environment_not_found",
+  "join_request_not_found",
 ]);
 export type EnvironmentResourceNotFoundReason = typeof EnvironmentResourceNotFoundReason.Type;
 
@@ -1026,9 +1031,9 @@ const EnvironmentHubEnvironmentErrors = [
   EnvironmentInternalError,
 ] as const;
 
-// The machines registered with this Hub. Each joins with `t3 join`: the Owner approves on the
-// «Register this machine» page with a strong factor, and the machine redeems the one-time code
-// for its Environment credential, which only `/api/environment/connect` and `leave` accept.
+// The machines registered with this Hub. Each joins with `t3 join`: the Owner approves its request
+// on «Register this machine» with a strong factor. The credential, made on the machine and known
+// to the Hub only as a hash, opens nothing but `/api/environment/connect` and `leave`.
 class EnvironmentHubEnvironmentsHttpApi extends HttpApiGroup.make("environments")
   .add(
     HttpApiEndpoint.get("list", "/api/environments", {
@@ -1053,24 +1058,51 @@ class EnvironmentHubEnvironmentsHttpApi extends HttpApiGroup.make("environments"
       error: [...EnvironmentHubEnvironmentErrors, EnvironmentResourceNotFoundError],
     }).middleware(EnvironmentAuthenticatedAuth),
   )
-  // Takes only the browser's own cookie, as app sign-in does.
+  // `t3 join` on the machine: start a request, then ask until the Owner decides.
+  .add(
+    HttpApiEndpoint.post("startJoin", "/api/environments/join/start", {
+      payload: EnvironmentJoinStartRequest,
+      success: EnvironmentJoinStartResult,
+      error: [EnvironmentRequestInvalidError, EnvironmentInternalError],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("joinStatus", "/api/environments/join/status", {
+      payload: EnvironmentJoinStatusRequest,
+      success: EnvironmentJoinStatus,
+      error: EnvironmentTokenExchangeErrors,
+    }),
+  )
+  // The «Register this machine» page; deciding takes only the browser's own cookie.
+  .add(
+    HttpApiEndpoint.post("joinRequest", "/api/environments/join/request", {
+      payload: EnvironmentJoinRequestRef,
+      success: EnvironmentJoinRequestView,
+      error: [EnvironmentResourceNotFoundError, EnvironmentInternalError],
+    }),
+  )
   .add(
     HttpApiEndpoint.post("approveJoin", "/api/environments/join/approve", {
       payload: EnvironmentJoinApproveRequest,
-      success: EnvironmentJoinApproveResult,
+      success: EnvironmentJoinDecisionResult,
       error: [
         EnvironmentRequestInvalidError,
         EnvironmentAuthInvalidError,
         EnvironmentRateLimitedError,
+        EnvironmentResourceNotFoundError,
         ...EnvironmentHubEnvironmentErrors,
       ],
     }),
   )
   .add(
-    HttpApiEndpoint.post("redeemJoin", "/api/environments/join/token", {
-      payload: EnvironmentJoinTokenRequest,
-      success: EnvironmentJoinTokenResult,
-      error: EnvironmentTokenExchangeErrors,
+    HttpApiEndpoint.post("denyJoin", "/api/environments/join/deny", {
+      payload: EnvironmentJoinRequestRef,
+      success: EnvironmentJoinDecisionResult,
+      error: [
+        EnvironmentAuthInvalidError,
+        EnvironmentResourceNotFoundError,
+        EnvironmentInternalError,
+      ],
     }),
   )
   // `t3 leave`: the machine unregisters itself with its own credential.

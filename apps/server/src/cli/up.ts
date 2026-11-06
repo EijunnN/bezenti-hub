@@ -355,9 +355,16 @@ const HealthBody = Schema.Struct({
 const readJoinedStatus = Effect.fn("cli.status.joined")(function* (
   config: ServerConfig.ServerConfig["Service"],
 ) {
-  const joined = yield* readJoinedHubState(config.joinedHubPath).pipe(
-    Effect.orElseSucceed(() => Option.none()),
-  );
+  const read = yield* readJoinedHubState(config.joinedHubPath).pipe(Effect.result);
+  if (read._tag === "Failure") {
+    return {
+      hubUrl: `unreadable (${config.joinedHubPath}) · run \`t3 leave\` to forget it`,
+      name: "",
+      environmentId: "",
+      connection: null,
+    } satisfies JoinedStatus;
+  }
+  const joined = read.success;
   if (Option.isNone(joined)) return null;
   const runtime = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(
     Effect.orElseSucceed(() => Option.none()),

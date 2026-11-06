@@ -14,6 +14,7 @@ import {
   type HubEnvironmentSummary,
   UserId,
 } from "@t3tools/contracts";
+import { environmentCredentialIssuer } from "@t3tools/shared/environmentJoin";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
@@ -31,8 +32,6 @@ import { base64UrlEncode } from "../auth/utils.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as EnvironmentConnections from "./EnvironmentConnections.ts";
-
-const CREDENTIAL_PREFIX = "t3env";
 
 export class EnvironmentStorageError extends Schema.TaggedError<EnvironmentStorageError>()(
   "EnvironmentStorageError",
@@ -98,6 +97,8 @@ interface EnvironmentRow {
   readonly lastResourcesJson: string | null;
   readonly lastProvidersJson: string | null;
   readonly revokedAt: string | null;
+  /** The owner was turned off or removed. */
+  readonly ownerInactive: number;
 }
 
 const decodeResources = Schema.decodeUnknownOption(Schema.fromJsonString(EnvironmentHostResources));
@@ -114,16 +115,6 @@ const resourceOf = (row: EnvironmentRow): AccessPolicy.EnvironmentResource => ({
   environmentKind: row.kind,
   ownerUserId: row.ownerUserId === null ? null : UserId.make(row.ownerUserId),
 });
-
-/** `t3env.<the issuing Hub's id>.<secret>`: the Hub's id lets another Hub say whose it is. */
-export const formatCredential = (hubId: EnvironmentId, secret: string) =>
-  `${CREDENTIAL_PREFIX}.${Buffer.from(hubId, "utf8").toString("base64url")}.${secret}`;
-
-const issuingHubOf = (credential: string): string | undefined => {
-  const [prefix, hub, secret, ...rest] = credential.split(".");
-  if (prefix !== CREDENTIAL_PREFIX || !hub || !secret || rest.length > 0) return undefined;
-  return Buffer.from(hub, "base64url").toString("utf8");
-};
 
 export class EnvironmentRegistry extends Context.Service<
   EnvironmentRegistry,
@@ -158,16 +149,22 @@ export class EnvironmentRegistry extends Context.Service<
     >;
     /** Whether the User may approve a machine joining; checked before the strong factor. */
     readonly mayRegister: (userId: UserId) => Effect.Effect<boolean, EnvironmentStorageError>;
-    /** Stores a newly joined machine with its credential, recording who approved it. */
+    /** Stores a newly joined machine by its credential's hash, recording who approved it. */
     readonly register: (input: {
       readonly approvedBy: UserId;
       readonly name: string;
       readonly os: string;
       readonly hostname: string;
-    }) => Effect.Effect<
-      { readonly environmentId: EnvironmentId; readonly credential: string },
-      EnvironmentAccessDeniedError | EnvironmentStorageError
-    >;
+      readonly credentialHash: string;
+    }) => Effect.Effect<EnvironmentId, EnvironmentAccessDeniedError | EnvironmentStorageError>;
+    /**
+     * Revokes every machine the User owns, as their account is turned off or removed; run it in
+     * that transaction. Answers what to disconnect once it commits.
+     */
+    readonly revokeOwnedBy: (input: {
+      readonly userId: UserId;
+      readonly actor: AuditLog.AuditActor;
+    }) => Effect.Effect<Effect.Effect<void>, EnvironmentStorageError>;
     readonly checkCredential: (
       credential: string | undefined,
     ) => Effect.Effect<CredentialCheck, EnvironmentStorageError>;
@@ -208,7 +205,11 @@ const make = Effect.gen(function* () {
     SELECT environment_id AS "environmentId", name, kind, owner_user_id AS "ownerUserId",
       registered_at AS "registeredAt", last_seen_at AS "lastSeenAt", last_os AS "lastOs",
       last_hostname AS "lastHostname", last_resources_json AS "lastResourcesJson",
-      last_providers_json AS "lastProvidersJson", revoked_at AS "revokedAt"
+      last_providers_json AS "lastProvidersJson", revoked_at AS "revokedAt",
+      EXISTS (
+        SELECT 1 FROM users AS owner WHERE owner.user_id = environments.owner_user_id
+          AND (owner.disabled_at IS NOT NULL OR owner.removed_at IS NOT NULL)
+      ) AS "ownerInactive"
     FROM environments WHERE ${sql.and(conditions)}
     ORDER BY kind = 'hub' DESC, registered_at, environment_id
   `;
@@ -330,7 +331,7 @@ const make = Effect.gen(function* () {
   const revoke = Effect.fn("EnvironmentRegistry.revoke")(function* (input: {
     readonly row: EnvironmentRow;
     readonly actor: AuditLog.AuditActor;
-    readonly via: "settings" | "leave";
+    readonly via: "settings" | "leave" | "userTurnedOff";
   }) {
     yield* sql`
         UPDATE environments SET revoked_at = ${yield* nowIso}
@@ -372,10 +373,8 @@ const make = Effect.gen(function* () {
 
   const register: EnvironmentRegistry["Service"]["register"] = Effect.fn(
     "EnvironmentRegistry.register",
-  )(function* ({ approvedBy, name, os, hostname }) {
+  )(function* ({ approvedBy, name, os, hostname, credentialHash }) {
     const environmentId = EnvironmentId.make(yield* random.uuidV4());
-    const credential = formatCredential(hubId, base64UrlEncode(yield* random.randomBytes(32)));
-    const credentialHash = yield* sha256(credential);
     yield* sql
       .withTransaction(
         Effect.gen(function* () {
@@ -404,8 +403,26 @@ const make = Effect.gen(function* () {
         }),
       )
       .pipe(Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }));
-    return { environmentId, credential };
+    return environmentId;
   });
+
+  const revokeOwnedBy: EnvironmentRegistry["Service"]["revokeOwnedBy"] = Effect.fn(
+    "EnvironmentRegistry.revokeOwnedBy",
+  )(
+    function* ({ userId, actor }) {
+      const rows = yield* selectRows([
+        sql`owner_user_id = ${userId}`,
+        sql`revoked_at IS NULL`,
+      ]).pipe(Effect.mapError(storageError));
+      for (const row of rows) yield* revoke({ row, actor, via: "userTurnedOff" });
+      return Effect.forEach(
+        rows,
+        (row) => connections.close(EnvironmentId.make(row.environmentId), "owner-inactive"),
+        { discard: true },
+      );
+    },
+    Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }),
+  );
 
   const findByCredential = Effect.fn("EnvironmentRegistry.findByCredential")(function* (
     credential: string,
@@ -423,7 +440,7 @@ const make = Effect.gen(function* () {
     if (credential === undefined || credential.length === 0) {
       return { _tag: "refused", reason: "credential-missing" } as const;
     }
-    const issuer = issuingHubOf(credential);
+    const issuer = environmentCredentialIssuer(credential);
     if (issuer === undefined) return { _tag: "refused", reason: "credential-unknown" } as const;
     if (issuer !== hubId) {
       return { _tag: "refused", reason: "credential-other-hub" } as const;
@@ -433,6 +450,7 @@ const make = Effect.gen(function* () {
       return { _tag: "refused", reason: "credential-unknown" } as const;
     }
     if (row.revokedAt !== null) return { _tag: "refused", reason: "credential-revoked" } as const;
+    if (row.ownerInactive === 1) return { _tag: "refused", reason: "owner-inactive" } as const;
     return {
       _tag: "valid",
       environmentId: EnvironmentId.make(row.environmentId),
@@ -502,6 +520,7 @@ const make = Effect.gen(function* () {
     remove,
     mayRegister,
     register,
+    revokeOwnedBy,
     checkCredential,
     recordHello,
     recordHeartbeat,

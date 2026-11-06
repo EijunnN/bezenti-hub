@@ -151,10 +151,11 @@ export const ENVIRONMENT_CLOSE_REASONS = {
   "credential-other-hub": { code: 4404, final: true },
   "environment-removed": { code: 4405, final: true },
   "insecure-transport": { code: 4406, final: true },
+  "owner-inactive": { code: 4407, final: true },
   "protocol-error": { code: 4410, final: false },
   "hello-timeout": { code: 4411, final: false },
   "heartbeat-timeout": { code: 4412, final: false },
-  replaced: { code: 4413, final: false },
+  replaced: { code: 4413, final: true },
   "hub-shutting-down": { code: 4414, final: false },
 } as const;
 
@@ -179,10 +180,12 @@ export const ENVIRONMENT_CLOSE_MESSAGES: Record<EnvironmentCloseReason, string> 
   "credential-other-hub": "This credential belongs to another Hub. Run `t3 join` for this one.",
   "environment-removed": "The Hub removed this machine. Run `t3 join` to add it again.",
   "insecure-transport": "The Hub accepts Environments only over HTTPS.",
+  "owner-inactive": "The Hub turned off the User this machine belongs to.",
   "protocol-error": "The connection sent a frame the other side could not read.",
   "hello-timeout": "The Hub did not receive this machine's hello in time.",
   "heartbeat-timeout": "The Hub stopped hearing from this machine.",
-  replaced: "Another connection for this machine took over.",
+  replaced:
+    "Another process is using this machine's credential, and the Hub kept the newer connection.",
   "hub-shutting-down": "The Hub is restarting.",
 };
 

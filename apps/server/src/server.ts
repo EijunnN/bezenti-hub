@@ -478,6 +478,7 @@ const layerAuth = Layer.mergeAll(
   InstallationUserService.layer,
   SpaceVisibility.layer,
   AuditLog.layer,
+  EnvironmentRegistry.layer,
 ).pipe(
   Layer.provideMerge(EnvironmentAuth.layer.pipe(Layer.provideMerge(SpaceDirectory.layer))),
   Layer.provideMerge(layerPersistence),
@@ -749,7 +750,6 @@ const layerMakeRoutes = Layer.mergeAll(
     ),
   ),
   Layer.provide(PreviewAutomationBroker.layer),
-  Layer.provide(EnvironmentRegistry.layer),
   Layer.provide(layerHubMachineSnapshot),
   Layer.provide(layerCommandReadiness),
   Layer.provide(ServerHttp.layerBrowserApiCors),

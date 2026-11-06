@@ -10,6 +10,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as AuditLog from "../audit/AuditLog.ts";
+import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as PairingGrantStore from "../auth/PairingGrantStore.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import * as SpaceDirectory from "./SpaceDirectory.ts";
@@ -41,6 +42,7 @@ const make = Effect.gen(function* () {
   const sessions = yield* SessionStore.SessionStore;
   const pairingLinks = yield* PairingGrantStore.PairingGrantStore;
   const audit = yield* AuditLog.AuditLog;
+  const environments = yield* EnvironmentRegistry.EnvironmentRegistry;
   const storageError = (cause: unknown) => new SpaceDirectory.SpaceDirectoryStorageError({ cause });
 
   const writeStatus = Effect.fn("InstallationUserService.writeStatus")(function* (
@@ -98,6 +100,10 @@ const make = Effect.gen(function* () {
             return { changed, announce: Effect.void };
           }
           if (changed && current.status !== "removed") yield* writeStatus(userId, status);
+          // Their machines go with their sign-in, and stay revoked if they come back.
+          const disconnect = yield* environments
+            .revokeOwnedBy({ userId, actor: AuditLog.userActor(actorUserId) })
+            .pipe(Effect.mapError(storageError));
           const announceSessions = yield* sessions
             .revokeAllForUserDeferred(userId)
             .pipe(Effect.mapError(storageError));
@@ -106,7 +112,12 @@ const make = Effect.gen(function* () {
             .pipe(Effect.mapError(storageError));
           // No cached principal outlives the commit, even if the work after it fails.
           yield* spaces.changed;
-          return { changed, announce: Effect.andThen(announceSessions, announceLinks) };
+          return {
+            changed,
+            announce: Effect.andThen(announceSessions, announceLinks).pipe(
+              Effect.andThen(disconnect),
+            ),
+          };
         }),
       )
       .pipe(Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }));
@@ -131,4 +142,5 @@ const make = Effect.gen(function* () {
 
 export const layer = Layer.effect(InstallationUserService, make).pipe(
   Layer.provide(AuditLog.layer),
+  Layer.provide(EnvironmentRegistry.layer),
 );

@@ -297,6 +297,8 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     readonly startupPresentation?: ServerConfig.StartupPresentation;
     readonly forceAutoBootstrapProjectFromCwd?: boolean;
     readonly rejectRunningServer?: boolean;
+    /** Starting the server, which reads joined mode from `joined-hub.json`. */
+    readonly serving?: boolean;
     readonly selectAutomaticPort?: (
       preferred: number,
     ) => Effect.Effect<number, NetService.NetError | CliError.UserError>;
@@ -394,16 +396,20 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
   }
   yield* fs.makeDirectory(cwd, { recursive: true });
   yield* ServerConfig.ensureServerDirectories(derivedPaths);
-  const joinedHub = Option.getOrUndefined(
-    yield* readJoinedHubState(derivedPaths.joinedHubPath).pipe(
-      Effect.mapError(
-        (cause) =>
-          new CliError.UserError({
-            cause: `Could not read ${derivedPaths.joinedHubPath}: ${String(cause)}. Run \`t3 leave\` or \`t3 join\` again.`,
-          }),
-      ),
-    ),
-  );
+  // Only starting the server needs it: `t3 join`, `t3 leave` and `t3 status` read it themselves
+  // and must work when it is unreadable, to fix it.
+  const joinedHub = options?.serving
+    ? Option.getOrUndefined(
+        yield* readJoinedHubState(derivedPaths.joinedHubPath).pipe(
+          Effect.mapError(
+            (cause) =>
+              new CliError.UserError({
+                cause: `Could not read ${derivedPaths.joinedHubPath}: ${String(cause)}. Run \`t3 leave\` to forget the Hub, or \`t3 join\` again.`,
+              }),
+          ),
+        ),
+      )
+    : undefined;
   const persistedObservabilitySettings = yield* loadPersistedObservabilitySettings(
     derivedPaths.settingsPath,
   );

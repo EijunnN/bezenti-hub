@@ -123,6 +123,12 @@ const ownersLaptop: AccessPolicy.EnvironmentResource = {
   ownerUserId: UserId.make("owner"),
 };
 
+const gracesLaptop: AccessPolicy.EnvironmentResource = {
+  kind: "environment",
+  environmentKind: "external",
+  ownerUserId: UserId.make("grace"),
+};
+
 const allow = AccessPolicy.allow;
 const deny = AccessPolicy.deny;
 
@@ -1033,6 +1039,16 @@ const rows: ReadonlyArray<
     deny("not-yours"),
   ],
   ["Owner sees their personal machine", owner, "environment.view", ownersLaptop, allow],
+  ["Owner sees another User's personal machine", owner, "environment.view", gracesLaptop, allow],
+  ["Owner removes another User's machine", owner, "environment.remove", gracesLaptop, allow],
+  [
+    "a Member does not see another Member's machine",
+    principal("ada", { roles: [[ORG, "member"]] }),
+    "environment.view",
+    gracesLaptop,
+    deny("not-yours"),
+  ],
+  ["a Member sees their own machine", member, "environment.view", gracesLaptop, allow],
   ["Owner renames their machine", owner, "environment.rename", ownersLaptop, allow],
   ["Owner renames the Hub machine", owner, "environment.rename", hubMachine, allow],
   ["Owner removes their machine", owner, "environment.remove", ownersLaptop, allow],

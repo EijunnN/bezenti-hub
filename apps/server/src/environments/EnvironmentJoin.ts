@@ -1,49 +1,63 @@
 /**
- * `t3 join`, the Hub's half. The «Register this machine» page approves with the Owner's browser
- * session and a strong factor in the same request, and answers a one-time code bound to the
- * machine's PKCE challenge and loopback redirect, as app sign-in does. The machine redeems the
- * code for its Environment credential; the row and its audit entry are written then.
+ * `t3 join`, the Hub's half. The machine starts a request with the SHA-256 of a credential it made
+ * and a PKCE challenge; the Owner approves it on «Register this machine» with a strong factor in
+ * the same request, which registers the machine; the machine asks with its verifier until then.
+ * The credential never leaves the machine, and asking again after a lost answer changes nothing.
  */
 import type {
   EnvironmentId,
   EnvironmentJoinApproveRequest,
-  EnvironmentJoinTokenRequest,
-  EnvironmentJoinTokenResult,
+  EnvironmentJoinRequestView,
+  EnvironmentJoinStartRequest,
+  EnvironmentJoinStatus,
+  EnvironmentJoinStatusRequest,
   UserId,
 } from "@t3tools/contracts";
 import {
   appSignInCallbackUrl,
+  appSignInCancelledUrl,
   appSignInRedirectKind,
   isAppSignInCodeChallenge,
-  isAppSignInCodeVerifier,
   isAppSignInState,
 } from "@t3tools/shared/appSignIn";
+import { isEnvironmentCredentialHash } from "@t3tools/shared/environmentJoin";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
-import * as Digest from "effect/crypto/Digest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import type { HttpServerRequest } from "effect/http";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import { makeGrantStore, makePkce } from "../auth/pkceGrants.ts";
 import * as UserDirectory from "../auth/UserDirectory.ts";
-import { base64UrlEncode, timingSafeEqualBase64Url } from "../auth/utils.ts";
+import { base64UrlEncode } from "../auth/utils.ts";
 import * as EnvironmentRegistry from "./EnvironmentRegistry.ts";
 
-/** Long enough for the browser to hand the code to `t3 join`, short enough to be stale if leaked. */
-const JOIN_CODE_TTL_MS = 60_000;
+/** Long enough for the Owner to reach a browser and sign in. */
+const JOIN_REQUEST_TTL_MS = 600_000;
+// Starting a request needs no session, so the store is bounded.
+const MAX_PENDING_REQUESTS = 200;
+
+type Decision =
+  | { readonly _tag: "pending" }
+  | { readonly _tag: "denied" }
+  | { readonly _tag: "approved"; readonly environmentId: EnvironmentId; readonly name: string };
 
 interface PendingJoin {
-  readonly approvedBy: UserId;
+  readonly codeChallenge: string;
+  readonly credentialHash: string;
   readonly name: string;
   readonly os: string;
   readonly hostname: string;
-  readonly redirectUri: string;
-  readonly codeChallenge: string;
+  readonly redirectUri: string | undefined;
+  readonly state: string | undefined;
+  readonly requestedAt: string;
   readonly expiresAtMs: number;
+  readonly decision: Decision;
 }
 
 export class EnvironmentJoinRequestError extends Schema.TaggedError<EnvironmentJoinRequestError>()(
@@ -60,42 +74,58 @@ export class EnvironmentJoinNotSignedInError extends Schema.TaggedError<Environm
   }
 }
 
-/** Unknown, used, expired, or presented with the wrong verifier or redirect: all look alike. */
-export class EnvironmentJoinInvalidGrantError extends Schema.TaggedError<EnvironmentJoinInvalidGrantError>()(
-  "EnvironmentJoinInvalidGrantError",
+/** Unknown, expired or already decided otherwise: all look alike. */
+export class EnvironmentJoinRequestNotFoundError extends Schema.TaggedError<EnvironmentJoinRequestNotFoundError>()(
+  "EnvironmentJoinRequestNotFoundError",
   {},
 ) {
   override get message(): string {
-    return "The registration code is invalid or expired. Run `t3 join` again.";
+    return "This registration expired or was already decided. Run `t3 join` again.";
   }
 }
+
+/** The verifier is not the one the request was started with. */
+export class EnvironmentJoinInvalidGrantError extends Schema.TaggedError<EnvironmentJoinInvalidGrantError>()(
+  "EnvironmentJoinInvalidGrantError",
+  {},
+) {}
+
+type ApproveError =
+  | EnvironmentJoinNotSignedInError
+  | EnvironmentJoinRequestNotFoundError
+  | EnvironmentRegistry.EnvironmentAccessDeniedError
+  | UserDirectory.AccountChangeRefusedError
+  | UserDirectory.SignInThrottledError
+  | UserDirectory.UserDirectoryStorageError
+  | EnvironmentRegistry.EnvironmentStorageError
+  | EnvironmentAuth.ServerAuthInternalError;
 
 export class EnvironmentJoin extends Context.Service<
   EnvironmentJoin,
   {
-    /** Approves with the request's browser session and answers the redirect back to `t3 join`. */
+    readonly start: (
+      input: EnvironmentJoinStartRequest,
+    ) => Effect.Effect<{ readonly requestId: string }, EnvironmentJoinRequestError>;
+    readonly view: (
+      requestId: string,
+    ) => Effect.Effect<EnvironmentJoinRequestView, EnvironmentJoinRequestNotFoundError>;
+    /** Registers the machine; answers where the browser goes next, if anywhere. */
     readonly approve: (
       request: HttpServerRequest.HttpServerRequest,
       input: EnvironmentJoinApproveRequest,
+    ) => Effect.Effect<string | null, ApproveError>;
+    readonly deny: (
+      request: HttpServerRequest.HttpServerRequest,
+      requestId: string,
     ) => Effect.Effect<
-      string,
-      | EnvironmentJoinRequestError
+      string | null,
       | EnvironmentJoinNotSignedInError
-      | EnvironmentRegistry.EnvironmentAccessDeniedError
-      | UserDirectory.AccountChangeRefusedError
-      | UserDirectory.SignInThrottledError
-      | UserDirectory.UserDirectoryStorageError
-      | EnvironmentRegistry.EnvironmentStorageError
+      | EnvironmentJoinRequestNotFoundError
       | EnvironmentAuth.ServerAuthInternalError
     >;
-    readonly redeem: (
-      input: EnvironmentJoinTokenRequest,
-    ) => Effect.Effect<
-      EnvironmentJoinTokenResult,
-      | EnvironmentJoinInvalidGrantError
-      | EnvironmentRegistry.EnvironmentAccessDeniedError
-      | EnvironmentRegistry.EnvironmentStorageError
-    >;
+    readonly status: (
+      input: EnvironmentJoinStatusRequest,
+    ) => Effect.Effect<EnvironmentJoinStatus, EnvironmentJoinInvalidGrantError>;
   }
 >()("t3/environments/EnvironmentJoin") {}
 
@@ -104,112 +134,170 @@ const make = Effect.gen(function* () {
   const userDirectory = yield* UserDirectory.UserDirectory;
   const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
   const random = yield* SecureRandom.SecureRandom;
-  const digester = yield* Digest.Digest;
-  // Keyed by the code's SHA-256, so the codes themselves are never held.
-  const codes = yield* Ref.make<ReadonlyMap<string, PendingJoin>>(new Map());
+  const pkce = yield* makePkce;
+  const requests = yield* makeGrantStore<PendingJoin>(MAX_PENDING_REQUESTS);
+  // One decision at a time, so two approvals of one request register it once.
+  const decisions = yield* Semaphore.make(1);
 
-  const sha256 = (value: string) =>
-    digester.digest(Digest.sha256, new TextEncoder().encode(value)).pipe(
-      Effect.orDie,
-      Effect.map((digest) => base64UrlEncode(digest)),
-    );
+  const start: EnvironmentJoin["Service"]["start"] = Effect.fn("EnvironmentJoin.start")(
+    function* (input) {
+      // Only `t3 join` on the machine itself is sent back to: a loopback port, never a scheme.
+      if (
+        input.redirectUri !== undefined &&
+        (appSignInRedirectKind(input.redirectUri) !== "this-computer" ||
+          input.state === undefined ||
+          !isAppSignInState(input.state))
+      ) {
+        return yield* new EnvironmentJoinRequestError({ reason: "invalid_redirect_uri" });
+      }
+      if (
+        !isAppSignInCodeChallenge(input.codeChallenge) ||
+        !isEnvironmentCredentialHash(input.credentialHash)
+      ) {
+        return yield* new EnvironmentJoinRequestError({ reason: "invalid_code_challenge" });
+      }
+      const now = yield* Clock.currentTimeMillis;
+      const requestId = base64UrlEncode(yield* random.randomBytes(24));
+      yield* requests.put(
+        requestId,
+        {
+          codeChallenge: input.codeChallenge,
+          credentialHash: input.credentialHash,
+          name: input.name,
+          os: input.os,
+          hostname: input.hostname,
+          redirectUri: input.redirectUri,
+          state: input.state,
+          requestedAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+          expiresAtMs: now + JOIN_REQUEST_TTL_MS,
+          decision: { _tag: "pending" },
+        },
+        now,
+      );
+      return { requestId };
+    },
+  );
+
+  const find = Effect.fn("EnvironmentJoin.find")(function* (requestId: string) {
+    const found = yield* requests.get(requestId, yield* Clock.currentTimeMillis);
+    if (found === undefined) return yield* new EnvironmentJoinRequestNotFoundError({});
+    return found;
+  });
+
+  const view: EnvironmentJoin["Service"]["view"] = Effect.fn("EnvironmentJoin.view")(
+    function* (requestId) {
+      const found = yield* find(requestId);
+      return {
+        requestId,
+        name: found.name,
+        os: found.os,
+        hostname: found.hostname,
+        requestedAt: found.requestedAt,
+        status: found.decision._tag,
+      };
+    },
+  );
+
+  // The browser's own cookie, never a token an app holds.
+  const browserUser = Effect.fn("EnvironmentJoin.browserUser")(function* (
+    request: HttpServerRequest.HttpServerRequest,
+  ) {
+    const session = yield* environmentAuth
+      .authenticateBrowserSession(request)
+      .pipe(
+        Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, () =>
+          Effect.fail(new EnvironmentJoinNotSignedInError({})),
+        ),
+      );
+    if (session.userId === undefined) return yield* new EnvironmentJoinNotSignedInError({});
+    return { userId: session.userId as UserId, sessionId: session.sessionId };
+  });
+
+  const returnTo = (found: PendingJoin, approved: boolean) =>
+    found.redirectUri === undefined || found.state === undefined
+      ? null
+      : approved
+        ? appSignInCallbackUrl(found.redirectUri, "approved", found.state)
+        : appSignInCancelledUrl(found.redirectUri, found.state);
 
   const approve: EnvironmentJoin["Service"]["approve"] = Effect.fn("EnvironmentJoin.approve")(
     function* (request, input) {
-      // Only `t3 join` on the machine itself gets the code: a loopback port, never a scheme.
-      if (appSignInRedirectKind(input.redirectUri) !== "this-computer") {
-        return yield* new EnvironmentJoinRequestError({ reason: "invalid_redirect_uri" });
-      }
-      if (!isAppSignInCodeChallenge(input.codeChallenge) || !isAppSignInState(input.state)) {
-        return yield* new EnvironmentJoinRequestError({ reason: "invalid_code_challenge" });
-      }
-      // The browser's own cookie, never a token an app holds.
-      const session = yield* environmentAuth
-        .authenticateBrowserSession(request)
-        .pipe(
-          Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, () =>
-            Effect.fail(new EnvironmentJoinNotSignedInError({})),
-          ),
-        );
-      if (session.userId === undefined) return yield* new EnvironmentJoinNotSignedInError({});
+      const user = yield* browserUser(request);
       // Who may comes before the factor, so a Member's proof is never even checked.
-      if (!(yield* registry.mayRegister(session.userId))) {
+      if (!(yield* registry.mayRegister(user.userId))) {
         return yield* new EnvironmentRegistry.EnvironmentAccessDeniedError({
           reason: "owner-only",
         });
       }
+      yield* find(input.requestId);
       yield* userDirectory.confirmStrongFactor(
-        {
-          userId: session.userId,
-          sessionId: session.sessionId,
-          origin: request.headers.origin ?? "",
-        },
+        { ...user, origin: request.headers.origin ?? "" },
         input.reauth,
       );
-      const now = yield* Clock.currentTimeMillis;
-      const code = base64UrlEncode(yield* random.randomBytes(32));
-      const key = yield* sha256(code);
-      const pending: PendingJoin = {
-        approvedBy: session.userId,
-        name: input.name,
-        os: input.os,
-        hostname: input.hostname,
-        redirectUri: input.redirectUri,
-        codeChallenge: input.codeChallenge,
-        expiresAtMs: now + JOIN_CODE_TTL_MS,
-      };
-      yield* Ref.update(codes, (current) => {
-        const next = new Map(
-          Array.from(current).filter(([, existing]) => existing.expiresAtMs > now),
-        );
-        next.set(key, pending);
-        return next;
-      });
-      return appSignInCallbackUrl(input.redirectUri, code, input.state);
+      return yield* decisions.withPermits(1)(
+        Effect.gen(function* () {
+          const found = yield* find(input.requestId);
+          if (found.decision._tag === "approved") return returnTo(found, true);
+          if (found.decision._tag === "denied") {
+            return yield* new EnvironmentJoinRequestNotFoundError({});
+          }
+          const environmentId = yield* registry.register({
+            approvedBy: user.userId,
+            name: input.name,
+            os: found.os,
+            hostname: found.hostname,
+            credentialHash: found.credentialHash,
+          });
+          const now = yield* Clock.currentTimeMillis;
+          yield* requests.update(input.requestId, now, (current) => ({
+            ...current,
+            name: input.name,
+            decision: { _tag: "approved", environmentId, name: input.name },
+          }));
+          return returnTo(found, true);
+        }),
+      );
     },
   );
 
-  const pkceVerifies = (verifier: string, challenge: string) =>
-    isAppSignInCodeVerifier(verifier)
-      ? sha256(verifier).pipe(Effect.map((digest) => timingSafeEqualBase64Url(digest, challenge)))
-      : Effect.succeed(false);
+  const deny: EnvironmentJoin["Service"]["deny"] = Effect.fn("EnvironmentJoin.deny")(
+    function* (request, requestId) {
+      yield* browserUser(request);
+      return yield* decisions.withPermits(1)(
+        Effect.gen(function* () {
+          const found = yield* find(requestId);
+          if (found.decision._tag === "approved") {
+            return yield* new EnvironmentJoinRequestNotFoundError({});
+          }
+          yield* requests.update(requestId, yield* Clock.currentTimeMillis, (current) => ({
+            ...current,
+            decision: { _tag: "denied" },
+          }));
+          return returnTo(found, false);
+        }),
+      );
+    },
+  );
 
-  const redeem: EnvironmentJoin["Service"]["redeem"] = Effect.fn("EnvironmentJoin.redeem")(
+  const status: EnvironmentJoin["Service"]["status"] = Effect.fn("EnvironmentJoin.status")(
     function* (input) {
-      const key = yield* sha256(input.code);
-      // A presented code is spent even when a later check fails (RFC 6749 §4.1.2).
-      const pending = yield* Ref.modify(codes, (current) => {
-        const found = current.get(key);
-        if (found === undefined) return [undefined, current] as const;
-        const next = new Map(current);
-        next.delete(key);
-        return [found, next] as const;
-      });
-      const now = yield* Clock.currentTimeMillis;
-      if (
-        pending === undefined ||
-        pending.expiresAtMs <= now ||
-        pending.redirectUri !== input.redirectUri ||
-        !(yield* pkceVerifies(input.codeVerifier, pending.codeChallenge))
-      ) {
+      const found = yield* requests.get(input.requestId, yield* Clock.currentTimeMillis);
+      if (found === undefined) return { status: "expired" } as const;
+      if (!(yield* pkce.verifies(input.codeVerifier, found.codeChallenge))) {
         return yield* new EnvironmentJoinInvalidGrantError({});
       }
-      const registered = yield* registry.register({
-        approvedBy: pending.approvedBy,
-        name: pending.name,
-        os: pending.os,
-        hostname: pending.hostname,
-      });
+      const { decision } = found;
+      if (decision._tag !== "approved") return { status: decision._tag } as const;
       return {
-        environmentId: registered.environmentId,
-        hubEnvironmentId: registry.hubId as EnvironmentId,
-        name: pending.name,
-        credential: registered.credential,
-      };
+        status: "approved",
+        environmentId: decision.environmentId,
+        hubEnvironmentId: registry.hubId,
+        name: decision.name,
+      } as const;
     },
   );
 
-  return EnvironmentJoin.of({ approve, redeem });
+  return EnvironmentJoin.of({ start, view, approve, deny, status });
 });
 
 export const layer = Layer.effect(EnvironmentJoin, make);

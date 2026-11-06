@@ -1,5 +1,9 @@
-import type { EnvironmentId, HubEnvironmentList, HubEnvironmentSummary } from "@t3tools/contracts";
-import type { EnvironmentJoinPageRequest } from "@t3tools/shared/environmentJoin";
+import type {
+  EnvironmentId,
+  EnvironmentJoinRequestView,
+  HubEnvironmentList,
+  HubEnvironmentSummary,
+} from "@t3tools/contracts";
 
 import { request, type StepUp, toReauth, UserSignInError } from "./userAccounts";
 
@@ -23,32 +27,40 @@ export function removeHubEnvironment(environmentId: EnvironmentId): Promise<HubE
   );
 }
 
+/** The `t3 join` request a «Register this machine» link names. */
+export function fetchEnvironmentJoinRequest(
+  requestId: string,
+): Promise<EnvironmentJoinRequestView> {
+  return request(
+    (client) => client.environments.joinRequest({ payload: { requestId } }),
+    "This registration expired or was already decided. Run `t3 join` again.",
+  );
+}
+
 const STRONG_FACTOR_REQUIRED =
   "Confirm with your passkey, or with your password and a code from your app.";
 
-/** The Owner's approval of `t3 join`, with a strong factor; answers where to send the browser. */
+/** The Owner's approval, with a strong factor; answers where to send the browser, if anywhere. */
 export async function approveEnvironmentJoin(input: {
-  readonly request: EnvironmentJoinPageRequest;
+  readonly requestId: string;
   readonly name: string;
   readonly stepUp: StepUp;
-}): Promise<string> {
+}): Promise<string | null> {
   const reauth = await toReauth(input.stepUp);
   if (reauth === undefined) throw new UserSignInError({ message: STRONG_FACTOR_REQUIRED });
   const result = await request(
     (client) =>
       client.environments.approveJoin({
-        payload: {
-          redirectUri: input.request.redirectUri,
-          codeChallenge: input.request.codeChallenge,
-          codeChallengeMethod: "S256",
-          state: input.request.state,
-          name: input.name,
-          os: input.request.os,
-          hostname: input.request.hostname,
-          reauth,
-        },
+        payload: { requestId: input.requestId, name: input.name, reauth },
       }),
     "Sign in to this Hub again, then approve the machine.",
+  );
+  return result.redirectTo;
+}
+
+export async function denyEnvironmentJoin(requestId: string): Promise<string | null> {
+  const result = await request((client) =>
+    client.environments.denyJoin({ payload: { requestId } }),
   );
   return result.redirectTo;
 }

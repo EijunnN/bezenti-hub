@@ -9,22 +9,20 @@ import {
   appSignInCallbackUrl,
   appSignInRedirectKind,
   isAppSignInCodeChallenge,
-  isAppSignInCodeVerifier,
   isAppSignInState,
 } from "@t3tools/shared/appSignIn";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
-import * as Digest from "effect/crypto/Digest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import type { HttpServerRequest } from "effect/http";
 
 import * as AuditLog from "../audit/AuditLog.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
-import { base64UrlEncode, timingSafeEqualBase64Url, type AuthRequestMetadata } from "./utils.ts";
+import { makeGrantStore, makePkce } from "./pkceGrants.ts";
+import type { AuthRequestMetadata } from "./utils.ts";
 
 // Desktop and mobile sign-in through the system browser (RFC 8252): a browser session approves a
 // one-time code bound to the app's PKCE challenge and redirect; the app exchanges it with its
@@ -32,6 +30,7 @@ import { base64UrlEncode, timingSafeEqualBase64Url, type AuthRequestMetadata } f
 
 /** Long enough for the browser to hand the code back, short enough that a leaked one is stale. */
 const APP_SIGN_IN_CODE_TTL_MS = 60_000;
+const MAX_PENDING_CODES = 1_000;
 
 interface PendingCode {
   readonly userId: UserId;
@@ -98,15 +97,9 @@ const make = Effect.gen(function* () {
   const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
   const audit = yield* AuditLog.AuditLog;
   const random = yield* SecureRandom.SecureRandom;
-  const digester = yield* Digest.Digest;
+  const { sha256, verifies: pkceVerifies } = yield* makePkce;
   // Keyed by the code's SHA-256, so the codes themselves are never held.
-  const codes = yield* Ref.make<ReadonlyMap<string, PendingCode>>(new Map());
-
-  const sha256 = (value: string) =>
-    digester.digest(Digest.sha256, new TextEncoder().encode(value)).pipe(
-      Effect.orDie,
-      Effect.map((digest) => base64UrlEncode(digest)),
-    );
+  const codes = yield* makeGrantStore<PendingCode>(MAX_PENDING_CODES);
 
   const approve: AppSignIn["Service"]["approve"] = Effect.fn("AppSignIn.approve")(
     function* (request, input) {
@@ -151,21 +144,10 @@ const make = Effect.gen(function* () {
         .pipe(
           Effect.mapError((cause) => new EnvironmentAuth.ServerAuthUserDirectoryError({ cause })),
         );
-      yield* Ref.update(codes, (current) => {
-        const next = new Map(
-          Array.from(current).filter(([, existing]) => existing.expiresAtMs > now),
-        );
-        next.set(key, pending);
-        return next;
-      });
+      yield* codes.put(key, pending, now);
       return appSignInCallbackUrl(input.redirectUri, code, input.state);
     },
   );
-
-  const pkceVerifies = (verifier: string, challenge: string) =>
-    isAppSignInCodeVerifier(verifier)
-      ? sha256(verifier).pipe(Effect.map((digest) => timingSafeEqualBase64Url(digest, challenge)))
-      : Effect.succeed(false);
 
   const exchange: AppSignIn["Service"]["exchange"] = Effect.fn("AppSignIn.exchange")(function* ({
     token,
@@ -174,13 +156,7 @@ const make = Effect.gen(function* () {
   }) {
     const key = yield* sha256(token.code);
     // A presented code is spent even when a later check fails (RFC 6749 §4.1.2).
-    const pending = yield* Ref.modify(codes, (current) => {
-      const found = current.get(key);
-      if (found === undefined) return [undefined, current] as const;
-      const next = new Map(current);
-      next.delete(key);
-      return [found, next] as const;
-    });
+    const pending = yield* codes.take(key);
     const now = yield* Clock.currentTimeMillis;
     if (
       pending === undefined ||

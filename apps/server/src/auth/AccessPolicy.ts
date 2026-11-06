@@ -242,9 +242,8 @@ const isEnvironment = (resource: Resource): resource is EnvironmentResource =>
   resource.kind === "environment";
 
 /**
- * Everyone uses the Hub machine. A personal machine is its owner's alone: nobody else sees it,
- * the Owner included when it is not theirs. Only the Owner renames or removes, and never the Hub
- * machine away.
+ * Everyone uses the Hub machine. A personal machine is its owner's: nobody else sees it but the
+ * Owner, who sees, renames and removes every one, and never removes the Hub machine.
  */
 const decideEnvironment = (
   principal: Principal,
@@ -253,13 +252,14 @@ const decideEnvironment = (
 ): Decision => {
   const own = environment.ownerUserId === principal.userId;
   if (action === "environment.view") {
-    return environment.environmentKind === "hub" || own ? allow : deny("not-yours");
+    return environment.environmentKind === "hub" || own || principal.isOwner
+      ? allow
+      : deny("not-yours");
   }
   if (!principal.isOwner) return deny("owner-only");
-  if (environment.environmentKind === "hub") {
-    return action === "environment.remove" ? deny("hub-machine") : allow;
-  }
-  return own ? allow : deny("not-yours");
+  return environment.environmentKind === "hub" && action === "environment.remove"
+    ? deny("hub-machine")
+    : allow;
 };
 
 const ROLES_THAT_CREATE_PROJECTS: ReadonlySet<SpaceRole> = new Set(["admin", "member"]);

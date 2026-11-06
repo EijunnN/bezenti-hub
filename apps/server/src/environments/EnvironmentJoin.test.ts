@@ -4,12 +4,12 @@ import * as Effect from "effect/Effect";
 import { addMember, passkeyReauth } from "../auth/UserAuth.testkit.ts";
 import {
   approveJoin,
-  codeOf,
   hubWithOwner,
   joinMachine,
+  joinStatus,
   listEnvironments,
-  REDIRECT,
-  VERIFIER,
+  loopbackStateOf,
+  startJoin,
 } from "./environments.testkit.ts";
 
 const OWNER_ONLY = "Only the Owner manages this Hub's Environments.";
@@ -60,7 +60,8 @@ it.effect("a Member cannot approve a machine, whatever proof they bring", () =>
   Effect.gen(function* () {
     const { server } = yield* hubWithOwner();
     const member = yield* addMember(server);
-    const refused = yield* approveJoin(server, member, {
+    const { requestId } = yield* startJoin(server);
+    const refused = yield* approveJoin(server, member, requestId, {
       reauth: { method: "password", password: "anything", totpCode: "123456" },
     });
     assert.equal(refused.status, 403);
@@ -72,15 +73,21 @@ it.effect("a Member cannot approve a machine, whatever proof they bring", () =>
 it.effect("the Owner's approval needs a strong factor in the same request", () =>
   Effect.gen(function* () {
     const { server, owner } = yield* hubWithOwner();
+    const { requestId } = yield* startJoin(server);
     // A stolen browser session alone, or a password without a code, adds no machine.
     for (const reauth of [undefined, { method: "password", password: "guess" }]) {
-      const refused = yield* approveJoin(server, owner, reauth === undefined ? {} : { reauth });
+      const refused = yield* approveJoin(
+        server,
+        owner,
+        requestId,
+        reauth === undefined ? {} : { reauth },
+      );
       assert.equal(refused.status, 403);
       assert.equal(refused.body.message, STRONG_FACTOR);
     }
-    // An app's bearer token, not the browser's own cookie, does not approve.
-    const signedOut = yield* approveJoin(server, "");
-    assert.equal(signedOut.status, 401);
+    // Without the browser's own cookie nothing is approved.
+    assert.equal((yield* approveJoin(server, "", requestId)).status, 401);
+    assert.equal((yield* joinStatus(server, requestId)).body.status, "pending");
     assert.deepEqual(
       (yield* listEnvironments(server, owner)).map((environment) => environment.kind),
       ["hub"],
@@ -88,42 +95,78 @@ it.effect("the Owner's approval needs a strong factor in the same request", () =
   }),
 );
 
-it.effect("a code is spent on first use and needs its verifier and redirect", () =>
+it.effect("only the `t3 join` that started a request learns its outcome, as often as it asks", () =>
   Effect.gen(function* () {
     const { server, authenticator, owner } = yield* hubWithOwner();
-    const approved = yield* approveJoin(server, owner, {
+    const joined = yield* joinMachine(server, authenticator, owner);
+    // Another verifier learns nothing.
+    const stranger = yield* joinStatus(
+      server,
+      joined.requestId,
+      "another-code-verifier-that-is-long-enough-for-pkce-0123",
+    );
+    assert.equal(stranger.status, 401);
+    // A lost answer is asked for again: the same machine, no second row or audit entry.
+    const again = yield* joinStatus(server, joined.requestId);
+    assert.deepEqual(again.body, {
+      status: "approved",
+      environmentId: joined.environmentId,
+      hubEnvironmentId: joined.hubEnvironmentId,
+      name: "Laptop",
+    });
+    const reapproved = yield* approveJoin(server, owner, joined.requestId, {
       reauth: yield* passkeyReauth(server, authenticator),
     });
-    const code = codeOf(approved.body.redirectTo);
-    const wrongVerifier = yield* server.request("/api/environments/join/token", {
-      body: { code, codeVerifier: `${VERIFIER}-other`, redirectUri: REDIRECT },
+    assert.equal(reapproved.status, 200);
+    const [rows] = yield* server.sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count FROM environments WHERE kind = 'external'
+    `;
+    assert.equal(rows!.count, 1);
+    const audit = yield* server.request("/api/installation/audit?action=environment.register", {
+      cookie: owner,
     });
-    assert.equal(wrongVerifier.status, 401);
-    // Spent by the failed attempt, so the right verifier no longer works either.
-    const replay = yield* server.request("/api/environments/join/token", {
-      body: { code, codeVerifier: VERIFIER, redirectUri: REDIRECT },
-    });
-    assert.equal(replay.status, 401);
+    assert.lengthOf(audit.body.entries as ReadonlyArray<unknown>, 1);
+    // The credential never crossed the wire from the Hub.
+    assert.notInclude(JSON.stringify(again.body), joined.credential);
   }),
 );
 
-it.effect("the credential is handed out only over HTTPS or on this machine", () =>
+it.effect("a browser on the machine returns to `t3 join`, and a refusal tells it so", () =>
   Effect.gen(function* () {
     const { server, authenticator, owner } = yield* hubWithOwner();
-    const approved = yield* approveJoin(server, owner, {
+    const approved = yield* startJoin(server, { loopback: true });
+    const decided = yield* approveJoin(server, owner, approved.requestId, {
       reauth: yield* passkeyReauth(server, authenticator),
     });
-    const overPlainHttp = yield* server.request("/api/environments/join/token", {
-      peer: "203.0.113.7",
+    assert.equal(loopbackStateOf(decided.body.redirectTo), "state-0123456789abcdef");
+
+    const denied = yield* startJoin(server);
+    const refused = yield* server.request("/api/environments/join/deny", {
+      cookie: owner,
+      body: { requestId: denied.requestId },
+    });
+    assert.deepEqual(refused.body, { redirectTo: null });
+    assert.equal((yield* joinStatus(server, denied.requestId)).body.status, "denied");
+    assert.equal((yield* joinStatus(server, "no-such-request-0123")).body.status, "expired");
+  }),
+);
+
+it.effect("a join request asks only for a loopback return and a well-formed hash", () =>
+  Effect.gen(function* () {
+    const { server } = yield* hubWithOwner();
+    const started = yield* server.request("/api/environments/join/start", {
       body: {
-        code: codeOf(approved.body.redirectTo),
-        codeVerifier: VERIFIER,
-        redirectUri: REDIRECT,
+        codeChallenge: "DeB41nTVkPwpbbYecrnqtVq7VXLezustdHAK4SWt13c",
+        codeChallengeMethod: "S256",
+        credentialHash: "DeB41nTVkPwpbbYecrnqtVq7VXLezustdHAK4SWt13c",
+        name: "x",
+        os: "linux",
+        hostname: "x",
+        redirectUri: "https://evil.example.com/callback",
+        state: "state-0123456789abcdef",
       },
     });
-    assert.equal(overPlainHttp.status, 400);
-    assert.equal(overPlainHttp.body.reason, "insecure_transport");
-    assert.notProperty(overPlainHttp.body, "credential");
+    assert.equal(started.status, 400);
   }),
 );
 
@@ -199,8 +242,15 @@ it.effect("`t3 leave` unregisters the machine with its own credential", () =>
   Effect.gen(function* () {
     const { server, authenticator, owner } = yield* hubWithOwner();
     const joined = yield* joinMachine(server, authenticator, owner);
-    const left = yield* server.request("/api/environments/leave", {
+    const overPlainHttp = yield* server.request("/api/environments/leave", {
       authorization: `Bearer ${joined.credential}`,
+      peer: "203.0.113.7",
+      body: {},
+    });
+    assert.equal(overPlainHttp.status, 400);
+    // The scheme is case-insensitive, as for every other bearer the Hub takes.
+    const left = yield* server.request("/api/environments/leave", {
+      authorization: `bearer ${joined.credential}`,
       body: {},
     });
     assert.equal(left.status, 200);

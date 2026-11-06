@@ -1,28 +1,34 @@
-// @effect-diagnostics nodeBuiltinImport:off globalTimersInEffect:off globalFetchInEffect:off
-// `t3 join` listens on a loopback port for one approval, as the desktop app's sign-in does, and
-// talks to a Hub this process has no HttpClient layer for.
+// @effect-diagnostics nodeBuiltinImport:off globalFetchInEffect:off
+// `t3 join` listens on a loopback port so a browser on this machine returns at once, and talks to
+// a Hub this process has no HttpClient layer for.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeHttp from "node:http";
 import type * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 
 import {
-  EnvironmentId,
-  EnvironmentJoinTokenResult,
-  type EnvironmentJoinTokenRequest,
+  EnvironmentJoinStartResult,
+  EnvironmentJoinStatus,
+  type EnvironmentJoinStartRequest,
 } from "@t3tools/contracts";
 import { appSignInLoopbackRedirectUri, readAppSignInCallback } from "@t3tools/shared/appSignIn";
 import { base64UrlEncode } from "@t3tools/shared/base64Url";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { assertEnvironmentHubUrl, environmentJoinPageUrl } from "@t3tools/shared/environmentJoin";
+import {
+  assertEnvironmentHubUrl,
+  environmentJoinPageUrl,
+  formatEnvironmentCredential,
+} from "@t3tools/shared/environmentJoin";
 import * as Console from "effect/Console";
 import * as Digest from "effect/crypto/Digest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
 import * as CliError from "effect/cli/CliError";
 
@@ -34,22 +40,41 @@ import {
   removeJoinedHubState,
   writeJoinedHubState,
 } from "../environments/joinedHubState.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { authLocationFlags, type CliAuthLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
-const APPROVAL_TIMEOUT_MS = 300_000;
+/** As long as the Hub keeps the request. */
+const APPROVAL_TIMEOUT_MS = 600_000;
+const POLL_INTERVAL_MS = 2_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 
 const RETURN_PAGE =
-  '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>T3 Code</title><style>body{font-family:system-ui;display:grid;place-items:center;min-height:90vh;margin:0}main{max-width:360px;padding:32px}h1{font-size:24px}p{line-height:1.6;opacity:.7}</style></head><body><main><h1>Machine approved</h1><p>Return to your terminal; <code>t3 join</code> is finishing. You can close this tab.</p></main></body></html>';
+  '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>T3 Code</title><style>body{font-family:system-ui;display:grid;place-items:center;min-height:90vh;margin:0}main{max-width:360px;padding:32px}h1{font-size:24px}p{line-height:1.6;opacity:.7}</style></head><body><main><h1>Return to your terminal</h1><p><code>t3 join</code> is finishing there. You can close this tab.</p></main></body></html>';
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const decodeStarted = Schema.decodeUnknownOption(EnvironmentJoinStartResult);
+const decodeStatus = Schema.decodeUnknownOption(EnvironmentJoinStatus);
+const decodeDescriptor = Schema.decodeUnknownOption(
+  Schema.Struct({ environmentId: Schema.String }),
+);
 
 const userError = (message: string) => new CliError.UserError({ cause: message });
 
-/** Waits for the Hub's page to send this one approval to a port on this machine. */
-const receiveApproval = (state: string, open: (redirectUri: string) => Effect.Effect<void>) =>
-  Effect.callback<{ readonly code: string; readonly redirectUri: string }, CliError.UserError>(
-    (resume) => {
+/**
+ * A loopback port the Hub's page returns a browser on this machine to: only a nudge to ask the
+ * Hub now, never a credential. With the page opened elsewhere, asking every few seconds does it.
+ */
+const listenForReturn = (state: string) =>
+  Effect.acquireRelease(
+    Effect.callback<
+      {
+        readonly server: NodeHttp.Server;
+        readonly redirectUri: string;
+        readonly returned: Promise<void>;
+      },
+      CliError.UserError
+    >((resume) => {
+      const returned = Promise.withResolvers<void>();
       let redirectUri = "";
       const server = NodeHttp.createServer((incoming, response) => {
         response.setHeader("cache-control", "no-store");
@@ -68,33 +93,20 @@ const receiveApproval = (state: string, open: (redirectUri: string) => Effect.Ef
           "default-src 'none'; style-src 'unsafe-inline'",
         );
         response.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(RETURN_PAGE);
-        resume(
-          callback._tag === "code"
-            ? Effect.succeed({ code: callback.code, redirectUri })
-            : Effect.fail(userError("The registration was cancelled on the Hub.")),
-        );
+        returned.resolve();
       });
-      const timer = setTimeout(
-        () =>
-          resume(
-            Effect.fail(
-              userError("Nobody approved the machine in 5 minutes. Run `t3 join` again."),
-            ),
-          ),
-        APPROVAL_TIMEOUT_MS,
-      );
       server.once("error", (cause) => resume(Effect.fail(userError(String(cause)))));
-      // Port 0: the system picks a free port for this approval only.
+      // Port 0: the system picks a free port for this join only.
       server.listen(0, "127.0.0.1", () => {
         redirectUri = appSignInLoopbackRedirectUri((server.address() as NodeNet.AddressInfo).port);
-        Effect.runFork(open(redirectUri));
+        resume(Effect.succeed({ server, redirectUri, returned: returned.promise }));
       });
-      return Effect.sync(() => {
-        clearTimeout(timer);
+    }),
+    ({ server }) =>
+      Effect.sync(() => {
         server.closeAllConnections();
         server.close();
-      });
-    },
+      }),
   );
 
 const openInBrowser = (url: string, platform: NodeJS.Platform) =>
@@ -117,18 +129,18 @@ const openInBrowser = (url: string, platform: NodeJS.Platform) =>
     }
   });
 
-const postJson = (url: URL, body: unknown, authorization?: string) =>
+const callHub = (url: URL, init: { readonly body?: unknown; readonly authorization?: string }) =>
   Effect.tryPromise({
     try: async (signal) => {
       const response = await fetch(url, {
-        method: "POST",
+        method: init.body === undefined ? "GET" : "POST",
         redirect: "error",
         signal: AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
         headers: {
-          "content-type": "application/json",
-          ...(authorization === undefined ? {} : { authorization }),
+          ...(init.body === undefined ? {} : { "content-type": "application/json" }),
+          ...(init.authorization === undefined ? {} : { authorization: init.authorization }),
         },
-        body: encodeJson(body),
+        ...(init.body === undefined ? {} : { body: encodeJson(init.body) }),
       });
       return {
         status: response.status,
@@ -137,8 +149,6 @@ const postJson = (url: URL, body: unknown, authorization?: string) =>
     },
     catch: (cause) => userError(`Could not reach the Hub at ${url.origin}: ${String(cause)}`),
   });
-
-const decodeTokenResult = Schema.decodeUnknownOption(EnvironmentJoinTokenResult);
 
 const runWithSecrets = Effect.fn("cli.join.runWithSecrets")(function* <A, E, R>(
   flags: CliAuthLocationFlags,
@@ -152,11 +162,42 @@ const runWithSecrets = Effect.fn("cli.join.runWithSecrets")(function* <A, E, R>(
   );
 });
 
+/** What this server would cut off by joining: its own Owner, Users and Threads. */
+const localData = Effect.fn("cli.join.localData")(function* (
+  config: ServerConfig.ServerConfig["Service"],
+) {
+  const fs = yield* FileSystem.FileSystem;
+  if (!(yield* fs.exists(config.dbPath).pipe(Effect.orElseSucceed(() => false)))) {
+    return { users: 0, threads: 0 };
+  }
+  return yield* Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const [users] = yield* sql<{ readonly count: number }>`SELECT COUNT(*) AS count FROM users`;
+    const [threads] = yield* sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL
+    `;
+    return { users: users?.count ?? 0, threads: threads?.count ?? 0 };
+  }).pipe(
+    Effect.provide(SqlitePersistence.layerConfig.pipe(Layer.provide(ServerConfig.layer(config)))),
+    Effect.mapError((cause) =>
+      userError(`Could not read this server's database: ${cause.message}`),
+    ),
+  );
+});
+
+const readLocalEnvironmentId = (path: string) =>
+  FileSystem.FileSystem.pipe(
+    Effect.flatMap((fs) => fs.readFileString(path)),
+    Effect.map((text) => text.trim()),
+    Effect.orElseSucceed(() => ""),
+  );
+
 const runJoin = (
   flags: CliAuthLocationFlags & {
     readonly url: string;
     readonly name: Option.Option<string>;
     readonly noBrowser: boolean;
+    readonly force: boolean;
   },
 ) =>
   runWithSecrets(flags, (config) =>
@@ -165,94 +206,148 @@ const runJoin = (
         try: () => assertEnvironmentHubUrl(flags.url),
         catch: (cause) => userError(cause instanceof Error ? cause.message : String(cause)),
       });
-      const joined = yield* readJoinedHubState(config.joinedHubPath).pipe(
-        Effect.orElseSucceed(() => Option.none()),
-      );
-      if (Option.isSome(joined)) {
+      const joined = yield* readJoinedHubState(config.joinedHubPath).pipe(Effect.result);
+      if (joined._tag === "Success" && Option.isSome(joined.success)) {
         return yield* userError(
-          `This machine is already joined to ${joined.value.hubUrl}. Run \`t3 leave\` first.`,
+          `This machine is already joined to ${joined.success.value.hubUrl}. Run \`t3 leave\` first.`,
         );
       }
+      if (joined._tag === "Failure") {
+        yield* Console.warn(`${config.joinedHubPath} is unreadable; joining replaces it.`);
+      }
+      const descriptor = decodeDescriptor(
+        (yield* callHub(new URL("/.well-known/t3/environment", hubUrl), {})).body,
+      );
+      if (Option.isNone(descriptor)) {
+        return yield* userError(`${hubUrl.origin} does not answer as a T3 Code Hub.`);
+      }
+      const hubId = descriptor.value.environmentId;
+      if (hubId === (yield* readLocalEnvironmentId(config.environmentIdPath))) {
+        return yield* userError("That address is this server itself; a Hub cannot join itself.");
+      }
+      const local = yield* localData(config);
+      if ((local.users > 0 || local.threads > 0) && !flags.force) {
+        return yield* userError(
+          `This server has ${local.users} User(s) and ${local.threads} Thread(s) of its own. Once joined it serves no sign-in or web app, so they are cut off until \`t3 leave\`. Run again with --force to join anyway.`,
+        );
+      }
+
       const random = yield* SecureRandom.SecureRandom;
       const digest = yield* Digest.Digest;
+      const sha256 = (value: string) =>
+        digest
+          .digest(Digest.sha256, new TextEncoder().encode(value))
+          .pipe(Effect.map(base64UrlEncode));
+      // Made here and kept here: the Hub only ever learns its hash.
+      const credential = formatEnvironmentCredential(
+        hubId,
+        base64UrlEncode(yield* random.randomBytes(32)),
+      );
       const codeVerifier = base64UrlEncode(yield* random.randomBytes(32));
       const state = base64UrlEncode(yield* random.randomBytes(16));
-      const codeChallenge = base64UrlEncode(
-        yield* digest.digest(Digest.sha256, new TextEncoder().encode(codeVerifier)),
-      );
       const hostname = NodeOS.hostname() || "machine";
       const platform = yield* HostProcess.Platform;
-      const requestedAt = DateTime.formatIso(yield* DateTime.now);
-      const approval = yield* receiveApproval(state, (redirectUri) => {
-        const page = environmentJoinPageUrl(hubUrl.toString(), {
-          redirectUri,
-          codeChallenge,
-          state,
+      const listener = yield* listenForReturn(state);
+      const started = yield* callHub(new URL("/api/environments/join/start", hubUrl), {
+        body: {
+          codeChallenge: yield* sha256(codeVerifier),
+          codeChallengeMethod: "S256",
+          credentialHash: yield* sha256(credential),
           name: Option.getOrElse(flags.name, () => hostname).slice(0, 64),
           os: platform,
           hostname,
-          requestedAt,
-        });
-        return Console.log(
-          `Approve this machine on the Hub as its Owner. Open:\n  ${page}\nWaiting for approval…`,
-        ).pipe(Effect.andThen(flags.noBrowser ? Effect.void : openInBrowser(page, platform)));
+          redirectUri: listener.redirectUri,
+          state,
+        } satisfies EnvironmentJoinStartRequest,
       });
-      const redeemed = yield* postJson(new URL("/api/environments/join/token", hubUrl), {
-        code: approval.code,
-        codeVerifier,
-        redirectUri: approval.redirectUri,
-      } satisfies EnvironmentJoinTokenRequest);
-      const result = decodeTokenResult(redeemed.body);
-      if (redeemed.status !== 200 || Option.isNone(result)) {
+      const request = decodeStarted(started.body);
+      if (started.status !== 200 || Option.isNone(request)) {
+        return yield* userError(`The Hub refused the join request (HTTP ${started.status}).`);
+      }
+      const page = environmentJoinPageUrl(hubUrl.toString(), request.value.requestId);
+      yield* Console.log(
+        `Approve this machine on the Hub as its Owner, from any device. Open:\n  ${page}\nWaiting for approval…`,
+      );
+      if (!flags.noBrowser) yield* openInBrowser(page, platform);
+
+      const askHub = callHub(new URL("/api/environments/join/status", hubUrl), {
+        body: { requestId: request.value.requestId, codeVerifier },
+      }).pipe(
+        Effect.map((answer) =>
+          answer.status === 200 ? Option.getOrUndefined(decodeStatus(answer.body)) : undefined,
+        ),
+        // A dropped answer is asked for again; the Hub answers the same.
+        Effect.orElseSucceed(() => undefined),
+      );
+      const waitForDecision = Effect.gen(function* () {
+        while (true) {
+          const status = yield* askHub;
+          if (status !== undefined && status.status !== "pending") return status;
+          // A browser on this machine returning means the decision is in: ask at once.
+          yield* Effect.promise(() => listener.returned).pipe(
+            Effect.timeoutOrElse({ duration: POLL_INTERVAL_MS, orElse: () => Effect.void }),
+          );
+        }
+      });
+      const decision = yield* waitForDecision.pipe(
+        Effect.timeoutOption(APPROVAL_TIMEOUT_MS),
+        Effect.map(Option.getOrElse(() => ({ status: "expired" as const }))),
+      );
+      if (decision.status !== "approved") {
         return yield* userError(
-          `The Hub refused the registration (HTTP ${redeemed.status}). Run \`t3 join\` again.`,
+          decision.status === "denied"
+            ? "The registration was cancelled on the Hub."
+            : "Nobody approved the machine in time. Run `t3 join` again.",
         );
       }
       const secrets = yield* ServerSecretStore.ServerSecretStore;
-      yield* secrets.set(
-        ENVIRONMENT_CREDENTIAL_SECRET,
-        new TextEncoder().encode(result.value.credential),
-      );
+      yield* secrets.set(ENVIRONMENT_CREDENTIAL_SECRET, new TextEncoder().encode(credential));
       yield* writeJoinedHubState(config.joinedHubPath, {
         hubUrl: hubUrl.origin,
-        hubEnvironmentId: EnvironmentId.make(result.value.hubEnvironmentId),
-        environmentId: result.value.environmentId,
-        name: result.value.name,
+        hubEnvironmentId: decision.hubEnvironmentId,
+        environmentId: decision.environmentId,
+        name: decision.name,
         joinedAt: DateTime.formatIso(yield* DateTime.now),
       });
       yield* Console.log(
-        `Joined ${hubUrl.origin} as ${result.value.name}. Start (or restart) this machine's server with \`t3 serve\` to connect; \`t3 status\` shows the connection.`,
+        `Joined ${hubUrl.origin} as ${decision.name}. Start (or restart) this machine's server with \`t3 serve\` to connect; \`t3 status\` shows the connection.`,
       );
-    }),
+    }).pipe(Effect.scoped),
   );
 
 const runLeave = (flags: CliAuthLocationFlags) =>
   runWithSecrets(flags, (config) =>
     Effect.gen(function* () {
-      const joined = yield* readJoinedHubState(config.joinedHubPath).pipe(
-        Effect.orElseSucceed(() => Option.none()),
-      );
-      if (Option.isNone(joined)) {
+      const secrets = yield* ServerSecretStore.ServerSecretStore;
+      const forget = secrets
+        .remove(ENVIRONMENT_CREDENTIAL_SECRET)
+        .pipe(Effect.andThen(removeJoinedHubState(config.joinedHubPath)));
+      const joined = yield* readJoinedHubState(config.joinedHubPath).pipe(Effect.result);
+      if (joined._tag === "Failure") {
+        yield* forget;
+        return yield* Console.log(
+          `${config.joinedHubPath} was unreadable; forgot it and this machine's credential. Remove the machine under Settings → Environments on the Hub if it is still listed.`,
+        );
+      }
+      if (Option.isNone(joined.success)) {
         return yield* Console.log("This machine is not joined to a Hub.");
       }
-      const secrets = yield* ServerSecretStore.ServerSecretStore;
+      const hub = joined.success.value;
       const credential = yield* secrets
         .get(ENVIRONMENT_CREDENTIAL_SECRET)
         .pipe(Effect.map(Option.map((bytes) => new TextDecoder().decode(bytes))));
       const outcome = Option.isNone(credential)
         ? { status: 401 }
-        : yield* postJson(
-            new URL("/api/environments/leave", joined.value.hubUrl),
-            {},
-            `Bearer ${credential.value}`,
-          ).pipe(Effect.orElseSucceed(() => ({ status: 0 })));
+        : yield* callHub(new URL("/api/environments/leave", hub.hubUrl), {
+            body: {},
+            authorization: `Bearer ${credential.value}`,
+          }).pipe(Effect.orElseSucceed(() => ({ status: 0 })));
       // Forgotten here either way: a credential the Hub no longer accepts is of no use.
-      yield* secrets.remove(ENVIRONMENT_CREDENTIAL_SECRET);
-      yield* removeJoinedHubState(config.joinedHubPath);
+      yield* forget;
       yield* Console.log(
         outcome.status === 200
-          ? `Left ${joined.value.hubUrl}. Restart this machine's server to run it on its own again.`
-          : `Forgot ${joined.value.hubUrl} here, but the Hub did not confirm (${outcome.status === 0 ? "unreachable" : `HTTP ${outcome.status}`}). Remove the machine under Settings → Environments on the Hub if it is still listed.`,
+          ? `Left ${hub.hubUrl}. Restart this machine's server to run it on its own again.`
+          : `Forgot ${hub.hubUrl} here, but the Hub did not confirm (${outcome.status === 0 ? "unreachable" : `HTTP ${outcome.status}`}). Remove the machine under Settings → Environments on the Hub if it is still listed.`,
       );
     }),
   );
@@ -267,12 +362,18 @@ export const joinCommand = Command.make("join", {
     Flag.optional,
   ),
   noBrowser: Flag.Boolean("no-browser").pipe(
-    Flag.withDescription("Print the approval link instead of opening a browser."),
+    Flag.withDescription("Print the approval link instead of opening a browser here."),
+    Flag.withDefault(false),
+  ),
+  force: Flag.Boolean("force").pipe(
+    Flag.withDescription(
+      "Join even though this server has Users or Threads of its own, which joining cuts off.",
+    ),
     Flag.withDefault(false),
   ),
 }).pipe(
   Command.withDescription(
-    "Join this machine to a Hub as one of your Environments. The Hub's Owner approves it in the browser.",
+    "Join this machine to a Hub as one of your Environments. The Hub's Owner approves it in a browser, on any device.",
   ),
   Command.withHandler((flags) => runJoin(flags)),
 );
