@@ -206,7 +206,7 @@ export function useTimelineRewind(input: TimelineRewindInput) {
       return;
     }
     await navigate({
-      to: "/$environmentId/$threadId",
+      to: "/$threadId",
       params: buildThreadRouteParams(targetThreadRef),
     });
   };

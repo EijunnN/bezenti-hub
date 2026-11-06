@@ -1415,7 +1415,7 @@ export function useComposerSend(input: ComposerSendInput) {
                   children: "Open",
                   onClick: () => {
                     void navigate({
-                      to: "/$environmentId/$threadId",
+                      to: "/$threadId",
                       params: buildThreadRouteParams(backgroundThreadRef),
                     });
                   },

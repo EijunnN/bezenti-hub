@@ -14,7 +14,7 @@ import {
   useNavigateToMainApp,
 } from "./mainAppLocation";
 
-const THREAD_PATH = "/environment-one/thread-one";
+const THREAD_PATH = "/thread-one";
 
 const citation: AssistantCitation = {
   version: 1,

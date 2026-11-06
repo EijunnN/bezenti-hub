@@ -10,6 +10,7 @@ import {
   isThreadRoutePathname,
   isThreadRouteSnapshotAuthoritative,
   resolveActiveThreadRouteRef,
+  resolveThreadRouteRef,
   resolveThreadRouteRenderState,
   resolveThreadRouteTarget,
 } from "./threadRoutes";
@@ -18,13 +19,26 @@ describe("threadRoutes", () => {
   it("matches only the thread's own route pathname", () => {
     const ref = scopeThreadRef("env-1" as never, ThreadId.make("thread-1"));
 
-    expect(isThreadRoutePathname("/env-1/thread-1", ref)).toBe(true);
-    expect(isThreadRoutePathname("/env-1/thread-1/", ref)).toBe(true);
+    expect(isThreadRoutePathname("/thread-1", ref)).toBe(true);
+    expect(isThreadRoutePathname("/thread-1/", ref)).toBe(true);
     expect(isThreadRoutePathname("/new", ref)).toBe(false);
-    expect(isThreadRoutePathname("/env-1/thread-2", ref)).toBe(false);
-    expect(isThreadRoutePathname("/env-2/thread-1", ref)).toBe(false);
+    expect(isThreadRoutePathname("/thread-2", ref)).toBe(false);
+    // The old two-part route redirects to the Thread's own; it is not that route.
+    expect(isThreadRoutePathname("/env-1/thread-1", ref)).toBe(false);
     expect(isThreadRoutePathname("/draft/thread-1", ref)).toBe(false);
-    expect(isThreadRoutePathname("/env-1/thread-1/extra", ref)).toBe(false);
+    expect(isThreadRoutePathname("/thread-1/extra", ref)).toBe(false);
+  });
+
+  it("resolves a Thread route on the Hub connection, and an old link's on its own", () => {
+    const hub = "hub-env" as never;
+    expect(resolveThreadRouteRef({ threadId: "thread-1" }, hub)).toEqual(
+      scopeThreadRef(hub, ThreadId.make("thread-1")),
+    );
+    // Before the Hub is first reached there is no connection to read it from.
+    expect(resolveThreadRouteRef({ threadId: "thread-1" }, null)).toBeNull();
+    expect(resolveThreadRouteRef({ environmentId: "env-1", threadId: "thread-1" }, hub)).toEqual(
+      scopeThreadRef("env-1" as never, ThreadId.make("thread-1")),
+    );
   });
 
   it("resolves the backing thread while a draft route is being promoted", () => {

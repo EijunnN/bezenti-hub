@@ -870,7 +870,7 @@ export default function ChatView(props: ChatViewProps) {
         sideChat: true,
         open: (): void => {
           void navigate({
-            to: "/$environmentId/$threadId",
+            to: "/$threadId",
             params: buildThreadRouteParams(sideChatParentRef),
           });
         },
@@ -881,7 +881,7 @@ export default function ChatView(props: ChatViewProps) {
         title: parentSubagentThread?.title ?? "Parent thread",
         open: (): void => {
           void navigate({
-            to: "/$environmentId/$threadId",
+            to: "/$threadId",
             params: buildThreadRouteParams(parentSubagentThreadRef),
           });
         },
@@ -898,7 +898,7 @@ export default function ChatView(props: ChatViewProps) {
         : {
             open: (): void => {
               void navigate({
-                to: "/$environmentId/$threadId",
+                to: "/$threadId",
                 params: buildThreadRouteParams(parentRef),
               });
             },

@@ -200,7 +200,7 @@ export function useMultipleModelSend(input: MultipleModelSendInput) {
             },
             openThread: (threadId) =>
               void navigate({
-                to: "/$environmentId/$threadId",
+                to: "/$threadId",
                 params: buildThreadRouteParams(scopeThreadRef(environmentId, threadId)),
               }),
           });

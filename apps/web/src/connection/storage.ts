@@ -27,6 +27,7 @@ import {
   pullRequestRoutingPermissionFor,
 } from "@t3tools/client-runtime/connection";
 import { EnvironmentId, ServerConfig, ThreadId, VcsListRefsResult } from "@t3tools/contracts";
+import { SINGLE_HUB_REFUSAL, savedConnectionSlots } from "./singleHub";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -624,8 +625,9 @@ export const layer = Layer.effectContext(
     });
 
     const targetStore = Persistence.ConnectionTargetStore.of({
+      // Saved connections past the one Hub this app may use are kept but never connected.
       list: catalog.read.pipe(
-        Effect.map((document) => document.targets),
+        Effect.map((document) => document.targets.slice(0, savedConnectionSlots())),
         Effect.mapError((cause) => persistenceError("list-targets", cause)),
       ),
       listDisabled: catalog.read.pipe(
@@ -636,9 +638,25 @@ export const layer = Layer.effectContext(
     const registrationStore = Persistence.ConnectionRegistrationStore.of({
       register: Effect.fn("Persistence.ConnectionRegistrationStore.register")(
         function (registration, routes) {
-          return catalog
-            .update((document) => registerConnectionInCatalog(document, registration, routes))
-            .pipe(Effect.mapError((cause) => persistenceError("register-connection", cause)));
+          const environmentId = registration.target.environmentId;
+          return Effect.gen(function* () {
+            const document = yield* catalog.read;
+            const others = document.targets.filter(
+              (target) => target.environmentId !== environmentId,
+            );
+            // A route or credential for the one saved Hub may change; a second Hub may not join.
+            if (others.length + 1 > savedConnectionSlots()) {
+              return yield* persistenceError("register-connection", SINGLE_HUB_REFUSAL);
+            }
+            yield* catalog
+              .update((current) => registerConnectionInCatalog(current, registration, routes))
+              .pipe(Effect.mapError((cause) => persistenceError("register-connection", cause)));
+          }).pipe(
+            Effect.catchTags({
+              ConnectionTransientError: (cause) =>
+                Effect.fail(persistenceError("register-connection", cause)),
+            }),
+          );
         },
       ),
       setRoutes: Effect.fn("Persistence.ConnectionRegistrationStore.setRoutes")(

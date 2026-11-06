@@ -340,8 +340,8 @@ export function EmptyRemoteEnvironments() {
         <ChevronsLeftRightEllipsisIcon />
       </EmptyMedia>
       <EmptyHeader>
-        <EmptyTitle>No saved remote environments</EmptyTitle>
-        <EmptyDescription>Click “Add environment” to pair another environment.</EmptyDescription>
+        <EmptyTitle>No Hub yet</EmptyTitle>
+        <EmptyDescription>Click “Add Hub” and sign in to the Hub this app uses.</EmptyDescription>
       </EmptyHeader>
     </Empty>
   );

@@ -184,7 +184,7 @@ export function useCommandPaletteThreadItems(input: {
         });
       }
       await navigate({
-        to: "/$environmentId/$threadId",
+        to: "/$threadId",
         params: buildThreadRouteParams(scopeThreadRef(thread.environmentId, thread.id)),
       });
     },

@@ -430,7 +430,7 @@ function SubagentTimelineLink(props: {
       : remote !== undefined && remoteEnvironment !== null
         ? () =>
             void navigate({
-              to: "/$environmentId/$threadId",
+              to: "/$threadId",
               params: buildThreadRouteParams(scopeThreadRef(remote.environmentId, remote.threadId)),
             })
         : null;

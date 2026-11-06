@@ -1,6 +1,9 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { Navigate, createFileRoute } from "@tanstack/react-router";
 
-// The _chat layout owns ChatView so draft promotion keeps it mounted.
+// A link from before the client had one connection named it too; the Thread's id is enough now.
 export const Route = createFileRoute("/_chat/$environmentId/$threadId")({
-  component: () => null,
+  component: function LegacyThreadRouteRedirect() {
+    const { threadId } = Route.useParams();
+    return <Navigate to="/$threadId" params={{ threadId }} search replace />;
+  },
 });

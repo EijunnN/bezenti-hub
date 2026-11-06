@@ -274,7 +274,7 @@ function RemoteSubagentRow(props: {
               onClick={() => {
                 if (environment === null) return;
                 void navigate({
-                  to: "/$environmentId/$threadId",
+                  to: "/$threadId",
                   params: buildThreadRouteParams(
                     scopeThreadRef(remoteChild.environmentId, remoteChild.threadId),
                   ),
@@ -346,7 +346,7 @@ function DelegatedFromRow(props: {
               onClick={() => {
                 if (environment === null) return;
                 void navigate({
-                  to: "/$environmentId/$threadId",
+                  to: "/$threadId",
                   params: buildThreadRouteParams(parentRef),
                 });
               }}
@@ -556,7 +556,7 @@ export function ThreadRelationshipsPanel(props: {
   const openThread = (threadId: ThreadId) => {
     if (openSideChatTab(ref, graph.nodes.get(threadId)?.thread ?? null)) return;
     void navigate({
-      to: "/$environmentId/$threadId",
+      to: "/$threadId",
       params: buildThreadRouteParams(scopeThreadRef(props.environmentId, threadId)),
     });
   };

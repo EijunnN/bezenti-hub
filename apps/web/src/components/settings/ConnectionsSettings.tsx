@@ -116,6 +116,7 @@ import {
 import { ITEM_ROW_CLASSNAME } from "./itemRows";
 import { EmptyRemoteEnvironments, SavedBackendListRow } from "./SavedEnvironmentRows";
 import { AddEnvironmentDialog } from "./AddEnvironmentDialog";
+import { savedConnectionSlots } from "~/connection/singleHub";
 
 const DEFAULT_TAILSCALE_SERVE_PORT = 443;
 const EMPTY_ADVERTISED_ENDPOINTS: ReadonlyArray<AdvertisedEndpoint> = [];
@@ -1394,38 +1395,42 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
           <LocalEnvironmentSetting />
         </SettingsSection>
       ) : null}
-      <SettingsSection
-        {...searchableSetting("remote-environments")}
-        title="Environments"
-        headerAction={
-          <div className="flex items-center gap-1">
-            <AddEnvironmentDialog
-              open={addBackendDialogOpen}
-              routeTarget={routeTarget}
-              error={savedBackendError}
-              savedEnvironments={savedEnvironments}
-              onOpenChange={handleAddBackendDialogOpenChange}
-              onErrorChange={setSavedBackendError}
+      {/* One connection, the Hub's: only a desktop that is not the Hub itself saves one. */}
+      {savedConnectionSlots() > 0 ? (
+        <SettingsSection
+          {...searchableSetting("remote-environments")}
+          title="Hub"
+          headerAction={
+            savedEnvironments.length === 0 || routeTarget !== null ? (
+              <div className="flex items-center gap-1">
+                <AddEnvironmentDialog
+                  open={addBackendDialogOpen}
+                  routeTarget={routeTarget}
+                  error={savedBackendError}
+                  onOpenChange={handleAddBackendDialogOpenChange}
+                  onErrorChange={setSavedBackendError}
+                />
+              </div>
+            ) : null
+          }
+        >
+          {listedEnvironments.map((environment) => (
+            <SavedBackendListRow
+              key={environment.environmentId}
+              environment={environment}
+              removingEnvironmentId={removingSavedEnvironmentId}
+              onSetEnabled={handleSetSavedBackendEnabled}
+              onRemove={handleRemoveSavedBackend}
+              onAddRoute={(target) => {
+                setRouteTarget(target);
+                setSavedBackendError(null);
+                setAddBackendDialogOpen(true);
+              }}
             />
-          </div>
-        }
-      >
-        {listedEnvironments.map((environment) => (
-          <SavedBackendListRow
-            key={environment.environmentId}
-            environment={environment}
-            removingEnvironmentId={removingSavedEnvironmentId}
-            onSetEnabled={handleSetSavedBackendEnabled}
-            onRemove={handleRemoveSavedBackend}
-            onAddRoute={(target) => {
-              setRouteTarget(target);
-              setSavedBackendError(null);
-              setAddBackendDialogOpen(true);
-            }}
-          />
-        ))}
-        {savedEnvironments.length === 0 ? <EmptyRemoteEnvironments /> : null}
-      </SettingsSection>
+          ))}
+          {savedEnvironments.length === 0 ? <EmptyRemoteEnvironments /> : null}
+        </SettingsSection>
+      ) : null}
       {peerLinkHosts.map((environment, index) => (
         <LinkedEnvironmentsSettings
           key={environment.environmentId}

@@ -136,7 +136,7 @@ export function ReopenClosedViewShortcut() {
       const draftId = thread === null ? drafts.getDraftIdByRef(ref) : null;
       if (draftId !== null)
         await navigate({ to: "/draft/$draftId", params: buildDraftThreadRouteParams(draftId) });
-      else await navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(ref) });
+      else await navigate({ to: "/$threadId", params: buildThreadRouteParams(ref) });
     }
   });
 

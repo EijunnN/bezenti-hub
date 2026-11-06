@@ -161,11 +161,7 @@ export function ThreadRouteView({
     } else if (draftRedirect && hidingAnywhere && draftRedirectShell === null) {
       // While hiding, a thread outside the live list is judged by the server route, unmounted here.
       redirect = (
-        <Navigate
-          to="/$environmentId/$threadId"
-          params={buildThreadRouteParams(draftRedirect)}
-          replace
-        />
+        <Navigate to="/$threadId" params={buildThreadRouteParams(draftRedirect)} replace />
       );
     } else if (draftRedirect) {
       // Same slot and key as the server route renders, so the swap keeps this instance.
@@ -178,11 +174,7 @@ export function ThreadRouteView({
         />
       );
       redirect = (
-        <Navigate
-          to="/$environmentId/$threadId"
-          params={buildThreadRouteParams(draftRedirect)}
-          replace
-        />
+        <Navigate to="/$threadId" params={buildThreadRouteParams(draftRedirect)} replace />
       );
     } else {
       redirect = <Navigate to="/" replace />;
