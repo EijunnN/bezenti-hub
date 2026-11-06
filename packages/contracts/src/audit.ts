@@ -51,11 +51,53 @@ export const AuditTargetKind = Schema.Literals([
 ]);
 export type AuditTargetKind = typeof AuditTargetKind.Type;
 
-/** Who acted: a signed-in User, the Hub's shell (`t3 ...`), or the server's own work. */
-export const AuditActorSource = Schema.Literals(["user", "cli", "system"]);
+/**
+ * Who acted: a signed-in User, an agent acting as its User (MCP tools, a Thread's agent), the
+ * Hub's shell (`t3 ...`, as `--user` when given), or the server's own work.
+ */
+export const AuditActorSource = Schema.Literals(["user", "agent", "cli", "system"]);
 export type AuditActorSource = typeof AuditActorSource.Type;
 
-/** Small facts about the action. Never a token, password, code or secret value. */
+/**
+ * The only detail keys each action may carry; anything else is dropped on write. Values are ids,
+ * enums, counts and names already shown elsewhere, never a token, password, code or secret.
+ */
+export const AUDIT_DETAIL_KEYS = {
+  "owner.bootstrap": [],
+  "owner.resetLink": [],
+  "resetLink.redeem": ["method"],
+  "invitation.create": ["role"],
+  "invitation.accept": ["role", "newUser"],
+  "invitation.revoke": ["role"],
+  "membership.changeRole": ["from", "to"],
+  "membership.remove": [],
+  "membership.leave": [],
+  "membership.resetLink": [],
+  "installationPermission.grant": ["permission"],
+  "installationPermission.revoke": ["permission"],
+  "user.disable": ["from"],
+  "user.enable": ["from"],
+  "user.remove": ["from"],
+  "organization.archive": [],
+  "organization.restore": [],
+  "organization.delete": [],
+  "project.move": ["fromSpaceId"],
+  "project.delete": [],
+  "thread.delete": ["via"],
+  "guestLink.create": ["expiresAt"],
+  "appSignIn.approve": ["client", "redirect"],
+  "mcpClient.approve": ["client", "access", "method"],
+  "cliSession.issue": ["sessionId", "label", "scopes"],
+  "secret.reveal": ["vault"],
+  "secret.edit": ["vault"],
+  "environment.register": ["kind"],
+} as const satisfies Record<AuditAction, ReadonlyArray<string>>;
+
+export type AuditDetailOf<A extends AuditAction> = {
+  readonly [K in (typeof AUDIT_DETAIL_KEYS)[A][number]]?: string | number | boolean | null;
+};
+
+/** Small facts about the action, limited to `AUDIT_DETAIL_KEYS` for its action. */
 export const AuditDetail = Schema.Record(
   Schema.String,
   Schema.Union([Schema.String, Schema.Number, Schema.Boolean, Schema.Null]),
@@ -85,6 +127,10 @@ export type AuditEntry = typeof AuditEntry.Type;
 
 export const AuditLogPage = Schema.Struct({
   entries: Schema.Array(AuditEntry),
+  /** Every Space the log names, deleted ones too, to filter by. */
+  spaces: Schema.Array(
+    Schema.Struct({ id: SpaceId, name: Schema.NullOr(Schema.String), deleted: Schema.Boolean }),
+  ),
   /** Pass as `before` for the next, older page; null on the last page. */
   nextCursor: Schema.NullOr(Schema.String),
 });

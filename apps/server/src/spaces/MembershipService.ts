@@ -4,6 +4,7 @@
  * their clients reload exactly what they may still see.
  */
 import type {
+  AuditAction,
   ChangeMemberRoleResult,
   MemberList,
   MemberResetLink,
@@ -81,8 +82,11 @@ const make = Effect.gen(function* () {
   const spaces = yield* SpaceDirectory.SpaceDirectory;
   const users = yield* UserDirectory.UserDirectory;
   const audit = yield* AuditLog.AuditLog;
-  const recordIn = (spaceId: SpaceId, entry: Omit<AuditLog.AuditRecord, "spaceId">) =>
-    audit.record({ ...entry, spaceId }).pipe(Effect.mapError(storageError));
+  const recordIn = <A extends AuditAction>(
+    spaceId: SpaceId,
+    entry: Omit<AuditLog.AuditRecord<A>, "spaceId">,
+  ) =>
+    audit.record({ ...entry, spaceId } as AuditLog.AuditRecord).pipe(Effect.mapError(storageError));
 
   const storageError = (cause: unknown) => new MembershipStorageError({ cause });
   const refused = (reason: string) => new MembershipRefusedError({ reason });

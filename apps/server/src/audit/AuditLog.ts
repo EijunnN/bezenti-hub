@@ -4,7 +4,9 @@
  * back leaves no entry; actions that commit outside this database record right after.
  */
 import {
+  AUDIT_DETAIL_KEYS,
   type AuditAction,
+  type AuditDetailOf,
   type AuditActorSource,
   AuditDetail,
   type AuditEntry,
@@ -26,31 +28,59 @@ import * as CommandActor from "../auth/CommandActor.ts";
 
 export type AuditActor =
   | { readonly source: "user"; readonly userId: UserId }
-  /** The Hub's shell: `t3 ...` run on the machine. */
-  | { readonly source: "cli" }
+  /** An agent acting as its User; without one, a Thread's agent from before owners: the Owner's. */
+  | { readonly source: "agent"; readonly userId?: UserId }
+  /** The Hub's shell: `t3 ...` run on the machine, as `--user` when given. */
+  | { readonly source: "cli"; readonly userId?: UserId }
   /** The server's own work. */
-  | { readonly source: "system" };
+  | { readonly source: "system" }
+  /** A session naming no User: only valid before an Owner exists, refused after. */
+  | { readonly source: "unnamed" };
 
 export const userActor = (userId: UserId): AuditActor => ({ source: "user", userId });
 export const cliActor: AuditActor = { source: "cli" };
 
 /** Whoever the current fiber acts for, as receipts are stamped. */
-export const currentActor: Effect.Effect<AuditActor> = Effect.map(CommandActor.current, (userId) =>
-  userId === undefined ? { source: "system" } : userActor(userId),
+export const currentActor: Effect.Effect<AuditActor> = Effect.map(
+  CommandActor.resolve,
+  (actor): AuditActor => {
+    switch (actor._tag) {
+      case "Server":
+        return actor.via === "cli" ? cliActor : { source: "system" };
+      case "User":
+        return actor.via === undefined
+          ? userActor(actor.userId)
+          : { source: actor.via, userId: actor.userId };
+      case "ThreadOwner":
+        return { source: "agent" };
+      case "NoUser":
+        return { source: "unnamed" };
+    }
+  },
 );
 
-export interface AuditRecord {
-  readonly actor: AuditActor;
-  readonly action: AuditAction;
-  readonly spaceId?: SpaceId | null;
-  readonly target: {
-    readonly kind: AuditTargetKind;
-    readonly id: string;
-    /** For a target whose row is already gone; otherwise its current name is kept. */
-    readonly name?: string;
-  };
-  readonly detail?: AuditDetail;
+interface AuditTarget {
+  readonly kind: AuditTargetKind;
+  readonly id: string;
+  /** For a target whose row is already gone; otherwise its current name is kept. */
+  readonly name?: string;
 }
+
+/** One entry; each action carries only its own detail keys (`AUDIT_DETAIL_KEYS`). */
+export type AuditRecord<A extends AuditAction = AuditAction> = A extends AuditAction
+  ? {
+      readonly actor: AuditActor;
+      readonly action: A;
+      readonly spaceId?: SpaceId | null;
+      readonly target: AuditTarget;
+      readonly detail?: AuditDetailOf<A>;
+    }
+  : never;
+
+/** An entry without its actor, for a writer that records as the fiber's actor. */
+export type AuditDraft<A extends AuditAction = AuditAction> = A extends AuditAction
+  ? Omit<AuditRecord<A>, "actor">
+  : never;
 
 export class AuditLogWriteError extends Schema.TaggedError<AuditLogWriteError>()(
   "AuditLogWriteError",
@@ -100,14 +130,26 @@ export class AuditLog extends Context.Service<
   }
 >()("t3/audit/AuditLog") {}
 
-// Credentials never belong in an entry, whatever a caller passes.
-const FORBIDDEN_DETAIL_KEY =
-  /(token|password|passphrase|code|credential|hash|cookie|secret|value)$/i;
-
-const safeDetail = (detail: AuditDetail | undefined): AuditDetail =>
-  Object.fromEntries(
-    Object.entries(detail ?? {}).filter(([key]) => !FORBIDDEN_DETAIL_KEY.test(key)),
+// Only the keys the action declares survive, whatever a caller passes.
+const allowedDetail = (action: AuditAction, detail: object | undefined): AuditDetail => {
+  const allowed: ReadonlyArray<string> = AUDIT_DETAIL_KEYS[action];
+  return Object.fromEntries(
+    Object.entries(detail ?? {}).filter(
+      (entry): entry is [string, string | number | boolean | null] =>
+        allowed.includes(entry[0]) &&
+        (entry[1] === null || ["string", "number", "boolean"].includes(typeof entry[1])),
+    ),
   );
+};
+
+export class AuditActorMissingError extends Schema.TaggedError<AuditActorMissingError>()(
+  "AuditActorMissingError",
+  {},
+) {
+  override get message(): string {
+    return "An audited action named no User.";
+  }
+}
 
 const DetailJson = Schema.fromJsonString(AuditDetail);
 const encodeDetail = Schema.encodeEffect(DetailJson);
@@ -120,10 +162,20 @@ const MAX_PAGE = 200;
 export const write = (sql: SqlClient.SqlClient) =>
   Effect.fn("AuditLog.write")(function* (entry: AuditRecord) {
     const at = DateTime.formatIso(yield* DateTime.now);
-    const userId = entry.actor.source === "user" ? entry.actor.userId : null;
+    const { actor } = entry;
+    if (actor.source === "unnamed") {
+      // Before an Owner exists nobody can be named; after, such a session acts for no one.
+      const [owner] = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM users WHERE is_owner = 1
+      `;
+      if ((owner?.count ?? 0) > 0) return yield* new AuditActorMissingError({});
+    }
+    const source = actor.source === "unnamed" ? "system" : actor.source;
+    const userId = "userId" in actor ? (actor.userId ?? null) : null;
+    const ownerFallback = actor.source === "agent" && actor.userId === undefined ? 1 : 0;
     const spaceId = entry.spaceId ?? null;
     const { kind, id } = entry.target;
-    const detailJson = yield* encodeDetail(safeDetail(entry.detail));
+    const detailJson = yield* encodeDetail(allowedDetail(entry.action, entry.detail));
     // A Thread or Project with no Space given is recorded in the Space it belongs to.
     yield* sql`
       INSERT INTO audit_log (
@@ -131,7 +183,10 @@ export const write = (sql: SqlClient.SqlClient) =>
         target_kind, target_id, target_name, detail_json
       )
       SELECT
-        ${at}, ${entry.actor.source}, ${userId}, resolved.space_id,
+        ${at}, ${source},
+        CASE WHEN ${ownerFallback} = 1
+          THEN (SELECT user_id FROM users WHERE is_owner = 1) ELSE ${userId} END,
+        resolved.space_id,
         (SELECT name FROM spaces WHERE space_id = resolved.space_id), ${entry.action},
         ${kind}, ${id},
         COALESCE(${entry.target.name ?? null}, CASE ${kind}
@@ -236,18 +291,37 @@ const make = Effect.gen(function* () {
         ON a.target_kind = 'user' AND target_user.user_id = a.target_id
       LEFT JOIN spaces AS target_space
         ON a.target_kind = 'space' AND target_space.space_id = a.target_id
-      WHERE (${query.action ?? null} IS NULL OR a.action = ${query.action ?? null})
-        AND (${query.actorUserId ?? null} IS NULL OR a.actor_user_id = ${query.actorUserId ?? null})
-        AND (${query.spaceId ?? null} IS NULL OR a.space_id = ${query.spaceId ?? null})
-        AND (${from} IS NULL OR a.at >= ${from})
-        AND (${to} IS NULL OR a.at < ${to})
-        AND (${before} IS NULL OR a.audit_id < ${before})
+      WHERE ${sql.and([
+        ...(query.action === undefined ? [] : [sql`a.action = ${query.action}`]),
+        ...(query.actorUserId === undefined ? [] : [sql`a.actor_user_id = ${query.actorUserId}`]),
+        ...(query.spaceId === undefined ? [] : [sql`a.space_id = ${query.spaceId}`]),
+        ...(from === null ? [] : [sql`a.at >= ${from}`]),
+        ...(to === null ? [] : [sql`a.at < ${to}`]),
+        ...(before === null ? [] : [sql`a.audit_id < ${before}`]),
+      ])}
       ORDER BY a.audit_id DESC
       LIMIT ${limit + 1}
     `.pipe(Effect.mapError(readError));
     const page = rows.slice(0, limit);
+    // Deleted Organizations too, named as they were, so the Owner can still filter by them.
+    const spaces = yield* sql<{
+      readonly id: string;
+      readonly name: string | null;
+      readonly deleted: number;
+    }>`
+      SELECT a.space_id AS id, COALESCE(s.name, MAX(a.space_name)) AS name,
+        s.space_id IS NULL AS deleted
+      FROM audit_log AS a LEFT JOIN spaces AS s ON s.space_id = a.space_id
+      WHERE a.space_id IS NOT NULL
+      GROUP BY a.space_id ORDER BY name
+    `.pipe(Effect.mapError(readError));
     return {
       entries: page.map(toEntry),
+      spaces: spaces.map((space) => ({
+        id: SpaceId.make(space.id),
+        name: space.name,
+        deleted: space.deleted === 1,
+      })),
       nextCursor: rows.length > limit ? String(page.at(-1)!.id) : null,
     };
   });

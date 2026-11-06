@@ -92,7 +92,7 @@ export const layer = HttpApiBuilder.group(
             projectClones,
             args.payload,
             principal.userId,
-          ).pipe(CommandActor.actAs(principal.userId));
+          ).pipe(CommandActor.actAsSession(principal));
           return yield* startup.enqueueCommand(operation).pipe(Effect.catch(failProjectMutation));
         }),
       );

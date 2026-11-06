@@ -292,7 +292,7 @@ export const make = Effect.gen(function* () {
   const auditOf = (
     command: ProjectCommand,
     project: { readonly spaceId: SpaceId | null } | undefined,
-  ): Omit<AuditLog.AuditRecord, "actor"> | undefined => {
+  ): AuditLog.AuditDraft | undefined => {
     const target = { kind: "project", id: command.projectId } as const;
     if (command.type === "project.delete") {
       return { action: "project.delete", spaceId: project?.spaceId ?? null, target };
@@ -567,6 +567,12 @@ export const make = Effect.gen(function* () {
       acceptedAt: now,
       events: plan.events,
       effects: plan.effects,
+      // Each Thread a Project or Organization delete destroys is named on its own.
+      audit: {
+        action: "thread.delete",
+        target: { kind: "thread", id: threadId },
+        detail: { via: input.projectId === undefined ? "organization.delete" : "project.delete" },
+      },
     });
     if (
       committed.receipt.threadId !== command.threadId ||

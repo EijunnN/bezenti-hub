@@ -1401,18 +1401,22 @@ export const make = Effect.gen(function* () {
           })
           .pipe(
             Effect.tap((issued) =>
-              input?.audited === true && "userId" in owner && owner.userId !== undefined
-                ? audit.record({
+              input?.audited !== true
+                ? Effect.void
+                : audit.record({
                     actor: AuditLog.cliActor,
                     action: "cliSession.issue",
-                    target: { kind: "user", id: owner.userId },
+                    // Before an Owner exists the token names no User; the session is the target.
+                    target:
+                      "userId" in owner && owner.userId !== undefined
+                        ? { kind: "user", id: owner.userId }
+                        : { kind: "session", id: issued.sessionId },
                     detail: {
                       sessionId: issued.sessionId,
                       label: input.label ?? null,
                       scopes: issued.scopes.join(" "),
                     },
-                  })
-                : Effect.void,
+                  }),
             ),
           ),
       ),

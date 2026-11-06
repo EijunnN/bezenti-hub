@@ -125,3 +125,66 @@ it.effect("a guest link and a permanent delete each record one entry as the acti
     ]);
   }).pipe(Effect.provide(layerTest)),
 );
+
+it.effect(
+  "an agent is named as the User it acts for, and a session naming no User records nothing once an Owner exists",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const create = (id: string) =>
+        orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`create-${id}`),
+          threadId: ThreadId.make(id),
+          projectId: ProjectId.make("project:audited"),
+          title: id,
+          modelSelection: { instanceId, model: "gpt-5.1-codex" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdBy: "user",
+          creationSource: "web",
+        });
+      const remove = (id: string) =>
+        orchestrator.dispatch({
+          type: "thread.delete",
+          commandId: CommandId.make(`delete-${id}`),
+          threadId: ThreadId.make(id),
+        });
+      for (const id of ["by-agent", "by-old-agent", "before-owner", "no-user"]) yield* create(id);
+      // Before an Owner exists a session names nobody, and the server is recorded.
+      yield* remove("before-owner").pipe(CommandActor.actAs(undefined));
+      yield* sql`
+      INSERT INTO users (user_id, display_name, is_owner, created_at)
+      VALUES ('user:owner', 'Ada', 1, '2026-01-01T00:00:00.000Z')
+    `;
+      yield* remove("by-agent").pipe(
+        CommandActor.actAsResolved({ _tag: "User", userId: grace, via: "agent" }),
+      );
+      // A Thread's agent from before owners were recorded acts as the Owner.
+      yield* remove("by-old-agent").pipe(CommandActor.actAsResolved({ _tag: "ThreadOwner" }));
+      const refused = yield* remove("no-user").pipe(CommandActor.actAs(undefined), Effect.exit);
+      assert.isTrue(refused._tag === "Failure");
+
+      const rows = yield* sql<{
+        readonly source: string;
+        readonly actorUserId: string | null;
+        readonly targetId: string;
+      }>`
+      SELECT actor_source AS source, actor_user_id AS "actorUserId", target_id AS "targetId"
+      FROM audit_log ORDER BY audit_id
+    `;
+      assert.deepEqual(rows, [
+        { source: "system", actorUserId: null, targetId: "before-owner" },
+        { source: "agent", actorUserId: grace, targetId: "by-agent" },
+        { source: "agent", actorUserId: "user:owner", targetId: "by-old-agent" },
+      ]);
+      const [kept] = yield* sql<{ readonly deletedAt: string | null }>`
+      SELECT deleted_at AS "deletedAt" FROM orchestration_v2_projection_threads
+      WHERE thread_id = 'no-user'
+    `;
+      assert.isNull(kept?.deletedAt);
+    }).pipe(Effect.provide(layerTest)),
+);

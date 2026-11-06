@@ -21,6 +21,7 @@ import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
 import { FetchHttpClient, HttpClient, HttpClientError } from "effect/http";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
 
+import * as CommandActor from "../auth/CommandActor.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 
@@ -230,6 +231,8 @@ const withProjectCliSessionToken = <A, E, R>(
     environmentAuth.issueSession({
       scopes: AuthStandardClientScopes,
       label: "t3 project cli",
+      // What it changes is recorded as the shell's, not the Owner's.
+      subject: CommandActor.SHELL_SESSION_SUBJECT,
     }),
     (issued) => run(issued.token),
     (issued) => environmentAuth.revokeSession(issued.sessionId).pipe(Effect.ignore({ log: true })),
@@ -446,7 +449,11 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
       const projects = yield* ProjectService.ProjectService;
       const output = yield* run({
         snapshot,
-        dispatch: (command) => projectMutationOperation(projects, command).pipe(Effect.asVoid),
+        dispatch: (command) =>
+          projectMutationOperation(projects, command).pipe(
+            Effect.asVoid,
+            CommandActor.actAsResolved({ _tag: "Server", via: "cli" }),
+          ),
         mode: "offline",
       });
       yield* Console.log(output);

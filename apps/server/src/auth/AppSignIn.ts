@@ -148,7 +148,9 @@ const make = Effect.gen(function* () {
             redirect: appSignInRedirectKind(input.redirectUri),
           },
         })
-        .pipe(Effect.orDie);
+        .pipe(
+          Effect.mapError((cause) => new EnvironmentAuth.ServerAuthUserDirectoryError({ cause })),
+        );
       yield* Ref.update(codes, (current) => {
         const next = new Map(
           Array.from(current).filter(([, existing]) => existing.expiresAtMs > now),

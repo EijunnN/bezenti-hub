@@ -150,7 +150,7 @@ export interface EventSinkV2Shape {
     /** Like writeWithEffects' updateDelegatedCompletionOnly, for this run's run.updated only. */
     readonly updateDelegatedCompletionOnlyRunId?: RunId;
     /** Recorded as the fiber's actor in the same transaction; a replayed command records nothing. */
-    readonly audit?: Omit<AuditLog.AuditRecord, "actor">;
+    readonly audit?: AuditLog.AuditDraft;
   }) => Effect.Effect<
     {
       readonly receipt: CommandReceiptStore.CommandReceiptV2;
@@ -174,7 +174,7 @@ export interface EventSinkV2Shape {
     readonly acceptedAt: DateTime.Utc;
     readonly event: UnsequencedProjectEvent;
     /** Recorded as the fiber's actor in the same transaction; a replayed command records nothing. */
-    readonly audit?: Omit<AuditLog.AuditRecord, "actor">;
+    readonly audit?: AuditLog.AuditDraft;
   }) => Effect.Effect<
     { readonly receipt: CommandReceiptStore.ProjectCommandReceiptV2; readonly committed: boolean },
     EventSinkV2Error
@@ -220,10 +220,12 @@ const layerBase: Layer.Layer<
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const writeAudit = AuditLog.write(sql);
-    const recordAudit = (entry: Omit<AuditLog.AuditRecord, "actor"> | undefined) =>
+    const recordAudit = (entry: AuditLog.AuditDraft | undefined) =>
       entry === undefined
         ? Effect.void
-        : Effect.flatMap(AuditLog.currentActor, (actor) => writeAudit({ ...entry, actor }));
+        : Effect.flatMap(AuditLog.currentActor, (actor) =>
+            writeAudit({ ...entry, actor } as AuditLog.AuditRecord),
+          );
     const commandReceipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
     const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
     const eventStore = yield* EventStore.EventStoreV2;

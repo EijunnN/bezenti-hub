@@ -14,3 +14,4 @@ Spec: ../spec.md
 - [x] Vista de auditoría solo para el Owner.
 
 Retención: se guarda todo, sin poda. Las acciones `secret.reveal`, `secret.edit` y `environment.register` existen en `AuditAction` y se registran con `AuditLog.record` desde los specs 3 y 5.
+Seguimiento: la vista de auditoría en mobile queda para la tanda de pantallas de administración en mobile.

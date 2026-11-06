@@ -1,5 +1,10 @@
 import {
   AuditAction,
+  EventId,
+  type OrchestrationV2AppThread,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
   AuthOrchestrationReadScope,
   AuthStandardClientScopes,
   SpaceId,
@@ -7,6 +12,7 @@ import {
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -16,7 +22,50 @@ import {
   type Server,
   serveAuthHttp,
 } from "../auth/UserAuth.testkit.ts";
+import * as CommandActor from "../auth/CommandActor.ts";
 import * as AuditLog from "./AuditLog.ts";
+
+const threadCreated = (input: {
+  readonly id: string;
+  readonly projectId: string;
+  readonly spaceId: string;
+}) => {
+  const id = ThreadId.make(input.id);
+  const at = DateTime.makeUnsafe("2026-11-01T00:00:00.000Z");
+  const providerInstanceId = ProviderInstanceId.make("codex");
+  const payload: OrchestrationV2AppThread = {
+    createdBy: "user",
+    creationSource: "web",
+    id,
+    projectId: ProjectId.make(input.projectId),
+    title: `work ${input.id}`,
+    providerInstanceId,
+    modelSelection: { instanceId: providerInstanceId, model: "gpt-5" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    activeProviderThreadId: null,
+    spaceId: SpaceId.make(input.spaceId),
+    lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: id },
+    forkedFrom: null,
+    createdAt: at,
+    updatedAt: at,
+    archivedAt: null,
+    settledOverride: null,
+    settledAt: null,
+    lastVisitedAt: null,
+    deletedAt: null,
+  };
+  return {
+    id: EventId.make(`create-${input.id}`),
+    type: "thread.created" as const,
+    threadId: id,
+    providerInstanceId,
+    occurredAt: at,
+    payload,
+  };
+};
 
 const PASSWORD = "correct horse battery";
 const NEW_PASSWORD = "a brand new password";
@@ -215,9 +264,17 @@ it.effect(
         })).status,
         200,
       );
+      // Deleting it destroys its Thread too, which is named on its own.
+      yield* server.eventSink.write({
+        events: [threadCreated({ id: "app-thread", projectId: "app", spaceId: acmeId })],
+      });
       assert.equal(
-        (yield* mutate({ type: "project.delete", commandId: "delete-app", projectId: "app" }))
-          .status,
+        (yield* mutate({
+          type: "project.delete",
+          commandId: "delete-app",
+          projectId: "app",
+          force: true,
+        })).status,
         200,
       );
 
@@ -400,6 +457,12 @@ it.effect(
           target: { kind: "project", id: "app" },
         },
         {
+          action: "thread.delete",
+          actor: user(ownerId),
+          spaceId: acmeId,
+          target: { kind: "thread", id: "app-thread" },
+        },
+        {
           action: "project.delete",
           actor: user(ownerId),
           spaceId: acmeId,
@@ -484,6 +547,19 @@ it.effect(
       assert.equal(named("project.delete").target.name, "App");
       assert.equal(named("user.remove").target.name, "grace");
       assert.deepEqual(named("project.move").detail, { fromSpaceId: personalId });
+      assert.deepEqual(named("thread.delete").detail, { via: "project.delete" });
+      // A deleted Organization stays a Space to filter by.
+      const listed = yield* auditOf(server, owner, "?limit=1");
+      assert.deepInclude(listed.body.spaces as ReadonlyArray<unknown>, {
+        id: globexId,
+        name: "Globex",
+        deleted: true,
+      });
+      assert.deepInclude(listed.body.spaces as ReadonlyArray<unknown>, {
+        id: acmeId,
+        name: "Acme",
+        deleted: false,
+      });
       assert.deepEqual(named("membership.changeRole").detail, { from: "member", to: "guest" });
 
       // No entry carries a credential, under any name.
@@ -503,7 +579,7 @@ it.effect(
 
       // Every action in the closed list is recorded by its flow: here, by the orchestrator's
       // tests (audit/AuditedThreadCommands.test.ts), or by a later spec through the hook.
-      const recordedElsewhere = ["thread.delete", "guestLink.create"];
+      const recordedElsewhere = ["guestLink.create"];
       const hooks = ["secret.reveal", "secret.edit", "environment.register"];
       assert.sameMembers(
         [...new Set([...expected.map((row) => row.action), ...recordedElsewhere, ...hooks])],
@@ -640,7 +716,16 @@ it.effect(
         action: "secret.reveal",
         spaceId: acmeId,
         target: { kind: "secret", id: "secret-1", name: "OPENAI_API_KEY" },
-        detail: { vault: "Acme", value: "sk-live-123", apiToken: "t-1", password: "p" },
+        // A caller that slips past the types still cannot store a value.
+        detail: {
+          vault: "Acme",
+          value: "sk-live-123",
+          apiToken: "t-1",
+          password: "p",
+          note: "whatever the caller typed",
+        } as {
+          vault: string;
+        },
       });
       yield* audit.record({
         actor: AuditLog.userActor(ownerId),
@@ -659,4 +744,99 @@ it.effect(
       assert.deepEqual(revealed!.detail, { vault: "Acme" });
       assert.equal(revealed!.target.name, "OPENAI_API_KEY");
     }),
+);
+
+it.effect("the Hub's shell is named as the shell, even before an Owner exists", () =>
+  Effect.gen(function* () {
+    const server = yield* serveAuthHttp;
+    // `t3 auth session issue` on a Hub nobody has claimed yet.
+    const early = yield* server.environmentAuth.issueSession({
+      audited: true,
+      label: "setup script",
+      scopes: AuthStandardClientScopes,
+    });
+    const { created } = yield* bootstrapOwner(server, yield* makeAuthenticator());
+    const owner = created.cookie ?? "";
+    const ownerId = (created.body.user as { id: string }).id;
+    // `t3 project add` and `t3 project remove` against the running server.
+    const shell = yield* server.environmentAuth.issueSession({
+      subject: CommandActor.SHELL_SESSION_SUBJECT,
+      scopes: AuthStandardClientScopes,
+    });
+    const mutate = (body: Record<string, unknown>) =>
+      server.request("/api/projects/mutate", {
+        authorization: `Bearer ${shell.token}`,
+        body,
+      });
+    const view = yield* server.request("/api/spaces", { cookie: owner });
+    assert.equal(
+      (yield* mutate({
+        type: "project.create",
+        commandId: "create-tool",
+        projectId: "tool",
+        title: "Tool",
+        workspaceRoot: "/work/tool",
+        spaceId: view.body.personalSpaceId,
+      })).status,
+      200,
+    );
+    assert.equal(
+      (yield* mutate({ type: "project.delete", commandId: "delete-tool", projectId: "tool" }))
+        .status,
+      200,
+    );
+
+    const entries = yield* entriesOf(server, owner);
+    const issued = entries.find((entry) => entry.action === "cliSession.issue")!;
+    assert.deepEqual(issued.actor, { source: "cli", userId: null, displayName: null });
+    assert.deepEqual(issued.target, { kind: "session", id: early.sessionId, name: null });
+    const removed = entries.find((entry) => entry.action === "project.delete")!;
+    assert.deepEqual(removed.actor, {
+      source: "cli",
+      userId: ownerId,
+      displayName: "Ada Lovelace",
+    });
+  }),
+);
+
+it.effect("an MCP pairing code is spent only when its approval is recorded", () =>
+  Effect.gen(function* () {
+    const { server, join } = yield* hub;
+    const grace = yield* join("grace");
+    const code = yield* server.request("/api/auth/pairing-token", {
+      body: { label: "Claude Code" },
+      cookie: grace.cookie,
+    });
+    const registered = yield* server.request("/oauth/mcp/register", {
+      body: { client_name: "Claude Code", redirect_uris: [REDIRECT] },
+    });
+    const authorization = {
+      response_type: "code",
+      client_id: registered.body.client_id as string,
+      redirect_uri: REDIRECT,
+      code_challenge: CHALLENGE,
+      code_challenge_method: "S256",
+    };
+    const decide = server.request("/oauth/mcp/decision", {
+      body: {
+        authorization,
+        decision: { _tag: "pairing-code", access: "read-only", code: code.body.credential },
+      },
+    });
+    yield* server.sql`
+      CREATE TRIGGER test_audit_unwritable BEFORE INSERT ON audit_log
+      BEGIN SELECT RAISE(ABORT, 'refused by the test'); END
+    `;
+    const failed = yield* decide;
+    assert.notEqual(failed.status, 500);
+    assert.notProperty(failed.body, "redirectTo");
+    yield* server.sql`DROP TRIGGER test_audit_unwritable`;
+    // The same code still works, and the approval names Grace.
+    const approved = yield* decide;
+    assert.isString(approved.body.redirectTo);
+    const [entry] = yield* server.sql<{ readonly actor: string; readonly action: string }>`
+      SELECT actor_user_id AS actor, action FROM audit_log WHERE action = 'mcpClient.approve'
+    `;
+    assert.deepEqual(entry, { actor: grace.userId, action: "mcpClient.approve" });
+  }),
 );

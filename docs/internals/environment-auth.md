@@ -429,14 +429,20 @@ transaction.
 is written by the service that performs the action, inside that action's
 transaction, so a rolled-back action leaves none and an entry that cannot be
 written fails the action. Event-sourced actions (permanent Thread and Project
-deletes, Project moves, guest links) pass their entry to `EventSink`
+deletes, each Thread a Project or Organization delete destroys, Project moves,
+guest links) pass their entry to `EventSink`
 (`commitCommand`/`commitProjectCommand` `audit`), which writes it with the
 receipt as the fiber's `CommandActor`, so a replayed command records nothing.
 App sign-in and MCP OAuth approvals live in memory and record before their
-code is minted. The shell (`t3 auth session issue`, `t3 auth owner-reset`)
-records as actor `cli`. Entries snapshot the Space and target names, since
+code is minted; an MCP pairing code is spent in the same transaction as its
+entry. The actor comes from `CommandActor`: an MCP call or a Thread's agent is
+`agent` (the pre-owner `ThreadOwner` resolves to the Owner), the shell is `cli`
+(`t3 auth ...`, offline `t3 project`, and live `t3 project` through a session
+with `SHELL_SESSION_SUBJECT`), and a session naming no User records as `system`
+before an Owner exists and fails the action after. Entries snapshot the Space and target names, since
 Organizations and Projects are deleted while Users are only tombstoned. Detail
-keys that name a credential are dropped on write, whatever the caller passes.
+keys are an allow-list per action (`AUDIT_DETAIL_KEYS` in contracts); any
+other key is dropped on write, whatever the caller passes.
 `secret.*` and `environment.register` are in the closed `AuditAction` list for
 the specs that own them to record. The read (`/api/installation/audit`) is
 Owner-only and needs `access:read`; anyone else gets the same 403 whatever

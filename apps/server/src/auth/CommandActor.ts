@@ -10,10 +10,19 @@ import * as Option from "effect/Option";
 
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 
+/**
+ * Where an actor's request came from, for the audit log: the Hub's shell (`t3 ...`), or an agent
+ * (an MCP tool call) acting as its User. Never changes what the actor may do.
+ */
+export type ActorVia = "cli" | "agent";
+
+/** The subject of a session the Hub's shell issues for its own requests to a running server. */
+export const SHELL_SESSION_SUBJECT = "t3-shell";
+
 export type Actor =
-  /** The server's own work. */
-  | { readonly _tag: "Server" }
-  | { readonly _tag: "User"; readonly userId: UserId }
+  /** The server's own work, or the shell's (`via: "cli"`) when it runs the services itself. */
+  | { readonly _tag: "Server"; readonly via?: "cli" }
+  | { readonly _tag: "User"; readonly userId: UserId; readonly via?: ActorVia }
   /** An agent in a Thread from before owners were recorded, which is the Owner's. */
   | { readonly _tag: "ThreadOwner" }
   /** A request whose session names no User, which only works before an Owner exists. */
@@ -28,11 +37,11 @@ const CommandActor = Context.Reference<Actor>("t3/auth/CommandActor", {
 /** Who the current fiber acts for: its transport's User, else its MCP caller's. */
 export const resolve: Effect.Effect<Actor> = Effect.gen(function* () {
   const explicit = yield* CommandActor;
-  if (explicit._tag !== "Server") return explicit;
+  if (explicit._tag !== "Server" || explicit.via !== undefined) return explicit;
   const mcp = yield* Effect.serviceOption(McpInvocationContext.McpInvocationContext);
   if (Option.isNone(mcp)) return SERVER;
   const { userId, thread } = mcp.value;
-  if (userId !== undefined) return { _tag: "User", userId };
+  if (userId !== undefined) return { _tag: "User", userId, via: "agent" };
   return thread !== undefined ? { _tag: "ThreadOwner" } : { _tag: "NoUser" };
 });
 
@@ -55,4 +64,18 @@ export const actAs =
 export const actAsResolved =
   (actor: Actor) =>
   <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
-    actor._tag === "Server" ? effect : Effect.provideService(effect, CommandActor, actor);
+    actor._tag === "Server" && actor.via === undefined
+      ? effect
+      : Effect.provideService(effect, CommandActor, actor);
+
+/** Runs `effect` for an HTTP session; a session the Hub's shell issued acts `via: "cli"`. */
+export const actAsSession =
+  (session: { readonly userId?: UserId; readonly subject: string }) =>
+  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+    session.subject !== SHELL_SESSION_SUBJECT
+      ? actAs(session.userId)(effect)
+      : actAsResolved(
+          session.userId === undefined
+            ? { _tag: "Server", via: "cli" }
+            : { _tag: "User", userId: session.userId, via: "cli" },
+        )(effect);

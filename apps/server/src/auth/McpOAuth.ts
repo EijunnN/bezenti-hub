@@ -29,6 +29,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Ref from "effect/Ref";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Schema from "effect/Schema";
 import { HttpServerRequest } from "effect/http";
 
@@ -271,6 +272,7 @@ const make = Effect.gen(function* () {
   const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
   const userDirectory = yield* UserDirectory.UserDirectory;
   const audit = yield* AuditLog.AuditLog;
+  const sql = yield* SqlClient.SqlClient;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const random = yield* SecureRandom.SecureRandom;
   const digester = yield* Digest.Digest;
@@ -490,14 +492,57 @@ const make = Effect.gen(function* () {
 
   const approve: McpOAuth["Service"]["approve"] = Effect.fn("McpOAuth.approve")(function* (input) {
     const { decision } = input;
+    const notRecorded = (cause: unknown) =>
+      Effect.logError("Could not record an MCP client approval.", { cause }).pipe(
+        Effect.andThen(
+          Effect.fail(
+            new McpOAuthPageError({ description: "The approval could not be saved. Try again." }),
+          ),
+        ),
+      );
+    // Once an Owner exists every approver is a User; never fall back to the Owner silently.
+    const requireNamed = Effect.fn("McpOAuth.requireNamed")(function* (
+      approver: UserId | undefined,
+    ) {
+      if (approver !== undefined) return;
+      const hasOwner = yield* userDirectory.hasOwner().pipe(Effect.orElseSucceed(() => true));
+      if (hasOwner)
+        return yield* new McpOAuthPageError({
+          description: "This approval names no account. Sign in and try again.",
+        });
+    });
+    // Before an Owner exists the approval names nobody; it is recorded against the client.
+    const recordApproval = (approver: UserId | undefined) =>
+      audit.record({
+        actor: approver === undefined ? { source: "system" } : AuditLog.userActor(approver),
+        action: "mcpClient.approve",
+        target:
+          approver === undefined
+            ? {
+                kind: "session",
+                id: `mcp-client:${input.authorization.client.clientId}`,
+                name: input.authorization.client.name,
+              }
+            : { kind: "user", id: approver },
+        detail: {
+          client: input.authorization.client.name,
+          access: decision.access,
+          method: decision._tag,
+        },
+      });
     // The client acts as whoever approved it: the signed-in User, or the User a code was issued to.
     let approver: UserId | undefined;
     if (decision._tag === "pairing-code") {
-      // A signed-in browser approves as its User, so a code may only be that User's.
-      const granted = yield* environmentAuth
-        .consumeMcpApprovalCode(decision.code, decision.access, {
-          asUser: yield* signedInUser(input.request),
-        })
+      // A signed-in browser approves as its User, so a code may only be that User's. Spending
+      // the code and recording the approval commit together: a failed entry leaves the code.
+      const asUser = yield* signedInUser(input.request);
+      const granted = yield* sql
+        .withTransaction(
+          environmentAuth.consumeMcpApprovalCode(decision.code, decision.access, { asUser }).pipe(
+            Effect.tap((spent) => requireNamed(spent.userId)),
+            Effect.tap((spent) => recordApproval(spent.userId).pipe(Effect.catch(notRecorded))),
+          ),
+        )
         .pipe(
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (cause) =>
             Effect.logError("MCP approval code check failed.", { cause }).pipe(
@@ -510,6 +555,7 @@ const make = Effect.gen(function* () {
               ),
             ),
           ),
+          Effect.catchTags({ SqlError: notRecorded }),
         );
       approver = granted.userId;
     } else {
@@ -524,29 +570,9 @@ const make = Effect.gen(function* () {
         });
       }
       approver = session.userId;
-    }
-    // Once an Owner exists every approver is a User; never fall back to the Owner silently.
-    if (approver === undefined) {
-      const hasOwner = yield* userDirectory.hasOwner().pipe(Effect.orElseSucceed(() => true));
-      if (hasOwner)
-        return yield* new McpOAuthPageError({
-          description: "This approval names no account. Sign in and try again.",
-        });
-    }
-    // Recorded before the code exists: an approval the log missed never signs anyone in.
-    if (approver !== undefined) {
-      yield* audit
-        .record({
-          actor: AuditLog.userActor(approver),
-          action: "mcpClient.approve",
-          target: { kind: "user", id: approver },
-          detail: {
-            client: input.authorization.client.name,
-            access: decision.access,
-            method: decision._tag,
-          },
-        })
-        .pipe(Effect.orDie);
+      yield* requireNamed(approver);
+      // Recorded before the code exists: an approval the log missed never signs anyone in.
+      yield* recordApproval(approver).pipe(Effect.catch(notRecorded));
     }
     const code = yield* mintCode(input.authorization, decision.access, approver);
     return redirectWith(input.authorization.redirectUri, {

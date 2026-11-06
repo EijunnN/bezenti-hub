@@ -6,6 +6,7 @@ import {
 import {
   AuditAction,
   type AuditEntry,
+  type AuditLogPage,
   type AuditLogQuery,
   type InstallationUser,
   SpaceId,
@@ -13,12 +14,11 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { PrimaryEnvironmentHttpClient } from "../../environments/primary/httpClient";
 import { errorMessageOf as messageOf } from "../../lib/errorMessage";
 import { runPrimaryHttp } from "../../lib/runtime";
-import { useCurrentSpace } from "../../state/currentSpace";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -51,16 +51,28 @@ const fetchPage = (query: AuditLogQuery) =>
     PrimaryEnvironmentHttpClient.pipe(Effect.flatMap((client) => fetchAuditLog(client, query))),
   );
 
+const labelOf = (space: AuditLogPage["spaces"][number] | undefined) =>
+  space === undefined
+    ? "Unknown Space"
+    : `${space.name ?? "Unnamed Space"}${space.deleted ? " (deleted)" : ""}`;
+
 const actorOf = (entry: AuditEntry) =>
   entry.actor.source === "cli"
-    ? "The Hub's shell"
-    : entry.actor.source === "system"
-      ? "T3 Code"
-      : (entry.actor.displayName ?? "Unknown User");
+    ? entry.actor.displayName === null
+      ? "The Hub's shell"
+      : `The Hub's shell, as ${entry.actor.displayName}`
+    : entry.actor.source === "agent"
+      ? `${entry.actor.displayName ?? "The Owner"}'s agent`
+      : entry.actor.source === "system"
+        ? "T3 Code"
+        : (entry.actor.displayName ?? "Unknown User");
 
 /** The Owner's audit log: who did what in the sensitive actions, newest first. */
 export function AuditLogDialog({ onClose }: { readonly onClose: () => void }) {
-  const spaces = useCurrentSpace((state) => state.view?.spaces ?? []);
+  // Every Space the log names, deleted Organizations included, as the server lists them.
+  const [spaces, setSpaces] = useState<AuditLogPage["spaces"]>([]);
+  // The filters a response was asked for; one that arrives after they changed is dropped.
+  const current = useRef<Filters | null>(null);
   const [users, setUsers] = useState<ReadonlyArray<InstallationUser>>([]);
   const [filters, setFilters] = useState<Filters>({ action: ANY, actorUserId: ANY, spaceId: ANY });
   const [entries, setEntries] = useState<ReadonlyArray<AuditEntry> | null>(null);
@@ -87,7 +99,9 @@ export function AuditLogDialog({ onClose }: { readonly onClose: () => void }) {
     void fetchPage(queryOf(filters, null)).then(
       (page) => {
         if (cancelled) return;
+        current.current = filters;
         setEntries(page.entries);
+        setSpaces(page.spaces);
         setNextCursor(page.nextCursor);
       },
       (cause: unknown) => {
@@ -100,28 +114,34 @@ export function AuditLogDialog({ onClose }: { readonly onClose: () => void }) {
   }, [filters]);
 
   const changeFilters = (next: Filters) => {
+    current.current = null;
     setFilters(next);
+    setNextCursor(null);
     setEntries(null);
     setError(null);
   };
 
   const loadOlder = async () => {
-    if (nextCursor === null) return;
+    if (nextCursor === null || loadingMore) return;
+    const askedFor = filters;
     setLoadingMore(true);
     try {
-      const page = await fetchPage(queryOf(filters, nextCursor));
-      setEntries((current) => [...(current ?? []), ...page.entries]);
+      const page = await fetchPage(queryOf(askedFor, nextCursor));
+      if (current.current !== askedFor) return;
+      setEntries((shown) => [...(shown ?? []), ...page.entries]);
+      setSpaces(page.spaces);
       setNextCursor(page.nextCursor);
+      setError(null);
     } catch (cause) {
-      setError(messageOf(cause, "Could not load older entries."));
+      if (current.current === askedFor) setError(messageOf(cause, "Could not load older entries."));
+    } finally {
+      setLoadingMore(false);
     }
-    setLoadingMore(false);
   };
 
   const userName = (userId: string) =>
     users.find((user) => user.id === userId)?.displayName ?? "Unknown User";
-  const spaceName = (spaceId: string) =>
-    spaces.find((space) => space.id === spaceId)?.name ?? "Unknown Space";
+  const spaceName = (spaceId: string) => labelOf(spaces.find((space) => space.id === spaceId));
 
   return (
     <Dialog
@@ -211,7 +231,7 @@ export function AuditLogDialog({ onClose }: { readonly onClose: () => void }) {
                   </SelectItem>
                   {spaces.map((space) => (
                     <SelectItem hideIndicator key={space.id} value={space.id}>
-                      {space.name}
+                      {labelOf(space)}
                     </SelectItem>
                   ))}
                 </SelectPopup>

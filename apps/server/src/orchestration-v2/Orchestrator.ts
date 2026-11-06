@@ -13086,9 +13086,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   });
 
   /** The audited Thread commands: a permanent delete and a new guest link. */
-  const auditOf = (
-    command: OrchestrationV2ServerCommand,
-  ): Omit<AuditLog.AuditRecord, "actor"> | undefined => {
+  const auditOf = (command: OrchestrationV2ServerCommand): AuditLog.AuditDraft | undefined => {
     // Discarding an unused draft is not a deletion anyone needs to answer for.
     if (command.type === "thread.delete" && command.onlyIfUnused !== true) {
       return { action: "thread.delete", target: { kind: "thread", id: command.threadId } };
