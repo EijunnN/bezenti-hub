@@ -2,6 +2,7 @@ import type { MenuAction } from "@react-native-menu/menu";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { ThreadListToolbar } from "./ThreadListToolbar";
 import type { HomeHeaderProps } from "./HomeHeader.types";
+import { spaceMenuTitle } from "./home-list-filter-menu";
 
 export type { HomeHeaderEnvironment } from "./HomeHeader.types";
 
@@ -12,7 +13,18 @@ function checkedMenuState(checked: boolean) {
 export function HomeHeader(props: HomeHeaderProps) {
   const hasCustomListOptions =
     props.selectedEnvironmentId !== null || props.selectedProjectKey !== null;
+  const spaceChoices = props.spaceChoices ?? [];
   const menuActions: MenuAction[] = [
+    // Ids carry indexes, not ids, since environment and Space ids may contain ":".
+    ...spaceChoices.map((choice, choiceIndex) => ({
+      id: `space:${choiceIndex}`,
+      title: spaceMenuTitle(choice, spaceChoices.length),
+      subactions: choice.spaces.map((space, spaceIndex) => ({
+        id: `space:${choiceIndex}:${spaceIndex}`,
+        title: space.name,
+        state: checkedMenuState(choice.currentSpaceId === space.id),
+      })),
+    })),
     {
       id: "environment",
       title: "Environment",
@@ -52,6 +64,13 @@ export function HomeHeader(props: HomeHeaderProps) {
   ];
   const handleMenuAction = (event: { nativeEvent: { event: string } }) => {
     const id = event.nativeEvent.event;
+    const spacePick = /^space:(\d+):(\d+)$/u.exec(id);
+    if (spacePick) {
+      const choice = spaceChoices[Number(spacePick[1])];
+      const space = choice?.spaces[Number(spacePick[2])];
+      if (choice && space) props.onSpaceChange?.(choice.environmentId, space.id);
+      return;
+    }
     if (id === "environment:all") {
       props.onEnvironmentChange(null);
       return;

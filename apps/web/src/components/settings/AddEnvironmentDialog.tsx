@@ -1,5 +1,5 @@
 import { pipe } from "effect/Function";
-import { ChevronsLeftRightEllipsisIcon, PlusIcon, TerminalIcon } from "lucide-react";
+import { ChevronsLeftRightEllipsisIcon, GlobeIcon, PlusIcon, TerminalIcon } from "lucide-react";
 import { useAtomValue } from "@effect/atom-react";
 import { type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import {
@@ -10,6 +10,11 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
+import { normalizeHubUrl, startAppSignIn } from "@t3tools/client-runtime/authorization";
+import * as Digest from "effect/crypto/Digest";
+import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
 import { cn } from "../../lib/utils";
@@ -39,6 +44,7 @@ import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { AnimatedHeight } from "../AnimatedHeight";
 import {
+  connectAppSignIn as connectAppSignInAtom,
   connectPairing as connectPairingAtom,
   connectSshEnvironment as connectSshEnvironmentAtom,
 } from "~/connection/onboarding";
@@ -61,6 +67,9 @@ import {
 } from "./ConnectionsSettings.logic";
 
 const EMPTY_DISCOVERED_SSH_HOSTS: ReadonlyArray<DesktopDiscoveredSshHost> = [];
+const APP_SIGN_IN_CRYPTO = Layer.merge(SecureRandom.layerWebCrypto, Digest.layerWebCrypto);
+
+type ConnectionMode = "hub" | "remote" | "ssh";
 
 export function AddEnvironmentDialog({
   open,
@@ -80,6 +89,10 @@ export function AddEnvironmentDialog({
   const desktopBridge = window.desktopBridge;
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const connectPairing = useAtomCommand(connectPairingAtom, { reportFailure: false });
+  const connectAppSignIn = useAtomCommand(connectAppSignInAtom, { reportFailure: false });
+  // The desktop app adds a Hub by its address and signs in in the system browser. A pairing
+  // code stays for the web app, which cannot receive the browser's answer.
+  const defaultMode: ConnectionMode = desktopBridge ? "hub" : "remote";
   const connectSshEnvironment = useAtomCommand(connectSshEnvironmentAtom, {
     reportFailure: false,
   });
@@ -100,7 +113,9 @@ export function AddEnvironmentDialog({
     }
     return keys;
   })();
-  const [savedBackendMode, setSavedBackendMode] = useState<"remote" | "ssh">("remote");
+  const [savedBackendMode, setSavedBackendMode] = useState<ConnectionMode>(defaultMode);
+  const [hubAddress, setHubAddress] = useState("");
+  const hubSignInStateRef = useRef<string | null>(null);
   const [savedBackendHost, setSavedBackendHost] = useState("");
   const [savedBackendPairingCode, setSavedBackendPairingCode] = useState("");
   const [savedBackendSshHost, setSavedBackendSshHost] = useState("");
@@ -141,7 +156,12 @@ export function AddEnvironmentDialog({
   const handleOpenChange = (nextOpen: boolean) => {
     if (!nextOpen) {
       savedBackendSessionRef.current += 1;
-      setSavedBackendMode("remote");
+      setSavedBackendMode(defaultMode);
+      setHubAddress("");
+      if (hubSignInStateRef.current !== null) {
+        void desktopBridge?.cancelSignInToHub(hubSignInStateRef.current).catch(() => undefined);
+        hubSignInStateRef.current = null;
+      }
       setSavedBackendHost("");
       setSavedBackendPairingCode("");
       setSavedBackendSshHost("");
@@ -178,7 +198,100 @@ export function AddEnvironmentDialog({
     setIsAddingSavedBackend(false);
   };
 
+  const reportAddFailure = (message: string) => {
+    onErrorChange(message);
+    toastManager.add(
+      stackedThreadToast({ type: "error", title: "Could not add backend", description: message }),
+    );
+  };
+
+  const finishAdding = () => {
+    handleOpenChange(false);
+    toastManager.add(
+      routeTarget
+        ? {
+            type: "success",
+            title: "Route added",
+            description: `${routeTarget.label} now has another way to connect.`,
+          }
+        : {
+            type: "success",
+            title: "Hub added",
+            description: "You are signed in. It reconnects on app startup.",
+          },
+    );
+  };
+
+  const handleAddHub = async () => {
+    if (!desktopBridge) return;
+    // A pasted pairing link (or the QR's link) still pairs, without a separate code field.
+    const pairing = parsePairingUrlFields(hubAddress);
+    if (pairing) {
+      setSavedBackendHost(pairing.host);
+      setSavedBackendPairingCode(pairing.pairingCode);
+    }
+    const session = savedBackendSessionRef.current;
+    setIsAddingSavedBackend(true);
+    onErrorChange(null);
+    try {
+      if (pairing) {
+        const paired = await connectPairing({
+          ...parseRemotePairingFields({ host: pairing.host, pairingCode: pairing.pairingCode }),
+          ...(routeTarget ? { expectedEnvironmentId: routeTarget.environmentId } : {}),
+        });
+        if (paired._tag === "Failure") {
+          if (!isAtomCommandInterrupted(paired)) {
+            const error = squashAtomCommandFailure(paired);
+            reportAddFailure(error instanceof Error ? error.message : "Failed to add backend.");
+          }
+          return;
+        }
+        finishAdding();
+        return;
+      }
+      const hubUrl = normalizeHubUrl(hubAddress);
+      const attempt = await Effect.runPromise(
+        startAppSignIn(hubUrl).pipe(Effect.provide(APP_SIGN_IN_CRYPTO)),
+      );
+      hubSignInStateRef.current = attempt.state;
+      const received = await desktopBridge.signInToHub({
+        hubUrl,
+        codeChallenge: attempt.codeChallenge,
+        state: attempt.state,
+        clientLabel: "T3 Code desktop",
+      });
+      hubSignInStateRef.current = null;
+      if (session !== savedBackendSessionRef.current) return;
+      const result = await connectAppSignIn({
+        hubUrl,
+        code: received.code,
+        codeVerifier: attempt.codeVerifier,
+        redirectUri: received.redirectUri,
+        ...(routeTarget ? { expectedEnvironmentId: routeTarget.environmentId } : {}),
+      });
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          reportAddFailure(error instanceof Error ? error.message : "Failed to add the Hub.");
+        }
+        return;
+      }
+      finishAdding();
+    } catch (error) {
+      hubSignInStateRef.current = null;
+      if (session === savedBackendSessionRef.current) {
+        reportAddFailure(error instanceof Error ? error.message : "Failed to add the Hub.");
+      }
+    } finally {
+      setIsAddingSavedBackend(false);
+    }
+  };
+
   const handleAddSavedBackend = async () => {
+    if (savedBackendMode === "hub") {
+      await handleAddHub();
+      return;
+    }
     if (savedBackendMode === "ssh") {
       let target: DesktopSshEnvironmentTarget;
       try {
@@ -339,7 +452,7 @@ export function AddEnvironmentDialog({
     setSavedBackendHost(value);
   };
   const renderConnectionModeCard = (input: {
-    readonly mode: "remote" | "ssh";
+    readonly mode: ConnectionMode;
     readonly title: string;
     readonly description: string;
     readonly icon?: ReactNode;
@@ -423,6 +536,40 @@ export function AddEnvironmentDialog({
       >
         <PlusIcon className="size-3.5" />
         {isAddingSavedBackend ? "Adding…" : routeTarget ? "Add route" : "Add environment"}
+      </Button>
+    </div>
+  );
+  const renderHubModeBody = () => (
+    <div className="space-y-4">
+      <label className="block">
+        <span className="mb-1.5 block text-xs font-medium text-foreground">Hub address</span>
+        <Input
+          value={hubAddress}
+          onChange={(event) => setHubAddress(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+            if (event.key === "Enter" && hubAddress.trim().length > 0) {
+              event.preventDefault();
+              void handleAddSavedBackend();
+            }
+          }}
+          placeholder="hub.example.com"
+          disabled={isAddingSavedBackend}
+          spellCheck={false}
+        />
+        <span className="mt-1 block text-2xs text-muted-foreground">
+          Your browser opens the Hub to sign in with your passkey or password, then returns here.
+        </span>
+      </label>
+      {error ? <p className="text-xs text-destructive">{error}</p> : null}
+      <Button
+        variant="outline"
+        className="w-full"
+        disabled={isAddingSavedBackend || hubAddress.trim().length === 0}
+        onClick={() => void handleAddSavedBackend()}
+      >
+        <GlobeIcon className="size-3.5" />
+        {isAddingSavedBackend ? "Waiting for the browser…" : "Sign in in browser"}
       </Button>
     </div>
   );
@@ -574,18 +721,27 @@ export function AddEnvironmentDialog({
           <DialogDescription>
             {routeTarget
               ? "Pair this machine again over another address, such as its Tailscale name. It joins the existing routes instead of adding a second machine."
-              : "Pair another environment to this client."}
+              : desktopBridge
+                ? "Add your team's Hub and sign in to it, or reach another machine over SSH."
+                : "Pair another environment to this client."}
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
           <div className="space-y-4">
             <div className="grid gap-3 sm:grid-cols-2">
-              {renderConnectionModeCard({
-                mode: "remote",
-                title: "Remote link",
-                description: "Enter a backend host and pairing code.",
-                icon: <ChevronsLeftRightEllipsisIcon aria-hidden className="size-4" />,
-              })}
+              {desktopBridge
+                ? renderConnectionModeCard({
+                    mode: "hub",
+                    title: "Hub",
+                    description: "Enter the Hub's address and sign in in your browser.",
+                    icon: <GlobeIcon aria-hidden className="size-4" />,
+                  })
+                : renderConnectionModeCard({
+                    mode: "remote",
+                    title: "Remote link",
+                    description: "Enter a backend host and pairing code.",
+                    icon: <ChevronsLeftRightEllipsisIcon aria-hidden className="size-4" />,
+                  })}
               {desktopBridge
                 ? renderConnectionModeCard({
                     mode: "ssh",
@@ -596,7 +752,11 @@ export function AddEnvironmentDialog({
                 : null}
             </div>
             <AnimatedHeight>
-              {savedBackendMode === "ssh" ? renderSshFields() : renderRemoteModeBody()}
+              {savedBackendMode === "ssh"
+                ? renderSshFields()
+                : savedBackendMode === "hub"
+                  ? renderHubModeBody()
+                  : renderRemoteModeBody()}
             </AnimatedHeight>
           </div>
         </DialogPanel>

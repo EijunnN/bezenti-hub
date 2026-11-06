@@ -1,7 +1,8 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, SpaceId } from "@t3tools/contracts";
 import type {
   HomeListFilterMenuEnvironment,
   HomeListFilterMenuProject,
+  HomeListSpaceChoice,
 } from "./home-list-filter-menu";
 
 export type HomeHeaderEnvironment = HomeListFilterMenuEnvironment;
@@ -15,6 +16,9 @@ export interface HomeHeaderProps {
   readonly onSearchQueryChange: (query: string) => void;
   readonly onEnvironmentChange: (environmentId: EnvironmentId | null) => void;
   readonly onProjectChange: (projectKey: string | null) => void;
+  /** The Space selector: where new Projects and Threads go on each Hub. */
+  readonly spaceChoices?: ReadonlyArray<HomeListSpaceChoice>;
+  readonly onSpaceChange?: (environmentId: EnvironmentId, spaceId: SpaceId) => void;
   readonly onOpenEnvironments: () => void;
   readonly onOpenSettings: () => void;
   readonly onStartNewTask: () => void;

@@ -73,6 +73,8 @@ import { requestUrl } from "../requestUrl.ts";
 const DEFAULT_SESSION_SUBJECT = "cli-issued-session";
 /** Browser sessions a User signed in to with an account credential rather than a pairing link. */
 export const USER_SIGN_IN_SUBJECT = "user-sign-in";
+/** Bearer and DPoP sessions a desktop or mobile app got by signing in in the system browser. */
+const APP_SIGN_IN_SUBJECT = "app-sign-in";
 export const INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT = "administrative-bootstrap";
 
 export interface IssuedPairingLink {
@@ -715,7 +717,23 @@ export class EnvironmentAuth extends Context.Service<
     >;
     /** For the Hub's shell (`t3 auth owner-reset`), when the Owner has lost every passkey. */
     readonly issueOwnerResetLink: UserDirectory.UserDirectory["Service"]["issueOwnerResetLink"];
-    /** Revokes the request's browser session; false when it carried none it may end. */
+    /**
+     * A bearer or DPoP session for a User an app sign-in approved in the browser (AppSignIn).
+     * Refused when the User can no longer sign in.
+     */
+    readonly issueAppSession: (input: {
+      readonly userId: UserId;
+      readonly client: AuthRequestMetadata;
+      readonly proofKeyThumbprint?: string;
+    }) => Effect.Effect<
+      AuthAccessTokenResult,
+      ServerAuthInvalidCredentialError | ServerAuthInsecureTransportError | ServerAuthInternalError
+    >;
+    /**
+     * Revokes the request's own session: a browser's cookie, or an app's bearer or DPoP token, so
+     * signing out of a Hub on desktop or mobile ends that session on the Hub too. False when it
+     * carried none it may end.
+     */
     readonly signOut: (
       request: HttpServerRequest.HttpServerRequest,
     ) => Effect.Effect<boolean, ServerAuthInternalError>;
@@ -2042,8 +2060,58 @@ export const make = Effect.gen(function* () {
       );
   });
 
+  const issueAppSession: EnvironmentAuth["Service"]["issueAppSession"] = Effect.fn(
+    "EnvironmentAuth.issueAppSession",
+  )(function* (input) {
+    yield* requireSecureTransport(input.client);
+    if (
+      !ManagedLimits.allowsRemoteClients(managedPolicy) &&
+      !isLoopbackClientAddress(input.client.ipAddress)
+    ) {
+      return yield* new ServerAuthInvalidCredentialError({
+        diagnostic: "The managed policy allows account sign-in only on this machine.",
+      });
+    }
+    // Refuses a User who was disabled or removed between the approval and the exchange.
+    const owner = yield* sessionUser(input.userId);
+    const session = yield* sessions
+      .issue({
+        method: input.proofKeyThumbprint ? "dpop-access-token" : "bearer-access-token",
+        subject: APP_SIGN_IN_SUBJECT,
+        ...owner,
+        scopes: AuthStandardClientScopes,
+        ...(input.proofKeyThumbprint
+          ? { proofKeyThumbprint: input.proofKeyThumbprint, ttl: Duration.hours(1) }
+          : {}),
+        client: input.client,
+      })
+      .pipe(
+        Effect.mapError((cause) => new ServerAuthAuthenticatedAccessTokenIssueError({ cause })),
+      );
+    const now = yield* DateTime.now;
+    return {
+      access_token: session.token,
+      issued_token_type: AuthAccessTokenType,
+      token_type: input.proofKeyThumbprint ? "DPoP" : "Bearer",
+      expires_in: Math.max(
+        0,
+        Math.floor((session.expiresAt.epochMilliseconds - now.epochMilliseconds) / 1000),
+      ),
+      scope: encodeOAuthScope(session.scopes),
+    } satisfies AuthAccessTokenResult;
+  });
+
+  // A cookie names a browser session; anything else is an app's bearer or DPoP token, checked
+  // (proof included) like any request it makes.
+  const requestSession = (request: HttpServerRequest.HttpServerRequest) => {
+    const credential = resolveRequestCredential(request);
+    return credential !== undefined && isBrowserCookieCredential(credential.source)
+      ? authenticateBrowserSession(request)
+      : authenticateRequest(request);
+  };
+
   const signOut: EnvironmentAuth["Service"]["signOut"] = (request) =>
-    authenticateBrowserSession(request).pipe(
+    requestSession(request).pipe(
       Effect.flatMap((session) =>
         // The reusable dev session is shared across worktrees and is not this browser's to end.
         session.subject === "reusable-dev-token"
@@ -2113,6 +2181,7 @@ export const make = Effect.gen(function* () {
     passkeyOrigin: resolvePasskeyOrigin,
     startUserBrowserSession: issueUserBrowserSession,
     issueOwnerResetLink: userDirectory.issueOwnerResetLink,
+    issueAppSession,
     signOut,
   });
 });
@@ -2143,7 +2212,8 @@ const revokePairedClientsThePolicyDisallows = Effect.fn(
       // The startup link and account sign-in also serve browsers on this machine; only a
       // device elsewhere goes.
       ((session.subject === INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT ||
-        session.subject === USER_SIGN_IN_SUBJECT) &&
+        session.subject === USER_SIGN_IN_SUBJECT ||
+        session.subject === APP_SIGN_IN_SUBJECT) &&
         isRemoteClient(session.client.ipAddress)),
   );
   const links = (yield* stores.pairingLinks.listActive()).filter(

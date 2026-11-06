@@ -3,8 +3,10 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import { environmentCatalog } from "../../connection/catalog";
 import {
   connectPairingUrl as connectPairingUrlAtom,
+  signOutAndRemoveEnvironment,
   updateBearerConnection,
 } from "../../connection/onboarding";
+import { forgetSpaces } from "../../state/spaces";
 import { useWorkspaceEnvironments } from "../../state/workspace";
 import { useAtomCommand } from "../../state/use-atom-command";
 
@@ -14,7 +16,11 @@ export function useConnectionController() {
     reportFailure: false,
   });
   const updateBearer = useAtomCommand(updateBearerConnection, { reportFailure: false });
-  const removeEnvironmentMutation = useAtomCommand(environmentCatalog.remove, "environment remove");
+  // Removing a Hub also ends this device's session on it.
+  const removeEnvironmentMutation = useAtomCommand(
+    signOutAndRemoveEnvironment,
+    "environment remove",
+  );
   const retryEnvironmentMutation = useAtomCommand(environmentCatalog.retryNow, "environment retry");
   const setEnvironmentEnabledMutation = useAtomCommand(
     environmentCatalog.setEnabled,
@@ -26,8 +32,10 @@ export function useConnectionController() {
       pairingUrl,
       ...(expectedEnvironmentId === undefined ? {} : { expectedEnvironmentId }),
     });
-  const removeEnvironment = (environmentId: EnvironmentId) =>
-    removeEnvironmentMutation(environmentId);
+  const removeEnvironment = (environmentId: EnvironmentId) => {
+    forgetSpaces(environmentId);
+    return removeEnvironmentMutation(environmentId);
+  };
   const retryEnvironment = (environmentId: EnvironmentId) =>
     retryEnvironmentMutation(environmentId);
   const setEnvironmentEnabled = (environmentId: EnvironmentId, enabled: boolean) =>

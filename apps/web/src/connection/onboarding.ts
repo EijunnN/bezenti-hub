@@ -3,7 +3,7 @@ import {
   createAtomCommandScheduler,
   createRuntimeCommand,
 } from "@t3tools/client-runtime/state/runtime";
-import type { DesktopSshEnvironmentTarget } from "@t3tools/contracts";
+import type { DesktopSshEnvironmentTarget, EnvironmentId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
 import { connectionAtomRuntime } from "./runtime";
@@ -33,5 +33,30 @@ export const connectSshEnvironment = createRuntimeCommand(connectionAtomRuntime,
   execute: (input: ConnectionOnboarding.SshConnectionInput) =>
     ConnectionOnboarding.ConnectionOnboarding.pipe(
       Effect.flatMap((onboarding) => onboarding.registerSsh(input)),
+    ),
+});
+
+/** Saves a Hub the User signed in to in the system browser (the desktop app's "Add a Hub"). */
+export const connectAppSignIn = createRuntimeCommand(connectionAtomRuntime, {
+  label: "web:connection:connect-app-sign-in",
+  scheduler: onboardingScheduler,
+  concurrency: {
+    mode: "singleFlight",
+    key: (input: ConnectionOnboarding.AppSignInConnectionInput) => input.code,
+  },
+  execute: (input: ConnectionOnboarding.AppSignInConnectionInput) =>
+    ConnectionOnboarding.ConnectionOnboarding.pipe(
+      Effect.flatMap((onboarding) => onboarding.registerAppSignIn(input)),
+    ),
+});
+
+/** Forgets an environment after ending its saved session there, so removing a Hub signs out of it. */
+export const signOutAndRemoveEnvironment = createRuntimeCommand(connectionAtomRuntime, {
+  label: "web:connection:sign-out-and-remove",
+  scheduler: onboardingScheduler,
+  concurrency: { mode: "serial", key: (environmentId: EnvironmentId) => environmentId },
+  execute: (environmentId: EnvironmentId) =>
+    ConnectionOnboarding.ConnectionOnboarding.pipe(
+      Effect.flatMap((onboarding) => onboarding.signOutAndRemove(environmentId)),
     ),
 });

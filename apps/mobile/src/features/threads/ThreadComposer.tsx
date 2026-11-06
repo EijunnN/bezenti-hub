@@ -205,6 +205,8 @@ function useCompactComposerEditor(text: ScaledTextRole, value: string) {
 export interface ThreadComposerProps {
   readonly isDraft?: boolean;
   readonly canOperateThread: boolean;
+  /** Why this User may not continue the Thread (it is someone else's); shown instead of the editor's hint. */
+  readonly readOnlyReason?: string | null;
   readonly placeholder: string;
   readonly contentMaxWidth?: number;
   readonly draftControls?: ReactNode;
@@ -601,6 +603,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
   const contextImports = useAtomValue(composerContextImportsAtom);
   const sendBlockedReason =
     (queuedEdit?.saving === true ? "Saving…" : null) ??
+    props.readOnlyReason ??
     props.sendBlockedReason ??
     (pendingPastedTextAttachmentCount > 0 ? "Attaching pasted text" : null) ??
     attachmentBlockReason;
@@ -1186,7 +1189,9 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
           </Animated.View>
         </ComposerSurface>
 
-        {props.connectionState === "connected" && !props.canOperateThread ? (
+        {props.readOnlyReason ? (
+          <Text className="pt-2 text-xs text-foreground-muted">{props.readOnlyReason}</Text>
+        ) : props.connectionState === "connected" && !props.canOperateThread ? (
           <Text className="pt-2 text-xs text-foreground-muted">
             This connection cannot control this task. You can still edit your draft.
           </Text>

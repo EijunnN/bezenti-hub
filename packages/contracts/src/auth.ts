@@ -243,6 +243,37 @@ export const AuthAccessTokenResult = Schema.Struct({
 });
 export type AuthAccessTokenResult = typeof AuthAccessTokenResult.Type;
 
+/**
+ * The Hub's `/app-sign-in` page, signed in with the browser's session, approves a desktop or
+ * mobile app's sign-in: the Hub keeps a one-time code bound to the app's PKCE challenge and
+ * redirect, and answers with the redirect that carries it back to the app.
+ */
+export const AuthAppSignInApproveRequest = Schema.Struct({
+  redirectUri: TrimmedNonEmptyString,
+  codeChallenge: TrimmedNonEmptyString,
+  codeChallengeMethod: Schema.Literal("S256"),
+  state: TrimmedNonEmptyString,
+  clientLabel: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type AuthAppSignInApproveRequest = typeof AuthAppSignInApproveRequest.Type;
+
+export const AuthAppSignInApproveResult = Schema.Struct({
+  redirectTo: TrimmedNonEmptyString,
+});
+export type AuthAppSignInApproveResult = typeof AuthAppSignInApproveResult.Type;
+
+/** The app exchanges the one-time code with its PKCE verifier for a session of the User. */
+export const AuthAppSignInTokenRequest = Schema.Struct({
+  grant_type: Schema.Literal("authorization_code"),
+  code: TrimmedNonEmptyString,
+  code_verifier: TrimmedNonEmptyString,
+  redirect_uri: TrimmedNonEmptyString,
+  client_label: Schema.optionalKey(TrimmedNonEmptyString),
+  client_device_type: Schema.optionalKey(AuthClientMetadataDeviceType),
+  client_os: Schema.optionalKey(TrimmedNonEmptyString),
+}).pipe(HttpApiSchema.asFormUrlEncoded());
+export type AuthAppSignInTokenRequest = typeof AuthAppSignInTokenRequest.Type;
+
 export const AuthWebSocketTicketResult = Schema.Struct({
   ticket: Schema.RedactedFromValue(TrimmedNonEmptyString),
   expiresAt: Schema.DateTimeUtc,

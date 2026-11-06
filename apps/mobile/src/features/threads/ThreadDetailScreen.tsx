@@ -38,6 +38,7 @@ import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSki
 import type { LegendListRef } from "@legendapp/list/react-native";
 import { HeaderHeightContext } from "@react-navigation/elements";
 import { NativeLayoutObserver } from "../../native/NativeLayoutObserver";
+import { useThreadRolePermissions } from "../../state/spaces";
 import { deriveBottomControlInsets, type NativeLayoutMetrics } from "../../lib/reserved-regions";
 import type {
   EnvironmentId,
@@ -366,10 +367,19 @@ export function ThreadDetailScreen(props: ThreadDetailScreenProps) {
   const [statusRequests, setStatusRequests] = useState<
     Record<string, BackgroundWorkStopRequest | undefined>
   >({});
+  // Someone else's Thread is read-only: only its creator continues it, answers its approvals and
+  // questions, and (with Admins) stops it. The server refuses the rest anyway.
+  const threadRole = useThreadRolePermissions(
+    props.environmentId,
+    props.draftMode ? null : props.selectedThread.source,
+  );
   return (
     <ThreadDetailBody
       key={scopedThreadKey(props.environmentId, props.selectedThread.id)}
       {...props}
+      canOperateThread={props.canOperateThread && threadRole.canContinue}
+      canStopThread={props.canStopThread && threadRole.canStop}
+      roleBlockedReason={threadRole.continueBlockedReason}
       statusRequests={statusRequests}
       setStatusRequests={setStatusRequests}
     />
@@ -378,6 +388,7 @@ export function ThreadDetailScreen(props: ThreadDetailScreenProps) {
 
 function ThreadDetailBody(
   props: ThreadDetailScreenProps & {
+    roleBlockedReason: string | null;
     statusRequests: Record<string, BackgroundWorkStopRequest | undefined>;
     setStatusRequests: React.Dispatch<
       React.SetStateAction<Record<string, BackgroundWorkStopRequest | undefined>>
@@ -1789,6 +1800,7 @@ function ThreadDetailBody(
                       <ThreadComposer
                         isDraft={Boolean(props.draftMode)}
                         canOperateThread={props.canOperateThread}
+                        readOnlyReason={props.roleBlockedReason}
                         reportedModelSelection={reportedModelSelection}
                         editorRef={composerEditorRef}
                         placeholder={

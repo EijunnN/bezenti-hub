@@ -1,4 +1,5 @@
 import * as Dialog from "../../components/ui/Dialog";
+import { useThreadRolePermissions } from "../../state/spaces";
 import type { ThreadRowProviderInstance } from "./thread-provider-instance";
 import {
   THREAD_LIST_V2_MONO_FONT as MONO_FONT,
@@ -768,7 +769,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
 
   const handleDelete = useCallback(() => onDeleteThread(thread), [onDeleteThread, thread]);
   const handleRename = useCallback(() => onRenameThread(thread), [onRenameThread, thread]);
-  const canOperateThread = useEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope);
+  const canOperateScope = useEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope);
+  // Settling, snoozing and archiving are the creator's or an Admin's; others see no swipe actions.
+  const canOrganize = useThreadRolePermissions(thread.environmentId, thread.source).canArchive;
+  const canOperateThread = canOperateScope && canOrganize;
   const handleRegenerateTitle = useCallback(
     () => onRegenerateThreadTitle(thread),
     [onRegenerateThreadTitle, thread],

@@ -229,6 +229,8 @@ last 30 days from when they were issued. **Settings → Access → Your sessions
 browsers, devices and outside agents; revoke any of them there and its open
 connections close at once. The Owner sees and can revoke every User's sessions.
 
+The desktop and mobile apps sign in to a Hub through your browser; see
+[Sign in to a Hub](./remote-access.md#sign-in-to-a-hub-from-the-desktop-or-mobile-app).
 **Create link** in the same section is an optional shortcut: it makes a
 one-time link or QR code that signs another device in as you. A link or
 session created from the server's shell (`t3 pair`, `t3 auth session issue`)

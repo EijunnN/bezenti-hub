@@ -285,7 +285,7 @@ export async function signInWithRecoveryCode(code: string): Promise<void> {
 }
 
 export async function signOut(): Promise<void> {
-  await request((client) => client.auth.signOut({}));
+  await request((client) => client.auth.signOut({ headers: {} }));
 }
 
 export function fetchInvitationPreview(token: string): Promise<InvitationPreview> {

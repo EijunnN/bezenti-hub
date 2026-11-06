@@ -32,6 +32,9 @@ import {
   AuthRevokePairingLinkInput,
   AuthEnvironmentScope,
   AuthTokenExchangeRequest,
+  AuthAppSignInApproveRequest,
+  AuthAppSignInApproveResult,
+  AuthAppSignInTokenRequest,
   AuthSessionState,
   AuthWebSocketTicketParams,
   AuthWebSocketTicketResult,
@@ -125,6 +128,10 @@ export const EnvironmentRequestInvalidReason = Schema.Literals([
   "invalid_origin",
   // A browser session asked for over plain HTTP from off the server's machine.
   "insecure_transport",
+  // An app sign-in names a redirect other than a loopback port or the mobile app's callback.
+  "invalid_redirect_uri",
+  // An app sign-in without a valid S256 PKCE challenge or state.
+  "invalid_code_challenge",
 ]);
 export type EnvironmentRequestInvalidReason = typeof EnvironmentRequestInvalidReason.Type;
 
@@ -590,6 +597,8 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
   )
   .add(
     HttpApiEndpoint.post("signOut", "/api/auth/sign-out", {
+      // A browser signs out with its cookie; an app with its bearer or DPoP token.
+      headers: OptionalBearerHeaders,
       success: AuthSignOutResult,
       error: [EnvironmentInternalError],
     }),
@@ -674,6 +683,24 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       payload: AuthResetLinkRedeemRequest,
       success: AuthBrowserSessionResult,
       error: EnvironmentUserSignInErrors,
+    }),
+  ) {}
+
+// Desktop and mobile apps sign in through the system browser; see `@t3tools/shared/appSignIn`.
+class EnvironmentAppSignInHttpApi extends HttpApiGroup.make("appSignIn")
+  .add(
+    HttpApiEndpoint.post("approve", "/api/auth/app-sign-in/approve", {
+      payload: AuthAppSignInApproveRequest,
+      success: AuthAppSignInApproveResult,
+      error: EnvironmentUserSignInErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("token", "/api/auth/app-sign-in/token", {
+      headers: OptionalDpopProofHeaders,
+      payload: AuthAppSignInTokenRequest,
+      success: AuthAccessTokenResult,
+      error: EnvironmentTokenExchangeErrors,
     }),
   ) {}
 
@@ -957,6 +984,7 @@ class EnvironmentWebhooksHttpApi extends HttpApiGroup.make("webhooks")
 export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentMetadataHttpApi)
   .add(EnvironmentAuthHttpApi)
+  .add(EnvironmentAppSignInHttpApi)
   .add(EnvironmentMcpOAuthHttpApi)
   .add(EnvironmentOrchestrationHttpApi)
   .add(EnvironmentPullRequestsHttpApi)

@@ -12,6 +12,8 @@ export function shouldHandleAppLink(url: string): boolean {
   return (
     !route.includes("expo-development-client") &&
     !route.includes("://expo-sharing") &&
+    // A Hub sign-in's answer belongs to the browser session waiting for it, not to navigation.
+    !route.includes("://auth/callback") &&
     !/^t3code(-dev|-preview)?:\/*$/.test(url)
   );
 }

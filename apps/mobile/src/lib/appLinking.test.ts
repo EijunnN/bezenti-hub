@@ -26,12 +26,13 @@ describe("shouldHandleAppLink", () => {
     expect(shouldHandleAppLink(url)).toBe(true);
   });
 
-  it.each(["t3code://expo-development-client/?url=x", "t3code://expo-sharing/anything"])(
-    "ignores lifecycle URL %s",
-    (url) => {
-      expect(shouldHandleAppLink(url)).toBe(false);
-    },
-  );
+  it.each([
+    "t3code://expo-development-client/?url=x",
+    "t3code://expo-sharing/anything",
+    "t3code://auth/callback?code=x&state=y",
+  ])("ignores lifecycle URL %s", (url) => {
+    expect(shouldHandleAppLink(url)).toBe(false);
+  });
 });
 
 describe("draft deep links", () => {

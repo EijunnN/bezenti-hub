@@ -171,6 +171,10 @@
       "types": "./src/remote.ts",
       "import": "./src/remote.ts"
     },
+    "./appSignIn": {
+      "types": "./src/appSignIn.ts",
+      "import": "./src/appSignIn.ts"
+    },
     "./dpop": {
       "types": "./src/dpop.ts",
       "import": "./src/dpop.ts"

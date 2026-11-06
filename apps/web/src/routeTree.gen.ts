@@ -16,6 +16,7 @@ import { Route as PairRouteImport } from './routes/pair'
 import { Route as InviteRouteImport } from './routes/invite'
 import { Route as GuestRouteImport } from './routes/guest'
 import { Route as ConnectAgentRouteImport } from './routes/connect-agent'
+import { Route as AppSignInRouteImport } from './routes/app-sign-in'
 import { Route as ChatRouteImport } from './routes/_chat'
 import { Route as ChatIndexRouteImport } from './routes/_chat.index'
 import { Route as ProjectsProjectKeyRouteImport } from './routes/projects.$projectKey'
@@ -86,6 +87,11 @@ const GuestRoute = GuestRouteImport.update({
 const ConnectAgentRoute = ConnectAgentRouteImport.update({
   id: '/connect-agent',
   path: '/connect-agent',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AppSignInRoute = AppSignInRouteImport.update({
+  id: '/app-sign-in',
+  path: '/app-sign-in',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ChatRoute = ChatRouteImport.update({
@@ -276,6 +282,7 @@ const ChatEnvironmentIdThreadIdRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof ChatIndexRoute
+  '/app-sign-in': typeof AppSignInRoute
   '/connect-agent': typeof ConnectAgentRoute
   '/guest': typeof GuestRoute
   '/invite': typeof InviteRoute
@@ -319,6 +326,7 @@ export interface FileRoutesByFullPath {
   '/threads/$environmentId/$threadId': typeof ThreadsEnvironmentIdThreadIdRoute
 }
 export interface FileRoutesByTo {
+  '/app-sign-in': typeof AppSignInRoute
   '/connect-agent': typeof ConnectAgentRoute
   '/guest': typeof GuestRoute
   '/invite': typeof InviteRoute
@@ -365,6 +373,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_chat': typeof ChatRouteWithChildren
+  '/app-sign-in': typeof AppSignInRoute
   '/connect-agent': typeof ConnectAgentRoute
   '/guest': typeof GuestRoute
   '/invite': typeof InviteRoute
@@ -412,6 +421,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/app-sign-in'
     | '/connect-agent'
     | '/guest'
     | '/invite'
@@ -455,6 +465,7 @@ export interface FileRouteTypes {
     | '/threads/$environmentId/$threadId'
   fileRoutesByTo: FileRoutesByTo
   to:
+    | '/app-sign-in'
     | '/connect-agent'
     | '/guest'
     | '/invite'
@@ -500,6 +511,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/_chat'
+    | '/app-sign-in'
     | '/connect-agent'
     | '/guest'
     | '/invite'
@@ -546,6 +558,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   ChatRoute: typeof ChatRouteWithChildren
+  AppSignInRoute: typeof AppSignInRoute
   ConnectAgentRoute: typeof ConnectAgentRoute
   GuestRoute: typeof GuestRoute
   InviteRoute: typeof InviteRoute
@@ -606,6 +619,13 @@ declare module '@tanstack/react-router' {
       path: '/connect-agent'
       fullPath: '/connect-agent'
       preLoaderRoute: typeof ConnectAgentRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/app-sign-in': {
+      id: '/app-sign-in'
+      path: '/app-sign-in'
+      fullPath: '/app-sign-in'
+      preLoaderRoute: typeof AppSignInRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_chat': {
@@ -949,6 +969,7 @@ const ChatRouteWithChildren = ChatRoute._addFileChildren(ChatRouteChildren)
 
 const rootRouteChildren: RootRouteChildren = {
   ChatRoute: ChatRouteWithChildren,
+  AppSignInRoute: AppSignInRoute,
   ConnectAgentRoute: ConnectAgentRoute,
   GuestRoute: GuestRoute,
   InviteRoute: InviteRoute,
