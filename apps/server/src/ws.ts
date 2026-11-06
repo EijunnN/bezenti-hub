@@ -181,12 +181,10 @@ import * as ServerSettings from "./serverSettings.ts";
 import { invalidateSettingsSecrets } from "./sourceControl/sourceControlHostSecrets.ts";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
-import * as TerminalManager from "./terminal/Manager.ts";
 import { terminalOutputStream, withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
-import * as PreviewManager from "./preview/Manager.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
 import {
   attachmentRelativePath,
@@ -195,8 +193,8 @@ import {
 } from "./attachmentStore.ts";
 import { parseBase64DataUrl } from "./imageMime.ts";
 import { deletePendingAttachment, issueAttachmentUploadUrl } from "./assets/AttachmentUpload.ts";
-import * as PortScanner from "./preview/PortScanner.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
+import * as EnvironmentExecutor from "./environment/EnvironmentExecutor.ts";
 import * as KnownWorkspaces from "./workspace/KnownWorkspaces.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import { readWorkflowScript } from "./orchestration-v2/workflowScriptQuery.ts";
@@ -1429,9 +1427,15 @@ export const layerWsRpc = (
       const review = yield* ReviewService.ReviewService;
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
-      const terminalManager = yield* TerminalManager.TerminalManager;
-      const previewManager = yield* PreviewManager.PreviewManager;
-      const portDiscovery = yield* PortScanner.PortDiscovery;
+      // Files, search, browse, terminals and previews act on the Hub machine through its
+      // Environment executor; RPCs on another Environment's Thread will route by Thread.
+      const {
+        entries: workspaceEntries,
+        files: workspaceFileSystem,
+        terminals: terminalManager,
+        previews: previewManager,
+        ports: portDiscovery,
+      } = yield* EnvironmentExecutor.hubMachineWorkspaceRpc;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
       const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
       const acpRegistryCatalog = yield* AcpRegistrySupport.AcpRegistryCatalog;
@@ -1449,8 +1453,6 @@ export const layerWsRpc = (
       const peerLinks = yield* PeerLinks.PeerLinks;
       const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
-      const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
-      const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
       const rpcClientIds = yield* Ref.make(new Set<RpcClientId>());

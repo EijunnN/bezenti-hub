@@ -11,6 +11,7 @@ export * from "./invitations.ts";
 export * from "./audit.ts";
 export * from "./environment.ts";
 export * from "./environmentHttp.ts";
+export * from "./environmentExecutor.ts";
 export * from "./desktopBootstrap.ts";
 export * from "./desktopBrowser.ts";
 export * from "./desktopAppActivation.ts";

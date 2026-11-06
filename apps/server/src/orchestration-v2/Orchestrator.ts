@@ -191,9 +191,9 @@ import {
 } from "./ThreadForkService.ts";
 import { planThreadDeletion } from "./ThreadDeletion.ts";
 import type * as AuditLog from "../audit/AuditLog.ts";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import { threadAccessOf } from "./commandAccess.ts";
 
 const isMessageQuestionAnswer = Schema.is(
@@ -1067,6 +1067,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const providerAdapters = yield* ProviderAdapterRegistryV2;
+  // Decide from the capabilities the Active environment last reported, never from an adapter call.
+  // Hosts without executors (orchestrator tests) read their fixed adapters once, here.
+  const providedCapabilities = yield* Effect.serviceOption(
+    EnvironmentExecutor.EnvironmentCapabilityCache,
+  );
+  const environmentCapabilities = Option.isSome(providedCapabilities)
+    ? providedCapabilities.value
+    : yield* EnvironmentExecutor.makeStaticCapabilityCache(providerAdapters);
+  const capabilitiesFor = (threadId: ThreadId, providerInstanceId: ProviderInstanceId) =>
+    environmentCapabilities
+      .forThread({ threadId, providerInstanceId })
+      .pipe(Effect.map((entry) => entry.capabilities));
   const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
   const providerSessions = yield* ProviderSessionManagerV2;
   const providerSwitchService = yield* ProviderSwitchServiceV2;
@@ -1140,11 +1152,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
 
   const providerSessionIdFor = (input: {
-    readonly adapter: ProviderAdapter.ProviderAdapterV2["Service"];
     readonly providerInstanceId: ProviderInstanceId;
     readonly threadId: ThreadId;
   }) =>
-    input.adapter.getCapabilities().pipe(
+    capabilitiesFor(input.threadId, input.providerInstanceId).pipe(
       Effect.flatMap((capabilities) =>
         capabilities.sessions.supportsMultipleProviderThreadsPerSession
           ? Effect.succeed(
@@ -1924,7 +1935,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             nativeMetadata: activeProviderThread.nativeMetadata,
           }
         : queuedProviderThread;
-      const targetCapabilities = yield* targetAdapter.getCapabilities().pipe(
+      const targetCapabilities = yield* capabilitiesFor(
+        threadId,
+        queuedRun.providerInstanceId,
+      ).pipe(
         Effect.mapError(
           (cause) =>
             new OrchestratorDispatchError({
@@ -2086,9 +2100,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ? queuedProviderThread.providerSessionId
           : null) ??
         (yield* providerAdapters.get(queuedRun.providerInstanceId).pipe(
-          Effect.flatMap((adapter) =>
+          Effect.flatMap(() =>
             providerSessionIdFor({
-              adapter,
               providerInstanceId: queuedRun.providerInstanceId,
               threadId,
             }),
@@ -5131,7 +5144,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
         ),
       );
-      const targetCapabilities = yield* targetAdapter.getCapabilities().pipe(
+      const targetCapabilities = yield* capabilitiesFor(
+        input.command.threadId,
+        input.modelSelection.instanceId,
+      ).pipe(
         Effect.mapError(
           (cause) =>
             new OrchestratorProviderAdapterError({
@@ -5158,7 +5174,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         existingTargetProviderThread?.providerSessionId ??
         (yield* mapDispatchError(input.command)(
           providerSessionIdFor({
-            adapter: targetAdapter,
             providerInstanceId: input.modelSelection.instanceId,
             threadId: input.command.threadId,
           }),
@@ -6035,7 +6050,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             );
       const queuedCapabilities =
         selectedProviderSession?.capabilities ??
-        (yield* queuedAdapter.getCapabilities().pipe(mapDispatchError(command)));
+        (yield* capabilitiesFor(command.threadId, modelSelection.instanceId).pipe(
+          mapDispatchError(command),
+        ));
       yield* mapDispatchError(command)(
         commandPolicy.ensureQueuedMessages({
           commandId: command.commandId,
@@ -6398,7 +6415,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         activeProviderThread?.providerSessionId ??
         (yield* mapDispatchError(command)(
           providerSessionIdFor({
-            adapter,
             providerInstanceId: modelSelection.instanceId,
             threadId: command.threadId,
           }),
@@ -6791,7 +6807,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       (canResumeAcrossInstances ? undefined : targetProviderThread?.providerSessionId) ??
       (yield* mapDispatchError(command)(
         providerSessionIdFor({
-          adapter,
           providerInstanceId: modelSelection.instanceId,
           threadId: command.threadId,
         }),
@@ -6812,7 +6827,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ),
       );
 
-    const capabilities = yield* adapter.getCapabilities().pipe(
+    const capabilities = yield* capabilitiesFor(command.threadId, modelSelection.instanceId).pipe(
       Effect.mapError(
         (cause) =>
           new OrchestratorProviderAdapterError({
@@ -12040,7 +12055,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
       const modelSelection = projection.thread.modelSelection;
       const capabilities = yield* providerAdapters.get(modelSelection.instanceId).pipe(
-        Effect.flatMap((adapter) => adapter.getCapabilities()),
+        Effect.flatMap(() => capabilitiesFor(command.threadId, modelSelection.instanceId)),
         Effect.mapError(
           (cause) =>
             new OrchestratorProviderAdapterError({

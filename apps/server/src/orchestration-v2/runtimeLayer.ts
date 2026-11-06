@@ -25,6 +25,7 @@ import * as CommandPolicy from "./CommandPolicy.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
+import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
@@ -65,8 +66,24 @@ export const layerEventInfrastructure = Layer.mergeAll(
   OrchestrationCommandReceipts.layer,
 );
 
-const layerRuntimePolicyProvided = RuntimePolicy.layerFromProjectStore.pipe(
-  Layer.provide(ProjectStore.layer),
+// The Hub machine's executor owns the local adapters, runtime policy and checkpoint store; the
+// orchestration services get forwarding versions that go to the current Environment's executor.
+const layerEnvironmentExecutorsProvided = EnvironmentExecutor.layerHubMachine.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      ProviderAdapterRegistry.layerFromProviderInstanceRegistry,
+      RuntimePolicy.layerFromProjectStore.pipe(Layer.provide(ProjectStore.layer)),
+    ),
+  ),
+);
+const layerProviderAdaptersProvided = EnvironmentExecutor.layerProviderAdapterRegistry.pipe(
+  Layer.provide(layerEnvironmentExecutorsProvided),
+);
+const layerRuntimePolicyProvided = EnvironmentExecutor.layerRuntimePolicy.pipe(
+  Layer.provide(layerEnvironmentExecutorsProvided),
+);
+const layerCheckpointStoreProvided = EnvironmentExecutor.layerCheckpointStore.pipe(
+  Layer.provide(layerEnvironmentExecutorsProvided),
 );
 
 const layerEventStoreProvided = EventStore.layerFromOrchestrationEventStore.pipe(
@@ -120,14 +137,14 @@ const layerProviderEventIngestorProvided = ProviderEventIngestor.layer.pipe(
 );
 
 const layerCheckpointServiceProvided = CheckpointService.layer.pipe(
-  Layer.provide(IdAllocator.layer),
+  Layer.provide(Layer.merge(IdAllocator.layer, layerCheckpointStoreProvided)),
 );
 const layerContextHandoffServiceProvided = ContextHandoffService.layer.pipe(
   Layer.provide(IdAllocator.layer),
 );
 
 const layerProviderSwitchServiceProvided = ProviderSwitchService.layer.pipe(
-  Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+  Layer.provide(layerProviderAdaptersProvided),
 );
 
 const layerCommandOutputHubProvided = CommandOutputHub.layer.pipe(
@@ -138,7 +155,7 @@ const layerProviderSessionManagerProvided = ProviderSessionManager.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
       layerCommandOutputHubProvided,
-      ProviderAdapterRegistry.layerFromProviderInstanceRegistry,
+      layerProviderAdaptersProvided,
       layerEventSink,
       IdAllocator.layer,
       layerProviderEventIngestorProvided,
@@ -225,7 +242,8 @@ const layerOrchestratorProvided = Orchestrator.layer.pipe(
       layerContextHandoffServiceProvided,
       IdAllocator.layer,
       ProjectStore.layer,
-      ProviderAdapterRegistry.layerFromProviderInstanceRegistry,
+      layerProviderAdaptersProvided,
+      layerEnvironmentExecutorsProvided,
       // Reuse the continuation worker's layer reference so memoization shares one request queue.
       ProviderContinuationRequests.layer,
       layerProviderEventIngestorProvided,
@@ -364,6 +382,7 @@ const layerMcpAppRequestsProvided = McpAppRequests.layer.pipe(
 );
 
 export const layer = Layer.mergeAll(
+  layerEnvironmentExecutorsProvided,
   layerCommandOutputHubProvided,
   layerOrchestratorProvided,
   layerMcpAppRequestsProvided,

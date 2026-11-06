@@ -143,6 +143,38 @@ export const PROCESS_BOUND_EFFECT_TYPES = [
   "runtime-request.respond",
 ] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
 
+/** Effects that act on the Thread's machine. They run against the Thread's Active environment. */
+const ENVIRONMENT_BOUND_EFFECT_TYPES = [
+  ...PROCESS_BOUND_EFFECT_TYPES,
+  "provider-runtime.continue",
+  "provider-session.detach",
+  "provider-thread.rollback",
+  "checkpoint.capture",
+  "terminal.cleanup",
+  "preview.cleanup",
+] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
+
+/** Effects on state the Hub keeps. They run on the Hub whatever machine runs the Thread. */
+const HUB_EFFECT_TYPES = [
+  "scheduled-tasks.cleanup",
+  "attachment.cleanup",
+  "thread-title.generate",
+  "delegated-tasks.stop",
+] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
+
+// Every effect type is placed: a new one must say where it runs.
+const everyEffectTypePlaced: Exclude<
+  OrchestrationEffectRequestV2["type"],
+  (typeof ENVIRONMENT_BOUND_EFFECT_TYPES)[number] | (typeof HUB_EFFECT_TYPES)[number]
+> extends never
+  ? true
+  : false = true;
+void everyEffectTypePlaced;
+
+const environmentBoundEffectTypes: ReadonlySet<string> = new Set(ENVIRONMENT_BOUND_EFFECT_TYPES);
+export const isEnvironmentBoundEffect = (request: OrchestrationEffectRequestV2): boolean =>
+  environmentBoundEffectTypes.has(request.type);
+
 export const OrchestrationEffectStatusV2 = Schema.Literals([
   "pending",
   "running",

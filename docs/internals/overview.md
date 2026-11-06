@@ -76,6 +76,27 @@ Retained events must remain decodable on replay. Changing a schema affects old e
 startup as well as live RPC traffic. Compatibility work must account for stored history, not just
 what the newest client sends.
 
+## Environment executors
+
+Everything that needs a machine sits behind one
+[Environment executor](../../apps/server/src/environment/EnvironmentExecutor.ts) per Environment:
+the provider adapters (sessions, turns, interrupt, steer, respond, rollback, detach, events), the
+workspace (checkpoints, runtime policy and cwd, files, search, browse, terminals, previews) and the
+host (resources and provider capabilities). The Hub machine registers an in-process executor under
+`HUB_MACHINE_ENVIRONMENT_ID`; a joined Environment will carry the same operations, catalogued and
+versioned in [the executor contract](../../packages/contracts/src/environmentExecutor.ts), over its
+WebSocket.
+
+`ProviderAdapterRegistryV2`, `RuntimePolicyV2` and `CheckpointStore` reach the orchestration as
+forwarding layers to the executor of the fiber's `CurrentEnvironment`. The effect worker runs every
+effect that needs the Thread's machine (`ENVIRONMENT_BOUND_EFFECT_TYPES`) against the Thread's Active
+environment; `HUB_EFFECT_TYPES` run on the Hub. Until Threads store an Active environment, the
+resolver always answers the Hub machine.
+
+The Orchestrator decides from a per-Environment capability cache, never from an adapter call. The
+in-process executor publishes its snapshot at startup, when provider instances change, and on every
+heartbeat. An instance added between snapshots is unknown until the next one.
+
 ## Turn completion and checkpoints
 
 A provider turn ending and its follow-up work settling are separate milestones. Orchestration
