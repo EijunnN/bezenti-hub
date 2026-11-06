@@ -4,9 +4,11 @@
 // verifier never leaves the app, and the session it gets belongs to the User who signed in.
 import type { AuthClientPresentationMetadata } from "@t3tools/contracts";
 import { normalizeHttpBaseUrl } from "@t3tools/shared/advertisedEndpoint";
+import { base64UrlEncode } from "@t3tools/shared/base64Url";
 import {
   type AppSignInCallback,
   appSignInPageUrl,
+  assertAppSignInHubUrl,
   readAppSignInCallback,
 } from "@t3tools/shared/appSignIn";
 import * as Digest from "effect/crypto/Digest";
@@ -18,19 +20,15 @@ import { executeEnvironmentHttpRequest, makeEnvironmentHttpApiGroupClient } from
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 
-const base64Url = (bytes: Uint8Array) => {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
-};
-
 /** The Hub's address as typed: `hub.example.com` means `https://hub.example.com/`. */
 export function normalizeHubUrl(input: string): string {
   const trimmed = input.trim();
   if (trimmed === "") throw new Error("Enter the Hub's address.");
-  return normalizeHttpBaseUrl(
+  const hubUrl = normalizeHttpBaseUrl(
     /^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmed) ? trimmed : `https://${trimmed}`,
   );
+  assertAppSignInHubUrl(hubUrl);
+  return hubUrl;
 }
 
 /** One sign-in attempt: what the app keeps (verifier, state) and what the page gets. */
@@ -46,9 +44,9 @@ export const startAppSignIn = Effect.fn("clientRuntime.appSignIn.start")(functio
 ) {
   const random = yield* SecureRandom.SecureRandom;
   const digest = yield* Digest.Digest;
-  const codeVerifier = base64Url(yield* random.randomBytes(32));
-  const state = base64Url(yield* random.randomBytes(16));
-  const codeChallenge = base64Url(
+  const codeVerifier = base64UrlEncode(yield* random.randomBytes(32));
+  const state = base64UrlEncode(yield* random.randomBytes(16));
+  const codeChallenge = base64UrlEncode(
     yield* digest.digest(Digest.sha256, new TextEncoder().encode(codeVerifier)),
   );
   return { hubUrl, codeVerifier, codeChallenge, state } satisfies AppSignInAttempt;

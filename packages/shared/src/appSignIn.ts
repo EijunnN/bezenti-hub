@@ -1,6 +1,12 @@
 // App sign-in: the Hub's `/app-sign-in` page sends a one-time code back to the desktop or mobile
 // app that asked, only to a loopback port or the mobile app's own scheme, so it is never an open
 // redirect. See docs/internals/environment-auth.md#app-sign-in.
+import {
+  isLocalLoopbackHost,
+  isPrivateNetworkHost,
+  isTailnetHost,
+  normalizeHostname,
+} from "./hostClassification.ts";
 
 /** The URL schemes of the T3 Code mobile app variants (see apps/mobile/app.config.ts). */
 export const APP_SIGN_IN_SCHEMES = ["t3code", "t3code-dev", "t3code-preview"] as const;
@@ -9,7 +15,8 @@ export type AppSignInScheme = (typeof APP_SIGN_IN_SCHEMES)[number];
 /** The page on the Hub that approves an app sign-in. */
 const APP_SIGN_IN_PAGE_PATH = "/app-sign-in";
 const LOOPBACK_CALLBACK_PATH = "/callback";
-const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+// Loopback IP literals only: `localhost` may resolve elsewhere (RFC 8252 §8.3).
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "[::1]"]);
 const MAX_REDIRECT_URI_LENGTH = 256;
 const CODE_CHALLENGE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const CODE_VERIFIER_PATTERN = /^[A-Za-z0-9\-._~]{43,128}$/;
@@ -47,6 +54,25 @@ export function appSignInRedirectKind(redirectUri: string): AppSignInRedirectKin
     url.href === redirectUri
     ? "this-computer"
     : null;
+}
+
+/**
+ * Whether an app may reach the Hub over plain HTTP: as the Hub's transport rule allows plain HTTP
+ * only from this machine, the LAN and the tailnet (never link-local, nor IPv6 off the tailnet).
+ */
+function appSignInAllowsPlainHttp(hostname: string): boolean {
+  const host = normalizeHostname(hostname);
+  if (isLocalLoopbackHost(host) || isTailnetHost(host)) return true;
+  if (host.includes(":") || host.startsWith("169.254.")) return false;
+  return isPrivateNetworkHost(host);
+}
+
+/** Refuses a Hub address the Hub would refuse a sign-in over. */
+export function assertAppSignInHubUrl(hubUrl: string): void {
+  const url = new URL(hubUrl);
+  if (url.protocol === "https:") return;
+  if (url.protocol === "http:" && appSignInAllowsPlainHttp(url.hostname)) return;
+  throw new Error("The Hub's address must start with https://.");
 }
 
 export const isAppSignInCodeChallenge = (value: string) => CODE_CHALLENGE_PATTERN.test(value);
@@ -95,6 +121,11 @@ export function readAppSignInPageRequest(pageUrl: string): AppSignInPageRequest 
 export function appSignInCallbackUrl(redirectUri: string, code: string, state: string): string {
   const separator = redirectUri.includes("?") ? "&" : "?";
   return `${redirectUri}${separator}code=${encodeURIComponent(code)}&state=${encodeURIComponent(state)}`;
+}
+
+/** Where a cancelled approval sends the app, so it stops waiting (RFC 6749 §4.1.2.1). */
+export function appSignInCancelledUrl(redirectUri: string, state: string): string {
+  return `${redirectUri}?error=access_denied&state=${encodeURIComponent(state)}`;
 }
 
 export type AppSignInCallback =

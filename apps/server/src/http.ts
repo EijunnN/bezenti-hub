@@ -571,6 +571,8 @@ const streamStaticFile = (file: FileSystem.File, size: bigint) =>
     }),
   );
 
+const CONSENT_PAGE_PATHS: ReadonlySet<string> = new Set(["/app-sign-in", "/connect-agent"]);
+
 const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
   function* (immutableBuildAssets: ReadonlySet<string>) {
     const request = yield* HttpServerRequest.HttpServerRequest;
@@ -699,6 +701,12 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
     }
 
     const contentType = isHtml ? "text/html; charset=utf-8" : mimeType;
+    // Pages that approve access must not be framed by another site (clickjacking the consent).
+    const frameHeaders: Record<string, string> =
+      isHtml && CONSENT_PAGE_PATHS.has(url.value.pathname.replace(/\/+$/u, ""))
+        ? { "X-Frame-Options": "DENY", "Content-Security-Policy": "frame-ancestors 'none'" }
+        : {};
+    Object.assign(headers, frameHeaders);
     if (opened.file === null && request.method !== "HEAD") {
       const fileSystem = yield* FileSystem.FileSystem;
       // Complete fallback reads before success headers; stream errors arrive too late for a 500.
@@ -708,6 +716,7 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
         headers: {
           "Cache-Control": cacheControl,
           ...validators({ ...info, size: ByteSize.bytes(bytes.byteLength) }),
+          ...frameHeaders,
         },
         contentType,
       });

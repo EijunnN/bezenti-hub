@@ -63,5 +63,10 @@ it.effect("takes a code only from a callback carrying this attempt's state", () 
 it("reads a typed Hub address as HTTPS unless it names a scheme", () => {
   expect(normalizeHubUrl(" hub.example.com ")).toBe("https://hub.example.com/");
   expect(normalizeHubUrl("http://192.168.1.20:3773/sign-in")).toBe("http://192.168.1.20:3773/");
+  expect(normalizeHubUrl("http://127.0.0.1:3773")).toBe("http://127.0.0.1:3773/");
+  expect(normalizeHubUrl("http://machine.tailnet.ts.net")).toBe("http://machine.tailnet.ts.net/");
   expect(() => normalizeHubUrl("")).toThrow();
+  // Plain HTTP only where the Hub accepts it: this machine, the LAN and the tailnet.
+  expect(() => normalizeHubUrl("http://hub.example.com")).toThrow(/https/);
+  expect(() => normalizeHubUrl("http://169.254.1.1")).toThrow(/https/);
 });

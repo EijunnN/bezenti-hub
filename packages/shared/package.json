@@ -171,6 +171,10 @@
       "types": "./src/remote.ts",
       "import": "./src/remote.ts"
     },
+    "./base64Url": {
+      "types": "./src/base64Url.ts",
+      "import": "./src/base64Url.ts"
+    },
     "./appSignIn": {
       "types": "./src/appSignIn.ts",
       "import": "./src/appSignIn.ts"

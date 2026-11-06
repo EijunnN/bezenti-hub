@@ -1,5 +1,6 @@
 import type {
   AuthAccessTokenResult,
+  AuthEnvironmentScope,
   AuthAppSignInApproveRequest,
   AuthAppSignInTokenRequest,
   UserId,
@@ -33,6 +34,8 @@ const APP_SIGN_IN_CODE_TTL_MS = 60_000;
 
 interface PendingCode {
   readonly userId: UserId;
+  /** The approving browser session's scopes; the app gets no more than these. */
+  readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly redirectUri: string;
   readonly codeChallenge: string;
   readonly clientLabel: string | undefined;
@@ -126,6 +129,7 @@ const make = Effect.gen(function* () {
       const key = yield* sha256(code);
       const pending: PendingCode = {
         userId: session.userId,
+        scopes: session.scopes,
         redirectUri: input.redirectUri,
         codeChallenge: input.codeChallenge,
         clientLabel: input.clientLabel?.slice(0, 80),
@@ -176,6 +180,7 @@ const make = Effect.gen(function* () {
     const label = client.label ?? pending.clientLabel;
     return yield* environmentAuth.issueAppSession({
       userId: pending.userId,
+      scopes: pending.scopes,
       client: label === undefined ? client : { ...client, label },
       ...(proofKeyThumbprint === undefined ? {} : { proofKeyThumbprint }),
     });

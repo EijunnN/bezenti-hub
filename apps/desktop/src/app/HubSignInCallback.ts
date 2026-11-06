@@ -5,6 +5,7 @@ import type * as NodeNet from "node:net";
 import {
   appSignInLoopbackRedirectUri,
   appSignInPageUrl,
+  assertAppSignInHubUrl,
   isAppSignInCodeChallenge,
   isAppSignInState,
   readAppSignInCallback,
@@ -33,10 +34,8 @@ export async function receiveHubSignIn(
   },
   openBrowser: (url: string) => Promise<boolean>,
 ): Promise<{ readonly code: string; readonly redirectUri: string }> {
+  assertAppSignInHubUrl(request.hubUrl);
   const hubUrl = new URL(request.hubUrl);
-  if (hubUrl.protocol !== "https:" && hubUrl.protocol !== "http:") {
-    throw new Error("The Hub's address must start with https://.");
-  }
   if (!isAppSignInCodeChallenge(request.codeChallenge) || !isAppSignInState(request.state)) {
     throw new Error("Invalid sign-in request.");
   }
@@ -51,9 +50,11 @@ export async function receiveHubSignIn(
     response.setHeader("cache-control", "no-store");
     response.setHeader("referrer-policy", "no-referrer");
     response.setHeader("x-content-type-options", "nosniff");
+    // A malformed request target must not throw here: this listener runs in the main process.
+    const target = incoming.url ?? "/";
     const callback =
-      incoming.method === "GET"
-        ? readAppSignInCallback(new URL(incoming.url ?? "/", redirectUri).toString(), {
+      incoming.method === "GET" && URL.canParse(target, redirectUri)
+        ? readAppSignInCallback(new URL(target, redirectUri).toString(), {
             redirectUri,
             state: request.state,
           })

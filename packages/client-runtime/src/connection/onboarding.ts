@@ -253,9 +253,37 @@ const registerAppSignInConnection = Effect.fn(
 )(function* (input: AppSignInConnectionInput) {
   const registration = yield* prepareAppSignInRegistration(input);
   const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+  const credentials = yield* ConnectionCredentialStore.ConnectionCredentialStore;
+  const signOut = (token: string) =>
+    signOutRemoteSession({
+      httpBaseUrl: registration.profile.httpBaseUrl,
+      bearerToken: token,
+      timeoutMs: 5_000,
+    }).pipe(
+      // Best effort: the session still expires on its own, and "Your sessions" can end it.
+      Effect.catch((error) =>
+        Effect.logWarning("Could not sign an unused app session out of the Hub.", { error }),
+      ),
+    );
+  const previous = yield* credentials
+    .get(registration.target.connectionId)
+    .pipe(Effect.orElseSucceed(() => Option.none()));
   const knownAddressOnly = input.expectedEnvironmentId === undefined;
-  if (!(yield* registry.register(registration, { knownAddressOnly }))) {
+  // The new session is live on the Hub; one this device does not keep must not stay so.
+  const registered = yield* registry
+    .register(registration, { knownAddressOnly })
+    .pipe(Effect.tapError(() => signOut(registration.credential.token)));
+  if (!registered) {
+    yield* signOut(registration.credential.token);
     return registration.target.environmentId;
+  }
+  // Signing in again replaces this device's session there rather than adding another.
+  if (
+    Option.isSome(previous) &&
+    isBearerCredential(previous.value) &&
+    previous.value.token !== registration.credential.token
+  ) {
+    yield* signOut(previous.value.token);
   }
   yield* registry.setCompatibility(registration.target.environmentId, null);
   yield* registry
@@ -459,6 +487,7 @@ export const make = Effect.gen(function* () {
         return yield* registerAppSignInConnection(input);
       },
       Effect.provideService(EnvironmentRegistry.EnvironmentRegistry, registry),
+      Effect.provideService(ConnectionCredentialStore.ConnectionCredentialStore, credentials),
       Effect.provideService(ClientCapabilities.ClientPresentation, presentation),
       Effect.provideService(HttpClient.HttpClient, httpClient),
     ),

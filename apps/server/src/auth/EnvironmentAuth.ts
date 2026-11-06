@@ -723,6 +723,8 @@ export class EnvironmentAuth extends Context.Service<
      */
     readonly issueAppSession: (input: {
       readonly userId: UserId;
+      /** The approving browser session's scopes: the app gets the standard ones it held. */
+      readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
       readonly client: AuthRequestMetadata;
       readonly proofKeyThumbprint?: string;
     }) => Effect.Effect<
@@ -2074,12 +2076,19 @@ export const make = Effect.gen(function* () {
     }
     // Refuses a User who was disabled or removed between the approval and the exchange.
     const owner = yield* sessionUser(input.userId);
+    // An approval hands out only what the approving session held.
+    const scopes = AuthStandardClientScopes.filter((scope) => input.scopes.includes(scope));
+    if (scopes.length === 0) {
+      return yield* new ServerAuthInvalidCredentialError({
+        diagnostic: "The approving session holds no scope an app could use.",
+      });
+    }
     const session = yield* sessions
       .issue({
         method: input.proofKeyThumbprint ? "dpop-access-token" : "bearer-access-token",
         subject: APP_SIGN_IN_SUBJECT,
         ...owner,
-        scopes: AuthStandardClientScopes,
+        scopes,
         ...(input.proofKeyThumbprint
           ? { proofKeyThumbprint: input.proofKeyThumbprint, ttl: Duration.hours(1) }
           : {}),

@@ -73,11 +73,7 @@ export function loopbackBindAddress(host: string | undefined): string | undefine
 export const isRemoteReachableHost = (host: string | undefined): boolean =>
   loopbackBindAddress(host) === undefined;
 
-export function base64UrlEncode(input: string | Uint8Array): string {
-  return typeof input === "string"
-    ? Base64Url.encode(new TextEncoder().encode(input))
-    : Base64Url.encode(input);
-}
+export { base64UrlEncode } from "@t3tools/shared/base64Url";
 
 export function base64UrlDecodeUtf8(input: string): string {
   return Result.getOrThrow(Base64Url.decodeString(input));

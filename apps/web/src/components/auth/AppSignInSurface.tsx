@@ -1,4 +1,8 @@
-import { readAppSignInPageRequest, appSignInRedirectKind } from "@t3tools/shared/appSignIn";
+import {
+  appSignInCancelledUrl,
+  appSignInRedirectKind,
+  readAppSignInPageRequest,
+} from "@t3tools/shared/appSignIn";
 import * as Effect from "effect/Effect";
 import { useState } from "react";
 
@@ -61,7 +65,7 @@ export function AppSignInSurface({ signedIn }: { readonly signedIn: boolean }) {
         <StandalonePageHeader
           context="App sign-in"
           title="Sign-in cancelled"
-          description="Nothing was shared with the app. You can close this tab."
+          description="Nothing was shared with the app. You can close this tab and return to it."
         />
       </StandalonePage>
     );
@@ -123,7 +127,15 @@ export function AppSignInSurface({ signedIn }: { readonly signedIn: boolean }) {
         <Button disabled={pending} onClick={() => void approve()}>
           {pending ? "Connecting…" : "Continue"}
         </Button>
-        <Button disabled={pending} onClick={() => setCancelled(true)} variant="outline">
+        <Button
+          disabled={pending}
+          onClick={() => {
+            setCancelled(true);
+            // Tell the app, so it stops waiting; the redirect was validated with the request.
+            window.location.replace(appSignInCancelledUrl(request.redirectUri, request.state));
+          }}
+          variant="outline"
+        >
           Cancel
         </Button>
       </div>

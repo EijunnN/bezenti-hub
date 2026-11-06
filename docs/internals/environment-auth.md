@@ -105,8 +105,12 @@ server side:
   S256 challenge, its redirect and a label. The page signs in as any browser
   does, then the User approves: `POST /api/auth/app-sign-in/approve` takes only
   the browser's own cookie (its origin checked with it), never a bearer token,
-  so every app session traces back to a sign-in in a browser.
-- The redirect is a loopback `http://127.0.0.1:<port>/callback` (the desktop
+  so every app session traces back to a sign-in in a browser. The page and
+  `/connect-agent` are served with `frame-ancestors 'none'` and
+  `X-Frame-Options: DENY`, so another site cannot frame the consent. Cancel
+  returns `error=access_denied` with the `state` to the same redirect.
+- The redirect is a loopback `http://127.0.0.1:<port>/callback` or `[::1]`, never
+  `localhost`, which can resolve elsewhere (RFC 8252 §8.3) (the desktop
   app listens on a port of its own for that one sign-in) or exactly
   `t3code[-dev|-preview]://auth/callback`
   ([`appSignInRedirectKind`](../../packages/shared/src/appSignIn.ts)). Anything
@@ -115,12 +119,17 @@ server side:
 - The Hub keeps the code's SHA-256 in memory with the User, challenge and
   redirect, for one minute. `POST /api/auth/app-sign-in/token` spends a code on
   its first presentation, even when the verifier or redirect then fails, and
-  issues a bearer (or, with a DPoP proof, DPoP) session with the standard
-  scopes, subject `app-sign-in`, for that User. A restart drops pending codes;
+  issues a bearer (or, with a DPoP proof, DPoP) session for that User, subject
+  `app-sign-in`, with the standard scopes the approving browser session held,
+  never more. A restart drops pending codes;
   the app just signs in again. Like other app tokens it lasts 30 days from
   issue and does not slide.
 - Signing out (`POST /api/auth/sign-out`) ends the request's own session,
-  cookie or token, so removing a Hub from an app revokes its session there.
+  cookie or token, so removing a Hub from an app revokes its session there. The
+  client also signs out a new session it could not save, and the previous one
+  when it signs in to a saved Hub again. Apps refuse a plain-HTTP Hub address
+  outside this machine, the LAN and the tailnet, as the Hub's transport rule
+  would.
 
 A custom URL scheme is not owned: another app on the phone can register
 `t3code://`. It cannot use a code it intercepts, because the exchange needs the

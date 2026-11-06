@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 
@@ -40,6 +41,8 @@ import * as EnvironmentRegistry from "./registry.ts";
 import * as ConnectionProfileStore from "./profileStore.ts";
 import { connectionRoutes, routeHttpBaseUrl } from "./routes.ts";
 import * as ConnectionWakeups from "./wakeups.ts";
+
+const isBearerCredential = Schema.is(BearerConnectionCredential);
 
 const layerClientPresentation = Layer.succeed(
   ClientCapabilities.ClientPresentation,
@@ -87,6 +90,24 @@ function layerPairingHttp(
           capabilities: { repositoryIdentity: true },
         }),
       );
+    }
+
+    if (url.endsWith("/api/auth/sign-out")) {
+      return Promise.resolve(Response.json({ signedOut: true }));
+    }
+
+    if (url.endsWith("/api/auth/app-sign-in/token")) {
+      const granted = Response.json({
+        access_token: "app-token",
+        issued_token_type: "urn:ietf:params:oauth:token-type:access_token",
+        token_type: "Bearer",
+        expires_in: 3600,
+        scope: grantScopes.join(" "),
+      });
+      const gate = options?.exchangeGate;
+      if (gate === undefined) return Promise.resolve(granted);
+      gate.reached();
+      return gate.release.then(() => granted);
     }
 
     if (url.endsWith("/oauth/token")) {
@@ -159,6 +180,8 @@ function layerPairingOnboarding(
   options?: Parameters<typeof layerPairingHttp>[1],
   calls: Array<{ readonly url: string; readonly init: RequestInit }> = [],
 ) {
+  // Saved credentials, written with a registration as the platform stores do.
+  const saved = new Map<string, BearerConnectionCredential>();
   const dependencies = Layer.mergeAll(
     layerClientPresentation,
     layerPairingHttp(calls, options),
@@ -167,14 +190,23 @@ function layerPairingOnboarding(
       listDisabled: Effect.succeed([]),
     }),
     Layer.mock(Persistence.ConnectionRegistrationStore)({
-      register: () => Effect.void,
+      register: (registration) =>
+        Effect.sync(() => {
+          if (isBearerCredential(registration.credential)) {
+            saved.set(registration.target.connectionId, registration.credential);
+          }
+        }),
       setEnabled: () => Effect.void,
     }),
     Layer.mock(Persistence.EnvironmentCacheStore)({}),
     Layer.mock(ConnectionProfileStore.ConnectionProfileStore)({}),
-    Layer.mock(ConnectionCredentialStore.ConnectionCredentialStore)({
-      get: () => Effect.succeedNone,
-      put: () => Effect.void,
+    Layer.sync(ConnectionCredentialStore.ConnectionCredentialStore, () => {
+      return ConnectionCredentialStore.ConnectionCredentialStore.of({
+        get: (connectionId) => Effect.sync(() => Option.fromUndefinedOr(saved.get(connectionId))),
+        put: (connectionId, credential) =>
+          Effect.sync(() => void saved.set(connectionId, credential as BearerConnectionCredential)),
+        remove: (connectionId) => Effect.sync(() => void saved.delete(connectionId)),
+      } as ConnectionCredentialStore.ConnectionCredentialStore["Service"]);
     }),
     Layer.mock(ClientCapabilities.SshEnvironmentGateway)({}),
     Layer.succeed(
@@ -201,6 +233,18 @@ const PAIRED_PROFILE = new BearerConnectionProfile({
   httpBaseUrl: "https://remote.example.test/",
   wsBaseUrl: "wss://remote.example.test/",
 });
+const APP_SIGN_IN_INPUT = {
+  hubUrl: "remote.example.test",
+  code: "one-time-code",
+  codeVerifier: "v".repeat(43),
+  redirectUri: "http://127.0.0.1:53111/callback",
+};
+const signOutTokens = (
+  calls: ReadonlyArray<{ readonly url: string; readonly init: RequestInit }>,
+) =>
+  calls
+    .filter((call) => call.url.endsWith("/api/auth/sign-out"))
+    .map((call) => new Headers(call.init.headers).get("authorization"));
 const UNSUPPORTED_ERROR = new ConnectionBlockedError({
   reason: "unsupported",
   detail: "The saved server used an incompatible orchestration protocol.",
@@ -346,6 +390,42 @@ describe("connection onboarding", () => {
       });
       expect(yield* SubscriptionRef.get(registry.entries)).toEqual(before);
     }).pipe(Effect.provide(layerPairingOnboarding({ exchangeGate })));
+  });
+
+  it.effect("signs the new app session out when a saved Hub is claimed during its exchange", () => {
+    let reached!: () => void;
+    let release!: () => void;
+    const exchangeReached = new Promise<void>((resolve) => (reached = resolve));
+    const exchangeGate = {
+      reached: () => reached(),
+      release: new Promise<void>((resolve) => (release = resolve)),
+    };
+    const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+    return Effect.gen(function* () {
+      const onboarding = yield* Onboarding.ConnectionOnboarding;
+      const signIn = yield* onboarding
+        .registerAppSignIn({ ...APP_SIGN_IN_INPUT, hubUrl: "attacker.example.test" })
+        .pipe(Effect.result, Effect.forkChild);
+      yield* Effect.promise(() => exchangeReached);
+      yield* registerSwitchedOffEnvironment;
+      release();
+
+      expect((yield* Fiber.join(signIn))._tag).toBe("Failure");
+      // The token the Hub issued is not saved anywhere, so it must not stay live there.
+      expect(signOutTokens(calls)).toEqual(["Bearer app-token"]);
+    }).pipe(Effect.provide(layerPairingOnboarding({ exchangeGate }, calls)));
+  });
+
+  it.effect("signs the previous session out when a saved Hub is signed in to again", () => {
+    const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+    return Effect.gen(function* () {
+      const onboarding = yield* Onboarding.ConnectionOnboarding;
+      yield* registerSwitchedOffEnvironment;
+
+      yield* onboarding.registerAppSignIn(APP_SIGN_IN_INPUT);
+
+      expect(signOutTokens(calls)).toEqual(["Bearer old-token"]);
+    }).pipe(Effect.provide(layerPairingOnboarding(undefined, calls)));
   });
 
   it.effect("adds a new address as a route when pairing targets that environment", () =>

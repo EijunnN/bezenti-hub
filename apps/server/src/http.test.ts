@@ -373,6 +373,24 @@ it.layer(
     }),
   );
 
+  it.effect("keeps the sign-in approval pages out of frames on other sites", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-static-frames-" });
+      yield* fs.writeFileString(path.join(staticDir, "index.html"), "<html>app</html>");
+      const request = yield* makeStaticRequest(staticDir);
+      for (const resource of ["/app-sign-in?state=x", "/connect-agent"]) {
+        const response = yield* request(resource);
+        expect(response.headers["x-frame-options"], resource).toBe("DENY");
+        expect(response.headers["content-security-policy"], resource).toBe(
+          "frame-ancestors 'none'",
+        );
+      }
+      expect((yield* request("/")).headers["x-frame-options"]).toBeUndefined();
+    }),
+  );
+
   it.effect("serves changed HTML when deployments preserve its size and timestamp", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
