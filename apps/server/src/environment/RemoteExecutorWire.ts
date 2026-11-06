@@ -48,6 +48,7 @@ import {
   TerminalResizeInput,
   TerminalSessionSnapshot,
   TerminalWriteInput,
+  TextGenerationError,
   NodeId,
   OrchestrationV2AppThread,
   OrchestrationV2ConversationMessage,
@@ -362,6 +363,25 @@ export const REMOTE_OPERATIONS = {
   ),
   "provider.hasPendingBackgroundWork": provider(onSession(Empty), Schema.Boolean),
   "provider.detach": provider(onSession(Empty), Schema.Void),
+  // A moved Thread's handoff summary, written with this machine's text generation.
+  "textGeneration.threadHandoff": {
+    input: Schema.Struct({
+      cwd: Schema.String,
+      threadTitle: Schema.String,
+      transcript: Schema.String,
+      changedFiles: Schema.Array(Schema.String),
+      sourceEnvironmentName: Schema.String,
+      targetEnvironmentName: Schema.String,
+      modelSelection: ModelSelection,
+      /** Names the call for `textGeneration.cancel`, which stops it when the Hub gives up. */
+      generationId: Schema.optionalKey(Schema.String),
+    }),
+    output: Schema.Struct({
+      summary: Schema.String,
+      providerInstanceId: Schema.optionalKey(Schema.String),
+    }),
+    error: Schema.Union([TextGenerationError, EnvironmentExecutorUnavailableError]),
+  },
   "checkpoint.isGitRepository": checkpoint(Schema.Struct({ cwd: Schema.String }), Schema.Boolean),
   "checkpoint.hasRef": checkpoint(
     Schema.Struct({ cwd: Schema.String, checkpointRef: CheckpointRef }),

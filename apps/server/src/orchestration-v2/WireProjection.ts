@@ -159,6 +159,16 @@ export function projectTurnItemForWire(item: OrchestrationV2TurnItem): Orchestra
       const { summary: _summary, ...projected } = item;
       return projected;
     }
+    // What a moved Thread's agent was told reaches a client only when it asks for the item.
+    case "environment_handoff": {
+      const { recentMessages: _recent, ...projected } = item;
+      return {
+        ...projected,
+        summary: Array.from(item.summary).slice(0, 200).join(""),
+        context: "",
+        detailOmitted: true,
+      };
+    }
     case "command_execution": {
       const { output, ...projected } = item;
       // A successful search can print "ENOENT" or "exit code 2", so output text
@@ -275,6 +285,11 @@ export function projectTurnItemForDetail(item: OrchestrationV2TurnItem): Orchest
       };
     case "handoff":
       return projectTurnItemForWire(item);
+    case "environment_handoff": {
+      // The text the agent got, without the messages the User already sees in the Thread.
+      const { recentMessages: _recent, detailOmitted: _omitted, ...detail } = item;
+      return detail;
+    }
     default:
       return item;
   }

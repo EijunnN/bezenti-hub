@@ -24,6 +24,7 @@ import {
   type ProjectId,
   type ProviderDriverKind,
   type ProviderInstanceId,
+  TextGenerationError,
   ThreadId,
   VcsUnsupportedOperationError,
 } from "@t3tools/contracts";
@@ -826,6 +827,46 @@ const make = Effect.gen(function* () {
         callCheckpoint<MovedWorkspace.MoveRecoverResult>(link, "move.recover", input),
       ),
     };
+    // The machine's own text generation; a failure it could not name is reported as one.
+    const textGeneration: EnvironmentExecutor.EnvironmentTextGeneration = {
+      threadHandoff: Effect.fn("RemoteEnvironments.textGeneration.threadHandoff")(
+        function* (input) {
+          const outcome = yield* invoke(link, "textGeneration.threadHandoff", input).pipe(
+            // The Hub gave up (a timeout): the machine stops the generation instead of paying on.
+            Effect.onInterrupt(() =>
+              input.generationId === undefined || link.channel === undefined
+                ? Effect.void
+                : link.channel.event(ENVIRONMENT_EXECUTOR_FRAME_METHODS.textGenerationCancel, {
+                    generationId: input.generationId,
+                  }),
+            ),
+          );
+          switch (outcome._tag) {
+            case "ok":
+              return outcome.value as {
+                readonly summary: string;
+                readonly providerInstanceId?: string;
+              };
+            case "unavailable":
+              return yield* offline(link);
+            case "failed":
+              return yield* isOperationError["textGeneration.threadHandoff"](outcome.error)
+                ? Effect.fail(
+                    outcome.error as TextGenerationError | EnvironmentExecutorUnavailableError,
+                  )
+                : Effect.fail(
+                    new TextGenerationError({
+                      operation: "generateThreadHandoff",
+                      detail:
+                        typeof outcome.error === "string"
+                          ? outcome.error.slice(0, 500)
+                          : "The machine could not write the summary.",
+                    }),
+                  );
+          }
+        },
+      ),
+    };
     // Resolved on the Hub from what the Environment reported: the Orchestrator asks while deciding.
     const runtimePolicy: RuntimePolicy.RuntimePolicyV2Shape = {
       resolve: Effect.fn("RemoteEnvironments.runtimePolicy.resolve")(function* (input) {
@@ -877,6 +918,7 @@ const make = Effect.gen(function* () {
         rpc: Option.none(),
         forward: Option.some({ call: forwardCall(link), stream: forwardStream(link) }),
       },
+      textGeneration,
       host: {
         describe: cache.snapshot(link.environmentId).pipe(
           Effect.flatMap(

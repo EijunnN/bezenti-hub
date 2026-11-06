@@ -10,7 +10,7 @@ El User ve en el timeline qué se le contó. Si el Thread se queda en la misma m
 
 **Blocked by:** 08.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] El paso `handoff` del move genera el resumen con el text generation del proveedor del Thread: en el origen si está online, si no en el Hub machine. Es una sola llamada al modelo.
 - [ ] La nueva sesión nativa en el destino arranca con el resumen y los mensajes recientes, dentro de un presupuesto de tamaño.

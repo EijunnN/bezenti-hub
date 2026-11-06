@@ -97,6 +97,24 @@ export type ReviewGuideGenerationResult = Omit<
   "headSha" | "generatedAt" | "modelSelection"
 >;
 
+/** A moved Thread's history, for the summary its agent on the new Environment starts from. */
+export interface ThreadHandoffGenerationInput {
+  cwd: string;
+  threadTitle: string;
+  /** The Thread's conversation, oldest first, already cut to fit. */
+  transcript: string;
+  changedFiles: ReadonlyArray<string>;
+  sourceEnvironmentName: string;
+  targetEnvironmentName: string;
+  modelSelection: ModelSelection;
+}
+
+export interface ThreadHandoffGenerationResult {
+  summary: string;
+  /** The provider instance that wrote it, when the caller's selection was not the one used. */
+  providerInstanceId?: string | undefined;
+}
+
 export interface ProviderTextGeneration {
   readonly generateCommitMessage: (
     input: CommitMessageGenerationInput,
@@ -117,4 +135,9 @@ export interface ProviderTextGeneration {
   readonly generateReviewGuide: (
     input: ReviewGuideGenerationInput,
   ) => Effect.Effect<ReviewGuideGenerationResult, TextGenerationError>;
+
+  /** Optional: a provider without it cannot write a moved Thread's handoff summary. */
+  readonly generateThreadHandoff?: (
+    input: ThreadHandoffGenerationInput,
+  ) => Effect.Effect<ThreadHandoffGenerationResult, TextGenerationError>;
 }

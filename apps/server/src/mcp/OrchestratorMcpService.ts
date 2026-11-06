@@ -953,6 +953,8 @@ function turnItemText(item: OrchestrationV2TurnItem): string | null {
         : `Moved from ${item.sourceEnvironmentName} to ${item.targetEnvironmentName}.`;
     case "recovered_changes":
       return `Changes found on ${item.environmentName} after the Thread moved away were kept on ${item.ref} in the Hub repository.`;
+    case "environment_handoff":
+      return item.context;
     case "thread_created":
       return `Created thread ${item.targetThreadId} with ${item.targetProviderInstanceId} (${item.targetModel}).`;
     case "secret_request":

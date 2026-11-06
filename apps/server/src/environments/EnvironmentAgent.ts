@@ -13,6 +13,7 @@ import {
   ENVIRONMENT_EXECUTOR_FRAME_METHODS,
   EnvironmentAttachmentReadResult,
   EnvironmentWorkspaceStreamCancel,
+  EnvironmentTextGenerationCancel,
   FilesystemBrowseError,
   ProjectListEntriesError,
   ProjectReadFileError,
@@ -27,6 +28,7 @@ import {
   type EnvironmentOrchestrationCapabilities,
   ProviderDriverKind,
   type ProviderInstanceId,
+  TextGenerationError,
   type ThreadId,
   VcsProcessExitError,
 } from "@t3tools/contracts";
@@ -38,6 +40,7 @@ import * as Digest from "effect/crypto/Digest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -126,6 +129,7 @@ const decodeAck = Schema.decodeUnknownOption(EnvironmentExecutorEventAck);
 const decodeRetired = Schema.decodeUnknownOption(EnvironmentExecutorRetiredSessions);
 const decodeAttachment = Schema.decodeUnknownOption(EnvironmentAttachmentReadResult);
 const decodeStreamCancel = Schema.decodeUnknownOption(EnvironmentWorkspaceStreamCancel);
+const decodeGenerationCancel = Schema.decodeUnknownOption(EnvironmentTextGenerationCancel);
 const OUTSIDE_MESSAGE = "That is outside this Thread's workspace.";
 const entriesOutside = { failure: "outside_thread_workspace", message: OUTSIDE_MESSAGE } as const;
 const fileOutside = (cwd: string, relativePath: string) =>
@@ -163,6 +167,8 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
     string,
     { readonly answer: Deferred.Deferred<ExecutorCallResult>; settled: boolean }
   >();
+  /** Text generations the Hub asked for by id, so it can cancel one it stopped waiting for. */
+  const generations = new Map<string, Fiber.Fiber<unknown, unknown>>();
   let channel: ExecutorChannel | undefined;
   /** The Hub's open workspace streams, each on the socket that opened it. */
   const workspaceStreams = new Map<
@@ -721,6 +727,29 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
           return session === undefined ? Effect.void : forgetSession(providerSessionId, session);
         });
       }
+      // The Hub asks this machine's provider to write a moved Thread's handoff summary.
+      case "textGeneration.threadHandoff": {
+        const textGeneration = local.textGeneration;
+        return textGeneration === undefined
+          ? Effect.fail(
+              new TextGenerationError({
+                operation: "generateThreadHandoff",
+                detail: "This machine has no text generation.",
+              }),
+            )
+          : Effect.gen(function* () {
+              const input = request as RemoteInput<"textGeneration.threadHandoff">;
+              const running = yield* textGeneration.threadHandoff(input).pipe(Effect.forkDetach);
+              if (input.generationId !== undefined) generations.set(input.generationId, running);
+              return yield* Fiber.join(running).pipe(
+                Effect.ensuring(
+                  Effect.sync(() => {
+                    if (input.generationId !== undefined) generations.delete(input.generationId);
+                  }),
+                ),
+              );
+            });
+      }
       case "checkpoint.isGitRepository":
         return checkpoints.isGitRepository(
           (request as RemoteInput<"checkpoint.isGitRepository">).cwd,
@@ -1082,6 +1111,14 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
   };
 
   const onEvent = (method: string, payload: unknown): Effect.Effect<void> => {
+    if (method === ENVIRONMENT_EXECUTOR_FRAME_METHODS.textGenerationCancel) {
+      // The Hub stopped waiting for a summary: stop paying for it.
+      const cancelled = decodeGenerationCancel(payload);
+      const running = Option.isNone(cancelled)
+        ? undefined
+        : generations.get(cancelled.value.generationId);
+      return running === undefined ? Effect.void : Fiber.interrupt(running).pipe(Effect.asVoid);
+    }
     if (method === ENVIRONMENT_EXECUTOR_FRAME_METHODS.workspaceStreamCancel) {
       const cancelled = decodeStreamCancel(payload);
       return Option.isNone(cancelled)

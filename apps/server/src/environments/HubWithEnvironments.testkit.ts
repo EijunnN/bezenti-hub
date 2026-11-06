@@ -21,6 +21,7 @@ import {
 } from "@t3tools/contracts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import type { McpProviderSessionConfig } from "@t3tools/provider-core/server/mcpSession";
+import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textGeneration";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -58,6 +59,7 @@ import * as PreviewManager from "../preview/Manager.ts";
 import * as PortScanner from "../preview/PortScanner.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as JoinedWorkspaceRoots from "../workspace/JoinedWorkspaceRoots.ts";
 import * as KnownWorkspaces from "../workspace/KnownWorkspaces.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
@@ -167,16 +169,30 @@ const layerHubOrchestration = CheckpointDiffQuery.layer.pipe(
   Layer.provideMerge(VcsProcess.layer),
 );
 
-const withOrchestration = (services: Context.Context<HubServices>) =>
-  Effect.gen(function* () {
-    const orchestration = yield* Layer.build(
-      layerHubOrchestration.pipe(Layer.provide(Layer.succeedContext(services))),
-    );
-    const merged = Context.merge(services, orchestration);
-    // The effect worker runs as the server runs it, so effects settle without a test draining them.
-    yield* EffectWorker.runDaemon.pipe(Effect.provideContext(merged), Effect.forkScoped);
-    return merged as unknown as Context.Context<HubServices>;
-  }).pipe(Effect.orDie);
+/** A machine's own text generation, when a test gives it one (none otherwise). */
+const layerTextGeneration = (textGeneration: ProviderTextGeneration | undefined) =>
+  textGeneration === undefined
+    ? Layer.empty
+    : Layer.succeed(
+        TextGeneration.TextGeneration,
+        TextGeneration.TextGeneration.of(textGeneration),
+      );
+
+const withOrchestration =
+  (textGeneration: ProviderTextGeneration | undefined) =>
+  (services: Context.Context<HubServices>) =>
+    Effect.gen(function* () {
+      const orchestration = yield* Layer.build(
+        layerHubOrchestration.pipe(
+          Layer.provide(Layer.succeedContext(services)),
+          Layer.provide(layerTextGeneration(textGeneration)),
+        ),
+      );
+      const merged = Context.merge(services, orchestration);
+      // The effect worker runs as the server runs it, so effects settle without a test draining them.
+      yield* EffectWorker.runDaemon.pipe(Effect.provideContext(merged), Effect.forkScoped);
+      return merged as unknown as Context.Context<HubServices>;
+    }).pipe(Effect.orDie);
 
 export interface TestEnvironment {
   readonly environmentId: EnvironmentId;
@@ -218,6 +234,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
     McpProviderSessions.McpProviderSessions
   >;
   readonly connect: boolean;
+  readonly textGeneration?: ProviderTextGeneration;
 }) {
   const scope = yield* Effect.scope;
   const mcpConfigs: Array<McpProviderSessionConfig> = [];
@@ -249,6 +266,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
         layerNoProviders,
         ProjectStore.layer,
         layerMachineWorkspace,
+        layerTextGeneration(input.textGeneration),
       ),
     ),
     Layer.provideMerge(layerRecordingMcp),
@@ -358,10 +376,15 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
 });
 
 /** A Hub with its Owner signed in, running the orchestration, listening on loopback. */
-export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* () {
+export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
+  options: {
+    /** The Hub machine's own text generation; none by default, as it runs no providers. */
+    readonly textGeneration?: ProviderTextGeneration;
+  } = {},
+) {
   const { server, authenticator, owner } = yield* hubWithOwner({
     listen: true,
-    extend: withOrchestration,
+    extend: withOrchestration(options.textGeneration),
   });
   /** Joins a machine as the Owner (`t3 join`, approved with a passkey) and connects it. */
   const join = Effect.fn("HubWithEnvironments.join")(function* (input: {
@@ -373,6 +396,8 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* () {
     >;
     /** Off: the machine joined but never connected, so the Hub sees it offline. */
     readonly connect?: boolean;
+    /** The machine's own text generation (with its providers); none by default. */
+    readonly textGeneration?: ProviderTextGeneration;
   }) {
     const joined = yield* joinMachine(server, authenticator, owner, input.name);
     return yield* startEnvironment({
@@ -383,6 +408,7 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* () {
       name: input.name,
       adapters: input.adapters,
       connect: input.connect ?? true,
+      ...(input.textGeneration === undefined ? {} : { textGeneration: input.textGeneration }),
     });
   });
   return { server, authenticator, owner, join, service: serviceOf(server) };

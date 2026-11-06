@@ -284,6 +284,12 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
       protect("generateThreadTitle", nativeGeneration.generateThreadTitle(value)),
     generateReviewGuide: (value) =>
       protect("generateReviewGuide", nativeGeneration.generateReviewGuide(value)),
+    ...(nativeGeneration.generateThreadHandoff === undefined
+      ? {}
+      : {
+          generateThreadHandoff: (value) =>
+            protect("generateThreadHandoff", nativeGeneration.generateThreadHandoff!(value)),
+        }),
   };
   return {
     instanceId,

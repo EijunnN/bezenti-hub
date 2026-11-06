@@ -181,7 +181,7 @@ describe("ConnectionResolver", () => {
         label: "Primary",
         httpBaseUrl: "http://127.0.0.1:3777",
         socketUrl:
-          "ws://127.0.0.1:3777/ws?orchestrationProtocol=2&clientCapabilities=settingsSecretReferences",
+          "ws://127.0.0.1:3777/ws?orchestrationProtocol=3&clientCapabilities=settingsSecretReferences",
         httpAuthorization: null,
         target,
       });

@@ -264,12 +264,13 @@ move waits for it) and holds the queue, which resumes on wherever the Thread run
    checkpoint's files are laid over it and, in a new worktree only, the Project's setup script
    runs (resolved with the User's settings, with a terminal's environment); its output is a
    timeline item. A worktree the move made is removed if a later part fails.
-5. `handoff`: empty for now; ticket 09 hands the agent on the target the conversation here.
+5. `handoff`: writes what the agent on the target is told (`move.handoff`, below).
 6. `switched`: one batch sets `activeEnvironmentId` and the Thread's worktree (stored as the
    target's host path), clears `activeProviderThreadId` so the next turn opens a new native
    conversation on the target, detaches the Thread's provider sessions
-   (`provider-session.detached`) and adds the timeline entry (`environment_move`: source, target,
-   actor, `continuesFrom`). Then `RemoteEnvironments.threadMoved` drops the cached Active
+   (`provider-session.detached`) and adds the timeline entries (`environment_move`: source, target,
+   actor, `continuesFrom`; then `environment_handoff`: who wrote the summary and the exact
+   `context` the agent receives, with how many recent messages follow). Then `RemoteEnvironments.threadMoved` drops the cached Active
    environment, so the source's late events are refused, and each source session is detached
    outside the effect lane (an offline source drops it on reconnect).
 
@@ -281,6 +282,56 @@ machine that has not said hello yet is unknown, not offline: the move gives each
 (`RECONNECT_GRACE`) before going on without the source or failing for the target. Scope cwds
 recorded before a move are still the source machine's paths, so rolling back to a turn from before
 the move is not supported yet.
+
+#### The agent's memory after a move
+
+A Thread that stays on its Environment resumes its native session (`nativeThreadRef`), as always.
+A moved one starts a new native session on the target, so the `handoff` step
+([MoveHandoff](../../apps/server/src/orchestration-v2/MoveHandoff.ts)) prepares what it is told:
+
+- **Notes (summary):** one model call through the machine's own text generation
+  (`EnvironmentExecutor.textGeneration.threadHandoff`, wire operation
+  `textGeneration.threadHandoff`; `TextGeneration.generateThreadHandoff`, with the Thread's
+  provider instance, or the machine's text generation model when it lacks that instance, and the
+  instance used is recorded). The source writes them when online. When it is offline the Hub
+  machine writes them only for the Owner's Threads (its provider sign-ins are the Owner's in spec 2);
+  any other User's history is never sent to the Owner's account, and the notes are assembled.
+  The prompt fences the conversation as untrusted data and asks for instructions found in it to be
+  reported, not followed; the agent receives the notes framed as possibly wrong, to be checked.
+- **Never fails the move:** the whole step (reads included) falls back to notes assembled from the
+  history (`mechanicalSummary`: title, turns, last requests and reply, changed files), with
+  `writtenBy: fallback` and the reason, on any error, an empty answer or a call past
+  `T3CODE_MOVE_HANDOFF_TIMEOUT_MS` (three minutes). A timed-out call is interrupted, which a joined
+  machine hears as `textGeneration.cancel` and stops. No second call is made: the call carries the
+  idempotency key `move:<id>:handoff` (a resend after a Hub restart gets the machine's answer) and
+  the result is kept in `orchestration_v2_move_handoffs` (migration 099) as soon as it arrives, so
+  the step reuses it after a restart.
+- **Secrets:** the transcript sent, the notes and the recent messages kept are passed through
+  `redactSecrets` (common token shapes, `NAME=value` lines whose name says key, secret, token or
+  password, private key blocks, URL passwords).
+- **Recent messages:** the newest history messages, at most 12 and 12,000 bytes; one longer than
+  4,000 bytes is cut, never dropped, and the User's latest request is kept whole when it fits.
+- **`context`:** the framed notes, pointing at the `thread_history` MCP tool.
+
+The Thread's shell (`move.handoff`, sent to every client) carries only who wrote the notes, the
+instance, a 200-character preview and the fallback reason. `switched` writes the
+`environment_handoff` timeline item with all of it; on the wire the item has a preview and
+`detailOmitted`, and the text comes with `getTurnItem` for whoever may read the Thread. A Guest's
+item read gets the wire form only. The first turn on the target (`ProviderTurnStartService`)
+reads that item and turns it into a context handoff record (`context-handoff:move:<id>`,
+`full_thread_summary`, `history.coverage` = `context`, the item's redacted recent messages), which
+the usual delivery budgets, injects or prepends to the prompt, and marks delivered; the record's
+id makes it go once per move.
+
+`thread_history` (`apps/server/src/mcp/toolkits/threadHistory/`) is a Thread caller's tool over
+the visible history of the caller's own Thread, read with its User's Space visibility
+(`readThread`) and only the conversation's item types: `search` (case-insensitive on the text
+itself, snippets, `total` = matches, paged over the matches) and `read` (paged, cut per item), each
+oldest or newest first. Naming any other Thread is refused (`capability_denied`).
+
+The new turn item needs clients that know it: `ORCHESTRATION_PROTOCOL_VERSION` is 3 (an older
+client is told to update before it connects) and `ENVIRONMENT_EXECUTOR_CONTRACT_VERSION` 7 (an
+older joined machine answers «unknown method» and the notes are assembled).
 
 ### Disconnections
 

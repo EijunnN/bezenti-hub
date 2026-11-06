@@ -468,6 +468,31 @@ export const OrchestrationV2ThreadMoveCheckpoint = Schema.Struct({
 export type OrchestrationV2ThreadMoveCheckpoint = typeof OrchestrationV2ThreadMoveCheckpoint.Type;
 
 /**
+ * Who wrote a moved Thread's handoff summary: the Thread's provider on the source, or on the Hub
+ * machine (the source was offline), or nobody (`fallback`: the text generation failed, so the
+ * summary was assembled from the Thread's history).
+ */
+export const OrchestrationV2ThreadHandoffWriter = Schema.Literals(["source", "hub", "fallback"]);
+export type OrchestrationV2ThreadHandoffWriter = typeof OrchestrationV2ThreadHandoffWriter.Type;
+
+/**
+ * A move's handoff as the Thread's shell carries it to every client: who wrote it and a short
+ * preview. The text itself is in the `environment_handoff` timeline item, fetched on demand.
+ */
+export const OrchestrationV2ThreadMoveHandoff = Schema.Struct({
+  writtenBy: OrchestrationV2ThreadHandoffWriter,
+  /** The machine whose provider wrote the summary; null when it was assembled. */
+  writerEnvironmentName: Schema.NullOr(Schema.String),
+  /** The provider instance that wrote it; null when it was assembled. */
+  writerProviderInstanceId: Schema.NullOr(Schema.String),
+  /** The summary's first characters, secrets redacted. */
+  preview: Schema.String,
+  /** Why no summary could be written, for an assembled one. */
+  fallbackReason: Schema.optional(Schema.String),
+});
+export type OrchestrationV2ThreadMoveHandoff = typeof OrchestrationV2ThreadMoveHandoff.Type;
+
+/**
  * A move of the Thread to another Environment (`thread.move`), persisted step by step. It stays
  * on the Thread once done or failed, so clients show how it went; only one runs at a time.
  */
@@ -499,6 +524,8 @@ export const OrchestrationV2ThreadMove = Schema.Struct({
   failure: Schema.optional(
     Schema.Struct({ step: OrchestrationV2ThreadMoveStep, message: Schema.String }),
   ),
+  /** Written at `handoff`; the first new native session on the target receives it. */
+  handoff: Schema.optional(OrchestrationV2ThreadMoveHandoff),
 });
 export type OrchestrationV2ThreadMove = typeof OrchestrationV2ThreadMove.Type;
 
@@ -1192,6 +1219,30 @@ export const OrchestrationV2HistoricalMessage = Schema.Struct({
 });
 export type OrchestrationV2HistoricalMessage = typeof OrchestrationV2HistoricalMessage.Type;
 
+/** The timeline entry of a move's handoff: what the agent on the target was told. */
+const OrchestrationV2EnvironmentHandoffItemFields = {
+  type: Schema.Literal("environment_handoff"),
+  moveId: TrimmedNonEmptyString,
+  writtenBy: OrchestrationV2ThreadHandoffWriter,
+  /** The machine whose provider wrote the summary; null when it was assembled. */
+  writerEnvironmentName: Schema.NullOr(Schema.String),
+  /** The provider instance that wrote it; null when it was assembled. */
+  writerProviderInstanceId: Schema.optional(Schema.NullOr(Schema.String)),
+  sourceEnvironmentName: Schema.String,
+  targetEnvironmentName: Schema.String,
+  /** Secrets redacted. On the wire a preview; whole in the item's detail. */
+  summary: Schema.String,
+  /** The text the agent receives ahead of the recent messages; empty on the wire. */
+  context: Schema.String,
+  recentMessageCount: NonNegativeInt,
+  /** The recent messages that follow it (redacted, long ones cut); left out on the wire. */
+  recentMessages: Schema.optional(Schema.Array(OrchestrationV2HistoricalMessage)),
+  /** Why no summary could be written, for an assembled one. */
+  fallbackReason: Schema.optional(Schema.String),
+  /** The wire left out `context` and cut `summary`: fetch the item's detail to read them. */
+  detailOmitted: Schema.optional(Schema.Literal(true)),
+};
+
 export const OrchestrationV2ContextHandoff = Schema.Struct({
   id: ContextHandoffId,
   transferId: Schema.optional(Schema.NullOr(ContextTransferId)),
@@ -1866,6 +1917,10 @@ export const OrchestrationV2TurnItem = Schema.Union([
     baseRef: Schema.NullOr(TrimmedNonEmptyString),
     /** The tree handed over, so the same changes are never handed over twice. */
     tree: Schema.optional(TrimmedNonEmptyString),
+  }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemBaseFields,
+    ...OrchestrationV2EnvironmentHandoffItemFields,
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -2734,6 +2789,10 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     baseRef: Schema.NullOr(TrimmedNonEmptyString),
     /** The tree handed over, so the same changes are never handed over twice. */
     tree: Schema.optional(TrimmedNonEmptyString),
+  }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemJsonBaseFields,
+    ...OrchestrationV2EnvironmentHandoffItemFields,
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,

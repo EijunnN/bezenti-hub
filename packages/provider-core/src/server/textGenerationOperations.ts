@@ -11,7 +11,9 @@ import {
   buildCommitMessagePrompt,
   buildPrContentPrompt,
   buildReviewGuidePrompt,
+  buildThreadHandoffPrompt,
   buildThreadTitlePrompt,
+  THREAD_HANDOFF_SUMMARY_MAX_CHARS,
 } from "./textGenerationPrompts.ts";
 import {
   sanitizeCommitSubject,
@@ -167,11 +169,23 @@ export function fromRunner(name: string, run: Runner): ProviderTextGeneration {
     });
   });
 
+  const generateThreadHandoff: NonNullable<ProviderTextGeneration["generateThreadHandoff"]> =
+    Effect.fn(`${name}.generateThreadHandoff`)(function* (input) {
+      const generated = yield* run({
+        operation: "generateThreadHandoff",
+        cwd: input.cwd,
+        modelSelection: input.modelSelection,
+        ...buildThreadHandoffPrompt(input),
+      });
+      return { summary: generated.summary.trim().slice(0, THREAD_HANDOFF_SUMMARY_MAX_CHARS) };
+    });
+
   return {
     generateCommitMessage,
     generatePrContent,
     generateBranchName,
     generateThreadTitle,
     generateReviewGuide,
+    generateThreadHandoff,
   } satisfies ProviderTextGeneration;
 }
