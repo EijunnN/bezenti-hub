@@ -99,6 +99,12 @@ export function useActiveEnvironment(
   return JSON.parse(key) as ActiveEnvironmentView | null;
 }
 
+/** Whether the User sees more machines than the Hub machine, so a Thread's machine is news. */
+export function useHasJoinedEnvironments(): boolean {
+  const read = () => environments.length > 1;
+  return useSyncExternalStore(subscribe, read, read);
+}
+
 /** "Laptop" while online, "Laptop, offline" otherwise: the words an accessible name ends with. */
 export function activeEnvironmentLabel(environment: ActiveEnvironmentView): string {
   return environment.status === "online"

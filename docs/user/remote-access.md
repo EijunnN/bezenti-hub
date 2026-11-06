@@ -12,10 +12,14 @@ Once a Hub has accounts, the desktop and mobile apps join it by its address and
 you sign in in your browser, with your passkey or your password (and code).
 No pairing code is needed.
 
-- **Desktop:** open **Settings → Environments → Add environment**, choose
-  **Hub**, enter its address (for example `hub.example.com`) and select **Sign
-  in in browser**. Your default browser opens the Hub's sign-in page; after you
-  sign in, select **Continue** and return to T3 Code.
+- **Desktop:** the desktop app connects to one Hub. Unless this computer is
+  your Hub, first turn off **Settings → Environments → This app → Local
+  environment** (the app restarts). Then select **Add Hub** under **Hub**, enter
+  its address (for example `hub.example.com`) and select **Sign in in browser**.
+  Your default browser opens the Hub's sign-in page; after you sign in, select
+  **Continue** and return to T3 Code. To run this computer's agents for that
+  Hub, join it as a machine instead (`t3 join`, see
+  [Join a machine to your Hub](./install.md#join-a-machine-to-your-hub)).
 - **Mobile:** open **Settings → Environments → Add**, enter the Hub's address
   and tap the checkmark. The Hub's sign-in page opens inside the app; sign in,
   tap **Continue**, and the app takes over.

@@ -1,7 +1,30 @@
 # Connection runtime
 
 Web, the desktop renderer, and mobile share one connection owner per environment
-in `packages/client-runtime`. Platform code supplies storage, credentials, network
+in `packages/client-runtime`.
+
+## Web and desktop hold one connection, the Hub's
+
+A Thread runs on whichever Environment the Hub places it on, and its Active
+environment arrives as a field of the Thread on the shell and detail streams
+(`activeEnvironmentId`). The client never connects to the machine itself; a
+joined machine serves only `/health` anyway. So web and desktop hold exactly one
+connection: in a browser, the page's own server; on desktop, either its local
+environment (this computer is the Hub) or, with that turned off, the one Hub it
+signed in to ([singleHub](../../apps/web/src/connection/singleHub.ts) refuses a
+second saved connection and never connects one past the first). The desktop's
+other local backends (WSL) are not connected.
+
+`ScopedThreadRef.environmentId` is that connection's id. It is never the Active
+environment and does not change when a Thread moves. Thread routes are
+`/$threadId`, resolved on the Hub connection; the older
+`/$environmentId/$threadId` and `/threads/$environmentId/$threadId` links redirect
+there. The Active environment's name and live status (online, reconnecting,
+offline) come from the Hub's Environments list, polled every five seconds while a
+view shows it. Mobile still keeps several saved connections (ticket 13 of spec 2).
+
+The rest of this page describes each connection, which the registry still keys by
+environment. Platform code supplies storage, credentials, network
 signals, and application lifecycle events. React views consume the runtime.
 Keeping retries and session lifetime here prevents competing reconnect loops when
 several views need the same environment.

@@ -24,7 +24,6 @@ import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
   type EnvironmentMachineKind,
-  HUB_MACHINE_ENVIRONMENT_ID,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 
@@ -120,6 +119,7 @@ import {
   ENVIRONMENT_STATUS_LABELS,
   activeEnvironmentLabel,
   useActiveEnvironment,
+  useHasJoinedEnvironments,
 } from "../../environments/primary/useHubEnvironments";
 import { useThreadHasUnsentDraft } from "../../composerDraftStore";
 
@@ -664,6 +664,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
   const threadKey = scopedThreadKey(threadRef);
   const activeEnvironment = useActiveEnvironment(thread.activeEnvironmentId);
+  const hasJoinedEnvironments = useHasJoinedEnvironments();
   const canOperateThread = useEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope);
   // Pins, settling and snoozes are stored on the Thread for everyone: its creator's or an Admin's.
   const canOrganize = useThreadRolePermissions(thread.environmentId, thread.source).canArchive;
@@ -1010,12 +1011,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       </span>
     ) : null;
 
-  // Where it runs, when that is not the Hub machine, where every Thread ran before Environments.
+  // Where it runs: with no other machine, every Thread runs on the Hub machine and it goes unsaid.
+  // Once the Hub has other machines every row names its own, the Hub machine's too.
   const shownEnvironment =
-    thread.activeEnvironmentId === undefined ||
-    thread.activeEnvironmentId === HUB_MACHINE_ENVIRONMENT_ID ||
-    activeEnvironment === null ||
-    activeEnvironment.isHubMachine
+    activeEnvironment === null || (activeEnvironment.isHubMachine && !hasJoinedEnvironments)
       ? null
       : activeEnvironment;
   const accessibility = resolveSidebarRowAccessibility({

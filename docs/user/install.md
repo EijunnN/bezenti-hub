@@ -439,10 +439,22 @@ When your Hub has another machine, the composer of a new Thread shows an
 **Environment** picker. Pick the machine and send: the agent, its checkpoints and
 the Project's files are on that machine, while the conversation, approvals and
 diffs stream to every client through the Hub. The Thread's header shows where it
-runs, and so does the sidebar for Threads off the Hub machine. A machine that is
-offline, or that lacks the selected provider, is listed but can't be picked, with
-the reason. Only the machine's owner can run Threads on it; everyone else runs
-on the Hub machine.
+runs and whether that machine is online, reconnecting or offline, and so does the
+sidebar for Threads off the Hub machine; both change on their own when the machine
+drops or returns (a machine shows **Reconnecting** at once and **Offline** about a
+minute later). A machine that is offline, or that lacks the selected provider, is
+listed but can't be picked, with the reason. Only the machine's owner can run
+Threads on it; everyone else runs on the Hub machine.
+
+Your apps connect only to the Hub, never to the machines themselves: one sign-in
+shows every Thread, whichever machine runs it, and a Thread's link (`/<thread>`)
+stays the same wherever it runs. Older links that also named an environment still
+open the Thread.
+
+To skip the picker, open the Project's settings and set **Preferred environment**
+to a machine you can use. New Threads in that Project start there unless someone
+picks another machine in the composer; a person who can't use that machine starts
+on the Hub machine instead.
 
 The machine works in its own copy of the Project, under its `projects` folder in
 the T3 home. The first Thread there clones it from the Project's `origin` remote

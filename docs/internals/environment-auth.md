@@ -199,6 +199,14 @@ accepts a provider event only from the Thread's Active environment. The agent
 there calls the Hub's MCP with the per-Thread credential the Hub issued, so it
 acts with exactly its User's permissions.
 
+A Project's preferred Environment (`project.update` with
+`preferredEnvironmentId`) may be set only to a machine its setter may use
+([`mayUseEnvironment`](../../apps/server/src/environments/EnvironmentRegistry.ts));
+an unknown or removed machine is refused alike. Placement takes the User's own
+choice first, then the preference, then the Hub machine; a preference the User
+may not use (the Owner's laptop, for a Member) falls back to the Hub machine
+instead of refusing, since that User never chose it.
+
 ### Spaces
 
 Every Project and Thread belongs to a Space: an Organization or a User's Personal
