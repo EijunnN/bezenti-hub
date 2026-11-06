@@ -19,7 +19,7 @@ import {
   legacyThreadPullRequestKey,
 } from "../sourceControl/threadPullRequests.ts";
 import {
-  EnvironmentExecutorUnavailableError,
+  isEnvironmentAwayError,
   HUB_MACHINE_ENVIRONMENT_ID,
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type ChatAttachment,
@@ -560,8 +560,6 @@ const STARTS_WORK: ReadonlySet<OrchestrationV2ServerCommand["type"]> = new Set([
  * since they would run on the machine it is leaving. Answering a request of the running turn is
  * still allowed while the move waits for that turn.
  */
-/** A Thread's machine has no executor now (it is away). */
-const isExecutorUnavailable = Schema.is(EnvironmentExecutorUnavailableError);
 
 const BLOCKED_WHILE_MOVING: ReadonlySet<OrchestrationV2ServerCommand["type"]> = new Set([
   "message.dispatch",
@@ -6262,12 +6260,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           capabilities: queuedCapabilities,
         }),
       );
-      // Only a new provider thread needs the adapter: with the Thread's machine away (a paused
-      // turn) its own provider thread takes the message, and no machine is asked.
+      // The provider must exist where the Thread runs. Only while its machine is away (a paused
+      // turn, its adapters unknown on the Hub) does its own provider thread vouch for it.
+      const queuedAdapter = yield* providerAdapters
+        .get(modelSelection.instanceId)
+        .pipe(Effect.result);
+      const machineAway =
+        queuedAdapter._tag === "Failure" && targetProviderThread !== undefined
+          ? yield* runtimePolicy.resolve({ thread: projection.thread, modelSelection }).pipe(
+              Effect.as(false),
+              Effect.catch((error) => Effect.succeed(isEnvironmentAwayError(error))),
+            )
+          : false;
       const queuedDriver =
-        targetProviderThread?.driver ??
-        (yield* providerAdapters.get(modelSelection.instanceId).pipe(mapDispatchError(command)))
-          .driver;
+        queuedAdapter._tag === "Success"
+          ? queuedAdapter.success.driver
+          : machineAway && targetProviderThread !== undefined
+            ? targetProviderThread.driver
+            : yield* mapDispatchError(command)(Effect.fail(queuedAdapter.failure));
       const queuedProviderThread: OrchestrationV2ProviderThread = targetProviderThread ?? {
         id: idAllocator.derive.providerThread({
           driver: queuedDriver,
@@ -6297,7 +6307,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               Effect.asSome,
               // Its machine is away (a paused turn): the scope is made when the run starts.
               Effect.catchIf(
-                (error) => isExecutorUnavailable((error as { readonly cause?: unknown }).cause),
+                (error) => isEnvironmentAwayError(error),
                 () => Effect.succeedNone,
               ),
               Effect.flatMap((resolved) =>

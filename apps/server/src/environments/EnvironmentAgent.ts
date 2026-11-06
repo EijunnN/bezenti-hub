@@ -806,7 +806,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
           { vcs: vcs.value, checkpoints: local.workspace.checkpoints, fileSystem },
           recover,
         ).pipe(
-          Effect.tap((status) =>
+          Effect.tap(({ status }) =>
             status === "recovered"
               ? hubRepository.push({
                   cwd: recover.cwd,
@@ -815,7 +815,6 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
                 })
               : Effect.void,
           ),
-          Effect.map((status) => ({ status })),
         );
       }
       // The Hub already authorized these and resolved their paths onto this machine.

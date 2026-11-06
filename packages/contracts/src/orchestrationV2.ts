@@ -1864,6 +1864,8 @@ export const OrchestrationV2TurnItem = Schema.Union([
     ref: TrimmedNonEmptyString,
     /** What the changes are compared with: what the machine last uploaded of the Thread. */
     baseRef: Schema.NullOr(TrimmedNonEmptyString),
+    /** The tree handed over, so the same changes are never handed over twice. */
+    tree: Schema.optional(TrimmedNonEmptyString),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -2730,6 +2732,8 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     ref: TrimmedNonEmptyString,
     /** What the changes are compared with: what the machine last uploaded of the Thread. */
     baseRef: Schema.NullOr(TrimmedNonEmptyString),
+    /** The tree handed over, so the same changes are never handed over twice. */
+    tree: Schema.optional(TrimmedNonEmptyString),
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,

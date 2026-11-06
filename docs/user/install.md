@@ -543,11 +543,14 @@ the turn** in the move dialog: **Wait for the turn to finish** waits for the
 machine to come back.
 
 When a machine that was off comes back with changes for a Thread that moved away
-in the meantime (files you edited by hand there, never uploaded), it puts them on a
-separate branch in the Hub's repository, `refs/t3/recovered/<thread>/<time>`, and
-the Thread's timeline says **Recovered changes from Laptop** with that branch.
-Nothing is merged and the machine's own files are left as they are, so you can
-still bring the changes back yourself from either place.
+in the meantime (files you edited by hand in the Thread's own worktree there,
+never uploaded), it puts them on a separate branch in the Hub's repository,
+`refs/t3/recovered/<thread>/return/<time>`, and the Thread's timeline says
+**Recovered changes from Laptop** with that branch. Nothing is merged and the
+machine's own files are left as they are, so you can still bring the changes back
+yourself from either place. A Thread that worked in the machine's shared copy of
+the Project is not collected from there, since other Threads use it too: its
+timeline says which folder on which machine may still hold changes.
 
 **Remove** a machine and its Threads keep all their history but run nowhere: they
 say **Needs an environment** and take no new messages until you move them (the

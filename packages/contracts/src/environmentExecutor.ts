@@ -64,17 +64,27 @@ export class EnvironmentSessionLostError extends Schema.TaggedError<EnvironmentS
 
 const isEnvironmentSessionLost = Schema.is(EnvironmentSessionLostError);
 
-/** The `EnvironmentSessionLostError` an error carries, through the errors that wrap it. */
-export const findEnvironmentSessionLost = (
+/** The first error `is` accepts in an error and the causes it wraps (`cause`, nested). */
+export const findInErrorChain = <A>(
   error: unknown,
-): EnvironmentSessionLostError | undefined => {
+  is: (value: unknown) => value is A,
+): A | undefined => {
   let current = error;
-  for (let depth = 0; depth < 8 && typeof current === "object" && current !== null; depth += 1) {
-    if (isEnvironmentSessionLost(current)) return current;
+  for (let depth = 0; depth < 12 && typeof current === "object" && current !== null; depth += 1) {
+    if (is(current)) return current;
     current = (current as { readonly cause?: unknown }).cause;
   }
   return undefined;
 };
+
+/** The `EnvironmentSessionLostError` an error carries, through the errors that wrap it. */
+export const findEnvironmentSessionLost = (
+  error: unknown,
+): EnvironmentSessionLostError | undefined => findInErrorChain(error, isEnvironmentSessionLost);
+
+/** Whether an error, or one it wraps, says the Environment has no executor (it is away). */
+export const isEnvironmentAwayError = (error: unknown): boolean =>
+  findInErrorChain(error, Schema.is(EnvironmentExecutorUnavailableError)) !== undefined;
 
 export const EnvironmentExecutorTransport = Schema.Literals(["in-process", "remote"]);
 export type EnvironmentExecutorTransport = typeof EnvironmentExecutorTransport.Type;

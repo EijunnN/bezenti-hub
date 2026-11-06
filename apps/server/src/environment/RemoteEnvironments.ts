@@ -30,6 +30,7 @@ import {
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
 import * as DateTime from "effect/DateTime";
@@ -49,6 +50,7 @@ import * as Stream from "effect/Stream";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import type { CheckpointStoreError } from "../checkpointing/Errors.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
+import type * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -169,10 +171,42 @@ export class RemoteEnvironments extends Context.Service<
       environmentId: EnvironmentId,
       threadId: ThreadId,
     ) => Effect.Effect<void>;
+    /**
+     * Forgets the machine's sessions without ending them, as a Hub restart does: their turns stay
+     * unfinished until something on the Hub ends them. For tests of that state.
+     */
+    readonly forgetSessions: (environmentId: EnvironmentId) => Effect.Effect<void>;
+    /**
+     * Lets a machine a Thread moved away from create exactly `ref` (one push, for a short while)
+     * in the Hub repository `key`: the changes it kept, when the Hub asks for them.
+     */
+    readonly grantRecovery: (input: {
+      readonly environmentId: EnvironmentId;
+      readonly key: HubRepository.HubRepositoryKey;
+      readonly ref: string;
+    }) => Effect.Effect<void>;
+    /** The machine's grants that have not expired or been used. */
+    readonly recoveryGrants: (
+      environmentId: EnvironmentId,
+    ) => Effect.Effect<ReadonlyArray<RecoveryGrant>>;
+    /** Uses up the grant of `ref`; false when there is none. */
+    readonly takeRecoveryGrant: (
+      environmentId: EnvironmentId,
+      ref: string,
+    ) => Effect.Effect<boolean>;
     /** Every connected machine's preview events, live (each machine streams its own). */
     readonly previewEvents: Stream.Stream<PreviewEvent>;
   }
 >()("t3/environment/RemoteEnvironments") {}
+
+export interface RecoveryGrant {
+  readonly key: HubRepository.HubRepositoryKey;
+  readonly ref: string;
+  readonly expiresAt: number;
+}
+
+/** How long a machine has to push the changes the Hub asked it for. */
+const RECOVERY_GRANT_MS = 5 * 60_000;
 
 const codec = (schema: Schema.Top) => Schema.toCodecJson(schema as Schema.Codec<unknown, unknown>);
 const encodeJson = (schema: Schema.Top, value: unknown) =>
@@ -214,6 +248,7 @@ const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const filePath = yield* Path.Path;
   const links = new Map<EnvironmentId, Link>();
+  const grants = new Map<EnvironmentId, ReadonlyArray<RecoveryGrant>>();
   let streamCount = 0;
   const previewEvents = yield* PubSub.unbounded<PreviewEvent>();
 
@@ -1239,6 +1274,40 @@ const make = Effect.gen(function* () {
         yield* retire(link);
         // A socket still open is closed by the removal; its finalizer finds nothing left to end.
         if (link.channel === undefined) links.delete(environmentId);
+      },
+    ),
+    forgetSessions: Effect.fn("RemoteEnvironments.forgetSessions")(function* (environmentId) {
+      yield* Effect.sync(() => {
+        const link = links.get(environmentId);
+        if (link === undefined) return;
+        link.sessions.clear();
+        link.activeByThread.clear();
+      });
+    }),
+    grantRecovery: Effect.fn("RemoteEnvironments.grantRecovery")(function* (input) {
+      const now = yield* Clock.currentTimeMillis;
+      const kept = (grants.get(input.environmentId) ?? []).filter(
+        (grant) => grant.expiresAt > now && grant.ref !== input.ref,
+      );
+      grants.set(input.environmentId, [
+        ...kept,
+        { key: input.key, ref: input.ref, expiresAt: now + RECOVERY_GRANT_MS },
+      ]);
+    }),
+    recoveryGrants: Effect.fn("RemoteEnvironments.recoveryGrants")(function* (environmentId) {
+      const now = yield* Clock.currentTimeMillis;
+      return (grants.get(environmentId) ?? []).filter((grant) => grant.expiresAt > now);
+    }),
+    takeRecoveryGrant: Effect.fn("RemoteEnvironments.takeRecoveryGrant")(
+      function* (environmentId, ref) {
+        const now = yield* Clock.currentTimeMillis;
+        const current = grants.get(environmentId) ?? [];
+        const found = current.some((grant) => grant.ref === ref && grant.expiresAt > now);
+        grants.set(
+          environmentId,
+          current.filter((grant) => grant.ref !== ref && grant.expiresAt > now),
+        );
+        return found;
       },
     ),
     abandonSessions: Effect.fn("RemoteEnvironments.abandonSessions")(

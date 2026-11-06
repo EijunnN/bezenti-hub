@@ -1,14 +1,15 @@
 /**
- * What the Hub does when a machine goes for good or comes back (docs/internals/overview.md,
- * «Disconnections»): a removed Environment's Threads keep their history and need an environment;
- * a machine that returns hands over the changes it still had for Threads that moved away, on a
- * branch of the Hub, and each Thread gets a notice. The machine's workspace is never touched.
+ * A removed machine's Threads end their turns and need an environment; a returning machine
+ * hands over, one Thread at a time, changes kept in moved Threads' own worktrees (never a shared
+ * checkout) on a branch of the Hub. See docs/internals/overview.md, «Disconnections».
  */
 import {
   CheckpointRef,
   type EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
   OrchestrationV2TurnItemJson,
+  type OrchestrationV2TurnItem,
+  type RunId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -20,6 +21,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
@@ -28,13 +30,28 @@ import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as EventSink from "./EventSink.ts";
+import { interruptRunsOnHub } from "./HubRunInterrupt.ts";
+import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 
 const decodeItem = Schema.decodeUnknownOption(Schema.fromJsonString(OrchestrationV2TurnItemJson));
 
-/** A file- and ref-safe instant: one path segment of `refs/t3/recovered/<threadId>/`. */
+/** A file- and ref-safe instant: one path segment of `refs/t3/recovered/<threadId>/return/`. */
 const stampOf = (now: DateTime.Utc) => DateTime.formatIso(now).replace(/[:.]/g, "-");
+
+/** What a machine was last known to hold of a Thread that moved away from it. */
+interface FormerThread {
+  readonly threadId: ThreadId;
+  /** The latest move away from the machine. */
+  readonly moveId: string;
+  readonly sourceOffline: boolean;
+  /** What the machine last handed over: the move's checkpoint, or a later recovery. */
+  readonly baseRef: string | null;
+  /** Trees already recovered from `baseRef`'s line, never handed over again. */
+  readonly knownTrees: ReadonlyArray<string>;
+}
 
 export const layer: Layer.Layer<
   never,
@@ -44,6 +61,8 @@ export const layer: Layer.Layer<
   | IdAllocator.IdAllocatorV2
   | ThreadCommandExecutor.ThreadCommandExecutor
   | ProjectionStore.ProjectionStoreV2
+  | Orchestrator.OrchestratorV2
+  | TurnItemPositionStore.TurnItemPositionStoreV2
   | SqlClient.SqlClient
 > = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -53,6 +72,8 @@ export const layer: Layer.Layer<
     const ids = yield* IdAllocator.IdAllocatorV2;
     const threadLocks = yield* ThreadCommandExecutor.ThreadCommandExecutor;
     const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const positions = yield* TurnItemPositionStore.TurnItemPositionStoreV2;
     // The server provides these; orchestration-only hosts join no machines.
     const environments = yield* Effect.serviceOption(EnvironmentRegistry.EnvironmentRegistry);
     const remote = yield* Effect.serviceOption(RemoteEnvironments.RemoteEnvironments);
@@ -70,9 +91,18 @@ export const layer: Layer.Layer<
           Effect.asVoid,
         );
 
+    const nameOf = (environmentId: EnvironmentId) =>
+      sql<{ readonly name: string }>`
+        SELECT name FROM environments WHERE environment_id = ${environmentId}
+      `.pipe(
+        Effect.map((rows) => rows[0]?.name ?? environmentId),
+        Effect.orElseSucceed(() => environmentId as string),
+      );
+
     /**
      * Every Thread on a removed Environment (or only `environmentId`'s) has none from now on:
-     * «needs an environment», its history intact, until it moves.
+     * «needs an environment», its history intact, until it moves. Its unfinished turns end on the
+     * Hub, whatever the Hub still knows of their sessions (nothing, after a restart).
      */
     const releaseRemoved = Effect.fn("EnvironmentReturns.releaseRemoved")(function* (
       environmentId?: EnvironmentId,
@@ -84,8 +114,10 @@ export const layer: Layer.Layer<
         WHERE environments.revoked_at IS NOT NULL AND thread.deleted_at IS NULL
           AND (${environmentId ?? null} IS NULL OR environments.environment_id = ${environmentId ?? null})
       `;
+      const released: Array<{ readonly threadId: ThreadId; readonly name: string }> = [];
       for (const row of rows) {
         const threadId = ThreadId.make(row.threadId);
+        const name = yield* nameOf(row.environmentId as EnvironmentId);
         yield* threadLocks.withLock(
           threadId,
           Effect.gen(function* () {
@@ -106,16 +138,32 @@ export const layer: Layer.Layer<
             });
           }),
         );
+        released.push({ threadId, name });
+      }
+      // Threads already without an Environment (released before a restart) whose turns did not
+      // end yet end now too.
+      const stranded =
+        environmentId !== undefined
+          ? []
+          : yield* sql<{ readonly threadId: string }>`
+              SELECT DISTINCT thread.thread_id AS "threadId"
+              FROM orchestration_v2_projection_threads thread
+              JOIN orchestration_v2_projection_runs run ON run.thread_id = thread.thread_id
+              WHERE thread.active_environment_id IS NULL AND thread.deleted_at IS NULL
+                AND run.status IN ('preparing', 'starting', 'running', 'waiting')
+            `;
+      for (const row of stranded) {
+        released.push({ threadId: ThreadId.make(row.threadId), name: "Its Environment" });
+      }
+      // Outside the Thread's lock: ending a turn is a command, which takes it.
+      for (const { threadId, name } of released) {
+        yield* interruptRunsOnHub(orchestrator, {
+          threadId,
+          reason: `${name} was removed from the Hub while this turn ran there. Move the Thread to another Environment to continue.`,
+          key: "environment-removed",
+        });
       }
     });
-
-    const nameOf = (environmentId: EnvironmentId) =>
-      sql<{ readonly name: string }>`
-        SELECT name FROM environments WHERE environment_id = ${environmentId}
-      `.pipe(
-        Effect.map((rows) => rows[0]?.name ?? environmentId),
-        Effect.orElseSucceed(() => environmentId as string),
-      );
 
     /**
      * The Threads that moved away from the machine and run elsewhere now, with what each was
@@ -123,12 +171,14 @@ export const layer: Layer.Layer<
      */
     const formerThreads = Effect.fn("EnvironmentReturns.formerThreads")(function* (
       environmentId: EnvironmentId,
+      only?: ThreadId,
     ) {
       const rows = yield* sql<{ readonly threadId: string; readonly payload: string }>`
         SELECT item.thread_id AS "threadId", item.payload_json AS payload
         FROM orchestration_v2_projection_turn_items item
         JOIN orchestration_v2_projection_threads thread ON thread.thread_id = item.thread_id
         WHERE thread.deleted_at IS NULL
+          AND (${only ?? null} IS NULL OR thread.thread_id = ${only ?? null})
           AND (thread.active_environment_id IS NULL OR thread.active_environment_id != ${environmentId})
           AND (
             (item.type = 'environment_move'
@@ -139,116 +189,227 @@ export const layer: Layer.Layer<
           )
         ORDER BY item.updated_at, item.turn_item_id
       `;
-      const latest = new Map<ThreadId, { baseRef: string | null; moved: boolean }>();
+      const latest = new Map<ThreadId, FormerThread>();
       for (const row of rows) {
         const item = decodeItem(row.payload);
         if (Option.isNone(item)) continue;
         const threadId = ThreadId.make(row.threadId);
         if (item.value.type === "environment_move") {
-          latest.set(threadId, { baseRef: item.value.continuesFrom.ref, moved: true });
+          latest.set(threadId, {
+            threadId,
+            moveId: item.value.moveId,
+            sourceOffline: item.value.sourceOffline,
+            baseRef: item.value.continuesFrom.ref,
+            knownTrees: [],
+          });
         } else if (item.value.type === "recovered_changes") {
           const known = latest.get(threadId);
-          latest.set(threadId, { baseRef: item.value.ref, moved: known?.moved ?? false });
+          if (known === undefined) continue;
+          latest.set(threadId, {
+            ...known,
+            baseRef: item.value.ref,
+            knownTrees:
+              item.value.tree === undefined
+                ? known.knownTrees
+                : [...known.knownTrees, item.value.tree],
+          });
         }
       }
-      return [...latest.entries()].filter(([, known]) => known.moved);
+      return [...latest.values()];
     });
 
-    /** Asks a machine that came back for the changes it kept of each Thread that left it. */
-    const recoverOn = Effect.fn("EnvironmentReturns.recoverOn")(function* (
+    /** A notice of the Thread's own, after its latest run's items: its place is when it happened. */
+    const noticeEvent = Effect.fn("EnvironmentReturns.noticeEvent")(function* (
+      threadId: ThreadId,
+      now: DateTime.Utc,
+      item: (base: {
+        readonly id: TurnItemId;
+        readonly threadId: ThreadId;
+        readonly runId: RunId | null;
+        readonly nodeId: null;
+        readonly providerThreadId: null;
+        readonly providerTurnId: null;
+        readonly nativeItemRef: null;
+        readonly parentItemId: null;
+        readonly ordinal: number;
+        readonly status: "completed";
+        readonly startedAt: DateTime.Utc;
+        readonly completedAt: DateTime.Utc;
+        readonly updatedAt: DateTime.Utc;
+      }) => OrchestrationV2TurnItem,
+      id: TurnItemId,
+    ) {
+      const { runs } = yield* projections.getThreadRecords(threadId, ["runs"], {
+        turnItemTypes: [],
+      });
+      const latestRun = runs.toSorted((a, b) => b.ordinal - a.ordinal)[0];
+      const ordinal = yield* positions.allocate({
+        threadId,
+        turnItemId: id,
+        runId: null,
+        runOrdinal: latestRun?.ordinal ?? 0,
+      });
+      const current = yield* projections.getThread(threadId);
+      return {
+        id: yield* ids.allocate.event({ threadId }),
+        type: "turn-item.updated" as const,
+        threadId,
+        providerInstanceId: current.providerInstanceId,
+        occurredAt: now,
+        payload: item({
+          id,
+          threadId,
+          runId: null,
+          nodeId: null,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal,
+          status: "completed",
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+        }),
+      };
+    });
+
+    /** Asks the machine for what it kept of one Thread that left it; under the Thread's lock. */
+    const recoverThread = Effect.fn("EnvironmentReturns.recoverThread")(function* (
       executor: EnvironmentExecutor.EnvironmentExecutor,
+      former: FormerThread,
     ) {
       const environmentId = executor.environmentId;
-      for (const [threadId, known] of yield* formerThreads(environmentId)) {
-        yield* Effect.gen(function* () {
-          const thread = yield* projections.getThread(threadId);
-          // A Thread without a Project uses its own Hub repository, never the Project's.
-          const repository = Option.isNone(repositories)
-            ? undefined
-            : Option.getOrUndefined(yield* repositories.value.threads.repositoryOfThread(threadId));
-          // Its worktree (or own folder) there, else the Project's checkout, unless another
-          // Thread works in it; a Thread without a Project never falls back to a shared folder.
-          const worktree = thread.move?.knownWorktrees?.[environmentId];
-          let cwd = worktree;
-          if (cwd === undefined && repository?.scratch !== undefined) return;
-          if (cwd === undefined) {
-            const checkout = yield* executor.workspace.paths.checkout(thread.projectId);
-            if (Option.isNone(checkout)) return;
-            const sharing = yield* sql<{ readonly count: number }>`
-              SELECT COUNT(*) AS count FROM orchestration_v2_projection_threads
-              WHERE project_id = ${thread.projectId} AND thread_id != ${threadId}
-                AND deleted_at IS NULL AND active_environment_id = ${environmentId}
-                AND json_extract(payload_json, '$.worktreePath') IS NULL
-            `;
-            if ((sharing[0]?.count ?? 0) > 0) return;
-            cwd = checkout.value;
-          }
-          const now = yield* DateTime.now;
-          const recoveredRef = CheckpointRef.make(
-            `${HubRepository.threadRefPrefixes(threadId)[1]}${stampOf(now)}`,
-          );
-          const result = yield* executor.workspace.move.recover({
-            cwd,
-            projectId: thread.projectId,
-            threadId,
-            ...(repository?.key.scratchThreadId === undefined
-              ? {}
-              : { scratchThreadId: repository.key.scratchThreadId }),
-            baseRef: known.baseRef === null ? null : CheckpointRef.make(known.baseRef),
-            recoveredRef,
-          });
-          if (result.status !== "recovered") return;
-          const environmentName = yield* nameOf(environmentId);
-          yield* threadLocks.withLock(
-            threadId,
-            Effect.gen(function* () {
-              const { runs } = yield* projections.getThreadRecords(threadId, ["runs"], {
-                turnItemTypes: [],
-              });
-              const latestRun = runs.toSorted((a, b) => b.ordinal - a.ordinal)[0];
-              const current = yield* projections.getThread(threadId);
-              yield* eventSink.write({
-                events: [
-                  {
-                    id: yield* ids.allocate.event({ threadId }),
-                    type: "turn-item.updated",
-                    threadId,
-                    ...(latestRun === undefined ? {} : { runId: latestRun.id }),
-                    providerInstanceId: current.providerInstanceId,
-                    occurredAt: now,
-                    payload: {
-                      id: TurnItemId.make(`turn-item:recovered-changes:${recoveredRef}`),
-                      threadId,
-                      runId: latestRun?.id ?? null,
-                      nodeId: null,
-                      providerThreadId: null,
-                      providerTurnId: null,
-                      nativeItemRef: null,
-                      parentItemId: null,
-                      ordinal: 0,
-                      status: "completed",
-                      title: `Recovered changes from ${environmentName}`,
-                      startedAt: now,
-                      completedAt: now,
-                      updatedAt: now,
-                      type: "recovered_changes",
-                      environmentId,
-                      environmentName,
-                      ref: recoveredRef,
-                      baseRef: known.baseRef,
-                    },
-                  },
-                ],
-              });
-            }),
-          );
-        }).pipe(
-          logged("Could not look for a moved Thread's changes on its former machine", {
-            environmentId,
-            threadId,
+      const { threadId } = former;
+      const thread = yield* projections.getThread(threadId);
+      // A move under way to or from this machine settles first; it asks again when it ends.
+      const move = thread.move;
+      if (
+        move != null &&
+        move.status === "running" &&
+        (move.sourceEnvironmentId === environmentId || move.targetEnvironmentId === environmentId)
+      ) {
+        return;
+      }
+      const environmentName = yield* nameOf(environmentId);
+      const worktree = thread.move?.knownWorktrees?.[environmentId];
+      if (worktree === undefined) {
+        // It ran in the shared checkout there: never read, since others share it. Only a move
+        // made while the machine was away can have left something behind; say where.
+        if (!former.sourceOffline) return;
+        const id = TurnItemId.make(
+          `turn-item:changes-may-remain:${threadId}:${environmentId}:${former.moveId}`,
+        );
+        const { turnItems } = yield* projections.getThreadRecords(threadId, ["turnItems"], {
+          turnItemTypes: ["system_notice"],
+        });
+        if (turnItems.some((item) => item.id === id)) return;
+        const checkout = yield* executor.workspace.paths.checkout(thread.projectId);
+        const where = Option.isSome(checkout) ? checkout.value : "the Project's checkout";
+        const now = yield* DateTime.now;
+        yield* threadLocks.withLock(
+          threadId,
+          Effect.gen(function* () {
+            yield* eventSink.write({
+              events: [
+                yield* noticeEvent(
+                  threadId,
+                  now,
+                  (base) => ({
+                    ...base,
+                    title: `Changes may remain on ${environmentName}`,
+                    type: "system_notice",
+                    message: `Changes made on ${environmentName} after this Thread's last upload may remain in ${where} on ${environmentName}. That folder is shared, so they were not collected.`,
+                  }),
+                  id,
+                ),
+              ],
+            });
           }),
         );
+        return;
       }
+      const repository = Option.isNone(repositories)
+        ? undefined
+        : Option.getOrUndefined(yield* repositories.value.threads.repositoryOfThread(threadId));
+      const key = repository?.key ?? { projectId: thread.projectId };
+      const now = yield* DateTime.now;
+      const recoveredRef = CheckpointRef.make(
+        `${HubRepository.threadRefPrefixes(threadId)[1]}return/${stampOf(now)}`,
+      );
+      // The machine may create exactly this ref, once, for a short while.
+      if (Option.isSome(remote)) {
+        yield* remote.value.grantRecovery({ environmentId, key, ref: recoveredRef });
+      }
+      yield* threadLocks.withLock(
+        threadId,
+        Effect.gen(function* () {
+          const result = yield* executor.workspace.move.recover({
+            cwd: worktree,
+            projectId: thread.projectId,
+            threadId,
+            ...(key.scratchThreadId === undefined ? {} : { scratchThreadId: key.scratchThreadId }),
+            baseRef: former.baseRef === null ? null : CheckpointRef.make(former.baseRef),
+            recoveredRef,
+            knownTrees: former.knownTrees,
+          });
+          if (result.status !== "recovered") return;
+          yield* eventSink.write({
+            events: [
+              yield* noticeEvent(
+                threadId,
+                now,
+                (base) => ({
+                  ...base,
+                  title: `Recovered changes from ${environmentName}`,
+                  type: "recovered_changes",
+                  environmentId,
+                  environmentName,
+                  ref: recoveredRef,
+                  baseRef: former.baseRef,
+                  ...(result.tree === undefined ? {} : { tree: result.tree }),
+                }),
+                TurnItemId.make(`turn-item:recovered-changes:${recoveredRef}`),
+              ),
+            ],
+          });
+        }),
+      );
+    });
+
+    // One machine is asked about one Thread at a time, so a machine that flaps never hands over
+    // the same changes twice.
+    const perMachine = new Map<EnvironmentId, Semaphore.Semaphore>();
+    const machineLock = Effect.fn("EnvironmentReturns.machineLock")(function* (
+      environmentId: EnvironmentId,
+    ) {
+      const known = perMachine.get(environmentId);
+      if (known !== undefined) return known;
+      const made = yield* Semaphore.make(1);
+      perMachine.set(environmentId, made);
+      return made;
+    });
+
+    const recoverOn = Effect.fn("EnvironmentReturns.recoverOn")(function* (
+      environmentId: EnvironmentId,
+      only?: ThreadId,
+    ) {
+      const lock = yield* machineLock(environmentId);
+      yield* lock.withPermits(1)(
+        Effect.gen(function* () {
+          // The machine as it is connected now, each time: a socket replaced meanwhile is used.
+          const executor = yield* executors.get(environmentId).pipe(Effect.option);
+          if (Option.isNone(executor)) return;
+          for (const former of yield* formerThreads(environmentId, only)) {
+            yield* recoverThread(executor.value, former).pipe(
+              logged("Could not look for a moved Thread's changes on its former machine", {
+                environmentId,
+                threadId: former.threadId,
+              }),
+            );
+          }
+        }),
+      );
     });
 
     // A machine that connects (again) hands over what it kept of the Threads that left it.
@@ -263,7 +424,7 @@ export const layer: Layer.Layer<
         const executor = yield* executors.get(environmentId).pipe(Effect.option);
         if (Option.isNone(executor) || known.get(environmentId) === executor.value) continue;
         known.set(environmentId, executor.value);
-        yield* recoverOn(executor.value).pipe(
+        yield* recoverOn(environmentId).pipe(
           logged("Could not look for recovered changes", { environmentId }),
           Effect.forkIn(scope),
         );
@@ -274,6 +435,28 @@ export const layer: Layer.Layer<
     yield* PubSub.take(changes).pipe(
       Effect.andThen(lookAtConnected),
       Effect.forever,
+      Effect.forkIn(scope),
+    );
+
+    // A move skipped above is looked at again once it ends, on the machines it involved.
+    yield* orchestrator.streamDomainEvents.pipe(
+      Stream.runForEach((event) => {
+        if (event.type !== "thread.move-updated") return Effect.void;
+        const move = event.payload.move;
+        if (move == null || move.status === "running") return Effect.void;
+        return Effect.forEach(
+          [move.sourceEnvironmentId, move.targetEnvironmentId],
+          (environmentId) =>
+            environmentId === null || environmentId === HUB_MACHINE_ENVIRONMENT_ID
+              ? Effect.void
+              : recoverOn(environmentId, event.threadId).pipe(
+                  logged("Could not look for recovered changes after a move", { environmentId }),
+                  Effect.forkIn(scope),
+                ),
+          { discard: true },
+        );
+      }),
+      logged("Recovered changes stopped following moves", {}),
       Effect.forkIn(scope),
     );
 

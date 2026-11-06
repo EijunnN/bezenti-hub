@@ -110,13 +110,17 @@ export const MoveRecoverInput = Schema.Struct({
   scratchThreadId: Schema.optional(ThreadId),
   /** What the machine last uploaded of it (or recovered before); none compares with HEAD. */
   baseRef: Schema.NullOr(CheckpointRef),
-  /** `refs/t3/recovered/<threadId>/<timestamp>`. */
+  /** `refs/t3/recovered/<threadId>/return/<timestamp>`. */
   recoveredRef: CheckpointRef,
+  /** Trees it already handed over from this base: the same changes are not handed over twice. */
+  knownTrees: Schema.optional(Schema.Array(Schema.String)),
 });
 export type MoveRecoverInput = typeof MoveRecoverInput.Type;
 
 export const MoveRecoverResult = Schema.Struct({
   status: Schema.Literals(["missing", "unchanged", "recovered"]),
+  /** The tree handed over, when recovered. */
+  tree: Schema.optional(Schema.String),
 });
 export type MoveRecoverResult = typeof MoveRecoverResult.Type;
 
@@ -131,9 +135,10 @@ export const captureRecoveredChanges = Effect.fn("MovedWorkspace.captureRecovere
     readonly fileSystem: FileSystem.FileSystem;
   },
   input: MoveRecoverInput,
-): Effect.fn.Return<MoveRecoverResult["status"], CheckpointStoreError> {
+): Effect.fn.Return<MoveRecoverResult, CheckpointStoreError> {
   const exists = yield* deps.fileSystem.exists(input.cwd).pipe(Effect.orElseSucceed(() => false));
-  if (!exists || !(yield* deps.checkpoints.isGitRepository(input.cwd))) return "missing";
+  if (!exists || !(yield* deps.checkpoints.isGitRepository(input.cwd)))
+    return { status: "missing" };
   const tree = (name: string) =>
     deps.vcs
       .run({
@@ -148,14 +153,14 @@ export const captureRecoveredChanges = Effect.fn("MovedWorkspace.captureRecovere
   const captured = yield* tree(input.recoveredRef);
   const base =
     (input.baseRef === null ? null : yield* tree(input.baseRef)) ?? (yield* tree("HEAD"));
-  if (captured !== null && captured === base) {
+  if (captured === null || captured === base || (input.knownTrees ?? []).includes(captured)) {
     yield* deps.checkpoints.deleteCheckpointRefs({
       cwd: input.cwd,
       checkpointRefs: [input.recoveredRef],
     });
-    return "unchanged";
+    return { status: "unchanged" };
   }
-  return "recovered";
+  return { status: "recovered", tree: captured };
 });
 
 const failed = (operation: string, cwd: string, detail: string, exitCode = 1) =>

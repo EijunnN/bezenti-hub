@@ -1,8 +1,10 @@
 import { makeAssistantStreamingFilter } from "./assistantStreaming.ts";
-import { SESSION_RELEASED_DURING_START } from "./ProviderSessionManager.ts";
+import { ProviderSessionReleasedDuringStartError } from "./ProviderSessionManager.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   findEnvironmentSessionLost,
+  findInErrorChain,
+  isEnvironmentAwayError,
   isOrchestrationV2WorkActive,
   CommandId,
   type EventId,
@@ -883,6 +885,28 @@ export const layer: Layer.Layer<
             ),
           ),
         );
+        /** A turn whose machine (or its session there) went away: interrupted, with why. */
+        const makeLostTerminalEvent = (
+          reason: string,
+          providerThreadId: OrchestrationV2ProviderThread["id"],
+          rootProviderTurnId: ProviderTurnId | null,
+        ): ProviderTerminalEvent => ({
+          type: "turn.terminal",
+          driver: input.providerThread.driver,
+          providerThreadId,
+          providerTurnId:
+            rootProviderTurnId ??
+            input.attempt.providerTurnId ??
+            idAllocator.derive.providerTurn({
+              driver: input.providerThread.driver,
+              nativeTurnId: `lost:${input.attempt.id}`,
+            }),
+          runOrdinal: input.run.ordinal,
+          status: "interrupted",
+          failure: null,
+          reason,
+          threadDisposition: "reusable",
+        });
         const makeFailedTerminalEvent = (
           failure: OrchestrationV2ProviderFailure,
           failureItemOrdinal: number,
@@ -1524,6 +1548,8 @@ export const layer: Layer.Layer<
                             requestRuntimeRestart: true,
                           })
                           .pipe(
+                            // A machine that does not answer must not keep the run unsettled.
+                            Effect.timeout(INTERRUPT_AFTER_FAILURE_TIMEOUT),
                             Effect.as(true),
                             Effect.catchCauseIf(
                               (interruptCause) => !Cause.hasInterruptsOnly(interruptCause),
@@ -1555,23 +1581,11 @@ export const layer: Layer.Layer<
                 const lostTerminal: ProviderTerminalEvent | undefined =
                   sessionLost === undefined
                     ? undefined
-                    : {
-                        type: "turn.terminal",
-                        driver: input.providerThread.driver,
-                        providerThreadId: providerThread.id,
-                        providerTurnId:
-                          routing.rootProviderTurnId ??
-                          input.attempt.providerTurnId ??
-                          idAllocator.derive.providerTurn({
-                            driver: input.providerThread.driver,
-                            nativeTurnId: `lost:${input.attempt.id}`,
-                          }),
-                        runOrdinal: input.run.ordinal,
-                        status: "interrupted",
-                        failure: null,
-                        reason: sessionLost.message,
-                        threadDisposition: "reusable",
-                      };
+                    : makeLostTerminalEvent(
+                        sessionLost.message,
+                        providerThread.id,
+                        routing.rootProviderTurnId,
+                      );
                 yield* writeFinalRunEvents({
                   run: input.run,
                   rootNode: input.rootNode,
@@ -1728,18 +1742,17 @@ export const layer: Layer.Layer<
               runId: input.run.id,
               cause,
             }).pipe(
-              // The session may have ended under the start (a joined machine that came back
-              // without it): its event stream then settles the run (interrupted), and the
-              // failure below finds the run no longer current. Give it a moment to do so.
+              // The machine may have gone under the start (a joined machine offline, or back
+              // without the session): its event stream then settles the run, and the write below
+              // finds the run no longer current. It gets a bounded moment to do so.
               Effect.andThen(
                 Ref.get(eventStreamFailed).pipe(
                   Effect.flatMap((failed) =>
-                    failed
-                      ? Fiber.await(providerEventFiber)
-                      : // A session released under the start ended its event stream too.
-                        Cause.pretty(cause).includes(SESSION_RELEASED_DURING_START)
-                        ? Fiber.await(providerEventFiber).pipe(Effect.timeoutOption("10 seconds"))
-                        : Effect.void,
+                    failed || machineLossOf(cause) !== undefined
+                      ? Fiber.await(providerEventFiber).pipe(
+                          Effect.timeoutOption(EVENT_STREAM_SETTLE_TIMEOUT),
+                        )
+                      : Effect.void,
                   ),
                 ),
               ),
@@ -1761,12 +1774,20 @@ export const layer: Layer.Layer<
                             expectedStatus: "running",
                           },
                           openRunOwnedSubagents: openSubagents,
-                          terminal: makeFailedTerminalEvent(
-                            makeProviderFailure({
-                              cause: Cause.squash(cause),
-                              class: Exit.isFailure(shouldStart) ? "unknown" : "provider_error",
-                            }),
-                            latestItemOrdinal + 1,
+                          // Its machine went away under the start: interrupted, not failed.
+                          terminal: ((lost) =>
+                            lost === undefined
+                              ? makeFailedTerminalEvent(
+                                  makeProviderFailure({
+                                    cause: Cause.squash(cause),
+                                    class: Exit.isFailure(shouldStart)
+                                      ? "unknown"
+                                      : "provider_error",
+                                  }),
+                                  latestItemOrdinal + 1,
+                                )
+                              : makeLostTerminalEvent(lost, providerThread.id, null))(
+                            machineLossOf(cause),
                           ),
                           failureItemPersisted: false,
                           refreshAfterTurn,
@@ -1797,6 +1818,36 @@ export const layer: Layer.Layer<
  * always set one, so a missing reason means a person stopped the run.
  */
 export const USER_STOP_REASON = "Stopped by user";
+
+/** How long a failed start waits for the run's event stream to settle it. */
+const EVENT_STREAM_SETTLE_TIMEOUT = "10 seconds";
+/** How long an interrupt sent after an ingestion failure may take. */
+const INTERRUPT_AFTER_FAILURE_TIMEOUT = "30 seconds";
+const isSessionReleasedDuringStart = Schema.is(ProviderSessionReleasedDuringStartError);
+
+/**
+ * Why a turn's machine went away under it, when that is what failed it: its session was lost
+ * there, released under the start, or the Environment has no executor. Undefined otherwise.
+ */
+function machineLossOf(cause: Cause.Cause<unknown>): string | undefined {
+  for (const reason of cause.reasons) {
+    const error = Cause.isFailReason(reason)
+      ? reason.error
+      : Cause.isDieReason(reason)
+        ? reason.defect
+        : undefined;
+    if (error === undefined) continue;
+    const lost = findEnvironmentSessionLost(error);
+    if (lost !== undefined) return lost.message;
+    if (
+      findInErrorChain(error, isSessionReleasedDuringStart) !== undefined ||
+      isEnvironmentAwayError(error)
+    ) {
+      return "The Thread's Environment went offline while this turn started. Send a message to continue, or move the Thread to another Environment.";
+    }
+  }
+  return undefined;
+}
 
 export function makeInterruptResultTurnItem(input: {
   readonly idAllocator: IdAllocator.IdAllocatorV2["Service"];

@@ -37,6 +37,7 @@ import * as Stream from "effect/Stream";
 import * as CommandActor from "../auth/CommandActor.ts";
 import * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
+import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
 import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import {
   ClaudeOrchestratorReplayHarness,
@@ -317,13 +318,20 @@ const sendMessage = (hub: Hub, threadId: ThreadId, actor: UserId, n: number) =>
 
 const dispatchMove = (
   hub: Hub,
-  input: { readonly threadId: ThreadId; readonly target: EnvironmentId; readonly actor: UserId },
+  input: {
+    readonly threadId: ThreadId;
+    readonly target: EnvironmentId;
+    readonly actor: UserId;
+    readonly n?: number;
+    readonly ifRunning?: "wait" | "stop";
+  },
 ) =>
   hub
     .service(ThreadManagementService.ThreadManagementService)
     .dispatch({
       type: "thread.move",
-      commandId: CommandId.make(`command:move:${input.target}`),
+      commandId: CommandId.make(`command:move:${input.target}:${input.n ?? 0}`),
+      ...(input.ifRunning === undefined ? {} : { ifRunning: input.ifRunning }),
       threadId: input.threadId,
       targetEnvironmentId: input.target,
       ownerUserId: input.actor,
@@ -580,7 +588,126 @@ describe("Hub con Environments: disconnections", () => {
   );
 
   it.live(
-    "changes left on a machine for a Thread that moved go to a recovered branch, once, and stay there",
+    "with its sessions lost on the Hub, a paused Thread still moves when its turn is stopped",
+    () =>
+      Effect.gen(function* () {
+        const loaded = yield* loadFixture("simple");
+        const hold = yield* holdingEvents(loaded.adapters, 2);
+        const hub = yield* makeHub();
+        const owner = yield* ownerIdOf(hub);
+        const laptop = yield* hub.join({ name: "Laptop", adapters: hold.layer });
+        const desktop = yield* hub.join({
+          name: "Desktop",
+          adapters: idleAdapters(loaded.variant.modelSelection.instanceId),
+        });
+        yield* replayOn(hub, laptop, loaded).pipe(Effect.forkScoped);
+        yield* Deferred.await(hold.reached);
+        const [threadId] = loaded.materialized.projectionThreadIds;
+        assert.isDefined(threadId);
+        yield* goesAway(hub, laptop, laptop.disconnect);
+        // As after a Hub restart: nothing on the Hub can end the Laptop's session any more.
+        yield* hub
+          .service(RemoteEnvironments.RemoteEnvironments)
+          .forgetSessions(laptop.environmentId);
+        yield* dispatchMove(hub, {
+          threadId,
+          target: desktop.environmentId,
+          actor: owner,
+          ifRunning: "stop",
+        });
+        const moved = yield* settledMove(hub, threadId);
+        assert.equal(moved.move?.status, "switched", moved.move?.failure?.message);
+        assert.equal(yield* awaitRunSettled(hub, threadId, 1), "interrupted");
+      }).pipe(Effect.scoped),
+  );
+
+  it.live("removing a machine the Hub lost track of still ends its Threads' turns", () =>
+    Effect.gen(function* () {
+      const loaded = yield* loadFixture("simple");
+      const hold = yield* holdingEvents(loaded.adapters, 2);
+      const hub = yield* makeHub();
+      const owner = yield* ownerIdOf(hub);
+      const laptop = yield* hub.join({ name: "Laptop", adapters: hold.layer });
+      yield* replayOn(hub, laptop, loaded).pipe(Effect.forkScoped);
+      yield* Deferred.await(hold.reached);
+      const [threadId] = loaded.materialized.projectionThreadIds;
+      assert.isDefined(threadId);
+      yield* goesAway(hub, laptop, laptop.disconnect);
+      yield* hub
+        .service(RemoteEnvironments.RemoteEnvironments)
+        .forgetSessions(laptop.environmentId);
+      yield* hub
+        .service(EnvironmentRegistry.EnvironmentRegistry)
+        .remove({ actorUserId: owner, environmentId: laptop.environmentId });
+      assert.equal(yield* awaitRunSettled(hub, threadId, 1), "interrupted");
+      const { turnItems, thread } = yield* projectionOf(hub, threadId);
+      assert.isNull(thread.activeEnvironmentId);
+      const ended = turnItems.find((item) => item.type === "run_interrupt_result");
+      assert.isTrue(
+        ended?.type === "run_interrupt_result" && ended.message.includes("removed"),
+        JSON.stringify(ended),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "a Thread that left a machine's shared checkout gets a notice; the checkout is not read",
+    () =>
+      Effect.gen(function* () {
+        const loaded = yield* loadFixture("simple");
+        const hub = yield* makeHub();
+        const owner = yield* ownerIdOf(hub);
+        const laptop = yield* hub.join({ name: "Laptop", adapters: loaded.adapters });
+        const desktop = yield* hub.join({
+          name: "Desktop",
+          adapters: idleAdapters(loaded.variant.modelSelection.instanceId),
+        });
+        yield* replayOn(hub, laptop, loaded);
+        const [threadId] = loaded.materialized.projectionThreadIds;
+        assert.isDefined(threadId);
+        const { thread } = yield* projectionOf(hub, threadId);
+        const laptopCheckout = yield* checkoutOn(hub, laptop, thread.projectId);
+        yield* goesAway(hub, laptop, laptop.disconnect);
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(`${laptopCheckout}/by-hand.txt`, "typed in the shared checkout\n"),
+        );
+        yield* dispatchMove(hub, { threadId, target: desktop.environmentId, actor: owner });
+        assert.equal((yield* settledMove(hub, threadId)).move?.status, "switched");
+        yield* laptop.connect;
+        const notice = yield* awaitThreadEvent(
+          hub,
+          threadId,
+          (event) => {
+            const item = event.payload as OrchestrationV2TurnItem;
+            return event.type === "turn-item.updated" && item.type === "system_notice"
+              ? item
+              : undefined;
+          },
+          projectionOf(hub, threadId).pipe(
+            Effect.map((projection) =>
+              projection.turnItems.find((item) => item.type === "system_notice"),
+            ),
+          ),
+        );
+        assert.isTrue(
+          notice?.type === "system_notice" &&
+            notice.message.includes(laptopCheckout) &&
+            notice.message.includes("Laptop"),
+          JSON.stringify(notice),
+        );
+        // Thread-level: it belongs to no run.
+        assert.isNull(notice?.runId);
+        const { turnItems } = yield* projectionOf(hub, threadId);
+        assert.isUndefined(turnItems.find((item) => item.type === "recovered_changes"));
+        assert.equal(
+          (yield* git(laptopCheckout, ["for-each-ref", "refs/t3/recovered/"])).stdout,
+          "",
+        );
+      }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "changes left in a moved Thread's own worktree go to a recovered branch, once, and stay there",
     () =>
       Effect.gen(function* () {
         const loaded = yield* loadFixture("simple");
@@ -598,68 +725,55 @@ describe("Hub con Environments: disconnections", () => {
         const [threadId] = loaded.materialized.projectionThreadIds;
         assert.isDefined(threadId);
         const { thread } = yield* projectionOf(hub, threadId);
-        // The turn's checkpoint reached the Hub before the machine went away.
-        yield* awaitThreadEvent(
-          hub,
-          threadId,
-          (event) => (event.type === "checkpoint.uploaded" ? true : undefined),
-          projectionOf(hub, threadId).pipe(
-            Effect.map((projection) =>
-              projection.checkpoints.some((checkpoint) => checkpoint.uploadedToHub === true)
-                ? true
-                : undefined,
-            ),
-          ),
-        );
+        // Away to the Desktop and back: on the Laptop the Thread now has a worktree of its own.
+        yield* dispatchMove(hub, { threadId, target: desktop.environmentId, actor: owner, n: 1 });
+        assert.equal((yield* settledMove(hub, threadId)).move?.status, "switched");
+        yield* dispatchMove(hub, { threadId, target: laptop.environmentId, actor: owner, n: 2 });
+        const back = yield* settledMove(hub, threadId);
+        assert.equal(back.move?.status, "switched", back.move?.failure?.message);
+        const worktree = back.worktreePath;
+        if (worktree === null) return assert.fail("no worktree on the Laptop");
         const laptopCheckout = yield* checkoutOn(hub, laptop, thread.projectId);
-        const headBefore = (yield* git(laptopCheckout, ["rev-parse", "HEAD"])).stdout.trim();
-        yield* laptop.disconnect;
+        assert.notEqual(worktree, laptopCheckout);
+        const headBefore = (yield* git(worktree, ["rev-parse", "HEAD"])).stdout.trim();
+        yield* goesAway(hub, laptop, laptop.disconnect);
         // Typed by hand on the Laptop while it was away from the Hub: never uploaded.
         yield* Effect.promise(() =>
-          NodeFSP.writeFile(`${laptopCheckout}/by-hand.txt`, "typed on the Laptop\n"),
+          NodeFSP.writeFile(`${worktree}/by-hand.txt`, "typed on the Laptop\n"),
         );
-        yield* dispatchMove(hub, { threadId, target: desktop.environmentId, actor: owner });
+        yield* dispatchMove(hub, { threadId, target: desktop.environmentId, actor: owner, n: 3 });
         const moved = yield* settledMove(hub, threadId);
         assert.equal(moved.move?.status, "switched", moved.move?.failure?.message);
         assert.isTrue(moved.move?.sourceOffline);
 
-        // The Laptop comes back: what it kept goes to a branch of the Hub, with a notice.
+        // The Laptop comes back, flapping: what it kept goes to one branch of the Hub, one notice.
+        yield* laptop.connect;
+        yield* laptop.disconnect;
         yield* laptop.connect;
         const notice = yield* awaitRecovered(hub, threadId);
-        assert.isDefined(notice);
         if (notice?.type !== "recovered_changes") return assert.fail("no notice");
         assert.equal(notice.environmentName, "Laptop");
         assert.equal(notice.title, "Recovered changes from Laptop");
-        const prefix = HubRepository.threadRefPrefixes(threadId)[1];
+        assert.isNull(notice.runId);
+        const prefix = `${HubRepository.threadRefPrefixes(threadId)[1]}return/`;
         assert.isTrue(notice.ref.startsWith(prefix), notice.ref);
         assert.match(notice.ref.slice(prefix.length), /^[A-Za-z0-9-]+$/);
         const repositories = hub.service(HubRepository.HubRepositories);
         const hubRepository = `${repositories.root}/${repositories.directoryOf({ projectId: thread.projectId })}`;
-        const listed = yield* git(repositories.root, [
+        const shown = yield* git(repositories.root, [
           `--git-dir=${hubRepository}`,
           "show",
           `${notice.ref}:by-hand.txt`,
         ]);
-        assert.equal(listed.stdout, "typed on the Laptop\n", listed.stderr);
-        // The Laptop's workspace is left as it was: the file is there, nothing merged or reset.
-        assert.equal(yield* readText(`${laptopCheckout}/by-hand.txt`), "typed on the Laptop\n");
-        assert.equal((yield* git(laptopCheckout, ["rev-parse", "HEAD"])).stdout.trim(), headBefore);
-        // Nor did it reach the Thread's workspace on the Desktop.
-        assert.isFalse(
-          yield* Effect.promise(() =>
-            NodeFSP.access(`${moved.worktreePath}/by-hand.txt`).then(
-              () => true,
-              () => false,
-            ),
-          ),
-        );
+        assert.equal(shown.stdout, "typed on the Laptop\n", shown.stderr);
+        // The Laptop's worktree is left as it was: the file is there, nothing merged or reset.
+        assert.equal(yield* readText(`${worktree}/by-hand.txt`), "typed on the Laptop\n");
+        assert.equal((yield* git(worktree, ["rev-parse", "HEAD"])).stdout.trim(), headBefore);
 
         // Coming back again with nothing new hands over nothing more.
         const asked = laptop.requests.length;
         yield* laptop.disconnect;
         yield* laptop.connect;
-        // The Hub asks again, the machine finds nothing it has not handed over, and no notice
-        // follows.
         yield* laptop.awaitRequest("move.recover", asked);
         const another = yield* awaitThreadEvent(
           hub,
@@ -673,76 +787,105 @@ describe("Hub con Environments: disconnections", () => {
               : undefined;
           },
           Effect.succeed(undefined),
-        ).pipe(Effect.timeoutOption("2 seconds"));
+        ).pipe(Effect.timeoutOption("3 seconds"));
         assert.isTrue(Option.isNone(another));
         const notices = (yield* projectionOf(hub, threadId)).turnItems.filter(
           (item) => item.type === "recovered_changes",
         );
         assert.equal(notices.length, 1);
+        const refs = yield* git(repositories.root, [
+          `--git-dir=${hubRepository}`,
+          "for-each-ref",
+          "--format=%(refname)",
+          prefix,
+        ]);
+        assert.equal(refs.stdout.trim().split("\n").length, 1, refs.stdout);
       }).pipe(Effect.scoped),
   );
 
-  it.live("a machine a Thread left may create its recovered ref and write nothing else", () =>
-    Effect.gen(function* () {
-      const loaded = yield* loadFixture("simple");
-      const hub = yield* makeHub();
-      const owner = yield* ownerIdOf(hub);
-      const laptop = yield* hub.join({ name: "Laptop", adapters: loaded.adapters });
-      const desktop = yield* hub.join({
-        name: "Desktop",
-        adapters: idleAdapters(loaded.variant.modelSelection.instanceId),
-      });
-      const stranger = yield* hub.join({
-        name: "Stranger",
-        adapters: idleAdapters(loaded.variant.modelSelection.instanceId),
-      });
-      yield* replayOn(hub, laptop, loaded);
-      const [threadId] = loaded.materialized.projectionThreadIds;
-      assert.isDefined(threadId);
-      const { thread, checkpoints } = yield* projectionOf(hub, threadId);
-      const laptopCheckout = yield* checkoutOn(hub, laptop, thread.projectId);
-      yield* dispatchMove(hub, { threadId, target: desktop.environmentId, actor: owner });
-      assert.equal((yield* settledMove(hub, threadId)).move?.status, "switched");
+  it.live(
+    "recovered refs are create-only for every machine; a former one creates only when asked",
+    () =>
+      Effect.gen(function* () {
+        const loaded = yield* loadFixture("simple");
+        const hub = yield* makeHub();
+        const owner = yield* ownerIdOf(hub);
+        const laptop = yield* hub.join({ name: "Laptop", adapters: loaded.adapters });
+        const desktop = yield* hub.join({
+          name: "Desktop",
+          adapters: idleAdapters(loaded.variant.modelSelection.instanceId),
+        });
+        const stranger = yield* hub.join({
+          name: "Stranger",
+          adapters: idleAdapters(loaded.variant.modelSelection.instanceId),
+        });
+        yield* replayOn(hub, laptop, loaded);
+        const [threadId] = loaded.materialized.projectionThreadIds;
+        assert.isDefined(threadId);
+        const { thread, checkpoints } = yield* projectionOf(hub, threadId);
+        const laptopCheckout = yield* checkoutOn(hub, laptop, thread.projectId);
+        const key = { projectId: thread.projectId };
+        const remoteOf = (machine: TestEnvironment) =>
+          HubRepository.withEnvironmentCredential(
+            HubRepository.hubRepositoryUrl(hub.server.url, key),
+            machine.credential,
+          );
+        const push = (machine: TestEnvironment, refspec: string) =>
+          git(laptopCheckout, ["push", remoteOf(machine).url, refspec], {
+            ...remoteOf(machine).env,
+          });
+        const listed = (machine: TestEnvironment) =>
+          git(laptopCheckout, ["ls-remote", remoteOf(machine).url], { ...remoteOf(machine).env });
+        const [threads, recovered] = HubRepository.threadRefPrefixes(threadId);
+        const ok = (output: { readonly exitCode: number; readonly stderr: string }) =>
+          assert.equal(output.exitCode, 0, output.stderr);
+        const refused = (output: { readonly exitCode: number }) =>
+          assert.notEqual(output.exitCode, 0);
+        const other = (yield* git(laptopCheckout, [
+          "-c",
+          "user.name=Laptop",
+          "-c",
+          "user.email=laptop@example.com",
+          "commit-tree",
+          "HEAD^{tree}",
+          "-p",
+          "HEAD",
+          "-m",
+          "another",
+        ])).stdout.trim();
 
-      const push = (machine: TestEnvironment, refspec: string) => {
-        const remote = HubRepository.withEnvironmentCredential(
-          HubRepository.hubRepositoryUrl(hub.server.url, { projectId: thread.projectId }),
-          machine.credential,
+        // Even the machine that runs the Thread only creates a recovered ref, never updates one.
+        const setAside = `${recovered}move/2026-01-01T00-00-00-000Z/workspace`;
+        ok(yield* push(laptop, `HEAD:${setAside}`));
+        refused(yield* push(laptop, `+${other}:${setAside}`));
+        refused(yield* push(laptop, `:${setAside}`));
+
+        yield* dispatchMove(hub, { threadId, target: desktop.environmentId, actor: owner });
+        assert.equal((yield* settledMove(hub, threadId)).move?.status, "switched");
+        const remote = hub.service(RemoteEnvironments.RemoteEnvironments);
+        const returned = `${recovered}return/2026-01-02T00-00-00-000Z`;
+
+        // The machine it left: nothing unless the Hub asked, then exactly that ref, once.
+        refused(yield* push(laptop, `HEAD:${returned}`));
+        yield* remote.grantRecovery({ environmentId: laptop.environmentId, key, ref: returned });
+        refused(yield* push(laptop, `HEAD:${recovered}return/2026-01-03T00-00-00-000Z`));
+        ok(yield* push(laptop, `HEAD:${returned}`));
+        yield* remote.grantRecovery({ environmentId: laptop.environmentId, key, ref: returned });
+        refused(yield* push(laptop, `+${other}:${returned}`));
+        // It reads none of the Thread's refs, recovered ones included.
+        const seen = (yield* listed(laptop)).stdout;
+        assert.notInclude(seen, recovered);
+        assert.notInclude(seen, threads);
+        // Nothing of the Thread's own, no checkpoint, nothing of another Thread.
+        refused(yield* push(laptop, `HEAD:${threads}head`));
+        const checkpoint = checkpoints.find((candidate) => candidate.status === "ready");
+        assert.isDefined(checkpoint);
+        refused(yield* push(laptop, `+HEAD:${checkpoint.ref}`));
+        refused(
+          yield* push(laptop, `HEAD:${HubRepository.threadRefPrefixes("thread:other")[1]}return/x`),
         );
-        return git(laptopCheckout, ["push", remote.url, refspec], { ...remote.env });
-      };
-      const [threads, recovered] = HubRepository.threadRefPrefixes(threadId);
-      const ok = (output: { readonly exitCode: number; readonly stderr: string }) =>
-        assert.equal(output.exitCode, 0, output.stderr);
-      const refused = (output: { readonly exitCode: number }) =>
-        assert.notEqual(output.exitCode, 0);
-
-      // The machine it left creates one recovered ref, once.
-      ok(yield* push(laptop, `HEAD:${recovered}2026-01-01T00-00-00-000Z`));
-      const other = (yield* git(laptopCheckout, [
-        "-c",
-        "user.name=Laptop",
-        "-c",
-        "user.email=laptop@example.com",
-        "commit-tree",
-        "HEAD^{tree}",
-        "-p",
-        "HEAD",
-        "-m",
-        "another",
-      ])).stdout.trim();
-      refused(yield* push(laptop, `+${other}:${recovered}2026-01-01T00-00-00-000Z`));
-      // Nothing deeper, nothing of the Thread's own, no checkpoint, nothing of another Thread.
-      refused(yield* push(laptop, `HEAD:${recovered}2026-01-02/branch/main`));
-      refused(yield* push(laptop, `HEAD:${threads}head`));
-      const checkpoint = checkpoints.find((candidate) => candidate.status === "ready");
-      assert.isDefined(checkpoint);
-      refused(yield* push(laptop, `+HEAD:${checkpoint.ref}`));
-      refused(
-        yield* push(laptop, `HEAD:${HubRepository.threadRefPrefixes("thread:other")[1]}2026-01-03`),
-      );
-      // A machine the Thread never ran on has no recovered ref to create.
-      refused(yield* push(stranger, `HEAD:${recovered}2026-01-04`));
-    }).pipe(Effect.scoped),
+        // A machine the Thread never ran on has no recovered ref to create.
+        refused(yield* push(stranger, `HEAD:${recovered}return/2026-01-04T00-00-00-000Z`));
+      }).pipe(Effect.scoped),
   );
 });

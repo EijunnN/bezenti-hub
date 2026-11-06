@@ -166,7 +166,7 @@ const existingRefs = Effect.fn("HubRepository.existingRefs")(function* (
   return new Set(listed.stdout.split("\n").filter((line) => line.length > 0));
 });
 
-/** Uploads the refs, replacing what the repository had under the same names. */
+/** Uploads the refs, replacing what the repository had under the same names (recovered ones excepted). */
 export const pushRefs = Effect.fn("HubRepository.pushRefs")(function* (input: {
   readonly cwd: string;
   readonly remote: HubRemote;
@@ -186,7 +186,10 @@ export const pushRefs = Effect.fn("HubRepository.pushRefs")(function* (input: {
       "--recurse-submodules=no",
       "--quiet",
       input.remote.url,
-      ...input.refs.map((ref) => `+${ref}:${ref}`),
+      // Recovered and set-aside refs are created once and never forced over.
+      ...input.refs.map((ref) =>
+        ref.startsWith("refs/t3/recovered/") ? `${ref}:${ref}` : `+${ref}:${ref}`,
+      ),
     ],
   });
 });

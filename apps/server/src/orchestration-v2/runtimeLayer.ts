@@ -453,6 +453,8 @@ const layerEnvironmentReturnsProvided = EnvironmentReturnService.layer.pipe(
       IdAllocator.layer,
       ThreadCommandExecutor.layer,
       ProjectionStore.layer,
+      layerOrchestratorProvided,
+      TurnItemPositionStore.layer,
     ),
   ),
 );

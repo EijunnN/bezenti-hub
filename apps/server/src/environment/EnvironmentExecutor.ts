@@ -535,7 +535,7 @@ const makeMoveWorkspace = (input: {
             { vcs: vcs.value, checkpoints: input.checkpoints, fileSystem: fileSystem.value },
             request,
           ).pipe(
-            Effect.tap((status) =>
+            Effect.tap(({ status }) =>
               status === "recovered"
                 ? input.hubRepository.push({
                     cwd: request.cwd,
@@ -544,7 +544,6 @@ const makeMoveWorkspace = (input: {
                   })
                 : Effect.void,
             ),
-            Effect.map((status) => ({ status })),
           ),
   };
 };

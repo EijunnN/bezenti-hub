@@ -19,6 +19,7 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
+import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
 import * as HubRepository from "../checkpointing/HubRepository.ts";
 import { checkpointRefForScopeOrdinal } from "../orchestration-v2/CheckpointService.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -143,34 +144,40 @@ const parseReceiveCommands = (
   }
 };
 
-/** One path segment: the timestamp of a recovery, never a deeper ref. */
-const RECOVERY_NAME = /^[A-Za-z0-9_-]+$/u;
+/** Every Thread's recovered and set-aside refs: created once, never updated or deleted. */
+const RECOVERED_ROOT = "refs/t3/recovered/";
+/** At most this much in a push a machine makes only with the Hub's grant (recovered changes). */
+const GRANTED_PUSH_MAX_BYTES = 256 * 1024 * 1024;
 
 /**
- * Why the machine may not make these updates, or undefined when it may. Besides the refs of the
- * Threads it runs, a machine a Thread moved away from may create (never update) exactly one ref
- * per recovery under that Thread's `refs/t3/recovered/<id>/<timestamp>`.
+ * Why the machine may not make these updates (undefined when it may), and the grants they use.
+ * Nobody deletes a ref; a recovered ref is only ever created, by whoever may write there. A
+ * machine a Thread moved away from writes only the exact refs the Hub granted it.
  */
-const refuseUpdates = (
+const checkUpdates = (
   updates: ReadonlyArray<RefUpdate>,
-  prefixes: {
-    readonly writable: ReadonlyArray<string>;
-    readonly recoverable: ReadonlyArray<string>;
-  },
-) => {
+  rules: { readonly writable: ReadonlyArray<string>; readonly granted: ReadonlyArray<string> },
+): { readonly refusal: string | undefined; readonly usedGrants: ReadonlyArray<string> } => {
+  const usedGrants: Array<string> = [];
+  const refuse = (refusal: string) => ({ refusal, usedGrants });
   for (const update of updates) {
-    if (ZERO_OID.test(update.newOid)) return `Deleting ${update.ref} is not allowed.`;
-    if (prefixes.writable.some((prefix) => update.ref.startsWith(prefix))) continue;
-    const recovery = prefixes.recoverable.some(
-      (prefix) =>
-        update.ref.startsWith(prefix) && RECOVERY_NAME.test(update.ref.slice(prefix.length)),
-    );
-    if (recovery && ZERO_OID.test(update.oldOid)) continue;
-    return recovery
-      ? `${update.ref} already exists: recovered changes are never overwritten.`
-      : `${update.ref} is not a ref of a Thread this machine runs.`;
+    if (ZERO_OID.test(update.newOid)) return refuse(`Deleting ${update.ref} is not allowed.`);
+    const writable = rules.writable.some((prefix) => update.ref.startsWith(prefix));
+    if (update.ref.startsWith(RECOVERED_ROOT)) {
+      if (!ZERO_OID.test(update.oldOid)) {
+        return refuse(`${update.ref} already exists: recovered changes are never overwritten.`);
+      }
+      if (writable) continue;
+      if (rules.granted.includes(update.ref)) {
+        usedGrants.push(update.ref);
+        continue;
+      }
+    } else if (writable) {
+      continue;
+    }
+    return refuse(`${update.ref} is not a ref of a Thread this machine runs.`);
   }
-  return undefined;
+  return { refusal: undefined, usedGrants };
 };
 
 // One span per request is enough; git's own work happens in the subprocess.
@@ -184,6 +191,7 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
   readonly digest: Digest.Digest["Service"];
   readonly maxRequestBytes: number;
   readonly nullDevice: string;
+  readonly remote: Option.Option<RemoteEnvironments.RemoteEnvironments["Service"]>;
 }) {
   const request = yield* HttpServerRequest.HttpServerRequest;
   const url = requestUrl(request);
@@ -270,8 +278,23 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
   if (!allowed) return HttpServerResponse.text("Forbidden", { status: 403 });
 
   const prefixes = yield* refPrefixesFor(deps, key.value, check.environmentId);
-  // A Thread's own repository is only for the machine that runs it (or the target of its move).
-  if (key.value.scratchThreadId !== undefined && prefixes.readable.length === 0) {
+  // What the Hub asked this machine to hand over in this repository (changes it kept).
+  const granted = Option.isNone(deps.remote)
+    ? []
+    : (yield* deps.remote.value.recoveryGrants(check.environmentId))
+        .filter(
+          (grant) =>
+            grant.key.projectId === key.value.projectId &&
+            grant.key.scratchThreadId === key.value.scratchThreadId,
+        )
+        .map((grant) => grant.ref);
+  // A Thread's own repository is only for the machine that runs it (or the target of its move),
+  // and a machine it left that the Hub asked for its changes.
+  if (
+    key.value.scratchThreadId !== undefined &&
+    prefixes.readable.length === 0 &&
+    granted.length === 0
+  ) {
     return HttpServerResponse.text("Forbidden", { status: 403 });
   }
   yield* deps.repositories.ensure(key.value);
@@ -289,9 +312,9 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
       ["transfer.hideRefs", "refs/"],
       ["transfer.hideRefs", "HEAD"],
       ...prefixes.readable.map((prefix) => ["transfer.hideRefs", `!${prefix}`] as const),
-      // A machine a Thread left only creates a recovered ref there (checked above); it fetches
-      // none of them.
-      ...prefixes.recoverable.map((prefix) => ["receive.hideRefs", `!${prefix}`] as const),
+      // A machine a Thread left creates only the refs it was granted, which do not exist yet:
+      // nothing is advertised to it.
+      ...granted.map((ref) => ["receive.hideRefs", `!${ref}`] as const),
     ]),
     GIT_PROJECT_ROOT: deps.repositories.root,
     GIT_HTTP_EXPORT_ALL: "1",
@@ -310,10 +333,11 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
   const scope = yield* Scope.make();
   return yield* Effect.gen(function* () {
     let received = 0;
+    let limit = deps.maxRequestBytes;
     const counted = request.stream.pipe(
       Stream.mapEffect((chunk) => {
         received += chunk.length;
-        return received > deps.maxRequestBytes
+        return received > limit
           ? Effect.fail(new HubRepositoryHttpError({ detail: "The request is too large." }))
           : Effect.succeed(chunk);
       }),
@@ -333,11 +357,30 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
         buffered = Buffer.concat([buffered, ...chunk]);
         commands = parseReceiveCommands(buffered);
       }
-      const refusal =
+      const checked =
         commands._tag === "parsed"
-          ? refuseUpdates(commands.updates, prefixes)
-          : "The push could not be read.";
-      if (refusal !== undefined) return HttpServerResponse.text(refusal, { status: 403 });
+          ? checkUpdates(commands.updates, { writable: prefixes.writable, granted })
+          : { refusal: "The push could not be read.", usedGrants: [] };
+      if (checked.refusal !== undefined) {
+        return HttpServerResponse.text(checked.refusal, { status: 403 });
+      }
+      if (checked.usedGrants.length > 0) {
+        // One push per grant, and a bounded one.
+        for (const ref of checked.usedGrants) {
+          const taken = Option.isSome(deps.remote)
+            ? yield* deps.remote.value.takeRecoveryGrant(check.environmentId, ref)
+            : false;
+          if (!taken) {
+            return HttpServerResponse.text(`${ref} was not asked for.`, { status: 403 });
+          }
+        }
+        if (commands._tag === "parsed" && checked.usedGrants.length === commands.updates.length) {
+          limit = Math.min(limit, GRANTED_PUSH_MAX_BYTES);
+          if (received > limit) {
+            return HttpServerResponse.text("Payload Too Large", { status: 413 });
+          }
+        }
+      }
       body = Stream.concat(
         Stream.make(new Uint8Array(buffered)),
         Stream.fromPull(Effect.succeed(pull)),
@@ -459,21 +502,7 @@ const refPrefixesFor = Effect.fn("HubRepositoryHttp.refPrefixesFor")(function* (
     // The target of a move uploads what it sets aside of its own before the Thread is its own.
     writable.add(HubRepository.threadRefPrefixes(row.threadId)[1]);
   }
-  // Threads that moved away from this machine and run elsewhere now: it may only hand over the
-  // changes it still had for them (`RecoveredChanges`), one new ref each time, and read nothing.
-  const former = yield* deps.sql<{ readonly threadId: string }>`
-    SELECT DISTINCT thread.thread_id AS "threadId"
-    FROM orchestration_v2_projection_threads thread
-    JOIN orchestration_v2_projection_turn_items item ON item.thread_id = thread.thread_id
-    WHERE ${repositoryThreads}
-      AND thread.deleted_at IS NULL
-      AND (thread.active_environment_id IS NULL OR thread.active_environment_id != ${environmentId})
-      AND item.type = 'environment_move'
-      AND json_extract(item.payload_json, '$.sourceEnvironmentId') = ${environmentId}
-      AND json_extract(item.payload_json, '$.outcome') IS NOT 'cancelled'
-  `;
-  const recoverable = former.map((row) => HubRepository.threadRefPrefixes(row.threadId)[1]);
-  return { readable: [...readable], writable: [...writable], recoverable };
+  return { readable: [...readable], writable: [...writable] };
 });
 
 /** Registered where the server keeps Hub repositories; joined machines serve none. */
@@ -493,6 +522,8 @@ export const layer = HttpRouter.use((router) =>
         Config.withDefault(2 * 1024 * 1024 * 1024),
       ),
       nullDevice: (yield* HostProcess.Platform) === "win32" ? "NUL" : "/dev/null",
+      // Its grants let a machine a Thread left hand over the changes it kept.
+      remote: yield* Effect.serviceOption(RemoteEnvironments.RemoteEnvironments),
     }).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("Hub repository request failed", { cause }).pipe(

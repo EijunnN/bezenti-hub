@@ -178,9 +178,13 @@ one, a machine sees and writes only the refs of Threads it is the Active environ
 checkpoint scopes, `refs/t3/threads/<id>/`, `refs/t3/recovered/<id>/`, the id percent-encoded):
 `transfer.hideRefs` hides the rest, and the ref updates of a push are read and checked before git
 sees them. The target of a Thread's running move also reads (never writes) that Thread's refs, so
-it can fetch what the Thread continues from before the Thread is its own. A machine a Thread moved
-away from (an `environment_move` names it as the source) may only create, never update, one
-`refs/t3/recovered/<id>/<timestamp>` (a single path segment) for it, and reads none of its refs. Nobody deletes a ref; an update need not fast-forward, since a rollback reuses its own
+it can fetch what the Thread continues from before the Thread is its own. Anything under
+`refs/t3/recovered/` is only ever created (its old value must be none), by every machine: a move's
+set-asides go under `<id>/move/<time>/…`, and recovered changes under `<id>/return/<time>`. A
+machine a Thread moved away from writes only the exact ref the Hub granted it
+(`RemoteEnvironments.grantRecovery`: one push, a few minutes, at most 256 MiB) and reads nothing;
+the granted ref is unhidden for that push alone, and does not exist yet, so nothing is advertised.
+Nobody deletes a ref; an update need not fast-forward, since a rollback reuses its own
 checkpoint refs. Transfers always name the Hub repository by URL or path, never a remote of the
 checkout, so nothing reaches `origin`.
 
@@ -291,20 +295,29 @@ an interrupted turn (a `run_interrupt_result` saying why) instead of a failed on
 goes on there. While a Thread's machine is away, a User's message that would steer or start
 work goes to the queue (`ThreadManagementService`, `queueWhileAway`). A move with **Stop the
 turn** from a machine that is away ends its sessions on the Hub
-(`RemoteEnvironments.abandonSessions`, the same interrupted turn); the machine drops them when it
-returns, since the Hub no longer knows them.
+(`RemoteEnvironments.abandonSessions`) and its unfinished runs there too
+([HubRunInterrupt](../../apps/server/src/orchestration-v2/HubRunInterrupt.ts), as Force stop does),
+so the move goes on even when the Hub no longer knows the sessions (after a restart); the machine
+drops them when it returns. A start that fails because its machine went away (session lost,
+released under the start, or no executor) also ends interrupted; the failed start waits a bounded
+time for the event stream to settle it first.
 
 [EnvironmentReturnService](../../apps/server/src/orchestration-v2/EnvironmentReturnService.ts)
 handles the rest. When an Environment is removed (`EnvironmentRegistry.removed`, and at startup
-for removals not yet handled) its sessions end (`environmentRemoved`) and each of its Threads gets
-`activeEnvironmentId: null` («needs an environment»): history intact, no new messages, its queue
-held, movable (the move's source is then null). Each time a joined machine connects, it is asked
-(`move.recover`) about every Thread that moved away from it: the workspace the Thread had there
-(its known worktree, else the Project's checkout unless another Thread runs in it) is captured
-into `refs/t3/recovered/<id>/<timestamp>` and compared with what the machine last handed over
-(the move's `continuesFrom`, or the previous recovery; HEAD when there is none). A difference is
-pushed to the Hub repository and noted in the Thread (`recovered_changes`, with the ref and the
-machine); otherwise the local ref is deleted. The workspace itself is never changed.
+for removals not yet handled) its sessions end (`environmentRemoved`), each of its Threads gets
+`activeEnvironmentId: null` («needs an environment»: history intact, no new messages, its queue
+held, movable, the move's source then null) and its unfinished runs end on the Hub, whether or not
+the Hub still knows their sessions. Each time a joined machine connects it is asked
+(`move.recover`), one Thread at a time per machine and under the Thread's lock, about every
+Thread that moved away from it; a Thread with a move under way to or from it is asked again when
+that move ends. Only the Thread's own worktree there is read (`knownWorktrees`): it is captured
+into a granted `refs/t3/recovered/<id>/return/<time>` and compared with what the machine last
+handed over (the move's `continuesFrom`, or the previous recovery) and with the trees it already
+handed over. A difference is pushed and noted in the Thread (`recovered_changes`, a Thread-level
+item placed when it happened, with the ref, the machine and the tree); otherwise the local ref is
+deleted. A Thread that ran in the machine's shared checkout and moved while the machine was away
+gets a notice that changes may remain in that folder; the shared checkout is never read. Nothing
+the machine has is ever changed.
 
 ### Workspace RPCs
 

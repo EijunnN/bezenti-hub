@@ -43,6 +43,7 @@ import * as ProjectCheckouts from "../environment/ProjectCheckouts.ts";
 import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as EventSink from "./EventSink.ts";
+import { interruptRunsOnHub } from "./HubRunInterrupt.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
@@ -475,6 +476,12 @@ export const layer: Layer.Layer<
           if (Option.isSome(remote) && move.sourceEnvironmentId !== null) {
             yield* remote.value.abandonSessions(move.sourceEnvironmentId, threadId);
           }
+          // Whatever the Hub still knew of them (nothing, after a restart), the turn ends here.
+          yield* interruptRunsOnHub(orchestrator, {
+            threadId,
+            reason: `This turn was paused on ${yield* nameOf(move.sourceEnvironmentId)}, which was offline, and was stopped to move the Thread.`,
+            key: `${move.id}:offline-stop`,
+          });
         }
         if (move.ifRunning === "stop" && !stopped) {
           stopped = true;
@@ -843,7 +850,8 @@ export const layer: Layer.Layer<
           ref: move.continuesFrom?.ref ?? null,
           branch: thread.branch,
           knownWorktree: move.knownWorktrees?.[move.targetEnvironmentId] ?? null,
-          setAsidePrefix: HubRepository.threadRefPrefixes(thread.id)[1],
+          // A move keeps what it sets aside apart from the changes a machine hands back.
+          setAsidePrefix: `${HubRepository.threadRefPrefixes(thread.id)[1]}move/`,
           // A scratch workspace is the Thread's own folder: no worktree, no setup script.
           setupScript: scratch === undefined ? yield* setupScriptOf(thread) : null,
           ...(scratch === undefined ? {} : { scratch: true }),
