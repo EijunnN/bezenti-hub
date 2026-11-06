@@ -36,6 +36,9 @@ export type RpcSpaceAccess =
   | "work"
   | "owned"
   | "filtered"
+  // A named Thread is not hidden (reads) or is the User's work (writes); else filesystem scopes.
+  | "readIfThread"
+  | "workIfThread"
   | { readonly unscoped: string };
 
 const BY_DIRECTORY = { unscoped: "works on a directory, which filesystem scopes guard" };
@@ -92,6 +95,15 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.previewList]: "work",
   [WS_METHODS.previewReportStatus]: "work",
   [WS_METHODS.deviceOpen]: "work",
+  // Without a Thread these work on a directory, which filesystem scopes guard; with one they run
+  // on that Thread's Active environment, inside its workspace (ThreadWorkspace).
+  [WS_METHODS.projectsSearchEntries]: "readIfThread",
+  [WS_METHODS.projectsSearchContents]: "readIfThread",
+  [WS_METHODS.projectsListEntries]: "readIfThread",
+  [WS_METHODS.projectsListIgnoredFiles]: "readIfThread",
+  [WS_METHODS.projectsReadFile]: "readIfThread",
+  [WS_METHODS.filesystemBrowse]: "readIfThread",
+  [WS_METHODS.projectsWriteFile]: "workIfThread",
   [WS_METHODS.deviceClose]: "work",
   [WS_METHODS.gitRunStackedAction]: BY_DIRECTORY,
   [WS_METHODS.gitPreparePullRequestThread]: BY_DIRECTORY,
@@ -250,8 +262,10 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
   userId: UserId | undefined,
 ) {
   const access = spaceAccessForRpcMethod(method);
+  const namesThread = stringField(payload, "threadId") !== undefined;
+  if ((access === "readIfThread" || access === "workIfThread") && !namesThread) return;
   // Before the Owner's early return: the Owner's drafts are held too, so no one else works them.
-  if (access === "work") {
+  if (access === "work" || access === "workIfThread") {
     const threadId = stringField(payload, "threadId");
     if (threadId === undefined) return yield* notFound();
     const work = yield* spaceVisibility.claimWork(visibility, userId, threadId);
@@ -310,6 +324,15 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
     return yield* requireVisible(threads, idsUnder(payload, PROJECT_KEYS));
   }
   if (access === "project") return yield* requireVisible([], idsUnder(payload, PROJECT_KEYS));
+  if (access === "readIfThread") {
+    // A draft has no row yet and stays shown, as composer searches start before the Thread.
+    const hidden = yield* spaceVisibility.hiddenThreadIds(
+      visibility,
+      idsUnder(payload, THREAD_KEYS),
+    );
+    if (hidden.size > 0) return yield* notFound();
+    return;
+  }
   if (access === "named") {
     yield* requireVisible([], idsUnder(payload, PROJECT_KEYS));
     const hidden = yield* spaceVisibility.hiddenThreadIds(

@@ -70,6 +70,9 @@ export const make = Effect.gen(function* () {
 
   const contains: KnownWorkspaces["Service"]["contains"] = Effect.fn("KnownWorkspaces.contains")(
     function* (realPath) {
+      // A joined Environment registers no Projects: its Hub authorized the call and resolved the
+      // path inside the Thread's workspace (and already runs that Thread's terminals here).
+      if (config.joinedHub !== undefined) return true;
       const within = (root: string | null) => root !== null && isWithinRoot(path, realPath, root);
       const worktreeSettings = yield* settings.getSettings.pipe(
         Effect.orElseSucceed(() => ({ worktreesDirectory: "", previousWorktreesDirectories: [] })),

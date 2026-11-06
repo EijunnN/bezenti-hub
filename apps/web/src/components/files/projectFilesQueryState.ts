@@ -5,12 +5,14 @@ import {
   ProjectReadFileError,
   type ProjectReadFileResult,
   T3_PROJECT_FILE_NAME,
+  type ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { AsyncResult, Atom } from "effect/reactivity";
 
+import { useWorkspaceThreadId } from "~/hooks/useWorkspaceThreadId";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { useFilesystemReadAccess } from "~/state/filesystem";
 import { projectEnvironment } from "~/state/projects";
@@ -59,17 +61,24 @@ function getProjectEntriesQueryAtom(
   environmentId: EnvironmentId,
   cwd: string,
   directoryPath?: string,
+  threadId?: ThreadId,
 ) {
   return projectEnvironment.listEntries({
     environmentId,
-    input: { cwd, ...(directoryPath !== undefined ? { directoryPath } : {}) },
+    input: {
+      cwd,
+      ...(directoryPath !== undefined ? { directoryPath } : {}),
+      ...(threadId !== undefined ? { threadId } : {}),
+    },
   });
 }
 
+/** With a Thread, the read runs on that Thread's Active environment. */
 export function getProjectFileQueryAtom(
   environmentId: EnvironmentId,
   cwd: string,
   relativePath: string | null,
+  threadId?: ThreadId,
 ) {
   return projectEnvironment.readFile({
     environmentId,
@@ -77,6 +86,7 @@ export function getProjectFileQueryAtom(
       cwd,
       relativePath: relativePath ?? EMPTY_PROJECT_FILE_PATH,
       ...(relativePath === T3_PROJECT_FILE_NAME ? { allowMissing: true } : {}),
+      ...(threadId !== undefined ? { threadId } : {}),
     },
   });
 }
@@ -114,10 +124,13 @@ export function getProjectFileContents(
   environmentId: EnvironmentId,
   cwd: string,
   relativePath: string,
+  threadId?: ThreadId,
 ): string | undefined {
   const optimistic = getOptimisticProjectFileQueryData(environmentId, cwd, relativePath);
   if (optimistic) return optimistic.contents;
-  const result = appAtomRegistry.get(getProjectFileQueryAtom(environmentId, cwd, relativePath));
+  const result = appAtomRegistry.get(
+    getProjectFileQueryAtom(environmentId, cwd, relativePath, threadId),
+  );
   const data = Option.getOrUndefined(AsyncResult.value(result));
   return data?.exists === false ? undefined : data?.contents;
 }
@@ -136,12 +149,13 @@ export function confirmProjectFileQueryData(
   cwd: string,
   relativePath: string,
   contents: string,
+  threadId?: ThreadId,
 ): boolean {
   const atom = optimisticFileAtom(environmentId, cwd, relativePath);
   const optimisticFile = appAtomRegistry.get(atom);
   if (optimisticFile?.data.contents !== contents) return false;
 
-  const queryAtom = getProjectFileQueryAtom(environmentId, cwd, relativePath);
+  const queryAtom = getProjectFileQueryAtom(environmentId, cwd, relativePath, threadId);
   const confirmed = {
     ...optimisticFile,
     confirmedAgainst: appAtomRegistry.get(queryAtom),
@@ -200,8 +214,9 @@ export function useProjectEntriesQuery(
 ): ProjectQueryState<ProjectListEntriesResult> {
   const fileAccess = useFilesystemReadAccess(environmentId);
   const { canReadFiles } = fileAccess;
+  const threadId = useWorkspaceThreadId(environmentId);
   const atom = canReadFiles
-    ? getProjectEntriesQueryAtom(environmentId, cwd, directoryPath)
+    ? getProjectEntriesQueryAtom(environmentId, cwd, directoryPath, threadId)
     : EMPTY_PROJECT_ENTRIES_QUERY_ATOM;
   const result = useAtomValue(revisionedQuery(atom, canReadFiles ? revision : undefined));
   const refreshAtom = useAtomRefresh(atom);
@@ -255,10 +270,11 @@ export function useProjectFileQuery(
   // Read media-like paths too; a failed read is how folders with those names are detected.
   const fileAccess = useFilesystemReadAccess(environmentId);
   const { canReadFiles } = fileAccess;
+  const threadId = useWorkspaceThreadId(environmentId);
   const isQueryEnabled = enabled;
   const atom =
     enabled && canReadFiles
-      ? getProjectFileQueryAtom(environmentId, cwd, relativePath)
+      ? getProjectFileQueryAtom(environmentId, cwd, relativePath, threadId)
       : EMPTY_PROJECT_FILE_QUERY_ATOM;
   const result = useAtomValue(atom);
   const refreshAtom = useAtomRefresh(atom);

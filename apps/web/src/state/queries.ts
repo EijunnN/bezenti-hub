@@ -38,6 +38,7 @@ import { isPaginatedBranchesNextPagePending } from "./paginatedBranches";
 import { projectContentSearch, projectEnvironment } from "./projects";
 import { useEnvironmentQuery } from "./query";
 import { vcsEnvironment } from "./vcs";
+import { useWorkspaceThreadId } from "~/hooks/useWorkspaceThreadId";
 
 const PROJECT_PATH_SEARCH_DEBOUNCE_MS = 120;
 const COMPOSER_PATH_SEARCH_LIMIT = 80;
@@ -304,6 +305,7 @@ export function useProjectPathSearch(
   const debouncedTarget = useDebouncedValue(normalizedTarget, PROJECT_PATH_SEARCH_DEBOUNCE_MS);
   const fileAccess = useFilesystemReadAccess(debouncedTarget.environmentId);
   const { canReadFiles } = fileAccess;
+  const threadId = useWorkspaceThreadId(debouncedTarget.environmentId);
   const searchTarget =
     debouncedTarget.environmentId !== null &&
     debouncedTarget.cwd !== null &&
@@ -317,6 +319,7 @@ export function useProjectPathSearch(
             limit,
             ...(debouncedTarget.kind ? { kind: debouncedTarget.kind } : {}),
             ...(debouncedTarget.imageOnly ? { imageOnly: true } : {}),
+            ...(threadId === undefined ? {} : { threadId }),
           },
         }
       : null;
@@ -359,6 +362,7 @@ interface ProjectContentSearchTarget {
 export function useProjectContentSearch(target: ProjectContentSearchTarget) {
   const hasTarget = target.environmentId !== null && target.cwd !== null;
   const fileAccess = useFilesystemReadAccess(target.environmentId);
+  const threadId = useWorkspaceThreadId(target.environmentId);
   const canReadFiles = hasTarget && fileAccess.canReadFiles;
   const isCheckingAccess = hasTarget && fileAccess.isPending;
   // Preserve query whitespace; trim only to detect blank input.
@@ -380,6 +384,7 @@ export function useProjectContentSearch(target: ProjectContentSearchTarget) {
             caseSensitive: target.caseSensitive,
             wholeWord: target.wholeWord,
             useRegex: target.useRegex,
+            ...(threadId === undefined ? {} : { threadId }),
           },
         })
       : null,

@@ -1,5 +1,5 @@
 import * as Schema from "effect/Schema";
-import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 const FILESYSTEM_PATH_MAX_LENGTH = 512;
 
@@ -29,6 +29,8 @@ export type FilesystemGetMetadataResult = typeof FilesystemGetMetadataResult.Typ
 export const FilesystemBrowseInput = Schema.Struct({
   partialPath: TrimmedNonEmptyString.check(Schema.isMaxLength(FILESYSTEM_PATH_MAX_LENGTH)),
   cwd: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(FILESYSTEM_PATH_MAX_LENGTH))),
+  // The Thread whose Active environment to browse, inside its workspace there.
+  threadId: Schema.optional(ThreadId),
 });
 export type FilesystemBrowseInput = typeof FilesystemBrowseInput.Type;
 
@@ -48,6 +50,8 @@ export const FilesystemBrowseFailure = Schema.Literals([
   "windows_path_unsupported",
   "current_project_required",
   "read_directory_failed",
+  "environment_offline",
+  "outside_thread_workspace",
 ]);
 export type FilesystemBrowseFailure = typeof FilesystemBrowseFailure.Type;
 
@@ -75,6 +79,7 @@ export class FilesystemBrowseError extends Schema.TaggedError<FilesystemBrowseEr
     readonly failure: FilesystemBrowseFailure;
     readonly parentPath?: string;
     readonly platform?: string;
+    readonly message?: string;
     readonly cause?: unknown;
   }) {
     const cwd = props.cwd === undefined ? "" : ` from '${props.cwd}'`;

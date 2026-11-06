@@ -253,12 +253,19 @@ export class ProjectMutationError extends Schema.TaggedError<ProjectMutationErro
 export const ProjectEntryKind = Schema.Literals(["file", "directory"]);
 export type ProjectEntryKind = typeof ProjectEntryKind.Type;
 
+/**
+ * The Thread a workspace call is for. The Hub runs it on that Thread's Active environment, inside
+ * the Thread's workspace there; without one it runs on the Hub machine.
+ */
+const WorkspaceThreadScope = { threadId: Schema.optional(ThreadId) };
+
 export const ProjectSearchEntriesInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   query: TrimmedString.check(Schema.isMaxLength(256)),
   limit: PositiveInt.check(Schema.isLessThanOrEqualTo(PROJECT_SEARCH_ENTRIES_MAX_LIMIT)),
   kind: Schema.optional(ProjectEntryKind),
   imageOnly: Schema.optional(Schema.Boolean),
+  ...WorkspaceThreadScope,
 });
 export type ProjectSearchEntriesInput = typeof ProjectSearchEntriesInput.Type;
 
@@ -283,6 +290,7 @@ export const ProjectSearchContentsInput = Schema.Struct({
   caseSensitive: Schema.Boolean,
   wholeWord: Schema.Boolean,
   useRegex: Schema.Boolean,
+  ...WorkspaceThreadScope,
 });
 export type ProjectSearchContentsInput = typeof ProjectSearchContentsInput.Type;
 
@@ -310,6 +318,7 @@ export type ProjectSearchContentsResult = typeof ProjectSearchContentsResult.Typ
 export const ProjectListEntriesInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   directoryPath: Schema.optional(TrimmedString),
+  ...WorkspaceThreadScope,
 });
 export type ProjectListEntriesInput = typeof ProjectListEntriesInput.Type;
 
@@ -323,6 +332,7 @@ export type ProjectListEntriesResult = typeof ProjectListEntriesResult.Type;
 // are left out, so the list stays small enough to pick from.
 export const ProjectListIgnoredFilesInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
+  ...WorkspaceThreadScope,
 });
 export type ProjectListIgnoredFilesInput = typeof ProjectListIgnoredFilesInput.Type;
 
@@ -347,6 +357,10 @@ export const ProjectEntriesFailure = Schema.Literals([
   "search_index_scan_timed_out",
   "search_index_search_failed",
   "directory_list_failed",
+  // The Thread's Active environment is not connected.
+  "environment_offline",
+  // The call named a Thread and a folder outside that Thread's workspace.
+  "outside_thread_workspace",
 ]);
 export type ProjectEntriesFailure = typeof ProjectEntriesFailure.Type;
 
@@ -355,6 +369,7 @@ type ProjectEntriesFailureContext = {
   readonly normalizedCwd?: string;
   readonly timeout?: string;
   readonly detail?: string;
+  readonly message?: string;
   readonly cause?: unknown;
 };
 
@@ -453,6 +468,7 @@ export const ProjectReadFileInput = Schema.Struct({
   relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_READ_FILE_PATH_MAX_LENGTH)),
   // Optional files can be absent without failing the read.
   allowMissing: Schema.optional(Schema.Boolean),
+  ...WorkspaceThreadScope,
 });
 export type ProjectReadFileInput = typeof ProjectReadFileInput.Type;
 
@@ -472,6 +488,8 @@ export const ProjectFileFailure = Schema.Literals([
   "path_not_file",
   "binary_file",
   "operation_failed",
+  // The Thread's Active environment is not connected; nothing was read or written.
+  "environment_offline",
 ]);
 export type ProjectFileFailure = typeof ProjectFileFailure.Type;
 
@@ -495,6 +513,7 @@ type ProjectFileFailureContext = {
   readonly resolvedWorkspaceRoot?: string;
   readonly operation?: ProjectFileOperation;
   readonly operationPath?: string;
+  readonly message?: string;
   readonly cause?: unknown;
 };
 
@@ -527,6 +546,7 @@ export const ProjectWriteFileInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH)),
   contents: Schema.String,
+  ...WorkspaceThreadScope,
 });
 export type ProjectWriteFileInput = typeof ProjectWriteFileInput.Type;
 

@@ -451,6 +451,11 @@ New worktrees can't be made on a joined machine yet, so start such Threads in
 the Project's checkout. Each machine uses the provider sign-ins it already has.
 **Settings → Environments** counts the Threads running on each machine.
 
+A Thread's terminals, its Files panel, file search and previews open on the
+machine it runs on, in that machine's copy of the Project. When the machine is
+off they say **Environment offline** instead; nothing you type or save is kept
+for later, so start the machine and try again.
+
 ## Next steps
 
 - [Working with threads](./thread-sidebar.md): start tasks and organize parallel work.

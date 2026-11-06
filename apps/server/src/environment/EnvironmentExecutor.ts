@@ -43,6 +43,7 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
 import * as ProjectCheckouts from "./ProjectCheckouts.ts";
+import type * as RemoteExecutorWire from "./RemoteExecutorWire.ts";
 import { locateInCheckout } from "./WorkspaceLocation.ts";
 
 export { EnvironmentExecutorUnavailableError } from "@t3tools/contracts";
@@ -80,6 +81,29 @@ export interface EnvironmentWorkspaceRpc {
   readonly ports: PortScanner.PortDiscovery["Service"];
 }
 
+/**
+ * Workspace calls carried to a joined Environment, with paths already resolved onto it. A call
+ * never waits for a dropped socket: the machine being offline fails it at once, so nothing a User
+ * types or saves is kept to run later.
+ */
+export interface EnvironmentWorkspaceForward {
+  readonly call: <O extends RemoteExecutorWire.RemoteOperation>(
+    operation: O,
+    input: RemoteExecutorWire.RemoteInput<O>,
+  ) => Effect.Effect<
+    RemoteExecutorWire.RemoteOutput<O>,
+    RemoteExecutorWire.RemoteError<O> | EnvironmentExecutorUnavailableError
+  >;
+  /** Live only: a dropped socket ends it with `EnvironmentExecutorUnavailableError`. */
+  readonly stream: <O extends RemoteExecutorWire.RemoteStreamOperation>(
+    operation: O,
+    input: Omit<RemoteExecutorWire.RemoteInput<O>, "subscriptionId">,
+  ) => Stream.Stream<
+    RemoteExecutorWire.RemoteStreamItem<O>,
+    RemoteExecutorWire.RemoteError<O> | EnvironmentExecutorUnavailableError
+  >;
+}
+
 export interface EnvironmentExecutor {
   readonly environmentId: EnvironmentId;
   readonly transport: EnvironmentExecutorTransport;
@@ -99,6 +123,8 @@ export interface EnvironmentExecutor {
     readonly runtimePolicy: RuntimePolicy.RuntimePolicyV2Shape;
     /** None where the server runs without the RPC services (orchestration-only tests). */
     readonly rpc: Option.Option<EnvironmentWorkspaceRpc>;
+    /** A joined Environment's workspace RPCs, over its socket; none in process. */
+    readonly forward: Option.Option<EnvironmentWorkspaceForward>;
   };
   readonly host: {
     /** Host resources and provider capabilities, as published in a hello or heartbeat. */
@@ -343,6 +369,7 @@ const makeInProcessExecutor = (input: InProcessExecutorInput): EnvironmentExecut
     checkpoints: input.checkpoints,
     runtimePolicy: input.runtimePolicy,
     rpc: input.rpc,
+    forward: Option.none(),
   },
   host: {
     describe: Effect.gen(function* () {
@@ -576,7 +603,7 @@ export const layerProviderAdapterRegistry: Layer.Layer<
  * form, the stored one when it matches the recorded path, else one computed against the Hub
  * machine's checkout. Null keeps the executor's own checkout of the Project.
  */
-const worktreeOn = Effect.fn("EnvironmentExecutor.worktreeOn")(function* (
+export const worktreeOn = Effect.fn("EnvironmentExecutor.worktreeOn")(function* (
   registry: EnvironmentExecutorRegistryShape,
   checkouts: ProjectCheckouts.ProjectCheckouts["Service"],
   executor: EnvironmentExecutor,

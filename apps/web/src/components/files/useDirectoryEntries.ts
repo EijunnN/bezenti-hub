@@ -5,10 +5,12 @@ import * as Cause from "effect/Cause";
 import { useEffect, useRef, useState } from "react";
 
 import { environmentCatalog } from "~/connection/catalog";
+import { useWorkspaceThreadId } from "~/hooks/useWorkspaceThreadId";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { projectEnvironment } from "~/state/projects";
 
 export function useDirectoryEntries(environmentId: EnvironmentId, cwd: string) {
+  const threadId = useWorkspaceThreadId(environmentId);
   const [directories, setDirectories] = useState(new Map<string, readonly ProjectEntry[]>());
   const [errors, setErrors] = useState(new Map<string, string>());
   const [pending, setPending] = useState(1);
@@ -26,7 +28,10 @@ export function useDirectoryEntries(environmentId: EnvironmentId, cwd: string) {
   const startRequest = (directoryPath: string, refresh: boolean): Promise<void> => {
     loaded.current.add(directoryPath);
     requested.current.add(directoryPath);
-    const atom = projectEnvironment.listEntries({ environmentId, input: { cwd, directoryPath } });
+    const atom = projectEnvironment.listEntries({
+      environmentId,
+      input: { cwd, directoryPath, ...(threadId === undefined ? {} : { threadId }) },
+    });
     const request = (async () => {
       if (running.current >= 4) await new Promise<void>((resolve) => waiting.current.push(resolve));
       else running.current++;

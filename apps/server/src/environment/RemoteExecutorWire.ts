@@ -8,7 +8,46 @@ import {
   CheckpointId,
   CheckpointRef,
   EnvironmentExecutorUnavailableError,
+  FilesystemBrowseError,
+  FilesystemBrowseInput,
+  FilesystemBrowseResult,
   ModelSelection,
+  PreviewAdjustInput,
+  PreviewCloseInput,
+  PreviewError,
+  PreviewEvent,
+  PreviewListInput,
+  PreviewListResult,
+  PreviewOpenInput,
+  PreviewReportStatusInput,
+  PreviewResizeInput,
+  PreviewSessionSnapshot,
+  ProjectListEntriesError,
+  ProjectListEntriesInput,
+  ProjectListEntriesResult,
+  ProjectListIgnoredFilesInput,
+  ProjectListIgnoredFilesResult,
+  ProjectReadFileError,
+  ProjectReadFileInput,
+  ProjectReadFileResult,
+  ProjectSearchContentsError,
+  ProjectSearchContentsInput,
+  ProjectSearchContentsResult,
+  ProjectSearchEntriesError,
+  ProjectSearchEntriesInput,
+  ProjectSearchEntriesResult,
+  ProjectWriteFileError,
+  ProjectWriteFileInput,
+  ProjectWriteFileResult,
+  TerminalAttachInput,
+  TerminalAttachStreamEvent,
+  TerminalClearInput,
+  TerminalCloseInput,
+  TerminalError,
+  TerminalOpenInput,
+  TerminalResizeInput,
+  TerminalSessionSnapshot,
+  TerminalWriteInput,
   NodeId,
   OrchestrationV2AppThread,
   OrchestrationV2ConversationMessage,
@@ -157,6 +196,12 @@ const checkpoint = <I extends Schema.Top, O extends Schema.Top>(input: I, output
   output,
   error: Schema.Union([VcsError, EnvironmentExecutorUnavailableError]),
 });
+
+const workspace = <I extends Schema.Top, O extends Schema.Top, E extends Schema.Top>(
+  input: I,
+  output: O,
+  error: E,
+) => ({ input, output, error });
 
 const DiffInput = Schema.Struct({
   cwd: Schema.String,
@@ -313,7 +358,73 @@ export const REMOTE_OPERATIONS = {
     Schema.Struct({ cwd: Schema.String, checkpointRefs: Schema.Array(CheckpointRef) }),
     Schema.Void,
   ),
+  // Workspace calls carry paths already resolved onto the machine and the contract's own errors,
+  // so the Hub hands a machine's answer to the client as it came.
+  "files.read": workspace(ProjectReadFileInput, ProjectReadFileResult, ProjectReadFileError),
+  "files.write": workspace(ProjectWriteFileInput, ProjectWriteFileResult, ProjectWriteFileError),
+  "search.paths": workspace(
+    ProjectSearchEntriesInput,
+    ProjectSearchEntriesResult,
+    ProjectSearchEntriesError,
+  ),
+  "search.contents": workspace(
+    ProjectSearchContentsInput,
+    ProjectSearchContentsResult,
+    ProjectSearchContentsError,
+  ),
+  "entries.list": workspace(
+    ProjectListEntriesInput,
+    ProjectListEntriesResult,
+    ProjectListEntriesError,
+  ),
+  "entries.listIgnored": workspace(
+    ProjectListIgnoredFilesInput,
+    ProjectListIgnoredFilesResult,
+    ProjectListEntriesError,
+  ),
+  "entries.browse": workspace(FilesystemBrowseInput, FilesystemBrowseResult, FilesystemBrowseError),
+  "terminal.open": workspace(TerminalOpenInput, TerminalSessionSnapshot, TerminalError),
+  "terminal.write": workspace(TerminalWriteInput, Schema.Void, TerminalError),
+  "terminal.resize": workspace(
+    Schema.Struct({ input: TerminalResizeInput, viewerId: Schema.optionalKey(Schema.String) }),
+    Schema.Void,
+    TerminalError,
+  ),
+  "terminal.clear": workspace(TerminalClearInput, Schema.Void, TerminalError),
+  "terminal.close": workspace(TerminalCloseInput, Schema.Void, TerminalError),
+  /** Opens a stream of `TerminalAttachStreamEvent`s; its items come as `workspace.stream` frames. */
+  "terminal.stream": workspace(
+    Schema.Struct({
+      subscriptionId: Schema.String,
+      mode: Schema.Literals(["attach", "observe"]),
+      input: TerminalAttachInput,
+      viewerId: Schema.optionalKey(Schema.String),
+    }),
+    Schema.Void,
+    TerminalError,
+  ),
+  "preview.open": workspace(PreviewOpenInput, PreviewSessionSnapshot, PreviewError),
+  "preview.resize": workspace(PreviewResizeInput, PreviewSessionSnapshot, PreviewError),
+  "preview.adjust": workspace(PreviewAdjustInput, PreviewSessionSnapshot, PreviewError),
+  "preview.close": workspace(PreviewCloseInput, Schema.Void, PreviewError),
+  "preview.list": workspace(PreviewListInput, PreviewListResult, PreviewError),
+  "preview.reportStatus": workspace(PreviewReportStatusInput, Schema.Void, PreviewError),
+  /** Opens the machine's stream of `PreviewEvent`s, every Thread's, while its socket lives. */
+  "preview.events": workspace(
+    Schema.Struct({ subscriptionId: Schema.String }),
+    Schema.Void,
+    PreviewError,
+  ),
 } as const;
+
+/** The item each stream-opening operation streams, in its JSON codec. */
+export const REMOTE_STREAM_ITEMS = {
+  "terminal.stream": TerminalAttachStreamEvent,
+  "preview.events": PreviewEvent,
+} as const;
+export type RemoteStreamOperation = keyof typeof REMOTE_STREAM_ITEMS;
+export type RemoteStreamItem<O extends RemoteStreamOperation> =
+  (typeof REMOTE_STREAM_ITEMS)[O]["Type"];
 
 export type RemoteOperation = keyof typeof REMOTE_OPERATIONS;
 export type RemoteInput<O extends RemoteOperation> = (typeof REMOTE_OPERATIONS)[O]["input"]["Type"];

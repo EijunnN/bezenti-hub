@@ -49,6 +49,15 @@ import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import * as PreviewManager from "../preview/Manager.ts";
+import * as PortScanner from "../preview/PortScanner.ts";
+import * as ProcessRunner from "../processRunner.ts";
+import * as TerminalManager from "../terminal/Manager.ts";
+import * as KnownWorkspaces from "../workspace/KnownWorkspaces.ts";
+import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
+import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
+import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import type * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 import type { HubServices, Server } from "../auth/UserAuth.testkit.ts";
 import * as EnvironmentAgent from "./EnvironmentAgent.ts";
 import { joinMachine, hubWithOwner } from "./environments.testkit.ts";
@@ -70,6 +79,59 @@ const layerNoProviders = Layer.succeed(ProviderInstanceRegistry.ProviderInstance
   streamChanges: Effect.never as never,
   subscribeChanges: Effect.never,
 } as unknown as ProviderInstanceRegistry.ProviderInstanceRegistry["Service"]);
+
+/**
+ * A shell that answers each line typed with the folder it started in, as `pwd` would, so a test
+ * sees which machine and folder a terminal runs in without a real shell.
+ */
+const echoingPty: PtyAdapter.PtyAdapter["Service"] = {
+  spawn: (input) =>
+    Effect.sync(() => {
+      const listeners = new Set<(data: string) => void>();
+      return {
+        pid: 4242,
+        write: (data: string) => {
+          for (const listener of listeners) listener(`${input.cwd}\r\n`);
+          void data;
+        },
+        resize: () => undefined,
+        kill: () => undefined,
+        onData: (callback: (data: string) => void) => {
+          listeners.add(callback);
+          return () => listeners.delete(callback);
+        },
+        onExit: () => () => undefined,
+      } satisfies PtyAdapter.PtyProcess;
+    }),
+};
+
+/**
+ * The workspace services a joined machine answers files, search and terminals with. Its Hub
+ * resolved every path, so any workspace is known here, as in joined mode.
+ */
+const layerMachineWorkspace = Layer.mergeAll(
+  WorkspaceFileSystem.layer.pipe(
+    Layer.provide(
+      Layer.succeed(KnownWorkspaces.KnownWorkspaces, {
+        contains: () => Effect.succeed(true),
+        assertContains: () => Effect.void,
+      }),
+    ),
+  ),
+  Layer.effect(
+    TerminalManager.TerminalManager,
+    Effect.flatMap(ServerConfig.ServerConfig, (config) =>
+      TerminalManager.makeWithOptions({
+        logsDir: config.terminalLogsDir,
+        ptyAdapter: echoingPty,
+        processKillGraceMs: 1,
+        subprocessPollIntervalMs: 60_000,
+      }),
+    ),
+  ).pipe(Layer.provide(ProcessRunner.layer)),
+  PreviewManager.layer,
+  Layer.mock(PortScanner.PortDiscovery)({ trackAgent: () => () => undefined }),
+).pipe(Layer.provideMerge(WorkspaceEntries.layer), Layer.provideMerge(WorkspacePaths.layer));
 
 const layerCheckpoints = CheckpointStore.layer.pipe(
   Layer.provide(VcsDriverRegistry.layer),
@@ -119,6 +181,8 @@ export interface TestEnvironment {
   readonly mcpConfigs: ReadonlyArray<McpProviderSessionConfig>;
   /** Where this machine keeps Project checkouts (`<T3 home>/projects`). */
   readonly workspaceRoot: string;
+  /** The method of each request the Hub sent this machine, in order. */
+  readonly requests: ReadonlyArray<string>;
   /** Opens a socket to the Hub; succeeds once the Hub welcomed it. */
   readonly connect: Effect.Effect<void>;
   /** Drops the socket. The machine keeps running: its sessions and unacknowledged events stay. */
@@ -141,6 +205,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
 }) {
   const scope = yield* Effect.scope;
   const mcpConfigs: Array<McpProviderSessionConfig> = [];
+  const requests: Array<string> = [];
   const layerRecordingMcp = Layer.effect(
     McpProviderSessions.McpProviderSessions,
     Effect.map(McpProviderSessions.McpProviderSessions, (sessions) => ({
@@ -156,6 +221,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
         layerCheckpoints,
         layerNoProviders,
         ProjectStore.layer,
+        layerMachineWorkspace,
       ),
     ),
     Layer.provideMerge(layerRecordingMcp),
@@ -209,7 +275,16 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
       hello,
       heartbeat,
       onWelcome: () => Deferred.succeed(welcomed, undefined).pipe(Effect.asVoid),
-      serve: agent.attach,
+      serve: (write) =>
+        Effect.map(agent.attach(write), (served) => ({
+          receive: (frame: unknown) => {
+            const request = frame as { readonly type?: unknown; readonly method?: unknown };
+            if (request.type === "request" && typeof request.method === "string") {
+              requests.push(request.method);
+            }
+            return served.receive(frame);
+          },
+        })),
     }).pipe(Effect.forkIn(scope));
     yield* Deferred.await(welcomed);
   });
@@ -224,6 +299,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
     name: input.name,
     mcpConfigs,
     workspaceRoot: (yield* report).workspaceRoot,
+    requests,
     connect,
     disconnect,
   } satisfies TestEnvironment;
@@ -331,7 +407,8 @@ const encodeCapabilities = Schema.encodeSync(
 
 /**
  * A machine that speaks the protocol by hand, attached to the Hub's side of it in process: tests
- * see each frame the Hub sends and choose each one it receives. It answers `provider.detach`.
+ * see each frame the Hub sends and choose each one it receives. It answers `provider.detach` and
+ * `preview.events`.
  */
 export const connectProtocolEnvironment = Effect.fn("HubWithEnvironments.connectProtocol")(
   function* (
@@ -388,7 +465,11 @@ export const connectProtocolEnvironment = Effect.fn("HubWithEnvironments.connect
         },
         write: (text) => {
           const frame = JSON.parse(text) as Record<string, unknown>;
-          if (frame.type === "request" && frame.method === "provider.detach") {
+          // It answers detaching sessions and opening its (empty) preview event stream.
+          if (
+            frame.type === "request" &&
+            (frame.method === "provider.detach" || frame.method === "preview.events")
+          ) {
             return receive({
               type: "response",
               requestId: frame.requestId,

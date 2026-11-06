@@ -1,6 +1,7 @@
 import { ThreadId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -8,6 +9,7 @@ import * as Schema from "effect/Schema";
 import { resolveAttachmentRelativePath } from "../attachmentPaths.ts";
 import { parseAttachmentFileExtension, resolveAttachmentPathById } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
+import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as PreviewManager from "../preview/Manager.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
@@ -46,6 +48,30 @@ export const layer = Layer.effect(
     const fileSystem = yield* FileSystem.FileSystem;
     const config = yield* ServerConfig.ServerConfig;
     const scheduledTasks = yield* ScheduledTaskService.ScheduledTaskService;
+    const executors = yield* Effect.serviceOption(EnvironmentExecutor.EnvironmentExecutorRegistry);
+    // A Thread on a joined Environment keeps its terminals and previews there; the effect runs
+    // while it is online.
+    const onRemote = (
+      threadId: string,
+      close: (
+        forward: EnvironmentExecutor.EnvironmentWorkspaceForward,
+      ) => Effect.Effect<void, unknown>,
+    ) =>
+      Option.match(executors, {
+        onNone: () => Effect.void,
+        onSome: (registry) =>
+          Effect.option(registry.forThread(ThreadId.make(threadId))).pipe(
+            Effect.flatMap((executor) =>
+              Option.match(
+                Option.flatMap(executor, (found) => found.workspace.forward),
+                {
+                  onNone: () => Effect.void,
+                  onSome: close,
+                },
+              ),
+            ),
+          ),
+      });
     return {
       cleanupScheduledTasks: Effect.fn("ResourceCleanupService.cleanupScheduledTasks")(function (
         threadId: ThreadId,
@@ -62,24 +88,30 @@ export const layer = Layer.effect(
       cleanupTerminals: Effect.fn("ResourceCleanupService.cleanupTerminals")(function (
         threadId: string,
       ) {
-        return terminals
-          .close({ threadId, deleteHistory: true })
-          .pipe(
-            Effect.mapError(
-              (cause) => new ResourceCleanupError({ operation: "terminal", threadId, cause }),
+        return terminals.close({ threadId, deleteHistory: true }).pipe(
+          Effect.andThen(
+            onRemote(threadId, (forward) =>
+              forward.call("terminal.close", { threadId, deleteHistory: true }),
             ),
-          );
+          ),
+          Effect.mapError(
+            (cause) => new ResourceCleanupError({ operation: "terminal", threadId, cause }),
+          ),
+        );
       }),
       cleanupPreviews: Effect.fn("ResourceCleanupService.cleanupPreviews")(function (
         threadId: string,
       ) {
-        return previews
-          .close({ threadId: ThreadId.make(threadId) })
-          .pipe(
-            Effect.mapError(
-              (cause) => new ResourceCleanupError({ operation: "preview", threadId, cause }),
+        return previews.close({ threadId: ThreadId.make(threadId) }).pipe(
+          Effect.andThen(
+            onRemote(threadId, (forward) =>
+              forward.call("preview.close", { threadId: ThreadId.make(threadId) }),
             ),
-          );
+          ),
+          Effect.mapError(
+            (cause) => new ResourceCleanupError({ operation: "preview", threadId, cause }),
+          ),
+        );
       }),
       cleanupAttachments: Effect.fn("ResourceCleanupService.cleanupAttachments")(function (
         attachmentIds: ReadonlyArray<string>,

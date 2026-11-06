@@ -119,6 +119,7 @@ import {
   workspaceAssetResource,
 } from "./filePreviewMode";
 import { changeFileSaveSession, useFileSaveSession } from "./fileSaveSessions";
+import { useWorkspaceThreadId } from "~/hooks/useWorkspaceThreadId";
 import { revisionedQuery } from "~/state/revisionedQuery";
 import {
   getOptimisticProjectFileQueryData,
@@ -689,7 +690,8 @@ function EditableFileSurface({
   };
   const surfaceRef = useRef<HTMLDivElement>(null);
   const selectionFrameRef = useRef<number | null>(null);
-  const saveTarget = { environmentId, cwd, relativePath };
+  const threadId = useWorkspaceThreadId(environmentId);
+  const saveTarget = { environmentId, cwd, relativePath, threadId };
   useFileSaveSession(saveTarget, onPendingChange);
   // Retain file identity for echoed editor changes; only external changes replace the editor's draft.
   const [externalFile, setExternalFile] = useState(() =>
@@ -716,7 +718,9 @@ function EditableFileSurface({
     file,
     lineAnnotations: nextLineAnnotations,
   }: EditorChangeEvent<"file", FileCommentAnnotationGroup, undefined>) => {
-    if (file.contents === getProjectFileContents(environmentId, cwd, relativePath)) return;
+    if (file.contents === getProjectFileContents(environmentId, cwd, relativePath, threadId)) {
+      return;
+    }
     setEditedContents(file.contents);
     setProjectFileQueryData(environmentId, cwd, relativePath, file.contents);
     changeFileSaveSession(saveTarget, file.contents);
@@ -937,7 +941,8 @@ function RenderedMarkdownSurface({
   readOnly: boolean;
   workspaceMutationId: string | null;
 }) {
-  const saveTarget = { environmentId, cwd, relativePath };
+  const threadId = useWorkspaceThreadId(environmentId);
+  const saveTarget = { environmentId, cwd, relativePath, threadId };
   useFileSaveSession(saveTarget, onPendingChange);
 
   return (
@@ -1040,6 +1045,7 @@ export default function FilePreviewPanel({
   const fileAccess = useFilesystemReadAccess(environmentId);
   const { canReadFiles } = fileAccess;
   const canWriteFiles = useEnvironmentScope(environmentId, AuthFilesystemWriteScope);
+  const workspaceThreadId = useWorkspaceThreadId(environmentId);
   const file = useProjectFileQuery(
     environmentId,
     cwd,
@@ -1174,7 +1180,7 @@ export default function FilePreviewPanel({
       (isFolder || (!isMedia && !isPdf && !isDocument)) &&
       !selectedFilePending
       ? revisionedQuery(
-          getProjectFileQueryAtom(environmentId, cwd, relativePath),
+          getProjectFileQueryAtom(environmentId, cwd, relativePath, workspaceThreadId),
           workspaceMutationId,
         )
       : NO_FILE_REVISION_ATOM,

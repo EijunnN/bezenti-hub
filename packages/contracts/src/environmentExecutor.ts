@@ -19,7 +19,7 @@ import {
   EnvironmentUnavailableProvider,
 } from "./environmentConnection.ts";
 
-export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 2;
+export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 3;
 
 /**
  * The Hub machine's Environment id. It is a constant so the `environments` table can seed the
@@ -89,6 +89,8 @@ const ENVIRONMENT_EXECUTOR_OPERATIONS = {
     "preview.resize",
     "preview.adjust",
     "preview.close",
+    "preview.list",
+    "preview.reportStatus",
     "preview.events",
     "ports.scan",
     "ports.stopServer",
@@ -202,4 +204,31 @@ export const ENVIRONMENT_EXECUTOR_FRAME_METHODS = {
   ack: "provider.ack",
   retired: "provider.retired",
   attachmentRead: "attachment.read",
+  workspaceStreamItem: "workspace.stream",
+  workspaceStreamEnd: "workspace.streamEnd",
+  workspaceStreamCancel: "workspace.streamCancel",
 } as const;
+
+/**
+ * Environment → Hub (frame method `workspace.stream`): one item of a stream the Hub opened with a
+ * workspace request (`terminal.stream`, `preview.events`). Live only: never spooled or resent; a
+ * dropped socket ends the stream on the Hub, and the client opens it again.
+ */
+export const EnvironmentWorkspaceStreamItem = Schema.Struct({
+  subscriptionId: TrimmedNonEmptyString,
+  item: Schema.Unknown,
+});
+export type EnvironmentWorkspaceStreamItem = typeof EnvironmentWorkspaceStreamItem.Type;
+
+/** Environment → Hub (`workspace.streamEnd`): the stream ended there, with its error if it failed. */
+export const EnvironmentWorkspaceStreamEnd = Schema.Struct({
+  subscriptionId: TrimmedNonEmptyString,
+  error: Schema.optionalKey(Schema.Unknown),
+});
+export type EnvironmentWorkspaceStreamEnd = typeof EnvironmentWorkspaceStreamEnd.Type;
+
+/** Hub → Environment (`workspace.streamCancel`): nobody reads the stream any more. */
+export const EnvironmentWorkspaceStreamCancel = Schema.Struct({
+  subscriptionId: TrimmedNonEmptyString,
+});
+export type EnvironmentWorkspaceStreamCancel = typeof EnvironmentWorkspaceStreamCancel.Type;

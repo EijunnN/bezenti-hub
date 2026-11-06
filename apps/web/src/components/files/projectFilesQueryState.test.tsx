@@ -89,6 +89,9 @@ vi.mock("react", async (importOriginal) => {
   };
 });
 
+// Outside a Thread: hooks are called without rendering, so no context is read.
+vi.mock("~/hooks/useWorkspaceThreadId", () => ({ useWorkspaceThreadId: () => undefined }));
+
 vi.mock("~/state/projects", () => ({
   projectEnvironment: projectMocks,
 }));

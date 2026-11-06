@@ -16,6 +16,7 @@ import { ScrollArea } from "../ui/scroll-area";
 import { Toggle } from "../ui/toggle";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { HighlightedSearchLine } from "./HighlightedSearchLine";
+import { FileMetadataThreadContext } from "~/hooks/FileMetadataThreadProvider";
 
 interface ProjectContentSearchDialogProps {
   readonly onOpenChange: (open: boolean) => void;
@@ -317,12 +318,15 @@ function OpenContentSearchDialog(props: {
 export function ProjectContentSearchDialog(props: ProjectContentSearchDialogProps) {
   const target = useActiveProjectTarget();
 
+  // The active Thread's files: the Hub searches them on its Active environment.
   return target ? (
-    <OpenContentSearchDialog
-      key={`${target.environmentId}:${target.cwd}`}
-      onOpenChange={props.onOpenChange}
-      target={target}
-    />
+    <FileMetadataThreadContext value={target.threadRef}>
+      <OpenContentSearchDialog
+        key={`${target.environmentId}:${target.cwd}`}
+        onOpenChange={props.onOpenChange}
+        target={target}
+      />
+    </FileMetadataThreadContext>
   ) : (
     <EmptyContentSearchDialog />
   );

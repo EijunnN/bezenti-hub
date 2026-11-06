@@ -12,6 +12,7 @@ import {
   type ChatAttachment,
   ENVIRONMENT_EXECUTOR_FRAME_METHODS,
   EnvironmentAttachmentReadResult,
+  EnvironmentWorkspaceStreamCancel,
   EnvironmentExecutorEventAck,
   EnvironmentExecutorRetiredSessions,
   type EnvironmentId,
@@ -48,12 +49,16 @@ import {
   isRemoteOperation,
   ProviderEventJson,
   REMOTE_OPERATIONS,
+  REMOTE_STREAM_ITEMS,
   type RemoteInput,
   type RemoteOperation,
+  type RemoteStreamOperation,
   type WireAttachmentRef,
   type WireCheckout,
 } from "../environment/RemoteExecutorWire.ts";
+import { terminalOutputStream } from "../terminal/OutputProtocol.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { makeWorkspaceRpcCalls } from "../workspace/WorkspaceRpcCalls.ts";
 
 /** Calls answered, by idempotency key, so a resend gets the first answer instead of a rerun. */
 const IDEMPOTENCY_MEMORY = 512;
@@ -108,6 +113,7 @@ const codec = (schema: Schema.Top) => Schema.toCodecJson(schema as Schema.Codec<
 const decodeAck = Schema.decodeUnknownOption(EnvironmentExecutorEventAck);
 const decodeRetired = Schema.decodeUnknownOption(EnvironmentExecutorRetiredSessions);
 const decodeAttachment = Schema.decodeUnknownOption(EnvironmentAttachmentReadResult);
+const decodeStreamCancel = Schema.decodeUnknownOption(EnvironmentWorkspaceStreamCancel);
 const encodeEvent = Schema.encodeUnknownEffect(ProviderEventJson);
 
 export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
@@ -132,6 +138,19 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
     { readonly answer: Deferred.Deferred<ExecutorCallResult>; settled: boolean }
   >();
   let channel: ExecutorChannel | undefined;
+  /** The Hub's open workspace streams, each on the socket that opened it. */
+  const workspaceStreams = new Map<
+    string,
+    { readonly channel: ExecutorChannel; readonly scope: Scope.Closeable }
+  >();
+  // The joined server always has the workspace services; an executor without them answers none.
+  const workspaceRpc = Effect.suspend(() =>
+    Option.match(local.workspace.rpc, {
+      onSome: Effect.succeed,
+      onNone: () => Effect.die(new Error("This machine has no workspace services.")),
+    }),
+  );
+  const workspaceCalls = Effect.map(workspaceRpc, makeWorkspaceRpcCalls);
 
   const sha256Hex = (bytes: Uint8Array) =>
     digester.digest(Digest.sha256, bytes).pipe(
@@ -383,6 +402,85 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
     return { providerSession: runtime.providerSession, features: session.features };
   });
 
+  const closeWorkspaceStream = (subscriptionId: string) =>
+    Effect.suspend(() => {
+      const open = workspaceStreams.get(subscriptionId);
+      if (open === undefined) return Effect.void;
+      workspaceStreams.delete(subscriptionId);
+      return Scope.close(open.scope, Exit.void);
+    });
+
+  /**
+   * Streams `events` to the Hub as `workspace.stream` frames on the socket that asked. Live only:
+   * it ends with that socket, and with the Hub's `workspace.streamCancel`.
+   */
+  const openWorkspaceStream = Effect.fn("EnvironmentAgent.openWorkspaceStream")(function* <A, E>(
+    operation: RemoteStreamOperation,
+    subscriptionId: string,
+    events: Stream.Stream<A, E>,
+  ) {
+    const asked = channel;
+    if (asked === undefined) return;
+    yield* closeWorkspaceStream(subscriptionId);
+    const scope = yield* Scope.fork(agentScope);
+    workspaceStreams.set(subscriptionId, { channel: asked, scope });
+    const end = (error?: unknown) =>
+      Effect.suspend(() => {
+        if (workspaceStreams.get(subscriptionId)?.scope !== scope) return Effect.void;
+        workspaceStreams.delete(subscriptionId);
+        return asked.event(ENVIRONMENT_EXECUTOR_FRAME_METHODS.workspaceStreamEnd, {
+          subscriptionId,
+          ...(error === undefined ? {} : { error }),
+        });
+      });
+    const encodeItem = Schema.encodeUnknownEffect(codec(REMOTE_STREAM_ITEMS[operation]));
+    yield* events.pipe(
+      Stream.runForEach((event) =>
+        encodeItem(event).pipe(
+          Effect.orDie,
+          Effect.flatMap((item) =>
+            asked.event(ENVIRONMENT_EXECUTOR_FRAME_METHODS.workspaceStreamItem, {
+              subscriptionId,
+              item,
+            }),
+          ),
+        ),
+      ),
+      Effect.exit,
+      Effect.flatMap((exit) => {
+        if (Exit.isSuccess(exit)) return end();
+        const failure = Cause.findErrorOption(exit.cause);
+        return Option.isNone(failure)
+          ? end()
+          : Schema.encodeUnknownEffect(codec(REMOTE_OPERATIONS[operation].error))(
+              failure.value,
+            ).pipe(
+              Effect.option,
+              Effect.flatMap((encoded) => end(Option.getOrUndefined(encoded))),
+            );
+      }),
+      Effect.forkIn(scope),
+    );
+  });
+
+  const openTerminalStream = Effect.fn("EnvironmentAgent.openTerminalStream")(function* (
+    request: RemoteInput<"terminal.stream">,
+  ) {
+    const { terminals } = yield* workspaceRpc;
+    yield* openWorkspaceStream(
+      "terminal.stream",
+      request.subscriptionId,
+      request.mode === "attach"
+        ? terminals.attachOutputStream(request.input, request.viewerId ?? request.subscriptionId)
+        : terminalOutputStream(
+            (listener, registerCleanup) =>
+              terminals.observeStream(request.input, listener, registerCleanup),
+            (listener, registerCleanup) =>
+              terminals.resyncStream(request.input, listener, registerCleanup),
+          ),
+    );
+  });
+
   const unsupported = (session: LocalSession, operation: string) =>
     new ProviderAdapter.ProviderAdapterProtocolError({
       driver: session.driver,
@@ -507,6 +605,89 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
           .pipe(Effect.map((paths) => (paths === null ? null : [...paths])));
       case "checkpoint.deleteRefs":
         return checkpoints.deleteCheckpointRefs(request as RemoteInput<"checkpoint.deleteRefs">);
+      // The Hub already authorized these and resolved their paths onto this machine.
+      case "files.read":
+        return Effect.flatMap(workspaceCalls, (calls) =>
+          calls.readFile(request as RemoteInput<"files.read">),
+        );
+      case "files.write":
+        return Effect.flatMap(workspaceCalls, (calls) =>
+          calls.writeFile(request as RemoteInput<"files.write">),
+        );
+      case "search.paths":
+        return Effect.flatMap(workspaceCalls, (calls) =>
+          calls.searchEntries(request as RemoteInput<"search.paths">),
+        );
+      case "search.contents":
+        return Effect.flatMap(workspaceCalls, (calls) =>
+          calls.searchContents(request as RemoteInput<"search.contents">),
+        );
+      case "entries.list":
+        return Effect.flatMap(workspaceCalls, (calls) =>
+          calls.listEntries(request as RemoteInput<"entries.list">),
+        );
+      case "entries.listIgnored":
+        return Effect.flatMap(workspaceCalls, (calls) =>
+          calls.listIgnoredFiles(request as RemoteInput<"entries.listIgnored">),
+        );
+      case "entries.browse":
+        return Effect.flatMap(workspaceCalls, (calls) =>
+          calls.browse(request as RemoteInput<"entries.browse">),
+        );
+      case "terminal.open":
+        return Effect.flatMap(workspaceRpc, ({ terminals }) =>
+          terminals.open(request as RemoteInput<"terminal.open">),
+        );
+      case "terminal.write":
+        return Effect.flatMap(workspaceRpc, ({ terminals }) =>
+          terminals.write(request as RemoteInput<"terminal.write">),
+        );
+      case "terminal.resize": {
+        const { input: size, viewerId } = request as RemoteInput<"terminal.resize">;
+        return Effect.flatMap(workspaceRpc, ({ terminals }) => terminals.resize(size, viewerId));
+      }
+      case "terminal.clear":
+        return Effect.flatMap(workspaceRpc, ({ terminals }) =>
+          terminals.clear(request as RemoteInput<"terminal.clear">),
+        );
+      case "terminal.close":
+        return Effect.flatMap(workspaceRpc, ({ terminals }) =>
+          terminals.close(request as RemoteInput<"terminal.close">),
+        );
+      case "terminal.stream":
+        return openTerminalStream(request as RemoteInput<"terminal.stream">);
+      case "preview.open":
+        return Effect.flatMap(workspaceRpc, ({ previews }) =>
+          previews.open(request as RemoteInput<"preview.open">),
+        );
+      case "preview.resize":
+        return Effect.flatMap(workspaceRpc, ({ previews }) =>
+          previews.resize(request as RemoteInput<"preview.resize">),
+        );
+      case "preview.adjust":
+        return Effect.flatMap(workspaceRpc, ({ previews }) =>
+          previews.adjust(request as RemoteInput<"preview.adjust">),
+        );
+      case "preview.close":
+        return Effect.flatMap(workspaceRpc, ({ previews }) =>
+          previews.close(request as RemoteInput<"preview.close">),
+        );
+      case "preview.list":
+        return Effect.flatMap(workspaceRpc, ({ previews }) =>
+          previews.list(request as RemoteInput<"preview.list">),
+        );
+      case "preview.reportStatus":
+        return Effect.flatMap(workspaceRpc, ({ previews }) =>
+          previews.reportStatus(request as RemoteInput<"preview.reportStatus">),
+        );
+      case "preview.events":
+        return Effect.flatMap(workspaceRpc, ({ previews }) =>
+          openWorkspaceStream(
+            "preview.events",
+            (request as RemoteInput<"preview.events">).subscriptionId,
+            previews.events,
+          ),
+        );
     }
   };
 
@@ -599,6 +780,12 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
   };
 
   const onEvent = (method: string, payload: unknown): Effect.Effect<void> => {
+    if (method === ENVIRONMENT_EXECUTOR_FRAME_METHODS.workspaceStreamCancel) {
+      const cancelled = decodeStreamCancel(payload);
+      return Option.isNone(cancelled)
+        ? Effect.void
+        : closeWorkspaceStream(cancelled.value.subscriptionId);
+    }
     if (method === ENVIRONMENT_EXECUTOR_FRAME_METHODS.retired) {
       // Sessions the Hub no longer has: nothing would read them, so their processes go.
       const retired = decodeRetired(payload);
@@ -655,6 +842,14 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
             Effect.sync(() => {
               if (channel === connected) channel = undefined;
             }),
+          ),
+          // Live streams end with their socket; the Hub opens them again on the next one.
+          Effect.andThen(
+            Effect.forEach(
+              [...workspaceStreams.entries()].filter(([, open]) => open.channel === connected),
+              ([subscriptionId]) => closeWorkspaceStream(subscriptionId),
+              { discard: true },
+            ),
           ),
         ),
       );
