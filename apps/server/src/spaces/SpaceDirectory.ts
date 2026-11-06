@@ -141,6 +141,9 @@ const deniedMessage = (action: string, reason: string): string | undefined => {
   if (action === "guestLink.create") {
     return "Only an Admin can create guest links, and only in an Organization.";
   }
+  if (action === "environment.use") {
+    return "You can't run Threads on that Environment, so it can't be this Project's preferred one.";
+  }
   return undefined;
 };
 

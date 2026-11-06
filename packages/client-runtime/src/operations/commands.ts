@@ -73,6 +73,8 @@ export interface UpdateProjectInput extends CommandMetadata {
   readonly scripts?: ReadonlyArray<ProjectScript>;
   readonly pinned?: boolean;
   readonly archived?: boolean;
+  /** Where new Threads start when nobody chooses; null for the Hub machine. */
+  readonly preferredEnvironmentId?: EnvironmentId | null;
 }
 
 export interface DeleteProjectInput extends CommandMetadata {
@@ -394,6 +396,9 @@ export const updateProject = Effect.fn("EnvironmentCommands.updateProject")(func
     ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
     ...(input.pinned === undefined ? {} : { pinned: input.pinned }),
     ...(input.archived === undefined ? {} : { archived: input.archived }),
+    ...(input.preferredEnvironmentId === undefined
+      ? {}
+      : { preferredEnvironmentId: input.preferredEnvironmentId }),
   });
 });
 

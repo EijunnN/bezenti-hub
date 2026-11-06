@@ -159,6 +159,42 @@ const resourceOf = (row: EnvironmentRow): AccessPolicy.EnvironmentResource => ({
   ownerUserId: row.ownerUserId === null ? null : UserId.make(row.ownerUserId),
 });
 
+/**
+ * Whether the User may run Threads on the Environment, as a Project's preferred Environment must
+ * be for whoever sets it. Unknown and removed machines answer false; without a User (the server's
+ * own work, the Hub's shell) any machine the Hub knows will do. A plain function rather than a
+ * registry method so Project services can ask it without the registry's connections.
+ */
+export const mayUseEnvironment = Effect.fn("EnvironmentRegistry.mayUseEnvironment")(function* (
+  userId: UserId | undefined,
+  environmentId: EnvironmentId,
+) {
+  if (environmentId === HUB_MACHINE_ENVIRONMENT_ID) return true;
+  const sql = yield* SqlClient.SqlClient;
+  const [row] = yield* sql<{
+    readonly kind: "hub" | "external";
+    readonly ownerUserId: string | null;
+  }>`
+    SELECT kind, owner_user_id AS "ownerUserId" FROM environments
+    WHERE environment_id = ${environmentId} AND revoked_at IS NULL
+  `.pipe(Effect.mapError((cause) => new EnvironmentStorageError({ cause })));
+  if (row === undefined) return false;
+  if (userId === undefined) return true;
+  const principal = yield* (yield* SpaceDirectory.SpaceDirectory)
+    .principalOf(userId)
+    .pipe(Effect.mapError((cause) => new EnvironmentStorageError({ cause })));
+  return (
+    principal.inactive !== true &&
+    AccessPolicy.isAllowed(
+      AccessPolicy.decide(principal, "environment.use", {
+        kind: "environment",
+        environmentKind: row.kind,
+        ownerUserId: row.ownerUserId === null ? null : UserId.make(row.ownerUserId),
+      }),
+    )
+  );
+});
+
 export class EnvironmentRegistry extends Context.Service<
   EnvironmentRegistry,
   {
@@ -226,7 +262,8 @@ export class EnvironmentRegistry extends Context.Service<
     /**
      * Where a new Thread runs: the User's choice, else its Project's preferred Environment, else
      * the Hub machine. Another Environment must be one the User may use, online, and have the
-     * provider enabled.
+     * provider enabled. A preferred Environment the User may not use (the Owner's own machine,
+     * for a Member) leaves them on the Hub machine.
      */
     readonly chooseForThread: (input: {
       readonly userId: UserId | undefined;
@@ -608,6 +645,8 @@ const make = Effect.gen(function* () {
       principal.inactive === true ||
       !AccessPolicy.isAllowed(decide(principal, "environment.use", resourceOf(row)))
     ) {
+      // Only a choice of the User's own is refused; a preference set by someone else falls back.
+      if (requested === undefined) return HUB_MACHINE_ENVIRONMENT_ID;
       return yield* new ThreadEnvironmentUnavailableError({ environmentId, reason: "not-usable" });
     }
     const summary = yield* summaryOf(row);

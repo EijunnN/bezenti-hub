@@ -1,4 +1,8 @@
-import { HUB_MACHINE_ENVIRONMENT_ID, type ProviderInstanceId } from "@t3tools/contracts";
+import {
+  type EnvironmentId,
+  HUB_MACHINE_ENVIRONMENT_ID,
+  type ProviderInstanceId,
+} from "@t3tools/contracts";
 import { memo } from "react";
 
 import {
@@ -23,21 +27,30 @@ import { useComposerMenuProps } from "./composerEventScope";
 
 /**
  * Where a new Thread runs, among the Hub's Environments the User may use. The Hub decides and
- * checks the choice; an Environment that is offline or lacks the provider shows why.
+ * checks the choice; an Environment that is offline or lacks the provider shows why. Left alone,
+ * it shows where the Hub will put the Thread: the Project's preferred Environment when the User
+ * can see it, else the Hub machine.
  */
 export const HubEnvironmentSelector = memo(function HubEnvironmentSelector({
   draftThreadId,
   providerInstanceId,
+  preferredEnvironmentId,
 }: {
   draftThreadId: string;
   providerInstanceId: ProviderInstanceId;
+  preferredEnvironmentId: EnvironmentId | null;
 }) {
   const environments = useHubEnvironments();
   const chosen = useHubEnvironmentChoice(draftThreadId);
   const floatingLayerProps = useComposerMenuProps();
   // One machine to pick from is no choice.
   if (environments.length < 2) return null;
-  const selectedId = chosen ?? HUB_MACHINE_ENVIRONMENT_ID;
+  const defaultId =
+    preferredEnvironmentId !== null &&
+    environments.some((environment) => environment.id === preferredEnvironmentId)
+      ? preferredEnvironmentId
+      : HUB_MACHINE_ENVIRONMENT_ID;
+  const selectedId = chosen ?? defaultId;
   const selected = environments.find((environment) => environment.id === selectedId);
   const items = environments.map((environment) => ({
     value: environment.id,
@@ -48,10 +61,8 @@ export const HubEnvironmentSelector = memo(function HubEnvironmentSelector({
       modal={false}
       value={selectedId}
       onValueChange={(value) =>
-        chooseHubEnvironment(
-          draftThreadId,
-          value === null || value === HUB_MACHINE_ENVIRONMENT_ID ? null : value,
-        )
+        // Picking the default again leaves the choice to the Hub.
+        chooseHubEnvironment(draftThreadId, value === null || value === defaultId ? null : value)
       }
       items={items}
     >

@@ -115,9 +115,11 @@ import { Kbd } from "../ui/kbd";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { MiddleTruncate } from "../ui/middle-truncate";
+import { EnvironmentStatusDot } from "../EnvironmentStatusDot";
 import {
-  activeEnvironmentName,
-  useHubEnvironments,
+  ENVIRONMENT_STATUS_LABELS,
+  activeEnvironmentLabel,
+  useActiveEnvironment,
 } from "../../environments/primary/useHubEnvironments";
 import { useThreadHasUnsentDraft } from "../../composerDraftStore";
 
@@ -661,7 +663,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   } = props;
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
   const threadKey = scopedThreadKey(threadRef);
-  const hubEnvironments = useHubEnvironments();
+  const activeEnvironment = useActiveEnvironment(thread.activeEnvironmentId);
   const canOperateThread = useEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope);
   // Pins, settling and snoozes are stored on the Thread for everyone: its creator's or an Admin's.
   const canOrganize = useThreadRolePermissions(thread.environmentId, thread.source).canArchive;
@@ -1009,13 +1011,18 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     ) : null;
 
   // Where it runs, when that is not the Hub machine, where every Thread ran before Environments.
-  const environmentName =
+  const shownEnvironment =
     thread.activeEnvironmentId === undefined ||
-    thread.activeEnvironmentId === HUB_MACHINE_ENVIRONMENT_ID
+    thread.activeEnvironmentId === HUB_MACHINE_ENVIRONMENT_ID ||
+    activeEnvironment === null ||
+    activeEnvironment.isHubMachine
       ? null
-      : activeEnvironmentName(hubEnvironments, thread.activeEnvironmentId);
+      : activeEnvironment;
   const accessibility = resolveSidebarRowAccessibility({
-    title: environmentName === null ? thread.title : `${thread.title}, runs on ${environmentName}`,
+    title:
+      shownEnvironment === null
+        ? thread.title
+        : `${thread.title}, runs on ${activeEnvironmentLabel(shownEnvironment)}`,
     statusLabel: topStatus?.label ?? null,
     projectDisplayName: props.projectDisplayName,
     isActive: props.isActive,
@@ -1061,13 +1068,21 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     </span>
   );
   const title =
-    environmentName === null || isRenaming ? (
+    shownEnvironment === null || isRenaming ? (
       titleText
     ) : (
       <>
         {titleText}
-        <span aria-hidden className="shrink-0 truncate text-muted-foreground text-xs">
-          {environmentName}
+        <span
+          aria-hidden
+          data-environment-status={shownEnvironment.status}
+          className="inline-flex shrink-0 items-center gap-1 truncate text-muted-foreground text-xs"
+        >
+          <EnvironmentStatusDot status={shownEnvironment.status} />
+          {shownEnvironment.name}
+          {shownEnvironment.status === "online"
+            ? null
+            : ` · ${ENVIRONMENT_STATUS_LABELS[shownEnvironment.status]}`}
         </span>
       </>
     );
