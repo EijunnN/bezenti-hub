@@ -354,19 +354,29 @@ and demotion without a write to the Thread.
 
 [InstallationUserService](../../apps/server/src/spaces/InstallationUserService.ts)
 sets `users.disabled_at` / `removed_at` and, in the same transaction, expires
-their reset links and revokes the Invitations they created; removal also deletes
-their Memberships and sets their Personal space's `frozen_at`. After it commits
-it revokes every `auth_sessions` row (browser, app, MCP client and CLI bearer are
-all sessions) and pairing link of theirs, which closes their sockets. Their
-principal carries `inactive`, which the policy denies everywhere, so anything
-that acts _as_ them without a session (guest links they made, scheduled-task
-runs, agent tool calls) stops too, and their Memberships can stay for a
-re-enable. A trigger refuses a new session or pairing link for an inactive User,
-closing the race with a sign-in already under way; app sign-in codes need no
-revocation since their exchange checks the User. Sign-in says the account is
-disabled or removed only after the credential verified, so it is no oracle.
-The User row stays as a tombstone for names. A frozen Personal space is
-read-only for everyone; the Owner may only delete from it, archived or not.
+their reset links, revokes the Invitations they created, and revokes every
+`auth_sessions` row (browser, app, MCP client and CLI bearer are all sessions)
+and pairing link of theirs in one write each; removal also deletes their
+Memberships and sets their Personal space's `frozen_at`. Sockets and the
+per-User hub hear it after the commit. Asking again for the same status reruns
+the revocation, so a retry finishes a half-done one, and a session read treats
+a disabled or removed User's session as revoked regardless. Their principal
+carries `inactive`, which the policy denies everywhere, so anything that acts
+_as_ them without a session (guest links they made, agent tool calls) stops
+too, and their Memberships can stay for a re-enable. After the commit
+`SpaceDirectory.userStatusChanged` tells the work that runs as them:
+`InactiveUserTurns` interrupts their running turns, and `ScheduledTaskService`
+pauses their enabled tasks (`paused_for_owner`), resumes exactly those on
+re-enable, and skips and pauses any run whose creator turned out inactive; the
+Owner may pause or delete such a task. A trigger (migration 092) refuses a new
+session or pairing link for an inactive User, closing the race with a sign-in
+already under way, which then answers as the disabled account. App sign-in
+codes need no revocation since their exchange checks the User. Sign-in
+(passkey, password, the TOTP step, recovery code) says the account is disabled
+or removed only after the credential verified, so it is no oracle, and spends
+nothing. The User row stays as a tombstone for names. A frozen Personal space
+is read-only for everyone; the Owner may only stop its running Threads and
+delete from it, archived or not.
 
 Reset links are the Owner's alone (`UserDirectory.issueResetLink`; `created_by`
 names the issuer), since a link takes the account over. Redeeming one registers a

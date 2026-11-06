@@ -782,6 +782,13 @@ const rows: ReadonlyArray<
     allow,
   ],
   [
+    "the Owner stops a running Thread in a frozen Personal space",
+    owner,
+    "thread.stop",
+    owned("thread", "grace", { space: frozenPersonal }),
+    allow,
+  ],
+  [
     "the Owner archives nothing in a frozen Personal space",
     owner,
     "project.archive",

@@ -284,9 +284,10 @@ links; to share work, it has to move to an organization.
 In **Users and permissions** the Owner can **Disable** a person: they are signed
 out everywhere at once (browsers, the desktop and mobile apps, outside agents and
 `t3` tokens), their pending reset links, pairing codes and invitations stop
-working, their scheduled tasks no longer run anything, and signing in tells them the Owner
-disabled the account. They stay in their organizations; **Turn back on** lets
-them sign in again.
+working, their running agent turns stop, their scheduled tasks pause (the Owner
+can delete them), and signing in tells them the Owner disabled the account.
+They stay in their organizations; **Turn back on** lets them sign in again and
+resumes the tasks that were paused.
 
 **Remove** is for good and asks you to type their sign-in name. On top of
 disabling, it takes them out of every organization (what they made there stays)

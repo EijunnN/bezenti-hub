@@ -92,6 +92,13 @@ export const RevokeOtherAuthSessionsInput = Schema.Struct({
 });
 export type RevokeOtherAuthSessionsInput = typeof RevokeOtherAuthSessionsInput.Type;
 
+export const RevokeUserAuthSessionsInput = Schema.Struct({
+  userId: UserId,
+  revokedAt: Schema.DateTimeUtcFromString,
+  exceptSessionId: Schema.NullOr(AuthSessionId),
+});
+export type RevokeUserAuthSessionsInput = typeof RevokeUserAuthSessionsInput.Type;
+
 export const RenewAuthSessionInput = Schema.Struct({
   sessionId: AuthSessionId,
   expiresAt: Schema.DateTimeUtcFromString,
@@ -128,6 +135,10 @@ export class AuthSessionRepository extends Context.Service<
     ) => Effect.Effect<boolean, AuthSessionRepositoryError>;
     readonly revokeAllExcept: (
       input: RevokeOtherAuthSessionsInput,
+    ) => Effect.Effect<ReadonlyArray<AuthSessionId>, AuthSessionRepositoryError>;
+    /** Revokes every live session of one User in a single write; returns their ids. */
+    readonly revokeAllForUser: (
+      input: RevokeUserAuthSessionsInput,
     ) => Effect.Effect<ReadonlyArray<AuthSessionId>, AuthSessionRepositoryError>;
     readonly setLastConnectedAt: (
       input: SetAuthSessionLastConnectedAtInput,
@@ -287,7 +298,12 @@ export const make = Effect.gen(function* () {
           expires_at AS "expiresAt",
           sliding AS "sliding",
           last_connected_at AS "lastConnectedAt",
-          revoked_at AS "revokedAt"
+          -- A disabled or removed User's session reads as revoked even if revoking it failed.
+          COALESCE(
+            revoked_at,
+            (SELECT COALESCE(u.removed_at, u.disabled_at) FROM users u
+              WHERE u.user_id = auth_sessions.user_id)
+          ) AS "revokedAt"
         FROM auth_sessions
         WHERE session_id = ${sessionId}
       `,
@@ -393,6 +409,31 @@ export const make = Effect.gen(function* () {
         RETURNING session_id AS "sessionId"
       `,
   });
+
+  const revokeUserSessionRows = SqlSchema.findAll({
+    Request: RevokeUserAuthSessionsInput,
+    Result: Schema.Struct({ sessionId: AuthSessionId }),
+    execute: ({ userId, revokedAt, exceptSessionId }) =>
+      sql`
+        UPDATE auth_sessions
+        SET revoked_at = ${revokedAt}
+        WHERE user_id = ${userId}
+          AND revoked_at IS NULL
+          ${exceptSessionId === null ? sql`` : sql`AND session_id <> ${exceptSessionId}`}
+        RETURNING session_id AS "sessionId"
+      `,
+  });
+
+  const revokeAllForUser: AuthSessionRepository["Service"]["revokeAllForUser"] = (input) =>
+    revokeUserSessionRows(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "AuthSessionRepository.revokeAllForUser:query",
+          "AuthSessionRepository.revokeAllForUser:decodeRows",
+        ),
+      ),
+      Effect.map((rows) => rows.map((row) => row.sessionId)),
+    );
 
   const create: AuthSessionRepository["Service"]["create"] = (input) =>
     createSessionRow(input).pipe(
@@ -548,6 +589,7 @@ export const make = Effect.gen(function* () {
     listActive,
     revoke,
     revokeAllExcept,
+    revokeAllForUser,
     setLastConnectedAt,
   } satisfies AuthSessionRepository["Service"];
 });

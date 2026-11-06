@@ -24,4 +24,7 @@ export default Effect.gen(function* () {
     )
     BEGIN SELECT RAISE(ABORT, 'pairing link for a disabled or removed user'); END
   `;
+
+  // Tasks paused because their creator was disabled, so turning them back on resumes exactly these.
+  yield* sql`ALTER TABLE scheduled_tasks ADD COLUMN paused_for_owner INTEGER NOT NULL DEFAULT 0`;
 });

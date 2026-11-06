@@ -212,6 +212,12 @@ const toResource = (row: SpaceRow): AccessPolicy.SpaceResource => ({
   frozen: row.frozen,
 });
 
+export interface UserStatusChange {
+  readonly userId: UserId;
+  /** False once disabled or removed. */
+  readonly active: boolean;
+}
+
 export class SpaceDirectory extends Context.Service<
   SpaceDirectory,
   {
@@ -264,6 +270,19 @@ export class SpaceDirectory extends Context.Service<
       readonly userId: UserId;
       readonly removed: boolean;
     }) => Effect.Effect<void, SpaceDirectoryStorageError>;
+    /**
+     * After a User's status change commits: whoever runs work as them (scheduled tasks, turns)
+     * hears it on `userStatusChanges` and pauses or resumes it.
+     */
+    readonly userStatusChanged: (change: UserStatusChange) => Effect.Effect<void>;
+    /** Subscribes now; every status change committed after this returns is delivered. */
+    readonly subscribeUserStatusChanges: Effect.Effect<
+      Stream.Stream<UserStatusChange>,
+      never,
+      Scope.Scope
+    >;
+    /** Whether the User may still sign in and act. */
+    readonly isActive: (userId: UserId) => Effect.Effect<boolean, SpaceDirectoryStorageError>;
     readonly installationUser: (
       userId: UserId,
     ) => Effect.Effect<Option.Option<InstallationUser>, SpaceDirectoryStorageError>;
@@ -931,6 +950,10 @@ const make = Effect.gen(function* () {
     item: ItemRef,
   ) {
     const principal = yield* currentPrincipal(userId);
+    // Said before looking the item up, so it tells nothing about what exists.
+    if (principal.inactive === true) {
+      return yield* new SpaceAccessDeniedError({ action, reason: "user-inactive" });
+    }
     const row = yield* (item.kind === "thread" ? findThreadItem : findProjectItem)(item.id).pipe(
       Effect.mapError(storageError),
     );
@@ -1131,6 +1154,9 @@ const make = Effect.gen(function* () {
   }, Effect.mapError(storageError));
 
   const membershipChanges = yield* PubSub.unbounded<UserId>();
+  const userStatusChanges = yield* PubSub.unbounded<UserStatusChange>();
+  const isActive = (userId: UserId) =>
+    Effect.map(principalOf(userId), (principal) => principal.inactive !== true);
   const membershipsChanged = (userIds: ReadonlyArray<UserId>) =>
     changed.pipe(
       // Open streams hear it as any access change does, then the sockets close.
@@ -1178,6 +1204,15 @@ const make = Effect.gen(function* () {
     authorizeUserChange,
     endAccessOf,
     installationUser,
+    userStatusChanged: Effect.fn("SpaceDirectory.userStatusChanged")(function* (
+      change: UserStatusChange,
+    ) {
+      yield* PubSub.publish(userStatusChanges, change);
+    }),
+    subscribeUserStatusChanges: PubSub.subscribe(userStatusChanges).pipe(
+      Effect.map(Stream.fromSubscription),
+    ),
+    isActive,
     subscribeAccessChanges,
     createOrganization,
     claimCreation,

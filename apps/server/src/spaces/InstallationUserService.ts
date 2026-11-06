@@ -63,41 +63,49 @@ const make = Effect.gen(function* () {
     yield* spaces.endAccessOf({ userId, removed: status === "removed" });
   }, Effect.mapError(storageError));
 
-  /** Every session (browser, app, outside MCP client, CLI bearer) and pairing link ends. */
-  const endSignIn = (userId: UserId) =>
-    sessions
-      .revokeAllForUser(userId)
-      .pipe(Effect.andThen(pairingLinks.revokeAllForUser(userId)), Effect.mapError(storageError));
-
   const setStatus: InstallationUserService["Service"]["setStatus"] = Effect.fn(
     "InstallationUserService.setStatus",
   )(function* ({ actorUserId, userId, status }) {
     const action = status === "removed" ? "user.remove" : "user.disable";
-    // The check and the writes share one transaction, so a concurrent change cannot slip between.
-    const changed = yield* sql
+    // The check, the status, and the revocation of every session (browser, app, outside MCP
+    // client, CLI bearer) and pairing link commit together. Asking again for the status they
+    // already have runs the revocation again, so a retry always finishes the job.
+    const outcome = yield* sql
       .withTransaction(
         Effect.gen(function* () {
           const current = yield* spaces.authorizeUserChange({ actorUserId, action, userId });
-          if (current.status === "removed") {
-            if (status === "removed") return false;
+          if (current.status === "removed" && status !== "removed") {
             return yield* new SpaceDirectory.SpaceAccessDeniedError({
               action,
               reason: "user-removed",
             });
           }
-          if (current.status === status) return false;
-          yield* writeStatus(userId, status);
-          return true;
+          const changed = current.status !== status;
+          if (status === "active") {
+            if (changed) yield* writeStatus(userId, status);
+            return { changed, announce: Effect.void };
+          }
+          if (changed && current.status !== "removed") yield* writeStatus(userId, status);
+          const announceSessions = yield* sessions
+            .revokeAllForUserDeferred(userId)
+            .pipe(Effect.mapError(storageError));
+          const announceLinks = yield* pairingLinks
+            .revokeAllForUserDeferred(userId)
+            .pipe(Effect.mapError(storageError));
+          // No cached principal outlives the commit, even if the work after it fails.
+          yield* spaces.changed;
+          return { changed, announce: Effect.andThen(announceSessions, announceLinks) };
         }),
       )
       .pipe(Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }));
-    if (changed) {
-      if (status === "active") {
-        yield* spaces.changed;
-      } else {
-        yield* endSignIn(userId);
-        yield* spaces.membershipsChanged([userId]);
-      }
+    if (status === "active") {
+      if (outcome.changed) yield* spaces.changed;
+    } else {
+      yield* outcome.announce;
+      yield* spaces.membershipsChanged([userId]);
+    }
+    yield* spaces.userStatusChanged({ userId, active: status === "active" });
+    if (outcome.changed) {
       // The audit log (ticket 14) records this action here.
       yield* Effect.logInfo("Changed a User's status.").pipe(
         Effect.annotateLogs({

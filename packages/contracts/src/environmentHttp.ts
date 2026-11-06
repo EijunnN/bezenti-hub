@@ -612,7 +612,8 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
     HttpApiEndpoint.post("recoveryCodeSignIn", "/api/auth/recovery-code/sign-in", {
       payload: AuthRecoveryCodeSignInRequest,
       success: AuthBrowserSessionResult,
-      error: EnvironmentUserSignInErrors,
+      // Forbidden: the code is right but the Owner disabled or removed the account.
+      error: [...EnvironmentUserSignInErrors, EnvironmentHttpForbiddenError],
     }),
   )
   .add(

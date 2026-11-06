@@ -7,6 +7,7 @@ import {
   ScheduledTaskError,
   ScheduledTaskId,
   ThreadId,
+  UserId,
   ScheduledTaskWebhookDeliveryId,
   type ScheduledTaskDeleteInput,
   type ScheduledTaskDeleteResult,
@@ -778,6 +779,30 @@ export const layer = Layer.effect(
         ),
     );
 
+    // A failed read counts as inactive: better a skipped run than one speaking for someone cut off.
+    const creatorActive = (userId: string) =>
+      Option.isNone(spaces)
+        ? Effect.succeed(true)
+        : spaces.value.isActive(UserId.make(userId)).pipe(Effect.orElseSucceed(() => false));
+
+    /** Pauses the tasks of a creator the Owner disabled or removed, marking them to resume. */
+    const pauseForOwner = Effect.fn("ScheduledTaskService.pauseForOwner")(function* (
+      target: { readonly ownerUserId: string } | { readonly taskId: ScheduledTaskId },
+    ) {
+      const now = iso(yield* localNow);
+      const paused = yield* sql<{ task_id: string }>`
+        UPDATE scheduled_tasks
+        SET enabled = 0, next_run_at = NULL, paused_for_owner = 1, updated_at = ${now}
+        WHERE enabled = 1 AND ${
+          "taskId" in target
+            ? sql`task_id = ${target.taskId}`
+            : sql`owner_user_id = ${target.ownerUserId}`
+        }
+        RETURNING task_id
+      `.pipe(Effect.orDie);
+      if (paused.length > 0) yield* notifyChanged;
+    });
+
     const runTask = Effect.fn("ScheduledTaskService.runTask")(function* (
       task: ScheduledTask,
       trigger: "scheduled" | "manual" | "webhook",
@@ -803,6 +828,21 @@ export const layer = Layer.effect(
             return yield* taskError("Schedule task not found.", { taskId: task.id });
           }
           return { task, threadId: null, dispatchFailed: false };
+        }
+        // A creator the Owner turned off runs nothing; their task pauses until they are back.
+        if (active.ownerUserId !== undefined && !(yield* creatorActive(active.ownerUserId))) {
+          yield* pauseForOwner({ taskId: active.id });
+          if (webhook !== undefined) {
+            return yield* new WebhookDeliverySkipped({
+              reason: "The person who created this task can no longer sign in.",
+            });
+          }
+          if (trigger !== "scheduled") {
+            return yield* taskError("The person who created this task can no longer sign in.", {
+              taskId: active.id,
+            });
+          }
+          return { task: active, threadId: null, dispatchFailed: false };
         }
         if (
           webhook !== undefined &&
@@ -1194,6 +1234,8 @@ export const layer = Layer.effect(
     const requireTaskRights = Effect.fn("ScheduledTaskService.requireTaskRights")(function* (
       task: Pick<ScheduledTask, "id" | "projectId" | "threadId">,
       existing: Pick<ScheduledTask, "ownerUserId"> | undefined,
+      /** Pausing or deleting, which the Owner may do to a task whose creator was turned off. */
+      stopping = false,
     ) {
       if (Option.isNone(spaces)) return undefined;
       const refused = (cause: unknown) =>
@@ -1204,6 +1246,13 @@ export const layer = Layer.effect(
       const actor = yield* spaces.value.actingUser.pipe(Effect.mapError(refused));
       if (Option.isNone(actor)) return existing?.ownerUserId;
       if (existing?.ownerUserId !== undefined && existing.ownerUserId !== actor.value) {
+        if (stopping) {
+          const [principal, creatorActive] = yield* Effect.all([
+            spaces.value.principalOf(actor.value),
+            spaces.value.isActive(existing.ownerUserId),
+          ]).pipe(Effect.mapError(refused));
+          if (principal.isOwner && !creatorActive) return existing.ownerUserId;
+        }
         return yield* taskError("Only the person who created this task can change or run it.", {
           taskId: task.id,
         });
@@ -1386,8 +1435,23 @@ export const layer = Layer.effect(
       "ScheduledTaskService.setEnabled",
     )(function* (input) {
       const existing = yield* loadTask(input.id);
-      yield* requireTaskRights(existing, existing);
-      if (existing.enabled === input.enabled) return { task: existing };
+      yield* requireTaskRights(existing, existing, !input.enabled);
+      return yield* applyEnabled(existing, input.enabled);
+    });
+
+    const applyEnabled = Effect.fn("ScheduledTaskService.applyEnabled")(function* (
+      existing: ScheduledTask,
+      enabled: boolean,
+    ) {
+      const input = { id: existing.id, enabled };
+      if (existing.enabled === input.enabled) {
+        yield* sql`UPDATE scheduled_tasks SET paused_for_owner = 0 WHERE task_id = ${input.id}`.pipe(
+          Effect.mapError((cause) =>
+            taskError("Could not update schedule task.", { taskId: input.id, cause }),
+          ),
+        );
+        return { task: existing };
+      }
       if (
         input.enabled &&
         existing.schedule.type === "webhook" &&
@@ -1415,7 +1479,8 @@ export const layer = Layer.effect(
           UPDATE scheduled_tasks
           SET enabled = ${input.enabled ? 1 : 0},
               next_run_at = ${next},
-              updated_at = ${iso(now)}
+              updated_at = ${iso(now)},
+              paused_for_owner = 0
           WHERE task_id = ${input.id}
           RETURNING task_id
         `.pipe(
@@ -1467,7 +1532,9 @@ export const layer = Layer.effect(
     const deleteTask: ScheduledTaskService["Service"]["delete"] = (input) =>
       findTask(input.id).pipe(
         Effect.flatMap((existing) =>
-          existing == null ? Effect.void : Effect.asVoid(requireTaskRights(existing, existing)),
+          existing == null
+            ? Effect.void
+            : Effect.asVoid(requireTaskRights(existing, existing, true)),
         ),
         Effect.andThen(deleteRow(input.id)),
         Effect.andThen(forgetWebhookTask(input.id)),
@@ -2445,6 +2512,50 @@ export const layer = Layer.effect(
       );
     });
     yield* scheduler.register("webhook-coalescing", dispatchPending());
+
+    /** Turns back on exactly the tasks paused because their creator was turned off. */
+    const resumeForOwner = Effect.fn("ScheduledTaskService.resumeForOwner")(function* (
+      ownerUserId: string,
+    ) {
+      const rows = yield* sql<{ task_id: ScheduledTaskId }>`
+        SELECT task_id FROM scheduled_tasks
+        WHERE owner_user_id = ${ownerUserId} AND paused_for_owner = 1
+      `.pipe(Effect.orDie);
+      yield* Effect.forEach(
+        rows,
+        (row) =>
+          loadTask(row.task_id).pipe(
+            Effect.flatMap((task) => applyEnabled(task, true)),
+            // A one-time task whose moment passed stays off.
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Could not resume a schedule task.", {
+                taskId: row.task_id,
+                cause,
+              }),
+            ),
+          ),
+        { discard: true },
+      );
+    });
+
+    if (Option.isSome(spaces)) {
+      const statusChanges = yield* spaces.value.subscribeUserStatusChanges;
+      yield* statusChanges.pipe(
+        Stream.runForEach((change) =>
+          (change.active
+            ? resumeForOwner(change.userId)
+            : pauseForOwner({ ownerUserId: change.userId })
+          ).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Could not follow a User's status in their schedule tasks.", {
+                cause,
+              }),
+            ),
+          ),
+        ),
+        Effect.forkScoped,
+      );
+    }
 
     return ScheduledTaskService.of({
       list,

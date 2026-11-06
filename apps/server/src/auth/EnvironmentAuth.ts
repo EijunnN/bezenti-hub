@@ -655,7 +655,10 @@ export class EnvironmentAuth extends Context.Service<
       requestMetadata: AuthRequestMetadata,
     ) => Effect.Effect<
       UserBrowserSession,
-      ServerAuthInvalidCredentialError | ServerAuthInsecureTransportError | ServerAuthInternalError
+      | ServerAuthInvalidCredentialError
+      | UserDirectory.AccountInactiveError
+      | ServerAuthInsecureTransportError
+      | ServerAuthInternalError
     >;
     /** Signs in, or answers that the account also needs a TOTP code with the password. */
     readonly signInWithPassword: (
@@ -2023,8 +2026,25 @@ export const make = Effect.gen(function* () {
           UserDirectoryStorageError: (cause) => Effect.fail(userDirectoryFailure(cause)),
         }),
       );
-    return yield* issueUserBrowserSession(request, user, requestMetadata);
+    return yield* issueSignInSession(request, user, requestMetadata);
   });
+
+  // The Owner may disable the User between the credential check and the session write, which the
+  // database then refuses (migration 092): answer that as the disabled account it is.
+  const issueSignInSession = (
+    request: HttpServerRequest.HttpServerRequest,
+    user: AuthUser,
+    requestMetadata: AuthRequestMetadata,
+  ) =>
+    issueUserBrowserSession(request, user, requestMetadata).pipe(
+      Effect.catchTags({
+        ServerAuthAuthenticatedSessionIssueError: (error) =>
+          userDirectory.inactiveReason(user.id).pipe(
+            Effect.mapError(userDirectoryFailure),
+            Effect.flatMap((inactive) => Effect.fail(inactive ?? error)),
+          ),
+      }),
+    );
 
   const signInWithRecoveryCode: EnvironmentAuth["Service"]["signInWithRecoveryCode"] = Effect.fn(
     "EnvironmentAuth.signInWithRecoveryCode",
@@ -2036,7 +2056,7 @@ export const make = Effect.gen(function* () {
         UserDirectoryStorageError: (cause) => Effect.fail(userDirectoryFailure(cause)),
       }),
     );
-    return yield* issueUserBrowserSession(request, user, requestMetadata);
+    return yield* issueSignInSession(request, user, requestMetadata);
   });
 
   const passwordFailures = {
@@ -2057,7 +2077,7 @@ export const make = Effect.gen(function* () {
         response: { authenticated: false, secondFactor: "totp", challengeId: checked.challengeId },
       } as const;
     }
-    return yield* issueUserBrowserSession(request, checked.user, requestMetadata);
+    return yield* issueSignInSession(request, checked.user, requestMetadata);
   });
 
   const signInWithTotp: EnvironmentAuth["Service"]["signInWithTotp"] = Effect.fn(
@@ -2066,7 +2086,7 @@ export const make = Effect.gen(function* () {
     const user = yield* userDirectory
       .checkTotp(input, requestMetadata.ipAddress)
       .pipe(Effect.catchTags(passwordFailures));
-    return yield* issueUserBrowserSession(request, user, requestMetadata);
+    return yield* issueSignInSession(request, user, requestMetadata);
   });
 
   const resetLinkFailures = {

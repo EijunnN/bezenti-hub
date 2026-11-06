@@ -1,18 +1,24 @@
 import { AuthSessionId, UserId } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Queue from "effect/Queue";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
+import * as InactiveUserTurns from "../orchestration-v2/InactiveUserTurns.ts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import {
   bootstrapOwner,
   isSignedIn,
   makeAuthenticator,
   type Server,
   serveAuthHttp,
+  totpCode,
 } from "../auth/UserAuth.testkit.ts";
 import { connectionEnds } from "../ws.ts";
 
@@ -305,4 +311,120 @@ it.effect(
         installationPermissions: ["personalSpace.create"],
       });
     }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "a disabled User's leftover session is refused, and disabling again revokes it for good",
+  () =>
+    Effect.gen(function* () {
+      const { server, owner, grace } = yield* hub;
+      assert.equal((yield* setStatus(server, owner, grace.userId, "disabled")).status, 200);
+      // As if the revocation after the status change had not happened.
+      yield* server.sql`UPDATE auth_sessions SET revoked_at = NULL WHERE user_id = ${grace.userId}`;
+      assert.isFalse(yield* isSignedIn(server, grace.cookie));
+      const again = yield* setStatus(server, owner, grace.userId, "disabled");
+      assert.equal(again.status, 200);
+      assert.equal(yield* liveSessions(server, grace.userId), 0);
+    }).pipe(Effect.scoped),
+);
+
+it.effect("a disabled User's recovery code says why and stays unspent", () =>
+  Effect.gen(function* () {
+    const { server, owner, grace } = yield* hub;
+    const code = "ABCDEFGHJK";
+    // SHA-256 of the code, as the server stores it.
+    const hash = "f57cbf1e3e471b25db4b8ad0844df41b2dae9c7d1944944d128e49294d412f66";
+    yield* server.sql`
+      INSERT INTO user_recovery_codes (code_hash, user_id, created_at)
+      VALUES (${hash}, ${grace.userId}, '2026-01-01T00:00:00.000Z')
+    `;
+    assert.equal((yield* setStatus(server, owner, grace.userId, "disabled")).status, 200);
+    const refused = yield* server.request("/api/auth/recovery-code/sign-in", { body: { code } });
+    assert.equal(refused.status, 403);
+    assert.equal(
+      refused.body.message,
+      "The Owner disabled this account. Ask them to turn it back on.",
+    );
+    const [row] = yield* server.sql<{ usedAt: string | null }>`
+      SELECT used_at AS "usedAt" FROM user_recovery_codes WHERE code_hash = ${hash}
+    `;
+    assert.isNull(row!.usedAt);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("disabled between the password and the code step, sign-in says why", () =>
+  Effect.gen(function* () {
+    const { server, owner, grace } = yield* hub;
+    const enrollment = yield* server.request("/api/auth/account/totp/enrollment", {
+      body: {},
+      cookie: grace.cookie,
+    });
+    const secret = enrollment.body.secret as string;
+    const confirmed = yield* server.request("/api/auth/account/totp", {
+      body: {
+        enrollmentId: enrollment.body.enrollmentId,
+        code: yield* totpCode(secret, yield* Clock.currentTimeMillis),
+        reauth: { method: "password", password: PASSWORD },
+      },
+      cookie: grace.cookie,
+    });
+    assert.equal(confirmed.status, 200);
+    const step = yield* signIn(server, "grace");
+    assert.equal(step.body.secondFactor, "totp");
+    assert.equal((yield* setStatus(server, owner, grace.userId, "disabled")).status, 200);
+    yield* TestClock.adjust("30 seconds");
+    const refused = yield* server.request("/api/auth/password/totp", {
+      body: {
+        challengeId: step.body.challengeId,
+        code: yield* totpCode(secret, yield* Clock.currentTimeMillis),
+      },
+    });
+    assert.equal(refused.status, 403);
+    assert.equal(
+      refused.body.message,
+      "The Owner disabled this account. Ask them to turn it back on.",
+    );
+  }).pipe(Effect.scoped),
+);
+
+it.effect("disabling a User stops their running turns, and only theirs", () =>
+  Effect.gen(function* () {
+    const { server, owner, grace, linus } = yield* hub;
+    const at = "2026-11-01T00:00:00.000Z";
+    for (const [threadId, ownerUserId, status] of [
+      ["grace-running", grace.userId, "running"],
+      ["grace-done", grace.userId, "completed"],
+      ["linus-running", linus.userId, "running"],
+    ] as const) {
+      yield* server.sql`
+        INSERT INTO orchestration_v2_projection_threads (
+          thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
+          created_at, updated_at, payload_json, owner_user_id
+        ) VALUES (
+          ${threadId}, 'acme-app', ${threadId}, 'codex', 'full-access', 'default', ${at}, ${at},
+          ${JSON.stringify({ lineage: { rootThreadId: threadId } })}, ${ownerUserId}
+        )
+      `;
+      yield* server.sql`
+        INSERT INTO orchestration_v2_projection_runs (
+          run_id, thread_id, ordinal, provider, status, requested_at, payload_json
+        ) VALUES (${`run-${threadId}`}, ${threadId}, 1, 'codex', ${status}, ${at}, '{}')
+      `;
+    }
+    const stopped = yield* Queue.unbounded<string>();
+    yield* Layer.build(
+      InactiveUserTurns.layer.pipe(
+        Layer.provide(
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            interruptThread: (input) =>
+              Queue.offer(stopped, input.threadId).pipe(Effect.as({ type: "no_active_run" })),
+          }),
+        ),
+        Layer.provide(Layer.succeedContext(server.services)),
+      ),
+    );
+    assert.equal((yield* setStatus(server, owner, grace.userId, "disabled")).status, 200);
+    assert.equal(yield* Queue.take(stopped), "grace-running");
+    assert.equal(yield* Queue.size(stopped), 0);
+  }).pipe(Effect.scoped),
 );

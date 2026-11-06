@@ -700,3 +700,108 @@ it.effect("a task acts as the User who created it, and only they change or run i
     }).pipe(Effect.provide(layer));
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
+
+it.effect(
+  "a disabled creator's tasks pause, the Owner may stop or delete them, and they resume on re-enable",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const at = "2026-01-01T00:00:00.000Z";
+      for (const [id, isOwner] of [
+        ["owner", 1],
+        ["grace", 0],
+      ] as const) {
+        yield* sql`INSERT INTO users (user_id, display_name, is_owner, created_at)
+          VALUES (${id}, ${id}, ${isOwner}, ${at})`;
+      }
+      yield* sql`INSERT INTO spaces (space_id, kind, name, created_at)
+        VALUES ('acme', 'organization', 'acme', ${at})`;
+      yield* sql`INSERT INTO projection_projects
+        (project_id, title, workspace_root, scripts_json, created_at, updated_at, space_id)
+        VALUES ('acme-app', 'acme', '/work/acme', '[]', ${at}, ${at}, 'acme')`;
+      yield* sql`INSERT INTO space_memberships (space_id, user_id, role, created_at)
+        VALUES ('acme', 'grace', 'member', ${at})`;
+      const layer = ScheduledTaskService.layer.pipe(
+        Layer.provideMerge(
+          Layer.mergeAll(
+            ManagedPolicy.layerTest(),
+            Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+              launch: () => Effect.die("a disabled creator's task launched"),
+            }),
+            Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+            Layer.mock(SecretRequests.SecretRequests)({}),
+            Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+              namedProjectsRoot: "/projects",
+              isScratchProject: () => Effect.succeed(false),
+            }),
+            SpaceDirectory.layer.pipe(Layer.provide(NodeCrypto.layer)),
+            NodeCrypto.layer,
+            Scheduler.layer,
+          ),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* ScheduledTaskService.ScheduledTaskService;
+        const spaces = yield* SpaceDirectory.SpaceDirectory;
+        const taskIn = (id: string) => ({
+          id: ScheduledTaskId.make(id),
+          title: "Check in",
+          prompt: "Check progress",
+          enabled: true,
+          schedule: { type: "interval" as const, everyMs: 60_000 },
+          projectId: ProjectId.make("acme-app"),
+          threadId: null,
+          workspaceStrategy: { type: "root" as const },
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+          runtimeMode: "full-access" as const,
+          interactionMode: "default" as const,
+        });
+        const asGrace = CommandActor.actAs(UserId.make("grace"));
+        const asOwner = CommandActor.actAs(UserId.make("owner"));
+        yield* service.upsert(taskIn("task:kept")).pipe(asGrace);
+        yield* service.upsert(taskIn("task:dropped")).pipe(asGrace);
+        const enabled = (id: string) =>
+          service
+            .list()
+            .pipe(
+              Effect.map(
+                (listed) => listed.tasks.find((task) => task.id === id)?.enabled ?? "missing",
+              ),
+            );
+        // While Grace is active, the Owner may not touch her task.
+        const early = yield* service
+          .setEnabled({ id: ScheduledTaskId.make("task:kept"), enabled: false })
+          .pipe(asOwner, Effect.flip);
+        assert.include(early.message, "Only the person who created this task");
+
+        const whenListed = (predicate: (tasks: ReadonlyArray<{ enabled: boolean }>) => boolean) =>
+          service.subscribeList().pipe(
+            Stream.filter((listed) => predicate(listed.tasks)),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+        const paused = yield* whenListed((tasks) => tasks.every((task) => !task.enabled));
+        yield* sql`UPDATE users SET disabled_at = ${at} WHERE user_id = 'grace'`;
+        yield* spaces.changed;
+        yield* spaces.userStatusChanged({ userId: UserId.make("grace"), active: false });
+        yield* Fiber.join(paused);
+        assert.isFalse(yield* enabled("task:kept"));
+        // A run asked for now is refused rather than speaking for her.
+        const run = yield* service
+          .runNow({ id: ScheduledTaskId.make("task:kept") })
+          .pipe(asGrace, Effect.flip);
+        assert.include(run.message, "can no longer sign in");
+        // The Owner may delete what she left.
+        yield* service.delete({ id: ScheduledTaskId.make("task:dropped") }).pipe(asOwner);
+        assert.equal(yield* enabled("task:dropped"), "missing");
+
+        const resumed = yield* whenListed((tasks) => tasks.some((task) => task.enabled));
+        yield* sql`UPDATE users SET disabled_at = NULL WHERE user_id = 'grace'`;
+        yield* spaces.changed;
+        yield* spaces.userStatusChanged({ userId: UserId.make("grace"), active: true });
+        yield* Fiber.join(resumed);
+        assert.isTrue(yield* enabled("task:kept"));
+      }).pipe(Effect.provide(layer), Effect.scoped);
+    }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);

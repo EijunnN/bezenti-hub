@@ -70,7 +70,7 @@ describe("V2 preview upgrade", () => {
         [88, "ScheduledTaskOwner"],
         [89, "UserAccessNarrowed"],
         [90, "InstallationPermissions"],
-        [92, "InactiveUsersSignNothing"],
+        [92, "InactiveUsers"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -184,7 +184,7 @@ describe("V2 preview upgrade", () => {
         [88, "ScheduledTaskOwner"],
         [89, "UserAccessNarrowed"],
         [90, "InstallationPermissions"],
-        [92, "InactiveUsersSignNothing"],
+        [92, "InactiveUsers"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

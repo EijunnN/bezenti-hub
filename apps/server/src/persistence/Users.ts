@@ -134,6 +134,10 @@ export class UserRepository extends Context.Service<
     readonly consumeRecoveryCode: (
       input: typeof ConsumeRecoveryCodeInput.Type,
     ) => Effect.Effect<Option.Option<UserId>, UserRepositoryError>;
+    /** The User of an unused recovery code, without spending it. */
+    readonly findRecoveryCodeUser: (
+      codeHash: string,
+    ) => Effect.Effect<Option.Option<UserId>, UserRepositoryError>;
     readonly getOwner: () => Effect.Effect<Option.Option<UserRecord>, UserRepositoryError>;
     readonly getByIds: (
       userIds: ReadonlyArray<UserId>,
@@ -475,6 +479,15 @@ const make = Effect.gen(function* () {
     `,
   });
 
+  const findUnusedRecoveryCode = SqlSchema.findOneOption({
+    Request: Schema.String,
+    Result: Schema.Struct({ userId: UserId }),
+    execute: (codeHash) => sql`
+      SELECT user_id AS "userId" FROM user_recovery_codes
+      WHERE code_hash = ${codeHash} AND used_at IS NULL
+    `,
+  });
+
   return UserRepository.of({
     hasOwner: Effect.fn("UserRepository.hasOwner")(function () {
       return findOwner(undefined).pipe(
@@ -542,6 +555,13 @@ const make = Effect.gen(function* () {
       return useRecoveryCode(input).pipe(
         Effect.map(Option.map((row) => row.userId)),
         Effect.mapError(toUserRepositoryError("UserRepository.consumeRecoveryCode")),
+      );
+    }),
+    findRecoveryCodeUser: Effect.fn("UserRepository.findRecoveryCodeUser")(function (codeHash) {
+      return findUnusedRecoveryCode(codeHash).pipe(
+        NodeSqliteClient.readOnly,
+        Effect.map(Option.map((row) => row.userId)),
+        Effect.mapError(toUserRepositoryError("UserRepository.findRecoveryCodeUser")),
       );
     }),
     getOwner: Effect.fn("UserRepository.getOwner")(function () {

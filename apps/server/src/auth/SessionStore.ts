@@ -440,6 +440,14 @@ export class SessionStore extends Context.Service<
       userId: UserId,
       options?: { readonly except?: AuthSessionId },
     ) => Effect.Effect<number, SessionCredentialInternalError>;
+    /**
+     * Revokes them in one write, inside the caller's transaction; run the returned effect once it
+     * commits, so their open sockets close.
+     */
+    readonly revokeAllForUserDeferred: (
+      userId: UserId,
+      options?: { readonly except?: AuthSessionId },
+    ) => Effect.Effect<Effect.Effect<number>, SessionCredentialInternalError>;
     readonly markConnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
     readonly markDisconnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
   }
@@ -1103,17 +1111,31 @@ const make = Effect.gen(function* () {
     return revokedSessionIds.length;
   });
 
+  const revokeAllForUserDeferred: SessionStore["Service"]["revokeAllForUserDeferred"] = Effect.fn(
+    "SessionStore.revokeAllForUserDeferred",
+  )(function* (userId, options) {
+    const sessionIds = yield* authSessions
+      .revokeAllForUser({
+        userId,
+        revokedAt: yield* DateTime.now,
+        exceptSessionId: options?.except ?? null,
+      })
+      .pipe(Effect.mapError((cause) => new ActiveSessionsListError({ cause })));
+    return Effect.gen(function* () {
+      yield* Ref.update(connectedSessionsRef, (current) => {
+        const next = new Map(current);
+        for (const sessionId of sessionIds) next.delete(sessionId);
+        return next;
+      });
+      yield* Effect.forEach(sessionIds, emitRemoved, { discard: true });
+      return sessionIds.length;
+    });
+  });
+
   const revokeAllForUser: SessionStore["Service"]["revokeAllForUser"] = Effect.fn(
     "SessionStore.revokeAllForUser",
   )(function* (userId, options) {
-    const rows = yield* authSessions
-      .listActive({ now: yield* DateTime.now })
-      .pipe(Effect.mapError((cause) => new ActiveSessionsListError({ cause })));
-    const sessionIds = rows
-      .filter((row) => row.userId === userId && row.sessionId !== options?.except)
-      .map((row) => row.sessionId);
-    const revoked = yield* Effect.forEach(sessionIds, revoke);
-    return revoked.filter(Boolean).length;
+    return yield* yield* revokeAllForUserDeferred(userId, options);
   });
 
   const awaitInvalidation = Effect.fn(function* (
@@ -1216,6 +1238,7 @@ const make = Effect.gen(function* () {
     revoke,
     revokeAllExcept,
     revokeAllForUser,
+    revokeAllForUserDeferred,
     markConnected,
     markDisconnected,
   });

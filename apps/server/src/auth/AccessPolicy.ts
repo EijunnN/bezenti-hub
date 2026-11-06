@@ -226,8 +226,10 @@ const decideOwned = (principal: Principal, action: Action, item: OwnedResource):
   const { space } = item;
   const deletes = action === "thread.delete" || action === "project.delete";
   if (principal.isOwner && othersPersonalSpace(principal, space)) {
-    // A removed User's work is the Owner's to keep or delete, archived or not.
-    return space.frozen && deletes ? allow : deny("personal-space-read-only");
+    // A removed User's work is the Owner's to stop, keep or delete, archived or not.
+    return space.frozen && (deletes || action === "thread.stop")
+      ? allow
+      : deny("personal-space-read-only");
   }
   if (action === "thread.continue") {
     if (space.archived) return deny("space-archived");

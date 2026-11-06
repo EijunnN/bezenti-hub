@@ -56,6 +56,7 @@ import * as ThreadForkService from "./ThreadForkService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as InactiveUserTurns from "./InactiveUserTurns.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 
 export const layerEventInfrastructure = Layer.mergeAll(
@@ -395,6 +396,9 @@ export const layerProduction = Layer.mergeAll(
     ),
   ),
   layerProviderContinuationWorkerProvided,
+  InactiveUserTurns.layer.pipe(
+    Layer.provide(Layer.merge(layerThreadManagementProvided, SpaceDirectory.layer)),
+  ),
   layerAgentSessionImporterProvided,
   EffectOutbox.layerPruneWorker.pipe(Layer.provide(EffectOutbox.layer)),
 ).pipe(

@@ -52,12 +52,12 @@ export function threadRolePermissions(
   // A Thread from before owners were recorded is the Owner's.
   const own =
     thread.ownerUserId == null ? view.isOwner === true : thread.ownerUserId === view.userId;
-  // The Owner only reads another User's Personal space, and deletes from a removed User's.
+  // The Owner only reads another User's Personal space, and stops or deletes in a removed User's.
   if (view.isOwner === true && space?.kind === "personal" && !space.isOwn) {
     return {
       canContinue: false,
       canArchive: false,
-      canStop: false,
+      canStop: space.frozen === true,
       canDelete: space.frozen === true,
       canCreateGuestLink: false,
       continueBlockedReason: READ_ONLY_PERSONAL_SPACE_REASON,

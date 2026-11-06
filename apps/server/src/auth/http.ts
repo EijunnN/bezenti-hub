@@ -870,7 +870,16 @@ export const layer = HttpApiBuilder.group(
               args.payload.code,
               deriveAuthClientMetadata({ request }),
             )
-            .pipe(failUserSignIn);
+            .pipe(
+              Effect.catchTags({
+                ServerAuthInvalidCredentialError:
+                  userSignInFailures.ServerAuthInvalidCredentialError,
+                ServerAuthInsecureTransportError:
+                  userSignInFailures.ServerAuthInsecureTransportError,
+                AccountInactiveError: failInactive,
+              }),
+              Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, failUserSignInInternal),
+            );
           yield* appendSessionCookie(sessions.cookieName, sessionToken, response.expiresAt);
           yield* appendCredentialResponseHeaders;
           return response;

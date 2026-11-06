@@ -302,6 +302,10 @@ export class UserDirectory extends Context.Service<
     readonly findActiveUser: (
       userId: UserId,
     ) => Effect.Effect<Option.Option<AuthUser>, UserDirectoryStorageError>;
+    /** Why the User may not sign in, when the Owner disabled or removed them. */
+    readonly inactiveReason: (
+      userId: UserId,
+    ) => Effect.Effect<AccountInactiveError | undefined, UserDirectoryStorageError>;
     /** The active User with this sign-in name or id, for the Hub's shell (`t3 ... --user`). */
     readonly findActiveUserByName: (
       loginNameOrId: string,
@@ -338,7 +342,10 @@ export class UserDirectory extends Context.Service<
     >;
     readonly redeemRecoveryCode: (
       code: string,
-    ) => Effect.Effect<AuthUser, RecoveryCodeRejectedError | UserDirectoryStorageError>;
+    ) => Effect.Effect<
+      AuthUser,
+      RecoveryCodeRejectedError | AccountInactiveError | UserDirectoryStorageError
+    >;
     readonly getAccount: (
       userId: UserId,
     ) => Effect.Effect<AuthAccount, AccountChangeRefusedError | UserDirectoryStorageError>;
@@ -806,17 +813,19 @@ const make = Effect.gen(function* () {
   const redeemRecoveryCode: UserDirectory["Service"]["redeemRecoveryCode"] = Effect.fn(
     "UserDirectory.redeemRecoveryCode",
   )(function* (code) {
+    const codeHash = yield* hashRecoveryCode(code);
+    // An account that may not sign in keeps its code unspent and is told why.
+    const holder = yield* users.findRecoveryCodeUser(codeHash).pipe(storage);
+    if (Option.isNone(holder)) return yield* new RecoveryCodeRejectedError({});
+    const record = yield* users.getById(holder.value).pipe(storage);
+    if (Option.isNone(record)) return yield* new RecoveryCodeRejectedError({});
+    const inactive = inactiveError(record.value);
+    if (inactive !== undefined) return yield* inactive;
     const userId = yield* users
-      .consumeRecoveryCode({ codeHash: yield* hashRecoveryCode(code), usedAt: yield* DateTime.now })
+      .consumeRecoveryCode({ codeHash, usedAt: yield* DateTime.now })
       .pipe(storage);
-    if (Option.isNone(userId)) {
-      return yield* new RecoveryCodeRejectedError({});
-    }
-    const user = yield* activeUser(userId.value);
-    if (Option.isNone(user)) {
-      return yield* new RecoveryCodeRejectedError({});
-    }
-    return toAuthUser(user.value);
+    if (Option.isNone(userId)) return yield* new RecoveryCodeRejectedError({});
+    return toAuthUser(record.value);
   });
 
   let cachedCredentialKey: Uint8Array | undefined;
@@ -1155,16 +1164,18 @@ const make = Effect.gen(function* () {
         yield* totpChallenges.delete(input.challengeId);
       }
       const credentials = yield* users.getCredentials(challenge.userId).pipe(storage);
-      // Both factors were right for an account that may no longer sign in: say so.
+      // Re-read now: the Owner may have disabled the account since the password step. When both
+      // factors were right, say so without counting a failure.
+      const record = yield* users.getById(challenge.userId).pipe(storage);
+      const inactive = Option.isSome(record) ? inactiveError(record.value) : undefined;
       if (
-        challenge.inactiveWithPassword &&
+        inactive !== undefined &&
+        (challenge.passwordOk || challenge.inactiveWithPassword) &&
         credentials.totpSecretCiphertext !== null &&
         (yield* acceptTotpCode(challenge.userId, credentials.totpSecretCiphertext, input.code))
       ) {
         yield* totpChallenges.delete(input.challengeId);
-        const record = yield* users.getById(challenge.userId).pipe(storage);
-        const inactive = Option.isSome(record) ? inactiveError(record.value) : undefined;
-        return yield* inactive ?? new PasswordRejectedError({});
+        return yield* inactive;
       }
       const user = yield* activeUser(challenge.userId);
       const accepted =
@@ -1527,6 +1538,10 @@ const make = Effect.gen(function* () {
     }),
     findActiveUser: Effect.fn("UserDirectory.findActiveUser")(function (userId: UserId) {
       return activeUser(userId).pipe(Effect.map(Option.map(toAuthUser)));
+    }),
+    inactiveReason: Effect.fn("UserDirectory.inactiveReason")(function* (userId: UserId) {
+      const record = yield* users.getById(userId).pipe(storage);
+      return Option.isSome(record) ? inactiveError(record.value) : undefined;
     }),
     findActiveUserByName: Effect.fn("UserDirectory.findActiveUserByName")(function* (
       loginNameOrId: string,

@@ -241,6 +241,10 @@ export class PairingGrantStore extends Context.Service<
     readonly revokeAllForUser: (
       userId: UserId,
     ) => Effect.Effect<number, BootstrapCredentialInternalError>;
+    /** The same write inside the caller's transaction; run the returned effect after it commits. */
+    readonly revokeAllForUserDeferred: (
+      userId: UserId,
+    ) => Effect.Effect<Effect.Effect<number>, BootstrapCredentialInternalError>;
     readonly consume: (
       credential: string,
       input?: {
@@ -671,23 +675,28 @@ const make = Effect.gen(function* () {
     Effect.mapError((cause) => new BootstrapCredentialLookupError({ cause })),
   );
 
+  const revokeAllForUserDeferred: PairingGrantStore["Service"]["revokeAllForUserDeferred"] =
+    Effect.fn("PairingGrantStore.revokeAllForUserDeferred")(function* (userId) {
+      const revokedAt = yield* DateTime.now;
+      const ids = yield* pairingLinks
+        .revokeUnspentForUser({ userId, revokedAt })
+        .pipe(
+          Effect.mapError((cause) => new PairingLinkRevokeError({ pairingLinkId: userId, cause })),
+        );
+      return Effect.forEach(ids, emitRemoved, { discard: true }).pipe(Effect.as(ids.length));
+    });
+
   const revokeAllForUser: PairingGrantStore["Service"]["revokeAllForUser"] = Effect.fn(
     "PairingGrantStore.revokeAllForUser",
   )(function* (userId) {
-    const revokedAt = yield* DateTime.now;
-    const ids = yield* pairingLinks
-      .revokeUnspentForUser({ userId, revokedAt })
-      .pipe(
-        Effect.mapError((cause) => new PairingLinkRevokeError({ pairingLinkId: userId, cause })),
-      );
-    yield* Effect.forEach(ids, emitRemoved, { discard: true });
-    return ids.length;
+    return yield* yield* revokeAllForUserDeferred(userId);
   });
 
   return PairingGrantStore.of({
     inspect,
     creatorOf,
     revokeAllForUser,
+    revokeAllForUserDeferred,
     issueOneTimeToken,
     listActive,
     get streamChanges() {
