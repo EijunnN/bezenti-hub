@@ -32,6 +32,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -229,6 +230,7 @@ const make = Effect.gen(function* () {
   const ids = yield* IdAllocator.IdAllocatorV2;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
+  const fileSystem = yield* Effect.serviceOption(FileSystem.FileSystem);
   const preparationScope = yield* Scope.make("sequential");
   const scheduledLaunches = yield* Ref.make<ReadonlySet<CommandId>>(new Set());
   yield* Effect.addFinalizer(() => Scope.close(preparationScope, Exit.void));
@@ -1019,7 +1021,17 @@ const make = Effect.gen(function* () {
                 createdBy: input.createdBy,
                 creationSource: input.creationSource,
               });
+        // A Scratch folder made for a Thread that is not created goes again.
+        const allocatedFolder =
+          initialWorktreePath !== null && input.workspaceStrategy.type === "root"
+            ? initialWorktreePath
+            : null;
         const claimed = yield* claimDispatch.pipe(
+          Effect.tapError(() =>
+            allocatedFolder === null || Option.isNone(fileSystem)
+              ? Effect.void
+              : fileSystem.value.remove(allocatedFolder, { recursive: true }).pipe(Effect.ignore),
+          ),
           Effect.mapError(
             mapError(
               input,

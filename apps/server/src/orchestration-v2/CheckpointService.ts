@@ -25,6 +25,7 @@ import { isGitImport, parseTurnDiffFilesFromNumstat } from "../checkpointing/Dif
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
+import { scratchFolderName, type ThreadRepository } from "../environment/ScratchWorkspace.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 
 const CHECKPOINT_REFS_PREFIX = "refs/t3/orchestration-v2/checkpoints";
@@ -260,11 +261,35 @@ export const layer: Layer.Layer<
     const isGitCheckpointable = (cwd: string) =>
       checkpointStore.isGitRepository(cwd).pipe(Effect.orElseSucceed(() => false));
 
+    /**
+     * Whether the scope's workspace takes checkpoints. A Thread without a Project whose folder is
+     * from before folders got git gets its repository here, where the Thread runs.
+     */
+    const ensureCheckpointable = Effect.fn("CheckpointService.ensureCheckpointable")(
+      function* (scope: OrchestrationV2CheckpointScope) {
+        if (yield* isGitCheckpointable(scope.cwd)) return true;
+        if (Option.isNone(hubRepositories) || Option.isNone(hubRepository)) return false;
+        const scratch = yield* hubRepositories.value.threads.scratchWorkspaceOf(scope.threadId);
+        if (scratch === undefined || scratchFolderName(scope.cwd) !== scratch.folder) return false;
+        yield* hubRepository.value.ensureScratch(scope.cwd);
+        return yield* isGitCheckpointable(scope.cwd);
+      },
+      (effect, scope) =>
+        effect.pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Could not give a Thread's folder its git repository", {
+              scopeId: scope.id,
+              cause: String(cause),
+            }).pipe(Effect.as(false)),
+          ),
+        ),
+    );
+
     const captureBaseline: CheckpointServiceV2Shape["captureBaseline"] = (input) =>
       withWorkspaceLock(
         input.scope.cwd,
         Effect.gen(function* () {
-          if (!(yield* isGitCheckpointable(input.scope.cwd))) {
+          if (!(yield* ensureCheckpointable(input.scope))) {
             return;
           }
 
@@ -381,7 +406,7 @@ export const layer: Layer.Layer<
             ordinalWithinScope: Math.max(0, input.ordinalWithinScope - 1),
           });
 
-          if (input.forceMissing === true || !(yield* isGitCheckpointable(input.scope.cwd))) {
+          if (input.forceMissing === true || !(yield* ensureCheckpointable(input.scope))) {
             return makeCheckpoint({
               id: checkpointId,
               scope: input.scope,
@@ -536,24 +561,30 @@ export const layer: Layer.Layer<
             // failed fetch leaves the restore below to report the ref unavailable.
             if (!present) {
               // A Thread without a Project fetches from its own repository.
-              const key = Option.isSome(hubRepositories)
-                ? yield* hubRepositories.value.keyOfThread(input.scope.threadId)
-                : Option.none<HubRepository.HubRepositoryKey>();
-              yield* hubRepository.value
-                .fetch({
+              const transfers = hubRepository.value;
+              yield* Effect.gen(function* () {
+                const repository = Option.isSome(hubRepositories)
+                  ? yield* hubRepositories.value.threads.repositoryOfThread(input.scope.threadId)
+                  : Option.none<ThreadRepository>();
+                yield* transfers.fetch({
                   cwd: input.scope.cwd,
-                  ...HubRepository.keyOf(Option.getOrElse(key, () => ({ projectId }))),
-                  checkpointRefs: [input.checkpoint.ref],
-                })
-                .pipe(
-                  Effect.catch((cause) =>
-                    Effect.logWarning("Could not fetch a checkpoint from the Hub repository", {
-                      scopeId: input.scope.id,
-                      checkpointRef: input.checkpoint.ref,
-                      cause: String(cause),
+                  ...HubRepository.keyOf(
+                    Option.match(repository, {
+                      onNone: () => ({ projectId }),
+                      onSome: (found) => found.key,
                     }),
                   ),
-                );
+                  checkpointRefs: [input.checkpoint.ref],
+                });
+              }).pipe(
+                Effect.catch((cause) =>
+                  Effect.logWarning("Could not fetch a checkpoint from the Hub repository", {
+                    scopeId: input.scope.id,
+                    checkpointRef: input.checkpoint.ref,
+                    cause: String(cause),
+                  }),
+                ),
+              );
             }
           }
           const restored = yield* checkpointStore.restoreCheckpoint({

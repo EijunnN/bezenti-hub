@@ -90,18 +90,20 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import type * as Statement from "effect/sql/Statement";
+import type { EnvironmentId } from "@t3tools/contracts";
+
+import * as ServerConfig from "../config.ts";
+import { isScratchWorkspaceRoot, scratchRootOf } from "../environment/ScratchWorkspace.ts";
 
 import { MCP_APP_OUTPUT_KEY } from "@t3tools/shared/mcpApp";
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
 import { threadInSpaces } from "../spaces/SpaceVisibility.ts";
-import {
-  hostLocationJson,
-  hubMachineLocationJson,
-  isCheckoutRelativeJson,
-} from "../environment/WorkspaceLocation.ts";
+import { hostLocationJson, hubMachineLocationJson } from "../environment/WorkspaceLocation.ts";
 import {
   isThreadHistoryUserTurn,
   isConversationHistoryItem,
@@ -1997,6 +1999,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
   ProjectionStoreV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    // Where Threads without a Project live; absent on hosts without a server config.
+    const scratchConfig = yield* Effect.serviceOption(ServerConfig.ServerConfig);
+    const scratchPath = yield* Effect.serviceOption(Path.Path);
 
     const inlineWorkOutput = sql`item.type = 'dynamic_tool' AND (
       item.payload_json LIKE '%htmlRender%' OR item.payload_json LIKE ${`%${MCP_APP_OUTPUT_KEY}%`}
@@ -2008,6 +2013,39 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       sql<{ readonly checkout: string }>`
         SELECT workspace_root AS checkout FROM projection_projects WHERE project_id = ${projectId}
       `.pipe(Effect.map((rows) => rows[0]?.checkout ?? null));
+    // Threads without a Project: a folder directly in the Hub's scratch folder, told by its path
+    // first, so a Thread elsewhere in a Project reads no Project row on each write.
+    const scratchRoot = Option.map(
+      Option.all({ config: scratchConfig, path: scratchPath }),
+      ({ config, path }) => ({
+        path,
+        baseDir: config.baseDir,
+        root: scratchRootOf(path, config.baseDir),
+      }),
+    );
+    const isScratchFolderPath = (worktreePath: string) =>
+      Option.isSome(scratchRoot) &&
+      scratchRoot.value.path.dirname(scratchRoot.value.path.resolve(worktreePath)) ===
+        scratchRoot.value.root;
+    /**
+     * A Thread without a Project's folder is relative to its checkout of the scratch Project; in
+     * another Project it is that machine's path; null while the Project is not projected yet.
+     */
+    const elsewhereLocationJson = (
+      projectId: ProjectId,
+      environmentId: EnvironmentId,
+      worktreePath: string,
+    ) =>
+      hubMachineCheckout(projectId).pipe(
+        Effect.map((checkout) =>
+          checkout === null
+            ? null
+            : Option.isSome(scratchRoot) &&
+                isScratchWorkspaceRoot(scratchRoot.value.path, scratchRoot.value.baseDir, checkout)
+              ? hubMachineLocationJson(checkout, worktreePath)
+              : hostLocationJson(environmentId, worktreePath),
+        ),
+      );
     const threadHubMachineCheckout = (threadId: ThreadId) =>
       sql<{ readonly checkout: string }>`
         SELECT p.workspace_root AS checkout
@@ -2093,25 +2131,25 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               const payloadJson = yield* encodeThreadPayload(event.payload);
               const payload = parseEncodedPayload(payloadJson);
               const activeEnvironmentId = event.payload.activeEnvironmentId;
-              const hubLocationJson =
-                event.payload.worktreePath === null
-                  ? null
-                  : hubMachineLocationJson(
-                      yield* hubMachineCheckout(event.payload.projectId),
-                      event.payload.worktreePath,
-                    );
+              const worktreePath = event.payload.worktreePath;
               const worktreeLocationJson =
-                event.payload.worktreePath === null
+                worktreePath === null
                   ? null
-                  : activeEnvironmentId !== undefined &&
-                      activeEnvironmentId !== null &&
-                      activeEnvironmentId !== HUB_MACHINE_ENVIRONMENT_ID &&
-                      // A folder inside the Project's checkout (a Thread without a Project's own
-                      // scratch folder) is found in that checkout on every machine.
-                      !isCheckoutRelativeJson(hubLocationJson)
-                    ? // Only a move gives a Thread elsewhere a worktree: it is that machine's path.
-                      hostLocationJson(activeEnvironmentId, event.payload.worktreePath)
-                    : hubLocationJson;
+                  : activeEnvironmentId === undefined ||
+                      activeEnvironmentId === null ||
+                      activeEnvironmentId === HUB_MACHINE_ENVIRONMENT_ID
+                    ? hubMachineLocationJson(
+                        yield* hubMachineCheckout(event.payload.projectId),
+                        worktreePath,
+                      )
+                    : isScratchFolderPath(worktreePath)
+                      ? yield* elsewhereLocationJson(
+                          event.payload.projectId,
+                          activeEnvironmentId,
+                          worktreePath,
+                        )
+                      : // Only a move gives a Thread elsewhere a worktree: that machine's path.
+                        hostLocationJson(activeEnvironmentId, worktreePath);
               yield* sql`
               INSERT INTO orchestration_v2_projection_threads (
                 thread_id,

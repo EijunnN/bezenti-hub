@@ -100,10 +100,22 @@ export interface EnvironmentHubRepository {
   readonly fetch: (
     input: HubRepository.CheckoutTransferInput,
   ) => Effect.Effect<void, CheckpointStoreError>;
+  /**
+   * Gives a Thread without a Project's folder its own git repository when it has none (one made
+   * before folders got one), so it gets checkpoints and can move.
+   */
+  readonly ensureScratch: (folder: string) => Effect.Effect<void, CheckpointStoreError>;
 }
 
 /** The machine's half of moving a Thread to it (`MovedWorkspace.ts`). */
 export interface EnvironmentMoveWorkspace {
+  /**
+   * The source's half for a Thread without a Project: its folder's branches and HEAD as refs
+   * under `prefix`, to push, and the repositories nested in it, which do not move.
+   */
+  readonly publishScratch: (
+    input: MovedWorkspace.MovePublishScratchInput,
+  ) => Effect.Effect<MovedWorkspace.MovePublishScratchResult, CheckpointStoreError>;
   /** Downloads what the Thread continues from into the Project's checkout, made if missing. */
   readonly fetch: (
     input: MovedWorkspace.MoveFetchInput,
@@ -421,11 +433,18 @@ const moveWorkspaceDeps: Effect.Effect<MoveWorkspaceDeps> = Effect.gen(function*
 const makeMoveWorkspace = (input: {
   readonly deps: MoveWorkspaceDeps;
   readonly checkpoints: CheckpointStore.CheckpointStore["Service"];
-  readonly hubRepository: EnvironmentHubRepository;
+  readonly hubRepository: LocalHubRepository;
   readonly checkoutOf: (projectId: ProjectId) => Effect.Effect<string, CheckpointStoreError>;
 }): EnvironmentMoveWorkspace => {
   const { vcs, fileSystem, path, config, platform, home } = input.deps;
   return {
+    publishScratch: (request) =>
+      Option.isNone(vcs) || Option.isNone(fileSystem) || Option.isNone(path)
+        ? Effect.fail(noCheckout("scratch" as ProjectId, "This server cannot use git."))
+        : ScratchWorkspace.publishScratchHistory(
+            { vcs: vcs.value, fileSystem: fileSystem.value, path: path.value },
+            request,
+          ),
     fetch: Effect.fn("EnvironmentExecutor.move.fetch")(function* (request) {
       let checkout = yield* input.checkoutOf(request.projectId);
       const { scratch } = request;
@@ -453,6 +472,14 @@ const makeMoveWorkspace = (input: {
           projectId: request.projectId,
           ...(scratch === undefined ? {} : { scratchThreadId: scratch.threadId }),
           checkpointRefs: request.refs,
+        });
+      }
+      if (scratch?.history !== undefined) {
+        yield* input.hubRepository.fetchPrefix({
+          cwd: checkout,
+          projectId: request.projectId,
+          scratchThreadId: scratch.threadId,
+          prefix: scratch.history,
         });
       }
       return { checkout };
@@ -503,18 +530,32 @@ const noCheckout = (projectId: ProjectId, detail?: string) =>
  * its Threads upload through the same path as a joined Environment's at the cost of a local copy.
  */
 const localHubRepository = (
-  repositories: Option.Option<HubRepository.HubRepositories["Service"]>,
-  vcs: Option.Option<VcsProcess.VcsProcess["Service"]>,
-): EnvironmentHubRepository =>
-  HubRepository.makeCheckoutTransfers({
-    vcs: Option.getOrUndefined(vcs),
+  repositories: Option.Option<HubRepositories["Service"]>,
+  deps: MoveWorkspaceDeps,
+): LocalHubRepository => ({
+  ...HubRepository.makeCheckoutTransfers({
+    vcs: Option.getOrUndefined(deps.vcs),
     remoteOf: Option.match(repositories, {
       onNone: () => undefined,
       onSome: (hub) => (key: HubRepository.HubRepositoryKey) =>
         hub.ensure(key).pipe(Effect.map((url) => ({ url }))),
     }),
     unavailable: "This server keeps no Hub repository.",
-  });
+  }),
+  ensureScratch: (folder) =>
+    Option.isNone(deps.vcs) || Option.isNone(deps.fileSystem) || Option.isNone(deps.path)
+      ? Effect.fail(noCheckout("scratch" as ProjectId, "This server cannot use git."))
+      : ScratchWorkspace.ensureScratchRepository(
+          { vcs: deps.vcs.value, fileSystem: deps.fileSystem.value, path: deps.path.value },
+          folder,
+        ),
+});
+
+type HubRepositories = HubRepository.HubRepositories;
+
+/** The Hub machine's side, with what its own moves need beyond the executor operations. */
+type LocalHubRepository = EnvironmentHubRepository &
+  Pick<HubRepository.CheckoutTransfers, "fetchPrefix">;
 
 /** An executor whose machine is this process. */
 const makeInProcessExecutor = (input: InProcessExecutorInput): EnvironmentExecutor => ({
@@ -632,9 +673,10 @@ export const layerHubMachine: Layer.Layer<
   Effect.gen(function* () {
     const paths = ProjectCheckouts.hubMachinePaths(yield* ProjectStore.ProjectStoreV2);
     const checkpoints = yield* CheckpointStore.CheckpointStore;
+    const deps = yield* moveWorkspaceDeps;
     const hubRepository = localHubRepository(
       yield* Effect.serviceOption(HubRepository.HubRepositories),
-      yield* Effect.serviceOption(VcsProcess.VcsProcess),
+      deps,
     );
     const hubMachine = makeInProcessExecutor({
       environmentId: HUB_MACHINE_ENVIRONMENT_ID,
@@ -647,7 +689,7 @@ export const layerHubMachine: Layer.Layer<
       hubRepository,
       // The Hub machine's checkout of a Project is its workspace root, which always exists.
       move: makeMoveWorkspace({
-        deps: yield* moveWorkspaceDeps,
+        deps,
         checkpoints,
         hubRepository,
         checkoutOf: (projectId) =>
@@ -926,6 +968,11 @@ export const layerHubRepositoryTransfers: Layer.Layer<
       fetch: Effect.fn("EnvironmentExecutor.hubRepository.fetch")(function* (input) {
         return yield* (yield* current).fetch(input);
       }),
+      ensureScratch: Effect.fn("EnvironmentExecutor.hubRepository.ensureScratch")(
+        function* (folder) {
+          return yield* (yield* current).ensureScratch(folder);
+        },
+      ),
     });
   }),
 );

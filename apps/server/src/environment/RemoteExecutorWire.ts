@@ -70,7 +70,13 @@ import {
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Schema from "effect/Schema";
 
-import { MoveFetchResult, MovePrepareInput, MovePrepareResult } from "./MovedWorkspace.ts";
+import {
+  MoveFetchResult,
+  MovePrepareInput,
+  MovePrepareResult,
+  MovePublishScratchInput,
+  MovePublishScratchResult,
+} from "./MovedWorkspace.ts";
 
 const RuntimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy;
 const ProviderThread = OrchestrationV2ProviderThread;
@@ -386,6 +392,10 @@ export const REMOTE_OPERATIONS = {
   ),
   "checkpoint.push": checkpoint(HubRepositoryTransfer, Schema.Void),
   "checkpoint.fetch": checkpoint(HubRepositoryTransfer, Schema.Void),
+  // A Thread without a Project's folder made before folders got git: it gets its repository.
+  "checkpoint.ensureScratch": checkpoint(Schema.Struct({ folder: Schema.String }), Schema.Void),
+  // A Thread without a Project leaves: its folder's branches and HEAD, as refs to push.
+  "move.publishScratch": checkpoint(MovePublishScratchInput, MovePublishScratchResult),
   // Moving a Thread here: the checkout (cloned when missing) fetches what the Thread continues
   // from, then the Thread's branch or worktree is made over it and the setup script runs.
   "move.fetch": checkpoint(
@@ -393,6 +403,8 @@ export const REMOTE_OPERATIONS = {
       checkout: WireCheckout,
       projectId: ProjectId,
       scratchThreadId: Schema.optionalKey(ThreadId),
+      /** A Thread without a Project: where its folder's own history is, fetched too. */
+      scratchHistory: Schema.optionalKey(Schema.String),
       refs: Schema.Array(CheckpointRef),
     }),
     MoveFetchResult,

@@ -10,7 +10,6 @@ import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
-import * as Path from "effect/Path";
 import * as Pull from "effect/Pull";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -21,8 +20,6 @@ import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as HubRepository from "../checkpointing/HubRepository.ts";
-import * as ServerConfig from "../config.ts";
-import { isScratchWorkspaceRoot } from "../environment/ScratchWorkspace.ts";
 import { checkpointRefForScopeOrdinal } from "../orchestration-v2/CheckpointService.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { requestUrl } from "../requestUrl.ts";
@@ -168,8 +165,6 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
   readonly digest: Digest.Digest["Service"];
   readonly maxRequestBytes: number;
   readonly nullDevice: string;
-  readonly path: Path.Path;
-  readonly baseDir: string;
 }) {
   const request = yield* HttpServerRequest.HttpServerRequest;
   const url = requestUrl(request);
@@ -215,23 +210,37 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
   }).pipe(Effect.option);
   if (Option.isNone(decodedId)) return HttpServerResponse.text("Not Found", { status: 404 });
   // A Thread's own repository is that of a Thread without a Project; a Project's is any other's.
-  const key: Option.Option<HubRepository.HubRepositoryKey> = asThread
-    ? Option.filter(
-        yield* deps.repositories.keyOfThread(ThreadId.make(decodedId.value)),
-        (found) => found.scratchThreadId !== undefined,
-      )
-    : Option.some({ projectId: ProjectId.make(decodedId.value) });
+  const { threads } = deps.repositories;
+  const resolved = yield* Effect.result(
+    asThread
+      ? threads.repositoryOfThread(ThreadId.make(decodedId.value)).pipe(
+          Effect.map((found) =>
+            Option.filter(
+              Option.map(found, (entry) => entry.key),
+              (entry) => entry.scratchThreadId !== undefined,
+            ),
+          ),
+        )
+      : // The scratch Project's Threads each have their own repository, never a shared one.
+        threads.isScratchProject(ProjectId.make(decodedId.value)).pipe(
+          Effect.map((scratch) =>
+            scratch
+              ? Option.none<HubRepository.HubRepositoryKey>()
+              : Option.some<HubRepository.HubRepositoryKey>({
+                  projectId: ProjectId.make(decodedId.value),
+                }),
+          ),
+        ),
+  );
+  // Which repository it is could not be read: the machine tries again, nothing goes elsewhere.
+  if (resolved._tag === "Failure") {
+    return HttpServerResponse.text("Service Unavailable", { status: 503 });
+  }
+  const key = resolved.success;
   if (Option.isNone(key)) return HttpServerResponse.text("Not Found", { status: 404 });
   const { projectId } = key.value;
   const project = yield* deps.projects.get(projectId).pipe(Effect.orElseSucceed(Option.none));
   if (Option.isNone(project)) return HttpServerResponse.text("Not Found", { status: 404 });
-  // The scratch Project's Threads each have their own repository, never a shared one.
-  if (
-    key.value.scratchThreadId === undefined &&
-    isScratchWorkspaceRoot(deps.path, deps.baseDir, project.value.workspaceRoot)
-  ) {
-    return HttpServerResponse.text("Not Found", { status: 404 });
-  }
   // The machine works for its owner only: in Spaces where they may start Threads.
   const allowed = yield* deps.spaces
     .claimCreation({ action: "thread.create", actorUserId: check.ownerUserId, projectId })
@@ -425,6 +434,8 @@ const refPrefixesFor = Effect.fn("HubRepositoryHttp.refPrefixesFor")(function* (
       readable.add(prefix);
       if (row.active === 1) writable.add(prefix);
     }
+    // The target of a move uploads what it sets aside of its own before the Thread is its own.
+    writable.add(HubRepository.threadRefPrefixes(row.threadId)[1]);
   }
   return { readable: [...readable], writable: [...writable] };
 });
@@ -446,8 +457,6 @@ export const layer = HttpRouter.use((router) =>
         Config.withDefault(2 * 1024 * 1024 * 1024),
       ),
       nullDevice: (yield* HostProcess.Platform) === "win32" ? "NUL" : "/dev/null",
-      path: yield* Path.Path,
-      baseDir: (yield* ServerConfig.ServerConfig).baseDir,
     }).pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("Hub repository request failed", { cause }).pipe(

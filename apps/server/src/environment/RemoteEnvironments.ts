@@ -48,7 +48,6 @@ import * as Stream from "effect/Stream";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import type { CheckpointStoreError } from "../checkpointing/Errors.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
-import * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -331,23 +330,10 @@ const make = Effect.gen(function* () {
           Effect.orElseSucceed(() => [] as ReadonlyArray<CheckpointRef>),
         );
 
-  /**
-   * A Thread without a Project: its own Hub repository and its scratch workspace's folder name.
-   * Undefined for a Thread in a Project, or one with no folder of its own.
-   */
-  const scratchOf = Effect.fn("RemoteEnvironments.scratchOf")(function* (thread: {
-    readonly id: ThreadId;
-    readonly worktreePath: string | null;
-  }) {
-    const key = yield* HubRepository.keyOfThreadIn(
-      { sql, path: filePath, baseDir: config.baseDir },
-      thread.id,
-    ).pipe(Effect.orElseSucceed(() => Option.none<HubRepository.HubRepositoryKey>()));
-    const folder =
-      thread.worktreePath === null ? null : ScratchWorkspace.scratchFolderName(thread.worktreePath);
-    return Option.isSome(key) && key.value.scratchThreadId !== undefined && folder !== null
-      ? { threadId: key.value.scratchThreadId, folder }
-      : undefined;
+  const scratchThreads = ScratchWorkspace.makeScratchThreads({
+    sql,
+    path: filePath,
+    baseDir: config.baseDir,
   });
 
   /**
@@ -520,7 +506,16 @@ const make = Effect.gen(function* () {
             link,
             thread.value.projectId,
             input.threadId,
-            yield* scratchOf(thread.value),
+            yield* scratchThreads.scratchWorkspaceOf(input.threadId).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterOpenSessionError({
+                    driver,
+                    providerSessionId: input.providerSessionId,
+                    cause,
+                  }),
+              ),
+            ),
           );
       const mcp = yield* mcpSessions.read(input.threadId);
       const sink: SessionSink = {
@@ -748,8 +743,14 @@ const make = Effect.gen(function* () {
       fetch: Effect.fn("RemoteEnvironments.hubRepository.fetch")((input) =>
         callCheckpoint<void>(link, "checkpoint.fetch", input),
       ),
+      ensureScratch: Effect.fn("RemoteEnvironments.hubRepository.ensureScratch")((folder) =>
+        callCheckpoint<void>(link, "checkpoint.ensureScratch", { folder }),
+      ),
     };
     const move: EnvironmentExecutor.EnvironmentMoveWorkspace = {
+      publishScratch: Effect.fn("RemoteEnvironments.move.publishScratch")((input) =>
+        callCheckpoint<MovedWorkspace.MovePublishScratchResult>(link, "move.publishScratch", input),
+      ),
       fetch: Effect.fn("RemoteEnvironments.move.fetch")(function* (input) {
         const checkout = yield* checkoutFor(link, input.projectId, undefined, input.scratch);
         if (checkout === undefined) {
@@ -763,6 +764,9 @@ const make = Effect.gen(function* () {
           checkout,
           projectId: input.projectId,
           ...(input.scratch === undefined ? {} : { scratchThreadId: input.scratch.threadId }),
+          ...(input.scratch?.history === undefined
+            ? {}
+            : { scratchHistory: input.scratch.history }),
           refs: input.refs,
         });
       }),

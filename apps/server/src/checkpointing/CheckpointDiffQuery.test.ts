@@ -391,7 +391,10 @@ it.effect.each([
           directoryOf: () => "project.git",
           hasRefs: () => Effect.succeed(true),
           ensure: () => Effect.succeed("/hub/project.git"),
-          keyOfThread: () => Effect.succeedNone,
+          threads: {
+            repositoryOfThread: () =>
+              Effect.succeedSome({ key: { projectId: ProjectId.make("project:diff") } }),
+          } as unknown as HubRepository.HubRepositories["Service"]["threads"],
           checkpoints: {
             diffCheckpoints: () => Effect.succeed("from the Hub"),
             listAuthoredPaths: () => Effect.succeed(null),

@@ -59,12 +59,12 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as Path from "effect/Path";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
-import { isScratchWorkspaceRoot, scratchRootOf } from "../environment/ScratchWorkspace.ts";
+import { makeScratchThreads } from "../environment/ScratchWorkspace.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as Orchestrator from "./Orchestrator.ts";
-import * as ProjectStore from "./ProjectStore.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { projectedRowEncodedBytes } from "./threadHistoryPaging.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
@@ -621,24 +621,19 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
   // A Thread without a Project works in its own scratch folder, which any Environment makes.
-  const scratchDeps = Option.all({
-    config: yield* Effect.serviceOption(ServerConfig.ServerConfig),
-    path: yield* Effect.serviceOption(Path.Path),
-    projects: yield* Effect.serviceOption(ProjectStore.ProjectStoreV2),
-  });
+  const scratchThreads = Option.map(
+    Option.all({
+      config: yield* Effect.serviceOption(ServerConfig.ServerConfig),
+      path: yield* Effect.serviceOption(Path.Path),
+      sql: yield* Effect.serviceOption(SqlClient.SqlClient),
+    }),
+    ({ config, path, sql }) => makeScratchThreads({ sql, path, baseDir: config.baseDir }),
+  );
   const isScratchWorkspace = (projectId: ProjectId, worktreePath: string) =>
-    Option.match(scratchDeps, {
+    Option.match(scratchThreads, {
       onNone: () => Effect.succeed(false),
-      onSome: ({ config, path, projects }) =>
-        projects.get(projectId).pipe(
-          Effect.map(
-            (project) =>
-              Option.isSome(project) &&
-              isScratchWorkspaceRoot(path, config.baseDir, project.value.workspaceRoot) &&
-              path.dirname(path.resolve(worktreePath)) === scratchRootOf(path, config.baseDir),
-          ),
-          Effect.orElseSucceed(() => false),
-        ),
+      onSome: (threads) =>
+        threads.isScratchFolder(projectId, worktreePath).pipe(Effect.orElseSucceed(() => false)),
     });
 
   const assertProviderInstanceEnabled: ThreadManagementServiceShape["assertProviderInstanceEnabled"] =

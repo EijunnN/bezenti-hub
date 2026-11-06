@@ -346,6 +346,7 @@ const make = Effect.gen(function* () {
       (folder, cause) => new ScratchFolderError({ folder, cause }),
     );
     // Its own repository, so its turns get checkpoints that upload to the Hub and move with it.
+    // Best effort: without git the Thread works as before, only without checkpoints or moves.
     if (Option.isSome(claimed)) {
       yield* git
         .execute({
@@ -354,7 +355,14 @@ const make = Effect.gen(function* () {
           args: ["init", "--quiet"],
           timeoutMs: 10_000,
         })
-        .pipe(Effect.mapError((cause) => new ScratchFolderError({ folder: claimed.value, cause })));
+        .pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("A Scratch thread's folder got no git repository", {
+              folder: claimed.value,
+              cause,
+            }),
+          ),
+        );
     }
     return claimed;
   });

@@ -742,6 +742,12 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
         return hubRepository.push(request as RemoteInput<"checkpoint.push">);
       case "checkpoint.fetch":
         return hubRepository.fetch(request as RemoteInput<"checkpoint.fetch">);
+      case "checkpoint.ensureScratch":
+        return local.workspace.hubRepository.ensureScratch(
+          (request as RemoteInput<"checkpoint.ensureScratch">).folder,
+        );
+      case "move.publishScratch":
+        return local.workspace.move.publishScratch(request as RemoteInput<"move.publishScratch">);
       // A Thread moves here: its checkout (cloned when missing) fetches what it continues from.
       case "move.fetch": {
         const moved = request as RemoteInput<"move.fetch">;
@@ -763,6 +769,16 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
                   cwd: moved.checkout.path,
                   ...HubRepository.keyOf(moved),
                   checkpointRefs: moved.refs,
+                }),
+          ),
+          // A Thread without a Project brings its folder's own branches and HEAD.
+          Effect.andThen(
+            moved.scratchHistory === undefined
+              ? Effect.void
+              : hubRepository.fetchPrefix({
+                  cwd: moved.checkout.path,
+                  ...HubRepository.keyOf(moved),
+                  prefix: moved.scratchHistory,
                 }),
           ),
           Effect.as({ checkout: moved.checkout.path }),

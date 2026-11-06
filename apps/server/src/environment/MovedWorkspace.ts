@@ -26,11 +26,33 @@ export const MoveFetchInput = Schema.Struct({
   /**
    * A Thread without a Project: its scratch workspace, `folder` under the scratch Project's
    * checkout, is made (with git) instead of the checkout, and fetches from the Thread's own
-   * repository. `move.fetch` answers that folder as the checkout.
+   * repository, with the folder's own history the source published under `history`.
+   * `move.fetch` answers that folder as the checkout.
    */
-  scratch: Schema.optionalKey(Schema.Struct({ threadId: ThreadId, folder: Schema.String })),
+  scratch: Schema.optionalKey(
+    Schema.Struct({
+      threadId: ThreadId,
+      folder: Schema.String,
+      history: Schema.optionalKey(Schema.String),
+    }),
+  ),
 });
 export type MoveFetchInput = typeof MoveFetchInput.Type;
+
+/** The source's folder publishes its branches and HEAD under `prefix`. */
+export const MovePublishScratchInput = Schema.Struct({
+  cwd: Schema.String,
+  prefix: Schema.String,
+});
+export type MovePublishScratchInput = typeof MovePublishScratchInput.Type;
+
+export const MovePublishScratchResult = Schema.Struct({
+  /** The refs made, to push to the Thread's Hub repository. */
+  refs: Schema.Array(CheckpointRef),
+  /** Folders in it that are repositories of their own: their contents do not move. */
+  nested: Schema.Array(Schema.String),
+});
+export type MovePublishScratchResult = typeof MovePublishScratchResult.Type;
 
 export const MoveFetchResult = Schema.Struct({
   /** The Project's checkout on the machine, made (cloned) when it had none. */
@@ -55,6 +77,8 @@ export const MovePrepareInput = Schema.Struct({
   setupScript: Schema.NullOr(Schema.Struct({ name: Schema.String, command: Schema.String })),
   /** `checkout` is a Thread's scratch workspace: the Thread works in it, never in a worktree. */
   scratch: Schema.optionalKey(Schema.Boolean),
+  /** Where the scratch folder's own history was fetched (`MovePublishScratchInput.prefix`). */
+  scratchHistory: Schema.optionalKey(Schema.String),
 });
 export type MovePrepareInput = typeof MovePrepareInput.Type;
 
@@ -170,6 +194,7 @@ export const prepareMovedWorkspace = Effect.fn("MovedWorkspace.prepare")(functio
       workspace: checkout,
       ref: input.ref,
       setAsidePrefix: input.setAsidePrefix,
+      history: input.scratchHistory,
     });
     return {
       cwd: prepared.cwd,

@@ -18,6 +18,7 @@ import * as Schema from "effect/Schema";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import { CHECKPOINT_DIFF_MAX_OUTPUT_BYTES } from "../vcs/VcsDriver.ts";
 import { checkpointRefForScopeOrdinal } from "../orchestration-v2/CheckpointService.ts";
+import type { ThreadRepository } from "../environment/ScratchWorkspace.ts";
 import type { ProjectionCheckpointContext } from "../orchestration-v2/ProjectionStore.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import {
@@ -119,13 +120,16 @@ export const make = Effect.gen(function* () {
     );
     if (uploaded && input.projectId !== undefined && Option.isSome(hubRepositories)) {
       const repositories = hubRepositories.value;
-      const projectId = input.projectId;
-      // A Thread without a Project reads its own repository.
-      const key = Option.getOrElse(yield* repositories.keyOfThread(input.threadId), () => ({
-        projectId,
-      }));
-      if (yield* repositories.hasRefs(key, input.refs)) {
-        const cwd = yield* repositories.ensure(key);
+      // A Thread without a Project reads its own repository; one that cannot be read now reads
+      // the workspace, as before an upload.
+      const repository = yield* repositories.threads
+        .repositoryOfThread(input.threadId)
+        .pipe(Effect.orElseSucceed(() => Option.none<ThreadRepository>()));
+      if (
+        Option.isSome(repository) &&
+        (yield* repositories.hasRefs(repository.value.key, input.refs))
+      ) {
+        const cwd = yield* repositories.ensure(repository.value.key);
         return { cwd, reads: repositories.checkpoints as CheckpointReads };
       }
     }

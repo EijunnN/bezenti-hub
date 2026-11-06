@@ -70,6 +70,8 @@ const ENVIRONMENT_EXECUTOR_OPERATIONS = {
     "checkpoint.deleteRefs",
     "checkpoint.push",
     "checkpoint.fetch",
+    "checkpoint.ensureScratch",
+    "move.publishScratch",
     "move.fetch",
     "move.prepare",
     "runtimePolicy.resolve",

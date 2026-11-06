@@ -2164,10 +2164,13 @@ describe("Hub con Environments: Threads without a Project", () => {
           .filter((checkpoint) => checkpoint.status === "ready")
           .map((checkpoint) => checkpoint.ref);
         assert.isNotEmpty(refs);
-        assert.deepEqual(Option.getOrThrow(yield* repositories.keyOfThread(threadId)), {
-          projectId,
-          scratchThreadId: threadId,
-        });
+        assert.deepEqual(
+          Option.getOrThrow(yield* repositories.threads.repositoryOfThread(threadId)).key,
+          {
+            projectId,
+            scratchThreadId: threadId,
+          },
+        );
         assert.isTrue(yield* repositories.hasRefs({ projectId, scratchThreadId: threadId }, refs));
         assert.isFalse(yield* repositories.hasRefs({ projectId }, refs));
 
@@ -2185,6 +2188,13 @@ describe("Hub con Environments: Threads without a Project", () => {
         yield* scratchTurnOnLaptop({ desktop: true });
       assert.isDefined(desktop);
       yield* Effect.promise(() => NodeFSP.writeFile(`${laptopFolder}/manual.txt`, "by hand\n"));
+      // The folder's own history: a commit on its branch, and a repository nested in it.
+      const commit = ["-c", "user.email=a@b.c", "-c", "user.name=A", "commit", "--quiet"];
+      yield* git(laptopFolder, ["checkout", "--quiet", "-b", "notes"]);
+      yield* git(laptopFolder, ["add", "notes.md"]);
+      yield* git(laptopFolder, [...commit, "-m", "Notes so far"]);
+      yield* Effect.promise(() => NodeFSP.mkdir(`${laptopFolder}/vendor`));
+      yield* git(`${laptopFolder}/vendor`, ["init", "--quiet"]);
 
       yield* dispatchMove(hub, {
         commandId: "command:scratch-to-desktop",
@@ -2204,6 +2214,21 @@ describe("Hub con Environments: Threads without a Project", () => {
         "Written on the Laptop (turn 1)\n",
       );
       assert.equal(yield* readText(`${desktopFolder}/manual.txt`), "by hand\n");
+      // The folder's branch and its commit came along, checked out as on the Laptop.
+      assert.equal(
+        (yield* git(desktopFolder, ["log", "-1", "--format=%s"])).stdout.trim(),
+        "Notes so far",
+      );
+      assert.equal(
+        (yield* git(desktopFolder, ["symbolic-ref", "--short", "HEAD"])).stdout.trim(),
+        "notes",
+      );
+      // The nested repository stays behind, and the Thread says so.
+      const { turnItems } = yield* hub
+        .service(Orchestrator.OrchestratorV2)
+        .getThreadProjection(threadId);
+      const notice = turnItems.find((item) => item.type === "system_notice");
+      assert.isTrue(notice?.type === "system_notice" && notice.message.includes("vendor"));
 
       // Back to the Laptop, where its old folder got a change the Hub never saw: it is kept.
       yield* Effect.promise(() => NodeFSP.writeFile(`${laptopFolder}/stale.txt`, "left behind\n"));
@@ -2226,6 +2251,39 @@ describe("Hub con Environments: Threads without a Project", () => {
       assert.include(setAside, HubRepository.threadRefPrefixes(threadId)[1]);
       const kept = yield* git(laptopFolder, ["show", `${setAside}:stale.txt`]);
       assert.equal(kept.stdout, "left behind\n");
+      // ... and not only on the Laptop: it goes to the Thread's repository on the Hub too.
+      const repositories = hub.service(HubRepository.HubRepositories);
+      assert.isTrue(
+        yield* repositories.hasRefs({ projectId, scratchThreadId: threadId }, [
+          CheckpointRef.make(setAside),
+        ]),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a folder from before folders got git gets its repository, and then moves", () =>
+    Effect.gen(function* () {
+      const { hub, desktop, threadId, projectId, owner, laptopFolder } = yield* scratchTurnOnLaptop(
+        { desktop: true },
+      );
+      assert.isDefined(desktop);
+      // As a Thread from before: its folder has no repository.
+      yield* Effect.promise(() => NodeFSP.rm(`${laptopFolder}/.git`, { recursive: true }));
+      yield* dispatchMove(hub, {
+        commandId: "command:old-scratch-to-desktop",
+        threadId,
+        target: desktop.environmentId,
+        actor: owner,
+      });
+      const moved = yield* settledMove(hub, threadId);
+      assert.equal(moved.move?.status, "switched", moved.move?.failure?.message);
+      assert.equal(moved.move?.continuesFrom?.kind, "final");
+      const desktopFolder = `${yield* checkoutOn(hub, desktop, projectId)}/${SCRATCH_FOLDER}`;
+      assert.equal(
+        yield* readText(`${desktopFolder}/notes.md`),
+        "Written on the Laptop (turn 1)\n",
+      );
+      assert.isTrue(yield* exists(`${laptopFolder}/.git`));
     }).pipe(Effect.scoped),
   );
 
@@ -2339,6 +2397,116 @@ describe("Hub con Environments: Threads without a Project", () => {
         assert.equal(
           yield* advertised(laptop, urlOf({ projectId, scratchThreadId: ThreadId.make("nope") })),
           404,
+        );
+      }).pipe(Effect.scoped),
+  );
+});
+
+describe("Hub con Environments: where a Thread elsewhere works", () => {
+  it.live("only a Thread without a Project's folder is found in a checkout on every machine", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const hub = yield* makeHub();
+      const laptop = yield* hub.join({ name: "Laptop", adapters: idleAdapters(instanceId) });
+      const projectId = ProjectId.make("project:normal");
+      const { workspaceRoot } = yield* seedProject(hub.server, {
+        projectId,
+        title: "Normal",
+        defaultModelSelection: null,
+      });
+      const create = (id: string, project: ProjectId, worktreePath: string) =>
+        hub.service(Orchestrator.OrchestratorV2).dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(`command:${id}`),
+          threadId: ThreadId.make(id),
+          projectId: project,
+          title: id,
+          modelSelection: { instanceId, model: "claude-sonnet-4-6" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath,
+          activeEnvironmentId: laptop.environmentId,
+        });
+      const locationOf = Effect.fn(function* (id: string) {
+        const [row] = yield* hub.server.sql<{ readonly location: string | null }>`
+          SELECT worktree_location_json AS location FROM orchestration_v2_projection_threads
+          WHERE thread_id = ${id}
+        `;
+        assert.isDefined(row);
+        return row.location === null ? null : JSON.parse(row.location);
+      });
+
+      // A Project's Thread on the Laptop keeps the Laptop's own path, even one that reads like a
+      // folder in the Hub's checkout.
+      yield* create("thread:normal-elsewhere", projectId, `${workspaceRoot}/nested`);
+      assert.deepEqual(yield* locationOf("thread:normal-elsewhere"), {
+        base: "host",
+        environmentId: laptop.environmentId,
+        path: `${workspaceRoot}/nested`,
+      });
+
+      // A scratch folder's Thread whose Project is not projected yet: nothing is frozen.
+      const baseDir = hub.service(ServerConfig.ServerConfig).baseDir;
+      yield* create(
+        "thread:scratch-early",
+        ProjectId.make("project:scratch-later"),
+        `${baseDir}/scratch/${SCRATCH_FOLDER}`,
+      );
+      assert.isNull(yield* locationOf("thread:scratch-early"));
+    }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "the Hub machine never makes or fills a repository shared by Threads without a Project",
+    () =>
+      Effect.gen(function* () {
+        const hub = yield* makeHub();
+        const projectId = ProjectId.make("project:scratch");
+        yield* seedProject(hub.server, {
+          projectId,
+          title: "No project",
+          defaultModelSelection: null,
+          scratch: true,
+        });
+        const repositories = hub.service(HubRepository.HubRepositories);
+        const registry = hub.service(EnvironmentExecutor.EnvironmentExecutorRegistry);
+        const hubMachine = yield* registry.get(HUB_MACHINE_ENVIRONMENT_ID);
+        const folder = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(`${NodeOS.tmpdir()}/t3-scratch-shared-`),
+        );
+        yield* git(folder, ["init", "--quiet"]);
+        yield* git(folder, [
+          "-c",
+          "user.email=a@b.c",
+          "-c",
+          "user.name=A",
+          "commit",
+          "--allow-empty",
+          "-m",
+          "x",
+        ]);
+        const ref = CheckpointRef.make("refs/t3/orchestration-v2/checkpoints/shared/ordinal/1");
+        yield* git(folder, ["update-ref", ref, "HEAD"]);
+        const pushed = yield* Effect.exit(
+          hubMachine.workspace.hubRepository.push({
+            cwd: folder,
+            projectId,
+            checkpointRefs: [ref],
+          }),
+        );
+        assert.isTrue(Exit.isFailure(pushed));
+        assert.isFalse(yield* repositories.hasRefs({ projectId }, [ref]));
+        const shared = `${repositories.root}/${repositories.directoryOf({ projectId })}`;
+        assert.isFalse(
+          yield* Effect.promise(() =>
+            NodeFSP.access(shared).then(
+              () => true,
+              () => false,
+            ),
+          ),
         );
       }).pipe(Effect.scoped),
   );

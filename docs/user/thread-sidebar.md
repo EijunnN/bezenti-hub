@@ -39,9 +39,9 @@ of its first message, and a short id, like
 folder, so the files the agent wrote stay until you delete them. Each folder is a
 Git repository of its own, so every turn gets a checkpoint and its diff, and the
 thread can move to another machine like any other (its folder goes with it). A
-thread started without a project before this kept a plain folder and has no
-checkpoints. This is unavailable when the data directory itself sits inside a Git
-checkout.
+plain folder from before gets its repository at the thread's next turn or move.
+Without Git installed the thread still works, just without checkpoints or moves.
+This is unavailable when the data directory itself sits inside a Git checkout.
 
 When the work grows into something real, pick **Turn into project** from the
 thread's menu. The thread's folder becomes a project where it is, so nothing
