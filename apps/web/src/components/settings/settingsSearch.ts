@@ -1101,14 +1101,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["add pair backend host code ssh config agent tunnel saved tailscale"],
   },
   {
-    id: "load-balancing",
-    title: "Load balancing",
-    to: "/settings/connections",
-    searchTerms: [
-      "automatic machine environment resources cpu memory capacity preference weight shared projects",
-    ],
-  },
-  {
     id: "pull-request-routing",
     title: "Pull request sharing",
     to: "/settings/connections",

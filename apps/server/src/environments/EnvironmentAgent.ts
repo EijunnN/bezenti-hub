@@ -578,7 +578,6 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
         onRequest,
         onEvent,
       });
-      channel = connected;
       yield* Effect.addFinalizer(() =>
         connected.close.pipe(
           Effect.andThen(
@@ -588,12 +587,23 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
           ),
         ),
       );
-      // What the Hub had not acknowledged when the last connection dropped; it drops duplicates.
-      for (const session of sessions.values()) {
-        for (const entry of session.spool) {
-          yield* connected.event(ENVIRONMENT_EXECUTOR_FRAME_METHODS.providerEvent, entry.frame);
+      // What the Hub had not acknowledged when the last connection dropped, in order; it drops
+      // duplicates. New events wait in the spool until the replay catches up, then go live: the
+      // check and the switch happen without yielding, so none is skipped or overtakes an older one.
+      const replayed = new Map<LocalSession, number>();
+      let progressed = true;
+      while (progressed) {
+        progressed = false;
+        for (const session of sessions.values()) {
+          for (const entry of session.spool) {
+            if (entry.seq <= (replayed.get(session) ?? 0)) continue;
+            yield* connected.event(ENVIRONMENT_EXECUTOR_FRAME_METHODS.providerEvent, entry.frame);
+            replayed.set(session, entry.seq);
+            progressed = true;
+          }
         }
       }
+      channel = connected;
       return { receive: connected.receive };
     }),
   });

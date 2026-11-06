@@ -168,7 +168,6 @@ function AddProjectToMachineDialog({ request }: { request: AddProjectToMachineRe
       drafts.setDraftThreadContext(draftId, {
         projectRef: targetRef,
         environmentSelection: "manual",
-        loadBalancedEnvironmentId: null,
       });
       return;
     }

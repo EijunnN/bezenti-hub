@@ -75,6 +75,7 @@ describe("V2 preview upgrade", () => {
         [93, "AuditLog"],
         [94, "Environments"],
         [95, "ProjectCheckouts"],
+        [96, "ThreadActiveEnvironment"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -193,6 +194,7 @@ describe("V2 preview upgrade", () => {
         [93, "AuditLog"],
         [94, "Environments"],
         [95, "ProjectCheckouts"],
+        [96, "ThreadActiveEnvironment"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

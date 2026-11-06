@@ -636,13 +636,22 @@ const make = Effect.gen(function* () {
     const sink = link.sessions.get(decoded.value.providerSessionId);
     if (sink === undefined) return;
     link.sessions.delete(decoded.value.providerSessionId);
+    if (decoded.value.error === undefined) return yield* Queue.end(sink.queue);
+    const error = yield* decodeJson(
+      ProviderAdapter.ProviderAdapterV2Error,
+      decoded.value.error,
+    ).pipe(Effect.option);
     yield* Queue.fail(
       sink.queue,
-      new ProviderAdapter.ProviderAdapterEventStreamError({
-        driver: sink.driver,
-        providerSessionId: decoded.value.providerSessionId,
-        cause: "The provider session ended on its Environment.",
-      }),
+      Option.getOrElse(
+        error as Option.Option<ProviderAdapter.ProviderAdapterV2Error>,
+        () =>
+          new ProviderAdapter.ProviderAdapterEventStreamError({
+            driver: sink.driver,
+            providerSessionId: decoded.value.providerSessionId,
+            cause: "The provider session failed on its Environment.",
+          }),
+      ),
     );
   });
 

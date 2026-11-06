@@ -191,7 +191,13 @@ read from `last_seen_at` and whether a socket is attached, not kept by timers.
 A joined server ([JoinedHub](../../apps/server/src/environments/JoinedHub.ts))
 serves only `/health` on loopback: no web app, sign-in or user WebSocket. Its
 mode comes from `joined-hub.json` in the state dir, which `t3 join` writes and
-`t3 leave` removes.
+`t3 leave` removes. Over its socket it runs the calls the Hub makes for the
+Threads placed on it, and authorizes nothing itself: the Hub checks
+`environment.use` when a Thread is placed (a personal machine runs only its
+owner's Threads; the Owner sees every machine but uses only their own), and
+accepts a provider event only from the Thread's Active environment. The agent
+there calls the Hub's MCP with the per-Thread credential the Hub issued, so it
+acts with exactly its User's permissions.
 
 ### Spaces
 

@@ -130,24 +130,6 @@ shown there apply only to the route marked **In use**; other routes are not
 checked. Each paired route has its own session and may grant different
 permissions.
 
-### Balance new threads across machines
-
-Auto balance is off by default. On web and desktop, enable it in
-**Settings → Environments → Load balancing** to automatically choose a machine for
-new threads in projects grouped across connected environments. The section
-appears once two or more machines are switched on.
-Each machine starts at **Normal**. Choose **Prefer** to favor it when it has CPU and
-memory available, **Less often** to reduce its share, or **Manual only** to exclude
-it from automatic selection. These are preferences, not fixed traffic percentages.
-Preferences are saved separately in each client.
-
-The composer checks eligible machines when choosing a draft's environment, then keeps
-that choice stable. Choose **Auto balance** again to check current resources, or choose
-a specific machine to override it. Choosing a branch or worktree also keeps the draft
-on that machine. Existing threads stay where they started. If resource checks are
-unavailable or all eligible machines are full, choose a machine manually to continue.
-Mobile keeps its manual environment selection.
-
 ### Tailscale HTTPS
 
 Join both devices to the same tailnet. In the desktop app, enable **Tailscale

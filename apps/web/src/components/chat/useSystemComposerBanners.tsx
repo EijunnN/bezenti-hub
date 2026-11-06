@@ -33,8 +33,6 @@ interface SystemComposerBannersInput {
   readonly activeEnvironment: EnvironmentPresentation | null;
   readonly activeEnvironmentUnavailable: boolean;
   readonly activeEnvironmentUnavailableState: EnvironmentUnavailableState | null;
-  readonly automaticEnvironment: boolean;
-  readonly autoBalancedEnvironments: ReadonlyArray<EnvironmentPresentation>;
 }
 
 /**
@@ -42,13 +40,8 @@ interface SystemComposerBannersInput {
  * and machines whose server is older than this app.
  */
 export function useSystemComposerBanners(input: SystemComposerBannersInput) {
-  const {
-    activeEnvironment,
-    activeEnvironmentUnavailable,
-    activeEnvironmentUnavailableState,
-    automaticEnvironment,
-    autoBalancedEnvironments,
-  } = input;
+  const { activeEnvironment, activeEnvironmentUnavailable, activeEnvironmentUnavailableState } =
+    input;
   const navigate = useNavigate();
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
@@ -118,11 +111,7 @@ export function useSystemComposerBanners(input: SystemComposerBannersInput) {
     handleDisconnectActiveEnvironment,
   );
   const versionMismatchBanner = useVersionMismatchBanner(
-    automaticEnvironment
-      ? autoBalancedEnvironments
-      : activeEnvironment === null
-        ? []
-        : [activeEnvironment],
+    activeEnvironment === null ? [] : [activeEnvironment],
   );
   return (() => {
     const items: ComposerBannerStackItem[] = [];

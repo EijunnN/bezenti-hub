@@ -91,12 +91,7 @@ import { threadEnvironment } from "../../state/threads";
 import { runMobileComposerTransition } from "./draftHeroTransition";
 import { useClientSettingsHydrated, useEnvironmentSettings } from "../../hooks/useSettings";
 import { environmentPresentations } from "../../state/presentation";
-import {
-  approvalRedirectNotice,
-  loadBalancingSendWarning,
-  multipleModelSendBlock,
-  referencedThreadContexts,
-} from "./composerSend.logic";
+import { approvalRedirectNotice, multipleModelSendBlock } from "./composerSend.logic";
 import { usePlanFollowUpSend } from "./useProposedPlanSend";
 import { useMultipleModelSend } from "./useMultipleModelSend";
 import { type ComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
@@ -135,7 +130,6 @@ import type { ProviderInstanceEntry } from "../../providerInstances";
 import type { SessionPhase } from "../../types";
 import type { DraftSessionState } from "../../composerDraftStore";
 import type { ComposerHandleRef } from "../../composerHandleContext";
-import type { useLogicalProjectEnvironments } from "../../hooks/useLogicalProjectEnvironments";
 import type { LatestProposedPlanState } from "../../session-logic";
 import type { useDraftEnvironmentRouting } from "./useDraftEnvironmentRouting";
 import type { useLocalDispatchState } from "./useLocalDispatchState";
@@ -192,7 +186,6 @@ interface ComposerSendInput {
     readonly threadBranch: string;
     readonly currentBranch: string;
   } | null;
-  readonly logicalProjectEnvironments: ReturnType<typeof useLogicalProjectEnvironments>;
   readonly providerInstanceEntries: ReadonlyArray<ProviderInstanceEntry>;
   readonly composerRef: ComposerHandleRef;
   readonly composerDraftTarget: ComposerThreadTarget;
@@ -217,8 +210,6 @@ interface ComposerSendInput {
   readonly usageLimitsOffered: boolean;
   readonly openUsageLimits: UsageLimitsPanel["open"];
   readonly clearUsageLimitsFor: UsageLimitsPanel["clearFor"];
-  readonly needsLoadBalancing: boolean;
-  readonly loadBalancing: DraftEnvironmentRouting["loadBalancing"];
   readonly readPendingEnvironmentChange: DraftEnvironmentRouting["readPendingEnvironmentChange"];
   readonly pendingApprovals: PendingThreadRequests["pendingApprovals"];
   readonly respondingRequestIds: PendingThreadRequests["respondingRequestIds"];
@@ -287,7 +278,6 @@ export function useComposerSend(input: ComposerSendInput) {
     sendEnvMode,
     startFromOrigin,
     localCheckoutBranchMismatch,
-    logicalProjectEnvironments,
     providerInstanceEntries,
     composerRef,
     composerDraftTarget,
@@ -312,8 +302,6 @@ export function useComposerSend(input: ComposerSendInput) {
     usageLimitsOffered,
     openUsageLimits,
     clearUsageLimitsFor,
-    needsLoadBalancing,
-    loadBalancing,
     readPendingEnvironmentChange,
     pendingApprovals,
     respondingRequestIds,
@@ -465,20 +453,6 @@ export function useComposerSend(input: ComposerSendInput) {
       feedbackUploadsInFlightRef.current.has(routeThreadKey)
     ) {
       notifyDirectAnnotationAttached();
-      return;
-    }
-    if (needsLoadBalancing) {
-      const draft = useComposerDraftStore.getState().getComposerDraft(composerDraftTarget);
-      toastManager.add({
-        type: "warning",
-        ...loadBalancingSendWarning({
-          pending: loadBalancing.pending,
-          threadContexts: draft ? referencedThreadContexts(draft) : [],
-          candidateEnvironmentIds: logicalProjectEnvironments.map(
-            (candidate) => candidate.environmentId,
-          ),
-        }),
-      });
       return;
     }
     if (activeEnvironmentUnavailable) {

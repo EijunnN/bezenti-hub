@@ -40,7 +40,6 @@ import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { HubEnvironmentsSettings } from "./HubEnvironmentsSettings";
 import { LinkedEnvironmentsSettings } from "./LinkedEnvironmentsSettings";
 import { usePeerLinkHosts } from "~/state/peerLinks";
-import { LoadBalancingSettings } from "./LoadBalancingSettings";
 import { PullRequestRoutingSettings } from "./PullRequestRoutingSettings";
 import { Input } from "../ui/input";
 import {
@@ -148,7 +147,7 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
   const listedEnvironments = savedEnvironments.filter(
     (environment) => !isDesktopLocalConnectionTarget(environment.entry.target),
   );
-  const loadBalancingEnvironments = [
+  const pullRequestRoutingEnvironments = [
     ...(primaryEnvironment ? [primaryEnvironment] : []),
     ...savedEnvironments.filter((environment) => environment.entry.enabled),
   ].filter((environment) => environment.connection.phase !== "unsupported");
@@ -1435,8 +1434,7 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
           isSearchTarget={index === 0}
         />
       ))}
-      <LoadBalancingSettings environments={loadBalancingEnvironments} />
-      <PullRequestRoutingSettings environments={loadBalancingEnvironments} />
+      <PullRequestRoutingSettings environments={pullRequestRoutingEnvironments} />
     </SettingsPageContainer>
   );
 }

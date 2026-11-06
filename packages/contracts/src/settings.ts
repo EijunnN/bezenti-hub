@@ -319,11 +319,6 @@ export const BrowserCustomSearchUrl = Schema.String.check(
   Schema.isMaxLength(BROWSER_CUSTOM_SEARCH_URL_MAX_LENGTH),
 );
 
-export const LoadBalancingWeights = Schema.Record(
-  TrimmedNonEmptyString,
-  Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
-);
-
 export const DiffColorScheme = Schema.Literals(["red-green", "blue-orange"]);
 
 export const ChatWidth = Schema.Literals(["comfortable", "wide", "full"]);
@@ -360,8 +355,6 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   chatWidth: ChatWidth.pipe(Schema.withDecodingDefault(Effect.succeed("comfortable" as const))),
   effortDisplay: EffortDisplay.pipe(Schema.withDecodingDefault(Effect.succeed("label" as const))),
-  loadBalancingEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
-  loadBalancingWeights: LoadBalancingWeights.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   appearanceContrast: AppearanceContrast.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_APPEARANCE_CONTRAST)),
   ),
@@ -1770,8 +1763,6 @@ export const ClientSettingsPatch = Schema.Struct({
   diffColorScheme: Schema.optionalKey(DiffColorScheme),
   chatWidth: Schema.optionalKey(ChatWidth),
   effortDisplay: Schema.optionalKey(EffortDisplay),
-  loadBalancingEnabled: Schema.optionalKey(Schema.Boolean),
-  loadBalancingWeights: Schema.optionalKey(LoadBalancingWeights),
   appearanceContrast: Schema.optionalKey(AppearanceContrast),
   panelAnimationDurationMs: Schema.optionalKey(PanelAnimationDurationMs),
   browserDefaultViewport: Schema.optionalKey(PreviewViewportSetting),

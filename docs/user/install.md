@@ -433,6 +433,24 @@ working, so a lost machine loses access immediately. The Hub machine itself is
 always listed and cannot be removed. Joining, renaming and removing are recorded
 in the audit log.
 
+### Run Threads on a joined machine
+
+When your Hub has another machine, the composer of a new Thread shows an
+**Environment** picker. Pick the machine and send: the agent, its checkpoints and
+the Project's files are on that machine, while the conversation, approvals and
+diffs stream to every client through the Hub. The Thread's header shows where it
+runs, and so does the sidebar for Threads off the Hub machine. A machine that is
+offline, or that lacks the selected provider, is listed but can't be picked, with
+the reason. Only the machine's owner can run Threads on it; everyone else runs
+on the Hub machine.
+
+The machine works in its own copy of the Project, under its `projects` folder in
+the T3 home. The first Thread there clones it from the Project's `origin` remote
+on the Hub; a Project without one must already be checked out on the machine.
+New worktrees can't be made on a joined machine yet, so start such Threads in
+the Project's checkout. Each machine uses the provider sign-ins it already has.
+**Settings → Environments** counts the Threads running on each machine.
+
 ## Next steps
 
 - [Working with threads](./thread-sidebar.md): start tasks and organize parallel work.

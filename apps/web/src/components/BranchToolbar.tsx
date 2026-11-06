@@ -5,7 +5,7 @@ import { stackedThreadToast, toastManager } from "./ui/toast";
 import { ComposerContextLabel } from "./ComposerContextLabel";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
-import { FolderGit2Icon, FolderGitIcon, FolderIcon, PlusIcon, ScaleIcon } from "lucide-react";
+import { FolderGit2Icon, FolderGitIcon, FolderIcon, PlusIcon } from "lucide-react";
 import {
   type Ref,
   type MouseEvent as ReactMouseEvent,
@@ -92,8 +92,6 @@ interface BranchToolbarProps {
   onActiveThreadBranchOverrideChange?: (branch: string | null) => void;
   startFromOrigin: boolean;
   onStartFromOriginChange: (startFromOrigin: boolean) => void;
-  autoEnvironmentLabel?: string | undefined;
-  onAutoEnvironment?: (() => void) | undefined;
   envLocked: boolean;
   onCheckoutPullRequestRequest?: (reference: string) => void;
   onComposerFocusRequest?: () => void;
@@ -143,8 +141,6 @@ interface RunContextSelectorProps {
   displayMode?: "toolbar" | "panel";
   workspaceRoot?: string;
   forceNewWorktree: boolean;
-  autoEnvironmentLabel?: string | undefined;
-  onAutoEnvironment?: (() => void) | undefined;
   envLocked: boolean;
   envModeLocked: boolean;
   environmentId: EnvironmentId;
@@ -166,8 +162,6 @@ const RunContextSelector = memo(function RunContextSelector({
   displayMode = "toolbar",
   workspaceRoot,
   forceNewWorktree,
-  autoEnvironmentLabel,
-  onAutoEnvironment,
   envLocked,
   envModeLocked,
   environmentId,
@@ -228,22 +222,15 @@ const RunContextSelector = memo(function RunContextSelector({
   const environmentIcon = (
     <Tooltip>
       <TooltipTrigger render={<span className="inline-flex shrink-0" />}>
-        {autoEnvironmentLabel ? (
-          <ScaleIcon
-            className={isPanel ? THREAD_DETAILS_PANEL_ICON_CLASS : "size-3 shrink-0"}
-            aria-hidden="true"
-          />
-        ) : (
-          <EnvironmentMachineIcon
-            kind={activeEnvironment?.machine ?? "server"}
-            // Wide machine glyphs need a little more box to match the square row icons.
-            className={
-              isPanel ? cn(THREAD_DETAILS_PANEL_ICON_CLASS, "-mx-px size-4.5") : "size-3 shrink-0"
-            }
-          />
-        )}
+        <EnvironmentMachineIcon
+          kind={activeEnvironment?.machine ?? "server"}
+          // Wide machine glyphs need a little more box to match the square row icons.
+          className={
+            isPanel ? cn(THREAD_DETAILS_PANEL_ICON_CLASS, "-mx-px size-4.5") : "size-3 shrink-0"
+          }
+        />
       </TooltipTrigger>
-      <TooltipPopup>{autoEnvironmentLabel ?? activeEnvironment?.label ?? "Run on"}</TooltipPopup>
+      <TooltipPopup>{activeEnvironment?.label ?? "Run on"}</TooltipPopup>
     </Tooltip>
   );
   const icon = showEnvironmentIndicator ? environmentIcon : workspaceIcon;
@@ -251,8 +238,7 @@ const RunContextSelector = memo(function RunContextSelector({
     <>
       {icon}
       <ComposerContextLabel displayMode={displayMode}>
-        {autoEnvironmentLabel ??
-          (showEnvironmentIndicator ? (activeEnvironment?.label ?? "Run on") : workspaceLabel)}
+        {showEnvironmentIndicator ? (activeEnvironment?.label ?? "Run on") : workspaceLabel}
       </ComposerContextLabel>
       {/* Trailing in the panel, so every row label starts on the same edge. */}
       {isPanel && showEnvironmentIndicator ? workspaceIcon : null}
@@ -270,7 +256,7 @@ const RunContextSelector = memo(function RunContextSelector({
         onContextMenu={handleContextMenu}
         aria-label={
           isPanel
-            ? `Run context: ${[autoEnvironmentLabel ?? activeEnvironment?.label, workspaceLabel].filter(Boolean).join(", ")}`
+            ? `Run context: ${[activeEnvironment?.label, workspaceLabel].filter(Boolean).join(", ")}`
             : undefined
         }
         data-composer-context-control
@@ -295,7 +281,7 @@ const RunContextSelector = memo(function RunContextSelector({
         }
         aria-label={
           isPanel
-            ? `Run context: ${[autoEnvironmentLabel ?? activeEnvironment?.label, workspaceLabel].filter(Boolean).join(", ")}`
+            ? `Run context: ${[activeEnvironment?.label, workspaceLabel].filter(Boolean).join(", ")}`
             : undefined
         }
         data-composer-context-control
@@ -324,30 +310,9 @@ const RunContextSelector = memo(function RunContextSelector({
             <MenuGroup>
               <MenuGroupLabel>Run on</MenuGroupLabel>
               <MenuRadioGroup
-                value={autoEnvironmentLabel ? "auto" : environmentId}
-                onValueChange={(value) =>
-                  value === "auto"
-                    ? onAutoEnvironment?.()
-                    : onEnvironmentChange?.(value as EnvironmentId)
-                }
+                value={environmentId}
+                onValueChange={(value) => onEnvironmentChange?.(value as EnvironmentId)}
               >
-                {onAutoEnvironment && (
-                  <MenuRadioItem
-                    value="auto"
-                    disabled={envLocked}
-                    closeOnClick
-                    onClick={() => {
-                      if (autoEnvironmentLabel) onAutoEnvironment?.();
-                    }}
-                  >
-                    <span className="flex min-w-0 items-center gap-1.5">
-                      <ScaleIcon className="size-3" aria-hidden="true" />
-                      <span className="min-w-0 truncate">
-                        {autoEnvironmentLabel ?? "Auto balance"}
-                      </span>
-                    </span>
-                  </MenuRadioItem>
-                )}
                 {availableEnvironments.map((env) => (
                   <MenuRadioItem
                     key={env.environmentId}
@@ -610,8 +575,6 @@ export const BranchToolbar = memo(function BranchToolbar({
   onActiveThreadBranchOverrideChange,
   startFromOrigin,
   onStartFromOriginChange,
-  autoEnvironmentLabel,
-  onAutoEnvironment,
   envLocked,
   onCheckoutPullRequestRequest,
   onComposerFocusRequest,
@@ -696,8 +659,6 @@ export const BranchToolbar = memo(function BranchToolbar({
             displayMode="panel"
             workspaceRoot={activeProject.workspaceRoot}
             forceNewWorktree={forceNewWorktree}
-            autoEnvironmentLabel={autoEnvironmentLabel}
-            onAutoEnvironment={onAutoEnvironment}
             envLocked={envLocked}
             envModeLocked={envModeLocked}
             environmentId={environmentId}
@@ -746,8 +707,6 @@ export const BranchToolbar = memo(function BranchToolbar({
         <div className="contents @xl/composer-surface:hidden">
           <RunContextSelector
             forceNewWorktree={forceNewWorktree}
-            autoEnvironmentLabel={autoEnvironmentLabel}
-            onAutoEnvironment={onAutoEnvironment}
             envLocked={envLocked}
             envModeLocked={envModeLocked}
             environmentId={environmentId}
@@ -777,8 +736,6 @@ export const BranchToolbar = memo(function BranchToolbar({
           {showEnvironmentIndicator && availableEnvironments && (
             <>
               <BranchToolbarEnvironmentSelector
-                autoEnvironmentLabel={autoEnvironmentLabel}
-                onAutoEnvironment={onAutoEnvironment}
                 envLocked={envLocked}
                 environmentId={environmentId}
                 availableEnvironments={availableEnvironments}

@@ -83,23 +83,60 @@ Everything that needs a machine sits behind one
 the provider adapters (sessions, turns, interrupt, steer, respond, rollback, detach, events), the
 workspace (checkpoints, runtime policy and cwd, files, search, browse, terminals, previews) and the
 host (resources and provider capabilities). The Hub machine registers an in-process executor under
-`HUB_MACHINE_ENVIRONMENT_ID`; a joined Environment will carry the same operations, catalogued and
-versioned in [the executor contract](../../packages/contracts/src/environmentExecutor.ts), over its
-WebSocket.
+`HUB_MACHINE_ENVIRONMENT_ID`; a joined Environment's executor
+([RemoteEnvironments](../../apps/server/src/environment/RemoteEnvironments.ts)) carries the same
+operations, catalogued and versioned in
+[the executor contract](../../packages/contracts/src/environmentExecutor.ts), over its WebSocket,
+and is registered only while that socket is open. The payload codecs of each operation
+([RemoteExecutorWire](../../apps/server/src/environment/RemoteExecutorWire.ts)) live in the server
+beside the adapter schemas they are built from; both halves of the server share them.
 
 `ProviderAdapterRegistryV2`, `RuntimePolicyV2` and `CheckpointStore` reach the orchestration as
 layers over the executors. Calls that carry a Thread resolve its Active environment each time: a
 session opens there, and its runtime policy and capabilities come from there. Checkpoint calls
 carry only a cwd, so the effect worker runs every effect that needs the Thread's machine
 (`ENVIRONMENT_BOUND_EFFECT_TYPES`) with its Thread's Environment as the checkpoint target;
-`HUB_EFFECT_TYPES` run on the Hub. Until Threads store an Active environment, the resolver always
-answers the Hub machine. A missing executor is a typed error, so effects retry and recover.
+`HUB_EFFECT_TYPES` run on the Hub. The Active environment is the projection's
+`active_environment_id` (migration 096, absent in the payload for the Hub machine), read on each
+call, and the registry takes the resolver when it is built: a reference read at call time would
+see the caller's fiber, not the server's. An effect bound to a machine whose Environment has no
+executor is never claimed (`claimNext` filters on the projection), so it spends no attempt while
+the machine is away and runs when its socket returns; anything else that reaches a missing executor
+gets a typed error and retries.
 
 The Orchestrator reads capabilities through `EnvironmentCapabilityCache`. For the Hub machine that
 reads the live adapter, as before. A remote executor answers from its last snapshot, the newest by
-`observedAt`, so deciding makes no network call. The Hub machine also publishes a snapshot at
-startup, when provider instances change, and on every heartbeat; instances it cannot describe are
-listed with the reason.
+`observedAt`, which every hello and heartbeat carries, so deciding makes no network call. The Hub
+machine also publishes a snapshot at startup, when provider instances change, and on every
+heartbeat; instances it cannot describe are listed with the reason. The Orchestrator also resolves
+runtime policy while deciding (a checkpoint scope's cwd), so a remote executor computes it on the
+Hub from the reported checkout and runtime modes, never by asking the machine.
+
+### Turns on a joined Environment
+
+The Hub decides where a new Thread runs (`EnvironmentRegistry.chooseForThread`, called by
+`ThreadManagementService` for every `thread.create`): the User's choice, else the Project's
+preferred Environment, else the Hub machine. Another Environment must be one the User may use
+(`environment.use`: a personal machine is its owner's alone, the Owner included), online, and have
+the provider. The client never picks by load.
+
+On the machine, the [agent](../../apps/server/src/environments/EnvironmentAgent.ts) runs each call
+on its own in-process executor. Constraints that span both halves:
+
+- Each session event carries `(providerSessionId, seq)`. The machine keeps what the Hub has not
+  acknowledged and resends it after a reconnect; the Hub drops a `seq` it already has and
+  acknowledges in one frame per burst. `command_output.delta` has no `seq`: it is live only.
+- The Hub drops (and logs) an event for a session it retired, or from a machine that is no longer
+  the Thread's Active environment, before it reaches the session manager.
+- A call made by an effect carries `effectId:attempt:<operation>:<n>`. The machine remembers recent
+  answers by key, so the Hub may resend after a dropped socket without running the call twice.
+- The agent reaches the Hub's MCP: the Hub issues the per-Thread credential as for a local session,
+  and the machine points it at `<the Hub URL it joined>/mcp`. Its own MCP server is not used.
+- Attachments stay on the Hub. A turn sends each one's id and SHA-256; the machine fetches the ones
+  it lacks with `attachment.read`, which answers only attachments a turn sent to that machine.
+- The machine uses the Project's checkout where it is, else clones the Hub checkout's `origin`
+  there. New worktrees are still made on the Hub machine only, so a launch that asks for one on
+  another Environment is refused.
 
 ### Logical workspace paths
 
@@ -112,7 +149,9 @@ path, which every Hub-local reader keeps using. Beside it the projection stores 
 [logical form](../../apps/server/src/environment/WorkspaceLocation.ts): relative to the checkout,
 or, when the path is not plainly inside it (a managed worktree, `..`, another folder), absolute and
 bound to the Environment that recorded it. Only a form that resolves back to the identical string
-is relative, so the Hub machine sees no change.
+is relative, so the Hub machine sees no change. A Thread on another Environment records its scope
+cwds as that machine's paths, since its runtime policy resolves there; their logical forms are
+still computed against the Hub machine's checkout, which a move between machines must revisit.
 
 `RuntimePolicyV2` passes the recorded worktree through on the Hub machine. On another Environment
 it resolves the stored logical form on that executor, or, when the row has none or its recorded

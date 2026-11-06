@@ -225,11 +225,16 @@ it.effect(
       const registry = yield* EnvironmentExecutor.EnvironmentExecutorRegistry;
       assert.equal(registry.hubMachineEnvironmentId, HUB_MACHINE_ENVIRONMENT_ID);
       assert.deepEqual(yield* registry.list, [HUB_MACHINE_ENVIRONMENT_ID]);
-      const hubMachine = yield* registry.forThread(THREAD_ON_LAPTOP);
+      const hubMachine = yield* registry.forThread(THREAD_ON_HUB);
       assert.equal(hubMachine.environmentId, HUB_MACHINE_ENVIRONMENT_ID);
       assert.equal(hubMachine.transport, "in-process");
       assert.equal(
         (yield* Effect.flip(registry.get(LAPTOP)))._tag,
+        "EnvironmentExecutorUnavailableError",
+      );
+      // A Thread whose machine has not connected has no executor, not the Hub machine's.
+      assert.equal(
+        (yield* Effect.flip(registry.forThread(THREAD_ON_LAPTOP)))._tag,
         "EnvironmentExecutorUnavailableError",
       );
 
