@@ -178,8 +178,8 @@ permission: without it the space is hidden (`space.view` is denied, so what it
 holds from before a revoke reads as missing too). The Owner grants and revokes
 permissions (`installation_permissions` rows) over HTTP
 (`/api/installation/users`, which also needs the `access:read`/`access:write`
-scope) through `SpaceDirectory.setInstallationPermission`, the one place ticket
-14 audits. `environments.registerOwn` is only stored. The Owner reads every
+scope) through `SpaceDirectory.setInstallationPermission`. `environments.registerOwn` is
+only stored. The Owner reads every
 Personal space and lists them in the selector, but changes nothing in another
 User's (`personal-space-read-only`). Naming a Space one cannot see, a
 `personal:<id>` included, answers exactly like naming a missing one.
@@ -421,6 +421,26 @@ names the issuer), since a link takes the account over. Redeeming one registers 
 passkey or, for anyone but the Owner, sets a new password; either way it removes
 every other passkey, the password and TOTP and ends every session, in one
 transaction.
+
+### Audit log
+
+[AuditLog](../../apps/server/src/audit/AuditLog.ts) appends to `audit_log`
+(migration 093), which triggers keep append-only; nothing prunes it. An entry
+is written by the service that performs the action, inside that action's
+transaction, so a rolled-back action leaves none and an entry that cannot be
+written fails the action. Event-sourced actions (permanent Thread and Project
+deletes, Project moves, guest links) pass their entry to `EventSink`
+(`commitCommand`/`commitProjectCommand` `audit`), which writes it with the
+receipt as the fiber's `CommandActor`, so a replayed command records nothing.
+App sign-in and MCP OAuth approvals live in memory and record before their
+code is minted. The shell (`t3 auth session issue`, `t3 auth owner-reset`)
+records as actor `cli`. Entries snapshot the Space and target names, since
+Organizations and Projects are deleted while Users are only tombstoned. Detail
+keys that name a credential are dropped on write, whatever the caller passes.
+`secret.*` and `environment.register` are in the closed `AuditAction` list for
+the specs that own them to record. The read (`/api/installation/audit`) is
+Owner-only and needs `access:read`; anyone else gets the same 403 whatever
+they filter by.
 
 ### Sign-in rules
 

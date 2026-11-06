@@ -35,6 +35,7 @@ import { LocalEnvironmentSetting } from "./LocalEnvironmentSetting";
 import { searchableSetting } from "./settingsSearch";
 import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
 import { AccountSettingsSection } from "./AccountSettingsSection";
+import { AuditLogSettingsSection } from "./AuditLogSettingsSection";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { LinkedEnvironmentsSettings } from "./LinkedEnvironmentsSettings";
 import { usePeerLinkHosts } from "~/state/peerLinks";
@@ -1379,6 +1380,7 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
     return (
       <SettingsPageContainer>
         <AccountSettingsSection />
+        <AuditLogSettingsSection />
         {primarySettings}
       </SettingsPageContainer>
     );

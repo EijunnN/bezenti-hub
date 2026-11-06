@@ -20,6 +20,8 @@ import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpApi from "effect/http-api/HttpApi";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
+import * as AuditLog from "../audit/AuditLog.ts";
+import * as AuditHttp from "../audit/http.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -67,6 +69,7 @@ class AuthTestApi extends HttpApi.make("environment")
   .add(EnvironmentHttpApi.groups.spaces)
   .add(EnvironmentHttpApi.groups.invitations)
   .add(EnvironmentHttpApi.groups.installationUsers)
+  .add(EnvironmentHttpApi.groups.audit)
   .add(EnvironmentHttpApi.groups.projects)
   .add(EnvironmentHttpApi.groups.orchestration)
   .add(EnvironmentHttpApi.groups.pullRequests)
@@ -155,6 +158,7 @@ const makeLayerServices = (config: { readonly publicUrl?: URL }) =>
           MembershipService.layer,
           InstallationUserService.layer,
           SpaceVisibility.layer,
+          AuditLog.layer,
           Layer.merge(McpOAuth.layer, McpOAuth.layerMcpClientAuthenticator).pipe(
             Layer.provide(ServerSettings.layerTest()),
             Layer.provide(
@@ -193,6 +197,7 @@ export const serveAuthHttpWith = Effect.fn(function* (config: { readonly publicU
     Layer.provide(SpacesHttp.layer),
     Layer.provide(InvitationsHttp.layer),
     Layer.provide(InstallationUsersHttp.layer),
+    Layer.provide(AuditHttp.layer),
     Layer.provide(ProjectHttp.layer),
     Layer.provide(OrchestrationHttp.layer),
     Layer.provide(PullRequestHttp.layer),

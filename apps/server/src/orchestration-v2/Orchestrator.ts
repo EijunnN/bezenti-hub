@@ -190,6 +190,7 @@ import {
   ThreadForkServiceV2,
 } from "./ThreadForkService.ts";
 import { planThreadDeletion } from "./ThreadDeletion.ts";
+import type * as AuditLog from "../audit/AuditLog.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
@@ -13084,6 +13085,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     return parentRun.id;
   });
 
+  /** The audited Thread commands: a permanent delete and a new guest link. */
+  const auditOf = (
+    command: OrchestrationV2ServerCommand,
+  ): Omit<AuditLog.AuditRecord, "actor"> | undefined => {
+    // Discarding an unused draft is not a deletion anyone needs to answer for.
+    if (command.type === "thread.delete" && command.onlyIfUnused !== true) {
+      return { action: "thread.delete", target: { kind: "thread", id: command.threadId } };
+    }
+    if (command.type === "thread.guest-share.open") {
+      return {
+        action: "guestLink.create",
+        target: { kind: "thread", id: command.threadId },
+        detail: { expiresAt: command.expiresAt },
+      };
+    }
+    return undefined;
+  };
+
   const dispatchUnsupported = (command: OrchestrationV2ServerCommand) =>
     Effect.fail(
       new OrchestratorDispatchError({
@@ -13752,6 +13771,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       } satisfies OrchestratorV2DispatchResult;
     }
     const acceptedAt = plan.events.at(-1)?.occurredAt ?? (yield* DateTime.now);
+    const audit = auditOf(command);
     const committed = yield* eventSink
       .commitCommand({
         commandId: command.commandId,
@@ -13760,6 +13780,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         acceptedAt,
         events: plan.events,
         effects: plan.effects,
+        ...(audit === undefined ? {} : { audit }),
         ...(plan.cancelUnsettledEffects === undefined
           ? {}
           : { cancelUnsettledEffects: plan.cancelUnsettledEffects }),

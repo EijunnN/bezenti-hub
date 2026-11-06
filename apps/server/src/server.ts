@@ -179,6 +179,8 @@ import * as SpacesHttp from "./spaces/http.ts";
 import * as InvitationService from "./spaces/InvitationService.ts";
 import * as InvitationsHttp from "./spaces/invitationsHttp.ts";
 import * as InstallationUsersHttp from "./spaces/installationUsersHttp.ts";
+import * as AuditLog from "./audit/AuditLog.ts";
+import * as AuditHttp from "./audit/http.ts";
 import * as NetService from "@t3tools/shared/Net";
 import {
   disableTailscaleServe,
@@ -470,6 +472,7 @@ const layerAuth = Layer.mergeAll(
   MembershipService.layer,
   InstallationUserService.layer,
   SpaceVisibility.layer,
+  AuditLog.layer,
 ).pipe(
   Layer.provideMerge(EnvironmentAuth.layer.pipe(Layer.provideMerge(SpaceDirectory.layer))),
   Layer.provideMerge(layerPersistence),
@@ -669,6 +672,7 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provide(SpacesHttp.layer),
       Layer.provide(InvitationsHttp.layer),
       Layer.provide(InstallationUsersHttp.layer),
+      Layer.provide(AuditHttp.layer),
       Layer.provide(ServerHttp.layerServerEnvironmentHttpApi),
       Layer.provide(WebhookRoute.layer),
       Layer.provide(AuthHttp.layerAuthenticatedAuth),

@@ -31,6 +31,7 @@ import * as Stream from "effect/Stream";
 import * as AccessChanges from "../auth/AccessChanges.ts";
 import * as AccessPolicy from "../auth/AccessPolicy.ts";
 import * as CommandActor from "../auth/CommandActor.ts";
+import * as AuditLog from "../audit/AuditLog.ts";
 
 export class SpaceDirectoryStorageError extends Schema.TaggedError<SpaceDirectoryStorageError>()(
   "SpaceDirectoryStorageError",
@@ -357,9 +358,10 @@ export class SpaceDirectory extends Context.Service<
      * Removes an archived Organization's Memberships, Invitations and row in one transaction.
      * Its Projects and Threads go first, through their own delete paths; refused unless archived.
      */
-    readonly removeArchivedOrganization: (
-      spaceId: SpaceId,
-    ) => Effect.Effect<void, SpaceAccessDeniedError | SpaceDirectoryStorageError>;
+    readonly removeArchivedOrganization: (input: {
+      readonly actor: UserId;
+      readonly spaceId: SpaceId;
+    }) => Effect.Effect<void, SpaceAccessDeniedError | SpaceDirectoryStorageError>;
     /**
      * Checks that the User may move the Project to `spaceId` (`project.move`, on its Space and
      * the destination). A hidden Project or destination answers like a missing one. No User is the
@@ -520,6 +522,7 @@ const SPACE_COLUMNS = `space_id AS "spaceId", kind, name, personal_owner_user_id
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const random = yield* SecureRandom.SecureRandom;
+  const audit = yield* AuditLog.AuditLog;
   const storageError = (cause: unknown) => new SpaceDirectoryStorageError({ cause });
   const revision = yield* Ref.make(0);
   const changed = Ref.update(revision, (current) => current + 1);
@@ -816,20 +819,35 @@ const make = Effect.gen(function* () {
       // The Owner holds every permission; there is nothing to grant or revoke.
       if (target.value.isOwner) return toInstallationUser(target.value);
       const now = DateTime.formatIso(yield* DateTime.now);
-      const written = yield* (
-        input.granted
-          ? sql<{ readonly userId: string }>`
-              INSERT INTO installation_permissions (user_id, permission, granted_by, granted_at)
-              VALUES (${input.userId}, ${input.permission}, ${input.actorUserId}, ${now})
-              ON CONFLICT (user_id, permission) DO NOTHING
-              RETURNING user_id AS "userId"
-            `
-          : sql<{ readonly userId: string }>`
-              DELETE FROM installation_permissions
-              WHERE user_id = ${input.userId} AND permission = ${input.permission}
-              RETURNING user_id AS "userId"
-            `
-      ).pipe(Effect.mapError(storageError));
+      const written = yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const rows = yield* input.granted
+              ? sql<{ readonly userId: string }>`
+                  INSERT INTO installation_permissions (user_id, permission, granted_by, granted_at)
+                  VALUES (${input.userId}, ${input.permission}, ${input.actorUserId}, ${now})
+                  ON CONFLICT (user_id, permission) DO NOTHING
+                  RETURNING user_id AS "userId"
+                `
+              : sql<{ readonly userId: string }>`
+                  DELETE FROM installation_permissions
+                  WHERE user_id = ${input.userId} AND permission = ${input.permission}
+                  RETURNING user_id AS "userId"
+                `;
+            if (rows.length > 0) {
+              yield* audit.record({
+                actor: AuditLog.userActor(input.actorUserId),
+                action: input.granted
+                  ? "installationPermission.grant"
+                  : "installationPermission.revoke",
+                target: { kind: "user", id: input.userId },
+                detail: { permission: input.permission },
+              });
+            }
+            return rows;
+          }),
+        )
+        .pipe(Effect.mapError(storageError));
       // Only a row that changed moves caches and wakes the User's connections.
       if (written.length > 0) yield* Effect.andThen(changed, accessChanged(input.userId));
       const updated = yield* findUserRow(input.userId).pipe(Effect.mapError(storageError));
@@ -1385,6 +1403,16 @@ const make = Effect.gen(function* () {
             }
             const members = written.length === 0 ? [] : yield* viewersOf([input.spaceId]);
             if (input.archived) yield* markAccessNarrowed(members);
+            if (written.length > 0) {
+              yield* audit
+                .record({
+                  actor: AuditLog.userActor(input.actor),
+                  action,
+                  spaceId: input.spaceId,
+                  target: { kind: "space", id: input.spaceId },
+                })
+                .pipe(Effect.mapError(storageError));
+            }
             return { changed: written.length > 0, members };
           }),
         )
@@ -1424,7 +1452,7 @@ const make = Effect.gen(function* () {
   );
 
   const removeArchivedOrganization = Effect.fn("SpaceDirectory.removeArchivedOrganization")(
-    function* (spaceId: SpaceId) {
+    function* ({ actor, spaceId }: { readonly actor: UserId; readonly spaceId: SpaceId }) {
       yield* sql
         .withTransaction(
           Effect.gen(function* () {
@@ -1445,6 +1473,13 @@ const make = Effect.gen(function* () {
                 SELECT thread_id FROM orchestration_v2_projection_threads WHERE space_id = ${spaceId}
               )
             `;
+            // Recorded while the row still names it.
+            yield* audit.record({
+              actor: AuditLog.userActor(actor),
+              action: "organization.delete",
+              spaceId,
+              target: { kind: "space", id: spaceId },
+            });
             yield* sql`DELETE FROM space_invitations WHERE space_id = ${spaceId}`;
             yield* sql`DELETE FROM space_memberships WHERE space_id = ${spaceId}`;
             yield* sql`DELETE FROM spaces WHERE space_id = ${spaceId}`;
@@ -1599,4 +1634,4 @@ export const layer = Layer.effect(
       widened: spaces.changed,
     });
   }),
-).pipe(Layer.provideMerge(Layer.effect(SpaceDirectory, make)));
+).pipe(Layer.provideMerge(Layer.effect(SpaceDirectory, make)), Layer.provide(AuditLog.layer));

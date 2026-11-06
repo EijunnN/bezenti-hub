@@ -78,6 +78,7 @@ import {
   SpaceDirectoryView,
   SpaceSummary,
 } from "./spaces.ts";
+import { AuditLogPage, AuditLogQuery } from "./audit.ts";
 import {
   AcceptInvitationRequest,
   AcceptInvitationResult,
@@ -146,6 +147,8 @@ export const EnvironmentRequestInvalidReason = Schema.Literals([
   "invalid_redirect_uri",
   // An app sign-in without a valid S256 PKCE challenge or state.
   "invalid_code_challenge",
+  // An audit log filter that is not a date, a cursor or a page size.
+  "invalid_audit_query",
 ]);
 export type EnvironmentRequestInvalidReason = typeof EnvironmentRequestInvalidReason.Type;
 
@@ -180,6 +183,7 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "spaces_failed",
   "invitations_failed",
   "installation_users_failed",
+  "audit_log_failed",
   "internal_error",
 ]);
 export type EnvironmentInternalErrorReason = typeof EnvironmentInternalErrorReason.Type;
@@ -992,6 +996,16 @@ class EnvironmentInstallationUsersHttpApi extends HttpApiGroup.make("installatio
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
+// The Owner's audit log; a session of the Owner's also needs the access scope.
+class EnvironmentAuditHttpApi extends HttpApiGroup.make("audit").add(
+  HttpApiEndpoint.get("list", "/api/installation/audit", {
+    headers: OptionalBearerHeaders,
+    query: AuditLogQuery,
+    success: AuditLogPage,
+    error: [...EnvironmentInstallationUserErrors, EnvironmentRequestInvalidError],
+  }).middleware(EnvironmentAuthenticatedAuth),
+) {}
+
 const EnvironmentInvitationManageErrors = [
   // The session has no User, or the policy refuses the change.
   EnvironmentHttpForbiddenError,
@@ -1136,4 +1150,5 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentSpacesHttpApi)
   .add(EnvironmentInvitationsHttpApi)
   .add(EnvironmentInstallationUsersHttpApi)
+  .add(EnvironmentAuditHttpApi)
   .add(EnvironmentWebhooksHttpApi) {}

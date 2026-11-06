@@ -208,6 +208,7 @@ const sessionIssueCommand = Command.make("issue", {
         Effect.gen(function* () {
           const userId = yield* resolveCliUser(flags.user);
           const issued = yield* environmentAuth.issueSession({
+            audited: true,
             scopes: flags.scopes,
             ...(userId === undefined ? {} : { userId }),
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),

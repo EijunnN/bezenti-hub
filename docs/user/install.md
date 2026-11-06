@@ -297,6 +297,19 @@ Owner can only read it, move its projects to an organization, or delete what is
 in it. Their name stays on what they did. The Owner
 cannot be disabled or removed.
 
+### Audit log
+
+The Owner can see who did what in the sensitive actions: open **Audit log**
+from the Space selector, or from **Settings → Access**. It lists invitations
+created, accepted and revoked, Role changes, people removed or leaving an
+organization, reset links, Installation permissions, people disabled, turned
+back on or removed, organizations archived, restored and deleted, projects
+moved and deleted, threads deleted for good, guest links, and the app and
+outside-agent sign-ins you approved, plus tokens and Owner reset links issued
+from the Hub's shell with `t3`. Each entry names the person, the space, what
+they acted on and when; filter by action, person or space. Entries are kept
+for good, and none contains a token, password or code.
+
 What you can change depends on your Role in the organization:
 
 | Action                               | Admin | Member |    Guest     |

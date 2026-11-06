@@ -72,6 +72,7 @@ describe("V2 preview upgrade", () => {
         [90, "InstallationPermissions"],
         [91, "SpaceDeleting"],
         [92, "InactiveUsers"],
+        [93, "AuditLog"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -187,6 +188,7 @@ describe("V2 preview upgrade", () => {
         [90, "InstallationPermissions"],
         [91, "SpaceDeleting"],
         [92, "InactiveUsers"],
+        [93, "AuditLog"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

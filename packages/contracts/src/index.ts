@@ -8,6 +8,7 @@ export * from "./auth.ts";
 export * from "./userAccounts.ts";
 export * from "./spaces.ts";
 export * from "./invitations.ts";
+export * from "./audit.ts";
 export * from "./environment.ts";
 export * from "./environmentHttp.ts";
 export * from "./desktopBootstrap.ts";

@@ -138,7 +138,6 @@ const make = Effect.gen(function* () {
     yield* spaces
       .setOrganizationArchived({ actor, spaceId, archived: true })
       .pipe(Effect.mapError(refusal));
-    // Audit (ticket 14): `organization.archive` by `actor` on `spaceId`.
     // Repeated on every archive, so a stop cut short finishes on the next try.
     yield* stopRunning(spaceId).pipe(
       Effect.catch((cause) =>
@@ -155,7 +154,6 @@ const make = Effect.gen(function* () {
     yield* spaces
       .setOrganizationArchived({ actor, spaceId, archived: false })
       .pipe(Effect.mapError(refusal));
-    // Audit (ticket 14): `organization.restore` by `actor` on `spaceId`.
     return yield* viewOf(actor);
   });
 
@@ -169,8 +167,7 @@ const make = Effect.gen(function* () {
     yield* projects
       .deleteSpaceContent({ commandId: CommandId.make(`organization-delete:${spaceId}`), spaceId })
       .pipe(Effect.mapError(refusal));
-    yield* spaces.removeArchivedOrganization(spaceId).pipe(Effect.mapError(refusal));
-    // Audit (ticket 14): `organization.delete` by `actor` on `spaceId`.
+    yield* spaces.removeArchivedOrganization({ actor, spaceId }).pipe(Effect.mapError(refusal));
     return yield* viewOf(actor);
   });
 

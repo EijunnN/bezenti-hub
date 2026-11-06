@@ -33,6 +33,7 @@ import type { HttpServerRequest } from "effect/http";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
 
+import * as AuditLog from "../audit/AuditLog.ts";
 import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import { makeSignInThrottle } from "../auth/signInThrottle.ts";
@@ -230,6 +231,7 @@ const make = Effect.gen(function* () {
   const digest = yield* Digest.Digest;
   const spaces = yield* SpaceDirectory.SpaceDirectory;
   const users = yield* UserDirectory.UserDirectory;
+  const audit = yield* AuditLog.AuditLog;
   const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
   // Failed redemptions back off per client, as password sign-in does.
   const throttle = makeSignInThrottle();
@@ -323,15 +325,29 @@ const make = Effect.gen(function* () {
       const expiresAt = DateTime.formatIso(
         DateTime.add(now, { milliseconds: Duration.toMillis(INVITATION_TTL) }),
       );
-      yield* sql`
-        INSERT INTO space_invitations (
-          invitation_id, space_id, role, token_hash, created_by, created_at, expires_at
+      const tokenHash = yield* hashToken(token);
+      yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* sql`
+              INSERT INTO space_invitations (
+                invitation_id, space_id, role, token_hash, created_by, created_at, expires_at
+              )
+              VALUES (
+                ${invitationId}, ${space.id}, ${role}, ${tokenHash}, ${actor},
+                ${createdAt}, ${expiresAt}
+              )
+            `;
+            yield* audit.record({
+              actor: AuditLog.userActor(actor),
+              action: "invitation.create",
+              spaceId: space.id,
+              target: { kind: "invitation", id: invitationId },
+              detail: { role },
+            });
+          }),
         )
-        VALUES (
-          ${invitationId}, ${space.id}, ${role}, ${yield* hashToken(token)}, ${actor},
-          ${createdAt}, ${expiresAt}
-        )
-      `.pipe(storage);
+        .pipe(storage);
       const row = yield* findById(invitationId).pipe(storage);
       if (Option.isNone(row)) return yield* storageError("invitation vanished after insert");
       return { invitation: toSummary(row.value, createdAt), token };
@@ -369,12 +385,28 @@ const make = Effect.gen(function* () {
           .pipe(Effect.catchTags(notYours));
       }
       const now = yield* nowIso;
-      const revoked = yield* sql<{ readonly invitationId: string }>`
-        UPDATE space_invitations SET revoked_at = ${now}
-        WHERE invitation_id = ${invitationId} AND accepted_at IS NULL AND revoked_at IS NULL
-          AND expires_at > ${now}
-        RETURNING invitation_id AS "invitationId"
-      `.pipe(storage);
+      const revoked = yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const rows = yield* sql<{ readonly invitationId: string }>`
+              UPDATE space_invitations SET revoked_at = ${now}
+              WHERE invitation_id = ${invitationId} AND accepted_at IS NULL AND revoked_at IS NULL
+                AND expires_at > ${now}
+              RETURNING invitation_id AS "invitationId"
+            `;
+            if (rows.length > 0) {
+              yield* audit.record({
+                actor: AuditLog.userActor(actor),
+                action: "invitation.revoke",
+                spaceId: found.value.spaceId,
+                target: { kind: "invitation", id: invitationId },
+                detail: { role: found.value.role },
+              });
+            }
+            return rows;
+          }),
+        )
+        .pipe(storage);
       if (revoked.length === 0) {
         return yield* new InvitationRefusedError({
           reason: "Only a pending Invitation can be revoked.",
@@ -556,6 +588,15 @@ const make = Effect.gen(function* () {
               role: spent.value.role,
             })
             .pipe(storage);
+          yield* audit
+            .record({
+              actor: AuditLog.userActor(user.id),
+              action: "invitation.accept",
+              spaceId: spent.value.spaceId,
+              target: { kind: "invitation", id: invitation.invitationId },
+              detail: { role: spent.value.role, newUser: true },
+            })
+            .pipe(storage);
           const session = yield* environmentAuth.startUserBrowserSession(
             request,
             user,
@@ -618,6 +659,15 @@ const make = Effect.gen(function* () {
               reason: `You're already in ${invitation.organizationName}.`,
             });
           }
+          yield* audit
+            .record({
+              actor: AuditLog.userActor(userId),
+              action: "invitation.accept",
+              spaceId: spent.value.spaceId,
+              target: { kind: "invitation", id: invitation.invitationId },
+              detail: { role: spent.value.role, newUser: false },
+            })
+            .pipe(storage);
           return spent.value.spaceId;
         }),
       )
@@ -649,4 +699,4 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(InvitationService, make);
+export const layer = Layer.effect(InvitationService, make).pipe(Layer.provide(AuditLog.layer));

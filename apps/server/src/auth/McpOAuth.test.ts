@@ -39,7 +39,7 @@ class AuthTestApi extends HttpApi.make("environment")
 const layerConfig = ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-oauth-test-" });
 const layerEnvironmentAuth = EnvironmentAuth.layer.pipe(
   Layer.provide(ManagedPolicy.layerTest()),
-  Layer.provide(Sqlite.layerMemory),
+  Layer.provideMerge(Sqlite.layerMemory),
   Layer.provideMerge(ServerSecretStore.layer),
   Layer.provideMerge(ServerEnvironment.layerIdentity),
   Layer.provide(layerConfig),

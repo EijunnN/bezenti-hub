@@ -48,6 +48,7 @@ import {
   timingSafeEqualBase64Url,
 } from "./utils.ts";
 import { requestUrl } from "../requestUrl.ts";
+import * as AuditLog from "../audit/AuditLog.ts";
 
 // Request-derived origins support loopback, Tailscale and tunnels.
 // Signed client metadata keeps unauthenticated registration stateless.
@@ -269,6 +270,7 @@ export const redirectForError = (error: McpOAuthRedirectError, issuer: string) =
 const make = Effect.gen(function* () {
   const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
   const userDirectory = yield* UserDirectory.UserDirectory;
+  const audit = yield* AuditLog.AuditLog;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const random = yield* SecureRandom.SecureRandom;
   const digester = yield* Digest.Digest;
@@ -531,12 +533,22 @@ const make = Effect.gen(function* () {
           description: "This approval names no account. Sign in and try again.",
         });
     }
+    // Recorded before the code exists: an approval the log missed never signs anyone in.
+    if (approver !== undefined) {
+      yield* audit
+        .record({
+          actor: AuditLog.userActor(approver),
+          action: "mcpClient.approve",
+          target: { kind: "user", id: approver },
+          detail: {
+            client: input.authorization.client.name,
+            access: decision.access,
+            method: decision._tag,
+          },
+        })
+        .pipe(Effect.orDie);
+    }
     const code = yield* mintCode(input.authorization, decision.access, approver);
-    yield* Effect.logInfo("Approved an MCP client sign-in.", {
-      client: input.authorization.client.name,
-      access: decision.access,
-      method: decision._tag,
-    });
     return redirectWith(input.authorization.redirectUri, {
       code,
       state: input.authorization.state,
@@ -633,7 +645,7 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(McpOAuth, make);
+export const layer = Layer.effect(McpOAuth, make).pipe(Layer.provide(AuditLog.layer));
 
 export const layerMcpClientAuthenticator = Layer.effect(
   McpHttpServer.McpClientAuthenticator,

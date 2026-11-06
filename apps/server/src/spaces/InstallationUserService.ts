@@ -9,6 +9,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import * as AuditLog from "../audit/AuditLog.ts";
 import * as PairingGrantStore from "../auth/PairingGrantStore.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import * as SpaceDirectory from "./SpaceDirectory.ts";
@@ -39,6 +40,7 @@ const make = Effect.gen(function* () {
   const spaces = yield* SpaceDirectory.SpaceDirectory;
   const sessions = yield* SessionStore.SessionStore;
   const pairingLinks = yield* PairingGrantStore.PairingGrantStore;
+  const audit = yield* AuditLog.AuditLog;
   const storageError = (cause: unknown) => new SpaceDirectory.SpaceDirectoryStorageError({ cause });
 
   const writeStatus = Effect.fn("InstallationUserService.writeStatus")(function* (
@@ -81,6 +83,16 @@ const make = Effect.gen(function* () {
             });
           }
           const changed = current.status !== status;
+          if (changed) {
+            yield* audit
+              .record({
+                actor: AuditLog.userActor(actorUserId),
+                action: status === "active" ? "user.enable" : action,
+                target: { kind: "user", id: userId },
+                detail: { from: current.status },
+              })
+              .pipe(Effect.mapError(storageError));
+          }
           if (status === "active") {
             if (changed) yield* writeStatus(userId, status);
             return { changed, announce: Effect.void };
@@ -105,16 +117,6 @@ const make = Effect.gen(function* () {
       yield* spaces.membershipsChanged([userId]);
     }
     yield* spaces.userStatusChanged({ userId, active: status === "active" });
-    if (outcome.changed) {
-      // The audit log (ticket 14) records this action here.
-      yield* Effect.logInfo("Changed a User's status.").pipe(
-        Effect.annotateLogs({
-          action: status === "active" ? "user.enable" : action,
-          actorUserId,
-          userId,
-        }),
-      );
-    }
     return yield* spaces.installationUser(userId).pipe(
       Effect.flatMap(Effect.fromOption),
       Effect.catchTags({
@@ -127,4 +129,6 @@ const make = Effect.gen(function* () {
   return InstallationUserService.of({ setStatus });
 });
 
-export const layer = Layer.effect(InstallationUserService, make);
+export const layer = Layer.effect(InstallationUserService, make).pipe(
+  Layer.provide(AuditLog.layer),
+);

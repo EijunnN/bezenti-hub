@@ -47,6 +47,7 @@ import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as CommandActor from "../auth/CommandActor.ts";
+import type * as AuditLog from "../audit/AuditLog.ts";
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
   readonly commandId: CommandId;
@@ -287,6 +288,30 @@ export const make = Effect.gen(function* () {
         ),
       );
 
+  /** A permanent delete, or a move to another Space, is audited with its commit. */
+  const auditOf = (
+    command: ProjectCommand,
+    project: { readonly spaceId: SpaceId | null } | undefined,
+  ): Omit<AuditLog.AuditRecord, "actor"> | undefined => {
+    const target = { kind: "project", id: command.projectId } as const;
+    if (command.type === "project.delete") {
+      return { action: "project.delete", spaceId: project?.spaceId ?? null, target };
+    }
+    if (
+      command.type === "project.meta.update" &&
+      command.spaceId !== undefined &&
+      command.spaceId !== project?.spaceId
+    ) {
+      return {
+        action: "project.move",
+        spaceId: command.spaceId,
+        target,
+        detail: { fromSpaceId: project?.spaceId ?? null },
+      };
+    }
+    return undefined;
+  };
+
   const commit = Effect.fn("ProjectService.commit")(function* (command: ProjectCommand) {
     const { projectId } = command;
     const dispatchError = (cause: unknown) =>
@@ -313,12 +338,14 @@ export const make = Effect.gen(function* () {
         now,
       });
       if (Result.isSuccess(planned)) {
+        const audit = auditOf(command, project);
         const { receipt } = yield* eventSink.commitProjectCommand({
           commandId: command.commandId,
           projectId,
           commandType: command.type,
           acceptedAt: now,
           event: planned.success,
+          ...(audit === undefined ? {} : { audit }),
         });
         return receipt;
       }
@@ -722,7 +749,6 @@ export const make = Effect.gen(function* () {
             return yield* new ProjectMoveBlockedError({ projectId, threadTitles: running });
           }
           // Spec 3 (Sandboxes) moves the Project's workspace to the destination's Sandbox here.
-          // Audit (ticket 14): `project.move` by the acting User, from `route.from` to `route.to`.
           yield* commit({
             type: "project.meta.update",
             commandId: input.commandId,

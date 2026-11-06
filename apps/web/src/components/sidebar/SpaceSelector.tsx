@@ -3,6 +3,7 @@ import type { SpaceId } from "@t3tools/contracts";
 import {
   BuildingIcon,
   ChevronsUpDownIcon,
+  ScrollTextIcon,
   PlusIcon,
   RefreshCwIcon,
   SettingsIcon,
@@ -34,6 +35,7 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { UsersDialog } from "./UsersDialog";
+import { AuditLogDialog } from "./AuditLogDialog";
 import { Label } from "../ui/label";
 import { OrganizationSettingsDialog } from "./OrganizationSettingsDialog";
 import {
@@ -57,6 +59,7 @@ export function SpaceSelector() {
   const loadFailed = useCurrentSpace((state) => state.loadFailed);
   const [creating, setCreating] = useState(false);
   const [managingUsers, setManagingUsers] = useState(false);
+  const [readingAudit, setReadingAudit] = useState(false);
   const [managing, setManaging] = useState(false);
   // A fresh shell snapshot follows a reconnect, as after the User's Memberships changed.
   const shellGeneration = useShellGeneration(environmentId);
@@ -208,10 +211,16 @@ export function SpaceSelector() {
               </>
             ) : null}
             {view.isOwner === true ? (
-              <MenuItem onClick={() => setManagingUsers(true)}>
-                <UsersIcon />
-                Users and permissions
-              </MenuItem>
+              <>
+                <MenuItem onClick={() => setManagingUsers(true)}>
+                  <UsersIcon />
+                  Users and permissions
+                </MenuItem>
+                <MenuItem onClick={() => setReadingAudit(true)}>
+                  <ScrollTextIcon />
+                  Audit log
+                </MenuItem>
+              </>
             ) : null}
           </MenuPopup>
         </Menu>
@@ -229,6 +238,7 @@ export function SpaceSelector() {
           />
         ) : null}
         {managingUsers ? <UsersDialog onClose={() => setManagingUsers(false)} /> : null}
+        {readingAudit ? <AuditLogDialog onClose={() => setReadingAudit(false)} /> : null}
         {notice !== null ? (
           <p className="px-2 pt-1 text-muted-foreground text-xs">{notice}</p>
         ) : null}

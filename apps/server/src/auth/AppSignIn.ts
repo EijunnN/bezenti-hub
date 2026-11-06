@@ -22,6 +22,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import type { HttpServerRequest } from "effect/http";
 
+import * as AuditLog from "../audit/AuditLog.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import { base64UrlEncode, timingSafeEqualBase64Url, type AuthRequestMetadata } from "./utils.ts";
 
@@ -95,6 +96,7 @@ export class AppSignIn extends Context.Service<
 
 const make = Effect.gen(function* () {
   const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
+  const audit = yield* AuditLog.AuditLog;
   const random = yield* SecureRandom.SecureRandom;
   const digester = yield* Digest.Digest;
   // Keyed by the code's SHA-256, so the codes themselves are never held.
@@ -135,15 +137,24 @@ const make = Effect.gen(function* () {
         clientLabel: input.clientLabel?.slice(0, 80),
         expiresAtMs: now + APP_SIGN_IN_CODE_TTL_MS,
       };
+      // Recorded before the code exists: an approval the log missed never signs anyone in.
+      yield* audit
+        .record({
+          actor: AuditLog.userActor(session.userId),
+          action: "appSignIn.approve",
+          target: { kind: "user", id: session.userId },
+          detail: {
+            client: pending.clientLabel ?? null,
+            redirect: appSignInRedirectKind(input.redirectUri),
+          },
+        })
+        .pipe(Effect.orDie);
       yield* Ref.update(codes, (current) => {
         const next = new Map(
           Array.from(current).filter(([, existing]) => existing.expiresAtMs > now),
         );
         next.set(key, pending);
         return next;
-      });
-      yield* Effect.logInfo("Approved an app sign-in.", {
-        redirect: appSignInRedirectKind(input.redirectUri),
       });
       return appSignInCallbackUrl(input.redirectUri, code, input.state);
     },
@@ -189,4 +200,4 @@ const make = Effect.gen(function* () {
   return AppSignIn.of({ approve, exchange });
 });
 
-export const layer = Layer.effect(AppSignIn, make);
+export const layer = Layer.effect(AppSignIn, make).pipe(Layer.provide(AuditLog.layer));

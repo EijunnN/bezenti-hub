@@ -65,6 +65,7 @@ import { verifyRequestDpopProof } from "./dpop.ts";
 import { OwnerPresence } from "./OwnerPresence.ts";
 import type { AuthRequestMetadata } from "./utils.ts";
 import { headerList, isLoopbackClientAddress, isPrivateClientAddress } from "./clientConnection.ts";
+import * as AuditLog from "../audit/AuditLog.ts";
 import { DESKTOP_RENDERER_ORIGINS } from "../httpCors.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ManagedLimits from "../policy/managedLimits.ts";
@@ -527,6 +528,8 @@ export class EnvironmentAuth extends Context.Service<
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
       readonly label?: string;
       readonly userId?: UserId;
+      /** A durable token the shell hands out (`t3 auth session issue`), recorded in the audit log. */
+      readonly audited?: boolean;
     }) => Effect.Effect<IssuedBearerSession, ServerAuthCredentialError | ServerAuthInternalError>;
     readonly listSessions: () => Effect.Effect<
       ReadonlyArray<AuthClientSession>,
@@ -905,6 +908,7 @@ export const make = Effect.gen(function* () {
   const sessions = yield* SessionStore.SessionStore;
   const userDirectory = yield* UserDirectory.UserDirectory;
   const sql = yield* SqlClient.SqlClient;
+  const audit = yield* AuditLog.AuditLog;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const digest = yield* Digest.Digest;
   const descriptor = yield* policy.getDescriptor();
@@ -1380,21 +1384,40 @@ export const make = Effect.gen(function* () {
       .pipe(Effect.mapError((cause) => new ServerAuthPairingLinkRevocationError({ cause })));
   });
 
-  const issueSession: EnvironmentAuth["Service"]["issueSession"] = (input) =>
-    sessionUser(input?.userId).pipe(
+  const issueSession: EnvironmentAuth["Service"]["issueSession"] = (input) => {
+    const issue = sessionUser(input?.userId).pipe(
       Effect.flatMap((owner) =>
-        sessions.issue({
-          subject: input?.subject ?? DEFAULT_SESSION_SUBJECT,
-          ...owner,
-          method: "bearer-access-token",
-          scopes: input?.scopes ?? AuthStandardClientScopes,
-          client: {
-            ...(input?.label ? { label: input.label } : {}),
-            deviceType: "bot",
-          },
-          ...(input?.ttl ? { ttl: input.ttl } : {}),
-        }),
+        sessions
+          .issue({
+            subject: input?.subject ?? DEFAULT_SESSION_SUBJECT,
+            ...owner,
+            method: "bearer-access-token",
+            scopes: input?.scopes ?? AuthStandardClientScopes,
+            client: {
+              ...(input?.label ? { label: input.label } : {}),
+              deviceType: "bot",
+            },
+            ...(input?.ttl ? { ttl: input.ttl } : {}),
+          })
+          .pipe(
+            Effect.tap((issued) =>
+              input?.audited === true && "userId" in owner && owner.userId !== undefined
+                ? audit.record({
+                    actor: AuditLog.cliActor,
+                    action: "cliSession.issue",
+                    target: { kind: "user", id: owner.userId },
+                    detail: {
+                      sessionId: issued.sessionId,
+                      label: input.label ?? null,
+                      scopes: issued.scopes.join(" "),
+                    },
+                  })
+                : Effect.void,
+            ),
+          ),
       ),
+    );
+    return (input?.audited === true ? sql.withTransaction(issue) : issue).pipe(
       Effect.map(
         (issued) =>
           ({
@@ -1415,6 +1438,7 @@ export const make = Effect.gen(function* () {
       ),
       Effect.withSpan("EnvironmentAuth.issueSession"),
     );
+  };
 
   // The Owner, or anyone before an Owner exists (only the operator can pair then), sees every
   // User's sessions and links; any other User sees their own.
@@ -1988,6 +2012,13 @@ export const make = Effect.gen(function* () {
             .pipe(Effect.mapError(toBootstrapExchangeError));
           const created = yield* userDirectory.createOwner(pending).pipe(ownerCreationFailures);
           const session = yield* issueUserBrowserSession(request, created.user, requestMetadata);
+          yield* audit
+            .record({
+              actor: AuditLog.userActor(created.user.id),
+              action: "owner.bootstrap",
+              target: { kind: "user", id: created.user.id },
+            })
+            .pipe(Effect.mapError((cause) => new ServerAuthUserDirectoryError({ cause })));
           return { created, session };
         }),
       )
@@ -2096,6 +2127,39 @@ export const make = Effect.gen(function* () {
       Effect.fail(userDirectoryFailure(cause)),
   };
 
+  const recordResetRedeemed = (userId: UserId, method: "passkey" | "password") =>
+    audit
+      .record({
+        actor: AuditLog.userActor(userId),
+        action: "resetLink.redeem",
+        target: { kind: "user", id: userId },
+        detail: { method },
+      })
+      .pipe(Effect.mapError((cause) => new ServerAuthUserDirectoryError({ cause })));
+
+  // The link and its entry commit together; the shell, not a signed-in User, issued it.
+  const issueOwnerResetLink: EnvironmentAuth["Service"]["issueOwnerResetLink"] = () =>
+    sql
+      .withTransaction(
+        userDirectory.issueOwnerResetLink().pipe(
+          Effect.tap((issued) =>
+            audit.record({
+              actor: AuditLog.cliActor,
+              action: "owner.resetLink",
+              target: { kind: "user", id: issued.user.id },
+            }),
+          ),
+        ),
+      )
+      .pipe(
+        Effect.mapError((cause) =>
+          cause._tag === "NoOwnerError" || cause._tag === "UserDirectoryStorageError"
+            ? cause
+            : new UserDirectory.UserDirectoryStorageError({ cause }),
+        ),
+        Effect.withSpan("EnvironmentAuth.issueOwnerResetLink"),
+      );
+
   const beginResetLinkRegistration: EnvironmentAuth["Service"]["beginResetLinkRegistration"] =
     Effect.fn("EnvironmentAuth.beginResetLinkRegistration")(function* (request, token) {
       const origin = yield* resolvePasskeyOrigin(request);
@@ -2118,6 +2182,7 @@ export const make = Effect.gen(function* () {
           const user = yield* userDirectory
             .redeemResetLink({ token: input.token, pending })
             .pipe(Effect.catchTags(resetLinkFailures));
+          yield* recordResetRedeemed(user.id, "passkey");
           return { user, session: yield* issueUserBrowserSession(request, user, requestMetadata) };
         }),
       )
@@ -2144,6 +2209,7 @@ export const make = Effect.gen(function* () {
                   UserDirectoryStorageError: resetLinkFailures.UserDirectoryStorageError,
                 }),
               );
+              yield* recordResetRedeemed(user.id, "password");
               return {
                 user,
                 session: yield* issueUserBrowserSession(request, user, requestMetadata),
@@ -2288,7 +2354,7 @@ export const make = Effect.gen(function* () {
     redeemResetLinkWithPassword,
     passkeyOrigin: resolvePasskeyOrigin,
     startUserBrowserSession: issueUserBrowserSession,
-    issueOwnerResetLink: userDirectory.issueOwnerResetLink,
+    issueOwnerResetLink,
     issueAppSession,
     signOut,
   });
@@ -2340,6 +2406,7 @@ const revokePairedClientsThePolicyDisallows = Effect.fn(
 });
 
 export const layer = Layer.effect(EnvironmentAuth, make).pipe(
+  Layer.provide(AuditLog.layer),
   Layer.provideMerge(UserDirectory.layer),
   Layer.provideMerge(PairingGrantStore.layer),
   Layer.provideMerge(SessionStore.layer),

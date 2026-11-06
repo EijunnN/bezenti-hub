@@ -19,6 +19,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import * as AuditLog from "../audit/AuditLog.ts";
 import * as UserDirectory from "../auth/UserDirectory.ts";
 import * as SpaceDirectory from "./SpaceDirectory.ts";
 
@@ -79,6 +80,9 @@ const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const spaces = yield* SpaceDirectory.SpaceDirectory;
   const users = yield* UserDirectory.UserDirectory;
+  const audit = yield* AuditLog.AuditLog;
+  const recordIn = (spaceId: SpaceId, entry: Omit<AuditLog.AuditRecord, "spaceId">) =>
+    audit.record({ ...entry, spaceId }).pipe(Effect.mapError(storageError));
 
   const storageError = (cause: unknown) => new MembershipStorageError({ cause });
   const refused = (reason: string) => new MembershipRefusedError({ reason });
@@ -157,6 +161,12 @@ const make = Effect.gen(function* () {
         const unchanged = { changed: false, pendingAdmin: false, signedOut: false };
         if (current === role) return unchanged;
         yield* spaces.setRole({ spaceId, userId, role });
+        yield* recordIn(spaceId, {
+          actor: AuditLog.userActor(actor),
+          action: "membership.changeRole",
+          target: { kind: "user", id: userId },
+          detail: { from: current, to: role },
+        });
         // Admin rights need a passkey or an authenticator app; until then they act as a Member.
         const promotion =
           role === "admin"
@@ -187,6 +197,15 @@ const make = Effect.gen(function* () {
           .pipe(
             Effect.mapError(refusal),
             Effect.andThen(spaces.removeMembership({ spaceId, userId })),
+            Effect.tap((removed) =>
+              removed
+                ? recordIn(spaceId, {
+                    actor: AuditLog.userActor(actor),
+                    action: "membership.remove",
+                    target: { kind: "user", id: userId },
+                  })
+                : Effect.void,
+            ),
           ),
         (removed) => removed,
       );
@@ -208,6 +227,15 @@ const make = Effect.gen(function* () {
                 : refusal(error),
             ),
             Effect.andThen(spaces.removeMembership({ spaceId, userId: actor })),
+            Effect.tap((removed) =>
+              removed
+                ? recordIn(spaceId, {
+                    actor: AuditLog.userActor(actor),
+                    action: "membership.leave",
+                    target: { kind: "user", id: actor },
+                  })
+                : Effect.void,
+            ),
           ),
         (removed) => removed,
       );
@@ -223,19 +251,32 @@ const make = Effect.gen(function* () {
         reason: "Change your own sign-in under Settings → Access.",
       });
     }
-    yield* spaces
-      .authorizeMembership({ actor, action: "membership.resetLink", spaceId, target: userId })
-      .pipe(Effect.mapError(refusal));
-    const link = yield* users
-      .issueResetLink({ userId, createdBy: actor })
-      .pipe(Effect.mapError(storageError));
-    if (Option.isNone(link)) {
-      return yield* new MembershipRefusedError({ reason: "This account cannot sign in." });
-    }
-    return link.value;
+    // The check, the link and its entry commit together.
+    const link = yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          yield* spaces
+            .authorizeMembership({ actor, action: "membership.resetLink", spaceId, target: userId })
+            .pipe(Effect.mapError(refusal));
+          const issued = yield* users
+            .issueResetLink({ userId, createdBy: actor })
+            .pipe(Effect.mapError(storageError));
+          if (Option.isNone(issued)) {
+            return yield* new MembershipRefusedError({ reason: "This account cannot sign in." });
+          }
+          yield* recordIn(spaceId, {
+            actor: AuditLog.userActor(actor),
+            action: "membership.resetLink",
+            target: { kind: "user", id: userId },
+          });
+          return issued.value;
+        }),
+      )
+      .pipe(Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }));
+    return link;
   });
 
   return MembershipService.of({ list, changeRole, remove, leave, issueResetLink });
 });
 
-export const layer = Layer.effect(MembershipService, make);
+export const layer = Layer.effect(MembershipService, make).pipe(Layer.provide(AuditLog.layer));

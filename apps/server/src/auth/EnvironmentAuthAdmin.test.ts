@@ -8,6 +8,7 @@ import * as Layer from "effect/Layer";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as AuditLog from "../audit/AuditLog.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import * as SessionStore from "./SessionStore.ts";
@@ -95,7 +96,11 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
 
         yield* EnvironmentAuth.make.pipe(
           Effect.provide(
-            Layer.merge(ManagedPolicy.layerTest(desktopAndLocalOnly), layerServerConfig()),
+            Layer.mergeAll(
+              ManagedPolicy.layerTest(desktopAndLocalOnly),
+              layerServerConfig(),
+              AuditLog.layer,
+            ),
           ),
         );
 

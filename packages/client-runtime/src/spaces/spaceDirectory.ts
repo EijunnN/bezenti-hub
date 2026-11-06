@@ -3,6 +3,8 @@
 // Clients show controls from the server's AccessPolicy answers (`canCreateOrganization`,
 // `canCreateThreads`) instead.
 import type {
+  AuditAction,
+  AuditLogQuery,
   CommandId,
   InstallationPermission,
   InstallationUserStatus,
@@ -78,6 +80,42 @@ export const setInstallationUserStatus = (
   userId: UserId,
   status: InstallationUserStatus,
 ) => client.installationUsers.setStatus({ headers: {}, params: { userId }, payload: { status } });
+
+/** The Owner's audit log, newest first; pass the last page's `nextCursor` as `before`. */
+export const fetchAuditLog = (client: EnvironmentHttpClient, query: AuditLogQuery = {}) =>
+  client.audit.list({ headers: {}, query });
+
+/** How the audit view names each action. */
+export const AUDIT_ACTION_LABELS: Record<AuditAction, string> = {
+  "owner.bootstrap": "Claimed the Hub as Owner",
+  "owner.resetLink": "Issued an Owner reset link",
+  "resetLink.redeem": "Used a reset link",
+  "invitation.create": "Created an Invitation",
+  "invitation.accept": "Accepted an Invitation",
+  "invitation.revoke": "Revoked an Invitation",
+  "membership.changeRole": "Changed a Role",
+  "membership.remove": "Removed a Member",
+  "membership.leave": "Left the Organization",
+  "membership.resetLink": "Issued a reset link",
+  "installationPermission.grant": "Granted an Installation permission",
+  "installationPermission.revoke": "Revoked an Installation permission",
+  "user.disable": "Disabled a User",
+  "user.enable": "Turned a User back on",
+  "user.remove": "Removed a User",
+  "organization.archive": "Archived an Organization",
+  "organization.restore": "Restored an Organization",
+  "organization.delete": "Deleted an Organization",
+  "project.move": "Moved a Project",
+  "project.delete": "Deleted a Project",
+  "thread.delete": "Deleted a Thread",
+  "guestLink.create": "Created a guest link",
+  "appSignIn.approve": "Approved an app sign-in",
+  "mcpClient.approve": "Approved an MCP client",
+  "cliSession.issue": "Issued a CLI token",
+  "secret.reveal": "Revealed a secret",
+  "secret.edit": "Edited a secret",
+  "environment.register": "Registered an Environment",
+};
 
 export const INSTALLATION_PERMISSION_LABELS: Record<InstallationPermission, string> = {
   "personalSpace.create": "Use their Personal space",

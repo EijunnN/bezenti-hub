@@ -4,11 +4,13 @@
 
 **Blocked by:** 09, 11, 12
 
-**Status:** ready-for-agent
+**Status:** done
 
 Spec: ../spec.md
 
-- [ ] Registro append-only con User, Space, acción, objetivo y hora.
-- [ ] Cada acción auditada de este spec genera su entrada (test de frontera).
-- [ ] API de auditoría para que otros specs añadan acciones.
-- [ ] Vista de auditoría solo para el Owner.
+- [x] Registro append-only con User, Space, acción, objetivo y hora.
+- [x] Cada acción auditada de este spec genera su entrada (test de frontera).
+- [x] API de auditoría para que otros specs añadan acciones.
+- [x] Vista de auditoría solo para el Owner.
+
+Retención: se guarda todo, sin poda. Las acciones `secret.reveal`, `secret.edit` y `environment.register` existen en `AuditAction` y se registran con `AuditLog.record` desde los specs 3 y 5.

@@ -23,6 +23,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import * as AuditLog from "../audit/AuditLog.ts";
 import { replayAndBufferProjectedLiveEvents } from "./LiveStreamBudget.ts";
 import type { UnsequencedProjectEvent } from "../persistence/OrchestrationEventStore.ts";
 import { projectDomainEventForWire } from "./WireProjection.ts";
@@ -148,6 +149,8 @@ export interface EventSinkV2Shape {
     };
     /** Like writeWithEffects' updateDelegatedCompletionOnly, for this run's run.updated only. */
     readonly updateDelegatedCompletionOnlyRunId?: RunId;
+    /** Recorded as the fiber's actor in the same transaction; a replayed command records nothing. */
+    readonly audit?: Omit<AuditLog.AuditRecord, "actor">;
   }) => Effect.Effect<
     {
       readonly receipt: CommandReceiptStore.CommandReceiptV2;
@@ -170,6 +173,8 @@ export interface EventSinkV2Shape {
     readonly commandType: string;
     readonly acceptedAt: DateTime.Utc;
     readonly event: UnsequencedProjectEvent;
+    /** Recorded as the fiber's actor in the same transaction; a replayed command records nothing. */
+    readonly audit?: Omit<AuditLog.AuditRecord, "actor">;
   }) => Effect.Effect<
     { readonly receipt: CommandReceiptStore.ProjectCommandReceiptV2; readonly committed: boolean },
     EventSinkV2Error
@@ -214,6 +219,11 @@ const layerBase: Layer.Layer<
   EventSinkV2,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    const writeAudit = AuditLog.write(sql);
+    const recordAudit = (entry: Omit<AuditLog.AuditRecord, "actor"> | undefined) =>
+      entry === undefined
+        ? Effect.void
+        : Effect.flatMap(AuditLog.currentActor, (actor) => writeAudit({ ...entry, actor }));
     const commandReceipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
     const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
     const eventStore = yield* EventStore.EventStoreV2;
@@ -684,6 +694,7 @@ const layerBase: Layer.Layer<
             error: null,
           };
           yield* commandReceipts.upsert(receipt);
+          yield* recordAudit(input.audit);
           const cancelledEffectIds =
             input.cancelUnsettledEffects === undefined
               ? []
@@ -766,6 +777,7 @@ const layerBase: Layer.Layer<
             yield* projectStore.apply(event);
             const receipt = { ...reserved, resultSequence: event.sequence };
             yield* commandReceipts.upsert(receipt);
+            yield* recordAudit(input.audit);
             return { receipt, event };
           }),
           (result) =>
