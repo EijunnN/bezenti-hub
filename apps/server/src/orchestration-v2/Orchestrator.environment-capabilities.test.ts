@@ -9,7 +9,9 @@ import {
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 
+import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
@@ -19,21 +21,31 @@ const driver = ProviderDriverKind.make("codex");
 const instanceId = ProviderInstanceId.make("codex");
 const modelSelection = { instanceId, model: "test-model" };
 
-// The Hub machine reads capabilities once, for its snapshot. Asking again while deciding fails.
-let capabilityReads = 0;
+// A remote Environment answers from its snapshot; the adapter must not be asked while deciding.
 const adapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
   instanceId,
   driver,
-  getCapabilities: () =>
-    Effect.suspend(() => {
-      capabilityReads += 1;
-      return capabilityReads === 1
-        ? Effect.succeed(CodexProviderCapabilitiesV2)
-        : Effect.die("The Orchestrator asked the adapter for capabilities while deciding");
-    }),
+  getCapabilities: () => Effect.die("The Orchestrator asked the adapter while deciding"),
   planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
   openSession: () => Effect.die("Execution is paused after dispatch"),
 };
+const capabilityReads: Array<ThreadId> = [];
+const snapshotCapabilities = EnvironmentExecutor.EnvironmentCapabilityCache.of({
+  publish: () => Effect.void,
+  snapshot: () => Effect.succeed(Option.none()),
+  snapshotProvider: () => Effect.die("unused"),
+  forThread: ({ threadId, providerInstanceId }) =>
+    Effect.sync(() => {
+      capabilityReads.push(threadId);
+      return {
+        instanceId: providerInstanceId,
+        provider: driver,
+        enabled: true,
+        continuationKey: "codex:remote",
+        capabilities: CodexProviderCapabilitiesV2,
+      };
+    }),
+});
 
 const layer = ProviderReplayHarness.layerWithRegistry(
   { name: "environment-capabilities" },
@@ -41,7 +53,7 @@ const layer = ProviderReplayHarness.layerWithRegistry(
   { runEffectWorker: false },
 );
 
-it.effect("deciding a turn reads provider capabilities from the Environment snapshot", () =>
+it.effect("deciding a turn reads provider capabilities from the Environment cache", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const threadId = ThreadId.make("environment-capabilities-thread");
@@ -74,6 +86,10 @@ it.effect("deciding a turn reads provider capabilities from the Environment snap
 
     const projection = yield* orchestrator.getThreadProjection(threadId);
     assert.lengthOf(projection.runs, 1);
-    assert.equal(capabilityReads, 1);
-  }).pipe(Effect.provide(layer)),
+    assert.isAbove(capabilityReads.length, 0);
+    assert.isTrue(capabilityReads.every((read) => read === threadId));
+  }).pipe(
+    Effect.provide(layer),
+    Effect.provideService(EnvironmentExecutor.EnvironmentCapabilityCache, snapshotCapabilities),
+  ),
 );

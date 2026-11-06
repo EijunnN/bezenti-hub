@@ -88,14 +88,18 @@ versioned in [the executor contract](../../packages/contracts/src/environmentExe
 WebSocket.
 
 `ProviderAdapterRegistryV2`, `RuntimePolicyV2` and `CheckpointStore` reach the orchestration as
-forwarding layers to the executor of the fiber's `CurrentEnvironment`. The effect worker runs every
-effect that needs the Thread's machine (`ENVIRONMENT_BOUND_EFFECT_TYPES`) against the Thread's Active
-environment; `HUB_EFFECT_TYPES` run on the Hub. Until Threads store an Active environment, the
-resolver always answers the Hub machine.
+layers over the executors. Calls that carry a Thread resolve its Active environment each time: a
+session opens there, and its runtime policy and capabilities come from there. Checkpoint calls
+carry only a cwd, so the effect worker runs every effect that needs the Thread's machine
+(`ENVIRONMENT_BOUND_EFFECT_TYPES`) with its Thread's Environment as the checkpoint target;
+`HUB_EFFECT_TYPES` run on the Hub. Until Threads store an Active environment, the resolver always
+answers the Hub machine. A missing executor is a typed error, so effects retry and recover.
 
-The Orchestrator decides from a per-Environment capability cache, never from an adapter call. The
-in-process executor publishes its snapshot at startup, when provider instances change, and on every
-heartbeat. An instance added between snapshots is unknown until the next one.
+The Orchestrator reads capabilities through `EnvironmentCapabilityCache`. For the Hub machine that
+reads the live adapter, as before. A remote executor answers from its last snapshot, the newest by
+`observedAt`, so deciding makes no network call. The Hub machine also publishes a snapshot at
+startup, when provider instances change, and on every heartbeat; instances it cannot describe are
+listed with the reason.
 
 ## Turn completion and checkpoints
 

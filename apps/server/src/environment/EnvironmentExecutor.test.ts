@@ -2,8 +2,11 @@ import { assert, it } from "@effect/vitest";
 import {
   EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
+  type OrchestrationV2AppThread,
+  ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderSessionId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -15,6 +18,7 @@ import * as Queue from "effect/Queue";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
+import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as RuntimePolicy from "../orchestration-v2/RuntimePolicy.ts";
@@ -22,26 +26,54 @@ import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.
 import * as EnvironmentExecutor from "./EnvironmentExecutor.ts";
 
 const LAPTOP = EnvironmentId.make("environment:laptop");
+const NOWHERE = EnvironmentId.make("environment:nowhere");
 const driver = ProviderDriverKind.make("codex");
 const instanceId = ProviderInstanceId.make("codex");
+const modelSelection = { instanceId, model: "test-model" };
+const THREAD_ON_LAPTOP = ThreadId.make("thread-on-laptop");
+const THREAD_ON_HUB = ThreadId.make("thread-on-hub");
+const THREAD_NOWHERE = ThreadId.make("thread-nowhere");
+
+const policyAt = (cwd: string): ProviderAdapter.ProviderAdapterV2RuntimePolicy => ({
+  runtimeMode: "full-access",
+  interactionMode: "default",
+  cwd,
+});
+
+const threadRecord = (id: ThreadId) =>
+  ({ id, projectId: ProjectId.make("project") }) as unknown as OrchestrationV2AppThread;
+
+interface AdapterProbe {
+  readonly reads: { count: number };
+  readonly opened: Array<string>;
+  readonly readSignals?: Queue.Queue<void>;
+}
 
 const makeAdapter = (
-  reads: { count: number },
-  readSignals?: Queue.Queue<void>,
+  label: string,
+  probe: AdapterProbe,
+  capabilities = CodexProviderCapabilitiesV2,
 ): ProviderAdapter.ProviderAdapterV2["Service"] => ({
   instanceId,
   driver,
   getCapabilities: () =>
     Effect.sync(() => {
-      reads.count += 1;
-      return CodexProviderCapabilitiesV2;
+      probe.reads.count += 1;
+      return capabilities;
     }).pipe(
       Effect.tap(() =>
-        readSignals === undefined ? Effect.void : Queue.offer(readSignals, undefined),
+        probe.readSignals === undefined ? Effect.void : Queue.offer(probe.readSignals, undefined),
       ),
     ),
   planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
-  openSession: () => Effect.die("not opened in these tests"),
+  openSession: () =>
+    Effect.sync(() => probe.opened.push(label)).pipe(Effect.andThen(Effect.die("opened"))),
+});
+
+const newProbe = (readSignals?: Queue.Queue<void>): AdapterProbe => ({
+  reads: { count: 0 },
+  opened: [],
+  ...(readSignals === undefined ? {} : { readSignals }),
 });
 
 // Replays the last change, so a publish before the executor subscribes still reaches it.
@@ -62,104 +94,275 @@ const makeLayer = (hubAdapter: ProviderAdapter.ProviderAdapterV2["Service"]) => 
     Layer.provide(
       Layer.mergeAll(
         ProviderAdapterRegistry.layerFromAdapters([hubAdapter]),
-        Layer.mock(RuntimePolicy.RuntimePolicyV2)({}),
-        Layer.mock(CheckpointStore.CheckpointStore)({}),
+        Layer.mock(RuntimePolicy.RuntimePolicyV2)({
+          resolve: () => Effect.succeed(policyAt("/hub")),
+        }),
+        Layer.mock(CheckpointStore.CheckpointStore)({
+          isGitRepository: () => Effect.succeed(true),
+        }),
         layerInstances,
       ),
     ),
   );
-  return EnvironmentExecutor.layerProviderAdapterRegistry.pipe(
+  return Layer.mergeAll(
+    EnvironmentExecutor.layerProviderAdapterRegistry,
+    EnvironmentExecutor.layerRuntimePolicy,
+    EnvironmentExecutor.layerCheckpointStore,
+  ).pipe(
     Layer.provideMerge(layerHubMachine),
     Layer.provideMerge(Layer.effect(InstanceChanges, PubSub.unbounded<void>({ replay: 1 }))),
   );
 };
 
+const resolver = {
+  resolve: (threadId: ThreadId) =>
+    Effect.succeed(
+      threadId === THREAD_ON_LAPTOP
+        ? LAPTOP
+        : threadId === THREAD_NOWHERE
+          ? NOWHERE
+          : HUB_MACHINE_ENVIRONMENT_ID,
+    ),
+};
+const withResolver = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.provideService(effect, EnvironmentExecutor.ActiveEnvironmentResolver, resolver);
+const onThread =
+  (threadId: ThreadId) =>
+  <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    withResolver(EnvironmentExecutor.onActiveEnvironment(threadId)(effect));
+
+/** Registers a laptop executor whose adapter, policy and capabilities differ from the Hub's. */
+const registerLaptop = (laptopAdapter: ProviderAdapter.ProviderAdapterV2["Service"]) =>
+  Effect.gen(function* () {
+    const registry = yield* EnvironmentExecutor.EnvironmentExecutorRegistry;
+    const hubMachine = yield* registry.get(HUB_MACHINE_ENVIRONMENT_ID);
+    yield* registry.register({
+      ...hubMachine,
+      environmentId: LAPTOP,
+      transport: "remote",
+      provider: {
+        adapters: {
+          get: () => Effect.succeed(laptopAdapter),
+          list: () => Effect.succeed([instanceId]),
+        },
+        capabilities: (requested) =>
+          Effect.succeed({
+            instanceId: requested,
+            provider: driver,
+            enabled: true,
+            continuationKey: "laptop",
+            capabilities: ClaudeProviderCapabilitiesV2,
+          }),
+      },
+      workspace: {
+        ...hubMachine.workspace,
+        runtimePolicy: { resolve: () => Effect.succeed(policyAt("/laptop")) },
+      },
+    });
+  });
+
+const openFor = (threadId: ThreadId) =>
+  Effect.gen(function* () {
+    const adapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+    const adapter = yield* adapters.get(instanceId);
+    yield* Effect.exit(
+      Effect.scoped(
+        adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make(`session:${threadId}`),
+          modelSelection,
+          runtimePolicy: policyAt("/unused"),
+        }),
+      ),
+    );
+  });
+
 it.effect(
-  "the registry holds the Hub machine and routes a Thread to its Active environment",
+  "the registry holds the Hub machine and opens a session on its Thread's Environment",
   () => {
-    const hubAdapter = makeAdapter({ count: 0 });
-    const laptopAdapter = makeAdapter({ count: 0 });
+    const hubProbe = newProbe();
+    const laptopProbe = newProbe();
     return Effect.gen(function* () {
       const registry = yield* EnvironmentExecutor.EnvironmentExecutorRegistry;
-      const adapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
-      const threadOnLaptop = ThreadId.make("thread-on-laptop");
-
       assert.equal(registry.hubMachineEnvironmentId, HUB_MACHINE_ENVIRONMENT_ID);
       assert.deepEqual(yield* registry.list, [HUB_MACHINE_ENVIRONMENT_ID]);
-      const hubMachine = yield* registry.forThread(threadOnLaptop);
+      const hubMachine = yield* registry.forThread(THREAD_ON_LAPTOP);
       assert.equal(hubMachine.environmentId, HUB_MACHINE_ENVIRONMENT_ID);
       assert.equal(hubMachine.transport, "in-process");
-      const missing = yield* Effect.flip(registry.get(LAPTOP));
-      assert.equal(missing._tag, "EnvironmentExecutorUnavailableError");
-
-      yield* registry.register({
-        ...hubMachine,
-        environmentId: LAPTOP,
-        provider: {
-          adapters: {
-            get: () => Effect.succeed(laptopAdapter),
-            list: () => Effect.succeed([instanceId]),
-          },
-        },
-      });
-      const resolver = {
-        resolve: (threadId: ThreadId) =>
-          Effect.succeed(threadId === threadOnLaptop ? LAPTOP : HUB_MACHINE_ENVIRONMENT_ID),
-      };
-      const routed = <A, E, R>(threadId: ThreadId, effect: Effect.Effect<A, E, R>) =>
-        EnvironmentExecutor.onActiveEnvironment(threadId)(effect).pipe(
-          Effect.provideService(EnvironmentExecutor.ActiveEnvironmentResolver, resolver),
-        );
-
-      assert.strictEqual(yield* adapters.get(instanceId), hubAdapter);
-      assert.strictEqual(yield* routed(threadOnLaptop, adapters.get(instanceId)), laptopAdapter);
-      assert.strictEqual(
-        yield* routed(ThreadId.make("thread-on-hub"), adapters.get(instanceId)),
-        hubAdapter,
+      assert.equal(
+        (yield* Effect.flip(registry.get(LAPTOP)))._tag,
+        "EnvironmentExecutorUnavailableError",
       );
-      const laptop = yield* registry
-        .forThread(threadOnLaptop)
-        .pipe(Effect.provideService(EnvironmentExecutor.ActiveEnvironmentResolver, resolver));
-      assert.equal(laptop.environmentId, LAPTOP);
+
+      yield* registerLaptop(makeAdapter("laptop", laptopProbe));
+      yield* withResolver(openFor(THREAD_ON_LAPTOP));
+      yield* withResolver(openFor(THREAD_ON_HUB));
+      assert.deepEqual(laptopProbe.opened, ["laptop"]);
+      assert.deepEqual(hubProbe.opened, ["hub"]);
+      assert.equal(
+        (yield* withResolver(registry.forThread(THREAD_ON_LAPTOP))).environmentId,
+        LAPTOP,
+      );
 
       yield* registry.unregister(LAPTOP);
       yield* registry.unregister(HUB_MACHINE_ENVIRONMENT_ID);
       assert.deepEqual(yield* registry.list, [HUB_MACHINE_ENVIRONMENT_ID]);
-    }).pipe(Effect.provide(makeLayer(hubAdapter)));
+    }).pipe(Effect.provide(makeLayer(makeAdapter("hub", hubProbe))));
   },
 );
 
-it.effect("capabilities come from the snapshot, refreshed on instance changes and heartbeats", () =>
-  Effect.gen(function* () {
-    const reads = { count: 0 };
-    const readSignals = yield* Queue.unbounded<void>();
-    yield* Effect.gen(function* () {
+it.effect(
+  "work for another Thread inside a Thread's effect uses that other Thread's Environment",
+  () => {
+    const hubProbe = newProbe();
+    const laptopProbe = newProbe();
+    return Effect.gen(function* () {
+      const policies = yield* RuntimePolicy.RuntimePolicyV2;
       const cache = yield* EnvironmentExecutor.EnvironmentCapabilityCache;
-      const adapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
-      const changes = yield* InstanceChanges;
-      const threadId = ThreadId.make("capabilities-thread");
-      yield* Queue.take(readSignals);
-      assert.equal(reads.count, 1);
+      yield* registerLaptop(makeAdapter("laptop", laptopProbe));
 
-      const entry = yield* cache.forThread({ threadId, providerInstanceId: instanceId });
-      assert.deepEqual(entry.capabilities, CodexProviderCapabilitiesV2);
-      assert.equal(entry.provider, driver);
-      const metadata = yield* adapters.getMetadata!(instanceId);
-      assert.deepEqual(metadata.capabilities, CodexProviderCapabilitiesV2);
-      assert.equal(reads.count, 1);
+      // An effect for the laptop Thread dispatches to a Thread on the Hub machine.
+      yield* onThread(THREAD_ON_LAPTOP)(
+        Effect.gen(function* () {
+          const policy = yield* policies.resolve({
+            thread: threadRecord(THREAD_ON_HUB),
+            modelSelection,
+          });
+          assert.equal(policy.cwd, "/hub");
+          yield* openFor(THREAD_ON_HUB);
+          const entry = yield* cache.forThread({
+            threadId: THREAD_ON_HUB,
+            providerInstanceId: instanceId,
+          });
+          assert.deepEqual(entry.capabilities, CodexProviderCapabilitiesV2);
 
-      const unknown = yield* Effect.flip(
-        cache.forThread({ threadId, providerInstanceId: ProviderInstanceId.make("claudeAgent") }),
+          const own = yield* policies.resolve({
+            thread: threadRecord(THREAD_ON_LAPTOP),
+            modelSelection,
+          });
+          assert.equal(own.cwd, "/laptop");
+        }),
       );
-      assert.equal(unknown._tag, "EnvironmentCapabilitiesUnavailableError");
+      assert.deepEqual(hubProbe.opened, ["hub"]);
+      assert.deepEqual(laptopProbe.opened, []);
+    }).pipe(Effect.provide(makeLayer(makeAdapter("hub", hubProbe))));
+  },
+);
 
-      yield* PubSub.publish(changes, undefined);
-      yield* Queue.take(readSignals);
-      assert.equal(reads.count, 2);
+it.effect("a Thread whose Environment has no executor fails with a typed error", () =>
+  Effect.gen(function* () {
+    const policies = yield* RuntimePolicy.RuntimePolicyV2;
+    const checkpoints = yield* CheckpointStore.CheckpointStore;
+    const policyError = yield* Effect.flip(
+      withResolver(policies.resolve({ thread: threadRecord(THREAD_NOWHERE), modelSelection })),
+    );
+    assert.equal(policyError._tag, "RuntimePolicyResolveError");
+    const checkpointError = yield* Effect.flip(
+      onThread(THREAD_NOWHERE)(checkpoints.isGitRepository("/repo")),
+    );
+    assert.equal(checkpointError._tag, "EnvironmentExecutorUnavailableError");
+  }).pipe(Effect.provide(makeLayer(makeAdapter("hub", newProbe())))),
+);
 
-      yield* TestClock.adjust(EnvironmentExecutor.HUB_MACHINE_HEARTBEAT_INTERVAL);
-      yield* Queue.take(readSignals);
-      assert.equal(reads.count, 3);
-    }).pipe(Effect.provide(makeLayer(makeAdapter(reads, readSignals))));
-  }),
+it.effect("the Hub machine reads capabilities from its live adapters", () => {
+  const probe = newProbe();
+  return Effect.gen(function* () {
+    const cache = yield* EnvironmentExecutor.EnvironmentCapabilityCache;
+    const adapters = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+    const before = probe.reads.count;
+    const entry = yield* cache.forThread({
+      threadId: THREAD_ON_HUB,
+      providerInstanceId: instanceId,
+    });
+    assert.deepEqual(entry.capabilities, CodexProviderCapabilitiesV2);
+    assert.equal(entry.provider, driver);
+    assert.equal(probe.reads.count, before + 1);
+    const unknown = yield* Effect.flip(
+      cache.forThread({
+        threadId: THREAD_ON_HUB,
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      }),
+    );
+    // The local registry's own error, not a generic one.
+    assert.equal(unknown._tag, "ProviderAdapterRegistryLookupError");
+    assert.equal(
+      (yield* Effect.flip(adapters.get(ProviderInstanceId.make("claudeAgent"))))._tag,
+      "ProviderAdapterRegistryLookupError",
+    );
+  }).pipe(Effect.provide(makeLayer(makeAdapter("hub", probe))));
+});
+
+it.effect(
+  "the Hub machine's snapshot refreshes on instance changes and heartbeats, newest wins",
+  () =>
+    Effect.gen(function* () {
+      const readSignals = yield* Queue.unbounded<void>();
+      yield* Effect.gen(function* () {
+        const cache = yield* EnvironmentExecutor.EnvironmentCapabilityCache;
+        const changes = yield* InstanceChanges;
+        yield* Queue.take(readSignals);
+        const first = yield* cache.snapshot(HUB_MACHINE_ENVIRONMENT_ID);
+        assert.equal(first._tag, "Some");
+        if (first._tag !== "Some") return;
+        assert.deepEqual(
+          first.value.providers.map((entry) => entry.instanceId),
+          [instanceId],
+        );
+
+        yield* PubSub.publish(changes, undefined);
+        yield* Queue.take(readSignals);
+        yield* TestClock.adjust(EnvironmentExecutor.HUB_MACHINE_HEARTBEAT_INTERVAL);
+        yield* Queue.take(readSignals);
+        const latest = yield* cache.snapshot(HUB_MACHINE_ENVIRONMENT_ID);
+        assert.equal(latest._tag, "Some");
+        if (latest._tag !== "Some") return;
+
+        // An older snapshot arriving late never replaces a newer one.
+        yield* cache.publish({
+          ...latest.value,
+          providers: [],
+          observedAt: "1970-01-01T00:00:00.000Z",
+        });
+        const kept = yield* cache.snapshot(HUB_MACHINE_ENVIRONMENT_ID);
+        assert.deepEqual(kept, latest);
+      }).pipe(Effect.provide(makeLayer(makeAdapter("hub", newProbe(readSignals)))));
+    }),
+);
+
+it.effect("a remote Environment's capabilities come from its last snapshot", () =>
+  Effect.gen(function* () {
+    const cache = yield* EnvironmentExecutor.EnvironmentCapabilityCache;
+    const missing = yield* Effect.flip(cache.snapshotProvider(LAPTOP, instanceId));
+    assert.equal(missing._tag, "EnvironmentCapabilitiesUnavailableError");
+    const base = {
+      contractVersion: 1,
+      environmentId: LAPTOP,
+      transport: "remote" as const,
+      unavailableProviders: [],
+    };
+    yield* cache.publish({
+      ...base,
+      providers: [
+        {
+          instanceId,
+          provider: driver,
+          enabled: true,
+          continuationKey: "laptop",
+          capabilities: ClaudeProviderCapabilitiesV2,
+        },
+      ],
+      observedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const entry = yield* cache.snapshotProvider(LAPTOP, instanceId);
+    assert.deepEqual(entry.capabilities, ClaudeProviderCapabilitiesV2);
+    yield* cache.publish({
+      ...base,
+      providers: [],
+      unavailableProviders: [{ instanceId, reason: "codex is not installed" }],
+      observedAt: "2026-01-01T00:00:10.000Z",
+    });
+    const gone = yield* Effect.flip(cache.snapshotProvider(LAPTOP, instanceId));
+    assert.equal(gone._tag, "EnvironmentCapabilitiesUnavailableError");
+    assert.equal(gone.reason, "codex is not installed");
+  }).pipe(Effect.provide(makeLayer(makeAdapter("hub", newProbe())))),
 );

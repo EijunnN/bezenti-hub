@@ -1,4 +1,9 @@
-import { NonNegativeInt, ThreadId, type VcsError } from "@t3tools/contracts";
+import {
+  type EnvironmentExecutorUnavailableError,
+  NonNegativeInt,
+  ThreadId,
+  type VcsError,
+} from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 import type { ProjectionRepositoryError } from "../persistence/Errors.ts";
@@ -77,7 +82,8 @@ export class CheckpointRefUnavailableError extends Schema.TaggedError<Checkpoint
   }
 }
 
-export type CheckpointStoreError = VcsError;
+// The store forwards to the Thread's Environment executor, which may be missing.
+export type CheckpointStoreError = VcsError | EnvironmentExecutorUnavailableError;
 
 export type CheckpointServiceError =
   | CheckpointStoreError

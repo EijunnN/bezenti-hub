@@ -22,6 +22,16 @@ export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 1;
  */
 export const HUB_MACHINE_ENVIRONMENT_ID = EnvironmentId.make("environment:hub-machine");
 
+/** The Environment has no executor right now (never joined, removed, or not connected). */
+export class EnvironmentExecutorUnavailableError extends Schema.TaggedError<EnvironmentExecutorUnavailableError>()(
+  "EnvironmentExecutorUnavailableError",
+  { environmentId: EnvironmentId },
+) {
+  override get message(): string {
+    return `Environment ${this.environmentId} has no executor.`;
+  }
+}
+
 export const EnvironmentExecutorTransport = Schema.Literals(["in-process", "remote"]);
 export type EnvironmentExecutorTransport = typeof EnvironmentExecutorTransport.Type;
 
@@ -92,12 +102,20 @@ export const EnvironmentProviderCapabilitySnapshot = Schema.Struct({
 export type EnvironmentProviderCapabilitySnapshot =
   typeof EnvironmentProviderCapabilitySnapshot.Type;
 
-/** The executor's self-description. The Orchestrator decides from the last one it received. */
+/** A provider instance the Environment has but could not describe, and why. */
+export const EnvironmentUnavailableProvider = Schema.Struct({
+  instanceId: EnvironmentProviderSummary.fields.instanceId,
+  reason: TrimmedNonEmptyString,
+});
+export type EnvironmentUnavailableProvider = typeof EnvironmentUnavailableProvider.Type;
+
+/** The executor's self-description. A remote Environment's capabilities come from its last one. */
 export const EnvironmentExecutorSnapshot = Schema.Struct({
   contractVersion: Schema.Number,
   environmentId: EnvironmentId,
   transport: EnvironmentExecutorTransport,
   providers: Schema.Array(EnvironmentProviderCapabilitySnapshot),
+  unavailableProviders: Schema.Array(EnvironmentUnavailableProvider),
   resources: Schema.optional(EnvironmentHostResources),
   observedAt: IsoDateTime,
 });

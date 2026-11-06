@@ -76,13 +76,13 @@ const layerEnvironmentExecutorsProvided = EnvironmentExecutor.layerHubMachine.pi
     ),
   ),
 );
-const layerProviderAdaptersProvided = EnvironmentExecutor.layerProviderAdapterRegistry.pipe(
+export const layerProviderAdaptersProvided = EnvironmentExecutor.layerProviderAdapterRegistry.pipe(
   Layer.provide(layerEnvironmentExecutorsProvided),
 );
 const layerRuntimePolicyProvided = EnvironmentExecutor.layerRuntimePolicy.pipe(
   Layer.provide(layerEnvironmentExecutorsProvided),
 );
-const layerCheckpointStoreProvided = EnvironmentExecutor.layerCheckpointStore.pipe(
+export const layerCheckpointStoreProvided = EnvironmentExecutor.layerCheckpointStore.pipe(
   Layer.provide(layerEnvironmentExecutorsProvided),
 );
 

@@ -94,7 +94,6 @@ import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as AntigravityInstallation from "./provider/AntigravityInstallation.ts";
 import * as CodexInstallation from "./provider/CodexInstallation.ts";
 import * as ProviderInstanceRegistry from "./provider/ProviderInstanceRegistry.ts";
-import * as ProviderAdapterRegistry from "./orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
 import * as ProviderUsageLimitsIngestion from "./provider/ProviderUsageLimitsIngestion.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
@@ -501,7 +500,12 @@ const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
 const layerOrchestrationApplication = Layer.merge(
   CheckpointDiffQuery.layer,
   NativeChildWorkQuery.layer,
-).pipe(Layer.provideMerge(layerCheckpointStore), Layer.provideMerge(layerOrchestrationV2Runtime));
+).pipe(
+  // Diffs read checkpoints through the Hub machine's executor, like the rest of the orchestration.
+  Layer.provide(RuntimeLayer.layerCheckpointStoreProvided),
+  Layer.provideMerge(layerCheckpointStore),
+  Layer.provideMerge(layerOrchestrationV2Runtime),
+);
 
 const layerThreadSettlementWorker = Layer.effectDiscard(
   ThreadSettlementService.make.pipe(Effect.flatMap((service) => service.start())),
@@ -718,7 +722,8 @@ const layerMakeRoutes = Layer.mergeAll(
     EnvironmentConnectRoute.layer,
   ),
   McpHttpServer.layer.pipe(
-    Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+    // The same executor-backed registry the orchestration uses, by layer memoization.
+    Layer.provide(RuntimeLayer.layerProviderAdaptersProvided),
     Layer.provide(McpOAuth.layerMcpClientAuthenticator),
   ),
   // Follows delegated tasks running in linked environments, including after a restart.

@@ -1067,14 +1067,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const providerAdapters = yield* ProviderAdapterRegistryV2;
-  // Decide from the capabilities the Active environment last reported, never from an adapter call.
-  // Hosts without executors (orchestrator tests) read their fixed adapters once, here.
+  // Capabilities come from the Thread's Active environment: the live adapter on the Hub machine,
+  // the last snapshot for a remote one. Hosts without executors (orchestrator tests) read their
+  // adapters directly.
   const providedCapabilities = yield* Effect.serviceOption(
     EnvironmentExecutor.EnvironmentCapabilityCache,
   );
   const environmentCapabilities = Option.isSome(providedCapabilities)
     ? providedCapabilities.value
-    : yield* EnvironmentExecutor.makeStaticCapabilityCache(providerAdapters);
+    : yield* EnvironmentExecutor.makeLocalCapabilityCache(providerAdapters);
   const capabilitiesFor = (threadId: ThreadId, providerInstanceId: ProviderInstanceId) =>
     environmentCapabilities
       .forThread({ threadId, providerInstanceId })

@@ -1,18 +1,22 @@
 /**
  * One executor per Environment holds everything the Hub needs a machine for. The Hub machine's is
- * in process; the orchestration's adapter registry, runtime policy and checkpoint store forward to
- * the executor of the fiber's `CurrentEnvironment` (`docs/internals/overview.md`).
+ * in process. The orchestration's adapter registry, runtime policy and capability reads resolve the
+ * Thread's Environment on each call (`docs/internals/overview.md`, «Environment executors»).
  */
 import {
   ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
+  EnvironmentExecutorUnavailableError,
   EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
   ProviderInstanceId,
   type EnvironmentExecutorSnapshot,
   type EnvironmentExecutorTransport,
   type EnvironmentProviderCapabilitySnapshot,
+  type EnvironmentUnavailableProvider,
   type ThreadId,
 } from "@t3tools/contracts";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -22,6 +26,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
@@ -35,26 +40,31 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
 
+export { EnvironmentExecutorUnavailableError } from "@t3tools/contracts";
+
 /** How often the in-process executor republishes its snapshot, like a remote heartbeat. */
 export const HUB_MACHINE_HEARTBEAT_INTERVAL = Duration.seconds(10);
 
-export class EnvironmentExecutorUnavailableError extends Schema.TaggedError<EnvironmentExecutorUnavailableError>()(
-  "EnvironmentExecutorUnavailableError",
-  { environmentId: EnvironmentId },
+export class EnvironmentCapabilitiesUnavailableError extends Schema.TaggedError<EnvironmentCapabilitiesUnavailableError>()(
+  "EnvironmentCapabilitiesUnavailableError",
+  {
+    environmentId: EnvironmentId,
+    instanceId: ProviderInstanceId,
+    reason: Schema.optional(Schema.String),
+  },
 ) {
   override get message(): string {
-    return `Environment ${this.environmentId} has no executor.`;
+    return this.reason === undefined
+      ? `Environment ${this.environmentId} has not reported provider ${this.instanceId}.`
+      : `Provider ${this.instanceId} is unavailable on Environment ${this.environmentId}: ${this.reason}`;
   }
 }
 
-export class EnvironmentCapabilitiesUnavailableError extends Schema.TaggedError<EnvironmentCapabilitiesUnavailableError>()(
-  "EnvironmentCapabilitiesUnavailableError",
-  { environmentId: EnvironmentId, instanceId: ProviderInstanceId },
-) {
-  override get message(): string {
-    return `Environment ${this.environmentId} has not reported provider ${this.instanceId}.`;
-  }
-}
+export type EnvironmentCapabilityReadError =
+  | ProviderAdapterRegistry.ProviderAdapterRegistryV2Error
+  | ProviderAdapter.ProviderAdapterV2Error
+  | EnvironmentCapabilitiesUnavailableError
+  | EnvironmentExecutorUnavailableError;
 
 /** The machine-side services behind the workspace RPCs (files, search, browse, terminals, previews). */
 export interface EnvironmentWorkspaceRpc {
@@ -68,9 +78,13 @@ export interface EnvironmentWorkspaceRpc {
 export interface EnvironmentExecutor {
   readonly environmentId: EnvironmentId;
   readonly transport: EnvironmentExecutorTransport;
-  /** One `ProviderAdapterV2` per provider instance; a session runtime carries turns and events. */
   readonly provider: {
+    /** One `ProviderAdapterV2` per provider instance; a session runtime carries turns and events. */
     readonly adapters: ProviderAdapterRegistry.ProviderAdapterRegistryV2Shape;
+    /** In process: the live adapter. Remote: the last snapshot, so deciding makes no network call. */
+    readonly capabilities: (
+      instanceId: ProviderInstanceId,
+    ) => Effect.Effect<EnvironmentProviderCapabilitySnapshot, EnvironmentCapabilityReadError>;
   };
   readonly workspace: {
     readonly checkpoints: CheckpointStore.CheckpointStore["Service"];
@@ -91,21 +105,31 @@ export const ActiveEnvironmentResolver = Context.Reference<{
   defaultValue: () => ({ resolve: () => Effect.succeed(HUB_MACHINE_ENVIRONMENT_ID) }),
 });
 
-/** The Environment whose executor the forwarding services use in this fiber. */
-const CurrentEnvironment = Context.Reference<EnvironmentId>(
-  "t3/environment/EnvironmentExecutor/CurrentEnvironment",
+/**
+ * The Environment for calls that carry no Thread: checkpoint operations, which only run inside
+ * their own Thread's effect. Everything that has a Thread resolves it instead.
+ */
+const CheckpointEnvironment = Context.Reference<EnvironmentId>(
+  "t3/environment/EnvironmentExecutor/CheckpointEnvironment",
   { defaultValue: () => HUB_MACHINE_ENVIRONMENT_ID },
 );
 
-/** Runs `effect` against the Thread's Active environment. */
+/** Runs a Thread's effect so its checkpoint work goes to the Thread's Active environment. */
 export const onActiveEnvironment =
   (threadId: ThreadId) =>
   <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
     Effect.gen(function* () {
       const resolver = yield* ActiveEnvironmentResolver;
       const environmentId = yield* resolver.resolve(threadId);
-      return yield* Effect.provideService(effect, CurrentEnvironment, environmentId);
+      return yield* Effect.provideService(effect, CheckpointEnvironment, environmentId);
     });
+
+const resolveThread = Effect.fn("EnvironmentExecutor.resolveThread")(function* (
+  threadId: ThreadId,
+) {
+  const resolver = yield* ActiveEnvironmentResolver;
+  return yield* resolver.resolve(threadId);
+});
 
 export interface EnvironmentExecutorRegistryShape {
   readonly hubMachineEnvironmentId: EnvironmentId;
@@ -113,8 +137,6 @@ export interface EnvironmentExecutorRegistryShape {
     environmentId: EnvironmentId,
   ) => Effect.Effect<EnvironmentExecutor, EnvironmentExecutorUnavailableError>;
   readonly list: Effect.Effect<ReadonlyArray<EnvironmentId>>;
-  /** The executor of the fiber's `CurrentEnvironment`. */
-  readonly current: Effect.Effect<EnvironmentExecutor, EnvironmentExecutorUnavailableError>;
   /** The executor of the Thread's Active environment. */
   readonly forThread: (
     threadId: ThreadId,
@@ -131,102 +153,125 @@ export class EnvironmentExecutorRegistry extends Context.Service<
 >()("t3/environment/EnvironmentExecutor/EnvironmentExecutorRegistry") {}
 
 export interface EnvironmentCapabilityCacheShape {
-  /** Replaces what is known about an Environment; the hello and every heartbeat call it. */
+  /** Keeps the newest snapshot per Environment by `observedAt`; an older one is ignored. */
   readonly publish: (snapshot: EnvironmentExecutorSnapshot) => Effect.Effect<void>;
   readonly snapshot: (
     environmentId: EnvironmentId,
   ) => Effect.Effect<Option.Option<EnvironmentExecutorSnapshot>>;
-  /** A pure read of the last snapshot: no adapter or network call. */
-  readonly provider: (
+  /** A pure read of the last snapshot. A remote executor answers `capabilities` with it. */
+  readonly snapshotProvider: (
     environmentId: EnvironmentId,
     instanceId: ProviderInstanceId,
   ) => Effect.Effect<
     EnvironmentProviderCapabilitySnapshot,
     EnvironmentCapabilitiesUnavailableError
   >;
-  /** The provider as the Thread's Active environment last reported it. */
+  /** The provider as the Thread's Active environment's executor reports it. */
   readonly forThread: (input: {
     readonly threadId: ThreadId;
     readonly providerInstanceId: ProviderInstanceId;
-  }) => Effect.Effect<
-    EnvironmentProviderCapabilitySnapshot,
-    EnvironmentCapabilitiesUnavailableError
-  >;
+  }) => Effect.Effect<EnvironmentProviderCapabilitySnapshot, EnvironmentCapabilityReadError>;
 }
 
-/** Per-Environment provider capabilities. The Orchestrator decides from here, never from an adapter. */
+/** Per-Environment provider capabilities, as the Orchestrator reads them while deciding. */
 export class EnvironmentCapabilityCache extends Context.Service<
   EnvironmentCapabilityCache,
   EnvironmentCapabilityCacheShape
 >()("t3/environment/EnvironmentExecutor/EnvironmentCapabilityCache") {}
 
-const makeCapabilityCache = Effect.gen(function* () {
+const makeCapabilityCache = Effect.fn("EnvironmentExecutor.makeCapabilityCache")(function* (
+  read: (
+    environmentId: EnvironmentId,
+    instanceId: ProviderInstanceId,
+  ) => Effect.Effect<EnvironmentProviderCapabilitySnapshot, EnvironmentCapabilityReadError>,
+) {
   const snapshots = yield* Ref.make<ReadonlyMap<EnvironmentId, EnvironmentExecutorSnapshot>>(
     new Map(),
   );
-  const provider: EnvironmentCapabilityCacheShape["provider"] = (environmentId, instanceId) =>
-    Ref.get(snapshots).pipe(
-      Effect.flatMap((byEnvironment) => {
-        const found = byEnvironment
-          .get(environmentId)
-          ?.providers.find((entry) => entry.instanceId === instanceId);
-        return found === undefined
-          ? Effect.fail(new EnvironmentCapabilitiesUnavailableError({ environmentId, instanceId }))
-          : Effect.succeed(found);
-      }),
-    );
   return EnvironmentCapabilityCache.of({
     publish: Effect.fn("EnvironmentCapabilityCache.publish")(function* (snapshot) {
-      yield* Ref.update(snapshots, (current) =>
-        new Map(current).set(snapshot.environmentId, snapshot),
-      );
+      // ISO-8601 instants in UTC order as strings, and the update is atomic.
+      yield* Ref.update(snapshots, (current) => {
+        const known = current.get(snapshot.environmentId);
+        if (known !== undefined && known.observedAt > snapshot.observedAt) return current;
+        return new Map(current).set(snapshot.environmentId, snapshot);
+      });
     }),
     snapshot: Effect.fn("EnvironmentCapabilityCache.snapshot")(function* (environmentId) {
       return Option.fromUndefinedOr((yield* Ref.get(snapshots)).get(environmentId));
     }),
-    provider,
+    snapshotProvider: Effect.fn("EnvironmentCapabilityCache.snapshotProvider")(
+      function* (environmentId, instanceId) {
+        const known = (yield* Ref.get(snapshots)).get(environmentId);
+        const found = known?.providers.find((entry) => entry.instanceId === instanceId);
+        if (found !== undefined) return found;
+        const unavailable = known?.unavailableProviders.find(
+          (entry) => entry.instanceId === instanceId,
+        );
+        return yield* new EnvironmentCapabilitiesUnavailableError({
+          environmentId,
+          instanceId,
+          ...(unavailable === undefined ? {} : { reason: unavailable.reason }),
+        });
+      },
+    ),
     forThread: Effect.fn("EnvironmentCapabilityCache.forThread")(function* (input) {
-      const resolver = yield* ActiveEnvironmentResolver;
-      const environmentId = yield* resolver.resolve(input.threadId);
-      return yield* provider(environmentId, input.providerInstanceId);
+      return yield* read(yield* resolveThread(input.threadId), input.providerInstanceId);
     }),
   });
 });
 
-/** Reads every provider instance of a local adapter registry; an instance that fails is left out. */
+/** What the local adapter registry says about one instance, with its own typed errors. */
+const readLocalProvider = Effect.fn("EnvironmentExecutor.readLocalProvider")(function* (
+  adapters: ProviderAdapterRegistry.ProviderAdapterRegistryV2Shape,
+  instanceId: ProviderInstanceId,
+) {
+  if (adapters.getMetadata !== undefined) {
+    const { driver, ...metadata } = yield* adapters.getMetadata(instanceId);
+    return { instanceId, provider: driver, ...metadata } as EnvironmentProviderCapabilitySnapshot;
+  }
+  const adapter = yield* adapters.get(instanceId);
+  const capabilities = yield* adapter.getCapabilities();
+  return {
+    instanceId,
+    provider: adapter.driver,
+    continuationKey: `${adapter.driver}:instance:${instanceId}`,
+    enabled: true,
+    capabilities,
+  } as EnvironmentProviderCapabilitySnapshot;
+});
+
+const failureReason = (cause: Cause.Cause<unknown>): string => {
+  const text = Cause.pretty(cause).trim();
+  return text.length > 0 ? text.slice(0, 500) : "The provider could not be described.";
+};
+
+/** Every instance of a local registry: described ones, and the ones that failed with why. */
 const describeLocalProviders = Effect.fn("EnvironmentExecutor.describeLocalProviders")(function* (
+  environmentId: EnvironmentId,
   adapters: ProviderAdapterRegistry.ProviderAdapterRegistryV2Shape,
 ) {
   const instanceIds = yield* adapters.list();
   const described = yield* Effect.forEach(instanceIds, (instanceId) =>
-    Effect.exit(
-      adapters.getMetadata !== undefined
-        ? adapters.getMetadata(instanceId).pipe(
-            Effect.map(({ driver, ...metadata }) => ({
-              instanceId,
-              provider: driver,
-              ...metadata,
-            })),
-          )
-        : adapters.get(instanceId).pipe(
-            Effect.flatMap((adapter) =>
-              adapter.getCapabilities().pipe(
-                Effect.map((capabilities) => ({
-                  instanceId,
-                  provider: adapter.driver,
-                  continuationKey: `${adapter.driver}:instance:${instanceId}`,
-                  enabled: true,
-                  capabilities,
-                })),
-              ),
-            ),
-          ),
+    Effect.exit(readLocalProvider(adapters, instanceId)).pipe(
+      Effect.map((exit) => ({ instanceId, exit })),
     ),
   );
-  const providers: ReadonlyArray<EnvironmentProviderCapabilitySnapshot> = described.flatMap(
-    (exit) => (Exit.isSuccess(exit) ? [exit.value] : []),
-  );
-  return providers;
+  const providers: Array<EnvironmentProviderCapabilitySnapshot> = [];
+  const unavailableProviders: Array<EnvironmentUnavailableProvider> = [];
+  for (const { instanceId, exit } of described) {
+    if (Exit.isSuccess(exit)) {
+      providers.push(exit.value);
+      continue;
+    }
+    yield* Effect.logWarning("Provider instance could not be described", {
+      environmentId,
+      instanceId,
+      cause: exit.cause,
+    });
+    unavailableProviders.push({ instanceId, reason: failureReason(exit.cause) });
+  }
+  return { providers, unavailableProviders };
 });
 
 const optionalWorkspaceRpc: Effect.Effect<Option.Option<EnvironmentWorkspaceRpc>> = Effect.gen(
@@ -253,7 +298,10 @@ interface InProcessExecutorInput {
 const makeInProcessExecutor = (input: InProcessExecutorInput): EnvironmentExecutor => ({
   environmentId: input.environmentId,
   transport: "in-process",
-  provider: { adapters: input.adapters },
+  provider: {
+    adapters: input.adapters,
+    capabilities: (instanceId) => readLocalProvider(input.adapters, instanceId),
+  },
   workspace: {
     checkpoints: input.checkpoints,
     runtimePolicy: input.runtimePolicy,
@@ -261,7 +309,7 @@ const makeInProcessExecutor = (input: InProcessExecutorInput): EnvironmentExecut
   },
   host: {
     describe: Effect.gen(function* () {
-      const providers = yield* describeLocalProviders(input.adapters);
+      const described = yield* describeLocalProviders(input.environmentId, input.adapters);
       const resources = Option.isSome(input.hostResources)
         ? { hostResources: yield* input.hostResources.value.read, disk: null }
         : undefined;
@@ -270,7 +318,7 @@ const makeInProcessExecutor = (input: InProcessExecutorInput): EnvironmentExecut
         contractVersion: ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
         environmentId: input.environmentId,
         transport: "in-process",
-        providers,
+        ...described,
         ...(resources === undefined ? {} : { resources }),
         observedAt,
       } satisfies EnvironmentExecutorSnapshot;
@@ -297,12 +345,8 @@ const makeRegistry = Effect.fn("EnvironmentExecutor.makeRegistry")(function* (
     hubMachineEnvironmentId: hubMachine.environmentId,
     get,
     list: Ref.get(executors).pipe(Effect.map((byEnvironment) => [...byEnvironment.keys()])),
-    current: Effect.gen(function* () {
-      return yield* get(yield* CurrentEnvironment);
-    }),
     forThread: Effect.fn("EnvironmentExecutorRegistry.forThread")(function* (threadId) {
-      const resolver = yield* ActiveEnvironmentResolver;
-      return yield* get(yield* resolver.resolve(threadId));
+      return yield* get(yield* resolveThread(threadId));
     }),
     register: Effect.fn("EnvironmentExecutorRegistry.register")(function* (executor) {
       yield* Ref.update(executors, (current) =>
@@ -320,10 +364,20 @@ const makeRegistry = Effect.fn("EnvironmentExecutor.makeRegistry")(function* (
   });
 });
 
+/** Logs a failed refresh and carries on, so a bad snapshot never stops startup or the heartbeat. */
+const logRefreshFailure = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(
+    Effect.asVoid,
+    Effect.catchCauseIf(
+      (cause) => !Cause.hasInterruptsOnly(cause),
+      (cause) => Effect.logWarning("Hub machine snapshot refresh failed", { cause }),
+    ),
+  );
+
 /**
  * The registry with the Hub machine's in-process executor, built over the local adapter registry,
- * runtime policy and checkpoint store. Its snapshot is published once before the layer is ready,
- * again whenever provider instances change, and on every heartbeat interval.
+ * runtime policy and checkpoint store. Its snapshot (for Settings and the hello of later tickets)
+ * is published at startup, when provider instances change, and on every heartbeat.
  */
 export const layerHubMachine: Layer.Layer<
   EnvironmentExecutorRegistry | EnvironmentCapabilityCache,
@@ -343,21 +397,34 @@ export const layerHubMachine: Layer.Layer<
       hostResources: yield* Effect.serviceOption(HostResources.HostResources),
     });
     const registry = yield* makeRegistry(hubMachine);
-    const cache = yield* makeCapabilityCache;
-    const publish = hubMachine.host.describe.pipe(Effect.flatMap(cache.publish));
+    const cache = yield* makeCapabilityCache(
+      Effect.fn("EnvironmentExecutor.readCapabilities")(function* (environmentId, instanceId) {
+        const executor = yield* registry.get(environmentId);
+        return yield* executor.provider.capabilities(instanceId);
+      }),
+    );
+    const refreshLock = yield* Semaphore.make(1);
+    const refresh = logRefreshFailure(
+      refreshLock.withPermits(1)(hubMachine.host.describe.pipe(Effect.flatMap(cache.publish))),
+    );
 
     const instances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
-    // Subscribing must not hold up startup; the heartbeat covers a change it misses meanwhile.
+    // Startup never waits on the subscription. Refreshing once subscribed covers a change that
+    // landed between the first snapshot and the subscription.
     yield* instances.subscribeChanges.pipe(
       Effect.flatMap((instanceChanges) =>
-        Stream.runForEach(Stream.fromSubscription(instanceChanges), () => publish),
+        refresh.pipe(
+          Effect.andThen(
+            Stream.runForEach(Stream.fromSubscription(instanceChanges), () => refresh),
+          ),
+        ),
       ),
       Effect.scoped,
       Effect.forkScoped,
     );
-    yield* publish;
+    yield* refresh;
     yield* Effect.sleep(HUB_MACHINE_HEARTBEAT_INTERVAL).pipe(
-      Effect.andThen(publish),
+      Effect.andThen(refresh),
       Effect.forever,
       Effect.forkScoped,
     );
@@ -368,76 +435,68 @@ export const layerHubMachine: Layer.Layer<
   }),
 );
 
-/** A capability cache over a fixed adapter registry, read once. For hosts without a registry. */
-export const makeStaticCapabilityCache = Effect.fn("EnvironmentExecutor.makeStaticCapabilityCache")(
-  function* (adapters: ProviderAdapterRegistry.ProviderAdapterRegistryV2Shape) {
-    const cache = yield* makeCapabilityCache;
-    const providers = yield* describeLocalProviders(adapters);
-    yield* cache.publish({
-      contractVersion: ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
-      environmentId: HUB_MACHINE_ENVIRONMENT_ID,
-      transport: "in-process",
-      providers,
-      observedAt: DateTime.formatIso(yield* DateTime.now),
-    });
-    return cache;
-  },
-);
+/** Capabilities read through to a fixed local adapter registry. For hosts without a registry. */
+export const makeLocalCapabilityCache = (
+  adapters: ProviderAdapterRegistry.ProviderAdapterRegistryV2Shape,
+) =>
+  makeCapabilityCache(
+    Effect.fn("EnvironmentExecutor.readLocalCapabilities")(function* (environmentId, instanceId) {
+      if (environmentId !== HUB_MACHINE_ENVIRONMENT_ID) {
+        return yield* new EnvironmentExecutorUnavailableError({ environmentId });
+      }
+      return yield* readLocalProvider(adapters, instanceId);
+    }),
+  );
 
-/** `ProviderAdapterRegistryV2` forwarded to the current Environment's executor. */
+/**
+ * `ProviderAdapterRegistryV2` over the executors. Lookups answer from the Hub machine, and a
+ * session opens on its Thread's Active environment.
+ */
 export const layerProviderAdapterRegistry: Layer.Layer<
   ProviderAdapterRegistry.ProviderAdapterRegistryV2,
   never,
-  EnvironmentExecutorRegistry | EnvironmentCapabilityCache
+  EnvironmentExecutorRegistry
 > = Layer.effect(
   ProviderAdapterRegistry.ProviderAdapterRegistryV2,
   Effect.gen(function* () {
     const registry = yield* EnvironmentExecutorRegistry;
-    const cache = yield* EnvironmentCapabilityCache;
-    const adaptersFor = (instanceId: ProviderInstanceId) =>
-      registry.current.pipe(
-        Effect.mapError(
-          () => new ProviderAdapterRegistry.ProviderAdapterRegistryLookupError({ instanceId }),
-        ),
-        Effect.map((executor) => executor.provider.adapters),
-      );
-    return ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
-      get: Effect.fn("EnvironmentExecutor.adapters.get")(function* (instanceId) {
-        return yield* (yield* adaptersFor(instanceId)).get(instanceId);
-      }),
-      list: Effect.fn("EnvironmentExecutor.adapters.list")(function* () {
-        return yield* registry.current.pipe(
-          Effect.flatMap((executor) => executor.provider.adapters.list()),
-          Effect.orElseSucceed((): ReadonlyArray<ProviderInstanceId> => []),
-        );
-      }),
-      // Read from the snapshot, so planning a provider switch makes no adapter call.
-      getMetadata: Effect.fn("EnvironmentExecutor.adapters.getMetadata")(function* (instanceId) {
-        const environmentId = yield* CurrentEnvironment;
-        const entry = yield* cache.provider(environmentId, instanceId).pipe(
+    const hubMachine = yield* registry.get(registry.hubMachineEnvironmentId).pipe(Effect.orDie);
+    const local = hubMachine.provider.adapters;
+    const routed = (
+      adapter: ProviderAdapter.ProviderAdapterV2["Service"],
+    ): ProviderAdapter.ProviderAdapterV2["Service"] => ({
+      ...adapter,
+      openSession: (input) =>
+        registry.forThread(input.threadId).pipe(
+          Effect.flatMap((executor) =>
+            executor.environmentId === hubMachine.environmentId
+              ? Effect.succeed(adapter)
+              : executor.provider.adapters.get(adapter.instanceId),
+          ),
           Effect.mapError(
             (cause) =>
-              new ProviderAdapterRegistry.ProviderAdapterRegistryMetadataError({
-                instanceId,
+              new ProviderAdapter.ProviderAdapterOpenSessionError({
+                driver: adapter.driver,
+                providerSessionId: input.providerSessionId,
                 cause,
               }),
           ),
-        );
-        return {
-          driver: entry.provider,
-          continuationKey: entry.continuationKey,
-          enabled: entry.enabled,
-          capabilities: entry.capabilities,
-        };
+          Effect.flatMap((target) => target.openSession(input)),
+        ),
+    });
+    return ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+      get: Effect.fn("EnvironmentExecutor.adapters.get")(function* (instanceId) {
+        return routed(yield* local.get(instanceId));
       }),
+      list: Effect.fn("EnvironmentExecutor.adapters.list")(function* () {
+        return yield* local.list();
+      }),
+      ...(local.getMetadata === undefined ? {} : { getMetadata: local.getMetadata }),
     });
   }),
 );
 
-const currentExecutorOrDie = (registry: EnvironmentExecutorRegistryShape) =>
-  registry.current.pipe(Effect.orDie);
-
-/** `RuntimePolicyV2` (cwd and sandbox resolution) forwarded to the current Environment's executor. */
+/** `RuntimePolicyV2` (cwd and sandbox resolution) on the Thread's Active environment. */
 export const layerRuntimePolicy: Layer.Layer<
   RuntimePolicy.RuntimePolicyV2,
   never,
@@ -448,14 +507,23 @@ export const layerRuntimePolicy: Layer.Layer<
     const registry = yield* EnvironmentExecutorRegistry;
     return RuntimePolicy.RuntimePolicyV2.of({
       resolve: Effect.fn("EnvironmentExecutor.runtimePolicy.resolve")(function* (input) {
-        const executor = yield* currentExecutorOrDie(registry);
+        const executor = yield* registry.forThread(input.thread.id).pipe(
+          Effect.mapError(
+            (cause) =>
+              new RuntimePolicy.RuntimePolicyResolveError({
+                projectId: input.thread.projectId,
+                providerInstanceId: input.modelSelection.instanceId,
+                cause,
+              }),
+          ),
+        );
         return yield* executor.workspace.runtimePolicy.resolve(input);
       }),
     });
   }),
 );
 
-/** `CheckpointStore` forwarded to the current Environment's executor. */
+/** `CheckpointStore` on the Environment of the Thread whose effect is running. */
 export const layerCheckpointStore: Layer.Layer<
   CheckpointStore.CheckpointStore,
   never,
@@ -464,10 +532,10 @@ export const layerCheckpointStore: Layer.Layer<
   CheckpointStore.CheckpointStore,
   Effect.gen(function* () {
     const registry = yield* EnvironmentExecutorRegistry;
-    const checkpoints = Effect.map(
-      currentExecutorOrDie(registry),
-      (executor) => executor.workspace.checkpoints,
-    );
+    const checkpoints = Effect.gen(function* () {
+      const executor = yield* registry.get(yield* CheckpointEnvironment);
+      return executor.workspace.checkpoints;
+    });
     return CheckpointStore.CheckpointStore.of({
       isGitRepository: Effect.fn("EnvironmentExecutor.checkpoints.isGitRepository")(
         function* (input) {
