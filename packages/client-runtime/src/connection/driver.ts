@@ -24,6 +24,7 @@ import {
 } from "./routes.ts";
 import * as RpcSession from "../rpc/session.ts";
 import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
+import { registerEnvironmentHubOrigins } from "../hubOrigins.ts";
 
 export type ConnectionDriverProgress =
   | {
@@ -192,6 +193,8 @@ export const make = Effect.gen(function* () {
       (route) => checkRoute(entry, route),
       Effect.fnUntraced(function* (route) {
         const prepared = yield* resolver.prepare(routeEntry(entry, route));
+        // Links copied while connected point at this address when the Hub has no public URL.
+        registerEnvironmentHubOrigins({ httpBaseUrl: prepared.httpBaseUrl });
         yield* reportProgress({ stage: "opening", prepared });
         const session = yield* sessions.connect(prepared);
         yield* reportProgress({ stage: "synchronizing", prepared });

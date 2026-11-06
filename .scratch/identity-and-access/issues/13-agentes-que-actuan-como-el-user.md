@@ -4,11 +4,11 @@
 
 **Blocked by:** 04, 07
 
-**Status:** ready-for-agent
+**Status:** done
 
 Spec: ../spec.md
 
-- [ ] El contexto de invocación MCP expone el principal del User (heredado de «Prefactor: principal actual en cada petición», que lo dejó solo en WS y HTTP).
-- [ ] Una llamada de herramienta de un agente no puede leer Projects o Threads fuera de los Spaces del User que lanzó el turno (test de frontera).
-- [ ] La autorización MCP OAuth pide y registra el User.
-- [ ] Los tokens emitidos por la CLI llevan `userId`.
+- [x] El contexto de invocación MCP expone el principal del User (heredado de «Prefactor: principal actual en cada petición», que lo dejó solo en WS y HTTP).
+- [x] Una llamada de herramienta de un agente no puede leer Projects o Threads fuera de los Spaces del User que lanzó el turno (test de frontera).
+- [x] La autorización MCP OAuth pide y registra el User.
+- [x] Los tokens emitidos por la CLI llevan `userId`.

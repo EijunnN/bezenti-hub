@@ -37,6 +37,7 @@ import * as GitVcsDriver from "../../../vcs/GitVcsDriver.ts";
 import * as VcsProcess from "../../../vcs/VcsProcess.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import * as SpaceDirectory from "../../../spaces/SpaceDirectory.ts";
 import * as ProjectHandlers from "./handlers.ts";
 import { ProjectToolkit } from "./tools.ts";
 
@@ -50,9 +51,11 @@ const clientLaunchHarness = (input: {
   readonly launched: Array<ThreadLaunch.ThreadLaunchInput>;
   readonly workspaceRoot?: string;
   readonly checkWorktreeBase?: ThreadLaunch.ThreadLaunchService["Service"]["checkWorktreeBase"];
-  readonly hostedAppUrl?: string;
+  readonly hubOrigin?: string;
   /** The orchestrator refuses the new thread's mode, as under a managed ceiling. */
   readonly refusedByCeiling?: true;
+  /** The caller's User may not create Threads in the Project's Space. */
+  readonly refusedBySpace?: true;
 }) => {
   const projectId = ProjectId.make("project:client-target");
   const modelSelection = {
@@ -89,7 +92,7 @@ const clientLaunchHarness = (input: {
         sessionId: "session-1",
         label: "Claude Code",
         access: input.runtimeModeCeiling,
-        hostedAppUrl: input.hostedAppUrl,
+        hubOrigin: input.hubOrigin,
       },
       issuedAt: 0,
       capabilities: new Set(["orchestration" as const]),
@@ -114,6 +117,19 @@ const clientLaunchHarness = (input: {
       checkWorktreeBase: input.checkWorktreeBase ?? (() => Effect.void),
       launch: (launch) => {
         input.launched.push(launch);
+        if (input.refusedBySpace) {
+          return Effect.fail(
+            new ThreadLaunch.ThreadLaunchError({
+              operation: "create-thread",
+              commandId: launch.commandId,
+              projectId: launch.projectId,
+              cause: new SpaceDirectory.SpaceAccessDeniedError({
+                action: "thread.create",
+                reason: "role",
+              }),
+            }),
+          );
+        }
         if (input.refusedByCeiling) {
           return Effect.fail(
             new ThreadLaunch.ThreadLaunchError({
@@ -187,19 +203,22 @@ it.effect(
           readonly runtimeMode?: RuntimeMode;
           readonly targeted?: false;
           readonly overrideModel?: ModelSelection;
-          readonly hostedAppUrl?: string;
+          readonly hubOrigin?: string;
           readonly refusedByCeiling?: true;
+          readonly refusedBySpace?: true;
         },
       ) {
-        const { targeted, overrideModel, hostedAppUrl, refusedByCeiling, ...input } = params;
+        const { targeted, overrideModel, hubOrigin, refusedByCeiling, refusedBySpace, ...input } =
+          params;
         const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
         const { projectId, modelSelection, dependencies } = clientLaunchHarness({
           runtimeModeCeiling,
           defaultRuntimeMode,
           launched,
           ...(overrideModel === undefined ? {} : { overrideModel }),
-          ...(hostedAppUrl === undefined ? {} : { hostedAppUrl }),
+          ...(hubOrigin === undefined ? {} : { hubOrigin }),
           ...(refusedByCeiling === undefined ? {} : { refusedByCeiling }),
+          ...(refusedBySpace === undefined ? {} : { refusedBySpace }),
         });
         const toolkit = yield* ProjectToolkit.pipe(
           Effect.provide(
@@ -228,7 +247,7 @@ it.effect(
 
       const aboveCeiling = yield* launchWith("auto-accept-edits", "full-access", {
         title: "Fix",
-        hostedAppUrl: "https://t3.example.com",
+        hubOrigin: "https://t3.example.com",
       });
       expect(aboveCeiling.launched[0]?.runtimeMode).toBe("auto-accept-edits");
       expect(aboveCeiling.result).toMatchObject({
@@ -272,6 +291,16 @@ it.effect(
       expect(managed.result).toMatchObject({
         code: "invalid_request",
         message: "Example Corp limits threads to Supervised.",
+      });
+
+      // A Space that refuses the caller's User is named too, as the app names it.
+      const refused = yield* launchWith("full-access", "full-access", {
+        title: "Fix",
+        refusedBySpace: true,
+      });
+      expect(refused.result).toMatchObject({
+        code: "invalid_request",
+        message: "You can't create Threads in this Space.",
       });
     }),
 );

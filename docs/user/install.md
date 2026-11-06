@@ -10,14 +10,17 @@ launch T3 Code and configure providers afterwards.
 
 ## Command line
 
+From a checkout of this repository:
+
 ```bash
-curl -fsSL https://t3.codes/install.sh | sh
+T3CODE_VERSION=<version> T3CODE_RELEASE_BASE_URL=<release source> sh scripts/install.sh
 ```
 
 On Windows, in PowerShell:
 
 ```powershell
-irm https://t3.codes/install.ps1 | iex
+$env:T3CODE_VERSION = "<version>"; $env:T3CODE_RELEASE_BASE_URL = "<release source>"
+.\scripts\install.ps1
 ```
 
 This installs the `t3` binary to `~/.local/bin`. If your shell reports `command not found`

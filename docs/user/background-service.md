@@ -39,10 +39,9 @@ directly. It does not answer on public addresses until the Installation has an
 Owner; after that every request needs someone signed in, so it answers on any
 address. To publish it on your own domain, see
 [Publish the Hub](./public-hub.md). Anyone on the same network can reach the
-port, so a pairing code is all that keeps them out. The hosted web app at
-app.t3.codes needs an HTTPS address such as
-[Tailscale HTTPS](./remote-access.md#tailscale-https), because browsers block
-plain HTTP from an HTTPS page.
+port, so a pairing code is all that keeps them out. Passkeys and copied links
+work best on an HTTPS address such as your own domain or
+[Tailscale HTTPS](./remote-access.md#tailscale-https).
 
 A service installed before `T3CODE_LAN` existed keeps listening on the local
 network. `t3 status` says so, and `t3 up --no-lan` turns it off. Any

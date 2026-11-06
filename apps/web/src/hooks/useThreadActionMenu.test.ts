@@ -64,6 +64,7 @@ vi.mock("../state/entities", () => ({
 vi.mock("../state/environments", () => ({ usePrimaryEnvironmentId: () => "primary" }));
 // Role rules have their own tests; here every action is allowed.
 vi.mock("../state/currentSpace", () => ({ readThreadRolePermissions: () => undefined }));
+vi.mock("../hubLinks", () => ({ readHubLinkOrigin: () => "https://hub.example.com" }));
 vi.mock("../state/threads", () => ({ threadEnvironment: { updateMetadata: "metadata" } }));
 vi.mock("../state/use-atom-command", () => ({
   useAtomCommand: () => async () => {

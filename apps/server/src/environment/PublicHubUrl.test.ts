@@ -7,9 +7,9 @@ import * as Option from "effect/Option";
 import * as ServerConfig from "../config.ts";
 import * as PublicHubUrl from "./PublicHubUrl.ts";
 
-const hostFor = (publicUrl: URL | undefined) =>
+const hubFor = (publicUrl: URL | undefined) =>
   PublicHubUrl.PublicHubUrl.pipe(
-    Effect.flatMap((hub) => hub.publicHubHost),
+    Effect.flatMap((hub) => Effect.all({ host: hub.publicHubHost, origin: hub.publicHubOrigin })),
     Effect.provide(
       PublicHubUrl.layer.pipe(
         Layer.provide(
@@ -25,11 +25,12 @@ const hostFor = (publicUrl: URL | undefined) =>
     ),
   );
 
-it.effect("gives guest links the host of T3CODE_PUBLIC_URL, and none without it", () =>
+it.effect("gives links the host and origin of T3CODE_PUBLIC_URL, and none without it", () =>
   Effect.gen(function* () {
-    expect(yield* hostFor(new URL("https://hub.example.com"))).toEqual(
-      Option.some("hub.example.com"),
-    );
-    expect(yield* hostFor(undefined)).toEqual(Option.none());
+    expect(yield* hubFor(new URL("https://hub.example.com/"))).toEqual({
+      host: Option.some("hub.example.com"),
+      origin: Option.some("https://hub.example.com"),
+    });
+    expect(yield* hubFor(undefined)).toEqual({ host: Option.none(), origin: Option.none() });
   }),
 );

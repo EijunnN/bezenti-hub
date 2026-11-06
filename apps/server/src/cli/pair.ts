@@ -47,6 +47,7 @@ import {
   resolveHeadlessConnectionString,
 } from "../startupAccess.ts";
 import { authScopesFlag } from "./authScopes.ts";
+import { resolveCliUser, userFlag } from "./userFlag.ts";
 import { baseDirFlag, DurationFromString } from "./config.ts";
 
 const WELL_KNOWN_ENVIRONMENT_PATH = "/.well-known/t3/environment";
@@ -428,12 +429,16 @@ const mintPairingLink = Effect.fn("pair.mintPairingLink")(function* (input: {
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly ttl: Option.Option<Duration.Duration>;
   readonly label: Option.Option<string>;
+  readonly user: Option.Option<string>;
 }) {
   return yield* Effect.gen(function* () {
     const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
+    // The device that pairs signs in as this User; without --user, as the Owner.
+    const userId = yield* resolveCliUser(input.user);
     return yield* environmentAuth.createPairingLink({
       scopes: input.scopes,
       subject: "one-time-token",
+      ...(userId === undefined ? {} : { userId }),
       label: Option.getOrElse(input.label, () => "t3 pair"),
       ...(Option.isSome(input.ttl) ? { ttl: input.ttl.value } : {}),
     });
@@ -478,6 +483,7 @@ export const pairCommand = Command.make("pair", {
   scopes: authScopesFlag(AuthStandardClientScopes),
   ttl: ttlFlag,
   label: labelFlag,
+  user: userFlag,
   tailscale: tailscaleFlag,
   tailscaleServePort: tailscaleServePortFlag,
 }).pipe(
@@ -542,6 +548,7 @@ export const pairCommand = Command.make("pair", {
         scopes: flags.scopes,
         ttl: flags.ttl,
         label: flags.label,
+        user: flags.user,
       });
       const pairingUrl = buildPairingUrl(pairingBaseUrl, issued.credential);
 

@@ -36,7 +36,7 @@ import {
 import { usePrimaryEnvironmentId } from "../state/environments";
 import { readThreadRolePermissions } from "../state/currentSpace";
 import { readLocalApi } from "../localApi";
-import { configuredHostedAppUrl } from "../hostedPairing";
+import { readHubLinkOrigin } from "../hubLinks";
 import {
   deriveLogicalProjectKeyFromSettings,
   derivePhysicalProjectKey,
@@ -299,7 +299,11 @@ export function useThreadActionMenu(input: {
           return;
         case "copy-thread":
           void copyThreadReference(
-            threadChipCopyTarget(threadRef, thread.title, configuredHostedAppUrl()),
+            threadChipCopyTarget(
+              threadRef,
+              thread.title,
+              readHubLinkOrigin(threadRef.environmentId),
+            ),
           );
           return;
         case "copy-thread-id":

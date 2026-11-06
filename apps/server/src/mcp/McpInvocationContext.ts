@@ -46,8 +46,8 @@ export interface McpClientCaller {
    * another environment passing on the limits of the agent it calls for.
    */
   readonly narrowedTo?: ClientModes | undefined;
-  /** An outside client's thread links go through this hosted app, as Copy thread's do. */
-  readonly hostedAppUrl?: string | undefined;
+  /** An outside client's thread links open on this Hub origin, as Copy thread's do. */
+  readonly hubOrigin?: string | undefined;
 }
 
 /**
@@ -131,8 +131,10 @@ export interface McpInvocationScope {
   readonly thread: McpThreadCaller | undefined;
   readonly client: McpClientCaller | undefined;
   /**
-   * The User the caller reads as. None reads as the Owner, as every caller does until agents
-   * act as the User who started their turn.
+   * The User the caller acts as: an agent's Thread owner, or the User who approved an outside
+   * client. Reads and creations follow it, and `SpaceDirectory.principalOf` gives the same
+   * principal WS and HTTP authorize by. None only before an Owner exists (or
+   * for a Thread with no owner), which reads as the Owner.
    */
   readonly userId?: UserId;
   /** False while the Linked environments beta is off here; `/mcp` reads it per request. */
@@ -141,15 +143,15 @@ export interface McpInvocationScope {
 
 /**
  * T3 Code renders `t3-thread://` links as thread chips. Other MCP clients cannot open them, so
- * they get the hosted link Copy thread copies, which opens the thread in either app or a browser.
+ * they get the Hub link Copy thread copies, which opens the thread in either app or a browser.
  */
 export const threadLinkFor = (
   scope: Pick<McpInvocationScope, "environmentId" | "client">,
   threadId: ThreadId,
 ): string => {
-  const hostedAppUrl = scope.client?.hostedAppUrl;
+  const hubOrigin = scope.client?.hubOrigin;
   const ref = { environmentId: scope.environmentId, threadId };
-  return hostedAppUrl === undefined ? formatThreadLink(ref) : hostedThreadLink(ref, hostedAppUrl);
+  return hubOrigin === undefined ? formatThreadLink(ref) : hostedThreadLink(ref, hubOrigin);
 };
 
 export class McpInvocationContext extends Context.Service<

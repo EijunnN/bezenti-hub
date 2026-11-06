@@ -33,6 +33,7 @@ import {
   type HardwareKeyboardCommand,
 } from "./hardwareKeyboardCommands";
 import { selectWorkspaceDetail } from "../workspace/workspace-detail-selection";
+import { readHubLinkOrigin } from "../../state/hubLinks";
 
 const EMPTY_COPY_FEEDBACK: GitActionProgress = {
   phase: "idle",
@@ -67,6 +68,7 @@ export function HardwareKeyboardCommandProvider({
             pullRequests: activeThread?.pullRequests,
             linkedPullRequestUrl:
               (activeThread?.linkedPullRequest ?? activeThread?.branchPullRequest)?.url ?? null,
+            hubOrigin: readHubLinkOrigin(activeThreadRef.environmentId),
           }),
     [activeThread, activeThreadRef],
   );

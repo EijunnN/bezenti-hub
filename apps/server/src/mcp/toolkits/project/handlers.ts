@@ -29,7 +29,8 @@ import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { resolveRuntimeMode } from "../../delegatedTaskModes.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
-import { visibilityOf } from "../../mcpVisibility.ts";
+import { seesProjectId, visibilityOf } from "../../mcpVisibility.ts";
+import { spaceRefusalMessage } from "../../../spaces/SpaceDirectory.ts";
 import * as SpaceVisibility from "../../../spaces/SpaceVisibility.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
 import { ProjectToolkit } from "./tools.ts";
@@ -37,7 +38,11 @@ import { ProjectToolkit } from "./tools.ts";
 const isAboveCeilingError = Schema.is(OrchestratorRuntimeModeAboveCeilingError);
 
 function projectFailure(error: Project.ProjectServiceError) {
-  if (error._tag === "ProjectOperationError") return unavailable();
+  if (error._tag === "ProjectOperationError" || error._tag === "SpaceDirectoryStorageError")
+    return unavailable();
+  // The caller's User may not create there; say so, as the app does.
+  if (error._tag === "SpaceAccessDeniedError" || error._tag === "SpaceNotFoundError")
+    return new OrchestratorMcpFailure({ code: "invalid_request", message: error.message });
   const message =
     error._tag === "ProjectNotFoundError"
       ? "The project was not found."
@@ -46,6 +51,22 @@ function projectFailure(error: Project.ProjectServiceError) {
         : "The project is not empty; force=true is required to delete it.";
   return new OrchestratorMcpFailure({ code: "invalid_request", message });
 }
+
+/**
+ * Changing a Project the caller's User cannot see fails exactly like changing a missing one, as
+ * POST /api/projects/mutate does. Role write rules (who in a visible Space may update or delete)
+ * are not here: ticket 08 (.scratch/identity-and-access/issues/08-reglas-de-role-al-escribir.md)
+ * puts them in the service with AccessPolicy, and MCP gets them from there.
+ */
+const requireVisibleProject = Effect.fn("mcp.requireVisibleProject")(function* (
+  projectId: ProjectId,
+) {
+  if (!(yield* seesProjectId(yield* McpInvocationContext.McpInvocationContext, projectId)))
+    return yield* new OrchestratorMcpFailure({
+      code: "invalid_request",
+      message: "The project was not found.",
+    });
+});
 
 /** Require project worktrees so launches cannot target arbitrary host directories. */
 const assertProjectWorktree = Effect.fn("mcp.assertProjectWorktree")(function* (
@@ -246,6 +267,8 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
               }),
           createdBy: "agent",
           creationSource: "mcp",
+          // The caller's User owns it and must be allowed to create in the Project's Space.
+          ...(scope.userId === undefined ? {} : { ownerUserId: scope.userId }),
           ...(linkOrigin === undefined ? {} : { linkOrigin }),
           // Kept only alongside linkOrigin: thread.create drops it otherwise.
           ...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
@@ -263,6 +286,10 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 message: error.message,
               });
             }
+            // The caller's User may not create in the Project's Space; say so, as the app does.
+            const refusal = spaceRefusalMessage(error);
+            if (refusal !== undefined)
+              return new OrchestratorMcpFailure({ code: "invalid_request", message: refusal });
             // The administrator's ceiling refuses the mode; say so rather than "unavailable".
             if (error._tag === "ThreadLaunchError" && isAboveCeilingError(error.cause)) {
               return new OrchestratorMcpFailure({
@@ -315,6 +342,8 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
     ({ workspaceRoot, ...input }) =>
       Effect.gen(function* () {
         const projects = yield* Project.ProjectService;
+        // Claimed as the caller's User, like a Project created from their session.
+        const { userId: actorUserId } = yield* McpInvocationContext.McpInvocationContext;
         if (workspaceRoot === undefined) {
           // Only updates record model defaults; reject defaults that creation would silently drop.
           if (
@@ -328,15 +357,20 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 "A project started from its title takes only a title; set scripts or defaultModelSelection afterwards with t3_project_update.",
             });
           const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
-          const created = yield* folders.createNamedProject({ name: input.title }).pipe(
-            Effect.mapError(
-              (error) =>
-                new OrchestratorMcpFailure({
-                  code: "orchestration_error",
-                  message: error.message,
-                }),
-            ),
-          );
+          const created = yield* folders
+            .createNamedProject({
+              name: input.title,
+              ...(actorUserId === undefined ? {} : { actorUserId }),
+            })
+            .pipe(
+              Effect.mapError(
+                (error) =>
+                  new OrchestratorMcpFailure({
+                    code: "orchestration_error",
+                    message: error.message,
+                  }),
+              ),
+            );
           const project = yield* projects
             .getById(created.projectId)
             .pipe(
@@ -352,7 +386,13 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         }
         const commandId = yield* newCommandId();
         return yield* projects
-          .create({ ...input, workspaceRoot, commandId, projectId: ProjectId.make(commandId) })
+          .create({
+            ...input,
+            workspaceRoot,
+            commandId,
+            projectId: ProjectId.make(commandId),
+            ...(actorUserId === undefined ? {} : { actorUserId }),
+          })
           .pipe(Effect.mapError(projectFailure));
       }),
     // Linked work may bring the repository it works in; an existing
@@ -361,6 +401,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   ),
   t3_project_update: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
+      yield* requireVisibleProject(input.projectId);
       const projects = yield* Project.ProjectService;
       return yield* projects
         .update({ ...input, commandId: yield* newCommandId() })
@@ -369,6 +410,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   ),
   t3_project_delete: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
+      yield* requireVisibleProject(input.projectId);
       const projects = yield* Project.ProjectService;
       const clones = yield* ProjectCloneTracker.ProjectCloneTracker;
       return yield* mutateProjectWithClone(projects, clones, {

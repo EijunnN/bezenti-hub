@@ -130,8 +130,9 @@ export interface CreationStamp {
 export interface CreationClaim {
   readonly action: "project.create" | "thread.create";
   /**
-   * The User creating it, taken from their session, never from a client payload. Callers with no
-   * User of their own yet (MCP tools, scheduled tasks, the CLI) leave it out and act as the Owner.
+   * The User creating it, taken from their session or MCP scope, never from a client payload.
+   * Only callers with no User (scheduled task runs, `t3 project`, before an Owner) leave it out
+   * and act as the Owner.
    */
   readonly actorUserId?: UserId | undefined;
   /** The client's current Space. */

@@ -631,7 +631,7 @@ the UI, and the mobile app each carry `t3code.release.channel` (`dev`, `stable`,
 `preview`, from their own version; desktop PR builds count as `preview`, and a server not built by a
 release workflow reports `dev`) and `deployment.environment.name` (`development`, `production`, or
 `staging` for `preview`). On the server and the desktop main process either key in
-`OTEL_RESOURCE_ATTRIBUTES` wins. The UI and mobile app never read that variable: Vercel PR previews
+`OTEL_RESOURCE_ATTRIBUTES` wins. The UI and mobile app never read that variable: web preview builds
 set `VITE_RELEASE_CHANNEL=preview` because their `APP_VERSION` must stay comparable with the
 server's, and the mobile app maps its build variant (`development`, `preview`, `production`), or
 reports `dev` from a development bundle.

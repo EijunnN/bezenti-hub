@@ -3,7 +3,7 @@
 # tar, sha256sum or shasum, and curl or wget; no Node, npm, or compiler.
 # Upstream's releases are never used (ADR 0007).
 #
-#   curl -fsSL https://t3.codes/install.sh | sh
+#   T3CODE_VERSION=<version> T3CODE_RELEASE_BASE_URL=<release source> sh scripts/install.sh
 #
 # Environment:
 #   T3CODE_VERSION           exact version to install (required)
@@ -148,7 +148,7 @@ case "$(uname -m)" in
   *) fail "unsupported architecture $(uname -m)" ;;
 esac
 if [ "${platform}-${arch}" = darwin-x64 ]; then
-  fail "there is no t3 CLI for Intel Macs. Install the desktop app from https://t3.codes/download, or run a server from source: https://github.com/${repo}/blob/main/docs/user/install.md#intel-macs"
+  fail "there is no t3 CLI for Intel Macs. Install the desktop app, or run a server from source: https://github.com/${repo}/blob/main/docs/user/install.md#intel-macs"
 fi
 command -v tar >/dev/null 2>&1 || fail "tar is required"
 if command -v sha256sum >/dev/null 2>&1; then

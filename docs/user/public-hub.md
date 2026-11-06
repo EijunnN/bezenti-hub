@@ -32,7 +32,13 @@ T3CODE_TRUSTED_PROXIES=loopback
 
 - `T3CODE_PUBLIC_URL` is the address people open. Passkeys are registered on
   that address and only work there, so set it before anyone registers one, and
-  sign in through it rather than through `localhost` or a LAN address.
+  sign in through it rather than through `localhost` or a LAN address. It is
+  also where every link T3 Code hands out points: **Copy thread** and prompt
+  links, thread links for outside MCP clients, guest links, and the links
+  `t3 auth pairing create` and `t3 auth owner-reset` print. Without it, links
+  use the address you reached the Hub on, and guest links are off. To have
+  copied thread links open the mobile app, build it with
+  `EXPO_PUBLIC_T3CODE_PUBLIC_URL` set to the same address.
 - `T3CODE_TRUSTED_PROXIES` lists the proxies allowed to tell T3 Code who the
   client is: `loopback` for a proxy on the same machine, or IP addresses and
   CIDR ranges such as `10.0.0.0/8` for one elsewhere, separated by commas.

@@ -4,7 +4,8 @@ Agents that T3 Code did not start can work with an environment through its MCP
 server. They can read projects and threads, start and message threads, and
 check which providers and models are available. This covers Claude Code or
 Codex in your own terminal, ChatGPT, and bots that support MCP. Each agent signs
-in once, and you choose what it may do.
+in once as you: it sees and does only what your account can, in the Spaces you
+belong to, and you choose what it may do on top of that.
 
 ## Get the MCP URL
 
@@ -41,18 +42,23 @@ The page names the agent and where its access goes:
 - For a hosted agent, approval goes to that service, such as `chatgpt.com`.
   Anyone who runs that service gets the access.
 
-Only approve a sign-in you just started. To approve, enter a pairing code from
-**Settings → Sharing & access** or from `t3 auth pairing create` on the host. A
-browser already signed in to the environment with permission to manage access
-can approve without a code.
+Only approve a sign-in you just started. If the browser is not signed in to the
+Hub, the page asks you to **Sign in** first, then shows the request again. The
+page says which account approves (“acting as …”): the agent acts as that User.
+To approve from a browser that is not yours, choose **Use a pairing code
+instead** and enter a code from **Settings → Sharing & access**; the agent then
+acts as whoever created the code. A browser signed in as you only accepts a
+code you created, so it never approves as someone else. On the Hub, `t3 auth pairing create --user
+<sign-in name>` creates one for that User, and without `--user` for the Owner.
 
 Then choose what the agent may do:
 
 - **Read only** is the default. The agent can read projects and threads and see
   the available providers and models. It cannot change anything.
 - **Supervised** through **Full access** also let it start, message and stop
-  threads in every project. A thread it starts or steers cannot run with more
-  permissions than the mode you chose.
+  threads in the projects you can reach. A thread it starts or steers cannot run
+  with more permissions than the mode you chose. What it creates belongs to you
+  and to the Space you could create it in; where you could not, it is refused.
 
 ## Claude Code
 
@@ -96,7 +102,8 @@ Agents without OAuth support cannot connect.
 ## Scripts on the host
 
 On the machine that runs the environment, `t3 thread` uses the same tools
-without a sign-in:
+without a sign-in. It acts as the Owner, or as another User with
+`--user <sign-in name>`:
 
 ```sh
 id=$(t3 thread start . "Find why the tests are slow")
@@ -115,8 +122,13 @@ the message to read it from stdin.
 2 when the agent waits for an answer you give in the app. Add `--json` for a
 result that always includes the thread id.
 
+Tokens from `t3 auth session issue` and devices paired with `t3 pair` act as
+the Owner too, or as `--user <sign-in name>`, so a script for a teammate sees
+only their Spaces. A User who is disabled or removed cannot be chosen.
+
 ## Remove an agent
 
-Approved agents appear under **Settings → Sharing & access** like other clients.
-Revoke one there to cut off its access immediately. A sign-in lasts 30 days;
-after that the agent asks you to approve it again.
+Approved agents appear in your sessions under **Settings → Sharing & access**,
+like your other clients. Revoke one there to cut off its access immediately; the
+Owner can revoke anyone's. A sign-in lasts 30 days; after that the agent asks
+you to approve it again.

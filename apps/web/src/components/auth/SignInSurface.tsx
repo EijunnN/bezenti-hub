@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 
 import {
   signInWithPasskey,
@@ -13,7 +13,16 @@ import { StandalonePage, StandalonePageHeader } from "../ui/standalone-page";
 
 type Method = "passkey" | "password" | "recovery";
 
-export function SignInSurface({ onSignedIn }: { onSignedIn: () => void }) {
+export function SignInSurface({
+  onSignedIn,
+  description = "Use your passkey, or your sign-in name and password.",
+  footer,
+}: {
+  onSignedIn: () => void;
+  description?: ReactNode;
+  /** Shown under the sign-in methods, such as another way to continue. */
+  footer?: ReactNode;
+}) {
   const [method, setMethod] = useState<Method>("passkey");
   const [loginName, setLoginName] = useState("");
   const [password, setPassword] = useState("");
@@ -60,10 +69,7 @@ export function SignInSurface({ onSignedIn }: { onSignedIn: () => void }) {
 
   return (
     <StandalonePage>
-      <StandalonePageHeader
-        title="Sign in"
-        description="Use your passkey, or your sign-in name and password."
-      />
+      <StandalonePageHeader title="Sign in" description={description} />
 
       <div className="mt-6 space-y-4">
         {method === "passkey" ? (
@@ -213,6 +219,7 @@ export function SignInSurface({ onSignedIn }: { onSignedIn: () => void }) {
             <AlertDescription>{errorMessage}</AlertDescription>
           </Alert>
         ) : null}
+        {footer}
       </div>
     </StandalonePage>
   );

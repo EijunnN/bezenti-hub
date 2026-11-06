@@ -34,10 +34,16 @@ mirrored in the signed `uid` claim. Verification reads the row, so detaching a
 User never needs a reissued token.
 
 Once an Owner exists every session belongs to a User. A pairing link carries
-the User who created it, and a device that redeems it signs in as that User.
-Paths with no User of their own (the Hub's shell, the startup link, the desktop
-bootstrap, the reusable dev token, MCP clients until they choose a User) bind to
-the Owner in [EnvironmentAuth](../../apps/server/src/auth/EnvironmentAuth.ts).
+the User who created it, and a device that redeems it signs in as that User. An
+outside MCP client acts as the User who approved it (see
+[MCP clients](#mcp-clients-are-a-separate-audience)). The Hub's shell picks the
+User: `t3 pair`, `t3 auth pairing create`, `t3 auth session issue` and
+`t3 thread` take `--user <sign-in name or id>`, resolved by
+`UserDirectory.findActiveUserByName`, and issuance refuses a disabled or removed
+User. Only paths that are the Installation's own bind to the Owner in
+[EnvironmentAuth](../../apps/server/src/auth/EnvironmentAuth.ts): those shell
+commands without `--user` (only someone with the Hub's shell runs them), the
+startup link, the desktop bootstrap, the reusable dev token and `t3 project`.
 The binding is explicit at each caller rather than a default in
 [SessionStore](../../apps/server/src/auth/SessionStore.ts): a future path that
 forgot its User would otherwise silently act as the Owner. Instead an
@@ -101,8 +107,13 @@ A new Project or Thread is claimed for its Space inside the service every caller
 goes through, `ProjectService.create` and `ThreadManagementService.dispatch`, so
 the web client, launches, MCP tools, scheduled tasks and the CLI are all checked
 and stamped with `spaceId` and `ownerUserId`. Transports only pass the session's
-User (a client's `ownerUserId` is replaced); callers with no User of their own yet
-act as the Owner, as their sessions do. A Thread joins its Project's Space, and a
+User (a client's `ownerUserId` is replaced). MCP tools pass the invocation
+scope's `userId`, so an agent creates as the Thread's owner and an outside client
+as the User who approved it; a refusal reaches the agent as the app's message.
+Only callers with no User at all act as the Owner: work before an Owner exists,
+`t3 project`, and server-made effects. A scheduled task records no creator yet, so its
+runs act as the Owner whoever scheduled it; that stays the one Owner fallback for
+work a User started. A Thread joins its Project's Space, and a
 Project from before Spaces counts as the Owner's Personal space, so a client's
 requested Space applies only to new Projects and to Threads in unknown Projects.
 Clients send their current Space only to the environment it came from. Archived
@@ -141,7 +152,14 @@ place this is answered, and every read of Projects or Threads asks it:
   missing. A hidden Thread and a missing one both fail with
   `SpaceResourceNotFoundError`, so a refusal is not an existence oracle. HTTP
   Thread routes answer `thread_not_found` the same way.
-- MCP read tools use the scope's `userId`; a caller with none reads as the Owner.
+- MCP read tools use the scope's `userId` (`mcpVisibility`). Every caller has
+  one once an Owner exists: an agent in a Thread reads as the Thread's owner, an
+  outside client as the User who approved it. A caller with none reads as
+  everything, which only happens before an Owner exists.
+  The scope's `userId` is the same field WS and HTTP principals carry, so
+  `SpaceDirectory.principalOf` gives services the same principal (Owner or not,
+  Roles, Installation permissions). MCP project updates and deletes treat a
+  Project the User cannot see as missing; Role write rules come with ticket 08.
 
 Each WebSocket connection resolves its viewer once (`CurrentViewer`) and again
 only when `SpaceDirectory.revision` moves, which every Space or Membership write
@@ -284,6 +302,24 @@ call. Every client is public and proves itself with PKCE; a client that asks
 for a secret is registered without one. Client registration is stateless, so an unauthenticated caller cannot grow server
 state. Approval spends a one-time pairing code, or uses a browser session with
 `access:write`; proof-bound codes are refused without being spent.
+
+The issued session belongs to whoever approved: the signed-in User of that
+browser session, or the User a pairing code was issued to (its creator, or the
+`--user` it was created for). The authorization code carries that User to the
+token exchange, and `/mcp` puts the session's `user_id` on the invocation
+scope, so reads, creations and the client's place in "Your sessions" (listing
+and revoking) all follow that User, and revoking or disabling the User cuts the
+client off with the rest of their sessions. A signed-out consent page shows the
+sign-in form in place and reloads the same request once signed in, so there is
+no return URL to redirect through; the approval details name the User
+(`signedInAs`). The CSRF token is bound to the approving session, client,
+redirect and PKCE challenge, so it cannot approve for another sign-in. A
+pairing code is checked before it is spent: its User must still sign in and, in a
+signed-in browser, be that browser's User, so the page's "acting as" is always
+true. Once an Owner exists an approval that names no User is refused rather than
+given to the Owner; sessions from before the Owner are adopted by it when it is
+created, so no MCP session stays userless. The token
+stays a plain bearer: DPoP binding of MCP clients is unchanged.
 
 The user grants either read-only access or a runtime-mode ceiling, not a
 scope list: MCP tools are all orchestration, and `orchestration:operate`

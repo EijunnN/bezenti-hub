@@ -4,9 +4,10 @@ import UIKit
 enum T3ComposerClipboard {
   static let fragmentType = "app.t3.context-fragment"
 
-  // Pasted thread links become chips in JS; packages/shared/src/threadLinks.ts parses them.
+  // Pasted thread links become chips in JS; packages/shared/src/threadLinks.ts decides which
+  // http(s) `/threads/` links are links to a known Hub.
   static func hasThreadLink(_ text: String) -> Bool {
-    text.contains("t3-thread://v2/") || text.contains("https://app.t3.codes/threads/")
+    text.contains("t3-thread://v2/") || (text.contains("://") && text.contains("/threads/"))
   }
 
   static func write(text: String, fragment: String) {

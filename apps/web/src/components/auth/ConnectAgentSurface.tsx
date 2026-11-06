@@ -23,6 +23,7 @@ import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { RadioGroup } from "../ui/radio-group";
+import { SignInSurface } from "./SignInSurface";
 import { Spinner } from "../ui/spinner";
 import { StandalonePage, StandalonePageHeader } from "../ui/standalone-page";
 
@@ -96,6 +97,8 @@ export function ConnectAgentSurface() {
   const [pairingCode, setPairingCode] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [pending, setPending] = useState<"approve" | "deny" | null>(null);
+  // Without a sign-in, a pairing code names the User instead.
+  const [usePairingCode, setUsePairingCode] = useState(false);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- fetches the MCP OAuth approval and redirects the window or stores details, ignoring stale answers
   useEffect(() => {
@@ -165,6 +168,35 @@ export function ConnectAgentSurface() {
   }
 
   const { details } = loaded;
+  if (details.csrfToken === undefined && !usePairingCode) {
+    return (
+      <SignInSurface
+        // The page reloads with the same request, now as the signed-in User.
+        onSignedIn={() => window.location.reload()}
+        description={
+          details.signedInAs === undefined ? (
+            <>
+              Sign in to connect {details.clientName}. It will act as you, with your access on{" "}
+              <span className="font-medium text-foreground">{details.environmentHost}</span>.
+            </>
+          ) : (
+            // A narrowed session (such as one paired for a single task) cannot hand out access.
+            <>
+              You are signed in as{" "}
+              <span className="font-medium text-foreground">{details.signedInAs}</span>, but this
+              session cannot approve agents. Sign in again with your account, or use a pairing code
+              you created.
+            </>
+          )
+        }
+        footer={
+          <Button size="sm" variant="outline" onClick={() => setUsePairingCode(true)}>
+            Use a pairing code instead
+          </Button>
+        }
+      />
+    );
+  }
   const oneClick = oneClickApproves(details, access);
   const canApprove = pending === null && (oneClick || pairingCode.trim().length > 0);
 
@@ -174,8 +206,16 @@ export function ConnectAgentSurface() {
         title={`Connect ${details.clientName}`}
         description={
           <>
-            This agent wants to use the threads in every project on{" "}
-            <span className="font-medium text-foreground">{details.environmentHost}</span>.
+            This agent wants to use the projects and threads you can reach on{" "}
+            <span className="font-medium text-foreground">{details.environmentHost}</span>
+            {details.signedInAs === undefined ? (
+              ". It acts as the person the pairing code was created for."
+            ) : (
+              <>
+                , acting as{" "}
+                <span className="font-medium text-foreground">{details.signedInAs}</span>.
+              </>
+            )}
           </>
         }
       />
@@ -243,8 +283,18 @@ export function ConnectAgentSurface() {
               value={pairingCode}
             />
             <p className="text-xs text-muted-foreground">
-              Create one in Settings → Sharing & access, or run <code>t3 auth pairing create</code>{" "}
-              on this machine.
+              {details.signedInAs === undefined ? (
+                <>
+                  Create one in Settings → Sharing & access, or run{" "}
+                  <code>t3 auth pairing create --user &lt;sign-in name&gt;</code> on the Hub. The
+                  agent acts as the person the code was created for.
+                </>
+              ) : (
+                <>
+                  Use a code you created in Settings → Sharing & access. This browser is signed in
+                  as {details.signedInAs}, so a code from another account is refused.
+                </>
+              )}
             </p>
           </div>
         )}

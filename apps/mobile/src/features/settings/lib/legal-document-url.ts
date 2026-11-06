@@ -1,25 +1,24 @@
-const DEFAULT_MARKETING_SITE_URL = "https://t3.codes";
-
-function resolveMarketingSiteUrl(override: string | undefined): URL {
+// The Owner's own legal pages, if the build names a site for them (EXPO_PUBLIC_MARKETING_SITE_URL).
+// pingdotgg's site is not this Installation's (ADR 0007), so without one there is no Legal page.
+function resolveMarketingSiteUrl(override: string | undefined): URL | null {
   try {
-    const url = new URL(override?.trim() || DEFAULT_MARKETING_SITE_URL);
-    if (url.protocol !== "https:" && url.protocol !== "http:") {
-      return new URL(DEFAULT_MARKETING_SITE_URL);
-    }
+    if (!override?.trim()) return null;
+    const url = new URL(override.trim());
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
 
     url.search = "";
     url.hash = "";
     url.pathname = `${url.pathname.replace(/\/+$/, "")}/`;
     return url;
   } catch {
-    return new URL(DEFAULT_MARKETING_SITE_URL);
+    return null;
   }
 }
 
 const MARKETING_SITE_URL = resolveMarketingSiteUrl(process.env.EXPO_PUBLIC_MARKETING_SITE_URL);
 
-function marketingSiteDocumentUrl(path: string): string {
-  return new URL(path, MARKETING_SITE_URL).toString();
+function marketingSiteDocumentUrl(path: string): string | null {
+  return MARKETING_SITE_URL === null ? null : new URL(path, MARKETING_SITE_URL).toString();
 }
 
 const PRIVACY_POLICY_URL = marketingSiteDocumentUrl("privacy-policy");
@@ -47,9 +46,9 @@ function webDocumentIdentity(value: string): string | null {
 }
 
 const ALLOWED_LEGAL_DOCUMENT_IDENTITIES = new Set(
-  ALLOWED_LEGAL_DOCUMENT_URLS.map(webDocumentIdentity).filter(
-    (value): value is string => value !== null,
-  ),
+  ALLOWED_LEGAL_DOCUMENT_URLS.flatMap((url) => (url === null ? [] : [url]))
+    .map(webDocumentIdentity)
+    .filter((value): value is string => value !== null),
 );
 
 export function isLegalDocumentUrl(value: string): boolean {

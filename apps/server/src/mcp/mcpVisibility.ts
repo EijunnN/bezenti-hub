@@ -1,4 +1,4 @@
-import type { OrchestrationV2ThreadShell } from "@t3tools/contracts";
+import type { OrchestrationV2ThreadShell, ProjectId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
@@ -35,4 +35,14 @@ export const visibleShells = Effect.fn("mcp.visibleShells")(function* <
     shells.map((shell) => shell.id),
   );
   return shells.filter((shell) => visible.has(shell.id));
+});
+
+/** Whether the caller may see the Project; a hidden one is answered like a missing one. */
+export const seesProjectId = Effect.fn("mcp.seesProjectId")(function* (
+  scope: Pick<McpInvocationScope, "userId">,
+  projectId: ProjectId,
+) {
+  const visibility = yield* visibilityOf(scope);
+  if (visibility.all) return true;
+  return (yield* (yield* service).visibleProjectIds(visibility, [projectId])).has(projectId);
 });
