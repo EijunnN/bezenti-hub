@@ -30,6 +30,7 @@ import { resolveServiceLauncherMode } from "../cloud/serviceLauncherClient.ts";
 import * as ServerConfig from "../config.ts";
 import { expandHomePath, resolveBaseDir } from "../os-jank.ts";
 import { isProcessAlive, readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
+import { readJoinedHubState } from "../environments/joinedHubState.ts";
 
 const modeFlag = Flag.Literals("mode", ServerConfig.RuntimeMode.literals).pipe(
   Flag.withDescription("Runtime mode. `desktop` keeps loopback defaults unless overridden."),
@@ -393,6 +394,16 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
   }
   yield* fs.makeDirectory(cwd, { recursive: true });
   yield* ServerConfig.ensureServerDirectories(derivedPaths);
+  const joinedHub = Option.getOrUndefined(
+    yield* readJoinedHubState(derivedPaths.joinedHubPath).pipe(
+      Effect.mapError(
+        (cause) =>
+          new CliError.UserError({
+            cause: `Could not read ${derivedPaths.joinedHubPath}: ${String(cause)}. Run \`t3 leave\` or \`t3 join\` again.`,
+          }),
+      ),
+    ),
+  );
   const persistedObservabilitySettings = yield* loadPersistedObservabilitySettings(
     derivedPaths.settingsPath,
   );
@@ -467,9 +478,13 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
           Effect.map((launcher) => launcher.managed),
           Effect.orElseSucceed(() => false),
         ));
-  const host = Option.getOrElse(explicitHost, () =>
-    privateNetworkOnly ? "0.0.0.0" : mode === "desktop" ? "127.0.0.1" : undefined,
-  );
+  // A joined machine listens on loopback only, for `/health`: it serves nobody else.
+  const host =
+    joinedHub !== undefined
+      ? "127.0.0.1"
+      : Option.getOrElse(explicitHost, () =>
+          privateNetworkOnly ? "0.0.0.0" : mode === "desktop" ? "127.0.0.1" : undefined,
+        );
   const logLevel = Option.getOrElse(cliLogLevel, () => env.logLevel);
 
   const otel = yield* OtelEnvironment.load;
@@ -534,14 +549,14 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     ...derivedPaths,
     serverTracePath,
     host,
-    ...(privateNetworkOnly ? { privateNetworkOnly } : {}),
+    ...(privateNetworkOnly && joinedHub === undefined ? { privateNetworkOnly } : {}),
     staticDir,
     devUrl,
     ...(devAuthToken === undefined ? {} : { devAuthToken }),
     ...(trustedProxies === undefined ? {} : { trustedProxies }),
     ...(publicUrl === undefined ? {} : { publicUrl }),
     devAllowedOrigins: env.devAllowedOrigins,
-    noBrowser,
+    noBrowser: noBrowser || joinedHub !== undefined,
     startupPresentation,
     desktopBootstrapToken,
     ...(desktopBootstrapSecret === undefined ? {} : { desktopBootstrapSecret }),
@@ -551,10 +566,11 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     desktopBrowserFd,
     desktopBrowserControlFd,
     resourceMonitorPath,
-    autoBootstrapProjectFromCwd,
+    autoBootstrapProjectFromCwd: autoBootstrapProjectFromCwd && joinedHub === undefined,
     logWebSocketEvents,
-    tailscaleServeEnabled,
+    tailscaleServeEnabled: tailscaleServeEnabled && joinedHub === undefined,
     tailscaleServePort,
+    ...(joinedHub === undefined ? {} : { joinedHub }),
   };
 
   return config;

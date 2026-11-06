@@ -37,6 +37,7 @@ import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
 import { AccountSettingsSection } from "./AccountSettingsSection";
 import { AuditLogSettingsSection } from "./AuditLogSettingsSection";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
+import { HubEnvironmentsSettings } from "./HubEnvironmentsSettings";
 import { LinkedEnvironmentsSettings } from "./LinkedEnvironmentsSettings";
 import { usePeerLinkHosts } from "~/state/peerLinks";
 import { LoadBalancingSettings } from "./LoadBalancingSettings";
@@ -1388,6 +1389,7 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
 
   return (
     <SettingsPageContainer>
+      <HubEnvironmentsSettings />
       {desktopBridge ? (
         <SettingsSection id="this-app" title="This app">
           <LocalEnvironmentSetting />

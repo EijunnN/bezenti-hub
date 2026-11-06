@@ -80,6 +80,17 @@ import {
 } from "./spaces.ts";
 import { AuditLogPage, AuditLogQuery } from "./audit.ts";
 import {
+  EnvironmentJoinApproveRequest,
+  EnvironmentJoinApproveResult,
+  EnvironmentJoinTokenRequest,
+  EnvironmentJoinTokenResult,
+  EnvironmentLeaveResult,
+  HubEnvironmentList,
+  HubEnvironmentSummary,
+  RemoveHubEnvironmentRequest,
+  RenameHubEnvironmentRequest,
+} from "./hubEnvironments.ts";
+import {
   AcceptInvitationRequest,
   AcceptInvitationResult,
   CreatedInvitation,
@@ -184,6 +195,7 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "invitations_failed",
   "installation_users_failed",
   "audit_log_failed",
+  "environments_failed",
   "internal_error",
 ]);
 export type EnvironmentInternalErrorReason = typeof EnvironmentInternalErrorReason.Type;
@@ -283,6 +295,7 @@ export class EnvironmentInternalError extends Schema.TaggedError<EnvironmentInte
 export const EnvironmentResourceNotFoundReason = Schema.Literals([
   "thread_not_found",
   "user_not_found",
+  "environment_not_found",
 ]);
 export type EnvironmentResourceNotFoundReason = typeof EnvironmentResourceNotFoundReason.Type;
 
@@ -1006,6 +1019,69 @@ class EnvironmentAuditHttpApi extends HttpApiGroup.make("audit").add(
   }).middleware(EnvironmentAuthenticatedAuth),
 ) {}
 
+const EnvironmentHubEnvironmentErrors = [
+  // The session has no User, or the policy refuses the change.
+  EnvironmentHttpForbiddenError,
+  EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+
+// The machines registered with this Hub. Each joins with `t3 join`: the Owner approves on the
+// «Register this machine» page with a strong factor, and the machine redeems the one-time code
+// for its Environment credential, which only `/api/environment/connect` and `leave` accept.
+class EnvironmentHubEnvironmentsHttpApi extends HttpApiGroup.make("environments")
+  .add(
+    HttpApiEndpoint.get("list", "/api/environments", {
+      headers: OptionalBearerHeaders,
+      success: HubEnvironmentList,
+      error: EnvironmentHubEnvironmentErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("rename", "/api/environments/rename", {
+      headers: OptionalBearerHeaders,
+      payload: RenameHubEnvironmentRequest,
+      success: HubEnvironmentSummary,
+      error: [...EnvironmentHubEnvironmentErrors, EnvironmentResourceNotFoundError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("remove", "/api/environments/remove", {
+      headers: OptionalBearerHeaders,
+      payload: RemoveHubEnvironmentRequest,
+      success: HubEnvironmentList,
+      error: [...EnvironmentHubEnvironmentErrors, EnvironmentResourceNotFoundError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  // Takes only the browser's own cookie, as app sign-in does.
+  .add(
+    HttpApiEndpoint.post("approveJoin", "/api/environments/join/approve", {
+      payload: EnvironmentJoinApproveRequest,
+      success: EnvironmentJoinApproveResult,
+      error: [
+        EnvironmentRequestInvalidError,
+        EnvironmentAuthInvalidError,
+        EnvironmentRateLimitedError,
+        ...EnvironmentHubEnvironmentErrors,
+      ],
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("redeemJoin", "/api/environments/join/token", {
+      payload: EnvironmentJoinTokenRequest,
+      success: EnvironmentJoinTokenResult,
+      error: EnvironmentTokenExchangeErrors,
+    }),
+  )
+  // `t3 leave`: the machine unregisters itself with its own credential.
+  .add(
+    HttpApiEndpoint.post("leave", "/api/environments/leave", {
+      headers: OptionalBearerHeaders,
+      success: EnvironmentLeaveResult,
+      error: EnvironmentTokenExchangeErrors,
+    }),
+  ) {}
+
 const EnvironmentInvitationManageErrors = [
   // The session has no User, or the policy refuses the change.
   EnvironmentHttpForbiddenError,
@@ -1151,4 +1227,5 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentInvitationsHttpApi)
   .add(EnvironmentInstallationUsersHttpApi)
   .add(EnvironmentAuditHttpApi)
+  .add(EnvironmentHubEnvironmentsHttpApi)
   .add(EnvironmentWebhooksHttpApi) {}

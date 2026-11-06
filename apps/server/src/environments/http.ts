@@ -1,0 +1,176 @@
+import {
+  AuthAccessWriteScope,
+  type AuthEnvironmentScope,
+  AuthOrchestrationReadScope,
+  EnvironmentHttpApi,
+  EnvironmentHttpForbiddenError,
+  EnvironmentRateLimitedError,
+} from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import { HttpServerRequest } from "effect/http";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+
+import { isLoopbackClientAddress } from "../auth/clientConnection.ts";
+import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import {
+  annotateEnvironmentRequest,
+  appendCredentialResponseHeaders,
+  failEnvironmentAuthInvalid,
+  failEnvironmentInternal,
+  failEnvironmentInvalidRequest,
+  failEnvironmentNotFound,
+  requireEnvironmentScope,
+} from "../auth/http.ts";
+import * as EnvironmentJoin from "./EnvironmentJoin.ts";
+import * as EnvironmentRegistry from "./EnvironmentRegistry.ts";
+
+const requireUser = Effect.fn(function* (scope: AuthEnvironmentScope) {
+  const principal = yield* requireEnvironmentScope(scope);
+  if (principal.userId === undefined) {
+    return yield* new EnvironmentHttpForbiddenError({ message: "Sign in with an account first." });
+  }
+  return principal.userId;
+});
+
+/**
+ * The Environment credential crosses only HTTPS, or plain HTTP from this same machine. Behind a
+ * trusted proxy the scheme and client are the ones it forwarded.
+ */
+export const isSecureEnvironmentTransport = (request: HttpServerRequest.HttpServerRequest) =>
+  request.protocol === "https" ||
+  isLoopbackClientAddress(Option.getOrUndefined(request.remoteAddress));
+
+export const bearerOf = (authorization: string | undefined) =>
+  authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length).trim() : undefined;
+
+const failForbidden = (error: { readonly message: string }) =>
+  Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message }));
+const failStorage = (cause: unknown) => failEnvironmentInternal("environments_failed", cause);
+
+const handlers = HttpApiBuilder.group(
+  EnvironmentHttpApi,
+  "environments",
+  Effect.fnUntraced(function* (handlers) {
+    const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+    const join = yield* EnvironmentJoin.EnvironmentJoin;
+    return handlers
+      .handle(
+        "list",
+        Effect.fn("environment.environments.list")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const viewer = yield* requireUser(AuthOrchestrationReadScope);
+          const environments = yield* registry.list(viewer).pipe(
+            Effect.catchTags({
+              EnvironmentAccessDeniedError: failForbidden,
+              EnvironmentStorageError: failStorage,
+            }),
+          );
+          return { environments };
+        }),
+      )
+      .handle(
+        "rename",
+        Effect.fn("environment.environments.rename")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          return yield* registry
+            .rename({
+              actorUserId: yield* requireUser(AuthAccessWriteScope),
+              environmentId: args.payload.environmentId,
+              name: args.payload.name,
+            })
+            .pipe(
+              Effect.catchTags({
+                EnvironmentAccessDeniedError: failForbidden,
+                EnvironmentNotFoundError: () => failEnvironmentNotFound("environment_not_found"),
+                EnvironmentStorageError: failStorage,
+              }),
+            );
+        }),
+      )
+      .handle(
+        "remove",
+        Effect.fn("environment.environments.remove")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const actorUserId = yield* requireUser(AuthAccessWriteScope);
+          const environments = yield* registry
+            .remove({ actorUserId, environmentId: args.payload.environmentId })
+            .pipe(
+              Effect.andThen(registry.list(actorUserId)),
+              Effect.catchTags({
+                EnvironmentAccessDeniedError: failForbidden,
+                EnvironmentNotFoundError: () => failEnvironmentNotFound("environment_not_found"),
+                EnvironmentStorageError: failStorage,
+              }),
+            );
+          return { environments };
+        }),
+      )
+      .handle(
+        "approveJoin",
+        Effect.fn("environment.environments.approveJoin")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            yield* appendCredentialResponseHeaders;
+            const redirectTo = yield* join.approve(request, args.payload);
+            return { redirectTo };
+          },
+          Effect.catchTags({
+            EnvironmentJoinRequestError: (error) => failEnvironmentInvalidRequest(error.reason),
+            EnvironmentJoinNotSignedInError: () => failEnvironmentAuthInvalid("missing_credential"),
+            EnvironmentAccessDeniedError: failForbidden,
+            AccountChangeRefusedError: failForbidden,
+            SignInThrottledError: (error) =>
+              Effect.fail(
+                new EnvironmentRateLimitedError({
+                  message: error.message,
+                  retryAfterSeconds: error.retryAfterSeconds,
+                }),
+              ),
+            UserDirectoryStorageError: failStorage,
+            EnvironmentStorageError: failStorage,
+          }),
+          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, failStorage),
+        ),
+      )
+      .handle(
+        "redeemJoin",
+        Effect.fn("environment.environments.redeemJoin")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          yield* appendCredentialResponseHeaders;
+          if (!isSecureEnvironmentTransport(request)) {
+            return yield* failEnvironmentInvalidRequest("insecure_transport");
+          }
+          return yield* join.redeem(args.payload).pipe(
+            Effect.catchTags({
+              EnvironmentJoinInvalidGrantError: () =>
+                failEnvironmentAuthInvalid("invalid_credential"),
+              EnvironmentAccessDeniedError: () => failEnvironmentAuthInvalid("invalid_credential"),
+              EnvironmentStorageError: (cause) =>
+                failEnvironmentInternal("access_token_issuance_failed", cause),
+            }),
+          );
+        }),
+      )
+      .handle(
+        "leave",
+        Effect.fn("environment.environments.leave")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          if (!isSecureEnvironmentTransport(request)) {
+            return yield* failEnvironmentInvalidRequest("insecure_transport");
+          }
+          const removed = yield* registry
+            .leave(bearerOf(args.headers.authorization))
+            .pipe(Effect.catchTags({ EnvironmentStorageError: failStorage }));
+          if (!removed) return yield* failEnvironmentAuthInvalid("invalid_credential");
+          return { removed };
+        }),
+      );
+  }),
+);
+
+export const layer = handlers.pipe(Layer.provide(EnvironmentJoin.layer));

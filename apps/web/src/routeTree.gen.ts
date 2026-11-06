@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as WelcomeRouteImport } from './routes/welcome'
 import { Route as SignInRouteImport } from './routes/sign-in'
 import { Route as ResetRouteImport } from './routes/reset'
+import { Route as RegisterEnvironmentRouteImport } from './routes/register-environment'
 import { Route as PairRouteImport } from './routes/pair'
 import { Route as InviteRouteImport } from './routes/invite'
 import { Route as GuestRouteImport } from './routes/guest'
@@ -67,6 +68,11 @@ const SignInRoute = SignInRouteImport.update({
 const ResetRoute = ResetRouteImport.update({
   id: '/reset',
   path: '/reset',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RegisterEnvironmentRoute = RegisterEnvironmentRouteImport.update({
+  id: '/register-environment',
+  path: '/register-environment',
   getParentRoute: () => rootRouteImport,
 } as any)
 const PairRoute = PairRouteImport.update({
@@ -287,6 +293,7 @@ export interface FileRoutesByFullPath {
   '/guest': typeof GuestRoute
   '/invite': typeof InviteRoute
   '/pair': typeof PairRoute
+  '/register-environment': typeof RegisterEnvironmentRoute
   '/reset': typeof ResetRoute
   '/sign-in': typeof SignInRoute
   '/welcome': typeof WelcomeRoute
@@ -331,6 +338,7 @@ export interface FileRoutesByTo {
   '/guest': typeof GuestRoute
   '/invite': typeof InviteRoute
   '/pair': typeof PairRoute
+  '/register-environment': typeof RegisterEnvironmentRoute
   '/reset': typeof ResetRoute
   '/sign-in': typeof SignInRoute
   '/welcome': typeof WelcomeRoute
@@ -378,6 +386,7 @@ export interface FileRoutesById {
   '/guest': typeof GuestRoute
   '/invite': typeof InviteRoute
   '/pair': typeof PairRoute
+  '/register-environment': typeof RegisterEnvironmentRoute
   '/reset': typeof ResetRoute
   '/sign-in': typeof SignInRoute
   '/welcome': typeof WelcomeRoute
@@ -426,6 +435,7 @@ export interface FileRouteTypes {
     | '/guest'
     | '/invite'
     | '/pair'
+    | '/register-environment'
     | '/reset'
     | '/sign-in'
     | '/welcome'
@@ -470,6 +480,7 @@ export interface FileRouteTypes {
     | '/guest'
     | '/invite'
     | '/pair'
+    | '/register-environment'
     | '/reset'
     | '/sign-in'
     | '/welcome'
@@ -516,6 +527,7 @@ export interface FileRouteTypes {
     | '/guest'
     | '/invite'
     | '/pair'
+    | '/register-environment'
     | '/reset'
     | '/sign-in'
     | '/welcome'
@@ -563,6 +575,7 @@ export interface RootRouteChildren {
   GuestRoute: typeof GuestRoute
   InviteRoute: typeof InviteRoute
   PairRoute: typeof PairRoute
+  RegisterEnvironmentRoute: typeof RegisterEnvironmentRoute
   ResetRoute: typeof ResetRoute
   SignInRoute: typeof SignInRoute
   WelcomeRoute: typeof WelcomeRoute
@@ -591,6 +604,13 @@ declare module '@tanstack/react-router' {
       path: '/reset'
       fullPath: '/reset'
       preLoaderRoute: typeof ResetRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/register-environment': {
+      id: '/register-environment'
+      path: '/register-environment'
+      fullPath: '/register-environment'
+      preLoaderRoute: typeof RegisterEnvironmentRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/pair': {
@@ -974,6 +994,7 @@ const rootRouteChildren: RootRouteChildren = {
   GuestRoute: GuestRoute,
   InviteRoute: InviteRoute,
   PairRoute: PairRoute,
+  RegisterEnvironmentRoute: RegisterEnvironmentRoute,
   ResetRoute: ResetRoute,
   SignInRoute: SignInRoute,
   WelcomeRoute: WelcomeRoute,

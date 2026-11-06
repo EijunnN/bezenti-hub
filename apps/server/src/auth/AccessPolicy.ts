@@ -67,13 +67,22 @@ export interface MoveResource {
   readonly to: SpaceResource;
 }
 
+/** A machine registered with the Hub: the Hub machine, or one joined with `t3 join`. */
+export interface EnvironmentResource {
+  readonly kind: "environment";
+  readonly environmentKind: "hub" | "external";
+  /** Null for the Hub machine, which belongs to the Installation. */
+  readonly ownerUserId: UserId | null;
+}
+
 export type Resource =
   | SpaceResource
   | InstallationResource
   | OwnedResource
   | MembershipResource
   | UserResource
-  | MoveResource;
+  | MoveResource
+  | EnvironmentResource;
 
 export type Action =
   | "space.view"
@@ -128,7 +137,14 @@ export type Action =
   /** Bring an archived Organization back. */
   | "organization.restore"
   /** Permanently delete an archived Organization with everything in it. */
-  | "organization.delete";
+  | "organization.delete"
+  /** Approve a machine joining the Hub (`t3 join`). */
+  | "environment.register"
+  /** See an Environment in Settings and where Threads may run. */
+  | "environment.view"
+  | "environment.rename"
+  /** Remove a machine: its credential stops working at once. */
+  | "environment.remove";
 
 /** Actions that read or manage rather than add something to the Space. */
 const NON_CREATING: ReadonlySet<Action> = new Set([
@@ -138,12 +154,21 @@ const NON_CREATING: ReadonlySet<Action> = new Set([
   "invitation.manage",
   // Checked beside `invitation.create`, which refuses archived Organizations.
   "admin.manage",
+  "environment.register",
 ]);
 
 const OWNER_ONLY: ReadonlySet<Action> = new Set([
   "organization.create",
   "admin.manage",
   "installationPermission.manage",
+  "environment.register",
+]);
+
+/** Actions on one registered Environment, decided against an `EnvironmentResource`. */
+const ENVIRONMENT_ACTIONS: ReadonlySet<Action> = new Set([
+  "environment.view",
+  "environment.rename",
+  "environment.remove",
 ]);
 
 const USER_ACTIONS: ReadonlySet<Action> = new Set(["user.disable", "user.remove"]);
@@ -194,6 +219,8 @@ export type DenyReason =
   | "not-yours"
   /** Only archived items are deleted permanently. */
   | "not-archived"
+  /** The Hub machine runs the Hub itself, so it is never removed. */
+  | "hub-machine"
   | "wrong-resource";
 
 export type Decision =
@@ -211,6 +238,29 @@ const isMembership = (resource: Resource): resource is MembershipResource =>
   resource.kind === "membership";
 const isUser = (resource: Resource): resource is UserResource => resource.kind === "user";
 const isMove = (resource: Resource): resource is MoveResource => resource.kind === "move";
+const isEnvironment = (resource: Resource): resource is EnvironmentResource =>
+  resource.kind === "environment";
+
+/**
+ * Everyone uses the Hub machine. A personal machine is its owner's alone: nobody else sees it,
+ * the Owner included when it is not theirs. Only the Owner renames or removes, and never the Hub
+ * machine away.
+ */
+const decideEnvironment = (
+  principal: Principal,
+  action: Action,
+  environment: EnvironmentResource,
+): Decision => {
+  const own = environment.ownerUserId === principal.userId;
+  if (action === "environment.view") {
+    return environment.environmentKind === "hub" || own ? allow : deny("not-yours");
+  }
+  if (!principal.isOwner) return deny("owner-only");
+  if (environment.environmentKind === "hub") {
+    return action === "environment.remove" ? deny("hub-machine") : allow;
+  }
+  return own ? allow : deny("not-yours");
+};
 
 const ROLES_THAT_CREATE_PROJECTS: ReadonlySet<SpaceRole> = new Set(["admin", "member"]);
 const ADMIN_ONLY: ReadonlySet<SpaceRole> = new Set(["admin"]);
@@ -364,6 +414,11 @@ export const decide = (principal: Principal, action: Action, resource: Resource)
     if (!USER_ACTIONS.has(action) || !isUser(resource)) return deny("wrong-resource");
     if (!principal.isOwner) return deny("owner-only");
     return resource.isOwner ? deny("owner-protected") : allow;
+  }
+  if (ENVIRONMENT_ACTIONS.has(action) || isEnvironment(resource)) {
+    return ENVIRONMENT_ACTIONS.has(action) && isEnvironment(resource)
+      ? decideEnvironment(principal, action, resource)
+      : deny("wrong-resource");
   }
   if (action === "project.move" || isMove(resource)) {
     return action === "project.move" && isMove(resource)

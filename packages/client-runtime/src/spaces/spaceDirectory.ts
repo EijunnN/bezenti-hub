@@ -115,6 +115,8 @@ export const AUDIT_ACTION_LABELS: Record<AuditAction, string> = {
   "secret.reveal": "Revealed a secret",
   "secret.edit": "Edited a secret",
   "environment.register": "Registered an Environment",
+  "environment.rename": "Renamed an Environment",
+  "environment.remove": "Removed an Environment",
 };
 
 export const INSTALLATION_PERMISSION_LABELS: Record<InstallationPermission, string> = {

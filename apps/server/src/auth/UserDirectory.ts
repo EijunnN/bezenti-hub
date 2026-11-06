@@ -369,6 +369,15 @@ export class UserDirectory extends Context.Service<
       actor: AccountActor,
       reauth: AuthReauth,
     ) => Effect.Effect<AuthAccount, AccountChangeError>;
+    /**
+     * Proof in this request of a strong sign-in, for actions a stolen session must not take: a
+     * fresh passkey assertion, or the password together with a TOTP code. A password alone never
+     * passes, whatever the account's rules allow at sign-in.
+     */
+    readonly confirmStrongFactor: (
+      actor: AccountActor,
+      reauth: AuthReauth | undefined,
+    ) => Effect.Effect<void, AccountChangeError>;
     readonly checkPassword: (
       input: AuthPasswordSignInRequest,
       clientIp: string | undefined,
@@ -970,6 +979,26 @@ const make = Effect.gen(function* () {
     throttle.reset(keys);
   });
 
+  const confirmStrongFactor: UserDirectory["Service"]["confirmStrongFactor"] = Effect.fn(
+    "UserDirectory.confirmStrongFactor",
+  )(function* (actor, reauth) {
+    const user = yield* requireAccount(actor.userId);
+    const credentials = yield* users.getCredentials(actor.userId).pipe(storage);
+    const strong =
+      reauth !== undefined &&
+      (reauth.method === "passkey"
+        ? credentials.hasPasskey
+        : credentials.passwordHash !== null &&
+          credentials.totpSecretCiphertext !== null &&
+          reauth.totpCode !== undefined);
+    if (!strong) {
+      return yield* new AccountChangeRefusedError({
+        reason: "Confirm with your passkey, or with your password and a code from your app.",
+      });
+    }
+    yield* requireStepUp(actor, user, reauth);
+  });
+
   // A credential change ends every other session and unspent link, which may belong to whoever
   // took the old one.
   const signOutOtherSessions = (actor: AccountActor) =>
@@ -1565,6 +1594,7 @@ const make = Effect.gen(function* () {
     startTotpEnrollment,
     confirmTotpEnrollment,
     removeTotp,
+    confirmStrongFactor,
     checkPassword,
     checkTotp,
     issueOwnerResetLink,

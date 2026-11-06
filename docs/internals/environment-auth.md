@@ -144,6 +144,52 @@ app) and where the code goes, and says to continue only with a sign-in the
 User just started. Claimed HTTPS redirects (universal and app links) would
 close that gap and are the next step if it matters.
 
+### Joined environments
+
+`t3 join <hub>` makes a machine one of the Hub's External environments
+([EnvironmentJoin](../../apps/server/src/environments/EnvironmentJoin.ts)). It
+reuses app sign-in's shape: PKCE, a loopback-only `127.0.0.1` redirect (never a
+URL scheme, since only `t3 join` on that machine may get the code), a one-minute
+code kept as its SHA-256 and spent on first presentation. Approval differs in
+two ways. The policy asks `environment.register` (Owner only) before anything
+else, so a Member's proof is never checked; then
+`UserDirectory.confirmStrongFactor` needs a fresh passkey assertion or a
+password _with_ a TOTP code in the same request. A stolen browser session alone
+cannot add a machine, and a password alone never passes even where sign-in
+would allow it. The row and its `environment.register` entry are written when
+the code is redeemed, not when it is approved, so an approval nobody redeems
+leaves nothing.
+
+The Environment credential is not a session: `SessionStore` never sees it, so
+no RPC, WebSocket or HTTP route other than `/api/environment/connect` and
+`/api/environments/leave` accepts it, as with guest tokens. It is
+`t3env.<issuing Hub's id>.<secret>`; the Hub stores only its SHA-256 and who
+issued it when, and the machine keeps it in its secret store. The Hub's id in it
+is the server's persisted EnvironmentId, not the Hub machine's row id (the
+constant `environment:hub-machine`, the same on every Hub), so a Hub can tell a
+credential another Hub issued from an unknown one. The machine checks the other
+way too: a Hub whose `welcome` names another id gets the socket closed. Both the
+redeem and the socket refuse plain HTTP from off the Hub's machine; behind a
+trusted proxy the forwarded scheme and client count
+(`isSecureEnvironmentTransport`).
+
+The socket ([connectRoute](../../apps/server/src/environments/connectRoute.ts))
+upgrades before it checks the credential, so every refusal reaches the machine
+as a close code it can explain (`ENVIRONMENT_CLOSE_REASONS` in the
+[protocol contract](../../packages/contracts/src/environmentConnection.ts));
+the `final` ones stop the machine's reconnect loop, the rest back off with
+jitter. The server's reader must be acquired before a close is written, or the
+handshake never completes and the client times out waiting for `open`.
+Removing an Environment revokes its row (kept, so the next use answers
+`credential-revoked`, not unknown) and only after the commit closes its live
+socket, so the machine cannot reconnect in between. Status is computed when
+read from `last_seen_at` and whether a socket is attached, not kept by timers.
+
+A joined server ([JoinedHub](../../apps/server/src/environments/JoinedHub.ts))
+serves only `/health` on loopback: no web app, sign-in or user WebSocket. Its
+mode comes from `joined-hub.json` in the state dir, which `t3 join` writes and
+`t3 leave` removes.
+
 ### Spaces
 
 Every Project and Thread belongs to a Space: an Organization or a User's Personal
@@ -443,8 +489,8 @@ before an Owner exists and fails the action after. Entries snapshot the Space an
 Organizations and Projects are deleted while Users are only tombstoned. Detail
 keys are an allow-list per action (`AUDIT_DETAIL_KEYS` in contracts); any
 other key is dropped on write, whatever the caller passes.
-`secret.*` and `environment.register` are in the closed `AuditAction` list for
-the specs that own them to record. The read (`/api/installation/audit`) is
+`secret.*` are in the closed `AuditAction` list for the spec that owns secrets
+to record. The read (`/api/installation/audit`) is
 Owner-only and needs `access:read`; anyone else gets the same 403 whatever
 they filter by.
 

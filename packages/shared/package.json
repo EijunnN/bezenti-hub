@@ -179,6 +179,10 @@
       "types": "./src/appSignIn.ts",
       "import": "./src/appSignIn.ts"
     },
+    "./environmentJoin": {
+      "types": "./src/environmentJoin.ts",
+      "import": "./src/environmentJoin.ts"
+    },
     "./dpop": {
       "types": "./src/dpop.ts",
       "import": "./src/dpop.ts"
