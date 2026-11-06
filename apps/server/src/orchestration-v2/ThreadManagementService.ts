@@ -833,7 +833,17 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
         providerInstanceId: command.modelSelection.instanceId,
       })
       .pipe(
-        Effect.map((activeEnvironmentId) => ({ ...command, activeEnvironmentId })),
+        Effect.flatMap((activeEnvironmentId) =>
+          // Worktrees are still made on the Hub machine only.
+          activeEnvironmentId !== HUB_MACHINE_ENVIRONMENT_ID && command.worktreePath !== null
+            ? Effect.fail(
+                new EnvironmentRegistry.ThreadEnvironmentUnavailableError({
+                  environmentId: activeEnvironmentId,
+                  reason: "worktree-unsupported",
+                }),
+              )
+            : Effect.succeed({ ...command, activeEnvironmentId }),
+        ),
         Effect.mapError(reject),
       );
   };

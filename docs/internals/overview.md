@@ -128,15 +128,26 @@ on its own in-process executor. Constraints that span both halves:
   acknowledges in one frame per burst. `command_output.delta` has no `seq`: it is live only.
 - The Hub drops (and logs) an event for a session it retired, or from a machine that is no longer
   the Thread's Active environment, before it reaches the session manager.
-- A call made by an effect carries `effectId:attempt:<operation>:<n>`. The machine remembers recent
-  answers by key, so the Hub may resend after a dropped socket without running the call twice.
+- A call made by an effect carries `effectId:<operation>:<n>`, the same on a resend and on the
+  effect's next attempt. The Hub resends it on the next socket (waiting a bounded time for one);
+  the machine runs a key once, joins a resend to the running call and answers later ones from
+  memory. A failed answer is not kept, so a retry runs again.
+- The hello names the sessions the machine still runs: the Hub ends the ones it lost and tells it
+  to drop the ones the Hub no longer has (`provider.retired`, as after a Hub restart). A session's
+  end is spooled in its event order, so it is reported even if it happened while offline.
+- The Hub acknowledges an event only once it has delivered or refused it. If the Thread cannot be
+  read, it delivers nothing more for that session until the machine resends after a reconnect.
+- Machine work for a Thread whose Environment is away waits without holding back the Hub's own
+  effects on that Thread; work for a removed Environment fails on its first attempt, and its
+  cleanup is skipped (`threadEnvironmentRemoved`, where ticket 10's «needs an environment» hooks in).
 - The agent reaches the Hub's MCP: the Hub issues the per-Thread credential as for a local session,
   and the machine points it at `<the Hub URL it joined>/mcp`. Its own MCP server is not used.
 - Attachments stay on the Hub. A turn sends each one's id and SHA-256; the machine fetches the ones
-  it lacks with `attachment.read`, which answers only attachments a turn sent to that machine.
+  it lacks with `attachment.read`, which answers only attachments a live session's turn sent to
+  that machine, while the Thread still runs there.
 - The machine uses the Project's checkout where it is, else clones the Hub checkout's `origin`
-  there. New worktrees are still made on the Hub machine only, so a launch that asks for one on
-  another Environment is refused.
+  there. New worktrees are still made on the Hub machine only, so placing a Thread that asks for
+  one (a launch strategy, or a `thread.create` with a worktree) on another Environment is refused.
 
 ### Logical workspace paths
 

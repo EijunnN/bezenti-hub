@@ -13,6 +13,7 @@ import {
   ENVIRONMENT_EXECUTOR_FRAME_METHODS,
   EnvironmentAttachmentReadResult,
   EnvironmentExecutorEventAck,
+  EnvironmentExecutorRetiredSessions,
   type EnvironmentId,
   type EnvironmentLiveProviderSession,
   type EnvironmentOrchestrationCapabilities,
@@ -75,8 +76,12 @@ interface LocalSession {
     readonly hasPendingBackgroundWork: boolean;
     readonly backgroundTasksEndWithProcess: boolean;
   };
+  /** The Hub-issued MCP credential this session's agent uses, if any. */
+  readonly credentialId: string | undefined;
   seq: number;
-  readonly spool: Array<{ readonly seq: number; readonly frame: unknown }>;
+  /** Ended on this machine; kept until the Hub acknowledges its last frame. */
+  ended: boolean;
+  readonly spool: Array<{ readonly seq: number; readonly method: string; readonly frame: unknown }>;
 }
 
 export class EnvironmentAgent extends Context.Service<
@@ -101,6 +106,7 @@ export class EnvironmentAgent extends Context.Service<
 
 const codec = (schema: Schema.Top) => Schema.toCodecJson(schema as Schema.Codec<unknown, unknown>);
 const decodeAck = Schema.decodeUnknownOption(EnvironmentExecutorEventAck);
+const decodeRetired = Schema.decodeUnknownOption(EnvironmentExecutorRetiredSessions);
 const decodeAttachment = Schema.decodeUnknownOption(EnvironmentAttachmentReadResult);
 const encodeEvent = Schema.encodeUnknownEffect(ProviderEventJson);
 
@@ -121,7 +127,10 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
   const mcpEndpoint = new URL("/mcp", input.hubUrl).toString();
 
   const sessions = new Map<string, LocalSession>();
-  const answered = new Map<string, Deferred.Deferred<ExecutorCallResult>>();
+  const answered = new Map<
+    string,
+    { readonly answer: Deferred.Deferred<ExecutorCallResult>; settled: boolean }
+  >();
   let channel: ExecutorChannel | undefined;
 
   const sha256Hex = (bytes: Uint8Array) =>
@@ -130,67 +139,100 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
       Effect.map((digest) => Buffer.from(digest).toString("hex")),
     );
 
-  const send = (frame: {
-    readonly seq?: number;
-    readonly providerSessionId: string;
-    readonly event: unknown;
-  }) =>
-    channel === undefined
-      ? Effect.void
-      : channel.event(ENVIRONMENT_EXECUTOR_FRAME_METHODS.providerEvent, frame);
+  const send = (method: string, frame: unknown) =>
+    Effect.suspend(() => (channel === undefined ? Effect.void : channel.event(method, frame)));
 
-  /** Streams a session's events: spooled with a `seq` until acknowledged, live output as is. */
+  /** Next in the session's order: kept until acknowledged, and sent now if connected. */
+  const spoolAndSend = (
+    providerSessionId: string,
+    session: LocalSession,
+    method: string,
+    frame: (seq: number) => unknown,
+  ) =>
+    Effect.suspend(() => {
+      session.seq += 1;
+      const framed = frame(session.seq);
+      session.spool.push({ seq: session.seq, method, frame: framed });
+      const sent = send(method, framed);
+      if (session.spool.length <= SPOOL_LIMIT) return sent;
+      session.spool.shift();
+      return Effect.logWarning("Dropped an unacknowledged event past the spool limit", {
+        providerSessionId,
+      }).pipe(Effect.andThen(sent));
+    });
+
+  /** Gone from this machine: its process, its spool and, if still its own, its MCP credential. */
+  const forgetSession = Effect.fn("EnvironmentAgent.forgetSession")(function* (
+    providerSessionId: string,
+    session: LocalSession,
+  ) {
+    if (sessions.get(providerSessionId) === session) sessions.delete(providerSessionId);
+    yield* Scope.close(session.scope, Exit.void);
+    const current = yield* mcpSessions.read(session.threadId);
+    // A newer session of the Thread may hold a newer credential; only this one's goes.
+    if (session.credentialId !== undefined && current?.providerSessionId === session.credentialId) {
+      yield* mcpSessions.clear(session.threadId);
+    }
+  });
+
+  /**
+   * Streams a session's events: spooled with a `seq` until acknowledged, live output as is. Its
+   * end goes in the same order, so a machine offline when it happens still reports it.
+   */
   const pump = (providerSessionId: string, session: LocalSession) =>
     session.runtime.events.pipe(
       Stream.runForEach((event) =>
         encodeEvent(event).pipe(
           Effect.orDie,
-          Effect.flatMap((encoded) => {
-            if (event.type === "command_output.delta") {
-              return send({ providerSessionId, event: encoded });
-            }
-            session.seq += 1;
-            const frame = { providerSessionId, seq: session.seq, event: encoded };
-            session.spool.push({ seq: session.seq, frame });
-            if (session.spool.length > SPOOL_LIMIT) {
-              session.spool.shift();
-              return Effect.logWarning("Dropped an unacknowledged event past the spool limit", {
-                providerSessionId,
-              }).pipe(Effect.andThen(send(frame)));
-            }
-            return send(frame);
-          }),
+          Effect.flatMap((encoded) =>
+            event.type === "command_output.delta"
+              ? send(ENVIRONMENT_EXECUTOR_FRAME_METHODS.providerEvent, {
+                  providerSessionId,
+                  event: encoded,
+                })
+              : spoolAndSend(
+                  providerSessionId,
+                  session,
+                  ENVIRONMENT_EXECUTOR_FRAME_METHODS.providerEvent,
+                  (seq) => ({ providerSessionId, seq, event: encoded }),
+                ),
+          ),
         ),
       ),
       Effect.exit,
-      Effect.flatMap((exit) => {
-        if (sessions.get(providerSessionId) !== session) return Effect.void;
-        sessions.delete(providerSessionId);
-        const error =
-          Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)
-            ? Option.getOrUndefined(Cause.findErrorOption(exit.cause))
-            : undefined;
-        return (
-          channel === undefined
-            ? Effect.void
-            : Effect.gen(function* () {
-                const encoded =
-                  error === undefined
-                    ? undefined
-                    : yield* Schema.encodeUnknownEffect(
-                        codec(ProviderAdapter.ProviderAdapterV2Error),
-                      )(error).pipe(Effect.option, Effect.map(Option.getOrUndefined));
-                yield* channel!.event(ENVIRONMENT_EXECUTOR_FRAME_METHODS.sessionEnded, {
-                  providerSessionId,
-                  ...(encoded === undefined ? {} : { error: encoded }),
-                });
-              })
-        ).pipe(Effect.andThen(Scope.close(session.scope, Exit.void)));
-      }),
+      Effect.flatMap((exit) =>
+        Effect.gen(function* () {
+          if (sessions.get(providerSessionId) !== session) return;
+          const error =
+            Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause)
+              ? Option.getOrUndefined(Cause.findErrorOption(exit.cause))
+              : undefined;
+          const encoded =
+            error === undefined
+              ? undefined
+              : yield* Schema.encodeUnknownEffect(codec(ProviderAdapter.ProviderAdapterV2Error))(
+                  error,
+                ).pipe(Effect.option, Effect.map(Option.getOrUndefined));
+          session.ended = true;
+          yield* spoolAndSend(
+            providerSessionId,
+            session,
+            ENVIRONMENT_EXECUTOR_FRAME_METHODS.sessionEnded,
+            (seq) => ({
+              providerSessionId,
+              seq,
+              ...(encoded === undefined ? {} : { error: encoded }),
+            }),
+          );
+          yield* Scope.close(session.scope, Exit.void);
+        }),
+      ),
     );
 
   /** The Project's checkout: used where it is, else cloned from the Project's own remote. */
-  const ensureCheckout = Effect.fnUntraced(function* (checkout: WireCheckout) {
+  const ensureCheckout = Effect.fn("EnvironmentAgent.ensureCheckout")(function* (
+    checkout: WireCheckout,
+  ) {
     if (yield* fileSystem.exists(checkout.path).pipe(Effect.orElseSucceed(() => false))) return;
     if (checkout.cloneUrl === null || Option.isNone(vcs)) {
       return yield* Effect.fail(
@@ -216,7 +258,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
   });
 
   /** Fetches from the Hub, by hash, the attachments a turn needs and this machine lacks. */
-  const ensureAttachments = Effect.fnUntraced(function* (
+  const ensureAttachments = Effect.fn("EnvironmentAgent.ensureAttachments")(function* (
     driver: ProviderDriverKind,
     threadId: ThreadId,
     attachments: ReadonlyArray<ChatAttachment>,
@@ -264,7 +306,9 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
         : Effect.succeed(session);
     });
 
-  const openSession = Effect.fnUntraced(function* (request: RemoteInput<"provider.openSession">) {
+  const openSession = Effect.fn("EnvironmentAgent.openSession")(function* (
+    request: RemoteInput<"provider.openSession">,
+  ) {
     const known = sessions.get(request.providerSessionId);
     if (known !== undefined) {
       return { providerSession: known.runtime.providerSession, features: known.features };
@@ -329,7 +373,9 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
         hasPendingBackgroundWork: runtime.hasPendingBackgroundWork !== undefined,
         backgroundTasksEndWithProcess: runtime.backgroundTasksEndWithProcess === true,
       },
+      credentialId: request.mcp?.credentialId,
       seq: 0,
+      ended: false,
       spool: [],
     };
     sessions.set(request.providerSessionId, session);
@@ -440,11 +486,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
         const { providerSessionId } = request as RemoteInput<"provider.detach">;
         return Effect.suspend(() => {
           const session = sessions.get(providerSessionId);
-          if (session === undefined) return Effect.void;
-          sessions.delete(providerSessionId);
-          return Scope.close(session.scope, Exit.void).pipe(
-            Effect.andThen(mcpSessions.clear(session.threadId)),
-          );
+          return session === undefined ? Effect.void : forgetSession(providerSessionId, session);
         });
       }
       case "checkpoint.isGitRepository":
@@ -469,7 +511,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
   };
 
   /** Decodes, runs and encodes one request; errors outside the operation's own become protocol errors. */
-  const answer = Effect.fnUntraced(function* (
+  const answer = Effect.fn("EnvironmentAgent.answer")(function* (
     method: string,
     payload: unknown,
   ): Effect.fn.Return<ExecutorCallResult> {
@@ -514,7 +556,10 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
     };
   });
 
-  /** An idempotency key answers once; a resend waits for, and returns, the same answer. */
+  /**
+   * An idempotency key runs once: a resend while it runs joins it, and one after it succeeded gets
+   * the same answer. A failure is not kept, so the effect's next attempt runs the call again.
+   */
   const onRequest = (request: {
     readonly method: string;
     readonly payload: unknown;
@@ -524,36 +569,62 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
     if (key === undefined) return answer(request.method, request.payload);
     return Effect.suspend(() => {
       const known = answered.get(key);
-      if (known !== undefined) return Deferred.await(known);
-      const pending = Deferred.makeUnsafe<ExecutorCallResult>();
-      answered.set(key, pending);
-      while (answered.size > IDEMPOTENCY_MEMORY) {
-        const oldest = answered.keys().next().value;
-        if (oldest === undefined) break;
-        answered.delete(oldest);
+      if (known !== undefined) {
+        // Most recently used last, so eviction takes the oldest settled answers.
+        answered.delete(key);
+        answered.set(key, known);
+        return Deferred.await(known.answer);
+      }
+      const entry = { answer: Deferred.makeUnsafe<ExecutorCallResult>(), settled: false };
+      answered.set(key, entry);
+      for (const [candidate, kept] of answered) {
+        if (answered.size <= IDEMPOTENCY_MEMORY) break;
+        // A call still running is never forgotten: its resend must join it.
+        if (kept.settled) answered.delete(candidate);
       }
       return answer(request.method, request.payload).pipe(
-        Effect.tap((result) => Deferred.succeed(pending, result)),
+        Effect.tap((result) =>
+          Effect.sync(() => {
+            entry.settled = true;
+            if (result._tag === "failure" && answered.get(key) === entry) answered.delete(key);
+          }).pipe(Effect.andThen(Deferred.succeed(entry.answer, result))),
+        ),
         Effect.onInterrupt(() =>
           Effect.sync(() => {
-            if (answered.get(key) === pending) answered.delete(key);
+            if (answered.get(key) === entry) answered.delete(key);
           }),
         ),
       );
     });
   };
 
-  const onEvent = (method: string, payload: unknown) =>
-    Effect.sync(() => {
-      if (method !== ENVIRONMENT_EXECUTOR_FRAME_METHODS.ack) return;
+  const onEvent = (method: string, payload: unknown): Effect.Effect<void> => {
+    if (method === ENVIRONMENT_EXECUTOR_FRAME_METHODS.retired) {
+      // Sessions the Hub no longer has: nothing would read them, so their processes go.
+      const retired = decodeRetired(payload);
+      if (Option.isNone(retired)) return Effect.void;
+      return Effect.forEach(
+        retired.value.providerSessionIds,
+        (providerSessionId) => {
+          const session = sessions.get(providerSessionId);
+          return session === undefined ? Effect.void : forgetSession(providerSessionId, session);
+        },
+        { discard: true },
+      );
+    }
+    if (method !== ENVIRONMENT_EXECUTOR_FRAME_METHODS.ack) return Effect.void;
+    return Effect.sync(() => {
       const acks = decodeAck(payload);
       if (Option.isNone(acks)) return;
       for (const ack of acks.value.acks) {
         const session = sessions.get(ack.providerSessionId);
         if (session === undefined) continue;
         while (session.spool.length > 0 && session.spool[0]!.seq <= ack.seq) session.spool.shift();
+        // Its end reached the Hub: nothing about it is left to resend.
+        if (session.ended && session.spool.length === 0) sessions.delete(ack.providerSessionId);
       }
     });
+  };
 
   return EnvironmentAgent.of({
     report: Effect.gen(function* () {
@@ -597,7 +668,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
         for (const session of sessions.values()) {
           for (const entry of session.spool) {
             if (entry.seq <= (replayed.get(session) ?? 0)) continue;
-            yield* connected.event(ENVIRONMENT_EXECUTOR_FRAME_METHODS.providerEvent, entry.frame);
+            yield* connected.event(entry.method, entry.frame);
             replayed.set(session, entry.seq);
             progressed = true;
           }

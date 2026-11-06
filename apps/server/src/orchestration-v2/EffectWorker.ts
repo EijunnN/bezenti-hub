@@ -581,10 +581,7 @@ export const layerExecutor: Layer.Layer<
         // What needs the Thread's machine runs against its Active environment, and its calls to
         // a joined Environment carry this attempt's idempotency key.
         const execution = executeRequest(effect, options).pipe(
-          EnvironmentExecutor.withEffectAttempt({
-            effectId: effect.id,
-            attempt: effect.attemptCount,
-          }),
+          EnvironmentExecutor.withEffectAttempt({ effectId: effect.id }),
         );
         return EffectOutbox.isEnvironmentBoundEffect(effect.request) && Option.isSome(environments)
           ? environments.value.onActiveEnvironment(effect.threadId)(execution)
@@ -593,6 +590,13 @@ export const layerExecutor: Layer.Layer<
     });
   }),
 );
+
+/** Cleanup of a machine's state, moot once the Environment that held it was removed. */
+const MOOT_WITHOUT_ENVIRONMENT: ReadonlySet<string> = new Set([
+  "terminal.cleanup",
+  "preview.cleanup",
+  "provider-session.detach",
+]);
 
 // A running effect blocks later work on its thread and its lease is never reclaimed in-process,
 // so a stop that hangs must give up and fall through to the normal retry/fail path.
@@ -818,8 +822,21 @@ export const layerWithOptions = (
           }).pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
           if (cancelledBeforeExecution) return true;
 
+          // Machine work for a removed Environment can never run: cleanup there is moot, and
+          // anything else fails for good on this attempt instead of retrying into nothing.
+          const environmentRemoved =
+            Option.isSome(environments) && EffectOutbox.isEnvironmentBoundEffect(effect.request)
+              ? yield* outbox
+                  .threadEnvironmentRemoved(effect.threadId)
+                  .pipe(Effect.orElseSucceed(() => false))
+              : false;
+          if (environmentRemoved && MOOT_WITHOUT_ENVIRONMENT.has(effect.request.type)) {
+            yield* outbox.succeed({ effectId: effect.id, workerId });
+            return true;
+          }
+          const lastAttempt = environmentRemoved || effect.attemptCount >= maxAttempts;
           const execution = executor
-            .execute(effect, { willRetry: effect.attemptCount < maxAttempts })
+            .execute(effect, { willRetry: !lastAttempt })
             .pipe(boundExecution(effect), Effect.as("executed" as const));
           const exit = yield* Effect.exit(Effect.raceFirst(execution, cancellation)).pipe(
             Effect.ensuring(outbox.clearCancellation(effect.id)),
@@ -855,7 +872,7 @@ export const layerWithOptions = (
             ? yield* outbox
                 .succeed({ effectId: effect.id, workerId })
                 .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))
-            : effect.attemptCount >= maxAttempts
+            : lastAttempt
               ? yield* outbox
                   .fail({ effectId: effect.id, workerId, error })
                   .pipe(Effect.onError((cause) => terminalizeClaim(effect, cause)))

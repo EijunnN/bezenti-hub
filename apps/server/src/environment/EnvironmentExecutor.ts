@@ -129,33 +129,31 @@ const CheckpointEnvironment = Context.Reference<EnvironmentId>(
 );
 
 /**
- * The effect attempt a call runs for, so a request to a joined Environment carries
- * `effectId:attempt` and a resend answers the same (`EnvironmentExecutorRequest`).
+ * The effect a call runs for. A request to a joined Environment carries
+ * `effectId:<operation>:<n>`: the same on a resend and on the effect's next attempt, so a call the
+ * machine already ran answers from its memory instead of running again (a turn is not restarted).
  */
 const EffectAttempt = Context.Reference<{ readonly key: string; next: number } | null>(
   "t3/environment/EnvironmentExecutor/EffectAttempt",
   { defaultValue: () => null },
 );
 
-/** Runs an effect's work under its attempt's idempotency key. */
+/** Runs an effect's work under its idempotency keys. */
 export const withEffectAttempt =
-  (input: { readonly effectId: string; readonly attempt: number }) =>
+  (input: { readonly effectId: string }) =>
   <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
     Effect.suspend(() =>
-      Effect.provideService(effect, EffectAttempt, {
-        key: `${input.effectId}:${input.attempt}`,
-        next: 0,
-      }),
+      Effect.provideService(effect, EffectAttempt, { key: input.effectId, next: 0 }),
     );
 
-/** The key for the next request of the current effect attempt, or none outside an effect. */
+/** The key for the next request of the current effect, or none outside an effect. */
 export const nextIdempotencyKey = Effect.fn("EnvironmentExecutor.nextIdempotencyKey")(function* (
   method: string,
 ) {
   const attempt = yield* EffectAttempt;
   if (attempt === null) return undefined;
   attempt.next += 1;
-  // One effect may make several calls; each has its own key within the attempt.
+  // One effect may make several calls, in the same order on every attempt; each has its own key.
   return `${attempt.key}:${method}:${attempt.next}`;
 });
 

@@ -35,6 +35,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../attachmentStore.ts";
@@ -64,11 +65,20 @@ import {
 
 /** How long a call made for an effect waits for a dropped Environment before giving up. */
 const RECONNECT_WAIT = "30 seconds";
+/** Resends of one keyed call across reconnects; the machine answers each from its memory. */
+const MAX_RESENDS = 3;
+/** Lookups of a Thread's Active environment before an event is left for the next resend. */
+const ACTIVE_LOOKUP_RETRIES = 3;
 
 type SessionQueue = Queue.Queue<
   ProviderAdapter.ProviderAdapterV2Event,
   ProviderAdapter.ProviderAdapterV2Error | Cause.Done
 >;
+
+interface AttachmentGrant {
+  readonly attachment: ChatAttachment;
+  readonly sha256: string;
+}
 
 interface SessionSink {
   readonly threadId: ThreadId;
@@ -76,11 +86,13 @@ interface SessionSink {
   readonly queue: SessionQueue;
   /** The highest `seq` delivered; a resent event at or below it is a duplicate. */
   lastSeq: number;
-}
-
-interface AttachmentGrant {
-  readonly attachment: ChatAttachment;
-  readonly sha256: string;
+  /**
+   * Set when an event could not be decided (its Thread could not be read): this and later events
+   * are left unacknowledged, so the machine resends them in order after the next reconnect.
+   */
+  stalled: boolean;
+  /** Attachments this session's turns carry, by id; they go with the session. */
+  readonly grants: Map<string, AttachmentGrant>;
 }
 
 interface Link {
@@ -91,9 +103,9 @@ interface Link {
   workspaceRoot: string;
   providers: ReadonlyArray<EnvironmentProviderSummary>;
   readonly sessions: Map<string, SessionSink>;
-  /** Attachments a turn sent here may fetch, by `threadId:attachmentId`. */
-  readonly grants: Map<string, AttachmentGrant>;
   readonly pendingAcks: Map<string, number>;
+  /** Each Thread's Active environment as last read; `threadMoved` forgets it. */
+  readonly activeByThread: Map<ThreadId, EnvironmentId | null>;
 }
 
 export interface RemoteConnection {
@@ -120,6 +132,8 @@ export class RemoteEnvironments extends Context.Service<
       never,
       Scope.Scope
     >;
+    /** A Thread changed Environments: events and attachment reads are checked anew. */
+    readonly threadMoved: (threadId: ThreadId) => Effect.Effect<void>;
   }
 >()("t3/environment/RemoteEnvironments") {}
 
@@ -154,6 +168,7 @@ const make = Effect.gen(function* () {
   const digester = yield* Digest.Digest;
   // Without git processes (orchestration-only hosts) a missing checkout is not cloned.
   const vcs = yield* Effect.serviceOption(VcsProcess.VcsProcess);
+  const sql = yield* SqlClient.SqlClient;
   const links = new Map<EnvironmentId, Link>();
 
   const sha256Hex = (bytes: Uint8Array) =>
@@ -162,8 +177,11 @@ const make = Effect.gen(function* () {
       Effect.map((digest) => Buffer.from(digest).toString("hex")),
     );
 
-  /** One request to the Environment, resent once it reconnects when the call is an effect's. */
-  const invoke = Effect.fnUntraced(function* (
+  /**
+   * One request to the Environment. A call an effect makes is resent, with the same key, on the
+   * next socket when the current one drops; the machine answers it once.
+   */
+  const invoke = Effect.fn("RemoteEnvironments.invoke")(function* (
     link: Link,
     operation: RemoteOperation,
     input: unknown,
@@ -172,29 +190,30 @@ const make = Effect.gen(function* () {
     const payload = yield* encodeJson(spec.input, input).pipe(Effect.orDie);
     const idempotencyKey = yield* EnvironmentExecutor.nextIdempotencyKey(operation);
     let result: ExecutorCallResult | undefined;
-    for (let attempt = 0; result === undefined; attempt += 1) {
+    for (let resends = 0; result === undefined; resends += 1) {
       const channel = link.channel;
-      if (channel === undefined) {
-        if (idempotencyKey === undefined || attempt > 0) return { _tag: "unavailable" };
+      if (channel !== undefined) {
+        const sent = yield* channel
+          .request({
+            method: operation,
+            payload,
+            ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+          })
+          .pipe(Effect.option);
+        if (Option.isSome(sent)) {
+          result = sent.value;
+          break;
+        }
+      }
+      // Without a key a resend could run the call twice; with one the machine answers it once.
+      if (idempotencyKey === undefined || resends >= MAX_RESENDS) return { _tag: "unavailable" };
+      // A newer socket may already be in place; otherwise wait, bounded, for one.
+      if (link.channel === undefined || link.channel === channel) {
         const reattached = yield* Deferred.await(link.attached).pipe(
           Effect.timeoutOption(RECONNECT_WAIT),
         );
         if (Option.isNone(reattached)) return { _tag: "unavailable" };
-        continue;
       }
-      const sent = yield* channel
-        .request({
-          method: operation,
-          payload,
-          ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
-        })
-        .pipe(Effect.option);
-      if (Option.isSome(sent)) {
-        result = sent.value;
-        break;
-      }
-      // Without a key a resend could run the call twice; with one the Environment answers again.
-      if (idempotencyKey === undefined || attempt > 0) return { _tag: "unavailable" };
     }
     if (result._tag === "failure") {
       const error = yield* decodeJson(spec.error, result.error).pipe(Effect.option);
@@ -267,7 +286,10 @@ const make = Effect.gen(function* () {
     });
 
   /** The Project's checkout on the Environment, and the Hub checkout's `origin` to clone from. */
-  const checkoutFor = Effect.fnUntraced(function* (link: Link, projectId: ProjectId) {
+  const checkoutFor = Effect.fn("RemoteEnvironments.checkoutFor")(function* (
+    link: Link,
+    projectId: ProjectId,
+  ) {
     const path = yield* pathsOf(link)
       .checkout(projectId)
       .pipe(Effect.option, Effect.map(Option.flatten));
@@ -295,10 +317,9 @@ const make = Effect.gen(function* () {
     return { path: path.value, cloneUrl } satisfies WireCheckout;
   });
 
-  /** Hashes a turn's attachments and lets the Environment fetch exactly those. */
-  const grantAttachments = Effect.fnUntraced(function* (
-    link: Link,
-    threadId: ThreadId,
+  /** Hashes a turn's attachments and lets the session's machine fetch exactly those. */
+  const grantAttachments = Effect.fn("RemoteEnvironments.grantAttachments")(function* (
+    sink: SessionSink,
     attachments: ReadonlyArray<ChatAttachment>,
   ) {
     const refs: Array<WireAttachmentRef> = [];
@@ -308,7 +329,7 @@ const make = Effect.gen(function* () {
       const bytes = yield* fileSystem.readFile(path).pipe(Effect.option);
       if (Option.isNone(bytes)) continue;
       const sha256 = yield* sha256Hex(bytes.value);
-      link.grants.set(`${threadId}:${attachment.id}`, { attachment, sha256 });
+      sink.grants.set(attachment.id, { attachment, sha256 });
       refs.push({ id: attachment.id, sha256 });
     }
     return refs;
@@ -337,7 +358,7 @@ const make = Effect.gen(function* () {
       ensureThread: (input) => onSession("provider.ensureThread", input),
       resumeThread: (input) => onSession("provider.resumeThread", input),
       startTurn: (input) =>
-        grantAttachments(link, input.threadId, input.message.attachments).pipe(
+        grantAttachments(sink, input.message.attachments).pipe(
           Effect.flatMap((attachments) =>
             callProvider<void>(link, driver, "provider.startTurn", {
               providerSessionId,
@@ -347,7 +368,7 @@ const make = Effect.gen(function* () {
           ),
         ),
       steerTurn: (input) =>
-        grantAttachments(link, input.threadId, input.message.attachments).pipe(
+        grantAttachments(sink, input.message.attachments).pipe(
           Effect.flatMap((attachments) =>
             callProvider<void>(link, driver, "provider.steer", {
               providerSessionId,
@@ -415,6 +436,8 @@ const make = Effect.gen(function* () {
           ProviderAdapter.ProviderAdapterV2Error | Cause.Done
         >(),
         lastSeq: 0,
+        stalled: false,
+        grants: new Map(),
       };
       // Before the call: the Environment may stream events ahead of its answer.
       link.sessions.set(input.providerSessionId, sink);
@@ -577,7 +600,7 @@ const make = Effect.gen(function* () {
     };
   };
 
-  const publishCapabilities = Effect.fnUntraced(function* (
+  const publishCapabilities = Effect.fn("RemoteEnvironments.publishCapabilities")(function* (
     link: Link,
     orchestration: EnvironmentOrchestrationCapabilities,
     hostResources: EnvironmentHelloFrame["hostResources"],
@@ -594,6 +617,95 @@ const make = Effect.gen(function* () {
     });
   });
 
+  /** Acknowledged up to `seq`, never backwards. */
+  const ack = (link: Link, providerSessionId: string, seq: number | undefined) => {
+    if (seq === undefined) return;
+    link.pendingAcks.set(
+      providerSessionId,
+      Math.max(link.pendingAcks.get(providerSessionId) ?? 0, seq),
+    );
+  };
+
+  /**
+   * The Thread's Active environment: Some(null) when it has none or is gone, None when it could
+   * not be read (nothing is decided on a guess).
+   */
+  const activeFor = Effect.fn("RemoteEnvironments.activeFor")(function* (
+    link: Link,
+    threadId: ThreadId,
+  ) {
+    if (link.activeByThread.has(threadId)) {
+      return Option.some(link.activeByThread.get(threadId) ?? null);
+    }
+    // The projection's column, which a move updates; a Thread not there has no Environment.
+    const read = yield* sql<{ readonly environmentId: string | null }>`
+      SELECT active_environment_id AS "environmentId"
+      FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}
+    `.pipe(
+      Effect.map((rows): EnvironmentId | null => {
+        const environmentId = rows[0]?.environmentId;
+        return environmentId === undefined || environmentId === null
+          ? null
+          : (environmentId as EnvironmentId);
+      }),
+      Effect.retry({ times: ACTIVE_LOOKUP_RETRIES }),
+      Effect.option,
+    );
+    if (Option.isSome(read)) link.activeByThread.set(threadId, read.value);
+    return read;
+  });
+
+  /**
+   * Whether a framed session event may go on: false (acknowledged unless undecided) when it is a
+   * duplicate, for a retired session, or from a machine the Thread no longer runs on.
+   */
+  const admit = Effect.fn("RemoteEnvironments.admit")(function* (
+    link: Link,
+    providerSessionId: string,
+    seq: number | undefined,
+  ) {
+    const sink = link.sessions.get(providerSessionId);
+    if (sink === undefined) {
+      ack(link, providerSessionId, seq);
+      yield* Effect.logWarning("Rejected an event for a provider session the Hub retired", {
+        environmentId: link.environmentId,
+        providerSessionId,
+      });
+      return undefined;
+    }
+    if (sink.stalled) return undefined;
+    if (seq !== undefined && seq <= sink.lastSeq) {
+      ack(link, providerSessionId, seq);
+      return undefined;
+    }
+    const active = yield* activeFor(link, sink.threadId);
+    if (Option.isNone(active)) {
+      sink.stalled = true;
+      yield* Effect.logWarning(
+        "Left an Environment's event for its resend: its Thread is unreadable",
+        {
+          environmentId: link.environmentId,
+          threadId: sink.threadId,
+        },
+      );
+      return undefined;
+    }
+    if (active.value !== link.environmentId) {
+      ack(link, providerSessionId, seq);
+      yield* Effect.logWarning(
+        "Rejected an event from an Environment that is not the Thread's Active environment",
+        {
+          environmentId: link.environmentId,
+          activeEnvironmentId: active.value,
+          threadId: sink.threadId,
+        },
+      );
+      return undefined;
+    }
+    return sink;
+  });
+
+  // Per streamed event: too frequent for a span each.
   /** An event the Environment streamed: kept once, in order, and only from the Thread's machine. */
   const onProviderEvent = Effect.fnUntraced(function* (link: Link, payload: unknown) {
     const decoded = decodeProviderEvent(payload);
@@ -603,24 +715,11 @@ const make = Effect.gen(function* () {
       });
     }
     const { providerSessionId, seq, event } = decoded.value;
-    if (seq !== undefined) link.pendingAcks.set(providerSessionId, seq);
-    const sink = link.sessions.get(providerSessionId);
-    if (sink === undefined) {
-      return yield* Effect.logWarning("Rejected an event for a provider session the Hub retired", {
-        environmentId: link.environmentId,
-        providerSessionId,
-      });
-    }
-    if (seq !== undefined && seq <= sink.lastSeq) return;
-    const active = yield* registry.activeEnvironment(sink.threadId);
-    if (active !== link.environmentId) {
-      return yield* Effect.logWarning(
-        "Rejected an event from an Environment that is not the Thread's Active environment",
-        { environmentId: link.environmentId, activeEnvironmentId: active, threadId: sink.threadId },
-      );
-    }
+    const sink = yield* admit(link, providerSessionId, seq);
+    if (sink === undefined) return;
     const parsed = decodeEvent(event);
     if (Option.isNone(parsed)) {
+      ack(link, providerSessionId, seq);
       return yield* Effect.logWarning("Rejected an unreadable provider event from an Environment", {
         environmentId: link.environmentId,
         providerSessionId,
@@ -628,14 +727,19 @@ const make = Effect.gen(function* () {
     }
     if (seq !== undefined) sink.lastSeq = seq;
     yield* Queue.offer(sink.queue, parsed.value);
+    ack(link, providerSessionId, seq);
   });
 
-  const onSessionEnded = Effect.fnUntraced(function* (link: Link, payload: unknown) {
+  const onSessionEnded = Effect.fn("RemoteEnvironments.onSessionEnded")(function* (
+    link: Link,
+    payload: unknown,
+  ) {
     const decoded = decodeSessionEnded(payload);
     if (Option.isNone(decoded)) return;
-    const sink = link.sessions.get(decoded.value.providerSessionId);
+    const sink = yield* admit(link, decoded.value.providerSessionId, decoded.value.seq);
     if (sink === undefined) return;
     link.sessions.delete(decoded.value.providerSessionId);
+    ack(link, decoded.value.providerSessionId, decoded.value.seq);
     if (decoded.value.error === undefined) return yield* Queue.end(sink.queue);
     const error = yield* decodeJson(
       ProviderAdapter.ProviderAdapterV2Error,
@@ -655,18 +759,30 @@ const make = Effect.gen(function* () {
     );
   });
 
-  /** `attachment.read`: only an attachment a turn on this Environment carries, by its hash. */
-  const onAttachmentRead = Effect.fnUntraced(function* (
+  /**
+   * `attachment.read`: only an attachment a live session's turn on this machine carries, by its
+   * hash, while the Thread still runs here.
+   */
+  const onAttachmentRead = Effect.fn("RemoteEnvironments.onAttachmentRead")(function* (
     link: Link,
     payload: unknown,
   ): Effect.fn.Return<ExecutorCallResult> {
+    const refused = {
+      _tag: "failure",
+      error: "This attachment is not available to this Environment.",
+    } as const;
     const decoded = decodeAttachmentRead(payload);
-    const grant = Option.isNone(decoded)
-      ? undefined
-      : link.grants.get(`${decoded.value.threadId}:${decoded.value.attachmentId}`);
-    if (Option.isNone(decoded) || grant === undefined || grant.sha256 !== decoded.value.sha256) {
-      return { _tag: "failure", error: "This attachment is not available to this Environment." };
-    }
+    if (Option.isNone(decoded)) return refused;
+    const { threadId, attachmentId, sha256 } = decoded.value;
+    const grant = [...link.sessions.values()]
+      .filter((sink) => sink.threadId === threadId)
+      .map((sink) => sink.grants.get(attachmentId))
+      .find((candidate) => candidate !== undefined && candidate.sha256 === sha256);
+    if (grant === undefined) return refused;
+    // Read again, not from the cache: this is an access decision.
+    link.activeByThread.delete(threadId);
+    const active = yield* activeFor(link, threadId);
+    if (Option.isNone(active) || active.value !== link.environmentId) return refused;
     const path = resolveAttachmentPath({
       attachmentsDir: config.attachmentsDir,
       attachment: grant.attachment,
@@ -705,13 +821,13 @@ const make = Effect.gen(function* () {
         workspaceRoot: hello.workspaceRoot,
         providers: hello.providers,
         sessions: new Map(),
-        grants: new Map(),
         pendingAcks: new Map(),
+        activeByThread: new Map(),
       };
       links.set(environmentId, link);
       link.workspaceRoot = hello.workspaceRoot;
       link.providers = hello.providers;
-      yield* link.channel?.close ?? Effect.void;
+      const previous = link.channel;
       const channel = yield* makeExecutorChannel({
         environmentId,
         write,
@@ -730,7 +846,36 @@ const make = Effect.gen(function* () {
           }
         },
       });
+      // In place before the old socket closes: calls it fails resend on this one.
       link.channel = channel;
+      yield* previous?.close ?? Effect.void;
+      link.pendingAcks.clear();
+      link.activeByThread.clear();
+      for (const sink of link.sessions.values()) sink.stalled = false;
+      // What runs on the machine now is what it reported: sessions it lost end here, and those
+      // the Hub no longer has (it restarted, or ended them) end there.
+      const reported = new Set(hello.sessions.map((session) => session.providerSessionId));
+      for (const [providerSessionId, sink] of link.sessions) {
+        if (reported.has(providerSessionId)) continue;
+        link.sessions.delete(providerSessionId);
+        yield* Queue.fail(
+          sink.queue,
+          new ProviderAdapter.ProviderAdapterEventStreamError({
+            driver: sink.driver,
+            providerSessionId:
+              providerSessionId as ProviderAdapter.ProviderAdapterV2SessionRuntime["providerSessionId"],
+            cause: "The provider session no longer runs on its Environment.",
+          }),
+        );
+      }
+      const unknown = hello.sessions
+        .map((session) => session.providerSessionId)
+        .filter((providerSessionId) => !link.sessions.has(providerSessionId));
+      if (unknown.length > 0) {
+        yield* channel.event(ENVIRONMENT_EXECUTOR_FRAME_METHODS.retired, {
+          providerSessionIds: unknown,
+        });
+      }
       yield* publishCapabilities(link, hello.orchestration, hello.hostResources, hello.disk);
       yield* registry.register(makeExecutor(link));
       const attached = link.attached;
@@ -763,6 +908,7 @@ const make = Effect.gen(function* () {
 
       return {
         receive: channel.receive,
+        // Every ten seconds per machine: too frequent for a span each.
         heartbeat: Effect.fnUntraced(function* (frame) {
           if (frame.providers !== undefined) link.providers = frame.providers;
           if (frame.orchestration !== undefined) {
@@ -777,7 +923,14 @@ const make = Effect.gen(function* () {
     },
   );
 
-  return RemoteEnvironments.of({ connect });
+  return RemoteEnvironments.of({
+    connect,
+    threadMoved: Effect.fn("RemoteEnvironments.threadMoved")(function* (threadId) {
+      yield* Effect.sync(() => {
+        for (const link of links.values()) link.activeByThread.delete(threadId);
+      });
+    }),
+  });
 });
 
 export const layer = Layer.effect(RemoteEnvironments, make);

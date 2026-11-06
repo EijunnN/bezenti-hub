@@ -217,6 +217,8 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const setupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
   const cloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+  // Where the server joins machines; without them every Thread runs on the Hub machine.
+  const environments = yield* Effect.serviceOption(EnvironmentRegistry.EnvironmentRegistry);
   const terminals = yield* TerminalManager.TerminalManager;
   const git = yield* GitWorkflow.GitWorkflowService;
   const setupScripts = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
@@ -852,7 +854,7 @@ const make = Effect.gen(function* () {
     function* (request) {
       // Scratch has no Git repository. Normalize before folder allocation so
       // durable preparation and retries use the thread's own Scratch folder.
-      const input: ThreadLaunchInput =
+      let input: ThreadLaunchInput =
         request.workspaceStrategy.type === "worktree" &&
         (yield* managedFolders.isScratchProject(request.projectId))
           ? { ...request, workspaceStrategy: { type: "root" } }
@@ -861,21 +863,29 @@ const make = Effect.gen(function* () {
         type: "thread.create",
         projectId: input.projectId,
       }).pipe(Effect.mapError(mapError(input, "resolve-project")));
-      // Worktrees are still made on the Hub machine; a Thread elsewhere runs in its checkout.
-      if (
-        input.activeEnvironmentId !== undefined &&
-        input.activeEnvironmentId !== HUB_MACHINE_ENVIRONMENT_ID &&
-        input.workspaceStrategy.type !== "root"
-      ) {
-        return yield* mapError(
-          input,
-          "provision-worktree",
-        )(
-          new EnvironmentRegistry.ThreadEnvironmentUnavailableError({
-            environmentId: input.activeEnvironmentId,
-            reason: "worktree-unsupported",
-          }),
-        );
+      // Placed now, as the Thread will be, so a worktree is refused where it can't be made: they
+      // are still made on the Hub machine; a Thread elsewhere runs in its checkout.
+      if (Option.isSome(environments) && input.reuseExistingThread !== true) {
+        const placed = yield* environments.value
+          .chooseForThread({
+            userId: input.ownerUserId,
+            requested: input.activeEnvironmentId,
+            projectId: input.projectId,
+            providerInstanceId: input.modelSelection.instanceId,
+          })
+          .pipe(Effect.mapError(mapError(input, "create-thread")));
+        if (placed !== HUB_MACHINE_ENVIRONMENT_ID && input.workspaceStrategy.type !== "root") {
+          return yield* mapError(
+            input,
+            "provision-worktree",
+          )(
+            new EnvironmentRegistry.ThreadEnvironmentUnavailableError({
+              environmentId: placed,
+              reason: "worktree-unsupported",
+            }),
+          );
+        }
+        input = { ...input, activeEnvironmentId: placed };
       }
       const project = yield* projects.getById(input.projectId).pipe(
         Effect.mapError(mapError(input, "resolve-project")),

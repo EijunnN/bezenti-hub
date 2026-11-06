@@ -158,6 +158,8 @@ export type EnvironmentExecutorProviderEvent = typeof EnvironmentExecutorProvide
 /** The Environment's provider session ended on its own (process exit, failure). */
 export const EnvironmentExecutorSessionEnded = Schema.Struct({
   providerSessionId: ProviderSessionId,
+  /** In the session's event order: spooled and resent like its events until acknowledged. */
+  seq: Schema.optionalKey(NonNegativeInt),
   /** A `ProviderAdapterV2Error` in its JSON encoding, when the stream failed. */
   error: Schema.optionalKey(Schema.Unknown),
 });
@@ -168,6 +170,16 @@ export const EnvironmentExecutorEventAck = Schema.Struct({
   acks: Schema.Array(Schema.Struct({ providerSessionId: ProviderSessionId, seq: NonNegativeInt })),
 });
 export type EnvironmentExecutorEventAck = typeof EnvironmentExecutorEventAck.Type;
+
+/**
+ * Hub → Environment (frame method `provider.retired`), right after a connection is welcomed: the
+ * sessions the machine reported that the Hub no longer has (after a Hub restart, or ones it ended).
+ * The machine detaches them instead of keeping their processes alive.
+ */
+export const EnvironmentExecutorRetiredSessions = Schema.Struct({
+  providerSessionIds: Schema.Array(ProviderSessionId),
+});
+export type EnvironmentExecutorRetiredSessions = typeof EnvironmentExecutorRetiredSessions.Type;
 
 /**
  * Environment → Hub request (method `attachment.read`): a Thread attachment the Hub stores,
@@ -188,5 +200,6 @@ export const ENVIRONMENT_EXECUTOR_FRAME_METHODS = {
   providerEvent: "provider.event",
   sessionEnded: "provider.sessionEnded",
   ack: "provider.ack",
+  retired: "provider.retired",
   attachmentRead: "attachment.read",
 } as const;

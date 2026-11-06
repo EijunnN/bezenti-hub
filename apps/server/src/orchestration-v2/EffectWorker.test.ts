@@ -687,3 +687,67 @@ it.effect(
       Effect.provide(EffectOutbox.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory))),
     ),
 );
+
+it.effect(
+  "the Hub's own work on a Thread is not held back by machine work waiting, and a removed machine's work settles",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const now = DateTime.formatIso(yield* DateTime.now);
+      const thread = (threadId: string, environmentId: string) => sql`
+        INSERT INTO orchestration_v2_projection_threads (
+          thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
+          created_at, updated_at, payload_json, active_environment_id
+        ) VALUES (
+          ${threadId}, 'project:laptop', ${threadId}, 'codex', 'full-access', 'default',
+          ${now}, ${now}, '{}', ${environmentId}
+        )
+      `;
+      yield* thread("thread:away", "environment:laptop");
+      yield* thread("thread:removed", "environment:gone");
+      yield* sql`
+        INSERT INTO environments (
+          environment_id, name, kind, mode, owner_user_id, credential_hash, credential_issued_at,
+          registered_at, revoked_at
+        ) VALUES (
+          'environment:gone', 'Gone', 'external', 'personal', 'owner', 'hash', ${now}, ${now}, ${now}
+        )
+      `;
+      yield* outbox.enqueue([
+        {
+          id: "effect:away-cleanup",
+          commandId: CommandId.make("command:away-cleanup"),
+          threadId: ThreadId.make("thread:away"),
+          request: { type: "terminal.cleanup" },
+        },
+        {
+          id: "effect:away-title-cleanup",
+          commandId: CommandId.make("command:away-scheduled-cleanup"),
+          threadId: ThreadId.make("thread:away"),
+          request: { type: "scheduled-tasks.cleanup" },
+        },
+        {
+          id: "effect:removed-cleanup",
+          commandId: CommandId.make("command:removed-cleanup"),
+          threadId: ThreadId.make("thread:removed"),
+          request: { type: "terminal.cleanup" },
+        },
+      ]);
+      const available = [HUB_MACHINE_ENVIRONMENT_ID];
+      const claimed = new Set<string>();
+      for (let index = 0; index < 3; index += 1) {
+        const next = yield* outbox.claimNext({ workerId: "w", availableEnvironmentIds: available });
+        if (Option.isNone(next)) break;
+        claimed.add(next.value.id);
+      }
+      assert.deepEqual([...claimed].sort(), [
+        "effect:away-title-cleanup",
+        "effect:removed-cleanup",
+      ]);
+      assert.isTrue(yield* outbox.threadEnvironmentRemoved(ThreadId.make("thread:removed")));
+      assert.isFalse(yield* outbox.threadEnvironmentRemoved(ThreadId.make("thread:away")));
+    }).pipe(
+      Effect.provide(EffectOutbox.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory))),
+    ),
+);

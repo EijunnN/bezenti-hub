@@ -27,7 +27,9 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Exit from "effect/Exit";
 import * as Queue from "effect/Queue";
+import * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
@@ -339,61 +341,69 @@ export const connectProtocolEnvironment = Effect.fn("HubWithEnvironments.connect
       readonly instanceId: ProviderInstanceId;
       readonly driver: ProviderDriverKind;
       readonly capabilities: OrchestrationV2ProviderCapabilities;
+      /** The sessions the machine says it still runs. */
+      readonly sessions?: EnvironmentHelloFrame["sessions"];
     },
   ) {
     const remote = hub.service(RemoteEnvironments.RemoteEnvironments);
     const frames = yield* Queue.unbounded<Record<string, unknown>>();
     let receive: (frame: unknown) => Effect.Effect<boolean> = () => Effect.succeed(false);
-    const connection = yield* remote.connect({
-      environmentId: input.environmentId,
-      hello: {
-        type: "hello",
-        protocolVersion: ENVIRONMENT_CONNECTION_PROTOCOL_VERSION,
-        os: "linux",
-        hostname: "protocol",
-        providers: [
-          {
-            instanceId: input.instanceId,
-            provider: input.driver,
-            displayName: null,
-            enabled: true,
-            installed: true,
-            version: "1.0.0",
-            capabilities: { runtimeModes: [], conversationRollback: true, textGeneration: false },
-          },
-        ],
-        hostResources: HOST_RESOURCES,
-        disk: null,
-        sessions: [],
-        workspaceRoot: "/remote/projects",
-        orchestration: {
+    // Its own scope, so a test can drop the socket while the test goes on.
+    const socket = yield* Scope.fork(yield* Effect.scope);
+    const connection = yield* remote
+      .connect({
+        environmentId: input.environmentId,
+        hello: {
+          type: "hello",
+          protocolVersion: ENVIRONMENT_CONNECTION_PROTOCOL_VERSION,
+          os: "linux",
+          hostname: "protocol",
           providers: [
             {
               instanceId: input.instanceId,
               provider: input.driver,
+              displayName: null,
               enabled: true,
-              continuationKey: `${input.driver}:instance:${input.instanceId}`,
-              capabilities: input.capabilities,
+              installed: true,
+              version: "1.0.0",
+              capabilities: { runtimeModes: [], conversationRollback: true, textGeneration: false },
             },
           ],
-          unavailableProviders: [],
+          hostResources: HOST_RESOURCES,
+          disk: null,
+          sessions: input.sessions ?? [],
+          workspaceRoot: "/remote/projects",
+          orchestration: {
+            providers: [
+              {
+                instanceId: input.instanceId,
+                provider: input.driver,
+                enabled: true,
+                continuationKey: `${input.driver}:instance:${input.instanceId}`,
+                capabilities: input.capabilities,
+              },
+            ],
+            unavailableProviders: [],
+          },
         },
-      },
-      write: (text) => {
-        const frame = JSON.parse(text) as Record<string, unknown>;
-        if (frame.type === "request" && frame.method === "provider.detach") {
-          return receive({
-            type: "response",
-            requestId: frame.requestId,
-            result: { _tag: "success", value: null },
-          }).pipe(Effect.forkDetach, Effect.asVoid);
-        }
-        return Queue.offer(frames, frame).pipe(Effect.asVoid);
-      },
-    });
+        write: (text) => {
+          const frame = JSON.parse(text) as Record<string, unknown>;
+          if (frame.type === "request" && frame.method === "provider.detach") {
+            return receive({
+              type: "response",
+              requestId: frame.requestId,
+              result: { _tag: "success", value: null },
+            }).pipe(Effect.forkDetach, Effect.asVoid);
+          }
+          return Queue.offer(frames, frame).pipe(Effect.asVoid);
+        },
+      })
+      .pipe(Effect.provideService(Scope.Scope, socket));
     receive = connection.receive;
     return {
       connection,
+      /** The socket drops; the Hub's side of it closes. */
+      disconnect: Scope.close(socket, Exit.void),
       /** The next frame the Hub sent, other than `provider.detach`. */
       nextFrame: Queue.take(frames),
       providerSession: (providerSessionId: string, cwd: string) => ({

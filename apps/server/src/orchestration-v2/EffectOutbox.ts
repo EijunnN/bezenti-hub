@@ -264,6 +264,13 @@ export interface EffectOutboxV2Shape {
     readonly availableEnvironmentIds?: ReadonlyArray<EnvironmentId>;
   }) => Effect.Effect<Option.Option<OrchestrationEffectV2>, EffectOutboxError>;
   readonly nextClaimableAt: Effect.Effect<Option.Option<DateTime.Utc>, EffectOutboxError>;
+  /**
+   * Whether the Thread's Environment was removed (or it has none): its machine work can only
+   * settle. Ticket 10's «needs an environment» state hooks in here.
+   */
+  readonly threadEnvironmentRemoved: (
+    threadId: ThreadId,
+  ) => Effect.Effect<boolean, EffectOutboxError>;
   /** `nextClaimableAt`, leaving out work `claimNext` would leave for an unavailable Environment. */
   readonly nextClaimableAtFor: (
     availableEnvironmentIds: ReadonlyArray<EnvironmentId>,
@@ -353,22 +360,40 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
         Array.from({ length: Math.min(64, Math.max(0, Math.floor(count))) }, () => undefined),
       ).pipe(Effect.asVoid);
     // A Thread's machine-bound work waits while its Active environment has no live executor.
+    // The candidate's Thread runs on an Environment that is away: not connected, and not removed
+    // (work for a removed one is claimed so it settles; see `threadEnvironmentRemoved`).
+    const threadAwayPredicate = (availableEnvironmentIds: ReadonlyArray<EnvironmentId>) => sql`
+      EXISTS (
+        SELECT 1
+        FROM orchestration_v2_projection_threads AS environment_thread
+        WHERE environment_thread.thread_id = candidate.thread_id
+          AND environment_thread.active_environment_id IS NOT NULL
+          AND environment_thread.active_environment_id NOT IN ${sql.in(availableEnvironmentIds)}
+          AND NOT EXISTS (
+            SELECT 1 FROM environments AS removed
+            WHERE removed.environment_id = environment_thread.active_environment_id
+              AND removed.revoked_at IS NOT NULL
+          )
+      )`;
+    const environmentBound = (alias: "candidate" | "active") =>
+      alias === "candidate"
+        ? sql`candidate.effect_type IN ${sql.in(ENVIRONMENT_BOUND_EFFECT_TYPES)}`
+        : sql`active.effect_type IN ${sql.in(ENVIRONMENT_BOUND_EFFECT_TYPES)}`;
     const environmentAvailablePredicate = (
       availableEnvironmentIds: ReadonlyArray<EnvironmentId> | undefined,
     ) =>
       availableEnvironmentIds === undefined
         ? sql`1 = 1`
-        : sql`(
-            candidate.effect_type NOT IN ${sql.in(ENVIRONMENT_BOUND_EFFECT_TYPES)}
-            OR NOT EXISTS (
-              SELECT 1
-              FROM orchestration_v2_projection_threads AS environment_thread
-              WHERE environment_thread.thread_id = candidate.thread_id
-                AND (
-                  environment_thread.active_environment_id IS NULL
-                  OR environment_thread.active_environment_id NOT IN ${sql.in(availableEnvironmentIds)}
-                )
-            )
+        : sql`NOT (${environmentBound("candidate")} AND ${threadAwayPredicate(availableEnvironmentIds)})`;
+    // Machine work waiting for its Environment does not hold back the Hub's own work on the Thread.
+    const notWaitingOnAway = (availableEnvironmentIds: ReadonlyArray<EnvironmentId> | undefined) =>
+      availableEnvironmentIds === undefined
+        ? sql`1 = 1`
+        : sql`NOT (
+            NOT ${environmentBound("candidate")}
+            AND ${environmentBound("active")}
+            AND active.status = 'pending'
+            AND ${threadAwayPredicate(availableEnvironmentIds)}
           )`;
     // Retry backoff must block later effects so turns cannot race a pending rollback.
     const claimableCandidatePredicate = (
@@ -400,6 +425,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
                 }
               )
             )
+            AND ${notWaitingOnAway(availableEnvironmentIds)}
             AND (
               (
                 candidate.effect_type = 'thread-title.generate'
@@ -638,6 +664,26 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
         Effect.mapError((cause) => new EffectOutboxError({ operation: "claim", cause })),
       ),
       nextClaimableAt: nextClaimableAtFor(undefined),
+      threadEnvironmentRemoved: Effect.fn("EffectOutbox.threadEnvironmentRemoved")(
+        function* (threadId) {
+          const rows = yield* sql<{ readonly removed: number }>`
+            SELECT (
+              thread.active_environment_id IS NULL
+              OR EXISTS (
+                SELECT 1 FROM environments AS environment
+                WHERE environment.environment_id = thread.active_environment_id
+                  AND environment.revoked_at IS NOT NULL
+              )
+            ) AS removed
+            FROM orchestration_v2_projection_threads AS thread
+            WHERE thread.thread_id = ${threadId}
+          `;
+          return rows[0]?.removed === 1;
+        },
+        Effect.mapError(
+          (cause) => new EffectOutboxError({ operation: "environment-removed", cause }),
+        ),
+      ),
       nextClaimableAtFor,
       succeed: Effect.fn("EffectOutbox.succeed")(
         function* ({ effectId, workerId }) {
