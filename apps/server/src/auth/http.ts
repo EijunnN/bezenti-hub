@@ -525,6 +525,35 @@ export const layer = HttpApiBuilder.group(
         }),
       )
       .handle(
+        "redeemResetLinkWithPassword",
+        Effect.fn("environment.auth.redeemResetLinkWithPassword")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const { response, sessionToken } = yield* serverAuth
+            .redeemResetLinkWithPassword(
+              request,
+              args.payload,
+              deriveAuthClientMetadata({ request }),
+            )
+            .pipe(
+              Effect.catchTags({
+                AccountChangeRefusedError: (error) =>
+                  Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+                LoginNameTakenError: (error) =>
+                  Effect.fail(new EnvironmentHttpConflictError({ message: error.message })),
+                ServerAuthInvalidCredentialError:
+                  userSignInFailures.ServerAuthInvalidCredentialError,
+                ServerAuthInsecureTransportError:
+                  userSignInFailures.ServerAuthInsecureTransportError,
+              }),
+              Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, failUserSignInInternal),
+            );
+          yield* appendSessionCookie(sessions.cookieName, sessionToken, response.expiresAt);
+          yield* appendCredentialResponseHeaders;
+          return response;
+        }),
+      )
+      .handle(
         "session",
         Effect.fn("environment.auth.session")(
           function* (args) {

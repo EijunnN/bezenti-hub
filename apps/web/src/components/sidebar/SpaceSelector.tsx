@@ -5,19 +5,22 @@ import {
   ChevronsUpDownIcon,
   PlusIcon,
   RefreshCwIcon,
+  SettingsIcon,
+  ShieldIcon,
   UserIcon,
   UserPlusIcon,
   UsersIcon,
 } from "lucide-react";
+import { Link } from "@tanstack/react-router";
 import { useEffect, useId, useState } from "react";
 
 import { primaryEnvironmentIdAtom } from "../../state/primaryEnvironment";
-import { useEnvironmentShellGeneration } from "../../state/shell";
 import {
   createAndSelectOrganization,
   loadSpaces,
   selectSpace,
   useCurrentSpace,
+  useShellGeneration,
 } from "../../state/currentSpace";
 import { Button } from "../ui/button";
 import {
@@ -30,9 +33,9 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
-import { InvitationsDialog } from "./InvitationsDialog";
 import { UsersDialog } from "./UsersDialog";
 import { Label } from "../ui/label";
+import { OrganizationSettingsDialog } from "./OrganizationSettingsDialog";
 import {
   Menu,
   MenuGroup,
@@ -53,17 +56,14 @@ export function SpaceSelector() {
   const currentSpaceId = useCurrentSpace((state) => state.currentSpaceId);
   const loadFailed = useCurrentSpace((state) => state.loadFailed);
   const [creating, setCreating] = useState(false);
-  const [inviting, setInviting] = useState(false);
   const [managingUsers, setManagingUsers] = useState(false);
-  const shellGeneration = useEnvironmentShellGeneration(environmentId);
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the signed-in User's Spaces from the server
+  const [managing, setManaging] = useState(false);
+  // A fresh shell snapshot follows a reconnect, as after the User's Memberships changed.
+  const shellGeneration = useShellGeneration(environmentId);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the signed-in User's Spaces from the server, again after each fresh shell snapshot
   useEffect(() => {
-    if (environmentId !== null) void loadSpaces(environmentId);
-  }, [
-    environmentId,
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- An access change (a granted or revoked Installation permission) sends a fresh shell snapshot, so the Spaces are read again.
-    shellGeneration,
-  ]);
+    if (environmentId !== null && shellGeneration >= 0) void loadSpaces(environmentId);
+  }, [environmentId, shellGeneration]);
   const reload = () => {
     if (environmentId !== null) void loadSpaces(environmentId);
   };
@@ -97,6 +97,16 @@ export function SpaceSelector() {
 
   return (
     <SidebarMenu>
+      {current?.pendingAdmin === true ? (
+        <SidebarMenuItem>
+          <SidebarMenuButton render={<Link to="/settings/access" />}>
+            <ShieldIcon />
+            <span className="min-w-0 flex-1 truncate">
+              Set up an authenticator app to become Admin
+            </span>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+      ) : null}
       <SidebarMenuItem>
         <Menu
           onOpenChange={(open) => {
@@ -149,12 +159,18 @@ export function SpaceSelector() {
                 </MenuItem>
               </>
             ) : null}
-            {current?.canInvite ? (
+            {current?.kind === "organization" ? (
               <>
                 <MenuSeparator />
-                <MenuItem onClick={() => setInviting(true)}>
-                  <UserPlusIcon />
-                  Invite people
+                {current.canInvite ? (
+                  <MenuItem onClick={() => setManaging(true)}>
+                    <UserPlusIcon />
+                    Invite people
+                  </MenuItem>
+                ) : null}
+                <MenuItem onClick={() => setManaging(true)}>
+                  <SettingsIcon />
+                  Organization settings
                 </MenuItem>
               </>
             ) : null}
@@ -176,8 +192,15 @@ export function SpaceSelector() {
           </MenuPopup>
         </Menu>
         {creating ? <CreateOrganizationDialog onClose={() => setCreating(false)} /> : null}
-        {inviting && current?.canInvite ? (
-          <InvitationsDialog space={current} onClose={() => setInviting(false)} />
+        {managing && current?.kind === "organization" ? (
+          <OrganizationSettingsDialog
+            space={current}
+            onClose={() => setManaging(false)}
+            onLeft={() => {
+              setManaging(false);
+              reload();
+            }}
+          />
         ) : null}
         {managingUsers ? <UsersDialog onClose={() => setManagingUsers(false)} /> : null}
         {notice !== null ? (

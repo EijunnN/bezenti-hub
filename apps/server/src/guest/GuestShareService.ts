@@ -17,6 +17,7 @@ import {
   type OrchestrationV2GetTurnItemResult,
   type OrchestrationV2ThreadHistoryPage,
   type OrchestrationV2TurnItem,
+  type ThreadGuestShare,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -57,6 +58,7 @@ import {
 } from "../orchestration-v2/WireProjection.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as CommandActor from "../auth/CommandActor.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import { guestShareView, guestThreadModel } from "./guestView.ts";
 import {
@@ -223,6 +225,20 @@ const make = Effect.gen(function* () {
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const publicHubUrl = yield* PublicHubUrl;
+  const spaces = yield* Effect.serviceOption(SpaceDirectory.SpaceDirectory);
+  /** Whether the link's creator may still share its Thread: removed or demoted, it stops. */
+  const creatorMayShare = (thread: { readonly id: ThreadId }, share: ThreadGuestShare) =>
+    share.createdByUserId === undefined || Option.isNone(spaces)
+      ? Effect.succeed(true)
+      : spaces.value
+          .authorizeItem(share.createdByUserId, "guestLink.create", {
+            kind: "thread",
+            id: thread.id,
+          })
+          .pipe(
+            Effect.as(true),
+            Effect.orElseSucceed(() => false),
+          );
   const { attachmentsDir } = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
   const random = yield* SecureRandom.SecureRandom;
@@ -325,7 +341,8 @@ const make = Effect.gen(function* () {
       thread.deletedAt !== null ||
       DateTime.toEpochMillis(now) >= Date.parse(share.expiresAt) ||
       (kind === "session" && share.guestName === null) ||
-      (yield* publicHost) !== share.host
+      (yield* publicHost) !== share.host ||
+      !(yield* creatorMayShare(thread, share))
     ) {
       return yield* inactive;
     }
@@ -343,6 +360,7 @@ const make = Effect.gen(function* () {
     const shareId = GuestShareId.make(base64UrlEncode(yield* random.randomBytes(SHARE_ID_BYTES)));
     const now = yield* DateTime.now;
     const expiresAt = DateTime.formatIso(DateTime.add(now, { milliseconds: GUEST_SHARE_TTL_MS }));
+    const createdByUserId = yield* CommandActor.current;
     yield* orchestrator
       .dispatch({
         type: "thread.guest-share.open",
@@ -351,6 +369,7 @@ const make = Effect.gen(function* () {
         shareId,
         host,
         expiresAt,
+        ...(createdByUserId === undefined ? {} : { createdByUserId }),
       })
       .pipe(
         Effect.mapError(

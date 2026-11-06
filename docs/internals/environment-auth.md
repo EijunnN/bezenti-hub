@@ -94,6 +94,56 @@ assumes the old passkeys are lost or stolen, so in one transaction it spends the
 link, replaces every passkey with the new one, revokes the Owner's sessions and
 issues a new one.
 
+### App sign-in
+
+The desktop and mobile apps sign in to a Hub through the system browser
+(RFC 8252), so passkeys and password managers work and the app never sees a
+credential. [AppSignIn](../../apps/server/src/auth/AppSignIn.ts) is the whole
+server side:
+
+- The app makes a PKCE verifier and `state`, and opens `/app-sign-in` with the
+  S256 challenge, its redirect and a label. The page signs in as any browser
+  does, then the User approves: `POST /api/auth/app-sign-in/approve` takes only
+  the browser's own cookie (its origin checked with it), never a bearer token,
+  so every app session traces back to a sign-in in a browser. The page and
+  `/connect-agent` are served with `frame-ancestors 'none'` and
+  `X-Frame-Options: DENY`, so another site cannot frame the consent. Cancel
+  returns `error=access_denied` with the `state` to the same redirect.
+- The redirect is a loopback `http://127.0.0.1:<port>/callback` or `[::1]`, never
+  `localhost`, which can resolve elsewhere (RFC 8252 §8.3) (the desktop
+  app listens on a port of its own for that one sign-in) or exactly
+  `t3code[-dev|-preview]://auth/callback`
+  ([`appSignInRedirectKind`](../../packages/shared/src/appSignIn.ts)). Anything
+  else is refused, so the page is not an open redirect and the code never
+  leaves the device that asked for it.
+- The Hub keeps the code's SHA-256 in memory with the User, challenge and
+  redirect, for one minute. `POST /api/auth/app-sign-in/token` spends a code on
+  its first presentation, even when the verifier or redirect then fails, and
+  issues a bearer (or, with a DPoP proof, DPoP) session for that User, subject
+  `app-sign-in`, with the standard scopes the approving browser session held,
+  never more. A restart drops pending codes;
+  the app just signs in again. Like other app tokens it lasts 30 days from
+  issue and does not slide.
+- Signing out (`POST /api/auth/sign-out`) ends the request's own session,
+  cookie or token, so removing a Hub from an app revokes its session there. The
+  client also signs out a new session it could not save, and the previous one
+  when it signs in to a saved Hub again. Apps refuse a plain-HTTP Hub address
+  outside this machine, the LAN and the tailnet, as the Hub's transport rule
+  would.
+
+A custom URL scheme is not owned: another app on the phone can register
+`t3code://`. It cannot use a code it intercepts, because the exchange needs the
+verifier that stayed in the T3 Code app, and a callback whose `state` is not
+the app's own is dropped. iOS hands an `ASWebAuthenticationSession` result
+only to the app that opened it; on Android the redirect is an ordinary intent
+that another app could catch, which is why the verifier matters. What a scheme
+cannot stop is
+a malicious app starting its own sign-in, with its own verifier, and asking the
+User to approve it; the approval page names the client label (chosen by the
+app) and where the code goes, and says to continue only with a sign-in the
+User just started. Claimed HTTPS redirects (universal and app links) would
+close that gap and are the next step if it matters.
+
 ### Spaces
 
 Every Project and Thread belongs to a Space: an Organization or a User's Personal
@@ -171,17 +221,28 @@ place this is answered, and every read of Projects or Threads asks it:
 
 Each WebSocket connection resolves its viewer once (`CurrentViewer`) and again
 only when `SpaceDirectory.revision` moves, which every Space or Membership write
-bumps, so a new Membership shows on the next read without reconnecting. A change
-that can hide what a connection already holds wakes that User's connections
-(`SpaceDirectory.subscribeAccessChanges`, one hub per User, only when a row
-changed). The shell stream restarts: the old round ends and a fresh
-authoritative snapshot and its live tail replace it (web reloads its Spaces on
-it). Streams on one Thread (Thread, command output, worktree setup, terminals)
-go through `untilAccessLost` in
+bumps, so a new Membership shows on the next read without reconnecting. A
+Membership that ends or changes instead closes the User's sockets
+(`connectionEnds` in `ws.ts`, fed by `SpaceDirectory.membershipsChanged`),
+because rows already sent cannot be filtered back out. The client reconnects and
+resumes its shell from its last sequence, and a resume would send only new
+events, so removing a Membership also stamps `users.access_narrowed_through`
+with the current event sequence; a resume from at or before it gets a full
+snapshot instead (`CurrentViewer.lostAccessSince`). Every other stream re-checks
+visibility when the client resubscribes. The socket subscribes to Membership
+changes before it resolves its viewer, so a change in between is not missed, and
+a write that changes nothing publishes nothing.
+
+Granting or revoking an Installation permission keeps the socket: it wakes that
+User's open streams instead (`SpaceDirectory.subscribeAccessChanges`, one hub
+per User, only when a row changed). The shell stream restarts, the old round
+ending before a fresh authoritative snapshot and its live tail take over (web
+reloads its Spaces on it). Streams on one Thread (Thread, command output,
+worktree setup, terminals) go through `untilAccessLost` in
 [RpcSpaceAccess](../../apps/server/src/auth/RpcSpaceAccess.ts): it subscribes,
-then reruns the middleware's guard once and on each change, and ends the stream
-when the guard refuses. Granting and revoking Installation permissions wake it;
-removing Members (ticket 09) should too.
+reruns the middleware's guard once and on each change, and ends the stream when
+the guard refuses. A Membership change wakes the same hub before its socket
+closes.
 
 #### Who changes what
 
@@ -238,9 +299,10 @@ People join an Organization only through an Invitation
 ([InvitationService](../../apps/server/src/spaces/InvitationService.ts)), which
 carries the Role and is created, listed and revoked over HTTP
 (`/api/spaces/:spaceId/invitations`, `/api/invitations/revoke`). The policy's
-`invitation.create` and `invitation.manage` actions allow only the Owner for now,
-only in an Organization (nothing is shared from a Personal space), and creating
-needs a live one. The link is `<origin>/invite#token=…`; the token is 32 random
+`invitation.create` and `invitation.manage` actions allow the Owner and the
+Organization's Admins, only in an Organization (nothing is shared from a Personal
+space), and creating needs a live one. An Admin Invitation, to create or to
+revoke, also needs `admin.manage`, which is the Owner's alone. The link is `<origin>/invite#token=…`; the token is 32 random
 bytes shown once, and only its SHA-256 is stored, so looking it up leaks nothing
 through timing. The web app's startup pairing leaves `#token=` alone on `/invite`,
 as on `/reset`.
@@ -257,6 +319,42 @@ a taken sign-in name, leaves the link unspent. A signed-in User accepts through
 `/api/invitations/join`, which adds the Organization to their User instead; it
 refuses the Owner, an existing Member, and an Admin Invitation for an account
 that signs in with a password alone.
+
+### Memberships
+
+[MembershipService](../../apps/server/src/spaces/MembershipService.ts) lists,
+changes, removes and leaves over `/api/spaces/:spaceId/members…` and `/leave`.
+The policy decides each on a `MembershipResource` (the target's current Role and
+the one asked for): an Admin acts on Members and Guests only, and anything that
+starts or ends at Admin is the Owner's. The check and the write share one
+transaction, and the target's connections close after it commits. Removing and
+leaving delete only the Membership row; Projects and Threads keep their Space and
+creator. Members of an Organization see its member list; anyone else gets the
+same answer as for a missing Organization.
+
+An Admin Membership counts only for a User with a passkey or TOTP: until then
+`SpaceDirectory` gives them a Member's Role (`pendingAdmin` in the directory and
+member list), and the credentials row's `isAdmin`, which feeds
+`passwordRequiresTotp`, is false. A phished password therefore never yields Admin
+rights, and nothing enrolls TOTP from the sign-in form: a pending Admin adds it
+under Settings → Access with a step-up. Promoting a User who has a passkey and a
+password but no TOTP revokes their sessions in the same transaction, since any of
+them may have come from the password; their password then answers
+`SecondFactorMissingError`. Credential changes that start or end Admin rights call
+`AccessChanges` (provided by SpaceDirectory, so account code need not depend on
+Spaces) after they commit.
+
+Removing someone, or changing an Admin to another Role, revokes the pending
+Invitations they created in that Organization in the same transaction. A guest
+link records its creator and stops working once that User may no longer create
+guest links on its Thread (checked on every guest request), which covers removal
+and demotion without a write to the Thread.
+
+Reset links are the Owner's alone (`UserDirectory.issueResetLink`; `created_by`
+names the issuer), since a link takes the account over. Redeeming one registers a
+passkey or, for anyone but the Owner, sets a new password; either way it removes
+every other passkey, the password and TOTP and ends every session, in one
+transaction.
 
 ### Sign-in rules
 

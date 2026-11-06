@@ -30,12 +30,14 @@ import * as OwnerPresence from "./OwnerPresence.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import * as SessionStore from "./SessionStore.ts";
 import * as AuthHttp from "./http.ts";
+import * as AppSignInHttp from "./appSignInHttp.ts";
 import * as McpOAuth from "./McpOAuth.ts";
 import * as McpOAuthHttp from "./mcpOAuthHttp.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as SpacesHttp from "../spaces/http.ts";
 import * as InvitationService from "../spaces/InvitationService.ts";
+import * as MembershipService from "../spaces/MembershipService.ts";
 import * as InvitationsHttp from "../spaces/invitationsHttp.ts";
 import * as InstallationUsersHttp from "../spaces/installationUsersHttp.ts";
 import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
@@ -59,6 +61,7 @@ import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 
 class AuthTestApi extends HttpApi.make("environment")
   .add(EnvironmentHttpApi.groups.auth)
+  .add(EnvironmentHttpApi.groups.appSignIn)
   .add(EnvironmentHttpApi.groups.spaces)
   .add(EnvironmentHttpApi.groups.invitations)
   .add(EnvironmentHttpApi.groups.installationUsers)
@@ -144,6 +147,7 @@ const makeLayerServices = (config: { readonly publicUrl?: URL }) =>
     // Outside MCP clients: OAuth approval and the bearer check /mcp runs.
     Layer.mergeAll(
       InvitationService.layer,
+      MembershipService.layer,
       SpaceVisibility.layer,
       Layer.merge(McpOAuth.layer, McpOAuth.layerMcpClientAuthenticator).pipe(
         Layer.provide(ServerSettings.layerTest()),
@@ -153,7 +157,9 @@ const makeLayerServices = (config: { readonly publicUrl?: URL }) =>
           }),
         ),
       ),
-    ).pipe(Layer.provideMerge(Layer.merge(EnvironmentAuth.layer, SpaceDirectory.layer))),
+    ).pipe(
+      Layer.provideMerge(EnvironmentAuth.layer.pipe(Layer.provideMerge(SpaceDirectory.layer))),
+    ),
     layerProjects,
     layerThreads,
   ).pipe(
@@ -176,6 +182,7 @@ export const serveAuthHttpWith = Effect.fn(function* (config: { readonly publicU
   const services = yield* Layer.build(makeLayerServices(config));
   const routes = HttpApiBuilder.layer(AuthTestApi).pipe(
     Layer.provide(AuthHttp.layer),
+    Layer.provide(AppSignInHttp.layer),
     Layer.provide(SpacesHttp.layer),
     Layer.provide(InvitationsHttp.layer),
     Layer.provide(InstallationUsersHttp.layer),

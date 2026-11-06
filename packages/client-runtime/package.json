@@ -515,9 +515,17 @@
       "types": "./src/spaces/spaceDirectory.ts",
       "default": "./src/spaces/spaceDirectory.ts"
     },
+    "./spaces/space-selection": {
+      "types": "./src/spaces/spaceSelection.ts",
+      "default": "./src/spaces/spaceSelection.ts"
+    },
     "./spaces/role-permissions": {
       "types": "./src/spaces/rolePermissions.ts",
       "default": "./src/spaces/rolePermissions.ts"
+    },
+    "./spaces/memberships": {
+      "types": "./src/spaces/memberships.ts",
+      "default": "./src/spaces/memberships.ts"
     },
     "./spaces/invitations": {
       "types": "./src/spaces/invitations.ts",

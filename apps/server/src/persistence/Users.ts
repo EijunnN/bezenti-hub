@@ -324,8 +324,12 @@ const make = Effect.gen(function* () {
     execute: (userId) => sql`
       SELECT
         EXISTS (SELECT 1 FROM user_passkeys WHERE user_id = ${userId}) AS "hasPasskey",
+        -- An Admin Membership counts once the User has a passkey or an authenticator app.
         EXISTS (
           SELECT 1 FROM space_memberships WHERE user_id = ${userId} AND role = 'admin'
+        ) AND (
+          EXISTS (SELECT 1 FROM user_passkeys WHERE user_id = ${userId})
+          OR EXISTS (SELECT 1 FROM user_totp WHERE user_id = ${userId})
         ) AS "isAdmin",
         (SELECT password_hash FROM user_passwords WHERE user_id = ${userId}) AS "passwordHash",
         (SELECT secret_ciphertext FROM user_totp WHERE user_id = ${userId}) AS "totpSecretCiphertext"

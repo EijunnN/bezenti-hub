@@ -140,7 +140,11 @@ export interface ServerClientSessionRecord {
 }
 
 type ServerAuthGateState =
-  | { status: "authenticated" }
+  | {
+      status: "authenticated";
+      /** Signed in as someone the Owner invited, who skips the Owner's setup welcome. */
+      invitedUser?: true;
+    }
   | {
       status: "requires-auth";
       auth: AuthSessionState["auth"];
@@ -327,7 +331,9 @@ function isTransientBootstrapError(error: unknown): boolean {
 async function bootstrapServerAuth(urlCredential: string | null): Promise<ServerAuthGateState> {
   const currentSession = await fetchSessionState();
   if (currentSession.authenticated && !urlCredential) {
-    return { status: "authenticated" };
+    return currentSession.isOwner === false
+      ? { status: "authenticated", invitedUser: true }
+      : { status: "authenticated" };
   }
 
   const bootstrapCredential = urlCredential ?? getDesktopBootstrapCredential();

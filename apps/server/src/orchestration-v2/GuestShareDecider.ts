@@ -120,6 +120,9 @@ export function decideGuestShareCommand(input: {
         expiresAt: command.expiresAt,
         guestName: null,
         messages: [],
+        ...(command.createdByUserId === undefined
+          ? {}
+          : { createdByUserId: command.createdByUserId }),
       });
     }
     case "thread.guest-share.close":

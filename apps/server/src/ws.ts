@@ -1008,7 +1008,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
     const spaceVisibility = yield* SpaceVisibility.SpaceVisibility;
     // Read per batch, so a new Membership shows up in later deltas without resubscribing.
-    const { visibility: currentVisibility } = yield* SpaceVisibility.CurrentViewer;
+    const { visibility: currentVisibility, lostAccessSince } = yield* SpaceVisibility.CurrentViewer;
     const visibleProjects = (all: ReadonlyArray<OrchestrationProjectShell>) =>
       currentVisibility.pipe(
         Effect.map((visibility) =>
@@ -1263,7 +1263,10 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
         });
       });
       const highWater = yield* applicationEvents.latestApplicationSequence;
-      if (!(yield* canReplayPersistedRange(input.afterSequence, highWater, SHELL_RESUME_MAX_GAP))) {
+      if (
+        (yield* lostAccessSince(input.afterSequence)) ||
+        !(yield* canReplayPersistedRange(input.afterSequence, highWater, SHELL_RESUME_MAX_GAP))
+      ) {
         return yield* fromSnapshot;
       }
 
@@ -1313,6 +1316,26 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     );
   },
 );
+
+/**
+ * Subscribes now; the returned effect completes when the socket must close: its session is
+ * revoked or expires, or its User's Memberships change. Clients then reconnect and reload only
+ * what they may still see.
+ */
+export const connectionEnds = Effect.fn("ws.connectionEnds")(function* (
+  session: EnvironmentAuth.AuthenticatedSession,
+) {
+  const sessions = yield* SessionStore.SessionStore;
+  const spaces = yield* SpaceDirectory.SpaceDirectory;
+  const membershipChange =
+    session.userId === undefined
+      ? Effect.never
+      : yield* spaces.nextMembershipChange(session.userId);
+  return Effect.raceFirst(
+    sessions.awaitInvalidation(session.sessionId, session.proofKeyThumbprint),
+    membershipChange,
+  );
+});
 
 export const layerWsRpc = (
   serverBrowser: ServerBrowser.ServerBrowser["Service"],
@@ -3507,6 +3530,9 @@ export const layer = Layer.unwrap(
             failEnvironmentInternal("internal_error", error),
           ),
         );
+        // Subscribed before the connection reads what it may see, so no Membership change between
+        // the two is missed.
+        const ends = yield* connectionEnds(session);
         const reportProfiles = yield* serverBrowser.profileReporter;
         const rpcWebSocketHttpEffect = yield* Effect.gen(function* () {
           const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
@@ -3561,7 +3587,7 @@ export const layer = Layer.unwrap(
           () =>
             Effect.raceFirst(
               rpcWebSocketHttpEffect,
-              sessions.awaitInvalidation(session.sessionId, session.proofKeyThumbprint).pipe(
+              ends.pipe(
                 Effect.as(HttpServerResponse.empty()),
                 Effect.catchTags({
                   SessionCredentialVerificationError: (error) =>

@@ -61,7 +61,8 @@ function setup() {
   return stubGlobal("desktopBridge", {});
 }
 
-const remoteCard = () => page.getByRole("button", { name: /Remote link/ });
+// The desktop app adds a Hub by its address; a pairing code is the web app's.
+const hubCard = () => page.getByRole("button", { name: /^Hub/ });
 const sshCard = () => page.getByRole("button", { name: /^SSH/ });
 
 async function openDialogOnSsh() {
@@ -73,13 +74,13 @@ async function openDialogOnSsh() {
 async function expectDefaultModeAfterReopen() {
   await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
   await userEvent.click(page.getByRole("button", { name: "Add environment" }));
-  await expect.element(remoteCard()).toHaveAttribute("aria-pressed", "true");
+  await expect.element(hubCard()).toHaveAttribute("aria-pressed", "true");
   await expect.element(sshCard()).toHaveAttribute("aria-pressed", "false");
-  await expect.element(page.getByPlaceholder("backend.example.com")).toBeInTheDocument();
+  await expect.element(page.getByPlaceholder("hub.example.com")).toBeInTheDocument();
 }
 
 describe("AddEnvironmentDialog", () => {
-  it("reopens on Remote link after adding an SSH environment", async () => {
+  it("reopens on Hub after adding an SSH environment", async () => {
     using _bridge = setup();
     await using _screen = await render(<Owner />);
 
@@ -98,9 +99,8 @@ describe("AddEnvironmentDialog", () => {
     await using _screen = await render(<Owner />);
 
     await openDialogOnSsh();
-    await userEvent.click(remoteCard());
-    await userEvent.type(page.getByPlaceholder("backend.example.com"), "devbox.example.com");
-    await userEvent.type(page.getByPlaceholder("PAIRCODE"), "PAIRCODE");
+    await userEvent.click(hubCard());
+    await userEvent.type(page.getByPlaceholder("hub.example.com"), "hub.example.com");
     await userEvent.click(sshCard());
     await userEvent.type(page.getByPlaceholder("Search hosts or type devbox"), "devbox");
     await userEvent.type(page.getByPlaceholder("root"), "maria");
@@ -108,8 +108,7 @@ describe("AddEnvironmentDialog", () => {
     await userEvent.keyboard("{Escape}");
 
     await expectDefaultModeAfterReopen();
-    await expect.element(page.getByPlaceholder("backend.example.com")).toHaveValue("");
-    await expect.element(page.getByPlaceholder("PAIRCODE")).toHaveValue("");
+    await expect.element(page.getByPlaceholder("hub.example.com")).toHaveValue("");
     await userEvent.click(sshCard());
     await expect.element(page.getByPlaceholder("Search hosts or type devbox")).toHaveValue("");
     await expect.element(page.getByPlaceholder("root")).toHaveValue("");
@@ -127,6 +126,7 @@ describe("AddEnvironmentDialog", () => {
     await userEvent.keyboard("{Escape}");
     await expectDefaultModeAfterReopen();
     finishConnection(AsyncResult.failure(Cause.fail(new Error("dismissed SSH attempt"))));
+    await userEvent.click(sshCard());
     await expect
       .element(page.getByRole("dialog").getByRole("button", { name: "Add environment" }))
       .toBeEnabled();

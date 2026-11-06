@@ -146,6 +146,18 @@ export async function resetPasskey(token: string): Promise<void> {
   );
 }
 
+/** Sets a new password from a reset link, which is then spent, and signs this browser in. */
+export async function resetPassword(input: {
+  readonly token: string;
+  readonly loginName: string;
+  readonly password: string;
+}): Promise<void> {
+  await request(
+    (client) => client.auth.redeemResetLinkWithPassword({ payload: input }),
+    "This reset link expired or was already used. Ask the Owner for a new one.",
+  );
+}
+
 /** Signed in, or the TOTP challenge to answer with `signInWithTotp`. */
 export async function signInWithPassword(input: {
   readonly loginName: string;
@@ -285,7 +297,7 @@ export async function signInWithRecoveryCode(code: string): Promise<void> {
 }
 
 export async function signOut(): Promise<void> {
-  await request((client) => client.auth.signOut({}));
+  await request((client) => client.auth.signOut({ headers: {} }));
 }
 
 export function fetchInvitationPreview(token: string): Promise<InvitationPreview> {

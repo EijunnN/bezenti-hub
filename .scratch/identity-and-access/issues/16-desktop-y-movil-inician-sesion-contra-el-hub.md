@@ -4,10 +4,10 @@
 
 **Blocked by:** 04, 05
 
-**Status:** ready-for-agent
+**Status:** done
 
 Spec: ../spec.md
 
-- [ ] Desktop: añadir Hub por URL y completar el inicio de sesión en el navegador del sistema.
-- [ ] Móvil: lo mismo, más el selector de Space en la navegación.
-- [ ] Principal y Space actual compartidos en el client runtime para web y móvil.
+- [x] Desktop: añadir Hub por URL y completar el inicio de sesión en el navegador del sistema.
+- [x] Móvil: lo mismo, más el selector de Space en la navegación.
+- [x] Principal y Space actual compartidos en el client runtime para web y móvil.

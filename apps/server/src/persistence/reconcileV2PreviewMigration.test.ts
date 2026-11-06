@@ -68,7 +68,8 @@ describe("V2 preview upgrade", () => {
         [86, "SpaceInvitations"],
         [87, "CommandReceiptActor"],
         [88, "ScheduledTaskOwner"],
-        [89, "InstallationPermissions"],
+        [89, "UserAccessNarrowed"],
+        [90, "InstallationPermissions"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -180,7 +181,8 @@ describe("V2 preview upgrade", () => {
         [86, "SpaceInvitations"],
         [87, "CommandReceiptActor"],
         [88, "ScheduledTaskOwner"],
-        [89, "InstallationPermissions"],
+        [89, "UserAccessNarrowed"],
+        [90, "InstallationPermissions"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

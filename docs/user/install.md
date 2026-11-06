@@ -229,6 +229,8 @@ last 30 days from when they were issued. **Settings → Access → Your sessions
 browsers, devices and outside agents; revoke any of them there and its open
 connections close at once. The Owner sees and can revoke every User's sessions.
 
+The desktop and mobile apps sign in to a Hub through your browser; see
+[Sign in to a Hub](./remote-access.md#sign-in-to-a-hub-from-the-desktop-or-mobile-app).
 **Create link** in the same section is an optional shortcut: it makes a
 one-time link or QR code that signs another device in as you. A link or
 session created from the server's shell (`t3 pair`, `t3 auth session issue`)
@@ -289,6 +291,8 @@ What you can change depends on your Role in the organization:
 | Pin, settle or snooze someone else's |  yes  |   no   |      no      |
 | Permanently delete what is archived  |  yes  |   no   |      no      |
 | Create guest links                   |  yes  |   no   |      no      |
+| Invite as Member or Guest            |  yes  |   no   |      no      |
+| Change Roles or remove (not Admins)  |  yes  |   no   |      no      |
 
 On a teammate's thread the composer explains that only its creator can continue
 it, and that holds for the Owner too; start a new thread in the same project to
@@ -301,10 +305,11 @@ everywhere.
 ### Invite people
 
 To add someone to an organization, switch to it in the Space selector, choose
-**Invite people**, pick a Role (Member, Guest or Admin) and press **Create invite
-link**. Copy the link and send it over any chat app: it is shown only once, works
-once and expires after 7 days. The same dialog lists every invitation with its
-status (pending, accepted, expired or revoked) and has **Revoke** for pending ones.
+**Invite people**, pick a Role and press **Create invite link**. Admins invite
+Members and Guests; only the Owner invites Admins. Copy the link and send it over
+any chat app: it is shown only once, works once and expires after 7 days. The same
+dialog lists every invitation with its status (pending, accepted, expired or
+revoked) and has **Revoke** for pending ones.
 
 Opening the link shows the organization, the Role and who invited you, and tells
 you that the Owner can see your Personal space. Enter your name and create your
@@ -312,7 +317,33 @@ account with a passkey, or with a sign-in name and password. An Admin who picks 
 password also sets up an authenticator app on the same page. You land signed in,
 in that organization. If you are already signed in, **Accept invitation** adds
 the organization to your account instead. The mobile app cannot accept
-invitations yet; open the link in a browser.
+invitations yet; open the link in a browser. Someone you invite starts in your
+organization, not in the Owner's setup.
+
+### Manage members
+
+Switch to the organization and choose **Organization settings** in the Space
+selector. Everyone in it sees who belongs and with which Role. Admins change
+Members' and Guests' Roles and remove them; only the Owner names Admins, changes
+them or removes them. Whoever is removed or leaves loses access at once, on every
+open device, and what they created stays in the organization. To come back they
+need a new invitation. **Leave organization** at the bottom of the dialog lets
+anyone but the Owner leave.
+
+An Admin needs a passkey, or a password together with an authenticator app.
+Someone made Admin who signs in with only a password stays a Member until they
+add an app: the sidebar shows **Set up an authenticator app to become Admin**,
+which opens **Settings → Access**. Someone with a passkey is an Admin at once,
+signs in with the passkey, and their password works only once they add an app.
+Invitations an Admin made end when they are removed or are no longer an Admin,
+and so do the guest links they created.
+
+Someone who can't sign in anymore can ask the Owner for a reset link: **Reset
+link** next to their name in **Organization settings** creates one. It works once
+and expires after an hour. Opening it lets them register a new passkey, or choose
+**Set a new password instead**; either way their old passkeys, password and
+authenticator app stop working and every device is signed out. Anyone holding the
+link can take over the account, so send it only to them.
 
 ## Next steps
 

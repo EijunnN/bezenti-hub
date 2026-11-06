@@ -65,6 +65,7 @@ vi.mock("./devAutoConnect", () => ({
   devAutoConnectAttemptAtom: {},
 }));
 vi.mock("../../state/use-remote-environment-registry", () => ({
+  signInToHub: vi.fn(),
   setPendingConnectionError: (message: string | null) => {
     harness.pendingConnectionError = message;
   },
@@ -90,7 +91,7 @@ it("does not show another feature's error as a pairing failure", () => {
   act(() => root.render(<ConnectionsNewRouteScreen route={{ params: undefined }} />));
 
   expect(container.textContent).not.toContain("Could not send the message.");
-  expect(container.textContent).toContain("For machines on your local network or tailnet.");
+  expect(container.textContent).toContain("Enter your Hub's address.");
 
   act(() => root.unmount());
   // Leaving the form must not wipe an error that belongs to another screen.

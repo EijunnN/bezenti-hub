@@ -8,7 +8,15 @@ import * as Schema from "effect/Schema";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as HttpClient from "effect/http/HttpClient";
 
-import { bootstrapRemoteBearerSession } from "../authorization/remote.ts";
+import {
+  bootstrapRemoteBearerSession,
+  type RemoteEnvironmentAuthError,
+} from "../authorization/remote.ts";
+import {
+  exchangeAppSignInCode,
+  normalizeHubUrl,
+  signOutRemoteSession,
+} from "../authorization/appSignIn.ts";
 import { deriveWsBaseUrl, normalizeHttpBaseUrl } from "../environment/endpoint.ts";
 import { fetchRemoteEnvironmentDescriptor } from "../environment/descriptor.ts";
 import * as ClientCapabilities from "../platform/capabilities.ts";
@@ -41,6 +49,15 @@ export interface PairingConnectionInput {
   readonly expectedEnvironmentId?: EnvironmentId;
 }
 
+/** A Hub the User signed in to in the system browser; see `../authorization/appSignIn.ts`. */
+export interface AppSignInConnectionInput {
+  readonly hubUrl: string;
+  readonly code: string;
+  readonly codeVerifier: string;
+  readonly redirectUri: string;
+  readonly expectedEnvironmentId?: EnvironmentId;
+}
+
 export interface SshConnectionInput {
   readonly target: DesktopSshEnvironmentTarget;
   readonly label?: string;
@@ -61,6 +78,26 @@ export class ConnectionOnboarding extends Context.Service<
     ) => Effect.Effect<
       EnvironmentId,
       ConnectionAttemptError | Persistence.ConnectionPersistenceError
+    >;
+    /** Saves a Hub with the session its app sign-in code exchanges for. */
+    readonly registerAppSignIn: (
+      input: AppSignInConnectionInput,
+    ) => Effect.Effect<
+      EnvironmentId,
+      ConnectionAttemptError | Persistence.ConnectionPersistenceError
+    >;
+    /**
+     * Forgets an environment, first ending its saved bearer session on the server so removing a
+     * Hub signs this device out of it there. An unreachable server does not keep it saved.
+     */
+    readonly signOutAndRemove: (
+      environmentId: EnvironmentId,
+    ) => Effect.Effect<
+      void,
+      | ConnectionAttemptError
+      | Persistence.ConnectionPersistenceError
+      | EnvironmentRegistry.EnvironmentNotRegisteredError
+      | EnvironmentRegistry.PlatformEnvironmentRemovalError
     >;
     readonly registerSsh: (
       input: SshConnectionInput,
@@ -103,6 +140,54 @@ export const preparePairingRegistration = Effect.fn(
 )(function* (input: PairingConnectionInput) {
   const target = yield* resolvePairingTarget(input);
   const presentation = yield* ClientCapabilities.ClientPresentation;
+  return yield* prepareBearerRegistration({
+    httpBaseUrl: target.httpBaseUrl,
+    wsBaseUrl: target.wsBaseUrl,
+    expectedEnvironmentId: input.expectedEnvironmentId,
+    issue: bootstrapRemoteBearerSession({
+      httpBaseUrl: target.httpBaseUrl,
+      credential: target.credential,
+      clientMetadata: presentation.metadata,
+    }),
+  });
+});
+
+const prepareAppSignInRegistration = Effect.fn(
+  "clientRuntime.connection.onboarding.prepareAppSignInRegistration",
+)(function* (input: AppSignInConnectionInput) {
+  const httpBaseUrl = yield* Effect.try({
+    try: () => normalizeHubUrl(input.hubUrl),
+    catch: (cause) =>
+      new ConnectionBlockedError({
+        reason: "configuration",
+        detail: cause instanceof Error ? cause.message : "The Hub's address is invalid.",
+      }),
+  });
+  const presentation = yield* ClientCapabilities.ClientPresentation;
+  return yield* prepareBearerRegistration({
+    httpBaseUrl,
+    wsBaseUrl: deriveWsBaseUrl(httpBaseUrl),
+    expectedEnvironmentId: input.expectedEnvironmentId,
+    issue: exchangeAppSignInCode({
+      hubUrl: httpBaseUrl,
+      code: input.code,
+      codeVerifier: input.codeVerifier,
+      redirectUri: input.redirectUri,
+      clientMetadata: presentation.metadata,
+    }),
+  });
+});
+
+/** Checks the machine behind an address, then spends the one-time credential `issue` holds. */
+const prepareBearerRegistration = Effect.fn(
+  "clientRuntime.connection.onboarding.prepareBearerRegistration",
+)(function* <R>(input: {
+  readonly httpBaseUrl: string;
+  readonly wsBaseUrl: string;
+  readonly expectedEnvironmentId: EnvironmentId | undefined;
+  readonly issue: Effect.Effect<{ readonly access_token: string }, RemoteEnvironmentAuthError, R>;
+}) {
+  const target = { httpBaseUrl: input.httpBaseUrl, wsBaseUrl: input.wsBaseUrl };
   const descriptor = yield* fetchRemoteEnvironmentDescriptor({
     httpBaseUrl: target.httpBaseUrl,
   }).pipe(Effect.mapError(mapRemoteEnvironmentError));
@@ -137,11 +222,7 @@ export const preparePairingRegistration = Effect.fn(
   if (compatibilityError !== null) {
     return yield* compatibilityError;
   }
-  const access = yield* bootstrapRemoteBearerSession({
-    httpBaseUrl: target.httpBaseUrl,
-    credential: target.credential,
-    clientMetadata: presentation.metadata,
-  }).pipe(Effect.mapError(mapRemoteEnvironmentError));
+  const access = yield* input.issue.pipe(Effect.mapError(mapRemoteEnvironmentError));
 
   return new BearerConnectionRegistration({
     ...route,
@@ -165,6 +246,93 @@ const registerPairingConnection = Effect.fn(
     .setEnabled(registration.target.environmentId, true)
     .pipe(Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.void }));
   return registration.target.environmentId;
+});
+
+const registerAppSignInConnection = Effect.fn(
+  "clientRuntime.connection.onboarding.registerAppSignInConnection",
+)(function* (input: AppSignInConnectionInput) {
+  const registration = yield* prepareAppSignInRegistration(input);
+  const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+  const credentials = yield* ConnectionCredentialStore.ConnectionCredentialStore;
+  const signOut = (token: string) =>
+    signOutRemoteSession({
+      httpBaseUrl: registration.profile.httpBaseUrl,
+      bearerToken: token,
+      timeoutMs: 5_000,
+    }).pipe(
+      // Best effort: the session still expires on its own, and "Your sessions" can end it.
+      Effect.catch((error) =>
+        Effect.logWarning("Could not sign an unused app session out of the Hub.", { error }),
+      ),
+    );
+  const previous = yield* credentials
+    .get(registration.target.connectionId)
+    .pipe(Effect.orElseSucceed(() => Option.none()));
+  const knownAddressOnly = input.expectedEnvironmentId === undefined;
+  // The new session is live on the Hub; one this device does not keep must not stay so.
+  const registered = yield* registry
+    .register(registration, { knownAddressOnly })
+    .pipe(Effect.tapError(() => signOut(registration.credential.token)));
+  if (!registered) {
+    yield* signOut(registration.credential.token);
+    return registration.target.environmentId;
+  }
+  // Signing in again replaces this device's session there rather than adding another.
+  if (
+    Option.isSome(previous) &&
+    isBearerCredential(previous.value) &&
+    previous.value.token !== registration.credential.token
+  ) {
+    yield* signOut(previous.value.token);
+  }
+  yield* registry.setCompatibility(registration.target.environmentId, null);
+  yield* registry
+    .setEnabled(registration.target.environmentId, true)
+    .pipe(Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.void }));
+  return registration.target.environmentId;
+});
+
+const signOutAndRemoveConnection = Effect.fn(
+  "clientRuntime.connection.onboarding.signOutAndRemove",
+)(function* (environmentId: EnvironmentId) {
+  const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+  const credentials = yield* ConnectionCredentialStore.ConnectionCredentialStore;
+  const saved = (yield* SubscriptionRef.get(registry.entries)).get(environmentId);
+  const bearerRoutes =
+    saved === undefined
+      ? []
+      : connectionRoutes(saved).flatMap((route) => {
+          const profile = Option.getOrUndefined(route.profile);
+          return route.target._tag === "BearerConnectionTarget" &&
+            profile !== undefined &&
+            isBearerProfile(profile)
+            ? [{ connectionId: route.target.connectionId, httpBaseUrl: profile.httpBaseUrl }]
+            : [];
+        });
+  yield* Effect.forEach(
+    bearerRoutes,
+    (route) =>
+      credentials.get(route.connectionId).pipe(
+        Effect.flatMap((credential) =>
+          Option.isSome(credential) && isBearerCredential(credential.value)
+            ? signOutRemoteSession({
+                httpBaseUrl: route.httpBaseUrl,
+                bearerToken: credential.value.token,
+                timeoutMs: 5_000,
+              })
+            : Effect.void,
+        ),
+        // Best effort: the session still expires on its own, and "Your sessions" can end it.
+        Effect.catch((error) =>
+          Effect.logWarning("Could not sign out of the environment before removing it.", {
+            environmentId,
+            error,
+          }),
+        ),
+      ),
+    { concurrency: "unbounded", discard: true },
+  );
+  yield* registry.remove(environmentId);
 });
 
 const isBearerCredential = Schema.is(BearerConnectionCredential);
@@ -312,6 +480,23 @@ export const make = Effect.gen(function* () {
       },
       Effect.provideService(EnvironmentRegistry.EnvironmentRegistry, registry),
       Effect.provideService(ClientCapabilities.ClientPresentation, presentation),
+      Effect.provideService(HttpClient.HttpClient, httpClient),
+    ),
+    registerAppSignIn: Effect.fnUntraced(
+      function* (input) {
+        return yield* registerAppSignInConnection(input);
+      },
+      Effect.provideService(EnvironmentRegistry.EnvironmentRegistry, registry),
+      Effect.provideService(ConnectionCredentialStore.ConnectionCredentialStore, credentials),
+      Effect.provideService(ClientCapabilities.ClientPresentation, presentation),
+      Effect.provideService(HttpClient.HttpClient, httpClient),
+    ),
+    signOutAndRemove: Effect.fnUntraced(
+      function* (environmentId) {
+        return yield* signOutAndRemoveConnection(environmentId);
+      },
+      Effect.provideService(EnvironmentRegistry.EnvironmentRegistry, registry),
+      Effect.provideService(ConnectionCredentialStore.ConnectionCredentialStore, credentials),
       Effect.provideService(HttpClient.HttpClient, httpClient),
     ),
     registerSsh: Effect.fnUntraced(

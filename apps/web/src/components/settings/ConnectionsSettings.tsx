@@ -81,6 +81,7 @@ import { useUiStateStore } from "~/uiStateStore";
 import { resolveServerConfigVersionMismatch } from "~/versionSkew";
 import { authEnvironment } from "~/state/auth";
 import { environmentCatalog } from "~/connection/catalog";
+import { signOutAndRemoveEnvironment } from "~/connection/onboarding";
 import { readEnvironmentScope, useEnvironmentScope } from "~/state/session";
 import { useEnvironmentQuery } from "~/state/query";
 import {
@@ -128,7 +129,8 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
   const { environments } = useEnvironments();
   const primaryEnvironment = usePrimaryEnvironment();
   const peerLinkHosts = usePeerLinkHosts();
-  const removeEnvironment = useAtomCommand(environmentCatalog.remove, { reportFailure: false });
+  // Removing a saved environment also ends its session there (signing out of a Hub).
+  const removeEnvironment = useAtomCommand(signOutAndRemoveEnvironment, { reportFailure: false });
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
     reportFailure: false,
   });

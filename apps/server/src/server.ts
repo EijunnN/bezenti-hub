@@ -126,6 +126,7 @@ import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as DirectEndpoints from "./environment/DirectEndpoints.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
 import * as AuthHttp from "./auth/http.ts";
+import * as AppSignInHttp from "./auth/appSignInHttp.ts";
 import * as ReplayMarkers from "./auth/replayMarkers.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as CodexManagedTokenBroker from "./provider/CodexManagedTokenBroker.ts";
@@ -170,6 +171,7 @@ import { makePersistedServerRuntimeState } from "./serverRuntimeState.ts";
 import { acceptsHubConnection, loopbackUrlHostForAddress } from "./startupAccess.ts";
 import * as OrchestrationHttp from "./orchestration-v2/http.ts";
 import * as ProjectHttp from "./project/http.ts";
+import * as MembershipService from "./spaces/MembershipService.ts";
 import * as SpaceDirectory from "./spaces/SpaceDirectory.ts";
 import * as SpaceVisibility from "./spaces/SpaceVisibility.ts";
 import * as SpacesHttp from "./spaces/http.ts";
@@ -462,8 +464,12 @@ const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
 
 const layerServerEnvironment = ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer));
 
-const layerAuth = Layer.merge(InvitationService.layer, SpaceVisibility.layer).pipe(
-  Layer.provideMerge(Layer.merge(EnvironmentAuth.layer, SpaceDirectory.layer)),
+const layerAuth = Layer.mergeAll(
+  InvitationService.layer,
+  MembershipService.layer,
+  SpaceVisibility.layer,
+).pipe(
+  Layer.provideMerge(EnvironmentAuth.layer.pipe(Layer.provideMerge(SpaceDirectory.layer))),
   Layer.provideMerge(layerPersistence),
   Layer.provide(layerServerEnvironment),
   Layer.provide(ServerSecretStore.layer),
@@ -653,6 +659,7 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
       Layer.provide(AuthHttp.layer),
+      Layer.provide(AppSignInHttp.layer),
       Layer.provide(McpOAuthHttp.layer.pipe(Layer.provide(McpOAuth.layer))),
       Layer.provide(OrchestrationHttp.layer),
       Layer.provide(PullRequestHttp.layer),

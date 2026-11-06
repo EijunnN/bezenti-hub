@@ -31,6 +31,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
 import * as Users from "../persistence/Users.ts";
+import * as AccessChanges from "./AccessChanges.ts";
 import * as AccountCredentials from "./AccountCredentials.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import * as PairingGrantStore from "./PairingGrantStore.ts";
@@ -360,6 +361,34 @@ export class UserDirectory extends Context.Service<
       { readonly token: string; readonly expiresAt: DateTime.Utc; readonly user: AuthUser },
       NoOwnerError | UserDirectoryStorageError
     >;
+    /**
+     * The same link for an active User, issued by the Owner (`createdBy`); only the newest link
+     * works. None when the User is disabled or removed.
+     */
+    readonly issueResetLink: (input: {
+      readonly userId: UserId;
+      readonly createdBy: UserId;
+    }) => Effect.Effect<
+      Option.Option<{ readonly token: string; readonly expiresAt: DateTime.Utc }>,
+      UserDirectoryStorageError
+    >;
+    /**
+     * Where a User just made Admin stands. Without a passkey or authenticator app they are
+     * `pending` and keep a Member's rights until they add an app from a signed-in session. With a
+     * passkey but a password that needs no code, their sessions end (`signedOut`): any of them may
+     * have come from the password alone. Run it in the promotion's transaction.
+     */
+    readonly onPromotedToAdmin: (
+      userId: UserId,
+    ) => Effect.Effect<
+      { readonly pending: boolean; readonly signedOut: boolean },
+      UserDirectoryStorageError
+    >;
+    /**
+     * After a change to a User's credentials commits: their Admin rights may have started or
+     * ended, so cached principals are dropped and their connections close.
+     */
+    readonly credentialsChanged: (userId: UserId) => Effect.Effect<void>;
     readonly getResetLinkStatus: (
       token: string,
     ) => Effect.Effect<AuthResetLinkStatus, UserDirectoryStorageError>;
@@ -416,6 +445,21 @@ export class UserDirectory extends Context.Service<
       readonly token: string;
       readonly pending: PendingResetPasskey;
     }) => Effect.Effect<AuthUser, ResetLinkRejectedError | UserDirectoryStorageError>;
+    /**
+     * Spends a reset link on a new password instead of a passkey, for anyone but the Owner. Like
+     * the passkey way, every old credential and session ends. Run it in a transaction.
+     */
+    readonly redeemResetLinkWithPassword: (input: {
+      readonly token: string;
+      readonly loginName: string;
+      readonly password: string;
+    }) => Effect.Effect<
+      AuthUser,
+      | ResetLinkRejectedError
+      | AccountChangeRefusedError
+      | LoginNameTakenError
+      | UserDirectoryStorageError
+    >;
   }
 >()("t3/auth/UserDirectory") {}
 
@@ -1009,6 +1053,8 @@ const make = Effect.gen(function* () {
       .pipe(storage);
     yield* totpEnrollments.delete(input.enrollmentId);
     yield* signOutOtherSessions(actor);
+    // A pending Admin becomes one now; their open session keeps working.
+    if (Option.isSome(accessChanges)) yield* accessChanges.value.widened;
     return yield* accountOf(user);
   });
 
@@ -1050,7 +1096,7 @@ const make = Effect.gen(function* () {
       yield* recordFailure(keys);
       return yield* new PasswordRejectedError({});
     }
-    // A rule change (becoming an Admin) can leave a password-only account that now needs TOTP.
+    // A rule change (gaining a passkey as an Admin) can leave a password that now needs TOTP.
     // The password was right, so say why instead of counting a guess.
     if (passwordRequiresTotp(user, credentials)) {
       return yield* new SecondFactorMissingError({});
@@ -1092,6 +1138,30 @@ const make = Effect.gen(function* () {
   const hashResetToken = (token: string) =>
     digest.digestHex(Digest.sha256, new TextEncoder().encode(token));
 
+  const createResetLink = Effect.fn("UserDirectory.createResetLink")(function* (
+    userId: UserId,
+    createdBy: UserId | null,
+  ) {
+    const token = yield* randomBase64Url(32);
+    const now = DateTime.toUtc(yield* DateTime.now);
+    const expiresAt = DateTime.toUtc(
+      DateTime.add(now, { milliseconds: Duration.toMillis(RESET_LINK_TTL) }),
+    );
+    // Only the newest link works, so an older one left in a terminal's history is harmless.
+    yield* users.expireResetLinks({ userId, now }).pipe(storage);
+    yield* users
+      .createResetLink({
+        linkId: yield* random.uuidV4(),
+        userId,
+        tokenHash: yield* hashResetToken(token),
+        createdBy,
+        createdAt: now,
+        expiresAt,
+      })
+      .pipe(storage);
+    return { token, expiresAt };
+  });
+
   const issueOwnerResetLink: UserDirectory["Service"]["issueOwnerResetLink"] = Effect.fn(
     "UserDirectory.issueOwnerResetLink",
   )(function* () {
@@ -1099,26 +1169,37 @@ const make = Effect.gen(function* () {
     if (Option.isNone(owner)) {
       return yield* new NoOwnerError({});
     }
-    const token = yield* randomBase64Url(32);
-    const now = DateTime.toUtc(yield* DateTime.now);
-    const expiresAt = DateTime.toUtc(
-      DateTime.add(now, { milliseconds: Duration.toMillis(RESET_LINK_TTL) }),
-    );
-    // Only the newest link works, so an older one left in a terminal's history is harmless.
-    yield* users.expireResetLinks({ userId: owner.value.userId, now }).pipe(storage);
-    yield* users
-      .createResetLink({
-        linkId: yield* random.uuidV4(),
-        userId: owner.value.userId,
-        tokenHash: yield* hashResetToken(token),
-        // Issued from the Hub's shell, not by a signed-in User.
-        createdBy: null,
-        createdAt: now,
-        expiresAt,
-      })
-      .pipe(storage);
-    return { token, expiresAt, user: toAuthUser(owner.value) };
+    // Issued from the Hub's shell, not by a signed-in User.
+    const link = yield* createResetLink(owner.value.userId, null);
+    return { ...link, user: toAuthUser(owner.value) };
   });
+
+  const issueResetLink: UserDirectory["Service"]["issueResetLink"] = Effect.fn(
+    "UserDirectory.issueResetLink",
+  )(function* ({ userId, createdBy }) {
+    const user = yield* activeUser(userId);
+    if (Option.isNone(user)) return Option.none();
+    return Option.some(yield* createResetLink(userId, createdBy));
+  });
+
+  const onPromotedToAdmin: UserDirectory["Service"]["onPromotedToAdmin"] = Effect.fn(
+    "UserDirectory.onPromotedToAdmin",
+  )(function* (userId) {
+    const credentials = yield* users.getCredentials(userId).pipe(storage);
+    const hasApp = credentials.totpSecretCiphertext !== null;
+    if (!credentials.hasPasskey && !hasApp) return { pending: true, signedOut: false };
+    if (hasApp || credentials.passwordHash === null) return { pending: false, signedOut: false };
+    yield* sessions.revokeAllForUser(userId).pipe(storage);
+    yield* pairingLinks.revokeAllForUser(userId).pipe(storage);
+    return { pending: false, signedOut: true };
+  });
+
+  const accessChanges = yield* Effect.serviceOption(AccessChanges.AccessChanges);
+  const credentialsChanged = (userId: UserId) =>
+    Option.match(accessChanges, {
+      onNone: () => Effect.void,
+      onSome: (changes) => changes.changed([userId]),
+    });
 
   const liveResetLinkUser = Effect.fn("UserDirectory.liveResetLinkUser")(function* (token: string) {
     const userId = yield* users
@@ -1132,7 +1213,13 @@ const make = Effect.gen(function* () {
   )(function* (token) {
     const user = yield* liveResetLinkUser(token);
     return Option.isSome(user)
-      ? ({ status: "valid", displayName: user.value.displayName } as const)
+      ? ({
+          status: "valid",
+          displayName: user.value.displayName,
+          loginName: user.value.loginName,
+          // The Owner's account always needs a passkey or a password with a code.
+          passwordAllowed: !user.value.isOwner,
+        } as const)
       : ({ status: "invalid" } as const);
   });
 
@@ -1199,10 +1286,45 @@ const make = Effect.gen(function* () {
     yield* users
       .removePasskeysExcept({ userId: userId.value, credentialId: pending.passkey.credentialId })
       .pipe(storage);
+    yield* users.removePassword(userId.value).pipe(storage);
+    yield* users.removeTotp(userId.value).pipe(storage);
     yield* sessions.revokeAllForUser(userId.value).pipe(storage);
     yield* pairingLinks.revokeAllForUser(userId.value).pipe(storage);
     return toAuthUser(user.value);
   });
+
+  const redeemResetLinkWithPassword: UserDirectory["Service"]["redeemResetLinkWithPassword"] =
+    Effect.fn("UserDirectory.redeemResetLinkWithPassword")(function* (input) {
+      const live = yield* liveResetLinkUser(input.token);
+      if (Option.isNone(live)) return yield* new ResetLinkRejectedError({});
+      if (live.value.isOwner) {
+        return yield* new AccountChangeRefusedError({
+          reason: "The Owner's account resets with a passkey.",
+        });
+      }
+      const passwordHash = yield* hashPassword(input.password);
+      const now = DateTime.toUtc(yield* DateTime.now);
+      const tokenHash = yield* hashResetToken(input.token);
+      const userId = yield* users.consumeResetLink({ tokenHash, now }).pipe(storage);
+      if (Option.isNone(userId) || userId.value !== live.value.userId) {
+        return yield* new ResetLinkRejectedError({});
+      }
+      // The old credentials may be what someone else holds: all of them end.
+      yield* users.removePasskeysExcept({ userId: userId.value, credentialId: "" }).pipe(storage);
+      yield* users.removeTotp(userId.value).pipe(storage);
+      const saved = yield* users
+        .setPassword({
+          userId: userId.value,
+          loginName: normalizeLoginName(input.loginName),
+          passwordHash,
+          updatedAt: now,
+        })
+        .pipe(storage);
+      if (!saved) return yield* new LoginNameTakenError({});
+      yield* sessions.revokeAllForUser(userId.value).pipe(storage);
+      yield* pairingLinks.revokeAllForUser(userId.value).pipe(storage);
+      return toAuthUser(live.value);
+    });
 
   const startInviteeRegistration: UserDirectory["Service"]["startInviteeRegistration"] = Effect.fn(
     "UserDirectory.startInviteeRegistration",
@@ -1335,6 +1457,10 @@ const make = Effect.gen(function* () {
     prepareInviteePassword,
     createInvitedUser,
     hasStrongSignIn,
+    issueResetLink,
+    onPromotedToAdmin,
+    credentialsChanged,
+    redeemResetLinkWithPassword,
     hasOwner: Effect.fn("UserDirectory.hasOwner")(function () {
       return users.hasOwner().pipe(storage);
     }),

@@ -4,12 +4,12 @@
 
 **Blocked by:** 06, 08
 
-**Status:** ready-for-agent
+**Status:** done
 
 Spec: ../spec.md
 
-- [ ] Ajustes de Organization: Members, Roles e Invitations, con las reglas de Admin y Owner.
-- [ ] Salir y expulsar conservan el contenido en la Organization.
-- [ ] Ascender a Admin exige passkey o TOTP en el siguiente inicio de sesión.
-- [ ] Enlaces de reset para Members y Guests, de un solo uso y con caducidad.
-- [ ] Un Member o Guest recién invitado no ve el asistente de bienvenida del Owner («Connect your computers», «Add a computer»): su primera pantalla es su Organization. (Visto en la prueba real del ticket 07.)
+- [x] Ajustes de Organization: Members, Roles e Invitations, con las reglas de Admin y Owner.
+- [x] Salir y expulsar conservan el contenido en la Organization.
+- [x] Ascender a Admin exige passkey o TOTP en el siguiente inicio de sesión.
+- [x] Enlaces de reset para Members y Guests, de un solo uso y con caducidad.
+- [x] Un Member o Guest recién invitado no ve el asistente de bienvenida del Owner («Connect your computers», «Add a computer»): su primera pantalla es su Organization. (Visto en la prueba real del ticket 07.)

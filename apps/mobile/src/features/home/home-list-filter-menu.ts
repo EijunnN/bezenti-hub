@@ -1,8 +1,21 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, SpaceId } from "@t3tools/contracts";
 
 export interface HomeListFilterMenuEnvironment {
   readonly environmentId: EnvironmentId;
   readonly label: string;
+}
+
+/** A Hub's Spaces and the one new Projects and Threads go to there. */
+export interface HomeListSpaceChoice {
+  readonly environmentId: EnvironmentId;
+  readonly environmentLabel: string;
+  readonly spaces: ReadonlyArray<{ readonly id: SpaceId; readonly name: string }>;
+  readonly currentSpaceId: SpaceId | null;
+}
+
+/** "Space", or "Space · <Hub>" when several Hubs each have their own. */
+export function spaceMenuTitle(choice: HomeListSpaceChoice, choiceCount: number): string {
+  return choiceCount > 1 ? `Space · ${choice.environmentLabel}` : "Space";
 }
 
 export interface HomeListFilterMenuProject {
@@ -36,8 +49,26 @@ export function buildHomeListFilterMenu(props: {
   readonly selectedProjectKey: string | null;
   readonly onEnvironmentChange: (environmentId: EnvironmentId | null) => void;
   readonly onProjectChange: (projectKey: string | null) => void;
+  readonly spaceChoices?: ReadonlyArray<HomeListSpaceChoice>;
+  readonly onSpaceChange?: (environmentId: EnvironmentId, spaceId: SpaceId) => void;
 }): HomeListFilterMenu {
   const items: Array<HomeListFilterMenuAction | HomeListFilterMenuSubmenu> = [];
+
+  // The Space selector: where new Projects and Threads go on each Hub.
+  const spaceChoices = props.spaceChoices ?? [];
+  for (const choice of spaceChoices) {
+    items.push({
+      type: "submenu",
+      title: spaceMenuTitle(choice, spaceChoices.length),
+      items: choice.spaces.map((space) => ({
+        type: "action" as const,
+        title: space.name,
+        subtitle: "New projects and threads go here",
+        state: choice.currentSpaceId === space.id ? ("on" as const) : ("off" as const),
+        onPress: () => props.onSpaceChange?.(choice.environmentId, space.id),
+      })),
+    });
+  }
 
   items.push({
     type: "submenu",

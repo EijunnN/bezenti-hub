@@ -6,6 +6,36 @@ machine. That machine must stay running and reachable while you work.
 Other devices reach the host over your local network, Tailscale, another VPN or
 proxy you run, or SSH. This fork has no hosted tunnel.
 
+## Sign in to a Hub from the desktop or mobile app
+
+Once a Hub has accounts, the desktop and mobile apps join it by its address and
+you sign in in your browser, with your passkey or your password (and code).
+No pairing code is needed.
+
+- **Desktop:** open **Settings → Environments → Add environment**, choose
+  **Hub**, enter its address (for example `hub.example.com`) and select **Sign
+  in in browser**. Your default browser opens the Hub's sign-in page; after you
+  sign in, select **Continue** and return to T3 Code.
+- **Mobile:** open **Settings → Environments → Add**, enter the Hub's address
+  and tap the checkmark. The Hub's sign-in page opens inside the app; sign in,
+  tap **Continue**, and the app takes over.
+
+The app acts as you, with your access, and appears in **Settings → Access →
+Your sessions** on the Hub, where you can revoke it. Removing the Hub from the
+app also signs that device out of it. On mobile, the thread list's filter menu
+has a **Space** section for each Hub: new projects and threads you start there
+go to that Space. A thread someone else started is read-only: you can read it,
+but only its creator can send messages or answer its questions.
+
+The browser hands the app a one-time code, never a session: on desktop it goes
+to a port on this computer that the app opens for that sign-in only, and on
+mobile to the T3 Code app's own link (`t3code://auth/callback`). The code works
+once, for one minute, and only together with a secret that never left the app.
+Only continue on a sign-in page you just opened from the app.
+
+Pasting a pairing link into the address field, or scanning a pairing QR code on
+mobile, still pairs as described below.
+
 ## Pair over a LAN or private network
 
 Use direct pairing when the other device can reach the host's network address.

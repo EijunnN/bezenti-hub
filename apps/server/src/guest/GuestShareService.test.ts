@@ -16,6 +16,7 @@ import {
   RunId,
   ThreadId,
   TurnItemId,
+  UserId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -37,6 +38,7 @@ import {
   resolveAttachmentPathById,
   sweepStalePendingAttachments,
 } from "../attachmentStore.ts";
+import * as CommandActor from "../auth/CommandActor.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { PublicHubUrl } from "../environment/PublicHubUrl.ts";
 import * as ServerConfig from "../config.ts";
@@ -53,6 +55,7 @@ import * as ResourceCleanupService from "../orchestration-v2/ResourceCleanupServ
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as GuestShareService from "./GuestShareService.ts";
 
 const instanceId = ProviderInstanceId.make("codex");
@@ -112,19 +115,21 @@ const layerCleanup = Layer.effect(
   Layer.provide(layerConfig),
   Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
 );
-const layerTest = GuestShareService.layer.pipe(
-  Layer.provideMerge(
-    CommandOutputHub.layer.pipe(
-      Layer.provideMerge(layerOrchestration.pipe(Layer.provide(layerCleanup))),
+const withServices = <E, R>(guestShares: Layer.Layer<GuestShareService.GuestShareService, E, R>) =>
+  guestShares.pipe(
+    Layer.provideMerge(
+      CommandOutputHub.layer.pipe(
+        Layer.provideMerge(layerOrchestration.pipe(Layer.provide(layerCleanup))),
+      ),
     ),
-  ),
-  Layer.provide(layerProviders),
-  Layer.provideMerge(ServerSettings.layerTest({ guestSharingEnabled: true })),
-  Layer.provide(layerPublicHubUrl),
-  Layer.provide(ServerSecretStore.layer),
-  Layer.provideMerge(layerConfig),
-  Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
-);
+    Layer.provide(layerProviders),
+    Layer.provideMerge(ServerSettings.layerTest({ guestSharingEnabled: true })),
+    Layer.provide(layerPublicHubUrl),
+    Layer.provide(ServerSecretStore.layer),
+    Layer.provideMerge(layerConfig),
+    Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+  );
+const layerTest = withServices(GuestShareService.layer);
 
 const threadId = ThreadId.make("thread:guest-share-service");
 
@@ -178,6 +183,40 @@ it.effect("spends an invite once and ends the guest stream when the owner stops 
     assert.isTrue(Exit.isFailure(yield* Effect.exit(guestShares.stream(session))));
     assert.isTrue(Exit.isFailure(yield* Effect.exit(guestShares.check(session))));
   }).pipe(Effect.provide(layerTest)),
+);
+
+// Whether the link's creator may still share the thread (an Admin of its Organization).
+const creatorMayShare = Ref.makeUnsafe(true);
+const layerWithSpaces = withServices(
+  Layer.provide(
+    GuestShareService.layer,
+    Layer.mock(SpaceDirectory.SpaceDirectory)({
+      authorizeItem: (_userId, action) =>
+        Ref.get(creatorMayShare).pipe(
+          Effect.flatMap((ok) =>
+            ok
+              ? Effect.void
+              : Effect.fail(
+                  new SpaceDirectory.SpaceAccessDeniedError({ action, reason: "not-a-member" }),
+                ),
+          ),
+        ),
+    }),
+  ),
+);
+
+it.effect("a guest link stops working once its creator may no longer share the thread", () =>
+  Effect.gen(function* () {
+    yield* Ref.set(creatorMayShare, true);
+    const { guestShares, credential } = yield* shareThread.pipe(
+      CommandActor.actAs(UserId.make("ada")),
+    );
+    const { token: session } = yield* guestShares.redeem({ credential, name: "Sam" });
+    assert.isTrue(Exit.isSuccess(yield* Effect.exit(guestShares.check(session))));
+    // Ada was removed from the Organization, or is no longer its Admin.
+    yield* Ref.set(creatorMayShare, false);
+    assert.isTrue(Exit.isFailure(yield* Effect.exit(guestShares.check(session))));
+  }).pipe(Effect.provide(layerWithSpaces)),
 );
 
 it.effect("streams the owner's thread events after the share and a snapshot", () =>

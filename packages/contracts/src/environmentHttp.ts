@@ -32,6 +32,9 @@ import {
   AuthRevokePairingLinkInput,
   AuthEnvironmentScope,
   AuthTokenExchangeRequest,
+  AuthAppSignInApproveRequest,
+  AuthAppSignInApproveResult,
+  AuthAppSignInTokenRequest,
   AuthSessionState,
   AuthWebSocketTicketParams,
   AuthWebSocketTicketResult,
@@ -51,6 +54,7 @@ import {
   AuthPasswordSignInRequest,
   AuthPasswordSignInResult,
   AuthRecoveryCodeSignInRequest,
+  AuthResetLinkPasswordRequest,
   AuthResetLinkRedeemRequest,
   AuthResetLinkRequest,
   AuthResetLinkStatus,
@@ -61,9 +65,14 @@ import {
   AuthTotpSignInRequest,
 } from "./userAccounts.ts";
 import {
+  ChangeMemberRoleRequest,
+  ChangeMemberRoleResult,
   CreateOrganizationRequest,
   InstallationUser,
   InstallationUserList,
+  MemberList,
+  MemberRequest,
+  MemberResetLink,
   SetInstallationPermissionRequest,
   SpaceDirectoryView,
   SpaceSummary,
@@ -132,6 +141,10 @@ export const EnvironmentRequestInvalidReason = Schema.Literals([
   "invalid_origin",
   // A browser session asked for over plain HTTP from off the server's machine.
   "insecure_transport",
+  // An app sign-in names a redirect other than a loopback port or the mobile app's callback.
+  "invalid_redirect_uri",
+  // An app sign-in without a valid S256 PKCE challenge or state.
+  "invalid_code_challenge",
 ]);
 export type EnvironmentRequestInvalidReason = typeof EnvironmentRequestInvalidReason.Type;
 
@@ -601,6 +614,8 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
   )
   .add(
     HttpApiEndpoint.post("signOut", "/api/auth/sign-out", {
+      // A browser signs out with its cookie; an app with its bearer or DPoP token.
+      headers: OptionalBearerHeaders,
       success: AuthSignOutResult,
       error: [EnvironmentInternalError],
     }),
@@ -685,6 +700,37 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       payload: AuthResetLinkRedeemRequest,
       success: AuthBrowserSessionResult,
       error: EnvironmentUserSignInErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("redeemResetLinkWithPassword", "/api/auth/reset/password", {
+      payload: AuthResetLinkPasswordRequest,
+      success: AuthBrowserSessionResult,
+      error: [
+        ...EnvironmentUserSignInErrors,
+        // The sign-in name belongs to another User.
+        EnvironmentHttpConflictError,
+        // The Owner's account resets with a passkey.
+        EnvironmentHttpForbiddenError,
+      ],
+    }),
+  ) {}
+
+// Desktop and mobile apps sign in through the system browser; see `@t3tools/shared/appSignIn`.
+class EnvironmentAppSignInHttpApi extends HttpApiGroup.make("appSignIn")
+  .add(
+    HttpApiEndpoint.post("approve", "/api/auth/app-sign-in/approve", {
+      payload: AuthAppSignInApproveRequest,
+      success: AuthAppSignInApproveResult,
+      error: EnvironmentUserSignInErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("token", "/api/auth/app-sign-in/token", {
+      headers: OptionalDpopProofHeaders,
+      payload: AuthAppSignInTokenRequest,
+      success: AuthAccessTokenResult,
+      error: EnvironmentTokenExchangeErrors,
     }),
   ) {}
 
@@ -815,6 +861,8 @@ const EnvironmentSpaceErrors = [
   EnvironmentInternalError,
 ] as const;
 
+const SpaceParams = Schema.Struct({ spaceId: SpaceId });
+
 class EnvironmentSpacesHttpApi extends HttpApiGroup.make("spaces")
   .add(
     HttpApiEndpoint.get("list", "/api/spaces", {
@@ -828,6 +876,50 @@ class EnvironmentSpacesHttpApi extends HttpApiGroup.make("spaces")
       headers: OptionalBearerHeaders,
       payload: CreateOrganizationRequest,
       success: SpaceSummary,
+      error: EnvironmentSpaceErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  // An Organization the viewer cannot see answers exactly like one that does not exist.
+  .add(
+    HttpApiEndpoint.get("members", "/api/spaces/:spaceId/members", {
+      headers: OptionalBearerHeaders,
+      params: SpaceParams,
+      success: MemberList,
+      error: EnvironmentSpaceErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("changeMemberRole", "/api/spaces/:spaceId/members/role", {
+      headers: OptionalBearerHeaders,
+      params: SpaceParams,
+      payload: ChangeMemberRoleRequest,
+      success: ChangeMemberRoleResult,
+      error: EnvironmentSpaceErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("removeMember", "/api/spaces/:spaceId/members/remove", {
+      headers: OptionalBearerHeaders,
+      params: SpaceParams,
+      payload: MemberRequest,
+      success: MemberList,
+      error: EnvironmentSpaceErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("issueMemberResetLink", "/api/spaces/:spaceId/members/reset-link", {
+      headers: OptionalBearerHeaders,
+      params: SpaceParams,
+      payload: MemberRequest,
+      success: MemberResetLink,
+      error: EnvironmentSpaceErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("leave", "/api/spaces/:spaceId/leave", {
+      headers: OptionalBearerHeaders,
+      params: SpaceParams,
+      success: SpaceDirectoryView,
       error: EnvironmentSpaceErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
@@ -994,6 +1086,7 @@ class EnvironmentWebhooksHttpApi extends HttpApiGroup.make("webhooks")
 export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentMetadataHttpApi)
   .add(EnvironmentAuthHttpApi)
+  .add(EnvironmentAppSignInHttpApi)
   .add(EnvironmentMcpOAuthHttpApi)
   .add(EnvironmentOrchestrationHttpApi)
   .add(EnvironmentPullRequestsHttpApi)

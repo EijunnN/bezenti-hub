@@ -3393,6 +3393,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
     shareId: GuestShareId,
     host: TrimmedNonEmptyString,
     expiresAt: IsoDateTime,
+    createdByUserId: Schema.optional(UserId),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.guest-share.redeem"),

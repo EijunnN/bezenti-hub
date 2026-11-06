@@ -226,7 +226,14 @@ export const AuthResetLinkRequest = Schema.Struct({ token: TrimmedNonEmptyString
 export type AuthResetLinkRequest = typeof AuthResetLinkRequest.Type;
 
 export const AuthResetLinkStatus = Schema.Union([
-  Schema.Struct({ status: Schema.Literal("valid"), displayName: Schema.String }),
+  Schema.Struct({
+    status: Schema.Literal("valid"),
+    displayName: Schema.String,
+    /** The account's sign-in name, if it has one, to keep when setting a new password. */
+    loginName: Schema.optional(Schema.NullOr(Schema.String)),
+    /** Whether the link may set a password instead of a passkey (not for the Owner). */
+    passwordAllowed: Schema.optional(Schema.Boolean),
+  }),
   Schema.Struct({ status: Schema.Literal("invalid") }),
 ]);
 export type AuthResetLinkStatus = typeof AuthResetLinkStatus.Type;
@@ -237,3 +244,10 @@ export const AuthResetLinkRedeemRequest = Schema.Struct({
   response: AuthPasskeyRegistrationResponse,
 });
 export type AuthResetLinkRedeemRequest = typeof AuthResetLinkRedeemRequest.Type;
+
+export const AuthResetLinkPasswordRequest = Schema.Struct({
+  token: TrimmedNonEmptyString,
+  loginName: AuthLoginName,
+  password: AuthPassword,
+});
+export type AuthResetLinkPasswordRequest = typeof AuthResetLinkPasswordRequest.Type;
