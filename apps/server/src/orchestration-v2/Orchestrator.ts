@@ -19,6 +19,7 @@ import {
   legacyThreadPullRequestKey,
 } from "../sourceControl/threadPullRequests.ts";
 import {
+  HUB_MACHINE_ENVIRONMENT_ID,
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type ChatAttachment,
   CommandId,
@@ -2866,6 +2867,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(command.linkOrigin === undefined ? {} : { linkOrigin: command.linkOrigin }),
       ...(command.spaceId === undefined ? {} : { spaceId: command.spaceId }),
       ...(command.ownerUserId === undefined ? {} : { ownerUserId: command.ownerUserId }),
+      // Absent means the Hub machine; the transport checked any other choice before dispatch.
+      ...(command.activeEnvironmentId === undefined ||
+      command.activeEnvironmentId === HUB_MACHINE_ENVIRONMENT_ID
+        ? {}
+        : { activeEnvironmentId: command.activeEnvironmentId }),
       // Only stamped work names a remote parent, so a client cannot claim one.
       ...(command.linkOrigin === undefined || command.delegatedFrom === undefined
         ? {}

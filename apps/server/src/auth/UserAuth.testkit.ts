@@ -14,6 +14,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import type * as Scope from "effect/Scope";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Etag from "effect/http/Etag";
 import * as HttpPlatform from "effect/http/HttpPlatform";
@@ -195,16 +196,30 @@ const makeLayerServices = (config: { readonly publicUrl?: URL }) =>
     Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
 
+/** What the testkit Hub's services provide. */
+export type HubServices = Layer.Success<ReturnType<typeof makeLayerServices>>;
+
 /**
  * A Hub over HTTP routes, optionally published on `publicUrl`. With `listen`, the same routes and
  * the Environment socket also answer on a real loopback port (`url`), for WebSocket clients.
  */
 export const serveAuthHttpWith = Effect.fn(function* (
-  config: { readonly publicUrl?: URL; readonly listen?: boolean } = {},
+  config: {
+    readonly publicUrl?: URL;
+    readonly listen?: boolean;
+    /**
+     * More services over the same database, such as a running orchestration (the «Hub con
+     * Environments» testkit); the routes and the Environment socket see them too.
+     */
+    readonly extend?: (
+      services: Context.Context<HubServices>,
+    ) => Effect.Effect<Context.Context<HubServices>, never, Scope.Scope>;
+  } = {},
 ) {
-  const services = yield* Layer.build(
+  const base = yield* Layer.build(
     makeLayerServices(config.publicUrl === undefined ? {} : { publicUrl: config.publicUrl }),
   );
+  const services = config.extend === undefined ? base : yield* config.extend(base);
   const routes = HttpApiBuilder.layer(AuthTestApi).pipe(
     Layer.provide(AuthHttp.layer),
     Layer.provide(AppSignInHttp.layer),

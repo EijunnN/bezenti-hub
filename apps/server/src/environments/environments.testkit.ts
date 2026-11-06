@@ -25,7 +25,7 @@ const sha256 = (value: string) =>
   );
 
 /** A Hub with its Owner signed in with a passkey; `listen` also serves a real port. */
-export const hubWithOwner = (options: { readonly listen?: boolean } = {}) =>
+export const hubWithOwner = (options: Parameters<typeof serveAuthHttpWith>[0] = {}) =>
   Effect.gen(function* () {
     const server = yield* serveAuthHttpWith(options);
     const authenticator = yield* makeAuthenticator();

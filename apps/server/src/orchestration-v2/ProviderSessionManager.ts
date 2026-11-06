@@ -53,6 +53,7 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_IDLE_PIN_MS = 4 * 60 * 60 * 1000;
@@ -335,6 +336,16 @@ export const layerWithOptions = (
     Effect.gen(function* () {
       const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
       const fileSystem = yield* FileSystem.FileSystem;
+      // A Thread on another Environment has its workspace there; that machine checks it.
+      const environments = yield* Effect.serviceOption(
+        EnvironmentExecutor.EnvironmentExecutorRegistry,
+      );
+      const runsHere = (threadId: ThreadId) =>
+        Option.isNone(environments)
+          ? Effect.succeed(true)
+          : environments.value
+              .activeEnvironment(threadId)
+              .pipe(Effect.map((id) => id === environments.value.hubMachineEnvironmentId));
       const mcpSessionRegistry = yield* McpSessionRegistry.McpSessionRegistry;
       const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
       /** Unreadable settings must preserve explicit browser-access opt-outs. */
@@ -2133,7 +2144,7 @@ export const layerWithOptions = (
             input.providerSessionId,
             Effect.gen(function* () {
               const cwd = input.runtimePolicy.cwd;
-              if (cwd !== null) {
+              if (cwd !== null && (yield* runsHere(input.threadId))) {
                 const workspaceIsDirectory = yield* fileSystem.stat(cwd).pipe(
                   Effect.map((stat) => stat.type === "Directory"),
                   Effect.catch((error) => Effect.succeed(error.reason._tag !== "NotFound")),

@@ -50,6 +50,8 @@ const hello = (
   hostResources,
   disk: { totalBytes: 500_000_000_000, availableBytes: 100_000_000_000 },
   sessions: [],
+  workspaceRoot: "/home/ada/.t3/projects",
+  orchestration: { providers: [], unavailableProviders: [] },
 });
 
 /** The machine's side of one connection; `welcomed` completes when the Hub accepts it. */

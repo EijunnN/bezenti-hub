@@ -135,6 +135,7 @@ const makeLayer = (
         }),
         layerInstances,
         layerProjects,
+        Layer.succeed(EnvironmentExecutor.ActiveEnvironmentResolver, resolver),
       ),
     ),
   );
@@ -159,12 +160,15 @@ const resolver = {
           : HUB_MACHINE_ENVIRONMENT_ID,
     ),
 };
-const withResolver = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-  Effect.provideService(effect, EnvironmentExecutor.ActiveEnvironmentResolver, resolver);
+// The registry reads the resolver it was built with; calls need nothing more.
+const withResolver = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect;
 const onThread =
   (threadId: ThreadId) =>
   <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-    withResolver(EnvironmentExecutor.onActiveEnvironment(threadId)(effect));
+    Effect.gen(function* () {
+      const registry = yield* EnvironmentExecutor.EnvironmentExecutorRegistry;
+      return yield* registry.onActiveEnvironment(threadId)(effect);
+    });
 
 /** Registers a laptop executor whose adapter, policy and capabilities differ from the Hub's. */
 const registerLaptop = (laptopAdapter: ProviderAdapter.ProviderAdapterV2["Service"]) =>

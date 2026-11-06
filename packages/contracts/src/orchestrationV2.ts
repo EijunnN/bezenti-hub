@@ -464,6 +464,11 @@ export const OrchestrationV2AppThread = Schema.Struct({
   /** Absent for Threads from before Spaces, which belong to the Owner's Personal space. */
   spaceId: Schema.optional(SpaceId),
   ownerUserId: Schema.optional(UserId),
+  /**
+   * The Environment the Thread runs on. Absent on Threads from before Environments, which run on
+   * the Hub machine; null when its Environment was removed and it needs another one.
+   */
+  activeEnvironmentId: Schema.optional(Schema.NullOr(EnvironmentId)),
   lineage: OrchestrationV2AppThreadLineage,
   forkedFrom: Schema.NullOr(
     Schema.Union([
@@ -2096,6 +2101,7 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
   delegatedFrom: Schema.optional(OrchestrationV2DelegatedFrom),
   spaceId: Schema.optional(SpaceId),
   ownerUserId: Schema.optional(UserId),
+  activeEnvironmentId: Schema.optional(Schema.NullOr(EnvironmentId)),
   latestRunId: Schema.NullOr(RunId),
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
@@ -2927,6 +2933,8 @@ export const OrchestrationV2Command = Schema.Union([
     spaceId: Schema.optional(SpaceId),
     /** Only the server sets this, from the creator's session. */
     ownerUserId: Schema.optional(UserId),
+    /** Where the Thread runs. The Hub checks a requested one and picks one when absent. */
+    activeEnvironmentId: Schema.optional(EnvironmentId),
     /** Only the server sets this; a client's thread.create never carries one. */
     linkOrigin: Schema.optional(OrchestrationV2LinkOrigin),
     /** Only the server sets this, with `linkOrigin`, for a linked environment's delegated task. */
@@ -3655,6 +3663,8 @@ export const OrchestrationV2ThreadLaunchInput = Schema.Struct({
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   workspaceStrategy: OrchestrationV2ThreadLaunchWorkspaceStrategy,
+  /** The Environment the User chose; the Hub checks it, and picks one when absent. */
+  environmentId: Schema.optional(EnvironmentId),
   initialMessage: Schema.optional(
     Schema.Struct({
       messageId: Schema.optional(MessageId),

@@ -1,4 +1,4 @@
-import { CommandId } from "@t3tools/contracts";
+import { CommandId, type EnvironmentId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -8,6 +8,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 
 import {
@@ -95,6 +96,9 @@ export const layerExecutor: Layer.Layer<
       yield* ThreadTitleRegenerationService.ThreadTitleRegenerationService;
     const threads = yield* ThreadManagementService.ThreadManagementService;
     const settings = yield* ServerSettings.ServerSettingsService;
+    const environments = yield* Effect.serviceOption(
+      EnvironmentExecutor.EnvironmentExecutorRegistry,
+    );
     const executeRequest = (
       effect: EffectOutbox.OrchestrationEffectV2,
       options?: { readonly willRetry: boolean },
@@ -574,12 +578,17 @@ export const layerExecutor: Layer.Layer<
     };
     return OrchestrationEffectExecutorV2.of({
       execute: Effect.fn("OrchestrationEffectExecutorV2.execute")(function (effect, options) {
-        // What needs the Thread's machine runs against its Active environment.
-        return EffectOutbox.isEnvironmentBoundEffect(effect.request)
-          ? EnvironmentExecutor.onActiveEnvironment(effect.threadId)(
-              executeRequest(effect, options),
-            )
-          : executeRequest(effect, options);
+        // What needs the Thread's machine runs against its Active environment, and its calls to
+        // a joined Environment carry this attempt's idempotency key.
+        const execution = executeRequest(effect, options).pipe(
+          EnvironmentExecutor.withEffectAttempt({
+            effectId: effect.id,
+            attempt: effect.attemptCount,
+          }),
+        );
+        return EffectOutbox.isEnvironmentBoundEffect(effect.request) && Option.isSome(environments)
+          ? environments.value.onActiveEnvironment(effect.threadId)(execution)
+          : execution;
       }),
     });
   }),
@@ -652,6 +661,21 @@ export const layerWithOptions = (
     Effect.gen(function* () {
       const outbox = yield* EffectOutbox.EffectOutboxV2;
       const executor = yield* OrchestrationEffectExecutorV2;
+      // Work for a Thread whose Environment is not connected waits unclaimed, spending no attempt;
+      // a connecting Environment wakes the worker to look again.
+      const environments = yield* Effect.serviceOption(
+        EnvironmentExecutor.EnvironmentExecutorRegistry,
+      );
+      const availableEnvironments: Effect.Effect<ReadonlyArray<EnvironmentId> | undefined> =
+        Option.isSome(environments) ? environments.value.list : Effect.succeed(undefined);
+      if (Option.isSome(environments)) {
+        const changes = yield* environments.value.changes;
+        yield* PubSub.take(changes).pipe(
+          Effect.andThen(outbox.notifyAvailable()),
+          Effect.forever,
+          Effect.forkScoped,
+        );
+      }
       const workerId = options.workerId ?? `orchestration-v2:${process.pid}`;
       const maxAttempts = Math.max(1, options.maxAttempts ?? 5);
       const wasCancelled = (effectId: string) =>
@@ -747,8 +771,13 @@ export const layerWithOptions = (
       // The worker probes for work repeatedly, including when the outbox is empty.
       const runOnce = Effect.fnUntraced(
         function* (excludeRestartContinuations = false) {
+          const availableEnvironmentIds = yield* availableEnvironments;
           const claimExit = yield* Effect.exit(
-            outbox.claimNext({ workerId, excludeRestartContinuations }),
+            outbox.claimNext({
+              workerId,
+              excludeRestartContinuations,
+              ...(availableEnvironmentIds === undefined ? {} : { availableEnvironmentIds }),
+            }),
           );
           yield* increment(orchestrationEffectClaimsTotal, {
             result: Exit.isFailure(claimExit)
@@ -862,7 +891,12 @@ export const layerWithOptions = (
         awaitWork: outbox.awaitAvailable,
         runOnce: runOnce(),
         runRecoveryOnce: runOnce(true),
-        nextClaimableAt: outbox.nextClaimableAt.pipe(
+        nextClaimableAt: availableEnvironments.pipe(
+          Effect.flatMap((availableEnvironmentIds) =>
+            availableEnvironmentIds === undefined
+              ? outbox.nextClaimableAt
+              : outbox.nextClaimableAtFor(availableEnvironmentIds),
+          ),
           Effect.mapError(
             (cause) =>
               new OrchestrationEffectWorkerError({

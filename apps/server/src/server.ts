@@ -918,15 +918,18 @@ const layerMakeServer = Layer.unwrap(
       ).pipe(Effect.asVoid),
     }).pipe(Layer.provideMerge(layerRuntimeDependencies), Layer.provide(layerLauncher));
 
-    const layerRoutes = HttpRouter.serve(
+    const layerHubRoutes = layerMakeRoutes.pipe(Layer.provide(layerLauncher));
+    // Joined mode serves fewer routes over services the runtime below also provides (its agent
+    // uses the executor registry and MCP sessions the Hub's routes reach only internally), so the
+    // two branches cannot unify; nothing reads the routes layer's own outputs.
+    const layerModeRoutes =
       config.joinedHub === undefined
-        ? layerMakeRoutes.pipe(Layer.provide(layerLauncher))
-        : layerJoinedRoutes(config.joinedHub),
-      {
-        disableLogger: !config.logWebSocketEvents,
-        routerConfig: HTTP_ROUTER_CONFIG,
-      },
-    ).pipe(
+        ? layerHubRoutes
+        : (layerJoinedRoutes(config.joinedHub) as unknown as typeof layerHubRoutes);
+    const layerRoutes = HttpRouter.serve(layerModeRoutes, {
+      disableLogger: !config.logWebSocketEvents,
+      routerConfig: HTTP_ROUTER_CONFIG,
+    }).pipe(
       withUntracedRequests,
       Layer.tap(() => Deferred.succeed(routesReady, undefined).pipe(Effect.orDie)),
     );

@@ -21,10 +21,11 @@ import * as Schema from "effect/Schema";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as Socket from "effect/socket/Socket";
 
+import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
 import * as EnvironmentConnections from "./EnvironmentConnections.ts";
 import * as EnvironmentRegistry from "./EnvironmentRegistry.ts";
 import { bearerOf, isSecureEnvironmentTransport } from "./http.ts";
-import { makeFrameReader } from "./socketFrames.ts";
+import { type FrameReader, makeFrameReader } from "./socketFrames.ts";
 
 const decodeFrame = Schema.decodeUnknownOption(Schema.fromJsonString(EnvironmentToHubFrame));
 const encodeWelcome = (frame: EnvironmentWelcomeFrame) => JSON.stringify(frame);
@@ -43,6 +44,7 @@ type SessionEnd = EnvironmentCloseReason | "peer-closed";
 const makeHandler = Effect.fnUntraced(function* (
   registry: EnvironmentRegistry.EnvironmentRegistry["Service"],
   connections: EnvironmentConnections.EnvironmentConnections["Service"],
+  remote: Option.Option<RemoteEnvironments.RemoteEnvironments["Service"]>,
 ) {
   const request = yield* HttpServerRequest.HttpServerRequest;
   if (request.headers.upgrade?.toLowerCase() !== "websocket") {
@@ -102,10 +104,22 @@ const makeHandler = Effect.fnUntraced(function* (
           name: current.name,
         }),
       );
+      // After the welcome, so the machine reads its welcome before any request.
+      const connection = Option.isNone(remote)
+        ? undefined
+        : yield* remote.value.connect({
+            environmentId,
+            hello: hello.value,
+            write: (text) => writer.write(text).pipe(Effect.ignore),
+          });
       const end = yield* Effect.raceFirst(
         Deferred.await(closeRequested),
-        receive(environmentId, nextFrame, registry),
+        receive(environmentId, nextFrame, registry, connection),
       );
+      // A removed machine will not come back: its sessions end with the socket.
+      if (end === "environment-removed" || end === "owner-inactive") {
+        yield* connection?.retireOnClose ?? Effect.void;
+      }
       if (end !== "peer-closed") yield* closeWith(end);
     }).pipe(
       Effect.catchTags({
@@ -119,8 +133,9 @@ const makeHandler = Effect.fnUntraced(function* (
 
 const receive = Effect.fn("EnvironmentConnection.receive")(function* (
   environmentId: EnvironmentId,
-  nextFrame: Effect.Effect<string, Socket.SocketError>,
+  nextFrame: FrameReader,
   registry: EnvironmentRegistry.EnvironmentRegistry["Service"],
+  connection: RemoteEnvironments.RemoteConnection | undefined,
 ): Effect.fn.Return<SessionEnd, EnvironmentRegistry.EnvironmentStorageError> {
   while (true) {
     const text = yield* nextFrame.pipe(
@@ -131,10 +146,14 @@ const receive = Effect.fn("EnvironmentConnection.receive")(function* (
     if (Option.isNone(text)) return "heartbeat-timeout" as const;
     const frame = decodeFrame(text.value);
     if (Option.isNone(frame)) return "protocol-error" as const;
-    // Requests, responses and events carry executor calls from a later protocol version.
     if (frame.value.type === "heartbeat") {
       yield* registry.recordHeartbeat(environmentId, frame.value);
+      yield* connection?.heartbeat(frame.value) ?? Effect.void;
+    } else if (frame.value.type !== "hello" && connection !== undefined) {
+      yield* connection.receive(frame.value);
     }
+    // Events are acknowledged in batches: once the frames that arrived together are handled.
+    if (connection !== undefined && nextFrame.buffered() === 0) yield* connection.flushAcks;
   }
 });
 
@@ -142,6 +161,8 @@ export const layer = HttpRouter.use((router) =>
   Effect.gen(function* () {
     const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
     const connections = yield* EnvironmentConnections.EnvironmentConnections;
-    yield* router.add("GET", ENVIRONMENT_CONNECT_PATH, makeHandler(registry, connections));
+    // Absent where the Hub runs no orchestration (the join flow's tests): sockets only say hello.
+    const remote = yield* Effect.serviceOption(RemoteEnvironments.RemoteEnvironments);
+    yield* router.add("GET", ENVIRONMENT_CONNECT_PATH, makeHandler(registry, connections, remote));
   }),
 );

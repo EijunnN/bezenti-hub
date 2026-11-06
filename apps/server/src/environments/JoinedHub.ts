@@ -34,6 +34,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import type * as Scope from "effect/Scope";
 import { HttpRouter, HttpServerResponse } from "effect/http";
 import * as Socket from "effect/socket/Socket";
 
@@ -41,6 +42,7 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as HostResources from "../resourceTelemetry/HostResources.ts";
+import * as EnvironmentAgent from "./EnvironmentAgent.ts";
 import { makeFrameReader } from "./socketFrames.ts";
 import { ENVIRONMENT_CREDENTIAL_SECRET, type JoinedHubState } from "./joinedHubState.ts";
 
@@ -88,6 +90,14 @@ const encodeHello = Schema.encodeSync(Schema.fromJsonString(EnvironmentHelloFram
 const encodeHeartbeat = Schema.encodeSync(Schema.fromJsonString(EnvironmentHeartbeatFrame));
 const decodeWelcome = Schema.decodeUnknownOption(Schema.fromJsonString(EnvironmentWelcomeFrame));
 
+const parseFrame = (text: string): unknown => {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+};
+
 const webSocketConstructor = Layer.effect(
   Socket.WebSocketConstructor,
   Effect.gen(function* () {
@@ -109,6 +119,14 @@ export const connectOnce = Effect.fn("JoinedHub.connectOnce")(function* (input: 
   readonly hello: Effect.Effect<EnvironmentHelloFrame>;
   readonly heartbeat: Effect.Effect<EnvironmentHeartbeatFrame>;
   readonly onWelcome: (welcome: EnvironmentWelcomeFrame) => Effect.Effect<void>;
+  /** Serves the Hub's requests on this connection; without it, frames after welcome are read and dropped. */
+  readonly serve?: (
+    write: (text: string) => Effect.Effect<void>,
+  ) => Effect.Effect<
+    { readonly receive: (frame: unknown) => Effect.Effect<boolean> },
+    never,
+    Scope.Scope
+  >;
 }) {
   const url = new URL(ENVIRONMENT_CONNECT_PATH, input.hubUrl);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -147,8 +165,20 @@ export const connectOnce = Effect.fn("JoinedHub.connectOnce")(function* (input: 
           Effect.flatMap((frame) => writer.write(encodeHeartbeat(frame))),
         ),
       ).pipe(Effect.forkScoped);
-      // Nothing else arrives yet; reading keeps the close from the Hub coming.
-      return yield* Effect.forever(nextFrame);
+      const served =
+        input.serve === undefined
+          ? undefined
+          : yield* input.serve((text) => writer.write(text).pipe(Effect.ignore));
+      // Reading also keeps the close from the Hub coming.
+      return yield* Effect.forever(
+        nextFrame.pipe(
+          Effect.flatMap((text) => {
+            if (served === undefined) return Effect.void;
+            const frame = parseFrame(text);
+            return frame === undefined ? Effect.void : served.receive(frame).pipe(Effect.asVoid);
+          }),
+        ),
+      );
     }),
   );
   return yield* session.pipe(
@@ -187,6 +217,7 @@ export class HubConnector extends Context.Service<
 
 /** What this machine tells the Hub about itself. */
 const makeReports = Effect.gen(function* () {
+  const agent = yield* EnvironmentAgent.EnvironmentAgent;
   const providers = yield* ProviderRegistry.ProviderRegistry;
   const hostResources = yield* HostResources.HostResources;
   const config = yield* ServerConfig.ServerConfig;
@@ -200,6 +231,7 @@ const makeReports = Effect.gen(function* () {
   });
   const hello: Effect.Effect<EnvironmentHelloFrame> = Effect.gen(function* () {
     const { hostResources: snapshot, disk } = yield* resources;
+    const report = yield* agent.report;
     return {
       type: "hello",
       protocolVersion: ENVIRONMENT_CONNECTION_PROTOCOL_VERSION,
@@ -208,7 +240,9 @@ const makeReports = Effect.gen(function* () {
       providers: yield* providerSummaries,
       hostResources: snapshot satisfies HostResourcesSnapshot,
       disk,
-      sessions: [],
+      sessions: report.sessions,
+      workspaceRoot: report.workspaceRoot,
+      orchestration: report.orchestration,
     };
   });
   const heartbeat: Effect.Effect<EnvironmentHeartbeatFrame> = Effect.gen(function* () {
@@ -218,12 +252,13 @@ const makeReports = Effect.gen(function* () {
       hostResources: snapshot,
       disk,
       providers: yield* providerSummaries,
+      orchestration: (yield* agent.report).orchestration,
     };
   });
-  return { hello, heartbeat };
+  return { hello, heartbeat, serve: agent.attach };
 });
 
-export const layer = (joined: JoinedHubState) =>
+const layerConnector = (joined: JoinedHubState) =>
   Layer.effect(
     HubConnector,
     Effect.gen(function* () {
@@ -254,6 +289,7 @@ export const layer = (joined: JoinedHubState) =>
             expectedHubId: joined.hubEnvironmentId,
             hello: reports.hello,
             heartbeat: reports.heartbeat,
+            serve: reports.serve,
             onWelcome: () =>
               DateTime.now.pipe(
                 Effect.flatMap((now) =>
@@ -281,6 +317,14 @@ export const layer = (joined: JoinedHubState) =>
       yield* Effect.forkScoped(run);
       return HubConnector.of({ joined, state: Ref.get(state) });
     }),
+  );
+
+/** The connection to the Hub and the agent that serves its requests on this machine. */
+export const layer = (joined: JoinedHubState) =>
+  layerConnector(joined).pipe(
+    Layer.provide(
+      EnvironmentAgent.layer({ environmentId: joined.environmentId, hubUrl: joined.hubUrl }),
+    ),
   );
 
 /** `/health` on loopback: what `t3 status` shows about a joined machine. */

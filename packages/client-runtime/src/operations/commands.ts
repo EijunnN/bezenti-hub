@@ -8,6 +8,7 @@ import {
   OrchestrationV2CheckpointUnavailableError,
   WS_METHODS,
   type ChatAttachment,
+  type EnvironmentId,
   MessageId,
   type ModelSelection,
   type NodeId,
@@ -165,6 +166,8 @@ interface StartThreadBootstrap {
     readonly branch: string | null;
     readonly worktreePath: string | null;
     readonly createdAt: string;
+    /** The Hub Environment the User picked; absent lets the Hub choose. */
+    readonly environmentId?: EnvironmentId;
   };
   readonly prepareWorktree?: {
     readonly requireWorktree?: boolean;
@@ -735,6 +738,7 @@ export const startThreadTurn = Effect.fn("EnvironmentCommands.startThreadTurn")(
       runtimeMode: input.runtimeMode,
       interactionMode: input.interactionMode,
       workspaceStrategy,
+      ...(bootstrap?.environmentId === undefined ? {} : { environmentId: bootstrap.environmentId }),
       initialMessage: {
         messageId: input.message.messageId,
         text: input.message.text,

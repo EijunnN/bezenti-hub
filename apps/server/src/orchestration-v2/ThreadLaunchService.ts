@@ -1,10 +1,13 @@
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
+import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
   type ChatAttachment,
+  type EnvironmentId,
+  HUB_MACHINE_ENVIRONMENT_ID,
   type MessageId,
   type ModelSelection,
   type OrchestrationV2Actor,
@@ -106,6 +109,8 @@ export interface ThreadLaunchInput {
   readonly ownerUserId?: UserId;
   /** The client's current Space. */
   readonly spaceId?: SpaceId;
+  /** The Environment the User chose; the Hub checks it, and picks one when absent. */
+  readonly activeEnvironmentId?: EnvironmentId;
   /** The linked environment this launch is for, if one asked for it. */
   readonly linkOrigin?: OrchestrationV2LinkOrigin;
   /** The parent there, when that environment's agent delegated this as a task. */
@@ -856,6 +861,22 @@ const make = Effect.gen(function* () {
         type: "thread.create",
         projectId: input.projectId,
       }).pipe(Effect.mapError(mapError(input, "resolve-project")));
+      // Worktrees are still made on the Hub machine; a Thread elsewhere runs in its checkout.
+      if (
+        input.activeEnvironmentId !== undefined &&
+        input.activeEnvironmentId !== HUB_MACHINE_ENVIRONMENT_ID &&
+        input.workspaceStrategy.type !== "root"
+      ) {
+        return yield* mapError(
+          input,
+          "provision-worktree",
+        )(
+          new EnvironmentRegistry.ThreadEnvironmentUnavailableError({
+            environmentId: input.activeEnvironmentId,
+            reason: "worktree-unsupported",
+          }),
+        );
+      }
       const project = yield* projects.getById(input.projectId).pipe(
         Effect.mapError(mapError(input, "resolve-project")),
         Effect.flatMap(
@@ -979,6 +1000,9 @@ const make = Effect.gen(function* () {
                 ...(input.linkOrigin === undefined ? {} : { linkOrigin: input.linkOrigin }),
                 ...(input.ownerUserId === undefined ? {} : { ownerUserId: input.ownerUserId }),
                 ...(input.spaceId === undefined ? {} : { spaceId: input.spaceId }),
+                ...(input.activeEnvironmentId === undefined
+                  ? {}
+                  : { activeEnvironmentId: input.activeEnvironmentId }),
                 ...(input.delegatedFrom === undefined
                   ? {}
                   : { delegatedFrom: input.delegatedFrom }),

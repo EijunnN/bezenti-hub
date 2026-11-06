@@ -25,8 +25,10 @@ import * as CommandPolicy from "./CommandPolicy.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
+import * as ActiveEnvironment from "../environment/ActiveEnvironment.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as ProjectCheckouts from "../environment/ProjectCheckouts.ts";
+import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
@@ -74,7 +76,19 @@ const layerEnvironmentExecutorsProvided = EnvironmentExecutor.layerHubMachine.pi
     Layer.mergeAll(
       ProviderAdapterRegistry.layerFromProviderInstanceRegistry,
       RuntimePolicy.layerFromProjectStore,
+      ActiveEnvironment.layerActiveEnvironmentResolver,
     ).pipe(Layer.provideMerge(ProjectStore.layer)),
+  ),
+);
+// Joined Environments' executors, registered while their sockets are open.
+const layerRemoteEnvironmentsProvided = RemoteEnvironments.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      layerEnvironmentExecutorsProvided,
+      ProjectCheckouts.layer,
+      ProjectStore.layer,
+      ProjectionStore.layer,
+    ),
   ),
 );
 export const layerProviderAdaptersProvided = EnvironmentExecutor.layerProviderAdapterRegistry.pipe(
@@ -155,6 +169,7 @@ const layerCommandOutputHubProvided = CommandOutputHub.layer.pipe(
 const layerProviderSessionManagerProvided = ProviderSessionManager.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
+      layerEnvironmentExecutorsProvided,
       layerCommandOutputHubProvided,
       layerProviderAdaptersProvided,
       layerEventSink,
@@ -345,6 +360,7 @@ const layerThreadTitleRegenerationProvided = ThreadTitleRegenerationService.laye
 const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
   Layer.provide(
     Layer.mergeAll(
+      layerEnvironmentExecutorsProvided,
       layerRunFinalizationServiceProvided,
       layerCheckpointRollbackServiceProvided,
       layerProviderSessionManagerProvided,
@@ -357,7 +373,9 @@ const layerEffectExecutorProvided = EffectWorker.layerExecutor.pipe(
   ),
 );
 const layerEffectWorkerProvided = EffectWorker.layer.pipe(
-  Layer.provide(Layer.merge(layerStores, layerEffectExecutorProvided)),
+  Layer.provide(
+    Layer.mergeAll(layerStores, layerEffectExecutorProvided, layerEnvironmentExecutorsProvided),
+  ),
 );
 const layerProviderRuntimeRecoveryProvided = ProviderRuntimeRecoveryService.layer.pipe(
   Layer.provide(
@@ -384,6 +402,7 @@ const layerMcpAppRequestsProvided = McpAppRequests.layer.pipe(
 
 export const layer = Layer.mergeAll(
   layerEnvironmentExecutorsProvided,
+  layerRemoteEnvironmentsProvided,
   layerCommandOutputHubProvided,
   layerOrchestratorProvided,
   layerMcpAppRequestsProvided,

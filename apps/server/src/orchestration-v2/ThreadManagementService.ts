@@ -11,6 +11,7 @@ import type {
 import {
   type ChatAttachment,
   CommandId,
+  HUB_MACHINE_ENVIRONMENT_ID,
   isListedThreadLineage,
   MessageId,
   OrchestrationV2StopWorkflowError,
@@ -68,6 +69,7 @@ import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
@@ -596,6 +598,7 @@ const isForceStopThreadError = Schema.is(OrchestrationV2ForceStopThreadError);
 
 const makeWith = Effect.fn("ThreadManagementService.make")(function* (
   spaces: Option.Option<SpaceDirectory.SpaceDirectory["Service"]>,
+  environments: Option.Option<EnvironmentRegistry.EnvironmentRegistry["Service"]> = Option.none(),
 ) {
   const threadDispatch = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -804,8 +807,40 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
     );
   };
 
+  // The Hub, not the client, decides where a new Thread runs, and checks a requested choice.
+  const placeThread = (
+    command: OrchestrationV2ServerCommand,
+  ): Effect.Effect<OrchestrationV2ServerCommand, Orchestrator.OrchestratorCommandRejectedError> => {
+    if (command.type !== "thread.create") return Effect.succeed(command);
+    const reject = (cause: unknown) =>
+      new Orchestrator.OrchestratorCommandRejectedError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause,
+      });
+    if (Option.isNone(environments)) {
+      // Without the Hub's Environments (orchestration-only hosts) only the Hub machine exists.
+      return command.activeEnvironmentId === undefined ||
+        command.activeEnvironmentId === HUB_MACHINE_ENVIRONMENT_ID
+        ? Effect.succeed(command)
+        : Effect.fail(reject("Only the Hub machine runs Threads here."));
+    }
+    return environments.value
+      .chooseForThread({
+        userId: command.ownerUserId,
+        requested: command.activeEnvironmentId,
+        projectId: command.projectId,
+        providerInstanceId: command.modelSelection.instanceId,
+      })
+      .pipe(
+        Effect.map((activeEnvironmentId) => ({ ...command, activeEnvironmentId })),
+        Effect.mapError(reject),
+      );
+  };
+
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
     claimThreadSpace(command).pipe(
+      Effect.flatMap(placeThread),
       Effect.flatMap((claimed) =>
         ensureCommandTranscripts(claimed).pipe(
           Effect.andThen(assertDispatchTargetEnabled(claimed)),
@@ -1681,6 +1716,10 @@ export const layerWithLegacyImporter: Layer.Layer<
 > = Layer.effect(
   ThreadManagementService,
   Effect.gen(function* () {
-    return yield* makeWith(Option.some(yield* SpaceDirectory.SpaceDirectory));
+    return yield* makeWith(
+      Option.some(yield* SpaceDirectory.SpaceDirectory),
+      // Where the server joins machines; a host without them runs every Thread on the Hub machine.
+      yield* Effect.serviceOption(EnvironmentRegistry.EnvironmentRegistry),
+    );
   }),
 ).pipe(Layer.provide(ThreadCommandExecutor.layer));

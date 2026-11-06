@@ -1039,6 +1039,22 @@ const rows: ReadonlyArray<
     deny("not-yours"),
   ],
   ["Owner sees their personal machine", owner, "environment.view", ownersLaptop, allow],
+  ["a Member runs a Thread on the Hub machine", member, "environment.use", hubMachine, allow],
+  ["Owner runs a Thread on their machine", owner, "environment.use", ownersLaptop, allow],
+  [
+    "a Member does not run a Thread on the Owner's machine",
+    member,
+    "environment.use",
+    ownersLaptop,
+    deny("not-yours"),
+  ],
+  [
+    "Owner does not run a Thread on another User's machine",
+    owner,
+    "environment.use",
+    gracesLaptop,
+    deny("not-yours"),
+  ],
   ["Owner sees another User's personal machine", owner, "environment.view", gracesLaptop, allow],
   ["Owner removes another User's machine", owner, "environment.remove", gracesLaptop, allow],
   [

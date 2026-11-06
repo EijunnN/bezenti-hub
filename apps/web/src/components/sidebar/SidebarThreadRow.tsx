@@ -24,6 +24,7 @@ import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
   type EnvironmentMachineKind,
+  HUB_MACHINE_ENVIRONMENT_ID,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 
@@ -114,6 +115,10 @@ import { Kbd } from "../ui/kbd";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "../ui/menu";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { MiddleTruncate } from "../ui/middle-truncate";
+import {
+  activeEnvironmentName,
+  useHubEnvironments,
+} from "../../environments/primary/useHubEnvironments";
 import { useThreadHasUnsentDraft } from "../../composerDraftStore";
 
 // The fields thread rows show. Provider status pushes refresh `checkedAt`,
@@ -656,6 +661,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   } = props;
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
   const threadKey = scopedThreadKey(threadRef);
+  const hubEnvironments = useHubEnvironments();
   const canOperateThread = useEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope);
   // Pins, settling and snoozes are stored on the Thread for everyone: its creator's or an Admin's.
   const canOrganize = useThreadRolePermissions(thread.environmentId, thread.source).canArchive;
@@ -1009,7 +1015,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     isActive: props.isActive,
   });
 
-  const title = isRenaming ? (
+  const titleText = isRenaming ? (
     <ThreadRenameInput
       title={renamingTitle}
       onTitleChange={onRenameTitleChange}
@@ -1048,7 +1054,29 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       {thread.title}
     </span>
   );
-  const accessibleTitle = isRenaming ? null : <span className="sr-only">{thread.title}</span>;
+  // Where it runs, when that is not the Hub machine, where every Thread ran before Environments.
+  const environmentName =
+    thread.activeEnvironmentId === undefined ||
+    thread.activeEnvironmentId === HUB_MACHINE_ENVIRONMENT_ID
+      ? null
+      : activeEnvironmentName(hubEnvironments, thread.activeEnvironmentId);
+  const title =
+    environmentName === null || isRenaming ? (
+      titleText
+    ) : (
+      <>
+        {titleText}
+        <span aria-hidden className="shrink-0 truncate text-muted-foreground text-xs">
+          {environmentName}
+        </span>
+      </>
+    );
+  const accessibleTitle = isRenaming ? null : (
+    <span className="sr-only">
+      {thread.title}
+      {environmentName === null ? null : `, runs on ${environmentName}`}
+    </span>
+  );
 
   const prBadgeShape = supportsMultiplePullRequests
     ? resolveThreadPullRequestBadge(thread.pullRequests)

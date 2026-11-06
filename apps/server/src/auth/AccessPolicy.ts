@@ -142,6 +142,8 @@ export type Action =
   | "environment.register"
   /** See an Environment in Settings and where Threads may run. */
   | "environment.view"
+  /** Run a Thread on the Environment. */
+  | "environment.use"
   | "environment.rename"
   /** Remove a machine: its credential stops working at once. */
   | "environment.remove";
@@ -167,6 +169,7 @@ const OWNER_ONLY: ReadonlySet<Action> = new Set([
 /** Actions on one registered Environment, decided against an `EnvironmentResource`. */
 const ENVIRONMENT_ACTIONS: ReadonlySet<Action> = new Set([
   "environment.view",
+  "environment.use",
   "environment.rename",
   "environment.remove",
 ]);
@@ -251,6 +254,10 @@ const decideEnvironment = (
   environment: EnvironmentResource,
 ): Decision => {
   const own = environment.ownerUserId === principal.userId;
+  // A personal machine runs only its owner's work: the Owner sees every one, uses only their own.
+  if (action === "environment.use") {
+    return environment.environmentKind === "hub" || own ? allow : deny("not-yours");
+  }
   if (action === "environment.view") {
     return environment.environmentKind === "hub" || own || principal.isOwner
       ? allow

@@ -226,6 +226,7 @@ import * as RpcAuthorization from "./auth/RpcAuthorization.ts";
 import { type AccessLost, untilAccessLost } from "./auth/RpcSpaceAccess.ts";
 import * as CurrentPrincipal from "./auth/CurrentPrincipal.ts";
 import * as SpaceDirectory from "./spaces/SpaceDirectory.ts";
+import * as EnvironmentRegistry from "./environments/EnvironmentRegistry.ts";
 import * as SpaceVisibility from "./spaces/SpaceVisibility.ts";
 import { RpcInstrumentation, rpcInstrumentationLayer } from "./observability/RpcInstrumentation.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
@@ -2244,6 +2245,9 @@ export const layerWsRpc = (
                     runtimeMode: input.runtimeMode,
                     interactionMode: input.interactionMode,
                     workspaceStrategy: input.workspaceStrategy,
+                    ...(input.environmentId === undefined
+                      ? {}
+                      : { activeEnvironmentId: input.environmentId }),
                     ...(input.initialMessage === undefined
                       ? {}
                       : {
@@ -2280,7 +2284,9 @@ export const layerWsRpc = (
                         commandId: input.commandId,
                         projectId: input.projectId,
                         message:
-                          SpaceDirectory.spaceRefusalMessage(cause) ?? "Failed to launch thread",
+                          SpaceDirectory.spaceRefusalMessage(cause) ??
+                          EnvironmentRegistry.environmentRefusalMessage(cause) ??
+                          "Failed to launch thread",
                         cause,
                       }),
                     ServerRuntimeStartupError: (cause) =>

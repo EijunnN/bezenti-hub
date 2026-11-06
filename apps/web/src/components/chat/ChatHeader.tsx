@@ -48,6 +48,8 @@ interface ChatHeaderProps {
   activeThreadId: ThreadId;
   activeThreadTitle: string;
   activeThreadLinkOrigin?: string | null | undefined;
+  /** The Environment the Thread runs on, by name. */
+  activeEnvironmentName?: string | null | undefined;
   isServerThread: boolean;
   activeProject: EnvironmentProject | null;
   parentThreadLink: { threadId: ThreadId; title: string } | null;
@@ -75,6 +77,7 @@ export const ChatHeader = memo(function ChatHeader({
   activeThreadId,
   activeThreadTitle,
   activeThreadLinkOrigin,
+  activeEnvironmentName,
   isServerThread,
   activeProject,
   parentThreadLink,
@@ -418,6 +421,22 @@ export const ChatHeader = memo(function ChatHeader({
               <TooltipPopup side="top">{activeThreadTitle}</TooltipPopup>
             </Tooltip>
           )}
+          {renamingTitle === null && activeEnvironmentName ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Badge
+                    variant="outline"
+                    size="sm"
+                    aria-label={`Active environment: ${activeEnvironmentName}`}
+                  />
+                }
+              >
+                {activeEnvironmentName}
+              </TooltipTrigger>
+              <TooltipPopup side="top">Runs on {activeEnvironmentName}</TooltipPopup>
+            </Tooltip>
+          ) : null}
           {renamingTitle === null && activeThreadLinkOrigin ? (
             <Tooltip>
               <TooltipTrigger render={<Badge variant="info" size="sm" />}>

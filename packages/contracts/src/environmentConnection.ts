@@ -6,10 +6,11 @@
 import * as Schema from "effect/Schema";
 
 import { EnvironmentId, NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { OrchestrationV2ProviderCapabilities } from "./orchestrationV2.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { HostResourcesSnapshot } from "./resourceTelemetry.ts";
 
-export const ENVIRONMENT_CONNECTION_PROTOCOL_VERSION = 1;
+export const ENVIRONMENT_CONNECTION_PROTOCOL_VERSION = 2;
 export const ENVIRONMENT_CONNECT_PATH = "/api/environment/connect";
 
 export const ENVIRONMENT_HEARTBEAT_INTERVAL_MS = 10_000;
@@ -55,6 +56,32 @@ export const EnvironmentProviderSummary = Schema.Struct({
 });
 export type EnvironmentProviderSummary = typeof EnvironmentProviderSummary.Type;
 
+/** What an Environment publishes about one provider instance, in its hello and each heartbeat. */
+export const EnvironmentProviderCapabilitySnapshot = Schema.Struct({
+  instanceId: EnvironmentProviderSummary.fields.instanceId,
+  provider: EnvironmentProviderSummary.fields.provider,
+  enabled: EnvironmentProviderSummary.fields.enabled,
+  continuationKey: TrimmedNonEmptyString,
+  /** What the Orchestrator decides from; the summary's `capabilities` are what Settings shows. */
+  capabilities: OrchestrationV2ProviderCapabilities,
+});
+export type EnvironmentProviderCapabilitySnapshot =
+  typeof EnvironmentProviderCapabilitySnapshot.Type;
+
+/** A provider instance the Environment has but could not describe, and why. */
+export const EnvironmentUnavailableProvider = Schema.Struct({
+  instanceId: EnvironmentProviderSummary.fields.instanceId,
+  reason: TrimmedNonEmptyString,
+});
+export type EnvironmentUnavailableProvider = typeof EnvironmentUnavailableProvider.Type;
+
+/** The orchestration capabilities of every provider instance, as the Hub's cache keeps them. */
+export const EnvironmentOrchestrationCapabilities = Schema.Struct({
+  providers: Schema.Array(EnvironmentProviderCapabilitySnapshot),
+  unavailableProviders: Schema.Array(EnvironmentUnavailableProvider),
+});
+export type EnvironmentOrchestrationCapabilities = typeof EnvironmentOrchestrationCapabilities.Type;
+
 /** A provider session the Environment still runs, so the Hub can resume its event stream. */
 export const EnvironmentLiveProviderSession = Schema.Struct({
   providerSessionId: TrimmedNonEmptyString,
@@ -72,6 +99,9 @@ export const EnvironmentHelloFrame = Schema.Struct({
   hostResources: HostResourcesSnapshot,
   disk: Schema.NullOr(EnvironmentDiskSpace),
   sessions: Schema.Array(EnvironmentLiveProviderSession),
+  /** Where this machine keeps Project checkouts: `<workspaceRoot>/<Project slug>` by default. */
+  workspaceRoot: TrimmedNonEmptyString,
+  orchestration: EnvironmentOrchestrationCapabilities,
 });
 export type EnvironmentHelloFrame = typeof EnvironmentHelloFrame.Type;
 
@@ -81,6 +111,7 @@ export const EnvironmentHeartbeatFrame = Schema.Struct({
   disk: Schema.NullOr(EnvironmentDiskSpace),
   /** Sent when the providers changed since the last frame. */
   providers: Schema.optionalKey(Schema.Array(EnvironmentProviderSummary)),
+  orchestration: Schema.optionalKey(EnvironmentOrchestrationCapabilities),
 });
 export type EnvironmentHeartbeatFrame = typeof EnvironmentHeartbeatFrame.Type;
 

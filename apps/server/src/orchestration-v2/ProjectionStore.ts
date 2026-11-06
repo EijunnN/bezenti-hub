@@ -1,5 +1,5 @@
 import type { ProjectThreadAwarenessV2Input } from "@t3tools/shared/agentAwareness";
-import { pendingGuestMessageCount } from "@t3tools/contracts";
+import { HUB_MACHINE_ENVIRONMENT_ID, pendingGuestMessageCount } from "@t3tools/contracts";
 import { applyThreadPullRequestLinkUpdate } from "../sourceControl/threadPullRequests.ts";
 import { projectTurnItemForWire } from "./WireProjection.ts";
 import * as Stream from "effect/Stream";
@@ -1634,6 +1634,10 @@ export function threadShellFromProjection(
     ...(projection.thread.ownerUserId === undefined
       ? {}
       : { ownerUserId: projection.thread.ownerUserId }),
+    // Absent means the Hub machine, as for Threads from before Environments.
+    ...(projection.thread.activeEnvironmentId === undefined
+      ? {}
+      : { activeEnvironmentId: projection.thread.activeEnvironmentId }),
     latestRunId: latestRun?.id ?? null,
     latestRunRequestedAt: latestRun?.requestedAt ?? null,
     latestRunStartedAt: latestRun?.startedAt ?? null,
@@ -1919,6 +1923,9 @@ function shellFromState(input: {
     ...(input.state.thread.ownerUserId === undefined
       ? {}
       : { ownerUserId: input.state.thread.ownerUserId }),
+    ...(input.state.thread.activeEnvironmentId === undefined
+      ? {}
+      : { activeEnvironmentId: input.state.thread.activeEnvironmentId }),
     latestRunId: input.state.latestRunId,
     latestRunRequestedAt: input.state.latestRunRequestedAt,
     latestRunStartedAt: input.state.latestRunStartedAt,
@@ -2087,6 +2094,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 space_id,
                 owner_user_id,
                 worktree_location_json,
+                active_environment_id,
                 payload_json
               )
               VALUES (
@@ -2105,6 +2113,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ${event.payload.spaceId ?? null},
                 ${event.payload.ownerUserId ?? null},
                 ${worktreeLocationJson},
+                ${
+                  // Threads from before Environments run on the Hub machine.
+                  event.payload.activeEnvironmentId === undefined
+                    ? HUB_MACHINE_ENVIRONMENT_ID
+                    : event.payload.activeEnvironmentId
+                },
                 ${payloadJson}
               )
               ON CONFLICT(thread_id)
@@ -2123,6 +2137,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 space_id = excluded.space_id,
                 owner_user_id = excluded.owner_user_id,
                 worktree_location_json = excluded.worktree_location_json,
+                active_environment_id = excluded.active_environment_id,
                 payload_json = excluded.payload_json
             `;
               yield* locatePendingScopes(event.payload.id, event.payload.projectId);

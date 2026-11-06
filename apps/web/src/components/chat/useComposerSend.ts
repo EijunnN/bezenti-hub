@@ -144,6 +144,7 @@ import type { useQueuedRunEdit } from "./useQueuedRunEdit";
 import type { useTimelineFollow } from "./useTimelineFollow";
 import type { useUsageLimitsPanel } from "./useUsageLimitsPanel";
 import type { useWorktreeSetup } from "./useWorktreeSetup";
+import { readHubEnvironmentChoice } from "../../environments/primary/useHubEnvironments";
 
 const ENVIRONMENT_UNAVAILABLE_SEND_TOAST_TRAIL_SIZE = 3;
 
@@ -1321,6 +1322,10 @@ export function useComposerSend(input: ComposerSendInput) {
 
     let backgroundDraftOpened = false;
     let turnStartSucceeded = false;
+    // Where the new Thread runs, if the User picked it; the Hub checks it, or picks.
+    const hubEnvironmentChoice = isLocalDraftThread
+      ? readHubEnvironmentChoice(threadIdForSend)
+      : undefined;
     if (failure === null && turnAttachmentsResult._tag === "Success") {
       const bootstrap =
         isLocalDraftThread || baseBranchForWorktree
@@ -1336,6 +1341,9 @@ export function useComposerSend(input: ComposerSendInput) {
                       branch: activeThreadBranch,
                       worktreePath: activeThread.worktreePath,
                       createdAt: activeThread.createdAt,
+                      ...(hubEnvironmentChoice === undefined
+                        ? {}
+                        : { environmentId: hubEnvironmentChoice }),
                     },
                   }
                 : {}),

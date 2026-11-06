@@ -25,6 +25,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
@@ -105,12 +106,18 @@ export interface EnvironmentExecutor {
   };
 }
 
-/** Which Environment a Thread runs on. Until Threads store one, every Thread runs on the Hub machine. */
+/**
+ * Which Environment a Thread runs on: the projection's, read when the registry is built (the
+ * server provides it; without it every Thread runs on the Hub machine).
+ */
 export const ActiveEnvironmentResolver = Context.Reference<{
   readonly resolve: (threadId: ThreadId) => Effect.Effect<EnvironmentId>;
 }>("t3/environment/EnvironmentExecutor/ActiveEnvironmentResolver", {
   defaultValue: () => ({ resolve: () => Effect.succeed(HUB_MACHINE_ENVIRONMENT_ID) }),
 });
+
+/** Stands for "no Environment": a Thread whose Environment was removed resolves to it. */
+export const NO_ENVIRONMENT_ID = EnvironmentId.make("environment:none");
 
 /**
  * The Environment for calls that carry no Thread: checkpoint operations, which only run inside
@@ -121,25 +128,47 @@ const CheckpointEnvironment = Context.Reference<EnvironmentId>(
   { defaultValue: () => HUB_MACHINE_ENVIRONMENT_ID },
 );
 
-/** Runs a Thread's effect so its checkpoint work goes to the Thread's Active environment. */
-export const onActiveEnvironment =
-  (threadId: ThreadId) =>
-  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
-    Effect.gen(function* () {
-      const resolver = yield* ActiveEnvironmentResolver;
-      const environmentId = yield* resolver.resolve(threadId);
-      return yield* Effect.provideService(effect, CheckpointEnvironment, environmentId);
-    });
+/**
+ * The effect attempt a call runs for, so a request to a joined Environment carries
+ * `effectId:attempt` and a resend answers the same (`EnvironmentExecutorRequest`).
+ */
+const EffectAttempt = Context.Reference<{ readonly key: string; next: number } | null>(
+  "t3/environment/EnvironmentExecutor/EffectAttempt",
+  { defaultValue: () => null },
+);
 
-const resolveThread = Effect.fn("EnvironmentExecutor.resolveThread")(function* (
-  threadId: ThreadId,
+/** Runs an effect's work under its attempt's idempotency key. */
+export const withEffectAttempt =
+  (input: { readonly effectId: string; readonly attempt: number }) =>
+  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+    Effect.suspend(() =>
+      Effect.provideService(effect, EffectAttempt, {
+        key: `${input.effectId}:${input.attempt}`,
+        next: 0,
+      }),
+    );
+
+/** The key for the next request of the current effect attempt, or none outside an effect. */
+export const nextIdempotencyKey = Effect.fn("EnvironmentExecutor.nextIdempotencyKey")(function* (
+  method: string,
 ) {
-  const resolver = yield* ActiveEnvironmentResolver;
-  return yield* resolver.resolve(threadId);
+  const attempt = yield* EffectAttempt;
+  if (attempt === null) return undefined;
+  attempt.next += 1;
+  // One effect may make several calls; each has its own key within the attempt.
+  return `${attempt.key}:${method}:${attempt.next}`;
 });
 
 export interface EnvironmentExecutorRegistryShape {
   readonly hubMachineEnvironmentId: EnvironmentId;
+  /** The Thread's Active environment, as the projection records it. */
+  readonly activeEnvironment: (threadId: ThreadId) => Effect.Effect<EnvironmentId>;
+  /** Runs a Thread's effect so its checkpoint work goes to the Thread's Active environment. */
+  readonly onActiveEnvironment: (
+    threadId: ThreadId,
+  ) => <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
+  /** Signals each time an executor registers or leaves, so waiting work can look again. */
+  readonly changes: Effect.Effect<PubSub.Subscription<void>, never, import("effect/Scope").Scope>;
   readonly get: (
     environmentId: EnvironmentId,
   ) => Effect.Effect<EnvironmentExecutor, EnvironmentExecutorUnavailableError>;
@@ -191,6 +220,7 @@ const makeCapabilityCache = Effect.fn("EnvironmentExecutor.makeCapabilityCache")
     environmentId: EnvironmentId,
     instanceId: ProviderInstanceId,
   ) => Effect.Effect<EnvironmentProviderCapabilitySnapshot, EnvironmentCapabilityReadError>,
+  resolveThread: (threadId: ThreadId) => Effect.Effect<EnvironmentId>,
 ) {
   const snapshots = yield* Ref.make<ReadonlyMap<EnvironmentId, EnvironmentExecutorSnapshot>>(
     new Map(),
@@ -338,9 +368,12 @@ const makeInProcessExecutor = (input: InProcessExecutorInput): EnvironmentExecut
 const makeRegistry = Effect.fn("EnvironmentExecutor.makeRegistry")(function* (
   hubMachine: EnvironmentExecutor,
 ) {
+  const resolver = yield* ActiveEnvironmentResolver;
+  const resolveThread = (threadId: ThreadId) => resolver.resolve(threadId);
   const executors = yield* Ref.make<ReadonlyMap<EnvironmentId, EnvironmentExecutor>>(
     new Map([[hubMachine.environmentId, hubMachine]]),
   );
+  const changed = yield* PubSub.sliding<void>(1);
   const get: EnvironmentExecutorRegistryShape["get"] = (environmentId) =>
     Ref.get(executors).pipe(
       Effect.flatMap((byEnvironment) => {
@@ -352,6 +385,16 @@ const makeRegistry = Effect.fn("EnvironmentExecutor.makeRegistry")(function* (
     );
   return EnvironmentExecutorRegistry.of({
     hubMachineEnvironmentId: hubMachine.environmentId,
+    activeEnvironment: resolveThread,
+    onActiveEnvironment:
+      (threadId) =>
+      <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+        resolveThread(threadId).pipe(
+          Effect.flatMap((environmentId) =>
+            Effect.provideService(effect, CheckpointEnvironment, environmentId),
+          ),
+        ),
+    changes: PubSub.subscribe(changed),
     get,
     list: Ref.get(executors).pipe(Effect.map((byEnvironment) => [...byEnvironment.keys()])),
     forThread: Effect.fn("EnvironmentExecutorRegistry.forThread")(function* (threadId) {
@@ -361,6 +404,7 @@ const makeRegistry = Effect.fn("EnvironmentExecutor.makeRegistry")(function* (
       yield* Ref.update(executors, (current) =>
         new Map(current).set(executor.environmentId, executor),
       );
+      yield* PubSub.publish(changed, undefined);
     }),
     unregister: Effect.fn("EnvironmentExecutorRegistry.unregister")(function* (environmentId) {
       if (environmentId === hubMachine.environmentId) return;
@@ -369,6 +413,7 @@ const makeRegistry = Effect.fn("EnvironmentExecutor.makeRegistry")(function* (
         next.delete(environmentId);
         return next;
       });
+      yield* PubSub.publish(changed, undefined);
     }),
   });
 });
@@ -413,6 +458,7 @@ export const layerHubMachine: Layer.Layer<
         const executor = yield* registry.get(environmentId);
         return yield* executor.provider.capabilities(instanceId);
       }),
+      registry.activeEnvironment,
     );
     const refreshLock = yield* Semaphore.make(1);
     const refresh = logRefreshFailure(
@@ -457,11 +503,13 @@ export const makeLocalCapabilityCache = (
       }
       return yield* readLocalProvider(adapters, instanceId);
     }),
+    () => Effect.succeed(HUB_MACHINE_ENVIRONMENT_ID),
   );
 
 /**
- * `ProviderAdapterRegistryV2` over the executors. Lookups answer from the Hub machine, and a
- * session opens on its Thread's Active environment.
+ * `ProviderAdapterRegistryV2` over the executors. Lookups answer from the Hub machine, else from
+ * the first joined Environment that has the instance, and a session opens on its Thread's Active
+ * environment.
  */
 export const layerProviderAdapterRegistry: Layer.Layer<
   ProviderAdapterRegistry.ProviderAdapterRegistryV2,
@@ -495,9 +543,26 @@ export const layerProviderAdapterRegistry: Layer.Layer<
           Effect.flatMap((target) => target.openSession(input)),
         ),
     });
+    // An instance the Hub machine lacks is still reachable on an Environment that has it.
+    const fromEnvironments = Effect.fn("EnvironmentExecutor.adapters.fromEnvironments")(function* (
+      instanceId: ProviderInstanceId,
+    ) {
+      for (const environmentId of yield* registry.list) {
+        if (environmentId === hubMachine.environmentId) continue;
+        const executor = yield* Effect.option(registry.get(environmentId));
+        if (Option.isNone(executor)) continue;
+        const adapter = yield* Effect.option(executor.value.provider.adapters.get(instanceId));
+        if (Option.isSome(adapter)) return Option.some(adapter.value);
+      }
+      return Option.none<ProviderAdapter.ProviderAdapterV2["Service"]>();
+    });
     return ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
       get: Effect.fn("EnvironmentExecutor.adapters.get")(function* (instanceId) {
-        return routed(yield* local.get(instanceId));
+        const found = yield* Effect.result(local.get(instanceId));
+        if (found._tag === "Success") return routed(found.success);
+        const remote = yield* fromEnvironments(instanceId);
+        if (Option.isSome(remote)) return routed(remote.value);
+        return yield* found.failure;
       }),
       list: Effect.fn("EnvironmentExecutor.adapters.list")(function* () {
         return yield* local.list();

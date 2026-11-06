@@ -381,6 +381,11 @@ const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_MODELS: ServerProvider["models"] = [];
 const EMPTY_USAGE_LIMIT_SOURCES: UsageLimitSourceSnapshots = [];
 import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplates";
+import {
+  activeEnvironmentName,
+  useHubEnvironments,
+} from "../environments/primary/useHubEnvironments";
+import { HubEnvironmentSelector } from "./chat/HubEnvironmentSelector";
 
 const EMPTY_FEEDBACK_SUBMISSIONS: ReadonlyArray<CodexFeedbackSubmission> = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
@@ -991,6 +996,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   const browserAvailable = isPreviewSupportedInRuntime() || activeEnvironmentServerBrowser;
   const activeThreadShell = serverThread;
+  const hubEnvironments = useHubEnvironments();
   const timelineThreadError =
     serverRuntime?.status === "failed" &&
     serverRuntime.lastErrorClass === "usage_limit" &&
@@ -3353,6 +3359,11 @@ export default function ChatView(props: ChatViewProps) {
               isServerThread={isServerThread}
               activeThreadTitle={activeThread.title}
               activeThreadLinkOrigin={activeThreadShell?.linkOrigin?.label ?? null}
+              activeEnvironmentName={
+                isServerThread
+                  ? activeEnvironmentName(hubEnvironments, activeThreadShell?.activeEnvironmentId)
+                  : null
+              }
               activeProject={activeProject ?? null}
               parentThreadLink={headerParentThreadLink}
               onOpenThread={onOpenRelatedThreadStable}
@@ -3815,14 +3826,22 @@ export default function ChatView(props: ChatViewProps) {
                                   ? {}
                                   : {
                                       trailing: (
-                                        <ComposerContextPermissions
-                                          environmentId={environmentId}
-                                          runtimeMode={runtimeMode}
-                                          supportedRuntimeModes={
-                                            activeProviderStatus?.supportedRuntimeModes
-                                          }
-                                          onRuntimeModeChange={handleRuntimeModeChangeStable}
-                                        />
+                                        <>
+                                          {activeProviderInstanceId === null ? null : (
+                                            <HubEnvironmentSelector
+                                              draftThreadId={activeThread.id}
+                                              providerInstanceId={activeProviderInstanceId}
+                                            />
+                                          )}
+                                          <ComposerContextPermissions
+                                            environmentId={environmentId}
+                                            runtimeMode={runtimeMode}
+                                            supportedRuntimeModes={
+                                              activeProviderStatus?.supportedRuntimeModes
+                                            }
+                                            onRuntimeModeChange={handleRuntimeModeChangeStable}
+                                          />
+                                        </>
                                       ),
                                     })}
                               />

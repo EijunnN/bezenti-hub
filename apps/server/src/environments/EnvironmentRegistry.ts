@@ -11,7 +11,10 @@ import {
   EnvironmentProviderSummary,
   type EnvironmentHeartbeatFrame,
   type EnvironmentHelloFrame,
+  HUB_MACHINE_ENVIRONMENT_ID,
   type HubEnvironmentSummary,
+  type ProjectId,
+  type ProviderInstanceId,
   UserId,
 } from "@t3tools/contracts";
 import { environmentCredentialIssuer } from "@t3tools/shared/environmentJoin";
@@ -67,6 +70,46 @@ export class EnvironmentAccessDeniedError extends Schema.TaggedError<Environment
     }
   }
 }
+
+/** Why a new Thread cannot run on the Environment it asked for. */
+export class ThreadEnvironmentUnavailableError extends Schema.TaggedError<ThreadEnvironmentUnavailableError>()(
+  "ThreadEnvironmentUnavailableError",
+  {
+    environmentId: EnvironmentId,
+    name: Schema.optional(Schema.String),
+    reason: Schema.Literals(["not-usable", "offline", "provider-missing", "worktree-unsupported"]),
+    providerInstanceId: Schema.optional(Schema.String),
+  },
+) {
+  override get message(): string {
+    const name = this.name ?? "This Environment";
+    switch (this.reason) {
+      case "not-usable":
+        return "You can't run Threads on this Environment.";
+      case "offline":
+        return `${name} is offline. Start it, or choose another Environment.`;
+      case "provider-missing":
+        return `${name} can't run ${this.providerInstanceId ?? "this provider"}. Choose another provider or Environment.`;
+      case "worktree-unsupported":
+        return "New worktrees are made only on the Hub machine for now. Start this Thread in the Project's checkout.";
+    }
+  }
+}
+
+const isThreadEnvironmentUnavailable = Schema.is(ThreadEnvironmentUnavailableError);
+
+/** The reason a launch was refused for its Environment, wherever it sits in the cause chain. */
+export const environmentRefusalMessage = (cause: unknown): string | undefined => {
+  let current = cause;
+  for (let depth = 0; current !== undefined && depth < 8; depth += 1) {
+    if (isThreadEnvironmentUnavailable(current)) return current.message;
+    current =
+      typeof current === "object" && current !== null
+        ? (current as { readonly cause?: unknown }).cause
+        : undefined;
+  }
+  return undefined;
+};
 
 /** Live facts about the Hub machine; the server provides them, tests leave them empty. */
 export class HubMachineSnapshot extends Context.Reference<{
@@ -180,6 +223,17 @@ export class EnvironmentRegistry extends Context.Service<
     readonly leave: (
       credential: string | undefined,
     ) => Effect.Effect<boolean, EnvironmentStorageError>;
+    /**
+     * Where a new Thread runs: the User's choice, else its Project's preferred Environment, else
+     * the Hub machine. Another Environment must be one the User may use, online, and have the
+     * provider enabled.
+     */
+    readonly chooseForThread: (input: {
+      readonly userId: UserId | undefined;
+      readonly requested: EnvironmentId | undefined;
+      readonly projectId: ProjectId;
+      readonly providerInstanceId: ProviderInstanceId;
+    }) => Effect.Effect<EnvironmentId, ThreadEnvironmentUnavailableError | EnvironmentStorageError>;
   }
 >()("t3/environments/EnvironmentRegistry") {}
 
@@ -214,6 +268,23 @@ const make = Effect.gen(function* () {
     ORDER BY kind = 'hub' DESC, registered_at, environment_id
   `;
 
+  /** Threads on the Environment with a run in progress. */
+  const runningThreadCount = (environmentId: EnvironmentId) =>
+    sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count
+      FROM orchestration_v2_projection_threads AS thread
+      WHERE thread.active_environment_id = ${environmentId}
+        AND thread.deleted_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM orchestration_v2_projection_runs AS run
+          WHERE run.thread_id = thread.thread_id
+            AND run.status IN ('preparing', 'queued', 'starting', 'running', 'waiting')
+        )
+    `.pipe(
+      Effect.map((rows) => rows[0]?.count ?? 0),
+      Effect.orElseSucceed(() => 0),
+    );
+
   const summaryOf = Effect.fn("EnvironmentRegistry.summaryOf")(function* (row: EnvironmentRow) {
     const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
     if (row.kind === "hub") {
@@ -231,7 +302,7 @@ const make = Effect.gen(function* () {
         hostname: null,
         providers: yield* snapshot.providers,
         resources: yield* snapshot.resources,
-        runningThreadCount: 0,
+        runningThreadCount: yield* runningThreadCount(HUB_MACHINE_ENVIRONMENT_ID),
       } satisfies HubEnvironmentSummary;
     }
     const environmentId = EnvironmentId.make(row.environmentId);
@@ -252,8 +323,7 @@ const make = Effect.gen(function* () {
       hostname: row.lastHostname,
       providers: Option.getOrElse(decodeProviders(row.lastProvidersJson), () => []),
       resources: Option.getOrNull(decodeResources(row.lastResourcesJson)),
-      // Threads start running on External environments with a later ticket.
-      runningThreadCount: 0,
+      runningThreadCount: yield* runningThreadCount(environmentId),
     } satisfies HubEnvironmentSummary;
   });
 
@@ -513,8 +583,56 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const chooseForThread: EnvironmentRegistry["Service"]["chooseForThread"] = Effect.fn(
+    "EnvironmentRegistry.chooseForThread",
+  )(function* ({ userId, requested, projectId, providerInstanceId }) {
+    const preferred =
+      requested === undefined
+        ? ((yield* sql<{ readonly environmentId: string | null }>`
+            SELECT preferred_environment_id AS "environmentId"
+            FROM projection_projects WHERE project_id = ${projectId}
+          `.pipe(Effect.mapError(storageError)))[0]?.environmentId ?? null)
+        : null;
+    const environmentId =
+      requested ??
+      (preferred === null ? HUB_MACHINE_ENVIRONMENT_ID : EnvironmentId.make(preferred));
+    if (environmentId === HUB_MACHINE_ENVIRONMENT_ID) return environmentId;
+    const [row] = yield* selectRows([
+      sql`environment_id = ${environmentId}`,
+      sql`revoked_at IS NULL`,
+    ]).pipe(Effect.mapError(storageError));
+    const principal = userId === undefined ? undefined : yield* principalOf(userId);
+    if (
+      row === undefined ||
+      principal === undefined ||
+      principal.inactive === true ||
+      !AccessPolicy.isAllowed(decide(principal, "environment.use", resourceOf(row)))
+    ) {
+      return yield* new ThreadEnvironmentUnavailableError({ environmentId, reason: "not-usable" });
+    }
+    const summary = yield* summaryOf(row);
+    if (summary.status !== "online") {
+      return yield* new ThreadEnvironmentUnavailableError({
+        environmentId,
+        name: row.name,
+        reason: "offline",
+      });
+    }
+    const provider = summary.providers.find((entry) => entry.instanceId === providerInstanceId);
+    if (provider === undefined || !provider.enabled || !provider.installed) {
+      return yield* new ThreadEnvironmentUnavailableError({
+        environmentId,
+        name: row.name,
+        reason: "provider-missing",
+        providerInstanceId,
+      });
+    }
+    return environmentId;
+  });
+
   return EnvironmentRegistry.of({
     hubId,
+    chooseForThread,
     list,
     rename,
     remove,

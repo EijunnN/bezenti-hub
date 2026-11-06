@@ -3,6 +3,8 @@ import {
   CheckpointId,
   CheckpointScopeId,
   CommandId,
+  EnvironmentId,
+  HUB_MACHINE_ENVIRONMENT_ID,
   NodeId,
   ProviderSessionId,
   ProviderThreadId,
@@ -21,6 +23,8 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as CheckpointService from "./CheckpointService.ts";
@@ -634,4 +638,52 @@ it.effect.each(["confirmed", "unconfirmed", "failed"] as const)(
         outcome === "confirmed" ? ["stop-child", "settle-child"] : ["stop-child"],
       );
     }),
+);
+
+it.effect(
+  "leaves a Thread's machine work unclaimed, spending no attempt, while its Environment is away",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const laptop = EnvironmentId.make("environment:laptop");
+      const laptopThreadId = ThreadId.make("thread:on-laptop");
+      const now = DateTime.formatIso(yield* DateTime.now);
+      yield* sql`
+        INSERT INTO orchestration_v2_projection_threads (
+          thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
+          created_at, updated_at, payload_json, active_environment_id
+        ) VALUES (
+          ${laptopThreadId}, 'project:laptop', 'On the laptop', 'codex', 'full-access', 'default',
+          ${now}, ${now}, '{}', ${laptop}
+        )
+      `;
+      yield* outbox.enqueue([
+        {
+          id: "effect:laptop-cleanup",
+          commandId: CommandId.make("command:laptop-cleanup"),
+          threadId: laptopThreadId,
+          request: { type: "terminal.cleanup" },
+        },
+      ]);
+
+      const whileAway = [HUB_MACHINE_ENVIRONMENT_ID];
+      assert.isTrue(
+        Option.isNone(
+          yield* outbox.claimNext({ workerId: "w", availableEnvironmentIds: whileAway }),
+        ),
+      );
+      assert.isTrue(Option.isNone(yield* outbox.nextClaimableAtFor(whileAway)));
+      const waiting = Option.getOrThrow(yield* outbox.get("effect:laptop-cleanup"));
+      assert.equal(waiting.status, "pending");
+      assert.equal(waiting.attemptCount, 0);
+
+      const claimed = yield* outbox.claimNext({
+        workerId: "w",
+        availableEnvironmentIds: [HUB_MACHINE_ENVIRONMENT_ID, laptop],
+      });
+      assert.equal(Option.getOrThrow(claimed).attemptCount, 1);
+    }).pipe(
+      Effect.provide(EffectOutbox.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory))),
+    ),
 );

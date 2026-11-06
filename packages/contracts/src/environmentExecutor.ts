@@ -8,13 +8,18 @@ import * as Schema from "effect/Schema";
 import {
   EnvironmentId,
   IsoDateTime,
+  NonNegativeInt,
   ProviderSessionId,
+  ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
-import { OrchestrationV2ProviderCapabilities } from "./orchestrationV2.ts";
-import { EnvironmentHostResources, EnvironmentProviderSummary } from "./environmentConnection.ts";
+import {
+  EnvironmentHostResources,
+  EnvironmentProviderCapabilitySnapshot,
+  EnvironmentUnavailableProvider,
+} from "./environmentConnection.ts";
 
-export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 1;
+export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 2;
 
 /**
  * The Hub machine's Environment id. It is a constant so the `environments` table can seed the
@@ -39,14 +44,25 @@ export type EnvironmentExecutorTransport = typeof EnvironmentExecutorTransport.T
 const ENVIRONMENT_EXECUTOR_OPERATIONS = {
   provider: [
     "provider.openSession",
+    "provider.ensureThread",
+    "provider.resumeThread",
     "provider.startTurn",
+    "provider.compactThread",
     "provider.interrupt",
     "provider.steer",
     "provider.respond",
+    "provider.readThreadSnapshot",
     "provider.rollback",
+    "provider.forkThread",
+    "provider.injectHistory",
+    "provider.stopTask",
+    "provider.unloadThread",
+    "provider.hasPendingBackgroundWork",
     "provider.detach",
   ],
   workspace: [
+    "checkpoint.isGitRepository",
+    "checkpoint.hasRef",
     "checkpoint.capture",
     "checkpoint.restore",
     "checkpoint.diff",
@@ -90,25 +106,6 @@ export const EnvironmentExecutorOperation = Schema.Literals([
 ]);
 export type EnvironmentExecutorOperation = typeof EnvironmentExecutorOperation.Type;
 
-/** What an Environment publishes about one provider instance, in its hello and each heartbeat. */
-export const EnvironmentProviderCapabilitySnapshot = Schema.Struct({
-  instanceId: EnvironmentProviderSummary.fields.instanceId,
-  provider: EnvironmentProviderSummary.fields.provider,
-  enabled: EnvironmentProviderSummary.fields.enabled,
-  continuationKey: TrimmedNonEmptyString,
-  /** What the Orchestrator decides from; the summary's `capabilities` are what Settings shows. */
-  capabilities: OrchestrationV2ProviderCapabilities,
-});
-export type EnvironmentProviderCapabilitySnapshot =
-  typeof EnvironmentProviderCapabilitySnapshot.Type;
-
-/** A provider instance the Environment has but could not describe, and why. */
-export const EnvironmentUnavailableProvider = Schema.Struct({
-  instanceId: EnvironmentProviderSummary.fields.instanceId,
-  reason: TrimmedNonEmptyString,
-});
-export type EnvironmentUnavailableProvider = typeof EnvironmentUnavailableProvider.Type;
-
 /** The executor's self-description. A remote Environment's capabilities come from its last one. */
 export const EnvironmentExecutorSnapshot = Schema.Struct({
   contractVersion: Schema.Number,
@@ -146,11 +143,50 @@ export const EnvironmentExecutorResponse = Schema.Union([
 ]);
 export type EnvironmentExecutorResponse = typeof EnvironmentExecutorResponse.Type;
 
-/** An Environment → Hub provider event, ordered and deduplicated by `(providerSessionId, seq)`. */
+/**
+ * An Environment → Hub provider event (frame method `provider.event`), ordered and deduplicated
+ * by `(providerSessionId, seq)`. Live-only output (`command_output.delta`) carries no `seq`: it
+ * is never spooled or resent. `event` is a `ProviderAdapterV2Event` in its JSON encoding.
+ */
 export const EnvironmentExecutorProviderEvent = Schema.Struct({
-  environmentId: EnvironmentId,
   providerSessionId: ProviderSessionId,
-  seq: Schema.Number,
+  seq: Schema.optionalKey(NonNegativeInt),
   event: Schema.Unknown,
 });
 export type EnvironmentExecutorProviderEvent = typeof EnvironmentExecutorProviderEvent.Type;
+
+/** The Environment's provider session ended on its own (process exit, failure). */
+export const EnvironmentExecutorSessionEnded = Schema.Struct({
+  providerSessionId: ProviderSessionId,
+  /** A `ProviderAdapterV2Error` in its JSON encoding, when the stream failed. */
+  error: Schema.optionalKey(Schema.Unknown),
+});
+export type EnvironmentExecutorSessionEnded = typeof EnvironmentExecutorSessionEnded.Type;
+
+/** Hub → Environment (frame method `provider.ack`): the highest `seq` committed per session. */
+export const EnvironmentExecutorEventAck = Schema.Struct({
+  acks: Schema.Array(Schema.Struct({ providerSessionId: ProviderSessionId, seq: NonNegativeInt })),
+});
+export type EnvironmentExecutorEventAck = typeof EnvironmentExecutorEventAck.Type;
+
+/**
+ * Environment → Hub request (method `attachment.read`): a Thread attachment the Hub stores,
+ * asked for by id and content hash while a turn on this Environment needs it.
+ */
+export const EnvironmentAttachmentReadRequest = Schema.Struct({
+  threadId: ThreadId,
+  attachmentId: TrimmedNonEmptyString,
+  sha256: TrimmedNonEmptyString,
+});
+export type EnvironmentAttachmentReadRequest = typeof EnvironmentAttachmentReadRequest.Type;
+
+export const EnvironmentAttachmentReadResult = Schema.Struct({ base64: Schema.String });
+export type EnvironmentAttachmentReadResult = typeof EnvironmentAttachmentReadResult.Type;
+
+/** Frame methods outside the operation catalog. */
+export const ENVIRONMENT_EXECUTOR_FRAME_METHODS = {
+  providerEvent: "provider.event",
+  sessionEnded: "provider.sessionEnded",
+  ack: "provider.ack",
+  attachmentRead: "attachment.read",
+} as const;
