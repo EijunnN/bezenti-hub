@@ -229,6 +229,8 @@ export type ProjectionSettlementCandidate = Pick<
   };
 
 const ProjectionCheckpointContext = Schema.Struct({
+  /** The Thread's Project, whose Hub repository holds the uploaded checkpoints. */
+  projectId: Schema.optionalKey(ProjectId),
   runs: Schema.Array(
     OrchestrationV2RunJsonSchema.mapFields(({ id, ordinal, status }) => ({ id, ordinal, status })),
   ),
@@ -2785,6 +2787,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 app_run_ordinal,
                 status,
                 captured_at,
+                uploaded_to_hub,
                 payload_json
               )
               VALUES (
@@ -2797,6 +2800,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 ${event.payload.appRunOrdinal},
                 ${event.payload.status},
                 ${stringField(payload, "capturedAt")},
+                ${event.payload.uploadedToHub === undefined ? null : booleanInt(event.payload.uploadedToHub)},
                 ${payloadJson}
               )
               ON CONFLICT(checkpoint_id)
@@ -2809,6 +2813,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 app_run_ordinal = excluded.app_run_ordinal,
                 status = excluded.status,
                 captured_at = excluded.captured_at,
+                uploaded_to_hub = excluded.uploaded_to_hub,
                 payload_json = excluded.payload_json
             `;
               break;
@@ -5298,11 +5303,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       sql
         .withTransaction(
           Effect.gen(function* () {
-            const threads = yield* sql<{ readonly thread_id: string }>`
-            SELECT thread_id FROM orchestration_v2_projection_threads
+            const threads = yield* sql<{ readonly projectId: string }>`
+            SELECT project_id AS "projectId" FROM orchestration_v2_projection_threads
             WHERE thread_id = ${threadId} LIMIT 1
           `;
-            if (threads.length === 0) {
+            const thread = threads[0];
+            if (thread === undefined) {
               return yield* new ProjectionStoreThreadNotFoundError({ threadId });
             }
             // Select checkpoint metadata only; diffs need neither transcripts nor large run/checkpoint JSON.
@@ -5330,7 +5336,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               ORDER BY scope_id ASC, ordinal_within_scope ASC
             `,
             ]);
-            return yield* decodeCheckpointContext({ runs, checkpointScopes, checkpoints });
+            return yield* decodeCheckpointContext({
+              projectId: thread.projectId,
+              runs,
+              checkpointScopes,
+              checkpoints,
+            });
           }),
         )
         .pipe(

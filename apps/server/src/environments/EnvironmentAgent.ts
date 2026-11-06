@@ -18,8 +18,10 @@ import {
   type EnvironmentLiveProviderSession,
   type EnvironmentOrchestrationCapabilities,
   ProviderDriverKind,
+  type ProjectId,
   type ProviderInstanceId,
   type ThreadId,
+  VcsUnsupportedOperationError,
 } from "@t3tools/contracts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -37,6 +39,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../attachmentStore.ts";
+import * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as ServerConfig from "../config.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import {
@@ -110,10 +113,14 @@ const decodeRetired = Schema.decodeUnknownOption(EnvironmentExecutorRetiredSessi
 const decodeAttachment = Schema.decodeUnknownOption(EnvironmentAttachmentReadResult);
 const encodeEvent = Schema.encodeUnknownEffect(ProviderEventJson);
 
-export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
+export interface EnvironmentAgentInput {
   readonly environmentId: EnvironmentId;
   readonly hubUrl: string;
-}) {
+  /** The Environment credential, for the Hub repository; without it nothing is uploaded. */
+  readonly credential: string | undefined;
+}
+
+export const make = Effect.fn("EnvironmentAgent.make")(function* (input: EnvironmentAgentInput) {
   const registry = yield* EnvironmentExecutor.EnvironmentExecutorRegistry;
   const local = yield* registry.get(registry.hubMachineEnvironmentId).pipe(Effect.orDie);
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
@@ -257,6 +264,35 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
       .pipe(Effect.mapError((cause) => `Could not clone the Project: ${cause.message}`));
   });
 
+  /** Pushes to or fetches from the Hub's repository of the Project, over HTTP with the credential. */
+  const transfer = (
+    operation: string,
+    run: typeof HubRepository.pushRefs | typeof HubRepository.fetchMissingRefs,
+    request: {
+      readonly cwd: string;
+      readonly projectId: ProjectId;
+      readonly checkpointRefs: ReadonlyArray<
+        RemoteInput<"checkpoint.push">["checkpointRefs"][number]
+      >;
+    },
+  ) =>
+    Option.isNone(vcs) || input.credential === undefined
+      ? Effect.fail(
+          new VcsUnsupportedOperationError({
+            operation,
+            kind: "git",
+            detail: "This machine cannot reach the Hub repository.",
+          }),
+        )
+      : run({
+          cwd: request.cwd,
+          remote: HubRepository.withEnvironmentCredential(
+            HubRepository.hubRepositoryUrl(input.hubUrl, request.projectId),
+            input.credential,
+          ),
+          refs: request.checkpointRefs,
+        }).pipe(Effect.provideService(VcsProcess.VcsProcess, vcs.value));
+
   /** Fetches from the Hub, by hash, the attachments a turn needs and this machine lacks. */
   const ensureAttachments = Effect.fn("EnvironmentAgent.ensureAttachments")(function* (
     driver: ProviderDriverKind,
@@ -323,6 +359,19 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
     const adapter = yield* local.provider.adapters.get(instanceId).pipe(Effect.mapError(openError));
     if (request.checkout !== undefined) {
       yield* ensureCheckout(request.checkout).pipe(Effect.mapError(openError));
+      const hubRefs = request.checkout.hubRefs;
+      // Once the Hub repository has the Thread's checkpoints, this checkout gets the ones it lacks.
+      if (hubRefs !== undefined) {
+        yield* transfer("HubRepository.fetch", HubRepository.fetchMissingRefs, {
+          cwd: request.checkout.path,
+          projectId: hubRefs.projectId,
+          checkpointRefs: hubRefs.refs,
+        }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Could not fetch the Thread's checkpoints from the Hub", { cause }),
+          ),
+        );
+      }
     }
     // The agent here reaches the Hub's MCP, with the credential the Hub issued for this Thread.
     if (request.mcp === undefined) {
@@ -507,6 +556,18 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
           .pipe(Effect.map((paths) => (paths === null ? null : [...paths])));
       case "checkpoint.deleteRefs":
         return checkpoints.deleteCheckpointRefs(request as RemoteInput<"checkpoint.deleteRefs">);
+      case "checkpoint.push":
+        return transfer(
+          "HubRepository.push",
+          HubRepository.pushRefs,
+          request as RemoteInput<"checkpoint.push">,
+        );
+      case "checkpoint.fetch":
+        return transfer(
+          "HubRepository.fetch",
+          HubRepository.fetchMissingRefs,
+          request as RemoteInput<"checkpoint.fetch">,
+        );
     }
   };
 
@@ -680,5 +741,4 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
   });
 });
 
-export const layer = (input: { readonly environmentId: EnvironmentId; readonly hubUrl: string }) =>
-  Layer.effect(EnvironmentAgent, make(input));
+export const layer = (input: EnvironmentAgentInput) => Layer.effect(EnvironmentAgent, make(input));

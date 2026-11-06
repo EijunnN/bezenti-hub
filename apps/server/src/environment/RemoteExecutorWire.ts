@@ -17,6 +17,7 @@ import {
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderTurn,
   OrchestrationV2RuntimeRequest,
+  ProjectId,
   ProviderApprovalDecision,
   ProviderSessionId,
   ProviderTurnId,
@@ -46,10 +47,16 @@ export const WireMcpCredential = Schema.Struct({
 });
 export type WireMcpCredential = typeof WireMcpCredential.Type;
 
-/** Where the Project's checkout is on the Environment, and the remote to clone it from. */
+/**
+ * Where the Project's checkout is on the Environment, the remote to clone it from, and the
+ * Thread's checkpoint refs the Hub repository has, for the checkout to fetch the ones it lacks.
+ */
 export const WireCheckout = Schema.Struct({
   path: Schema.String,
   cloneUrl: Schema.NullOr(Schema.String),
+  hubRefs: Schema.optionalKey(
+    Schema.Struct({ projectId: ProjectId, refs: Schema.Array(CheckpointRef) }),
+  ),
 });
 export type WireCheckout = typeof WireCheckout.Type;
 
@@ -167,6 +174,12 @@ const DiffInput = Schema.Struct({
   format: Schema.optionalKey(Schema.Literals(["patch", "numstat"])),
   maxOutputBytes: Schema.optionalKey(Schema.Number),
   filePaths: Schema.optionalKey(Schema.Array(Schema.String)),
+});
+
+const HubRepositoryTransfer = Schema.Struct({
+  cwd: Schema.String,
+  projectId: ProjectId,
+  checkpointRefs: Schema.Array(CheckpointRef),
 });
 
 /** Every operation a joined Environment answers today, with its codecs. */
@@ -313,6 +326,8 @@ export const REMOTE_OPERATIONS = {
     Schema.Struct({ cwd: Schema.String, checkpointRefs: Schema.Array(CheckpointRef) }),
     Schema.Void,
   ),
+  "checkpoint.push": checkpoint(HubRepositoryTransfer, Schema.Void),
+  "checkpoint.fetch": checkpoint(HubRepositoryTransfer, Schema.Void),
 } as const;
 
 export type RemoteOperation = keyof typeof REMOTE_OPERATIONS;

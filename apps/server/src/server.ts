@@ -53,6 +53,7 @@ import * as ProviderHostLive from "./provider/ProviderHostLive.ts";
 import * as DocumentText from "./provider/DocumentText.ts";
 import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRegistrySupport";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
+import * as HubRepository from "./checkpointing/HubRepository.ts";
 import * as NativeChildWorkQuery from "./orchestration-v2/NativeChildWorkQuery.ts";
 import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
 import * as SourceControlBuiltInDrivers from "./sourceControl/builtInDrivers.ts";
@@ -181,6 +182,7 @@ import * as InstallationUsersHttp from "./spaces/installationUsersHttp.ts";
 import * as AuditLog from "./audit/AuditLog.ts";
 import * as AuditHttp from "./audit/http.ts";
 import * as EnvironmentConnectRoute from "./environments/connectRoute.ts";
+import * as EnvironmentGitRoute from "./environments/gitRoute.ts";
 import * as EnvironmentRegistry from "./environments/EnvironmentRegistry.ts";
 import * as HubEnvironmentsHttp from "./environments/http.ts";
 import * as JoinedHub from "./environments/JoinedHub.ts";
@@ -487,6 +489,8 @@ const layerAuth = Layer.mergeAll(
 
 const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
   Layer.provide(layerCheckpointStore),
+  // Each Project's checkpoints on the Hub: uploads, diffs and `/api/git` read the same folder.
+  Layer.provideMerge(HubRepository.layer),
   Layer.provide(layerGitWorkflow),
   Layer.provide(
     RunFinalizationService.layerObserver.pipe(
@@ -720,6 +724,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerHttp.layerStaticAndDevRoute,
     Ws.layer,
     EnvironmentConnectRoute.layer,
+    EnvironmentGitRoute.layer,
   ),
   McpHttpServer.layer.pipe(
     // The same executor-backed registry the orchestration uses, by layer memoization.

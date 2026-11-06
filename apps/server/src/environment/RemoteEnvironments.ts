@@ -4,6 +4,7 @@
  * drops what it already has. See docs/internals/overview.md, «Environment executors».
  */
 import {
+  CheckpointRef,
   type ChatAttachment,
   ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
   ENVIRONMENT_EXECUTOR_FRAME_METHODS,
@@ -285,10 +286,14 @@ const make = Effect.gen(function* () {
       projects,
     });
 
-  /** The Project's checkout on the Environment, and the Hub checkout's `origin` to clone from. */
+  /**
+   * The Project's checkout on the Environment, the Hub checkout's `origin` to clone from, and the
+   * Thread's checkpoint refs the Hub repository has, which the checkout fetches if it lacks them.
+   */
   const checkoutFor = Effect.fn("RemoteEnvironments.checkoutFor")(function* (
     link: Link,
     projectId: ProjectId,
+    threadId: ThreadId,
   ) {
     const path = yield* pathsOf(link)
       .checkout(projectId)
@@ -314,7 +319,18 @@ const make = Effect.gen(function* () {
               ),
               Effect.orElseSucceed(() => null),
             );
-    return { path: path.value, cloneUrl } satisfies WireCheckout;
+    const uploaded = yield* sql<{ readonly ref: string }>`
+      SELECT json_extract(payload_json, '$.ref') AS ref
+      FROM orchestration_v2_projection_checkpoints
+      WHERE thread_id = ${threadId} AND status = 'ready' AND uploaded_to_hub = 1
+    `.pipe(Effect.orElseSucceed(() => []));
+    return {
+      path: path.value,
+      cloneUrl,
+      ...(uploaded.length === 0
+        ? {}
+        : { hubRefs: { projectId, refs: uploaded.map((row) => CheckpointRef.make(row.ref)) } }),
+    } satisfies WireCheckout;
   });
 
   /** Hashes a turn's attachments and lets the session's machine fetch exactly those. */
@@ -426,7 +442,7 @@ const make = Effect.gen(function* () {
       const thread = yield* projections.getThread(input.threadId).pipe(Effect.option);
       const checkout = Option.isNone(thread)
         ? undefined
-        : yield* checkoutFor(link, thread.value.projectId);
+        : yield* checkoutFor(link, thread.value.projectId, input.threadId);
       const mcp = yield* mcpSessions.read(input.threadId);
       const sink: SessionSink = {
         threadId: input.threadId,
@@ -534,6 +550,14 @@ const make = Effect.gen(function* () {
         callCheckpoint<void>(link, "checkpoint.deleteRefs", definedOnly(input)),
       ),
     });
+    const hubRepository: EnvironmentExecutor.EnvironmentHubRepository = {
+      push: Effect.fn("RemoteEnvironments.hubRepository.push")((input) =>
+        callCheckpoint<void>(link, "checkpoint.push", input),
+      ),
+      fetch: Effect.fn("RemoteEnvironments.hubRepository.fetch")((input) =>
+        callCheckpoint<void>(link, "checkpoint.fetch", input),
+      ),
+    };
     // Resolved on the Hub from what the Environment reported: the Orchestrator asks while deciding.
     const runtimePolicy: RuntimePolicy.RuntimePolicyV2Shape = {
       resolve: Effect.fn("RemoteEnvironments.runtimePolicy.resolve")(function* (input) {
@@ -576,7 +600,7 @@ const make = Effect.gen(function* () {
         adapters,
         capabilities: (instanceId) => cache.snapshotProvider(link.environmentId, instanceId),
       },
-      workspace: { paths, checkpoints, runtimePolicy, rpc: Option.none() },
+      workspace: { paths, checkpoints, hubRepository, runtimePolicy, rpc: Option.none() },
       host: {
         describe: cache.snapshot(link.environmentId).pipe(
           Effect.flatMap(

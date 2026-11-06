@@ -4,7 +4,7 @@
 
 **Blocked by:** 04.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Un repositorio bare por Project en el state dir del Hub, servido por git smart HTTP con la Environment credential. El credential helper de `t3` la inyecta.
 - [ ] Autorización por Project: solo los Environments que el dueño del Thread puede usar en ese Space. Un Environment no puede leer ni escribir el repositorio de un Project de otro Space. Test red-first.

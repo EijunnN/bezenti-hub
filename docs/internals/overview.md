@@ -146,8 +146,36 @@ on its own in-process executor. Constraints that span both halves:
   it lacks with `attachment.read`, which answers only attachments a live session's turn sent to
   that machine, while the Thread still runs there.
 - The machine uses the Project's checkout where it is, else clones the Hub checkout's `origin`
-  there. New worktrees are still made on the Hub machine only, so placing a Thread that asks for
-  one (a launch strategy, or a `thread.create` with a worktree) on another Environment is refused.
+  there; when the Hub repository has the Thread's checkpoints, the session's open names them and
+  the checkout fetches the ones it lacks. New worktrees are still made on the Hub machine only, so
+  placing a Thread that asks for one (a launch strategy, or a `thread.create` with a worktree) on
+  another Environment is refused.
+
+### Hub repository
+
+The Hub keeps one bare repository per Project under `<state dir>/hub-repositories`
+([HubRepository](../../apps/server/src/checkpointing/HubRepository.ts)), so a turn's checkpoint
+outlives the machine that captured it. After `checkpoint.capture` commits, the
+[uploader](../../apps/server/src/orchestration-v2/CheckpointUploadService.ts) asks the Thread's
+Active environment to push the refs of every ready checkpoint not yet uploaded, then re-emits each
+one with `uploadedToHub: true` (column `uploaded_to_hub`, migration 097). It runs outside the
+effect lane, so a slow or failing upload never holds back the Thread's next turn: failures retry
+with backoff, at once when an Environment connects, and from the projection after a restart. It is
+tracked per checkpoint, not as an ordinal per scope, because a rollback reuses its ordinals: a mark
+is written only if the checkpoint still has the ref and capture time that were pushed. The Hub
+machine pushes to the repository on disk through the same executor operation (`checkpoint.push`),
+so there is one path; joined machines use `/api/git/<projectId>`
+([gitRoute](../../apps/server/src/environments/gitRoute.ts)), git smart HTTP relayed to
+`git http-backend`. Each request carries the Environment credential, which `t3` hands git through
+a credential helper in the process environment, after an empty helper that drops the user's own,
+so it is never on a command line or in a user's credential store. The route checks it on every
+request (a removed machine loses access at once) and allows only Projects where the machine's
+owner may start Threads (`thread.create` in the Project's Space). Transfers always name the Hub
+repository by URL or path, never a remote of the checkout, so nothing reaches `origin`.
+
+Turn and Thread diffs read the Hub repository once it has both refs, so they work with the machine
+offline; until then they run on the Thread's Active environment. A restore whose ref is missing in
+the workspace (a move, or refs dropped there) fetches it from the Hub repository first.
 
 ### Logical workspace paths
 

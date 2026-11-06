@@ -1,17 +1,21 @@
 import {
+  type CheckpointRef,
   OrchestrationGetTurnDiffResult,
   type OrchestrationGetFullThreadDiffInput,
   type OrchestrationGetFullThreadDiffResult,
   type OrchestrationGetTurnDiffInput,
   type OrchestrationGetTurnDiffResult as OrchestrationGetTurnDiffResultType,
+  type ProjectId,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import { CHECKPOINT_DIFF_MAX_OUTPUT_BYTES } from "../vcs/VcsDriver.ts";
 import { checkpointRefForScopeOrdinal } from "../orchestration-v2/CheckpointService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
@@ -24,6 +28,7 @@ import {
   type CheckpointServiceError,
 } from "./Errors.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
+import * as HubRepository from "./HubRepository.ts";
 import { isGitImport, parseTurnDiffFilesFromNumstat, type TurnDiffFileSummary } from "./Diffs.ts";
 
 // Windows limits a command line to 32,767 characters. Leave room for the rest of git's arguments.
@@ -85,6 +90,41 @@ export const make = Effect.gen(function* () {
   const threads = yield* ThreadManagement.ThreadManagementService;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const digest = yield* Digest.Digest;
+  // Absent on hosts without Environments or a Hub repository (orchestration-only tests).
+  const hubRepositories = yield* Effect.serviceOption(HubRepository.HubRepositories);
+  const environments = yield* Effect.serviceOption(EnvironmentExecutor.EnvironmentExecutorRegistry);
+
+  type CheckpointReads = Pick<
+    CheckpointStore.CheckpointStore["Service"],
+    "diffCheckpoints" | "listAuthoredPaths"
+  >;
+  /**
+   * Where a diff reads both refs: the Hub repository once it has them, so it needs no machine;
+   * else the workspace on the Thread's Active environment, which captured them.
+   */
+  const readsFor = Effect.fn("CheckpointDiffQuery.readsFor")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly projectId: ProjectId | undefined;
+    readonly workspaceCwd: string;
+    readonly refs: ReadonlyArray<CheckpointRef>;
+  }) {
+    if (input.projectId !== undefined && Option.isSome(hubRepositories)) {
+      const repositories = hubRepositories.value;
+      if (yield* repositories.hasRefs(input.projectId, input.refs)) {
+        const cwd = yield* repositories.ensure(input.projectId);
+        return { cwd, reads: repositories.checkpoints as CheckpointReads };
+      }
+    }
+    const onEnvironment = <A, E>(effect: Effect.Effect<A, E>) =>
+      Option.isSome(environments)
+        ? environments.value.onActiveEnvironment(input.threadId)(effect)
+        : effect;
+    const reads: CheckpointReads = {
+      diffCheckpoints: (diff) => onEnvironment(checkpointStore.diffCheckpoints(diff)),
+      listAuthoredPaths: (paths) => onEnvironment(checkpointStore.listAuthoredPaths(paths)),
+    };
+    return { cwd: input.workspaceCwd, reads };
+  });
 
   const getTurnDiff: CheckpointDiffQuery["Service"]["getTurnDiff"] = Effect.fn("getTurnDiff")(
     function* (input) {
@@ -202,20 +242,26 @@ export const make = Effect.gen(function* () {
         });
       }
 
+      const { cwd, reads } = yield* readsFor({
+        threadId: input.threadId,
+        projectId: projection.projectId,
+        workspaceCwd: toScope.cwd,
+        refs: [fromCheckpointRef, toCheckpoint.ref],
+      });
       const comparison = {
-        cwd: toScope.cwd,
+        cwd,
         fromCheckpointRef,
         toCheckpointRef: toCheckpoint.ref,
         fallbackFromToHead: false,
         ignoreWhitespace,
       };
-      const authoredPaths = yield* checkpointStore
+      const authoredPaths = yield* reads
         .listAuthoredPaths(comparison)
         .pipe(Effect.orElseSucceed(() => null));
       const files =
         authoredPaths === null
           ? []
-          : yield* checkpointStore.diffCheckpoints({ ...comparison, format: "numstat" }).pipe(
+          : yield* reads.diffCheckpoints({ ...comparison, format: "numstat" }).pipe(
               Effect.map(parseTurnDiffFilesFromNumstat),
               Effect.orElseSucceed(() => []),
             );
@@ -226,7 +272,7 @@ export const make = Effect.gen(function* () {
       let diff = "";
       let remainingBytes = CHECKPOINT_DIFF_MAX_OUTPUT_BYTES;
       for (const filePaths of pathBatches) {
-        const patch = yield* checkpointStore
+        const patch = yield* reads
           .diffCheckpoints({
             ...comparison,
             ...(filePaths === undefined ? {} : { filePaths }),

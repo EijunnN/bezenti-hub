@@ -4,6 +4,7 @@ import {
   CheckpointScopeId,
   NodeId,
   OrchestrationV2Checkpoint,
+  type ProjectId,
   OrchestrationV2CheckpointScope,
   ProviderThreadId,
   RunId,
@@ -17,10 +18,12 @@ import * as Base64Url from "effect/encoding/Base64Url";
 import * as Hex from "effect/encoding/Hex";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { isGitImport, parseTurnDiffFilesFromNumstat } from "../checkpointing/Diffs.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
+import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 
 const CHECKPOINT_REFS_PREFIX = "refs/t3/orchestration-v2/checkpoints";
@@ -133,6 +136,8 @@ export interface CheckpointServiceV2Shape {
   readonly restore: (input: {
     readonly scope: OrchestrationV2CheckpointScope;
     readonly checkpoint: OrchestrationV2Checkpoint;
+    /** With it, a ref the workspace lacks is fetched from the Hub's repository of the Project. */
+    readonly projectId?: ProjectId;
   }) => Effect.Effect<void, CheckpointServiceV2Error>;
   readonly deleteStaleRefs: (input: {
     readonly scope: OrchestrationV2CheckpointScope;
@@ -225,6 +230,7 @@ function makeCheckpoint(input: {
     status: input.status,
     files: input.files,
     capturedAt: input.capturedAt,
+    ...(input.status === "ready" ? { uploadedToHub: false } : {}),
   };
 }
 
@@ -240,6 +246,8 @@ export const layer: Layer.Layer<
     const checkpointRefFor = (input: Parameters<typeof checkpointRefForScopeOrdinal>[0]) =>
       checkpointRefForScopeOrdinal(input).pipe(Effect.provideService(Digest.Digest, crypto));
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
+    // Absent where no Environment executors run (orchestration-only hosts).
+    const hubRepository = yield* Effect.serviceOption(EnvironmentExecutor.HubRepositoryTransfers);
     const workspaceLocks = yield* KeyedLock.make<string>();
     const withWorkspaceLock = <A, E, R>(cwd: string, effect: Effect.Effect<A, E, R>) =>
       workspaceLocks.withLock(cwd, effect);
@@ -513,6 +521,31 @@ export const layer: Layer.Layer<
             });
           }
 
+          if (input.projectId !== undefined && Option.isSome(hubRepository)) {
+            const present = yield* checkpointStore.hasCheckpointRef({
+              cwd: input.scope.cwd,
+              checkpointRef: input.checkpoint.ref,
+            });
+            // Captured elsewhere (before a move) or pruned here: the Hub's copy restores it. A
+            // failed fetch leaves the restore below to report the ref unavailable.
+            if (!present) {
+              yield* hubRepository.value
+                .fetch({
+                  cwd: input.scope.cwd,
+                  projectId: input.projectId,
+                  checkpointRefs: [input.checkpoint.ref],
+                })
+                .pipe(
+                  Effect.catch((cause) =>
+                    Effect.logWarning("Could not fetch a checkpoint from the Hub repository", {
+                      scopeId: input.scope.id,
+                      checkpointRef: input.checkpoint.ref,
+                      cause: String(cause),
+                    }),
+                  ),
+                );
+            }
+          }
           const restored = yield* checkpointStore.restoreCheckpoint({
             cwd: input.scope.cwd,
             checkpointRef: input.checkpoint.ref,

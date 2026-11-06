@@ -17,6 +17,7 @@ import {
   type ProjectId,
   type ProviderDriverKind,
   type ProviderInstanceId,
+  type SpaceId,
 } from "@t3tools/contracts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import type { McpProviderSessionConfig } from "@t3tools/provider-core/server/mcpSession";
@@ -32,7 +33,9 @@ import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
 
+import * as CheckpointDiffQuery from "../checkpointing/CheckpointDiffQuery.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
+import * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as ServerConfig from "../config.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
@@ -77,7 +80,10 @@ const layerCheckpoints = CheckpointStore.layer.pipe(
 );
 
 /** The production orchestration over the Hub's own database and Environments. */
-const layerHubOrchestration = RuntimeLayer.layer.pipe(
+const layerHubOrchestration = CheckpointDiffQuery.layer.pipe(
+  // Diffs read checkpoints as the server reads them, through the same executors.
+  Layer.provide(RuntimeLayer.layerCheckpointStoreProvided),
+  Layer.provideMerge(RuntimeLayer.layer),
   Layer.provideMerge(ProjectStore.layer),
   Layer.provide(McpSessionRegistryTestkit.layer),
   Layer.provide(McpProviderSessions.layer),
@@ -95,6 +101,7 @@ const layerHubOrchestration = RuntimeLayer.layer.pipe(
       resolveLink: () => Effect.die("unused title link"),
     }),
   ),
+  Layer.provideMerge(HubRepository.layer),
   Layer.provideMerge(VcsProcess.layer),
 );
 
@@ -112,6 +119,8 @@ const withOrchestration = (services: Context.Context<HubServices>) =>
 export interface TestEnvironment {
   readonly environmentId: EnvironmentId;
   readonly name: string;
+  /** Its Environment credential, as `t3 join` stored it. */
+  readonly credential: string;
   /**
    * The per-Thread MCP configs the Hub sent for this machine's agents. Recorded, not handed to the
    * replay adapters, whose transcripts were recorded without T3's MCP server.
@@ -170,6 +179,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
   const agent = yield* EnvironmentAgent.make({
     environmentId: input.environmentId,
     hubUrl: input.hubUrl,
+    credential: input.credential,
   }).pipe(Effect.provideContext(machine));
   const report = agent.report;
   const hello: Effect.Effect<EnvironmentHelloFrame> = Effect.map(report, (described) => ({
@@ -222,6 +232,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
   return {
     environmentId: input.environmentId,
     name: input.name,
+    credential: input.credential,
     mcpConfigs,
     workspaceRoot: (yield* report).workspaceRoot,
     connect,
@@ -276,6 +287,8 @@ export const seedProject = Effect.fn("HubWithEnvironments.seedProject")(function
     readonly projectId: ProjectId;
     readonly title: string;
     readonly defaultModelSelection: ModelSelection | null;
+    /** Its Space; none is a Project from before Spaces, in the Owner's Personal space. */
+    readonly spaceId?: SpaceId;
   },
 ) {
   const fs = yield* FileSystem.FileSystem;
@@ -314,6 +327,7 @@ export const seedProject = Effect.fn("HubWithEnvironments.seedProject")(function
         title: input.title,
         workspaceRoot,
         defaultModelSelection: input.defaultModelSelection,
+        ...(input.spaceId === undefined ? {} : { spaceId: input.spaceId }),
         scripts: [],
         createdAt: now,
         updatedAt: now,

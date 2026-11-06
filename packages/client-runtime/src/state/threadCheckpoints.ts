@@ -24,6 +24,8 @@ export interface ThreadCheckpointSummary {
     readonly deletions: number;
   }>;
   readonly filesTotal?: OrchestrationV2CheckpointFileTotals;
+  /** False until the Hub's repository has the checkpoint; absent when the Hub keeps no record. */
+  readonly uploadedToHub?: boolean;
   readonly assistantMessageId: MessageId | null;
   readonly completedAt: string;
 }
@@ -70,6 +72,9 @@ export function deriveThreadCheckpointSummaries(
         status: checkpoint.status,
         files: checkpoint.files,
         ...(checkpoint.filesTotal === undefined ? {} : { filesTotal: checkpoint.filesTotal }),
+        ...(checkpoint.uploadedToHub === undefined
+          ? {}
+          : { uploadedToHub: checkpoint.uploadedToHub }),
         assistantMessageId,
         completedAt: DateTime.formatIso(checkpoint.capturedAt),
       },

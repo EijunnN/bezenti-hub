@@ -1409,6 +1409,11 @@ export const OrchestrationV2Checkpoint = Schema.Struct({
   files: Schema.Array(OrchestrationV2CheckpointFileSummary),
   filesTotal: Schema.optionalKey(OrchestrationV2CheckpointFileTotals),
   capturedAt: Schema.DateTimeUtc,
+  /**
+   * Whether the checkpoint's ref is in the Hub's repository of the Project: a ready checkpoint is
+   * captured with false. Absent on checkpoints from before the Hub kept one.
+   */
+  uploadedToHub: Schema.optionalKey(Schema.Boolean),
 });
 export type OrchestrationV2Checkpoint = typeof OrchestrationV2Checkpoint.Type;
 

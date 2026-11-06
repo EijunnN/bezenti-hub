@@ -4,6 +4,7 @@
  * Thread's Environment on each call (`docs/internals/overview.md`, «Environment executors»).
  */
 import {
+  type CheckpointRef,
   ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
   EnvironmentExecutorUnavailableError,
   EnvironmentId,
@@ -14,7 +15,9 @@ import {
   type EnvironmentProviderCapabilitySnapshot,
   type EnvironmentUnavailableProvider,
   type OrchestrationV2AppThread,
+  type ProjectId,
   type ThreadId,
+  VcsUnsupportedOperationError,
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Cause from "effect/Cause";
@@ -32,6 +35,8 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
+import type { CheckpointStoreError } from "../checkpointing/Errors.ts";
+import * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as RuntimePolicy from "../orchestration-v2/RuntimePolicy.ts";
@@ -42,6 +47,7 @@ import * as HostResources from "../resourceTelemetry/HostResources.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as ProjectCheckouts from "./ProjectCheckouts.ts";
 import { locateInCheckout } from "./WorkspaceLocation.ts";
 
@@ -80,6 +86,21 @@ export interface EnvironmentWorkspaceRpc {
   readonly ports: PortScanner.PortDiscovery["Service"];
 }
 
+export interface HubRepositoryTransferInput {
+  /** A folder of the checkout on the executor's machine. */
+  readonly cwd: string;
+  readonly projectId: ProjectId;
+  readonly checkpointRefs: ReadonlyArray<CheckpointRef>;
+}
+
+/** The checkout's side of the Hub's repository of a Project (`HubRepository.ts`). */
+export interface EnvironmentHubRepository {
+  /** Uploads the refs from the checkout, replacing the Hub's refs of the same names. */
+  readonly push: (input: HubRepositoryTransferInput) => Effect.Effect<void, CheckpointStoreError>;
+  /** Downloads into the checkout the refs it lacks. */
+  readonly fetch: (input: HubRepositoryTransferInput) => Effect.Effect<void, CheckpointStoreError>;
+}
+
 export interface EnvironmentExecutor {
   readonly environmentId: EnvironmentId;
   readonly transport: EnvironmentExecutorTransport;
@@ -95,6 +116,7 @@ export interface EnvironmentExecutor {
     /** Project checkouts on this machine, and logical workspace paths resolved against them. */
     readonly paths: ProjectCheckouts.EnvironmentWorkspacePaths;
     readonly checkpoints: CheckpointStore.CheckpointStore["Service"];
+    readonly hubRepository: EnvironmentHubRepository;
     /** Takes the Thread with its worktree already resolved onto this machine. */
     readonly runtimePolicy: RuntimePolicy.RuntimePolicyV2Shape;
     /** None where the server runs without the RPC services (orchestration-only tests). */
@@ -328,7 +350,42 @@ interface InProcessExecutorInput {
   readonly runtimePolicy: RuntimePolicy.RuntimePolicyV2Shape;
   readonly rpc: Option.Option<EnvironmentWorkspaceRpc>;
   readonly hostResources: Option.Option<HostResources.HostResources["Service"]>;
+  readonly hubRepository: EnvironmentHubRepository;
 }
+
+/**
+ * The Hub machine's side of the Hub repository: a push to the bare repository on this disk, so
+ * its Threads upload through the same path as a joined Environment's at the cost of a local copy.
+ */
+const localHubRepository = (
+  repositories: Option.Option<HubRepository.HubRepositories["Service"]>,
+  vcs: Option.Option<VcsProcess.VcsProcess["Service"]>,
+): EnvironmentHubRepository => {
+  const transfer =
+    (
+      operation: string,
+      run: typeof HubRepository.pushRefs | typeof HubRepository.fetchMissingRefs,
+    ) =>
+    (input: HubRepositoryTransferInput) =>
+      Option.isNone(repositories) || Option.isNone(vcs)
+        ? Effect.fail(
+            new VcsUnsupportedOperationError({
+              operation,
+              kind: "git",
+              detail: "This server keeps no Hub repository.",
+            }),
+          )
+        : repositories.value.ensure(input.projectId).pipe(
+            Effect.flatMap((repository) =>
+              run({ cwd: input.cwd, remote: { url: repository }, refs: input.checkpointRefs }),
+            ),
+            Effect.provideService(VcsProcess.VcsProcess, vcs.value),
+          );
+  return {
+    push: transfer("HubRepository.push", HubRepository.pushRefs),
+    fetch: transfer("HubRepository.fetch", HubRepository.fetchMissingRefs),
+  };
+};
 
 /** An executor whose machine is this process. */
 const makeInProcessExecutor = (input: InProcessExecutorInput): EnvironmentExecutor => ({
@@ -341,6 +398,7 @@ const makeInProcessExecutor = (input: InProcessExecutorInput): EnvironmentExecut
   workspace: {
     paths: input.paths,
     checkpoints: input.checkpoints,
+    hubRepository: input.hubRepository,
     runtimePolicy: input.runtimePolicy,
     rpc: input.rpc,
   },
@@ -449,6 +507,10 @@ export const layerHubMachine: Layer.Layer<
       runtimePolicy: yield* RuntimePolicy.RuntimePolicyV2,
       rpc: yield* optionalWorkspaceRpc,
       hostResources: yield* Effect.serviceOption(HostResources.HostResources),
+      hubRepository: localHubRepository(
+        yield* Effect.serviceOption(HubRepository.HubRepositories),
+        yield* Effect.serviceOption(VcsProcess.VcsProcess),
+      ),
     });
     const registry = yield* makeRegistry(hubMachine);
     const cache = yield* makeCapabilityCache(
@@ -686,6 +748,34 @@ export const layerCheckpointStore: Layer.Layer<
           return yield* (yield* checkpoints).deleteCheckpointRefs(input);
         },
       ),
+    });
+  }),
+);
+
+/** Transfers with the Hub repository, made by the checkout on the running effect's Environment. */
+export class HubRepositoryTransfers extends Context.Service<
+  HubRepositoryTransfers,
+  EnvironmentHubRepository
+>()("t3/environment/EnvironmentExecutor/HubRepositoryTransfers") {}
+
+export const layerHubRepositoryTransfers: Layer.Layer<
+  HubRepositoryTransfers,
+  never,
+  EnvironmentExecutorRegistry
+> = Layer.effect(
+  HubRepositoryTransfers,
+  Effect.gen(function* () {
+    const registry = yield* EnvironmentExecutorRegistry;
+    const current = Effect.gen(function* () {
+      return (yield* registry.get(yield* CheckpointEnvironment)).workspace.hubRepository;
+    });
+    return HubRepositoryTransfers.of({
+      push: Effect.fn("EnvironmentExecutor.hubRepository.push")(function* (input) {
+        return yield* (yield* current).push(input);
+      }),
+      fetch: Effect.fn("EnvironmentExecutor.hubRepository.fetch")(function* (input) {
+        return yield* (yield* current).fetch(input);
+      }),
     });
   }),
 );

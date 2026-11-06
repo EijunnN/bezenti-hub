@@ -355,6 +355,7 @@ function AssistantChangedFilesSectionInner({
       runId={turnSummary.runId}
       files={checkpointFiles}
       totals={checkpointFileTotals(turnSummary)}
+      notUploaded={turnSummary.status === "ready" && turnSummary.uploadedToHub === false}
       allDirectoriesExpanded={allDirectoriesExpanded}
       resolvedTheme={resolvedTheme}
       onToggleAllDirectories={() =>

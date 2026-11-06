@@ -1,10 +1,15 @@
 // @effect-diagnostics nodeBuiltinImport:off -- writes one attachment file for the Hub to serve.
 import * as NodeFSP from "node:fs/promises";
 
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
+  CheckpointId,
+  CheckpointRef,
+  CheckpointScopeId,
   CommandId,
   EnvironmentId,
+  EventId,
   HUB_MACHINE_ENVIRONMENT_ID,
   type OrchestrationV2Command,
   ProjectId,
@@ -18,6 +23,7 @@ import {
   ProviderThreadId,
   RunAttemptId,
   RunId,
+  SpaceId,
   ThreadId,
   UserId,
 } from "@t3tools/contracts";
@@ -28,18 +34,25 @@ import { makeProviderReplayGate } from "@t3tools/provider-testing/replayGate";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 
 import { resolveAttachmentPath } from "../attachmentStore.ts";
+import * as CheckpointDiffQuery from "../checkpointing/CheckpointDiffQuery.ts";
+import * as HubRepository from "../checkpointing/HubRepository.ts";
 import { addMember } from "../auth/UserAuth.testkit.ts";
 import * as ServerConfig from "../config.ts";
 import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { ClaudeOrchestratorReplayHarness } from "../orchestration-v2/Adapters/ClaudeAdapterV2.testkit.ts";
+import * as CheckpointUploadService from "../orchestration-v2/CheckpointUploadService.ts";
+import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import type * as RuntimePolicy from "../orchestration-v2/RuntimePolicy.ts";
 import { materializeFixtureInput } from "../orchestration-v2/testkit/fixtures/shared.ts";
@@ -52,6 +65,7 @@ import {
   readReplayFixtureTranscript,
 } from "../orchestration-v2/testkit/ProviderReplayFixtures.ts";
 import { materializeReplayTranscriptRuntimeInstructions } from "../orchestration-v2/testkit/ReplayRuntimeInstructions.ts";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as EnvironmentRegistry from "./EnvironmentRegistry.ts";
 import {
   connectProtocolEnvironment,
@@ -678,5 +692,299 @@ describe("Hub con Environments", () => {
         });
         assert.equal(yield* read, "failure");
       }).pipe(Effect.scoped),
+  );
+});
+
+/** Git in a folder of the test, its exit code and output whatever they are. */
+const git = (
+  cwd: string,
+  args: ReadonlyArray<string>,
+  options: { readonly env?: Readonly<Record<string, string>> } = {},
+) =>
+  Effect.flatMap(VcsProcess.VcsProcess, (vcs) =>
+    vcs.run({
+      operation: "HubRepository.test.git",
+      command: "git",
+      cwd,
+      args,
+      allowNonZeroExit: true,
+      ...(options.env === undefined ? {} : { env: { ...options.env } }),
+    }),
+  ).pipe(Effect.provide(VcsProcess.layer.pipe(Layer.provide(NodeServices.layer))), Effect.orDie);
+
+/** Resolves once the Hub marks the turn's checkpoint as in its repository. */
+const awaitUploaded = Effect.fn(function* (hub: Hub, threadId: ThreadId, appRunOrdinal: number) {
+  const orchestrator = hub.service(Orchestrator.OrchestratorV2);
+  // Events after this sequence are streamed, so a mark the projection does not show yet is seen.
+  const afterSequence = yield* hub
+    .service(EventSink.EventSinkV2)
+    .latestSequence({ threadId })
+    .pipe(Effect.orDie);
+  const projection = yield* orchestrator.getThreadProjection(threadId).pipe(Effect.orDie);
+  const uploaded = projection.checkpoints.some(
+    (checkpoint) => checkpoint.appRunOrdinal === appRunOrdinal && checkpoint.uploadedToHub === true,
+  );
+  if (uploaded) return;
+  // The orchestration's own event stream: it sees the uploader's writes as clients do.
+  yield* orchestrator.streamStoredEventsFrom({ threadId, afterSequence }).pipe(
+    Stream.filter(
+      (stored) =>
+        stored.event.type === "checkpoint.captured" &&
+        stored.event.payload.uploadedToHub === true &&
+        stored.event.payload.appRunOrdinal === appRunOrdinal,
+    ),
+    Stream.runHead,
+    Effect.orDie,
+  );
+});
+
+/** The machine's agent, with turns that edit a file the turn's checkpoint then carries. */
+const withEditingTurns = (
+  adapters: LoadedFixture["adapters"],
+  input: { readonly file: string; readonly content: string },
+) =>
+  Layer.effect(
+    ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+    Effect.map(ProviderAdapterRegistry.ProviderAdapterRegistryV2, (registry) => ({
+      ...registry,
+      get: (instanceId: ProviderInstanceId) =>
+        registry.get(instanceId).pipe(
+          Effect.map((adapter) => ({
+            ...adapter,
+            openSession: (open: ProviderAdapter.ProviderAdapterV2OpenSessionInput) =>
+              adapter.openSession(open).pipe(
+                Effect.map((runtime) => ({
+                  ...runtime,
+                  startTurn: (turn: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+                    Effect.promise(() =>
+                      NodeFSP.writeFile(
+                        `${turn.runtimePolicy.cwd}/${input.file}`,
+                        `${input.content} (turn ${turn.runOrdinal})
+`,
+                      ),
+                    ).pipe(Effect.andThen(runtime.startTurn(turn))),
+                })),
+              ),
+          })),
+        ),
+    })),
+  ).pipe(Layer.provide(adapters));
+
+describe("Hub repository", () => {
+  it.live(
+    "an Environment reaches the repositories of Projects its owner works in, until removed",
+    () =>
+      Effect.gen(function* () {
+        const hub = yield* makeHub();
+        const laptop = yield* hub.join({
+          name: "Laptop",
+          adapters: idleAdapters(ProviderInstanceId.make("claudeAgent")),
+        });
+        const own = ProjectId.make("project:own");
+        const { workspaceRoot } = yield* seedProject(hub.server, {
+          projectId: own,
+          title: "Own",
+          defaultModelSelection: null,
+        });
+        yield* addMember(hub.server, { id: "member-1", displayName: "Grace Hopper" });
+        const others = ProjectId.make("project:graces");
+        yield* seedProject(hub.server, {
+          projectId: others,
+          title: "Grace's",
+          defaultModelSelection: null,
+          spaceId: SpaceId.make("personal:member-1"),
+        });
+        const ref = CheckpointRef.make("refs/t3/orchestration-v2/checkpoints/test/ordinal/1");
+        yield* git(workspaceRoot, ["update-ref", ref, "HEAD"]);
+        const remote = (projectId: ProjectId) =>
+          HubRepository.withEnvironmentCredential(
+            HubRepository.hubRepositoryUrl(hub.server.url, projectId),
+            laptop.credential,
+          );
+        const push = (projectId: ProjectId) =>
+          git(workspaceRoot, ["push", remote(projectId).url, `${ref}:${ref}`], {
+            env: remote(projectId).env ?? {},
+          });
+        const advertised = (projectId: ProjectId, credential = laptop.credential) =>
+          HttpClient.HttpClient.pipe(
+            Effect.flatMap((client) =>
+              client.execute(
+                HttpClientRequest.get(
+                  `${remote(projectId).url}/info/refs?service=git-upload-pack`,
+                ).pipe(HttpClientRequest.bearerToken(credential)),
+              ),
+            ),
+            Effect.map((response) => response.status),
+            Effect.provide(FetchHttpClient.layer),
+            Effect.orDie,
+          );
+
+        assert.equal((yield* push(own)).exitCode, 0);
+        const listed = yield* git(workspaceRoot, ["ls-remote", remote(own).url], {
+          env: remote(own).env ?? {},
+        });
+        assert.equal(listed.exitCode, 0);
+        assert.include(listed.stdout, ref);
+
+        // Another User's Space: the Owner's machine neither reads nor writes its Project.
+        assert.equal(yield* advertised(others), 403);
+        assert.notEqual((yield* push(others)).exitCode, 0);
+        assert.equal(yield* advertised(own, "not-a-credential"), 401);
+
+        // Removed: push and fetch stop at once.
+        const owner = yield* ownerIdOf(hub);
+        yield* hub
+          .service(EnvironmentRegistry.EnvironmentRegistry)
+          .remove({ actorUserId: owner, environmentId: laptop.environmentId });
+        assert.equal(yield* advertised(own), 401);
+        assert.notEqual((yield* push(own)).exitCode, 0);
+      }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "a turn's checkpoint uploads, and its diffs open on the Hub with the machine offline",
+    () =>
+      Effect.gen(function* () {
+        const loaded = yield* loadFixture("simple");
+        const hub = yield* makeHub();
+        const laptop = yield* hub.join({
+          name: "Laptop",
+          adapters: withEditingTurns(loaded.adapters, {
+            file: "notes.md",
+            content: "Written on the Laptop",
+          }),
+        });
+        yield* replayOn(hub, laptop, loaded);
+        const [threadId] = loaded.materialized.projectionThreadIds;
+        assert.isDefined(threadId);
+        yield* awaitUploaded(hub, threadId, 1);
+        yield* laptop.disconnect;
+
+        const diffs = hub.service(CheckpointDiffQuery.CheckpointDiffQuery);
+        const turn = yield* diffs.getTurnDiff({ threadId, fromTurnCount: 0, toTurnCount: 1 });
+        assert.include(turn.diff, "+Written on the Laptop (turn 1)");
+        const whole = yield* diffs.getFullThreadDiff({ threadId, toTurnCount: 1 });
+        assert.include(whole.diff, "notes.md");
+
+        // Uploaded to the Hub, not to the Project's own remote the Laptop cloned from.
+        const projection = yield* hub
+          .service(Orchestrator.OrchestratorV2)
+          .getThreadProjection(threadId);
+        const project = yield* hub
+          .service(ProjectStore.ProjectStoreV2)
+          .get(projection.thread.projectId);
+        assert.isTrue(Option.isSome(project));
+        const origin = Option.getOrThrow(project).workspaceRoot;
+        assert.equal((yield* git(origin, ["for-each-ref", "refs/t3/"])).stdout, "");
+        for (const checkpoint of projection.checkpoints) {
+          if (checkpoint.status === "ready") assert.isTrue(checkpoint.uploadedToHub, checkpoint.id);
+        }
+      }).pipe(Effect.scoped),
+  );
+
+  it.live("a failed upload shows as not uploaded and retries when the machine comes back", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub();
+      const opened = yield* openProtocolSession(hub);
+      const { threadId } = opened;
+      const projection = yield* hub
+        .service(Orchestrator.OrchestratorV2)
+        .getThreadProjection(threadId);
+      const now = projection.thread.createdAt;
+      const scopeId = CheckpointScopeId.make("scope:protocol");
+      const nodeId = NodeId.make("node:protocol");
+      const ref = CheckpointRef.make("refs/t3/orchestration-v2/checkpoints/protocol/ordinal/1");
+      const checkpointId = CheckpointId.make("checkpoint:protocol");
+      yield* hub.server.eventSink.write({
+        events: [
+          {
+            id: EventId.make("event:protocol-scope"),
+            type: "checkpoint-scope.created",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: scopeId,
+              threadId,
+              runId: null,
+              nodeId,
+              parentScopeId: null,
+              providerThreadId: null,
+              kind: "root_run",
+              ordinalWithinParent: 0,
+              advancesAppRunCount: true,
+              cwd: "/remote/projects/protocol",
+              createdAt: now,
+            },
+          },
+          {
+            id: EventId.make("event:protocol-checkpoint"),
+            type: "checkpoint.captured",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: checkpointId,
+              threadId,
+              scopeId,
+              runId: null,
+              nodeId,
+              parentCheckpointId: null,
+              ordinalWithinScope: 1,
+              appRunOrdinal: 1,
+              ref,
+              status: "ready",
+              files: [],
+              capturedAt: now,
+              uploadedToHub: false,
+            },
+          },
+        ],
+      });
+      yield* hub.service(CheckpointUploadService.CheckpointUploads).request(threadId);
+
+      const pushed = yield* opened.machine.nextFrame;
+      assert.equal(pushed.method, "checkpoint.push");
+      assert.deepEqual(pushed.payload, {
+        cwd: "/remote/projects/protocol",
+        projectId: "project:protocol",
+        checkpointRefs: [ref],
+      });
+      yield* opened.machine.connection.receive({
+        type: "response",
+        requestId: pushed.requestId,
+        result: {
+          _tag: "failure",
+          error: {
+            _tag: "VcsProcessExitError",
+            operation: "HubRepository.push",
+            command: "git push",
+            cwd: "/remote/projects/protocol",
+            exitCode: 128,
+            detail: "Could not reach the Hub.",
+          },
+        },
+      });
+      const stored = yield* hub.server.sql<{ readonly uploaded: number | null }>`
+        SELECT uploaded_to_hub AS uploaded FROM orchestration_v2_projection_checkpoints
+        WHERE checkpoint_id = ${checkpointId}
+      `;
+      assert.deepEqual(stored, [{ uploaded: 0 }]);
+
+      // The machine reconnects: the upload runs again at once, and the turn is marked uploaded.
+      yield* opened.machine.disconnect;
+      const back = yield* connectProtocolEnvironment(hub, {
+        environmentId: opened.environmentId,
+        instanceId: opened.instanceId,
+        driver: CLAUDE,
+        capabilities: ClaudeProviderCapabilitiesV2,
+      });
+      const retried = yield* back.nextFrame;
+      assert.equal(retried.method, "checkpoint.push");
+      yield* back.connection.receive({
+        type: "response",
+        requestId: retried.requestId,
+        result: { _tag: "success", value: null },
+      });
+      yield* awaitUploaded(hub, threadId, 1);
+    }).pipe(Effect.scoped),
   );
 });

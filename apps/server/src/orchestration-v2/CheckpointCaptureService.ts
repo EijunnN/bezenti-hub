@@ -16,6 +16,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
 import * as CheckpointService from "./CheckpointService.ts";
+import * as CheckpointUploadService from "./CheckpointUploadService.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -59,6 +60,8 @@ export const layer: Layer.Layer<
     const eventSink = yield* EventSink.EventSinkV2;
     const ids = yield* IdAllocator.IdAllocatorV2;
     const projections = yield* ProjectionStore.ProjectionStoreV2;
+    // Absent where no Hub repository is kept (orchestration-only hosts).
+    const uploads = yield* Effect.serviceOption(CheckpointUploadService.CheckpointUploads);
 
     const execute = Effect.fn("orchestrationV2.checkpointCapture.execute")(function* (input: {
       readonly threadId: ThreadId;
@@ -232,6 +235,7 @@ export const layer: Layer.Layer<
               ]),
         ],
       });
+      if (uploads._tag === "Some") yield* uploads.value.request(input.threadId);
     });
 
     return CheckpointCaptureServiceV2.of({

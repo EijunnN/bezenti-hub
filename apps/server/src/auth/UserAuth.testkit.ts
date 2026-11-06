@@ -28,6 +28,7 @@ import * as AuditHttp from "../audit/http.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as EnvironmentConnectRoute from "../environments/connectRoute.ts";
+import * as EnvironmentGitRoute from "../environments/gitRoute.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as HubEnvironmentsHttp from "../environments/http.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -247,6 +248,7 @@ export const serveAuthHttpWith = Effect.fn(function* (
       Layer.mergeAll(
         routes,
         EnvironmentConnectRoute.layer.pipe(Layer.provide(Layer.succeedContext(services))),
+        EnvironmentGitRoute.layer.pipe(Layer.provide(Layer.succeedContext(services))),
       ),
       { disableListenLog: true, disableLogger: true },
     ).pipe(

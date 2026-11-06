@@ -19,7 +19,7 @@ import {
   EnvironmentUnavailableProvider,
 } from "./environmentConnection.ts";
 
-export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 2;
+export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 3;
 
 /**
  * The Hub machine's Environment id. It is a constant so the `environments` table can seed the
@@ -68,6 +68,8 @@ const ENVIRONMENT_EXECUTOR_OPERATIONS = {
     "checkpoint.diff",
     "checkpoint.listAuthoredPaths",
     "checkpoint.deleteRefs",
+    "checkpoint.push",
+    "checkpoint.fetch",
     "runtimePolicy.resolve",
     "launch.prepareWorktree",
     "launch.runSetupScript",

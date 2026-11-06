@@ -451,6 +451,16 @@ New worktrees can't be made on a joined machine yet, so start such Threads in
 the Project's checkout. Each machine uses the provider sign-ins it already has.
 **Settings → Environments** counts the Threads running on each machine.
 
+After each turn the machine uploads the turn's checkpoint, with your uncommitted
+changes, to the Hub, which keeps its own git repository per Project. Turn and
+Thread diffs then open even while that machine is off, and undoing a turn works
+there from the Hub's copy. Until the upload finishes the turn's changed files
+say **Checkpoint not uploaded yet**; a failed upload retries by itself, and right
+away when the machine reconnects. The Hub's repository is separate from your
+own remotes: checkpoints are never pushed to `origin`. A machine can only reach
+the repositories of Projects its owner works in, and loses access as soon as it
+is removed.
+
 ## Next steps
 
 - [Working with threads](./thread-sidebar.md): start tasks and organize parallel work.

@@ -258,6 +258,12 @@ const makeReports = Effect.gen(function* () {
   return { hello, heartbeat, serve: agent.attach };
 });
 
+const readCredential = (secrets: ServerSecretStore.ServerSecretStore["Service"]) =>
+  secrets.get(ENVIRONMENT_CREDENTIAL_SECRET).pipe(
+    Effect.map(Option.map((bytes) => new TextDecoder().decode(bytes))),
+    Effect.orElseSucceed(() => Option.none<string>()),
+  );
+
 const layerConnector = (joined: JoinedHubState) =>
   Layer.effect(
     HubConnector,
@@ -269,10 +275,7 @@ const layerConnector = (joined: JoinedHubState) =>
         attempt: 0,
         lastError: null,
       });
-      const credential = yield* secrets.get(ENVIRONMENT_CREDENTIAL_SECRET).pipe(
-        Effect.map(Option.map((bytes) => new TextDecoder().decode(bytes))),
-        Effect.orElseSucceed(() => Option.none<string>()),
-      );
+      const credential = yield* readCredential(secrets);
       const run = Effect.gen(function* () {
         if (Option.isNone(credential)) {
           return yield* Ref.set(state, {
@@ -323,7 +326,16 @@ const layerConnector = (joined: JoinedHubState) =>
 export const layer = (joined: JoinedHubState) =>
   layerConnector(joined).pipe(
     Layer.provide(
-      EnvironmentAgent.layer({ environmentId: joined.environmentId, hubUrl: joined.hubUrl }),
+      Layer.unwrap(
+        Effect.gen(function* () {
+          const credential = yield* readCredential(yield* ServerSecretStore.ServerSecretStore);
+          return EnvironmentAgent.layer({
+            environmentId: joined.environmentId,
+            hubUrl: joined.hubUrl,
+            credential: Option.getOrUndefined(credential),
+          });
+        }),
+      ),
     ),
   );
 

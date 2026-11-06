@@ -60,6 +60,7 @@ it.effect("a request resent with its idempotency key runs once and gets the firs
     const agent = yield* EnvironmentAgent.make({
       environmentId: EnvironmentId.make("environment:laptop"),
       hubUrl: "http://127.0.0.1:1",
+      credential: undefined,
     });
     const written = yield* Queue.unbounded<unknown>();
     const connection = yield* agent.attach((text) =>
@@ -203,6 +204,7 @@ it.effect("a session that ends while the Hub is away is reported when the socket
     const agent = yield* EnvironmentAgent.make({
       environmentId: EnvironmentId.make("environment:laptop"),
       hubUrl: "http://127.0.0.1:1",
+      credential: undefined,
     });
     const first = yield* connect(agent);
     yield* first.receive(openRequest("session-1", "credential-1"));
@@ -232,6 +234,7 @@ it.effect(
       const agent = yield* EnvironmentAgent.make({
         environmentId: EnvironmentId.make("environment:laptop"),
         hubUrl: "http://127.0.0.1:1",
+        credential: undefined,
       });
       const mcp = yield* McpProviderSessions.McpProviderSessions;
       const socket = yield* connect(agent);

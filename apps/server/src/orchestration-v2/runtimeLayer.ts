@@ -19,6 +19,7 @@ import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.t
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ScratchThreadPromotion from "../project/ScratchThreadPromotion.ts";
 import * as CheckpointCaptureService from "./CheckpointCaptureService.ts";
+import * as CheckpointUploadService from "./CheckpointUploadService.ts";
 import * as CheckpointService from "./CheckpointService.ts";
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as CommandPolicy from "./CommandPolicy.ts";
@@ -100,6 +101,9 @@ const layerRuntimePolicyProvided = EnvironmentExecutor.layerRuntimePolicy.pipe(
 export const layerCheckpointStoreProvided = EnvironmentExecutor.layerCheckpointStore.pipe(
   Layer.provide(layerEnvironmentExecutorsProvided),
 );
+const layerHubRepositoryTransfersProvided = EnvironmentExecutor.layerHubRepositoryTransfers.pipe(
+  Layer.provide(layerEnvironmentExecutorsProvided),
+);
 
 const layerEventStoreProvided = EventStore.layerFromOrchestrationEventStore.pipe(
   Layer.provide(layerEventInfrastructure),
@@ -152,7 +156,23 @@ const layerProviderEventIngestorProvided = ProviderEventIngestor.layer.pipe(
 );
 
 const layerCheckpointServiceProvided = CheckpointService.layer.pipe(
-  Layer.provide(Layer.merge(IdAllocator.layer, layerCheckpointStoreProvided)),
+  Layer.provide(
+    Layer.mergeAll(
+      IdAllocator.layer,
+      layerCheckpointStoreProvided,
+      layerHubRepositoryTransfersProvided,
+    ),
+  ),
+);
+const layerCheckpointUploadsProvided = CheckpointUploadService.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      layerEnvironmentExecutorsProvided,
+      layerEventSink,
+      IdAllocator.layer,
+      ThreadCommandExecutor.layer,
+    ),
+  ),
 );
 const layerContextHandoffServiceProvided = ContextHandoffService.layer.pipe(
   Layer.provide(IdAllocator.layer),
@@ -237,6 +257,7 @@ const layerCheckpointCaptureServiceProvided = CheckpointCaptureService.layer.pip
   Layer.provide(
     Layer.mergeAll(
       layerCheckpointServiceProvided,
+      layerCheckpointUploadsProvided,
       layerEventSink,
       IdAllocator.layer,
       ProjectionStore.layer,
@@ -403,6 +424,7 @@ const layerMcpAppRequestsProvided = McpAppRequests.layer.pipe(
 export const layer = Layer.mergeAll(
   layerEnvironmentExecutorsProvided,
   layerRemoteEnvironmentsProvided,
+  layerCheckpointUploadsProvided,
   layerCommandOutputHubProvided,
   layerOrchestratorProvided,
   layerMcpAppRequestsProvided,
