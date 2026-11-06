@@ -4,6 +4,8 @@ import {
   HUB_MACHINE_ENVIRONMENT_ID,
   type HubEnvironmentSummary,
   type ProviderInstanceId,
+  previewThreadPlacement,
+  type UserId,
 } from "@t3tools/contracts";
 import { useSyncExternalStore } from "react";
 
@@ -110,6 +112,32 @@ export function activeEnvironmentLabel(environment: ActiveEnvironmentView): stri
   return environment.status === "online"
     ? environment.name
     : `${environment.name}, ${ENVIRONMENT_STATUS_LABELS[environment.status].toLowerCase()}`;
+}
+
+/**
+ * Where the Hub will start a new Thread nobody placed, by the Hub's own rule: the Project's
+ * preferred Environment when this User may use it (the Hub machine, or their own machine), it is
+ * online and it has the provider; otherwise the Hub machine.
+ */
+export function previewDefaultEnvironment(input: {
+  readonly environments: ReadonlyArray<HubEnvironmentSummary>;
+  readonly preferredEnvironmentId: EnvironmentId | null;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly userId: UserId | null;
+}): EnvironmentId {
+  const preferred = input.environments.find(
+    (environment) => environment.id === input.preferredEnvironmentId,
+  );
+  return previewThreadPlacement({
+    preferred:
+      preferred === undefined
+        ? undefined
+        : {
+            ...preferred,
+            usable: preferred.kind === "hub" || preferred.ownerUserId === input.userId,
+          },
+    providerInstanceId: input.providerInstanceId,
+  });
 }
 
 /** Why a new Thread could not run on the Environment, or null when it can. */

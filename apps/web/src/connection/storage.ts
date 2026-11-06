@@ -27,7 +27,15 @@ import {
   pullRequestRoutingPermissionFor,
 } from "@t3tools/client-runtime/connection";
 import { EnvironmentId, ServerConfig, ThreadId, VcsListRefsResult } from "@t3tools/contracts";
-import { SINGLE_HUB_REFUSAL, savedConnectionSlots } from "./singleHub";
+import {
+  SINGLE_HUB_REFUSAL,
+  chooseSavedHub,
+  connectedSavedHub,
+  forgetConnectedSavedHub,
+  probeHubDescriptor,
+  recordSavedConnections,
+  savedConnectionSlots,
+} from "./singleHub";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -625,9 +633,27 @@ export const layer = Layer.effectContext(
     });
 
     const targetStore = Persistence.ConnectionTargetStore.of({
-      // Saved connections past the one Hub this app may use are kept but never connected.
+      // Saved connections past the one Hub this app may use stay saved but are not connected.
       list: catalog.read.pipe(
-        Effect.map((document) => document.targets.slice(0, savedConnectionSlots())),
+        Effect.flatMap((document) =>
+          Effect.promise(() =>
+            chooseSavedHub({
+              targets: document.targets,
+              profiles: document.profiles,
+              slots: savedConnectionSlots(),
+              probe: probeHubDescriptor,
+            }),
+          ).pipe(
+            Effect.tap((chosen) =>
+              Effect.sync(() =>
+                recordSavedConnections({
+                  saved: document.targets.length,
+                  connected: chosen[0]?.environmentId ?? null,
+                }),
+              ),
+            ),
+          ),
+        ),
         Effect.mapError((cause) => persistenceError("list-targets", cause)),
       ),
       listDisabled: catalog.read.pipe(
@@ -641,11 +667,15 @@ export const layer = Layer.effectContext(
           const environmentId = registration.target.environmentId;
           return Effect.gen(function* () {
             const document = yield* catalog.read;
-            const others = document.targets.filter(
-              (target) => target.environmentId !== environmentId,
+            const alreadySaved = document.targets.some(
+              (target) => target.environmentId === environmentId,
             );
-            // A route or credential for the one saved Hub may change; a second Hub may not join.
-            if (others.length + 1 > savedConnectionSlots()) {
+            const connected = connectedSavedHub();
+            // A route or credential for the one Hub may change; a second Hub may not join it.
+            if (
+              savedConnectionSlots() === 0 ||
+              (!alreadySaved && connected !== null && connected !== environmentId)
+            ) {
               return yield* persistenceError("register-connection", SINGLE_HUB_REFUSAL);
             }
             yield* catalog
@@ -669,7 +699,10 @@ export const layer = Layer.effectContext(
       remove: Effect.fn("Persistence.ConnectionRegistrationStore.remove")(function (environmentId) {
         return catalog
           .update((document) => removeConnectionFromCatalog(document, environmentId))
-          .pipe(Effect.mapError((cause) => persistenceError("remove-connection", cause)));
+          .pipe(
+            Effect.tap(() => Effect.sync(() => forgetConnectedSavedHub(environmentId))),
+            Effect.mapError((cause) => persistenceError("remove-connection", cause)),
+          );
       }),
       setEnabled: Effect.fn("Persistence.ConnectionRegistrationStore.setEnabled")(
         function (environmentId, enabled) {

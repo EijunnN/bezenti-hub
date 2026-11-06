@@ -12,6 +12,7 @@ import {
   EnvironmentHostResources,
   EnvironmentProviderSummary,
 } from "./environmentConnection.ts";
+import { HUB_MACHINE_ENVIRONMENT_ID } from "./environmentExecutor.ts";
 import { AuthReauth } from "./userAccounts.ts";
 
 /** The Hub machine runs in the Hub's own process; every other one joined with `t3 join`. */
@@ -41,6 +42,32 @@ export const HubEnvironmentSummary = Schema.Struct({
   runningThreadCount: NonNegativeInt,
 });
 export type HubEnvironmentSummary = typeof HubEnvironmentSummary.Type;
+
+/**
+ * Where a new Thread nobody placed starts: the Project's preferred Environment when the User may
+ * use it (`usable`, the `environment.use` rule), it is online and it has the provider enabled;
+ * otherwise the Hub machine. The Hub places Threads by this rule and clients preview it with it,
+ * so the composer's default is where the Thread starts.
+ */
+export function previewThreadPlacement(input: {
+  readonly preferred:
+    | (Pick<HubEnvironmentSummary, "id" | "kind" | "status" | "providers"> & {
+        readonly usable: boolean;
+      })
+    | undefined;
+  readonly providerInstanceId: string;
+}): EnvironmentId {
+  const preferred = input.preferred;
+  if (preferred === undefined || !preferred.usable) return HUB_MACHINE_ENVIRONMENT_ID;
+  if (preferred.kind === "hub") return preferred.id;
+  if (preferred.status !== "online") return HUB_MACHINE_ENVIRONMENT_ID;
+  const provider = preferred.providers.find(
+    (entry) => entry.instanceId === input.providerInstanceId,
+  );
+  return provider !== undefined && provider.enabled && provider.installed
+    ? preferred.id
+    : HUB_MACHINE_ENVIRONMENT_ID;
+}
 
 export const HubEnvironmentList = Schema.Struct({
   environments: Schema.Array(HubEnvironmentSummary),

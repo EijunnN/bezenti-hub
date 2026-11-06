@@ -117,6 +117,7 @@ import { ITEM_ROW_CLASSNAME } from "./itemRows";
 import { EmptyRemoteEnvironments, SavedBackendListRow } from "./SavedEnvironmentRows";
 import { AddEnvironmentDialog } from "./AddEnvironmentDialog";
 import { savedConnectionSlots } from "~/connection/singleHub";
+import { KeptSavedConnectionsNotice } from "./KeptSavedConnectionsNotice";
 
 const DEFAULT_TAILSCALE_SERVE_PORT = 443;
 const EMPTY_ADVERTISED_ENDPOINTS: ReadonlyArray<AdvertisedEndpoint> = [];
@@ -1395,6 +1396,7 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
           <LocalEnvironmentSetting />
         </SettingsSection>
       ) : null}
+      <KeptSavedConnectionsNotice />
       {/* One connection, the Hub's: only a desktop that is not the Hub itself saves one. */}
       {savedConnectionSlots() > 0 ? (
         <SettingsSection

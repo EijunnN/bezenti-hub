@@ -1,5 +1,11 @@
 import { type EnvironmentId, HUB_MACHINE_ENVIRONMENT_ID } from "@t3tools/contracts";
 import { useState } from "react";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
+
+import { errorMessageOf } from "../../lib/errorMessage";
 
 import { useHubEnvironments } from "../../environments/primary/useHubEnvironments";
 import { useProjectGroupUpdate } from "../../hooks/useProjectGroupUpdate";
@@ -26,6 +32,7 @@ export function ProjectPreferredEnvironmentSettings({
   const environments = useHubEnvironments();
   const { updateProjectGroup } = useProjectGroupUpdate();
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const project = group.memberProjects.find(
     (member) => member.environmentId === primaryEnvironmentId,
   );
@@ -39,21 +46,39 @@ export function ProjectPreferredEnvironmentSettings({
   const choose = async (environmentId: EnvironmentId) => {
     if (environmentId === current) return;
     setSaving(true);
-    await updateProjectGroup(
-      [project],
-      {
-        preferredEnvironmentId: environmentId === HUB_MACHINE_ENVIRONMENT_ID ? null : environmentId,
-      },
-      "Could not set the preferred environment",
-    );
-    setSaving(false);
+    setError(null);
+    try {
+      const result = await updateProjectGroup(
+        [project],
+        {
+          preferredEnvironmentId:
+            environmentId === HUB_MACHINE_ENVIRONMENT_ID ? null : environmentId,
+        },
+        "Could not set the preferred environment",
+      );
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const failure = squashAtomCommandFailure(result);
+        setError(failure instanceof Error ? failure.message : "Could not save. Try again.");
+      }
+    } catch (cause) {
+      setError(errorMessageOf(cause, "Could not save. Try again."));
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
     <SettingsSection title="Environment">
       <SettingsRow
         title="Preferred environment"
-        description="New Threads in this project start here unless you pick another Environment in the composer."
+        description="New Threads in this project start here unless you pick another Environment in the composer. While it is offline or lacks the provider, they start on the Hub machine."
+        status={
+          error === null ? null : (
+            <span role="alert" className="text-destructive">
+              {error}
+            </span>
+          )
+        }
         control={
           <select
             aria-label="Preferred environment"

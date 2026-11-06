@@ -13,6 +13,7 @@ import {
   type EnvironmentHelloFrame,
   HUB_MACHINE_ENVIRONMENT_ID,
   type HubEnvironmentSummary,
+  previewThreadPlacement,
   type ProjectId,
   type ProviderInstanceId,
   UserId,
@@ -262,8 +263,8 @@ export class EnvironmentRegistry extends Context.Service<
     /**
      * Where a new Thread runs: the User's choice, else its Project's preferred Environment, else
      * the Hub machine. Another Environment must be one the User may use, online, and have the
-     * provider enabled. A preferred Environment the User may not use (the Owner's own machine,
-     * for a Member) leaves them on the Hub machine.
+     * provider enabled. A preferred Environment that is not (the Owner's own machine, for a
+     * Member, or one offline) leaves the Thread on the Hub machine: `previewThreadPlacement`.
      */
     readonly chooseForThread: (input: {
       readonly userId: UserId | undefined;
@@ -650,6 +651,13 @@ const make = Effect.gen(function* () {
       return yield* new ThreadEnvironmentUnavailableError({ environmentId, reason: "not-usable" });
     }
     const summary = yield* summaryOf(row);
+    // An unavailable preference starts the Thread on the Hub machine, as the composer previews.
+    if (requested === undefined) {
+      return previewThreadPlacement({
+        preferred: { ...summary, usable: true },
+        providerInstanceId,
+      });
+    }
     if (summary.status !== "online") {
       return yield* new ThreadEnvironmentUnavailableError({
         environmentId,
