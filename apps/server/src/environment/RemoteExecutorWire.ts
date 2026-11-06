@@ -203,6 +203,9 @@ const workspace = <I extends Schema.Top, O extends Schema.Top, E extends Schema.
   error: E,
 ) => ({ input, output, error });
 
+/** A workspace call: the Thread's workspace root on the machine, and paths relative to it. */
+const rooted = <I extends Schema.Top>(input: I) => Schema.Struct({ root: Schema.String, input });
+
 const DiffInput = Schema.Struct({
   cwd: Schema.String,
   fromCheckpointRef: CheckpointRef,
@@ -358,32 +361,45 @@ export const REMOTE_OPERATIONS = {
     Schema.Struct({ cwd: Schema.String, checkpointRefs: Schema.Array(CheckpointRef) }),
     Schema.Void,
   ),
-  // Workspace calls carry paths already resolved onto the machine and the contract's own errors,
-  // so the Hub hands a machine's answer to the client as it came.
-  "files.read": workspace(ProjectReadFileInput, ProjectReadFileResult, ProjectReadFileError),
-  "files.write": workspace(ProjectWriteFileInput, ProjectWriteFileResult, ProjectWriteFileError),
+  // Workspace calls name the Thread's workspace root on the machine and paths relative to it; the
+  // machine refuses whatever resolves (symlinks included) outside the root. They carry the
+  // contract's own errors, so the Hub hands a machine's answer to the client as it came.
+  "files.read": workspace(
+    rooted(ProjectReadFileInput),
+    ProjectReadFileResult,
+    ProjectReadFileError,
+  ),
+  "files.write": workspace(
+    rooted(ProjectWriteFileInput),
+    ProjectWriteFileResult,
+    ProjectWriteFileError,
+  ),
   "search.paths": workspace(
-    ProjectSearchEntriesInput,
+    rooted(ProjectSearchEntriesInput),
     ProjectSearchEntriesResult,
     ProjectSearchEntriesError,
   ),
   "search.contents": workspace(
-    ProjectSearchContentsInput,
+    rooted(ProjectSearchContentsInput),
     ProjectSearchContentsResult,
     ProjectSearchContentsError,
   ),
   "entries.list": workspace(
-    ProjectListEntriesInput,
+    rooted(ProjectListEntriesInput),
     ProjectListEntriesResult,
     ProjectListEntriesError,
   ),
   "entries.listIgnored": workspace(
-    ProjectListIgnoredFilesInput,
+    rooted(ProjectListIgnoredFilesInput),
     ProjectListIgnoredFilesResult,
     ProjectListEntriesError,
   ),
-  "entries.browse": workspace(FilesystemBrowseInput, FilesystemBrowseResult, FilesystemBrowseError),
-  "terminal.open": workspace(TerminalOpenInput, TerminalSessionSnapshot, TerminalError),
+  "entries.browse": workspace(
+    rooted(FilesystemBrowseInput),
+    FilesystemBrowseResult,
+    FilesystemBrowseError,
+  ),
+  "terminal.open": workspace(rooted(TerminalOpenInput), TerminalSessionSnapshot, TerminalError),
   "terminal.write": workspace(TerminalWriteInput, Schema.Void, TerminalError),
   "terminal.resize": workspace(
     Schema.Struct({ input: TerminalResizeInput, viewerId: Schema.optionalKey(Schema.String) }),
@@ -397,6 +413,7 @@ export const REMOTE_OPERATIONS = {
     Schema.Struct({
       subscriptionId: Schema.String,
       mode: Schema.Literals(["attach", "observe"]),
+      root: Schema.String,
       input: TerminalAttachInput,
       viewerId: Schema.optionalKey(Schema.String),
     }),

@@ -53,6 +53,7 @@ import * as PreviewManager from "../preview/Manager.ts";
 import * as PortScanner from "../preview/PortScanner.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as JoinedWorkspaceRoots from "../workspace/JoinedWorkspaceRoots.ts";
 import * as KnownWorkspaces from "../workspace/KnownWorkspaces.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
@@ -106,18 +107,11 @@ const echoingPty: PtyAdapter.PtyAdapter["Service"] = {
 };
 
 /**
- * The workspace services a joined machine answers files, search and terminals with. Its Hub
- * resolved every path, so any workspace is known here, as in joined mode.
+ * The workspace services a joined machine answers files, search and terminals with. As in joined
+ * mode, it knows only the workspace roots of the calls its Hub is running.
  */
 const layerMachineWorkspace = Layer.mergeAll(
-  WorkspaceFileSystem.layer.pipe(
-    Layer.provide(
-      Layer.succeed(KnownWorkspaces.KnownWorkspaces, {
-        contains: () => Effect.succeed(true),
-        assertContains: () => Effect.void,
-      }),
-    ),
-  ),
+  WorkspaceFileSystem.layer.pipe(Layer.provide(KnownWorkspaces.layerJoined)),
   Layer.effect(
     TerminalManager.TerminalManager,
     Effect.flatMap(ServerConfig.ServerConfig, (config) =>
@@ -131,7 +125,11 @@ const layerMachineWorkspace = Layer.mergeAll(
   ).pipe(Layer.provide(ProcessRunner.layer)),
   PreviewManager.layer,
   Layer.mock(PortScanner.PortDiscovery)({ trackAgent: () => () => undefined }),
-).pipe(Layer.provideMerge(WorkspaceEntries.layer), Layer.provideMerge(WorkspacePaths.layer));
+).pipe(
+  Layer.provideMerge(WorkspaceEntries.layer),
+  Layer.provideMerge(WorkspacePaths.layer),
+  Layer.provideMerge(JoinedWorkspaceRoots.layer),
+);
 
 const layerCheckpoints = CheckpointStore.layer.pipe(
   Layer.provide(VcsDriverRegistry.layer),
@@ -226,6 +224,8 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
     ),
     Layer.provideMerge(layerRecordingMcp),
     Layer.provideMerge(VcsProcess.layer),
+    // The agent shares the workspace services' roots (memoized: one instance per machine).
+    Layer.provideMerge(JoinedWorkspaceRoots.layer),
     Layer.provideMerge(SqlitePersistence.layerMemory),
     Layer.provideMerge(
       ServerConfig.layerTest(process.cwd(), { prefix: `t3-environment-${input.name}-` }),
@@ -425,6 +425,7 @@ export const connectProtocolEnvironment = Effect.fn("HubWithEnvironments.connect
     const remote = hub.service(RemoteEnvironments.RemoteEnvironments);
     const frames = yield* Queue.unbounded<Record<string, unknown>>();
     let receive: (frame: unknown) => Effect.Effect<boolean> = () => Effect.succeed(false);
+    let previewSubscription: string | undefined;
     // Its own scope, so a test can drop the socket while the test goes on.
     const socket = yield* Scope.fork(yield* Effect.scope);
     const connection = yield* remote
@@ -465,6 +466,9 @@ export const connectProtocolEnvironment = Effect.fn("HubWithEnvironments.connect
         },
         write: (text) => {
           const frame = JSON.parse(text) as Record<string, unknown>;
+          if (frame.type === "request" && frame.method === "preview.events") {
+            previewSubscription = (frame.payload as { subscriptionId: string }).subscriptionId;
+          }
           // It answers detaching sessions and opening its (empty) preview event stream.
           if (
             frame.type === "request" &&
@@ -487,6 +491,15 @@ export const connectProtocolEnvironment = Effect.fn("HubWithEnvironments.connect
       disconnect: Scope.close(socket, Exit.void),
       /** The next frame the Hub sent, other than `provider.detach`. */
       nextFrame: Queue.take(frames),
+      /** Streams a preview event as this machine's own, whatever Thread it names. */
+      sendPreviewEvent: (event: Record<string, unknown>) =>
+        Effect.suspend(() =>
+          receive({
+            type: "event",
+            method: "workspace.stream",
+            payload: { subscriptionId: previewSubscription, item: event },
+          }),
+        ),
       providerSession: (providerSessionId: string, cwd: string) => ({
         id: providerSessionId,
         driver: input.driver,

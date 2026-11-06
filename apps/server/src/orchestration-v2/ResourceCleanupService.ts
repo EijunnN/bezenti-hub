@@ -40,6 +40,27 @@ export class ResourceCleanupService extends Context.Reference<{
   }),
 }) {}
 
+/**
+ * Runs `close` on the Thread's machine when it is a joined Environment. Offline, it fails, so the
+ * effect stays pending until the machine is back instead of reporting the cleanup done.
+ */
+export const onThreadMachine = Effect.fn("ResourceCleanupService.onThreadMachine")(function* (
+  registry: EnvironmentExecutor.EnvironmentExecutorRegistryShape,
+  threadId: string,
+  close: (forward: EnvironmentExecutor.EnvironmentWorkspaceForward) => Effect.Effect<void, unknown>,
+) {
+  const environmentId = yield* registry.activeEnvironment(ThreadId.make(threadId));
+  // On the Hub machine the local close already ran; a removed machine has nothing left to close.
+  if (
+    environmentId === registry.hubMachineEnvironmentId ||
+    environmentId === EnvironmentExecutor.NO_ENVIRONMENT_ID
+  ) {
+    return;
+  }
+  const executor = yield* registry.get(environmentId);
+  if (Option.isSome(executor.workspace.forward)) yield* close(executor.workspace.forward.value);
+});
+
 export const layer = Layer.effect(
   ResourceCleanupService,
   Effect.gen(function* () {
@@ -59,18 +80,7 @@ export const layer = Layer.effect(
     ) =>
       Option.match(executors, {
         onNone: () => Effect.void,
-        onSome: (registry) =>
-          Effect.option(registry.forThread(ThreadId.make(threadId))).pipe(
-            Effect.flatMap((executor) =>
-              Option.match(
-                Option.flatMap(executor, (found) => found.workspace.forward),
-                {
-                  onNone: () => Effect.void,
-                  onSome: close,
-                },
-              ),
-            ),
-          ),
+        onSome: (registry) => onThreadMachine(registry, threadId, close),
       });
     return {
       cleanupScheduledTasks: Effect.fn("ResourceCleanupService.cleanupScheduledTasks")(function (

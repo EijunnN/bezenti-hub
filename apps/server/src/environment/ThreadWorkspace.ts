@@ -6,6 +6,7 @@
 import {
   FilesystemBrowseError,
   type FilesystemBrowseInput,
+  type EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
   type PreviewAdjustInput,
   type PreviewCloseInput,
@@ -46,6 +47,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Stream from "effect/Stream";
 
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
@@ -60,7 +62,7 @@ import { makeWorkspaceRpcCalls } from "../workspace/WorkspaceRpcCalls.ts";
 import * as EnvironmentExecutor from "./EnvironmentExecutor.ts";
 import * as ProjectCheckouts from "./ProjectCheckouts.ts";
 import * as RemoteEnvironments from "./RemoteEnvironments.ts";
-import { joinUnderRoot, locateInCheckout } from "./WorkspaceLocation.ts";
+import { locateInCheckout } from "./WorkspaceLocation.ts";
 
 /** Who asks: the session's User, whose rules a forwarded call keeps to. */
 export interface WorkspaceCaller {
@@ -71,11 +73,12 @@ type Route =
   | { readonly _tag: "local" }
   | {
       readonly _tag: "remote";
+      readonly environmentId: EnvironmentId;
       readonly name: string;
       readonly forward: EnvironmentExecutor.EnvironmentWorkspaceForward;
       /** The Thread's workspace as the Hub machine records it, which clients send. */
       readonly hubBase: string;
-      /** The same workspace on the Thread's machine. */
+      /** The same workspace on the Thread's machine: the root every forwarded path is under. */
       readonly remoteBase: string;
     }
   | { readonly _tag: "offline"; readonly name: string | undefined }
@@ -161,21 +164,24 @@ export const make = Effect.gen(function* () {
       Effect.map(Option.getOrNull),
       Effect.orElseSucceed(() => null),
     );
+    // A worktree the machine cannot resolve is refused, never swapped for the main checkout.
     const remoteWorktree = yield* EnvironmentExecutor.worktreeOn(
       registry.value,
       checkouts.value,
       executor.value,
       thread.value,
-    ).pipe(Effect.orElseSucceed(() => null));
+    ).pipe(Effect.option);
+    if (Option.isNone(remoteWorktree)) return REFUSED;
     const remoteCheckout = yield* executor.value.workspace.paths.checkout(projectId).pipe(
       Effect.map(Option.getOrNull),
       Effect.orElseSucceed(() => null),
     );
     const hubBase = thread.value.worktreePath ?? hubCheckout;
-    const remoteBase = remoteWorktree ?? remoteCheckout;
+    const remoteBase = remoteWorktree.value ?? remoteCheckout;
     if (hubBase === null || remoteBase === null) return REFUSED;
     return {
       _tag: "remote",
+      environmentId,
       name,
       forward: executor.value.workspace.forward.value,
       hubBase,
@@ -184,30 +190,24 @@ export const make = Effect.gen(function* () {
   });
 
   /**
-   * An absolute path inside the Thread's workspace, on the Thread's machine. Clients send the
-   * workspace as the Hub records it or as the machine reported it; anything else is outside.
+   * A path inside the Thread's workspace, relative to its root (`remoteBase`). Clients send the
+   * workspace as the Hub records it or as the machine reported it; anything else is outside. The
+   * machine resolves it against the root and refuses what its symlinks take outside.
    */
   const onMachine = (
     route: Extract<Route, { _tag: "remote" }>,
     absolute: string,
   ): string | undefined => {
-    for (const [base, resolveOn] of [
-      [route.hubBase, route.remoteBase],
-      [route.remoteBase, route.remoteBase],
-    ] as const) {
+    for (const base of [route.hubBase, route.remoteBase]) {
       const location = locateInCheckout({
         environmentId: HUB_MACHINE_ENVIRONMENT_ID,
         checkout: base,
         absolute,
       });
-      if (location.base === "checkout") return joinUnderRoot(resolveOn, location.path);
+      if (location.base === "checkout") return location.path;
     }
     return undefined;
   };
-
-  /** A path a file call names: inside the workspace, relative to it or absolute within it. */
-  const fileOnMachine = (route: Extract<Route, { _tag: "remote" }>, path: string) =>
-    isAbsolute(path) ? onMachine(route, path) : relativeInside(path);
 
   const fileFailure = (route: Route, input: { cwd: string; relativePath: string }) =>
     route._tag === "offline"
@@ -364,6 +364,94 @@ export const make = Effect.gen(function* () {
     };
   };
 
+  /**
+   * Terminals a caller opened or attached on another machine, by (User, Thread, terminal): typing
+   * and resizing skip the full route and only check the Thread is still on that machine's socket.
+   */
+  const openTerminals = new Map<
+    string,
+    {
+      readonly environmentId: EnvironmentId;
+      readonly name: string;
+      readonly forward: EnvironmentExecutor.EnvironmentWorkspaceForward;
+    }
+  >();
+  const terminalKey = (
+    input: { readonly threadId: string; readonly terminalId: string },
+    caller: WorkspaceCaller,
+  ) => `${caller.userId ?? ""}\u0000${input.threadId}\u0000${input.terminalId}`;
+  const remember = (
+    input: { readonly threadId: string; readonly terminalId: string },
+    caller: WorkspaceCaller,
+    where: Extract<Route, { _tag: "remote" }>,
+  ) =>
+    Effect.sync(() => {
+      openTerminals.set(terminalKey(input, caller), {
+        environmentId: where.environmentId,
+        name: where.name,
+        forward: where.forward,
+      });
+    });
+
+  /** A call on an open terminal: the remembered machine while it still holds the Thread. */
+  const openTerminalCall = Effect.fn("ThreadWorkspace.openTerminalCall")(function* <
+    I extends { readonly threadId: string; readonly terminalId: string },
+    A,
+  >(
+    input: I,
+    caller: WorkspaceCaller,
+    runLocal: (
+      terminals: TerminalManager.TerminalManager["Service"],
+    ) => Effect.Effect<A, TerminalError>,
+    runRemote: (
+      forward: EnvironmentExecutor.EnvironmentWorkspaceForward,
+    ) => Effect.Effect<A, TerminalError | EnvironmentExecutor.EnvironmentExecutorUnavailableError>,
+  ): Effect.fn.Return<A, TerminalError> {
+    {
+      const key = terminalKey(input, caller);
+      const known = openTerminals.get(key);
+      if (known !== undefined && Option.isSome(registry)) {
+        const current = yield* Effect.option(registry.value.get(known.environmentId));
+        const active = yield* registry.value.activeEnvironment(ThreadId.make(input.threadId));
+        const forward = Option.flatMap(current, (executor) => executor.workspace.forward);
+        if (
+          active === known.environmentId &&
+          Option.isSome(forward) &&
+          forward.value === known.forward
+        ) {
+          return yield* runRemote(known.forward).pipe(
+            Effect.catchTags({
+              EnvironmentExecutorUnavailableError: () =>
+                Effect.fail(
+                  terminalUnavailable(input.threadId)({ _tag: "offline", name: known.name }),
+                ),
+            }),
+          );
+        }
+        // It moved, or its machine reconnected or left: authorize it again.
+        openTerminals.delete(key);
+      }
+      return yield* terminalCall(input, caller, runLocal, (forward) => runRemote(forward));
+    }
+  });
+
+  /** Ends when the caller may no longer use the Environment, checked whenever executors change. */
+  const untilUnusable = (environmentId: EnvironmentId, caller: WorkspaceCaller) =>
+    Option.isNone(registry) || Option.isNone(environments)
+      ? Effect.never
+      : Effect.scoped(
+          Effect.gen(function* () {
+            const changes = yield* registry.value.changes;
+            while (true) {
+              yield* PubSub.take(changes);
+              const usable = yield* environments.value
+                .usableBy({ userId: caller.userId, environmentId })
+                .pipe(Effect.orElseSucceed(() => Option.none()));
+              if (Option.isNone(usable)) return;
+            }
+          }),
+        );
+
   const terminalStream = (
     input: TerminalAttachInput,
     caller: WorkspaceCaller,
@@ -381,16 +469,20 @@ export const make = Effect.gen(function* () {
         if (where._tag !== "remote") return Stream.fail(refuse(where));
         const resolved = terminalFolders(where, input);
         if (resolved === undefined) return Stream.fail(refuse(REFUSED));
+        yield* remember(input, caller, where);
         return where.forward
           .stream("terminal.stream", {
             mode,
+            root: where.remoteBase,
             input: resolved,
             ...(viewerId === undefined ? {} : { viewerId }),
           })
           .pipe(
-            Stream.catchTag("EnvironmentExecutorUnavailableError", () =>
-              Stream.fail(refuse({ _tag: "offline", name: where.name })),
-            ),
+            Stream.catchTags({
+              EnvironmentExecutorUnavailableError: () =>
+                Stream.fail(refuse({ _tag: "offline", name: where.name })),
+            }),
+            Stream.interruptWhen(untilUnusable(where.environmentId, caller)),
           );
       }),
     );
@@ -401,7 +493,8 @@ export const make = Effect.gen(function* () {
         input,
         caller,
         (input) => Effect.flatMap(localCalls, (calls) => calls.searchEntries(input)),
-        (forward, input) => forward.call("search.paths", withoutThread(input)),
+        (forward, input, where) =>
+          forward.call("search.paths", { root: where.remoteBase, input: withoutThread(input) }),
         (where) =>
           new ProjectSearchEntriesError({
             cwd: input.cwd,
@@ -415,7 +508,8 @@ export const make = Effect.gen(function* () {
         input,
         caller,
         (input) => Effect.flatMap(localCalls, (calls) => calls.searchContents(input)),
-        (forward, input) => forward.call("search.contents", withoutThread(input)),
+        (forward, input, where) =>
+          forward.call("search.contents", { root: where.remoteBase, input: withoutThread(input) }),
         (where) =>
           new ProjectSearchContentsError({
             cwd: input.cwd,
@@ -429,14 +523,20 @@ export const make = Effect.gen(function* () {
         input,
         caller,
         (input) => Effect.flatMap(localCalls, (calls) => calls.listEntries(input)),
-        (forward, input) => {
+        (forward, input, where) => {
           if (input.directoryPath === undefined || input.directoryPath === "") {
-            return forward.call("entries.list", withoutThread(input));
+            return forward.call("entries.list", {
+              root: where.remoteBase,
+              input: withoutThread(input),
+            });
           }
           const directoryPath = relativeInside(input.directoryPath);
           return directoryPath === undefined
             ? undefined
-            : forward.call("entries.list", { ...withoutThread(input), directoryPath });
+            : forward.call("entries.list", {
+                root: where.remoteBase,
+                input: { ...withoutThread(input), directoryPath },
+              });
         },
         (where) => new ProjectListEntriesError({ cwd: input.cwd, ...entriesFailure(where) }),
       ),
@@ -445,7 +545,11 @@ export const make = Effect.gen(function* () {
         input,
         caller,
         (input) => Effect.flatMap(localCalls, (calls) => calls.listIgnoredFiles(input)),
-        (forward, input) => forward.call("entries.listIgnored", withoutThread(input)),
+        (forward, input, where) =>
+          forward.call("entries.listIgnored", {
+            root: where.remoteBase,
+            input: withoutThread(input),
+          }),
         (where) => new ProjectListEntriesError({ cwd: input.cwd, ...entriesFailure(where) }),
       ),
     readFile: (input: ProjectReadFileInput, caller: WorkspaceCaller) =>
@@ -454,10 +558,17 @@ export const make = Effect.gen(function* () {
         caller,
         (input) => Effect.flatMap(localCalls, (calls) => calls.readFile(input)),
         (forward, input, where) => {
-          const relativePath = fileOnMachine(where, input.relativePath);
+          // An absolute path inside the workspace is sent relative to the root, never as is.
+          const absolute = isAbsolute(input.relativePath);
+          const relativePath = absolute
+            ? onMachine(where, input.relativePath)
+            : relativeInside(input.relativePath);
           return relativePath === undefined
             ? undefined
-            : forward.call("files.read", { ...withoutThread(input), relativePath });
+            : forward.call("files.read", {
+                root: where.remoteBase,
+                input: { ...withoutThread(input), ...(absolute ? { cwd: "." } : {}), relativePath },
+              });
         },
         (where) => new ProjectReadFileError(fileFailure(where, input)),
       ),
@@ -466,12 +577,15 @@ export const make = Effect.gen(function* () {
         input,
         caller,
         (input) => Effect.flatMap(localCalls, (calls) => calls.writeFile(input)),
-        (forward, input) => {
+        (forward, input, where) => {
           // Only workspace-relative paths are writable, as on the Hub machine.
           const relativePath = relativeInside(input.relativePath);
           return relativePath === undefined
             ? undefined
-            : forward.call("files.write", { ...withoutThread(input), relativePath });
+            : forward.call("files.write", {
+                root: where.remoteBase,
+                input: { ...withoutThread(input), relativePath },
+              });
         },
         (where) => new ProjectWriteFileError(fileFailure(where, input)),
       ),
@@ -500,7 +614,10 @@ export const make = Effect.gen(function* () {
         return yield* refuse(REFUSED);
       }
       return yield* where.forward
-        .call("entries.browse", { partialPath: input.partialPath, cwd })
+        .call("entries.browse", {
+          root: where.remoteBase,
+          input: { partialPath: input.partialPath, cwd },
+        })
         .pipe(
           Effect.catchTags({
             EnvironmentExecutorUnavailableError: () =>
@@ -515,11 +632,15 @@ export const make = Effect.gen(function* () {
         (terminals) => terminals.open(input),
         (forward, where) => {
           const resolved = terminalFolders(where, input);
-          return resolved === undefined ? undefined : forward.call("terminal.open", resolved);
+          return resolved === undefined
+            ? undefined
+            : forward
+                .call("terminal.open", { root: where.remoteBase, input: resolved })
+                .pipe(Effect.tap(() => remember(input, caller, where)));
         },
       ),
     terminalWrite: (input: TerminalWriteInput, caller: WorkspaceCaller) =>
-      terminalCall(
+      openTerminalCall(
         input,
         caller,
         (terminals) => terminals.write(input),
@@ -530,7 +651,7 @@ export const make = Effect.gen(function* () {
       viewerId: string | undefined,
       caller: WorkspaceCaller,
     ) =>
-      terminalCall(
+      openTerminalCall(
         input,
         caller,
         (terminals) => terminals.resize(input, viewerId),
@@ -541,7 +662,7 @@ export const make = Effect.gen(function* () {
           }),
       ),
     terminalClear: (input: TerminalClearInput, caller: WorkspaceCaller) =>
-      terminalCall(
+      openTerminalCall(
         input,
         caller,
         (terminals) => terminals.clear(input),

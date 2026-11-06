@@ -13,6 +13,13 @@ import {
   ENVIRONMENT_EXECUTOR_FRAME_METHODS,
   EnvironmentAttachmentReadResult,
   EnvironmentWorkspaceStreamCancel,
+  FilesystemBrowseError,
+  ProjectListEntriesError,
+  ProjectReadFileError,
+  ProjectSearchContentsError,
+  ProjectSearchEntriesError,
+  ProjectWriteFileError,
+  TerminalEnvironmentUnavailableError,
   EnvironmentExecutorEventAck,
   EnvironmentExecutorRetiredSessions,
   type EnvironmentId,
@@ -58,6 +65,7 @@ import {
 } from "../environment/RemoteExecutorWire.ts";
 import { terminalOutputStream } from "../terminal/OutputProtocol.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import * as JoinedWorkspaceRoots from "../workspace/JoinedWorkspaceRoots.ts";
 import { makeWorkspaceRpcCalls } from "../workspace/WorkspaceRpcCalls.ts";
 
 /** Calls answered, by idempotency key, so a resend gets the first answer instead of a rerun. */
@@ -114,6 +122,15 @@ const decodeAck = Schema.decodeUnknownOption(EnvironmentExecutorEventAck);
 const decodeRetired = Schema.decodeUnknownOption(EnvironmentExecutorRetiredSessions);
 const decodeAttachment = Schema.decodeUnknownOption(EnvironmentAttachmentReadResult);
 const decodeStreamCancel = Schema.decodeUnknownOption(EnvironmentWorkspaceStreamCancel);
+const OUTSIDE_MESSAGE = "That is outside this Thread's workspace.";
+const entriesOutside = { failure: "outside_thread_workspace", message: OUTSIDE_MESSAGE } as const;
+const fileOutside = (cwd: string, relativePath: string) =>
+  ({
+    cwd,
+    relativePath,
+    failure: "resolved_path_outside_root",
+    message: OUTSIDE_MESSAGE,
+  }) as const;
 const encodeEvent = Schema.encodeUnknownEffect(ProviderEventJson);
 
 export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
@@ -129,6 +146,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
   // Optional so joined mode needs nothing the Hub's routes do not; the server always has it.
   const vcs = yield* Effect.serviceOption(VcsProcess.VcsProcess);
   const agentScope = yield* Effect.scope;
+  const roots = yield* JoinedWorkspaceRoots.JoinedWorkspaceRoots;
   const workspaceRoot = NodePath.resolve(config.baseDir, "projects");
   const mcpEndpoint = new URL("/mcp", input.hubUrl).toString();
 
@@ -418,8 +436,8 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
     operation: RemoteStreamOperation,
     subscriptionId: string,
     events: Stream.Stream<A, E>,
+    asked: ExecutorChannel | undefined,
   ) {
-    const asked = channel;
     if (asked === undefined) return;
     yield* closeWorkspaceStream(subscriptionId);
     const scope = yield* Scope.fork(agentScope);
@@ -428,10 +446,16 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
       Effect.suspend(() => {
         if (workspaceStreams.get(subscriptionId)?.scope !== scope) return Effect.void;
         workspaceStreams.delete(subscriptionId);
-        return asked.event(ENVIRONMENT_EXECUTOR_FRAME_METHODS.workspaceStreamEnd, {
-          subscriptionId,
-          ...(error === undefined ? {} : { error }),
-        });
+        return asked
+          .event(ENVIRONMENT_EXECUTOR_FRAME_METHODS.workspaceStreamEnd, {
+            subscriptionId,
+            ...(error === undefined ? {} : { error }),
+          })
+          .pipe(
+            // Its own fiber runs in the scope, so the scope closes from outside it.
+            Effect.andThen(Scope.close(scope, Exit.void).pipe(Effect.forkDetach)),
+            Effect.asVoid,
+          );
       });
     const encodeItem = Schema.encodeUnknownEffect(codec(REMOTE_STREAM_ITEMS[operation]));
     yield* events.pipe(
@@ -463,23 +487,77 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
     );
   });
 
+  const terminalOutside = (threadId: string) =>
+    new TerminalEnvironmentUnavailableError({ threadId, reason: "outside_thread_workspace" });
+
+  /** A terminal's folders, relative to the Thread's root, as real paths inside it. */
+  const terminalFoldersIn = Effect.fn("EnvironmentAgent.terminalFoldersIn")(function* <
+    I extends {
+      readonly threadId: string;
+      readonly cwd?: string | undefined;
+      readonly worktreePath?: string | null | undefined;
+    },
+  >(workspace: JoinedWorkspaceRoots.Workspace, input: I) {
+    const cwd = input.cwd === undefined ? undefined : yield* workspace.inside(input.cwd);
+    const worktreePath =
+      input.worktreePath === undefined || input.worktreePath === null
+        ? input.worktreePath
+        : yield* workspace.inside(input.worktreePath);
+    return {
+      ...input,
+      ...(cwd === undefined ? {} : { cwd }),
+      ...(input.worktreePath === undefined ? {} : { worktreePath }),
+    };
+  });
+
   const openTerminalStream = Effect.fn("EnvironmentAgent.openTerminalStream")(function* (
     request: RemoteInput<"terminal.stream">,
+    origin: ExecutorChannel | undefined,
   ) {
     const { terminals } = yield* workspaceRpc;
+    const input = yield* roots
+      .withRoot(request.root, (workspace) => terminalFoldersIn(workspace, request.input))
+      .pipe(
+        Effect.catchTags({
+          WorkspaceRootEscapeError: () => Effect.fail(terminalOutside(request.input.threadId)),
+        }),
+      );
     yield* openWorkspaceStream(
       "terminal.stream",
       request.subscriptionId,
       request.mode === "attach"
-        ? terminals.attachOutputStream(request.input, request.viewerId ?? request.subscriptionId)
+        ? terminals.attachOutputStream(input, request.viewerId ?? request.subscriptionId)
         : terminalOutputStream(
             (listener, registerCleanup) =>
-              terminals.observeStream(request.input, listener, registerCleanup),
-            (listener, registerCleanup) =>
-              terminals.resyncStream(request.input, listener, registerCleanup),
+              terminals.observeStream(input, listener, registerCleanup),
+            (listener, registerCleanup) => terminals.resyncStream(input, listener, registerCleanup),
           ),
+      origin,
     );
   });
+
+  /**
+   * A workspace call held to its root: `cwd` (and the other paths it names, relative to it) must
+   * resolve, symlinks followed, inside the Thread's workspace, else the call's own refusal.
+   */
+  const inRoot = <I extends { readonly cwd?: string | undefined }, A, E>(
+    request: { readonly root: string; readonly input: I },
+    refuse: () => E,
+    paths: (input: I) => ReadonlyArray<string>,
+    run: (input: I & { readonly cwd: string }) => Effect.Effect<A, E>,
+  ) =>
+    roots
+      .withRoot(request.root, (workspace) =>
+        Effect.gen(function* () {
+          const cwd = yield* workspace.inside(request.input.cwd ?? ".");
+          for (const relative of paths(request.input)) yield* workspace.inside(relative);
+          return yield* run({ ...request.input, cwd });
+        }),
+      )
+      .pipe(Effect.catchTags({ WorkspaceRootEscapeError: () => Effect.fail(refuse()) }));
+
+  const underCwd = (cwd: string | undefined, relative: string) =>
+    NodePath.posix.join(cwd ?? ".", relative.split("\\").join("/"));
 
   const unsupported = (session: LocalSession, operation: string) =>
     new ProviderAdapter.ProviderAdapterProtocolError({
@@ -488,7 +566,11 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
     });
 
   /** Runs one decoded operation on this machine. */
-  const run = (operation: RemoteOperation, request: unknown): Effect.Effect<unknown, unknown> => {
+  const run = (
+    operation: RemoteOperation,
+    request: unknown,
+    origin: ExecutorChannel | undefined,
+  ): Effect.Effect<unknown, unknown> => {
     const onSession = <A>(
       body: (session: LocalSession, input: never) => Effect.Effect<A, unknown>,
     ) => {
@@ -606,38 +688,122 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
       case "checkpoint.deleteRefs":
         return checkpoints.deleteCheckpointRefs(request as RemoteInput<"checkpoint.deleteRefs">);
       // The Hub already authorized these and resolved their paths onto this machine.
-      case "files.read":
+      case "files.read": {
+        const rooted = request as RemoteInput<"files.read">;
+        const { cwd, relativePath } = rooted.input;
         return Effect.flatMap(workspaceCalls, (calls) =>
-          calls.readFile(request as RemoteInput<"files.read">),
+          inRoot(
+            rooted,
+            () => new ProjectReadFileError(fileOutside(cwd, relativePath)),
+            (input) => [underCwd(input.cwd, input.relativePath)],
+            calls.readFile,
+          ),
         );
-      case "files.write":
+      }
+      case "files.write": {
+        const rooted = request as RemoteInput<"files.write">;
+        const { cwd, relativePath } = rooted.input;
         return Effect.flatMap(workspaceCalls, (calls) =>
-          calls.writeFile(request as RemoteInput<"files.write">),
+          inRoot(
+            rooted,
+            () => new ProjectWriteFileError(fileOutside(cwd, relativePath)),
+            (input) => [underCwd(input.cwd, input.relativePath)],
+            calls.writeFile,
+          ),
         );
-      case "search.paths":
+      }
+      case "search.paths": {
+        const rooted = request as RemoteInput<"search.paths">;
+        const { cwd, query, limit } = rooted.input;
         return Effect.flatMap(workspaceCalls, (calls) =>
-          calls.searchEntries(request as RemoteInput<"search.paths">),
+          inRoot(
+            rooted,
+            () =>
+              new ProjectSearchEntriesError({
+                cwd,
+                queryLength: query.length,
+                limit,
+                ...entriesOutside,
+              }),
+            () => [],
+            calls.searchEntries,
+          ),
         );
-      case "search.contents":
+      }
+      case "search.contents": {
+        const rooted = request as RemoteInput<"search.contents">;
+        const { cwd, query, limit } = rooted.input;
         return Effect.flatMap(workspaceCalls, (calls) =>
-          calls.searchContents(request as RemoteInput<"search.contents">),
+          inRoot(
+            rooted,
+            () =>
+              new ProjectSearchContentsError({
+                cwd,
+                queryLength: query.length,
+                limit,
+                ...entriesOutside,
+              }),
+            () => [],
+            calls.searchContents,
+          ),
         );
-      case "entries.list":
+      }
+      case "entries.list": {
+        const rooted = request as RemoteInput<"entries.list">;
         return Effect.flatMap(workspaceCalls, (calls) =>
-          calls.listEntries(request as RemoteInput<"entries.list">),
+          inRoot(
+            rooted,
+            () => new ProjectListEntriesError({ cwd: rooted.input.cwd, ...entriesOutside }),
+            (input) =>
+              input.directoryPath === undefined || input.directoryPath === ""
+                ? []
+                : [underCwd(input.cwd, input.directoryPath)],
+            calls.listEntries,
+          ),
         );
-      case "entries.listIgnored":
+      }
+      case "entries.listIgnored": {
+        const rooted = request as RemoteInput<"entries.listIgnored">;
         return Effect.flatMap(workspaceCalls, (calls) =>
-          calls.listIgnoredFiles(request as RemoteInput<"entries.listIgnored">),
+          inRoot(
+            rooted,
+            () => new ProjectListEntriesError({ cwd: rooted.input.cwd, ...entriesOutside }),
+            () => [],
+            calls.listIgnoredFiles,
+          ),
         );
-      case "entries.browse":
+      }
+      case "entries.browse": {
+        const rooted = request as RemoteInput<"entries.browse">;
+        const { partialPath, cwd } = rooted.input;
         return Effect.flatMap(workspaceCalls, (calls) =>
-          calls.browse(request as RemoteInput<"entries.browse">),
+          inRoot(
+            rooted,
+            () =>
+              new FilesystemBrowseError({
+                partialPath,
+                ...(cwd === undefined ? {} : { cwd }),
+                failure: "outside_thread_workspace",
+                message: OUTSIDE_MESSAGE,
+              }),
+            (input) => [underCwd(input.cwd, input.partialPath)],
+            calls.browse,
+          ),
         );
-      case "terminal.open":
+      }
+      case "terminal.open": {
+        const rooted = request as RemoteInput<"terminal.open">;
         return Effect.flatMap(workspaceRpc, ({ terminals }) =>
-          terminals.open(request as RemoteInput<"terminal.open">),
+          roots
+            .withRoot(rooted.root, (workspace) => terminalFoldersIn(workspace, rooted.input))
+            .pipe(
+              Effect.catchTags({
+                WorkspaceRootEscapeError: () => Effect.fail(terminalOutside(rooted.input.threadId)),
+              }),
+              Effect.flatMap((input) => terminals.open(input)),
+            ),
         );
+      }
       case "terminal.write":
         return Effect.flatMap(workspaceRpc, ({ terminals }) =>
           terminals.write(request as RemoteInput<"terminal.write">),
@@ -655,7 +821,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
           terminals.close(request as RemoteInput<"terminal.close">),
         );
       case "terminal.stream":
-        return openTerminalStream(request as RemoteInput<"terminal.stream">);
+        return openTerminalStream(request as RemoteInput<"terminal.stream">, origin);
       case "preview.open":
         return Effect.flatMap(workspaceRpc, ({ previews }) =>
           previews.open(request as RemoteInput<"preview.open">),
@@ -686,6 +852,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
             "preview.events",
             (request as RemoteInput<"preview.events">).subscriptionId,
             previews.events,
+            origin,
           ),
         );
     }
@@ -695,6 +862,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
   const answer = Effect.fn("EnvironmentAgent.answer")(function* (
     method: string,
     payload: unknown,
+    origin: ExecutorChannel | undefined,
   ): Effect.fn.Return<ExecutorCallResult> {
     if (!isRemoteOperation(method)) {
       return { _tag: "failure", error: `This machine does not answer '${method}'.` };
@@ -706,7 +874,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
     if (Option.isNone(request)) {
       return { _tag: "failure", error: `The request for '${method}' could not be read.` };
     }
-    const exit = yield* Effect.exit(run(method, request.value));
+    const exit = yield* Effect.exit(run(method, request.value, origin));
     if (Exit.isSuccess(exit)) {
       const value = yield* Schema.encodeUnknownEffect(codec(spec.output))(exit.value).pipe(
         Effect.orElseSucceed(() => null),
@@ -741,13 +909,17 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
    * An idempotency key runs once: a resend while it runs joins it, and one after it succeeded gets
    * the same answer. A failure is not kept, so the effect's next attempt runs the call again.
    */
-  const onRequest = (request: {
-    readonly method: string;
-    readonly payload: unknown;
-    readonly idempotencyKey: string | undefined;
-  }): Effect.Effect<ExecutorCallResult> => {
+  /** Answers a request that came on `origin`, the socket a stream it opens is bound to. */
+  const onRequest = (
+    request: {
+      readonly method: string;
+      readonly payload: unknown;
+      readonly idempotencyKey: string | undefined;
+    },
+    origin: ExecutorChannel | undefined,
+  ): Effect.Effect<ExecutorCallResult> => {
     const key = request.idempotencyKey;
-    if (key === undefined) return answer(request.method, request.payload);
+    if (key === undefined) return answer(request.method, request.payload, origin);
     return Effect.suspend(() => {
       const known = answered.get(key);
       if (known !== undefined) {
@@ -763,7 +935,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
         // A call still running is never forgotten: its resend must join it.
         if (kept.settled) answered.delete(candidate);
       }
-      return answer(request.method, request.payload).pipe(
+      return answer(request.method, request.payload, origin).pipe(
         Effect.tap((result) =>
           Effect.sync(() => {
             entry.settled = true;
@@ -830,12 +1002,14 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: {
       };
     }),
     attach: Effect.fn("EnvironmentAgent.attach")(function* (write) {
+      let origin: ExecutorChannel | undefined;
       const connected = yield* makeExecutorChannel({
         environmentId: input.environmentId,
         write,
-        onRequest,
+        onRequest: (request) => onRequest(request, origin),
         onEvent,
       });
+      origin = connected;
       yield* Effect.addFinalizer(() =>
         connected.close.pipe(
           Effect.andThen(

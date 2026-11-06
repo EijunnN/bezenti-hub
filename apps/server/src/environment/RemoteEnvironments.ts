@@ -22,7 +22,7 @@ import {
   type ProjectId,
   type ProviderDriverKind,
   type ProviderInstanceId,
-  type ThreadId,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -75,6 +75,8 @@ const RECONNECT_WAIT = "30 seconds";
 const MAX_RESENDS = 3;
 /** Lookups of a Thread's Active environment before an event is left for the next resend. */
 const ACTIVE_LOOKUP_RETRIES = 3;
+/** Items of one forwarded stream the Hub holds for a reader that has not taken them. */
+const MAX_STREAM_BACKLOG = 4_096;
 
 type SessionQueue = Queue.Queue<
   ProviderAdapter.ProviderAdapterV2Event,
@@ -581,7 +583,17 @@ const make = Effect.gen(function* () {
     const item = yield* decodeJson(REMOTE_STREAM_ITEMS[stream.operation], decoded.value.item).pipe(
       Effect.option,
     );
-    if (Option.isSome(item)) yield* Queue.offer(stream.queue, item.value);
+    if (Option.isNone(item)) return;
+    // Bounded: a reader that falls this far behind loses the stream and opens it again (a
+    // terminal reattaches from its snapshot), so a slow client never holds the machine's socket.
+    if ((yield* Queue.size(stream.queue)) >= MAX_STREAM_BACKLOG) {
+      link.streams.delete(decoded.value.subscriptionId);
+      yield* stream.channel.event(ENVIRONMENT_EXECUTOR_FRAME_METHODS.workspaceStreamCancel, {
+        subscriptionId: decoded.value.subscriptionId,
+      });
+      return yield* Queue.end(stream.queue);
+    }
+    yield* Queue.offer(stream.queue, item.value);
   });
 
   const onStreamEnd = Effect.fn("RemoteEnvironments.onStreamEnd")(function* (
@@ -1020,8 +1032,20 @@ const make = Effect.gen(function* () {
       link.attached = yield* Deferred.make<void>();
       yield* Deferred.succeed(attached, undefined);
       // The machine's previews reach the Hub's clients while this socket lives.
+      // Only a Thread's own machine reports on its previews; anything else is dropped and logged.
       yield* forwardStream(link)("preview.events", {}).pipe(
-        Stream.runForEach((event) => PubSub.publish(previewEvents, event)),
+        Stream.runForEach((event) =>
+          activeFor(link, ThreadId.make(event.threadId)).pipe(
+            Effect.flatMap((active) =>
+              Option.isSome(active) && active.value === link.environmentId
+                ? PubSub.publish(previewEvents, event)
+                : Effect.logWarning(
+                    "Rejected a preview event from an Environment that is not the Thread's Active environment",
+                    { environmentId: link.environmentId, threadId: event.threadId },
+                  ),
+            ),
+          ),
+        ),
         Effect.ignore,
         Effect.forkScoped,
       );

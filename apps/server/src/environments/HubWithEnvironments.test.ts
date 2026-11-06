@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- writes one attachment file for the Hub to serve.
 import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
 
 import { assert, describe, it } from "@effect/vitest";
 import {
@@ -27,6 +28,7 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import { makeProviderReplayGate } from "@t3tools/provider-testing/replayGate";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -42,6 +44,7 @@ import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as ProjectCheckouts from "../environment/ProjectCheckouts.ts";
 import * as ThreadWorkspace from "../environment/ThreadWorkspace.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ResourceCleanupService from "../orchestration-v2/ResourceCleanupService.ts";
 import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { ClaudeOrchestratorReplayHarness } from "../orchestration-v2/Adapters/ClaudeAdapterV2.testkit.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
@@ -914,6 +917,102 @@ describe("Hub con Environments: a Thread's files and terminals", () => {
         .readFile({ cwd: laptopCheckout, relativePath: "README.md" }, owner)
         .pipe(Effect.exit);
       assert.deepEqual(laptop.requests.slice(asked), []);
+    }).pipe(Effect.scoped),
+  );
+});
+
+describe("Hub con Environments: what a machine is trusted with", () => {
+  it.live("the machine refuses a workspace path whose symlinks lead outside the Thread", () =>
+    Effect.gen(function* () {
+      const { threadId, hubCheckout, laptopCheckout, owner, workspace } = yield* threadOnLaptop();
+      const outside = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(`${NodeOS.tmpdir()}/t3-outside-`),
+      );
+      yield* Effect.promise(async () => {
+        await NodeFSP.writeFile(`${outside}/secret.txt`, "not the Thread's\n");
+        await NodeFSP.symlink(outside, `${laptopCheckout}/home-link`);
+        await NodeFSP.symlink("/", `${laptopCheckout}/root-link`);
+      });
+      // Inside the workspace as text, outside it once the machine follows the links.
+      const read = yield* workspace
+        .readFile({ cwd: hubCheckout, relativePath: "home-link/secret.txt", threadId }, owner)
+        .pipe(Effect.flip);
+      assert.equal(read.failure, "resolved_path_outside_root");
+      const write = yield* workspace
+        .writeFile(
+          { cwd: hubCheckout, relativePath: "home-link/planted.txt", contents: "x", threadId },
+          owner,
+        )
+        .pipe(Effect.flip);
+      assert.equal(write.failure, "resolved_path_outside_root");
+      assert.isFalse(
+        yield* Effect.promise(() =>
+          NodeFSP.access(`${outside}/planted.txt`).then(
+            () => true,
+            () => false,
+          ),
+        ),
+      );
+      const listed = yield* workspace
+        .listEntries({ cwd: `${hubCheckout}/root-link`, threadId }, owner)
+        .pipe(Effect.flip);
+      assert.equal(listed.failure, "outside_thread_workspace");
+      const terminal = yield* workspace
+        .terminalOpen({ threadId, terminalId: "term-1", cwd: `${hubCheckout}/root-link` }, owner)
+        .pipe(Effect.flip);
+      assert.equal(
+        terminal._tag === "TerminalEnvironmentUnavailableError" ? terminal.reason : terminal._tag,
+        "outside_thread_workspace",
+      );
+      // What the workspace does hold still answers.
+      assert.equal(
+        (yield* workspace.readFile(
+          { cwd: hubCheckout, relativePath: "README.md", threadId },
+          owner,
+        )).contents,
+        "# On the Laptop\n",
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a machine's preview events reach clients only for Threads it runs", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub();
+      const opened = yield* openProtocolSession(hub);
+      const workspace = yield* threadWorkspaceOf(hub);
+      const received = yield* workspace.previewEvents.pipe(
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkScoped({ startImmediately: true }),
+      );
+      const closed = (threadId: string) => ({
+        type: "closed",
+        threadId,
+        tabId: "tab-1",
+        createdAt: "1970-01-01T00:00:00.000Z",
+        serverEpoch: "epoch",
+        revision: 1,
+      });
+      // A Thread on the Hub machine, which this machine has no say over.
+      yield* opened.machine.sendPreviewEvent(closed("thread:elsewhere"));
+      yield* opened.machine.sendPreviewEvent(closed(opened.threadId));
+      const [first] = yield* Fiber.join(received);
+      assert.equal(first?.threadId, opened.threadId);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("cleaning up a Thread's terminals waits for its machine instead of reporting done", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub();
+      const opened = yield* openProtocolSession(hub);
+      const registry = hub.service(EnvironmentExecutor.EnvironmentExecutorRegistry);
+      yield* opened.machine.disconnect;
+      const cleanup = yield* ResourceCleanupService.onThreadMachine(
+        registry,
+        opened.threadId,
+        (forward) => forward.call("terminal.close", { threadId: opened.threadId }),
+      ).pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(cleanup));
     }).pipe(Effect.scoped),
   );
 });
