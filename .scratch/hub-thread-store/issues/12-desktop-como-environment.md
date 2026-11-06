@@ -4,7 +4,7 @@
 
 **Blocked by:** 04.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] El ajuste en desktop lanza el flujo de alta en el navegador del sistema, guarda la credencial con el secret store del servidor joined y arranca ese proceso.
 - [ ] Muestra el estado de la conexión. Desactivarlo para el proceso. «Leave» lo da de baja en el Hub.
