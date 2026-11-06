@@ -2,6 +2,7 @@ import type { ProjectionRecordField } from "../orchestration-v2/ProjectionStore.
 import {
   CommandId,
   OrchestratorMcpFailure,
+  SpaceResourceNotFoundError,
   type ProjectId,
   type ProviderInstanceId,
   type ProviderInteractionMode,
@@ -12,9 +13,11 @@ import {
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import { resolveInteractionMode, resolveRuntimeMode } from "./delegatedTaskModes.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import { visibleShells } from "./mcpVisibility.ts";
@@ -56,7 +59,23 @@ export const unavailable = () =>
     message: "The operation could not be completed.",
   });
 
+const isHidden = Schema.is(SpaceResourceNotFoundError);
+
 export const dispatchFailure = (
+  error: OrchestratorV2Error | ThreadManagement.ThreadManagementProviderInstanceDisabledError,
+) => {
+  // The agent acts as its Thread's owner, so the Role rules refuse it like that User.
+  if (error._tag === "OrchestratorCommandRejectedError") {
+    if (isHidden(error.cause)) return hiddenThread("Thread not found.");
+    const refusal = SpaceDirectory.spaceRefusalMessage(error.cause);
+    if (refusal !== undefined) {
+      return new OrchestratorMcpFailure({ code: "invalid_request", message: refusal });
+    }
+  }
+  return dispatchFailureOf(error);
+};
+
+const dispatchFailureOf = (
   error: OrchestratorV2Error | ThreadManagement.ThreadManagementProviderInstanceDisabledError,
 ) =>
   error._tag === "ThreadManagementProviderInstanceDisabledError" ||

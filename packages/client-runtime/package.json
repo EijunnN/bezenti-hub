@@ -515,6 +515,10 @@
       "types": "./src/spaces/spaceDirectory.ts",
       "default": "./src/spaces/spaceDirectory.ts"
     },
+    "./spaces/role-permissions": {
+      "types": "./src/spaces/rolePermissions.ts",
+      "default": "./src/spaces/rolePermissions.ts"
+    },
     "./spaces/invitations": {
       "types": "./src/spaces/invitations.ts",
       "default": "./src/spaces/invitations.ts"

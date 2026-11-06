@@ -70,6 +70,7 @@ const GUEST_SHARE_CREATE_MESSAGES = {
   thread_unavailable: "This thread cannot be shared.",
   read_failed: "Failed to read the shared thread.",
   changed: "The guest link changed while it was being created.",
+  not_permitted: "Only an Admin can create guest links, and only for a Thread in an Organization.",
 } as const;
 
 export class GuestShareCreateError extends Schema.TaggedError<GuestShareCreateError>()(
@@ -81,6 +82,7 @@ export class GuestShareCreateError extends Schema.TaggedError<GuestShareCreateEr
       "thread_unavailable",
       "read_failed",
       "changed",
+      "not_permitted",
     ]),
   },
 ) {

@@ -28,6 +28,15 @@ export type Visibility =
 
 export const everything: Visibility = { all: true };
 
+/**
+ * What the current request may see, for services that pick Projects themselves (a Pull Request
+ * call routed by repository). Transports set it; work no transport started sees everything.
+ */
+export const RequestVisibility = Context.Reference<Visibility>(
+  "t3/spaces/SpaceVisibility/RequestVisibility",
+  { defaultValue: () => everything },
+);
+
 /** The `spaceIds` option the stores take; undefined reads every Space. */
 export const spaceFilter = (visibility: Visibility): ReadonlyArray<SpaceId> | undefined =>
   visibility.all ? undefined : visibility.spaceIds;
@@ -85,8 +94,26 @@ export class SpaceVisibility extends Context.Service<
       visibility: Visibility,
       projectIds: ReadonlyArray<ProjectId>,
     ) => Effect.Effect<ReadonlySet<ProjectId>>;
+    /**
+     * Whether the User may work a Thread's terminals, previews, devices, attachments and
+     * worktree setup: an existing Thread only its owner (and the Owner) works; a draft, which has
+     * no row yet, belongs to the first User who works it, and is hidden from everyone else.
+     */
+    readonly claimWork: (
+      visibility: Visibility,
+      userId: UserId | undefined,
+      threadId: string,
+    ) => Effect.Effect<WorkAccess>;
+    /** The ids among `threadIds` the User may work, by the same rule, without claiming drafts. */
+    readonly workableThreadIds: (
+      visibility: Visibility,
+      userId: UserId | undefined,
+      threadIds: ReadonlyArray<string>,
+    ) => Effect.Effect<ReadonlySet<string>>;
   }
 >()("t3/spaces/SpaceVisibility") {}
+
+export type WorkAccess = "allowed" | "hidden" | "not-yours";
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -160,12 +187,67 @@ const make = Effect.gen(function* () {
     return new Set(rows.map((row) => ProjectId.make(row.projectId)));
   });
 
+  // Drafts have no row to carry an owner, so the first User to work one holds it while the
+  // server runs; their terminals and previews end with it. Bounded: the oldest claims go first.
+  const draftOwners = new Map<string, UserId>();
+  const MAX_DRAFT_CLAIMS = 20_000;
+
+  const workOf = Effect.fn("SpaceVisibility.workOf")(function* (
+    visibility: Visibility,
+    userId: UserId,
+    threadId: string,
+    claim: boolean,
+  ) {
+    const owner = yield* spaces.threadOwner(ThreadId.make(threadId)).pipe(Effect.orDie);
+    if (Option.isSome(owner)) {
+      if (visibility.all || owner.value === userId) return "allowed" as const;
+      const hidden = yield* hiddenThreadIds(visibility, [threadId]);
+      return hidden.size > 0 ? ("hidden" as const) : ("not-yours" as const);
+    }
+    const holder = draftOwners.get(threadId);
+    if (holder === undefined && claim) {
+      if (draftOwners.size >= MAX_DRAFT_CLAIMS) {
+        const oldest = draftOwners.keys().next();
+        if (oldest.done !== true) draftOwners.delete(oldest.value);
+      }
+      draftOwners.set(threadId, userId);
+      return "allowed" as const;
+    }
+    if (holder === userId || visibility.all) return "allowed" as const;
+    // Someone else's draft looks like one that does not exist.
+    return "hidden" as const;
+  });
+
+  const claimWork = Effect.fn("SpaceVisibility.claimWork")(function* (
+    visibility: Visibility,
+    userId: UserId | undefined,
+    threadId: string,
+  ) {
+    if (userId === undefined) return "allowed" as const;
+    return yield* workOf(visibility, userId, threadId, true);
+  });
+
+  const workableThreadIds = Effect.fn("SpaceVisibility.workableThreadIds")(function* (
+    visibility: Visibility,
+    userId: UserId | undefined,
+    threadIds: ReadonlyArray<string>,
+  ) {
+    if (userId === undefined) return new Set(threadIds);
+    const unique = [...new Set(threadIds)];
+    const access = yield* Effect.forEach(unique, (threadId) =>
+      workOf(visibility, userId, threadId, false),
+    );
+    return new Set(unique.filter((_, index) => access[index] === "allowed"));
+  });
+
   return SpaceVisibility.of({
     of,
     viewer,
     visibleThreadIds,
     hiddenThreadIds,
     visibleProjectIds,
+    claimWork,
+    workableThreadIds,
   });
 });
 

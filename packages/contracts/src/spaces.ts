@@ -38,6 +38,8 @@ export const SpaceDirectoryView = Schema.Struct({
   spaces: Schema.Array(SpaceSummary),
   personalSpaceId: SpaceId,
   canCreateOrganization: Schema.Boolean,
+  /** The Installation's Owner, who may act on everything. Optional so older servers decode. */
+  isOwner: Schema.optional(Schema.Boolean),
 });
 export type SpaceDirectoryView = typeof SpaceDirectoryView.Type;
 

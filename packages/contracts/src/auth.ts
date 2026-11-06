@@ -366,6 +366,15 @@ export class SpaceResourceNotFoundError extends Schema.TaggedError<SpaceResource
   { message: Schema.String },
 ) {}
 
+/**
+ * A Project or Thread the session can see but its Role does not let it change, such as another
+ * User's Thread. Unlike a hidden one it says why, since the User already sees it.
+ */
+export class SpaceActionDeniedError extends Schema.TaggedError<SpaceActionDeniedError>()(
+  "SpaceActionDeniedError",
+  { message: Schema.String },
+) {}
+
 export const AuthAccessStreamClientUpsertedEvent = Schema.Struct({
   version: Schema.Literal(1),
   revision: Schema.Number,

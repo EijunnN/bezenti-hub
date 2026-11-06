@@ -16,6 +16,7 @@ import {
 } from "../auth/http.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
+import * as CommandActor from "../auth/CommandActor.ts";
 import * as ProjectCloneTracker from "./ProjectCloneTracker.ts";
 import * as ProjectService from "./ProjectService.ts";
 import { mutateProjectWithClone } from "./ProjectMutation.ts";
@@ -84,7 +85,7 @@ export const layer = HttpApiBuilder.group(
             projectClones,
             args.payload,
             principal.userId,
-          );
+          ).pipe(CommandActor.actAs(principal.userId));
           return yield* startup.enqueueCommand(operation).pipe(Effect.catch(failProjectMutation));
         }),
       );

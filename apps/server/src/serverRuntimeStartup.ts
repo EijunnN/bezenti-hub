@@ -26,6 +26,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
+import * as CommandActor from "./auth/CommandActor.ts";
 import * as ServerConfig from "./config.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import { flushCompileCache } from "./compileCache.ts";
@@ -120,9 +121,11 @@ export const makeCommandGate = Effect.gen(function* () {
     }
 
     const result = yield* Deferred.make<A, E | ServerRuntimeStartupError>();
+    // The worker fiber runs it, so it keeps acting for the User who sent it.
+    const actor = yield* CommandActor.current;
     yield* Queue.offer(commandQueue, {
       run: Deferred.await(commandReady).pipe(
-        Effect.flatMap(() => effect),
+        Effect.flatMap(() => effect.pipe(CommandActor.actAs(actor))),
         Effect.exit,
         Effect.flatMap((exit) => settleQueuedCommand(result, exit)),
       ),

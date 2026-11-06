@@ -232,6 +232,8 @@ const layerOrchestratorProvided = Orchestrator.layer.pipe(
       layerProviderSwitchServiceProvided,
       layerRunExecutionServiceProvided,
       ThreadForkService.layer,
+      // Every command is checked against the Role rules (`commandAccess.ts`).
+      SpaceDirectory.layer,
     ),
   ),
 );

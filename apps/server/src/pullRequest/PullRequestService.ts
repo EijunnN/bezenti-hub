@@ -97,6 +97,7 @@ import * as PullRequestReadCache from "./PullRequestReadCache.ts";
 import * as PullRequestProviderRegistry from "./PullRequestProviderRegistry.ts";
 import * as ViewedFiles from "./pullRequestViewedFiles.ts";
 import { toChangeBreakdown } from "./pullRequestChangeBreakdown.ts";
+import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 
 export interface PullRequestMergeEvent extends PullRequestRef {
   readonly mergedAt: string;
@@ -865,6 +866,7 @@ export const make = Effect.gen(function* () {
       );
     });
 
+  // A call routed by repository (an explicit host) must not reach a Project the caller cannot see.
   const readWorkspaceProjects = (
     filter: Pick<PullRequestListInput, "projectId" | "projectIds" | "host">,
   ): Effect.Effect<WorkspaceProjects, PullRequestError> =>
@@ -874,6 +876,11 @@ export const make = Effect.gen(function* () {
         )
       : projects.getShell(filter.projectId).pipe(Effect.map(Option.toArray))
     ).pipe(
+      Effect.flatMap((shells) =>
+        Effect.map(SpaceVisibility.RequestVisibility, (visibility) =>
+          shells.filter((shell) => SpaceVisibility.seesProject(visibility, shell)),
+        ),
+      ),
       Effect.mapError(
         (error) =>
           new PullRequestOperationError({

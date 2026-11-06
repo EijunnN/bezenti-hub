@@ -37,7 +37,9 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
+import * as CommandActor from "../auth/CommandActor.ts";
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
   readonly commandId: CommandId;
@@ -115,6 +117,7 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
 
 export type ProjectServiceError =
   | SpaceDirectory.SpaceClaimError
+  | SpaceDirectory.ItemAccessError
   | ProjectNotFoundError
   | ProjectConflictError
   | ProjectNotEmptyError
@@ -361,7 +364,7 @@ export const make = Effect.gen(function* () {
       // Before touching the workspace, which may create its folder.
       const stamp = yield* spaces.claimCreation({
         action: "project.create",
-        actorUserId: input.actorUserId,
+        actorUserId: input.actorUserId ?? (yield* CommandActor.current),
         spaceId: input.spaceId,
       });
       const workspaceRoot = yield* normalizeWorkspaceRoot({
@@ -383,8 +386,27 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  // The Role rules for an existing Project, for whoever the command acts for.
+  const authorizeProject = Effect.fn("ProjectService.authorizeProject")(function* (
+    projectId: ProjectId,
+    actions: ReadonlyArray<AccessPolicy.Action>,
+  ) {
+    const actor = yield* CommandActor.current;
+    if (actor === undefined) return;
+    for (const action of actions) {
+      yield* spaces.authorizeItem(actor, action, { kind: "project", id: projectId });
+    }
+  });
+
   const update: ProjectService["Service"]["update"] = Effect.fn("ProjectService.update")(
     function* (input) {
+      const { commandId: _commandId, projectId: _projectId, archived, ...changes } = input;
+      yield* authorizeProject(input.projectId, [
+        ...(archived === undefined ? [] : ["project.archive" as const]),
+        ...(Object.values(changes).some((value) => value !== undefined)
+          ? ["project.manage" as const]
+          : []),
+      ]);
       const existing = yield* readRow(input.projectId);
       if (Option.isNone(existing)) {
         return yield* new ProjectNotFoundError({ projectId: input.projectId });
@@ -527,6 +549,7 @@ export const make = Effect.gen(function* () {
   const deleteProject: ProjectService["Service"]["delete"] = Effect.fn("ProjectService.delete")(
     function* (input) {
       const { projectId } = input;
+      yield* authorizeProject(projectId, ["project.delete"]);
       // Read deleted rows so retries replay receipts and other command ids fail as not found.
       const existing = yield* readRow(projectId, { includeDeleted: true });
       if (Option.isNone(existing)) {

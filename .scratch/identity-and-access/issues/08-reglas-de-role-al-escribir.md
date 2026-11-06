@@ -4,11 +4,11 @@
 
 **Blocked by:** 07
 
-**Status:** ready-for-agent
+**Status:** done
 
 Spec: ../spec.md
 
-- [ ] `AccessPolicy` cubre todas las filas de la tabla de Roles de «Roles y permisos», guest links incluidos.
-- [ ] Cada comando de Project y Thread consulta `AccessPolicy` antes de despachar; test de frontera de un Member que intenta continuar un Thread ajeno.
-- [ ] `actorUserId` sellado por el servidor en comandos y receipts; el cliente no puede fijarlo.
-- [ ] Los permission atoms del cliente usan el Role del Space actual; se extienden los tests de command permissions.
+- [x] `AccessPolicy` cubre todas las filas de la tabla de Roles de «Roles y permisos», guest links incluidos.
+- [x] Cada comando de Project y Thread consulta `AccessPolicy` antes de despachar; test de frontera de un Member que intenta continuar un Thread ajeno.
+- [x] `actorUserId` sellado por el servidor en comandos y receipts; el cliente no puede fijarlo.
+- [x] Los permission atoms del cliente usan el Role del Space actual; se extienden los tests de command permissions.

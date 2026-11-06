@@ -1,10 +1,11 @@
-import { CommandId, NonNegativeInt, ProjectId, ThreadId } from "@t3tools/contracts";
+import { CommandId, NonNegativeInt, ProjectId, ThreadId, UserId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as CommandActor from "../auth/CommandActor.ts";
 import * as OrchestrationCommandReceipts from "../persistence/OrchestrationCommandReceipts.ts";
 
 export class CommandReceiptStoreWriteError extends Schema.TaggedError<CommandReceiptStoreWriteError>()(
@@ -48,6 +49,8 @@ export const CommandReceiptV2 = Schema.Struct({
   resultSequence: NonNegativeInt,
   status: CommandReceiptV2Status,
   error: Schema.NullOr(Schema.String),
+  /** The User the command acted for, stamped from the fiber's `CommandActor` on write. */
+  actorUserId: Schema.optional(Schema.NullOr(UserId)),
 });
 export type CommandReceiptV2 = typeof CommandReceiptV2.Type;
 
@@ -59,6 +62,7 @@ export const ProjectCommandReceiptV2 = Schema.Struct({
   resultSequence: NonNegativeInt,
   status: CommandReceiptV2Status,
   error: Schema.NullOr(Schema.String),
+  actorUserId: Schema.optional(Schema.NullOr(UserId)),
 });
 export type ProjectCommandReceiptV2 = typeof ProjectCommandReceiptV2.Type;
 
@@ -108,11 +112,13 @@ function fromApplicationReceipt(receipt: OrchestrationCommandReceipts.Orchestrat
     resultSequence: receipt.resultSequence,
     status: receipt.status,
     error: receipt.error,
+    ...(receipt.actorUserId == null ? {} : { actorUserId: receipt.actorUserId }),
   });
 }
 
 function toApplicationReceipt(
   receipt: AnyCommandReceiptV2,
+  actorUserId: UserId | undefined,
 ): OrchestrationCommandReceipts.OrchestrationCommandReceipt {
   return {
     commandId: receipt.commandId,
@@ -124,6 +130,7 @@ function toApplicationReceipt(
     resultSequence: receipt.resultSequence,
     status: receipt.status,
     error: receipt.error,
+    actorUserId: receipt.actorUserId ?? actorUserId ?? null,
   };
 }
 
@@ -138,7 +145,8 @@ const layerBase: Layer.Layer<
 
     return CommandReceiptStoreV2.of({
       insertIfAbsent: (receipt) =>
-        receipts.insertIfAbsent(toApplicationReceipt(receipt)).pipe(
+        CommandActor.current.pipe(
+          Effect.flatMap((actor) => receipts.insertIfAbsent(toApplicationReceipt(receipt, actor))),
           Effect.mapError(
             (cause) =>
               new CommandReceiptStoreWriteError({
@@ -148,7 +156,8 @@ const layerBase: Layer.Layer<
           ),
         ),
       upsert: (receipt) =>
-        receipts.upsert(toApplicationReceipt(receipt)).pipe(
+        CommandActor.current.pipe(
+          Effect.flatMap((actor) => receipts.upsert(toApplicationReceipt(receipt, actor))),
           Effect.mapError(
             (cause) =>
               new CommandReceiptStoreWriteError({
@@ -189,6 +198,9 @@ const layerBase: Layer.Layer<
                   resultSequence: receipt.value.resultSequence,
                   status: receipt.value.status,
                   error: receipt.value.error,
+                  ...(receipt.value.actorUserId == null
+                    ? {}
+                    : { actorUserId: receipt.value.actorUserId }),
                 }).pipe(Effect.asSome),
           ),
           Effect.mapError((cause) => new CommandReceiptStoreReadError({ commandId, cause })),

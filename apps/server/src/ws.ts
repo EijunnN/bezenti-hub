@@ -1472,15 +1472,18 @@ export const layerWsRpc = (
           ),
         };
       });
-      // Terminal and preview streams also carry drafts, which have no Thread row and stay shown.
+      // Terminals and previews are their Thread owner's, or the draft's User's: show only those.
       const withoutHiddenThreads = Effect.fn("ws.withoutHiddenThreads")(function* <A>(
         items: ReadonlyArray<A>,
         threadIdOf: (item: A) => string,
       ) {
-        const visibility = yield* currentVisibility;
-        if (visibility.all || items.length === 0) return items;
-        const hidden = yield* spaceVisibility.hiddenThreadIds(visibility, items.map(threadIdOf));
-        return items.filter((item) => !hidden.has(threadIdOf(item)));
+        if (items.length === 0) return items;
+        const workable = yield* spaceVisibility.workableThreadIds(
+          yield* currentVisibility,
+          principal.userId,
+          items.map(threadIdOf),
+        );
+        return items.filter((item) => workable.has(threadIdOf(item)));
       });
 
       const authorizeEffect = <A, E, R>(

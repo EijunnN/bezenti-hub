@@ -5,8 +5,11 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  AuthTerminalOperateScope,
   AuthTerminalReadScope,
   EventId,
+  GuestShareId,
+  MessageId,
   SpaceId,
   type OrchestrationV2AppThread,
   type OrchestrationV2ShellStreamItem,
@@ -39,6 +42,7 @@ import * as Cause from "effect/Cause";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
+import * as Result from "effect/Result";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -102,6 +106,7 @@ import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
+import * as SourceControlProviderRegistry from "./sourceControl/SourceControlProviderRegistry.ts";
 import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
 import * as SourceControlSignIn from "./sourceControl/SourceControlSignIn.ts";
@@ -147,7 +152,20 @@ import * as SpaceDirectory from "./spaces/SpaceDirectory.ts";
 import * as RpcAuthorization from "./auth/RpcAuthorization.ts";
 import { layerSeesEverything } from "./spaces/SpaceVisibility.testkit.ts";
 import * as SpaceVisibility from "./spaces/SpaceVisibility.ts";
-import { bootstrapOwner, makeAuthenticator, serveAuthHttp } from "./auth/UserAuth.testkit.ts";
+import {
+  addMember,
+  bootstrapOwner,
+  joinOrganization,
+  makeAuthenticator,
+  serveAuthHttp,
+} from "./auth/UserAuth.testkit.ts";
+import * as CommandActor from "./auth/CommandActor.ts";
+import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
+import * as McpSessionRegistryTestkit from "./mcp/McpSessionRegistry.testkit.ts";
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import { CodexProviderCapabilitiesV2 } from "./orchestration-v2/Adapters/CodexAdapterV2.ts";
+import * as ProviderTurnStartServiceTestkit from "./orchestration-v2/ProviderTurnStartService.testkit.ts";
+import * as RuntimeLayer from "./orchestration-v2/runtimeLayer.ts";
 import { visibleShells } from "./mcp/mcpVisibility.ts";
 import { threadNotFound } from "./mcp/threadAccess.ts";
 import * as McpInvocationContext from "./mcp/McpInvocationContext.ts";
@@ -1464,6 +1482,8 @@ describe("Space visibility", () => {
     WS_METHODS.pullRequestsList,
     WS_METHODS.scheduledTasksSubscribe,
     WS_METHODS.subscribeTerminalMetadata,
+    WS_METHODS.terminalWrite,
+    ORCHESTRATION_V2_WS_METHODS.forceStopThread,
   ] as const;
   const group = WsRpcGroup.omit(
     ...[...WsRpcGroup.requests.keys()].filter(
@@ -1478,6 +1498,7 @@ describe("Space visibility", () => {
     readonly id: string;
     readonly projectId: string;
     readonly spaceId?: string;
+    readonly ownerUserId?: string;
   }) => {
     const id = ThreadId.make(input.id);
     const at = DateTime.makeUnsafe("2026-11-01T00:00:00.000Z");
@@ -1496,6 +1517,7 @@ describe("Space visibility", () => {
       worktreePath: "/wt/shared",
       activeProviderThreadId: null,
       ...(input.spaceId === undefined ? {} : { spaceId: SpaceId.make(input.spaceId) }),
+      ...(input.ownerUserId === undefined ? {} : { ownerUserId: UserId.make(input.ownerUserId) }),
       lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: id },
       forkedFrom: null,
       createdAt: at,
@@ -1603,6 +1625,7 @@ describe("Space visibility", () => {
                 AuthOrchestrationReadScope,
                 AuthOrchestrationOperateScope,
                 AuthTerminalReadScope,
+                AuthTerminalOperateScope,
               ],
             }),
           ),
@@ -1918,13 +1941,313 @@ describe("Space visibility", () => {
             Stream.take(1),
             Stream.runCollect,
           );
+          // Terminals are their Thread owner's: the Owner's Thread and a draft nobody holds are
+          // not Grace's to see.
           assert.deepEqual(
             terminals?.type === "snapshot"
               ? terminals.terminals.map((item) => item.threadId)
               : null,
-            ["acme-thread", "draft-thread"],
+            [],
           );
         }),
       ),
+  );
+  // The real orchestrator and Thread services over the hub's database: every transport's
+  // commands meet the Role rules there, so these run the production path end to end.
+  const codex = ProviderInstanceId.make("codex");
+  const codexInstance = {
+    instanceId: codex,
+    driverKind: ProviderDriverKind.make("codex"),
+    continuationIdentity: {
+      driverKind: ProviderDriverKind.make("codex"),
+      continuationKey: "codex",
+    },
+    displayName: "Codex",
+    enabled: true,
+    snapshot: { getSnapshot: Effect.succeed({}) },
+    orchestrationAdapter: {
+      instanceId: codex,
+      driver: ProviderDriverKind.make("codex"),
+      getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+      planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
+      openSession: () => Effect.die("no provider turn runs in these tests"),
+    },
+    textGeneration: {},
+  } as never;
+  const layerOrchestration = (server: Effect.Success<typeof serveAuthHttp>) =>
+    RuntimeLayer.layer.pipe(
+      Layer.provide(ProviderTurnStartServiceTestkit.layer),
+      Layer.provide(McpSessionRegistryTestkit.layer),
+      Layer.provide(McpProviderSessions.layer),
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(CheckpointStore.CheckpointStore)({}),
+          Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
+            resolveLink: () => Effect.die("no title links in these tests"),
+          }),
+          Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
+            getInstance: (instanceId) =>
+              Effect.succeed(instanceId === codex ? codexInstance : undefined),
+            listInstances: Effect.succeed([codexInstance]),
+            listUnavailable: Effect.succeed([]),
+            streamChanges: Stream.empty,
+            subscribeChanges: Effect.never,
+          }),
+        ),
+      ),
+      Layer.provide(Layer.succeedContext(server.services)),
+    );
+
+  // Ada is Acme's Admin and Gus its Guest; Grace, a Member, owns grace-thread. acme-thread,
+  // which names no owner, is the Owner's.
+  const team = hub.pipe(
+    Effect.flatMap((seeded) =>
+      Effect.gen(function* () {
+        const { server, acme, grace } = seeded;
+        yield* server.eventSink.write({
+          events: [
+            threadCreated({
+              id: "grace-thread",
+              projectId: "acme-app",
+              spaceId: acme,
+              ownerUserId: grace.userId,
+            }),
+          ],
+        });
+        const adaCookie = yield* addMember(server, { id: "ada", displayName: "Ada" });
+        yield* joinOrganization(server, acme, "ada", "admin");
+        const gusCookie = yield* addMember(server, { id: "gus", displayName: "Gus" });
+        yield* joinOrganization(server, acme, "gus", "guest");
+        return {
+          ...seeded,
+          ada: { cookie: adaCookie, userId: UserId.make("ada") },
+          gus: { cookie: gusCookie, userId: UserId.make("gus") },
+        };
+      }),
+    ),
+  );
+  const withTeam = <A, E, R>(
+    body: (seeded: Effect.Success<typeof team>) => Effect.Effect<A, E, R>,
+  ) =>
+    team.pipe(
+      Effect.flatMap(body),
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.fresh(layerConfigSources),
+          Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+          Layer.mock(ServerBrowser.ServerBrowser)({}),
+        ),
+      ),
+    );
+  const connectWriter = (server: Effect.Success<typeof serveAuthHttp>, userId: UserId) =>
+    connect(
+      server,
+      userId,
+      Layer.mergeAll(
+        layerOrchestration(server),
+        Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
+          enqueueCommand: (effect) => effect,
+        }),
+        Layer.mock(TerminalManager.TerminalManager)({ write: () => Effect.void }),
+      ),
+    );
+  type Writer = Effect.Success<ReturnType<typeof connectWriter>>;
+  let sent = 0;
+  const dispatch = (client: Writer, command: Record<string, unknown>) =>
+    client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand]({
+      commandId: CommandId.make(`${String(command.type)}-${(sent += 1)}`),
+      ...command,
+    } as never).pipe(Effect.result);
+  const refusal = (result: Result.Result<unknown, unknown>) =>
+    Result.isFailure(result) ? ((result.failure as { detail?: string }).detail ?? null) : null;
+  const receiptActor = (server: Effect.Success<typeof serveAuthHttp>, commandId: string) =>
+    server.sql<{ actor: string | null }>`
+      SELECT actor_user_id AS actor FROM orchestration_command_receipts
+      WHERE command_id = ${commandId}
+    `.pipe(Effect.map((rows) => rows[0]?.actor));
+
+  it.effect("only a Thread's owner continues it; Admins archive and stop others' Threads", () =>
+    withTeam(({ server, grace, ada }) =>
+      Effect.gen(function* () {
+        const asGrace = yield* connectWriter(server, grace.userId);
+        const asAda = yield* connectWriter(server, ada.userId);
+        const message = (threadId: string) => ({
+          type: "message.dispatch",
+          threadId,
+          messageId: MessageId.make(`message-${threadId}`),
+          text: "Hi",
+          attachments: [],
+          dispatchMode: { type: "queue_after_active" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+
+        // Grace sees the Owner's Thread, so she is told why rather than that it is missing.
+        assert.equal(
+          refusal(yield* dispatch(asGrace, message("acme-thread"))),
+          "Only the person who started this Thread can continue it. Start a new Thread to build on it.",
+        );
+        // Not even an Admin continues someone else's Thread.
+        assert.isNotNull(refusal(yield* dispatch(asAda, message("grace-thread"))));
+        assert.match(
+          refusal(yield* dispatch(asGrace, { type: "thread.archive", threadId: "acme-thread" })) ??
+            "",
+          /Only its creator or an Admin/,
+        );
+        assert.match(
+          refusal(yield* dispatch(asGrace, { type: "thread.stop", threadId: "acme-thread" })) ?? "",
+          /Only its creator or an Admin/,
+        );
+        const forceStop = yield* asGrace[ORCHESTRATION_V2_WS_METHODS.forceStopThread]({
+          threadId: ThreadId.make("acme-thread"),
+        } as never).pipe(Effect.flip);
+        assert.include(forceStop.message, "Only the Thread's creator or an Admin");
+
+        // The Admin stops and archives it; Grace archives her own.
+        assert.isTrue(
+          Result.isSuccess(
+            yield* dispatch(asAda, { type: "thread.stop", threadId: "acme-thread" }),
+          ),
+        );
+        assert.isTrue(
+          Result.isSuccess(
+            yield* dispatch(asAda, { type: "thread.archive", threadId: "acme-thread" }),
+          ),
+        );
+        assert.isTrue(
+          Result.isSuccess(
+            yield* dispatch(asGrace, { type: "thread.archive", threadId: "grace-thread" }),
+          ),
+        );
+        // Deleting for good is the Admin's alone.
+        assert.match(
+          refusal(yield* dispatch(asGrace, { type: "thread.delete", threadId: "grace-thread" })) ??
+            "",
+          /Only an Admin/,
+        );
+      }),
+    ),
+  );
+
+  it.effect("the server stamps the acting User on every receipt; a client cannot set it", () =>
+    withTeam(({ server, owner, grace }) =>
+      Effect.gen(function* () {
+        const asGrace = yield* connectWriter(server, grace.userId);
+        const commandId = CommandId.make("grace-pins");
+        const pinned = yield* asGrace[ORCHESTRATION_V2_WS_METHODS.dispatchCommand]({
+          type: "thread.pin",
+          commandId,
+          threadId: ThreadId.make("grace-thread"),
+          // A forged actor is dropped by the schema; the session decides.
+          actorUserId: "someone-else",
+        } as never).pipe(Effect.result);
+        assert.isTrue(Result.isSuccess(pinned));
+        assert.equal(yield* receiptActor(server, commandId), grace.userId);
+        // Over HTTP too: the Project the Owner creates carries the Owner.
+        const created = yield* server.request("/api/projects/mutate", {
+          cookie: owner,
+          body: {
+            type: "project.create",
+            commandId: "owner-creates",
+            projectId: "owner-app",
+            title: "owner-app",
+            workspaceRoot: "/work/owner-app",
+          },
+        });
+        assert.equal(created.status, 200);
+        const [ownerRow] = yield* server.sql<{ userId: string }>`
+          SELECT user_id AS "userId" FROM users WHERE is_owner = 1
+        `;
+        assert.equal(yield* receiptActor(server, "owner-creates"), ownerRow?.userId);
+      }),
+    ),
+  );
+
+  it.effect("Project rules hold over HTTP: Guests create none, Members archive only theirs", () =>
+    withTeam(({ server, acme, grace, gus, ada }) =>
+      Effect.gen(function* () {
+        const mutate = (cookie: string, body: Record<string, unknown>) =>
+          server.request("/api/projects/mutate", { cookie, body });
+        const guestCreates = yield* mutate(gus.cookie, {
+          type: "project.create",
+          commandId: "gus-creates",
+          projectId: "gus-app",
+          title: "gus-app",
+          workspaceRoot: "/work/gus-app",
+          spaceId: acme,
+        });
+        assert.notEqual(guestCreates.status, 200);
+        // acme-app is the Owner's: Grace may not archive it, Ada may.
+        const graceArchives = yield* mutate(grace.cookie, {
+          type: "project.update",
+          commandId: "grace-archives",
+          projectId: "acme-app",
+          archived: true,
+        });
+        assert.notEqual(graceArchives.status, 200);
+        assert.include(JSON.stringify(graceArchives.body), "Only its creator or an Admin");
+        const adaArchives = yield* mutate(ada.cookie, {
+          type: "project.update",
+          commandId: "ada-archives",
+          projectId: "acme-app",
+          archived: true,
+        });
+        assert.equal(adaArchives.status, 200);
+      }),
+    ),
+  );
+
+  it.effect("terminals work only on one's own Thread or a draft one holds", () =>
+    withTeam(({ server, grace, ada }) =>
+      Effect.gen(function* () {
+        const asGrace = yield* connectWriter(server, grace.userId);
+        const asAda = yield* connectWriter(server, ada.userId);
+        const write = (client: Writer, threadId: string) =>
+          client[WS_METHODS.terminalWrite]({ threadId, terminalId: "t", data: "ls" } as never).pipe(
+            Effect.result,
+          );
+        const owners = yield* write(asGrace, "acme-thread");
+        assert.isTrue(Result.isFailure(owners) && owners.failure._tag === "SpaceActionDeniedError");
+        assert.isTrue(Result.isSuccess(yield* write(asGrace, "grace-thread")));
+        // Grace's draft is hers: to Ada it looks like it does not exist.
+        assert.isTrue(Result.isSuccess(yield* write(asGrace, "grace-draft")));
+        const adas = yield* write(asAda, "grace-draft");
+        assert.isTrue(Result.isFailure(adas) && adas.failure._tag === "SpaceResourceNotFoundError");
+      }),
+    ),
+  );
+
+  it.effect("guest links are an Admin's, only in Organizations", () =>
+    withTeam(({ server, grace, ada }) =>
+      Effect.gen(function* () {
+        const services = yield* Layer.build(layerOrchestration(server));
+        const orchestrator = Context.get(services, Orchestrator.OrchestratorV2);
+        const open = (actor: UserId, threadId: string) =>
+          orchestrator
+            .dispatch({
+              type: "thread.guest-share.open",
+              commandId: CommandId.make(`share-${actor}-${threadId}`),
+              threadId: ThreadId.make(threadId),
+              shareId: GuestShareId.make(`share-${actor}`),
+              host: "https://hub.example.com",
+              expiresAt: "2026-11-06T00:00:00.000Z",
+            } as never)
+            .pipe(CommandActor.actAs(actor), Effect.result);
+        const members = yield* open(grace.userId, "grace-thread");
+        assert.equal(
+          Result.isFailure(members) ? SpaceDirectory.spaceRefusalMessage(members.failure) : null,
+          "Only an Admin can create guest links, and only in an Organization.",
+        );
+        const admins = yield* open(ada.userId, "grace-thread");
+        assert.isTrue(Result.isSuccess(admins));
+        // Nothing is shared from a Personal space, not even by the Owner.
+        const [ownerRow] = yield* server.sql<{ userId: string }>`
+          SELECT user_id AS "userId" FROM users WHERE is_owner = 1
+        `;
+        const personal = yield* open(UserId.make(ownerRow!.userId), "legacy-thread");
+        assert.isTrue(Result.isFailure(personal));
+      }),
+    ),
   );
 });

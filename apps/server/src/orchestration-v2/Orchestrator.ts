@@ -192,6 +192,9 @@ import {
 import { planThreadDeletion } from "./ThreadDeletion.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ServerSettings from "../serverSettings.ts";
+import * as CommandActor from "../auth/CommandActor.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import { threadAccessOf } from "./commandAccess.ts";
 
 const isMessageQuestionAnswer = Schema.is(
   Schema.Union([TrimmedNonEmptyString, Schema.NonEmptyArray(TrimmedNonEmptyString)]),
@@ -1035,6 +1038,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const projects = yield* ProjectStore.ProjectStoreV2;
   const projectionStore = yield* ProjectionStoreV2;
   const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
+  // The server provides it; orchestrator tests without Spaces leave every command unchecked.
+  const spaces = yield* Effect.serviceOption(SpaceDirectory.SpaceDirectory);
   const nextTurnItemOrdinal = (
     projection: Pick<OrchestrationV2ThreadProjection, "thread"> &
       Partial<Pick<OrchestrationV2ThreadProjection, "turnItems">>,
@@ -13508,6 +13513,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       "orchestration_v2.command_type": command.type,
       "orchestration_v2.thread_id": commandThreadId(command),
     });
+
+    // Every command passes here whatever its transport, so the Role rules hold for WS, HTTP,
+    // MCP and agents alike. Refusals record no receipt: a Role can change and the retry pass.
+    const actor = yield* CommandActor.current;
+    if (actor !== undefined && Option.isSome(spaces)) {
+      for (const access of threadAccessOf(command)) {
+        yield* spaces.value
+          .authorizeItem(actor, access.action, { kind: "thread", id: access.threadId })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestratorCommandRejectedError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause,
+                }),
+            ),
+          );
+      }
+    }
 
     const existingReceipt = yield* commandReceipts.getByCommandId(command.commandId).pipe(
       Effect.mapError(

@@ -6,8 +6,10 @@
 import {
   ORCHESTRATION_V2_WS_METHODS,
   type ProjectId,
+  SpaceActionDeniedError,
   SpaceResourceNotFoundError,
   type ThreadId,
+  type UserId,
   WS_METHODS,
   type WsRpcGroup,
 } from "@t3tools/contracts";
@@ -20,26 +22,24 @@ import type * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 
 /**
- * `thread` and `project`: the middleware refuses ids the session cannot see. `command`: the
- * same for what a command acts on, minus what it creates. `named`: every Project named at any
- * depth, and no hidden Thread (drafts pass). `filtered`: the handler reads through
- * SpaceVisibility. `unscoped`: why the rule does not apply here.
+ * `thread`/`project`: refuse ids the session cannot see. `command`: what it acts on, not what it
+ * creates. `named`: Projects at any depth, no hidden Thread. `work`: the session User's own
+ * Thread or held draft (`claimWork`). `filtered`: the handler filters. `unscoped`: why not.
  */
 export type RpcSpaceAccess =
   | "thread"
   | "project"
   | "command"
   | "named"
+  | "work"
   | "filtered"
   | { readonly unscoped: string };
 
-const DRAFTS = {
-  unscoped: "drafts use it before their Thread exists; ticket 08 sets the operate rules",
-};
 const BY_DIRECTORY = { unscoped: "works on a directory, which filesystem scopes guard" };
 
 export const RPC_SPACE_ACCESS = {
-  // Which Role may write is ticket 08; here a hidden target answers like a missing one.
+  // A hidden target answers like a missing one; the Role rules run on every command in the
+  // orchestrator, whatever its transport.
   [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: "command",
   [ORCHESTRATION_V2_WS_METHODS.launchThread]: "command",
   [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: "filtered",
@@ -70,28 +70,25 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.mcpAppsReadResource]: "thread",
   [WS_METHODS.mcpAppsUpdateModelContext]: "thread",
   [WS_METHODS.providerUploadFeedback]: "thread",
-  [WS_METHODS.assetsPersistChatAttachments]: DRAFTS,
-  [WS_METHODS.subscribeWorktreeSetup]: {
-    unscoped: "starts while the Thread it sets up is still launching; ticket 08",
-  },
-  [WS_METHODS.worktreeSetupCancel]: {
-    unscoped: "starts while the Thread it sets up is still launching; ticket 08",
-  },
-  [WS_METHODS.terminalOpen]: DRAFTS,
-  [WS_METHODS.terminalAttach]: DRAFTS,
-  [WS_METHODS.terminalObserve]: DRAFTS,
-  [WS_METHODS.terminalWrite]: DRAFTS,
-  [WS_METHODS.terminalResize]: DRAFTS,
-  [WS_METHODS.terminalClear]: DRAFTS,
-  [WS_METHODS.terminalClose]: DRAFTS,
-  [WS_METHODS.previewOpen]: DRAFTS,
-  [WS_METHODS.previewResize]: DRAFTS,
-  [WS_METHODS.previewAdjust]: DRAFTS,
-  [WS_METHODS.previewClose]: DRAFTS,
-  [WS_METHODS.previewList]: DRAFTS,
-  [WS_METHODS.previewReportStatus]: DRAFTS,
-  [WS_METHODS.deviceOpen]: DRAFTS,
-  [WS_METHODS.deviceClose]: DRAFTS,
+  // Drafts use these before their Thread exists, so they also take a draft its User holds.
+  [WS_METHODS.assetsPersistChatAttachments]: "work",
+  [WS_METHODS.subscribeWorktreeSetup]: "work",
+  [WS_METHODS.worktreeSetupCancel]: "work",
+  [WS_METHODS.terminalOpen]: "work",
+  [WS_METHODS.terminalAttach]: "work",
+  [WS_METHODS.terminalObserve]: "work",
+  [WS_METHODS.terminalWrite]: "work",
+  [WS_METHODS.terminalResize]: "work",
+  [WS_METHODS.terminalClear]: "work",
+  [WS_METHODS.terminalClose]: "work",
+  [WS_METHODS.previewOpen]: "work",
+  [WS_METHODS.previewResize]: "work",
+  [WS_METHODS.previewAdjust]: "work",
+  [WS_METHODS.previewClose]: "work",
+  [WS_METHODS.previewList]: "work",
+  [WS_METHODS.previewReportStatus]: "work",
+  [WS_METHODS.deviceOpen]: "work",
+  [WS_METHODS.deviceClose]: "work",
   [WS_METHODS.gitRunStackedAction]: BY_DIRECTORY,
   [WS_METHODS.gitPreparePullRequestThread]: BY_DIRECTORY,
   [WS_METHODS.projectsMutate]: "command",
@@ -155,6 +152,10 @@ export const spaceAccessForRpcMethod = (method: string): RpcSpaceAccess | undefi
 
 const notFound = () =>
   new SpaceResourceNotFoundError({ message: "That Project or Thread does not exist." });
+const notYours = () =>
+  new SpaceActionDeniedError({
+    message: "Only the person who started this Thread can use its terminals, previews and files.",
+  });
 
 const THREAD_KEYS = new Set(["threadId", "threadIds"]);
 const PROJECT_KEYS = new Set(["projectId", "projectIds"]);
@@ -199,14 +200,11 @@ const commandTargets = (method: string, payload: unknown) => {
       created: [],
     };
   }
+  // A launch's client-chosen id that names a hidden Thread is handled by ThreadLaunchService,
+  // which answers it like an unused id.
   if (method === ORCHESTRATION_V2_WS_METHODS.launchThread) {
-    const threadId = stringField(payload, "threadId");
     const projectId = stringField(payload, "projectId");
-    return {
-      threads: [],
-      projects: projectId === undefined ? [] : [projectId],
-      created: threadId === undefined ? [] : [threadId],
-    };
+    return { threads: [], projects: projectId === undefined ? [] : [projectId], created: [] };
   }
   const createdField =
     type === "thread.create"
@@ -240,9 +238,19 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
   payload: unknown,
   visibility: SpaceVisibility.Visibility,
   spaceVisibility: SpaceVisibility.SpaceVisibility["Service"],
+  userId: UserId | undefined,
 ) {
-  if (visibility.all) return;
   const access = spaceAccessForRpcMethod(method);
+  // Before the Owner's early return: the Owner's drafts are held too, so no one else works them.
+  if (access === "work") {
+    const threadId = stringField(payload, "threadId");
+    if (threadId === undefined) return yield* notFound();
+    const work = yield* spaceVisibility.claimWork(visibility, userId, threadId);
+    if (work === "hidden") return yield* notFound();
+    if (work === "not-yours") return yield* notYours();
+    return;
+  }
+  if (visibility.all) return;
   const requireVisible = Effect.fn(function* (
     threads: ReadonlyArray<string>,
     projects: ReadonlyArray<string>,

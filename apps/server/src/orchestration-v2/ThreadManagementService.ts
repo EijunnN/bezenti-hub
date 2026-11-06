@@ -68,6 +68,8 @@ import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as CommandActor from "../auth/CommandActor.ts";
+import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
 
@@ -380,6 +382,14 @@ export interface ThreadManagementServiceShape {
   readonly ensureLegacyTranscript: (
     threadId: ThreadId,
   ) => Effect.Effect<void, LegacyV1ThreadImporter.LegacyV1ThreadImportError>;
+  /**
+   * Refuses the action on the Thread when the current `CommandActor` may not take it: not found
+   * when it is hidden from them, a permission error when they can see it.
+   */
+  readonly authorizeThread: (
+    threadId: ThreadId,
+    action: AccessPolicy.Action,
+  ) => Effect.Effect<void, SpaceDirectory.ItemAccessError>;
   /** A new Thread is claimed for its Space here, so every caller is checked and stamped. */
   readonly dispatch: (
     command: OrchestrationV2ServerCommand,
@@ -773,24 +783,25 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
   ): Effect.Effect<OrchestrationV2ServerCommand, Orchestrator.OrchestratorCommandRejectedError> => {
     if (command.type !== "thread.create" || Option.isNone(spaces)) return Effect.succeed(command);
     const { spaceId, ownerUserId, ...rest } = command;
-    return spaces.value
-      .claimCreation({
-        action: "thread.create",
-        actorUserId: ownerUserId,
-        spaceId,
-        projectId: command.projectId,
-      })
-      .pipe(
-        Effect.map((stamp) => (stamp === undefined ? rest : { ...rest, ...stamp })),
-        Effect.mapError(
-          (cause) =>
-            new Orchestrator.OrchestratorCommandRejectedError({
-              commandId: command.commandId,
-              commandType: command.type,
-              cause,
-            }),
-        ),
-      );
+    return CommandActor.current.pipe(
+      Effect.flatMap((actor) =>
+        spaces.value.claimCreation({
+          action: "thread.create",
+          actorUserId: ownerUserId ?? actor,
+          spaceId,
+          projectId: command.projectId,
+        }),
+      ),
+      Effect.map((stamp) => (stamp === undefined ? rest : { ...rest, ...stamp })),
+      Effect.mapError(
+        (cause) =>
+          new Orchestrator.OrchestratorCommandRejectedError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause,
+          }),
+      ),
+    );
   };
 
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
@@ -1159,10 +1170,31 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
     return { type: "interrupt_requested", run: interruptibleRun, dispatch } as const;
   });
 
+  const authorizeThread: ThreadManagementServiceShape["authorizeThread"] = Effect.fn(
+    "ThreadManagementService.authorizeThread",
+  )(function* (threadId, action) {
+    const actor = yield* CommandActor.current;
+    if (actor === undefined || Option.isNone(spaces)) return;
+    yield* spaces.value.authorizeItem(actor, action, { kind: "thread", id: threadId });
+  });
+
+  // Stopping kills the agent before any command is dispatched, so the Role rule is checked first.
+  const mayStop = (threadId: ThreadId) =>
+    authorizeThread(threadId, "thread.stop").pipe(
+      Effect.as(true),
+      Effect.orElseSucceed(() => false),
+    );
+
   const forceStopThread: ThreadManagementServiceShape["forceStopThread"] = Effect.fn(
     "ThreadManagementService.forceStopThread",
   )(
     function* (input) {
+      if (!(yield* mayStop(input.threadId))) {
+        return yield* new OrchestrationV2ForceStopThreadError({
+          threadId: input.threadId,
+          reason: "not-permitted",
+        });
+      }
       // Under the thread lock no new run can be created between the check and the kill. The
       // settlement below dispatches, which takes that lock itself, so it runs after release.
       const { records, target, killed } = yield* threadDispatch.withLock(
@@ -1310,6 +1342,9 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
     "ThreadManagementService.stopWorkflow",
   )(
     function* (input) {
+      if (!(yield* mayStop(input.threadId))) {
+        return yield* new OrchestrationV2StopWorkflowError({ ...input, reason: "not-permitted" });
+      }
       const records = yield* orchestrator
         .getThreadRecords(input.threadId, ["subagents", "runs", "providerThreads"])
         .pipe(
@@ -1511,6 +1546,7 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
   });
 
   return ThreadManagementService.of({
+    authorizeThread,
     ensureLegacyTranscript,
     searchThreadStream: (input) =>
       Stream.unwrap(

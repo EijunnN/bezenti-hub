@@ -1,5 +1,6 @@
 import {
   type ServerConfig,
+  type SpaceActionDeniedError,
   type SpaceResourceNotFoundError,
   type ServerConfigStreamEvent,
   WsSubscribeServerConfigRpc,
@@ -81,6 +82,7 @@ type ServerConfigSubscriptionError =
   | Rpc.ErrorExit<typeof WsSubscribeServerConfigRpc>
   // Every RPC can carry the authorization middleware's errors.
   | SpaceResourceNotFoundError
+  | SpaceActionDeniedError
   | RpcClientError.RpcClientError;
 type ServerConfigSubscription = Stream.Stream<
   ServerConfigStreamEvent,
@@ -135,6 +137,7 @@ function mapSessionRpcError(
     case "EnvironmentAuthorizationError":
     // Config RPCs name no Project or Thread, so the middleware never refuses them for one.
     case "SpaceResourceNotFoundError":
+    case "SpaceActionDeniedError":
       return new ConnectionBlockedError({
         reason: "permission",
         detail: error.message,

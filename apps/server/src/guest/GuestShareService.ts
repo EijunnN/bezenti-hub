@@ -57,6 +57,7 @@ import {
 } from "../orchestration-v2/WireProjection.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import { guestShareView, guestThreadModel } from "./guestView.ts";
 import {
   classifyGuestUploads,
@@ -351,7 +352,17 @@ const make = Effect.gen(function* () {
         host,
         expiresAt,
       })
-      .pipe(Effect.mapError(() => new GuestShareCreateError({ reason: "thread_unavailable" })));
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new GuestShareCreateError({
+              reason:
+                SpaceDirectory.spaceRefusalMessage(cause) === undefined
+                  ? "thread_unavailable"
+                  : "not_permitted",
+            }),
+        ),
+      );
     const { thread } = yield* orchestrator
       .getThreadRecords(input.threadId, [])
       .pipe(Effect.mapError(() => new GuestShareCreateError({ reason: "read_failed" })));

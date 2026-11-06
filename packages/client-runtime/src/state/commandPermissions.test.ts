@@ -21,6 +21,9 @@ import {
   WS_METHODS,
   type AuthSessionState,
   type PeerLinkSummary,
+  SpaceId,
+  type SpaceDirectoryView,
+  UserId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -33,6 +36,11 @@ import { createCommandPermissions } from "./commandPermissions.ts";
 import { createEnvironmentRpcCommand } from "./runtime.ts";
 import { AVAILABLE_CONNECTION_STATE, BearerConnectionTarget } from "../connection/model.ts";
 import { createPeerLinkEnvironmentAtoms } from "./peerLinks.ts";
+import {
+  NOT_YOUR_THREAD_REASON,
+  threadRolePermissions,
+  type ThreadRolePermissions,
+} from "../spaces/rolePermissions.ts";
 
 vi.mock("./session.ts", () => ({
   createEnvironmentSessionAtoms: () => ({ sessionStateAtom: sessions }),
@@ -565,3 +573,95 @@ it.effect("rejects protected unary and streamed RPCs outside a guarded command",
     expect(writes).toBe(0);
   }),
 );
+
+// The scope grants above say what a connection may do; the Role in a Thread's Space says what
+// its User may do there. Both must allow a control before the UI offers it.
+describe("Role permissions", () => {
+  const acme = SpaceId.make("org-acme");
+  const view = (
+    userId: string,
+    role: "admin" | "member" | "guest" | null,
+    isOwner = false,
+  ): SpaceDirectoryView => ({
+    userId: UserId.make(userId),
+    personalSpaceId: SpaceId.make(`personal:${userId}`),
+    canCreateOrganization: isOwner,
+    isOwner,
+    spaces: [
+      {
+        id: SpaceId.make(`personal:${userId}`),
+        kind: "personal",
+        name: "Personal",
+        role: null,
+        isOwn: true,
+        canCreateThreads: false,
+        canInvite: false,
+      },
+      ...(role === null
+        ? []
+        : [
+            {
+              id: acme,
+              kind: "organization" as const,
+              name: "Acme",
+              role,
+              isOwn: false,
+              canCreateThreads: true,
+              canInvite: false,
+            },
+          ]),
+    ],
+  });
+  const gracesThread = { spaceId: acme, ownerUserId: UserId.make("grace") };
+  const allowed = (permissions: ThreadRolePermissions) => ({
+    continue: permissions.canContinue,
+    archive: permissions.canArchive,
+    stop: permissions.canStop,
+    delete: permissions.canDelete,
+  });
+
+  it.each([
+    [
+      "the creator continues, archives and stops",
+      view("grace", "member"),
+      [true, true, true, false],
+    ],
+    ["a Member only reads another's Thread", view("linus", "member"), [false, false, false, false]],
+    ["a Guest only reads another's Thread", view("linus", "guest"), [false, false, false, false]],
+    [
+      "an Admin archives, stops and deletes but never continues",
+      view("ada", "admin"),
+      [false, true, true, true],
+    ],
+    ["the Owner does everything", view("owner", null, true), [true, true, true, true]],
+  ] as const)("%s", (_name, viewer, [canContinue, archive, stop, remove]) => {
+    expect(allowed(threadRolePermissions(viewer, gracesThread))).toEqual({
+      continue: canContinue,
+      archive,
+      stop,
+      delete: remove,
+    });
+  });
+
+  it("offers guest links only to Admins and the Owner, and only in Organizations", () => {
+    expect(threadRolePermissions(view("ada", "admin"), gracesThread).canCreateGuestLink).toBe(true);
+    expect(threadRolePermissions(view("grace", "member"), gracesThread).canCreateGuestLink).toBe(
+      false,
+    );
+    const personal = { spaceId: SpaceId.make("personal:owner"), ownerUserId: UserId.make("owner") };
+    expect(threadRolePermissions(view("owner", null, true), personal).canCreateGuestLink).toBe(
+      false,
+    );
+  });
+
+  it("explains why the composer is disabled on someone else's Thread", () => {
+    expect(threadRolePermissions(view("ada", "admin"), gracesThread).continueBlockedReason).toBe(
+      NOT_YOUR_THREAD_REASON,
+    );
+    // A Thread from before Spaces is the Owner's.
+    expect(threadRolePermissions(view("grace", "member"), {}).canContinue).toBe(false);
+    // Without Users (before an Owner exists) and on drafts, nothing is held back.
+    expect(threadRolePermissions(null, gracesThread).canContinue).toBe(true);
+    expect(threadRolePermissions(view("linus", "member"), null).canContinue).toBe(true);
+  });
+});

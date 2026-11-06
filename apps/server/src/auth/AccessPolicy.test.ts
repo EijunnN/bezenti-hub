@@ -43,6 +43,25 @@ const guest = principal("linus", { roles: [[ORG, "guest"]] });
 const outsider = principal("eve", { roles: [[OTHER_ORG, "admin"]] });
 const personalCreator = principal("grace", { permissions: ["personalSpace.create"] });
 
+const owned = (
+  kind: "thread" | "project",
+  ownerUserId: string,
+  options: { readonly archived?: boolean; readonly space?: AccessPolicy.SpaceResource } = {},
+): AccessPolicy.OwnedResource => ({
+  kind,
+  space: options.space ?? organization,
+  ownerUserId: UserId.make(ownerUserId),
+  archived: options.archived ?? false,
+});
+// Ada is the Admin, Grace the Member, Linus the Guest.
+const adasThread = owned("thread", "ada");
+const gracesThread = owned("thread", "grace");
+const linusThread = owned("thread", "linus");
+const gracesProject = owned("project", "grace");
+const adasProject = owned("project", "ada");
+const archivedGracesThread = owned("thread", "grace", { archived: true });
+const archivedGracesProject = owned("project", "grace", { archived: true });
+
 const allow = AccessPolicy.allow;
 const deny = AccessPolicy.deny;
 
@@ -212,6 +231,204 @@ const rows: ReadonlyArray<
     "invitation.manage",
     organization,
     deny("owner-only"),
+  ],
+
+  // Role table, Threads: only the creator continues one, not even an Admin.
+  ["Admin continues their own Thread", admin, "thread.continue", adasThread, allow],
+  ["Member continues their own Thread", member, "thread.continue", gracesThread, allow],
+  ["Guest continues their own Thread", guest, "thread.continue", linusThread, allow],
+  [
+    "Admin cannot continue another's Thread",
+    admin,
+    "thread.continue",
+    gracesThread,
+    deny("not-yours"),
+  ],
+  [
+    "Member cannot continue another's Thread",
+    member,
+    "thread.continue",
+    adasThread,
+    deny("not-yours"),
+  ],
+  [
+    "Guest cannot continue another's Thread",
+    guest,
+    "thread.continue",
+    gracesThread,
+    deny("not-yours"),
+  ],
+  ["the Owner continues anyone's Thread", owner, "thread.continue", gracesThread, allow],
+  ["non-Member cannot continue", outsider, "thread.continue", gracesThread, deny("not-a-member")],
+  [
+    "nobody continues a Thread in an archived Organization",
+    owner,
+    "thread.continue",
+    owned("thread", "grace", { space: archivedOrganization }),
+    deny("space-archived"),
+  ],
+
+  // Archiving (and restoring): one's own; Admins also others'. Guests own no Projects.
+  ["Admin archives their own Thread", admin, "thread.archive", adasThread, allow],
+  ["Member archives their own Thread", member, "thread.archive", gracesThread, allow],
+  ["Guest archives their own Thread", guest, "thread.archive", linusThread, allow],
+  ["Admin archives another's Thread", admin, "thread.archive", gracesThread, allow],
+  [
+    "Member cannot archive another's Thread",
+    member,
+    "thread.archive",
+    adasThread,
+    deny("not-yours"),
+  ],
+  [
+    "Guest cannot archive another's Thread",
+    guest,
+    "thread.archive",
+    gracesThread,
+    deny("not-yours"),
+  ],
+  ["Admin archives their own Project", admin, "project.archive", adasProject, allow],
+  ["Member archives their own Project", member, "project.archive", gracesProject, allow],
+  [
+    "Guest cannot archive a Project, even one they created",
+    guest,
+    "project.archive",
+    owned("project", "linus"),
+    deny("role-not-allowed"),
+  ],
+  ["Admin archives another's Project", admin, "project.archive", gracesProject, allow],
+  [
+    "Member cannot archive another's Project",
+    member,
+    "project.archive",
+    adasProject,
+    deny("not-yours"),
+  ],
+  [
+    "Guest cannot archive another's Project",
+    guest,
+    "project.archive",
+    gracesProject,
+    deny("not-yours"),
+  ],
+  ["Member changes their own Project", member, "project.manage", gracesProject, allow],
+  [
+    "Member cannot change another's Project",
+    member,
+    "project.manage",
+    adasProject,
+    deny("not-yours"),
+  ],
+  ["Admin changes another's Project", admin, "project.manage", gracesProject, allow],
+  ["the Owner archives anything", owner, "project.archive", gracesProject, allow],
+
+  // Stopping a running Thread: one's own; Admins also others'.
+  ["Member stops their own Thread", member, "thread.stop", gracesThread, allow],
+  ["Guest stops their own Thread", guest, "thread.stop", linusThread, allow],
+  ["Admin stops another's Thread", admin, "thread.stop", gracesThread, allow],
+  ["Member cannot stop another's Thread", member, "thread.stop", adasThread, deny("not-yours")],
+  ["Guest cannot stop another's Thread", guest, "thread.stop", gracesThread, deny("not-yours")],
+
+  // Permanent deletion: Admins, and only what is archived.
+  ["Admin deletes an archived Thread", admin, "thread.delete", archivedGracesThread, allow],
+  ["Admin deletes an archived Project", admin, "project.delete", archivedGracesProject, allow],
+  [
+    "Admin cannot delete a Thread that is not archived",
+    admin,
+    "thread.delete",
+    gracesThread,
+    deny("not-archived"),
+  ],
+  [
+    "Member cannot delete, even their own archived Thread",
+    member,
+    "thread.delete",
+    archivedGracesThread,
+    deny("role-not-allowed"),
+  ],
+  [
+    "Guest cannot delete",
+    guest,
+    "thread.delete",
+    owned("thread", "linus", { archived: true }),
+    deny("role-not-allowed"),
+  ],
+  [
+    "Member cannot delete their own archived Project",
+    member,
+    "project.delete",
+    archivedGracesProject,
+    deny("role-not-allowed"),
+  ],
+  ["the Owner deletes anything", owner, "thread.delete", gracesThread, allow],
+
+  // A Personal space's User runs it; others (but the Owner) do not reach it.
+  [
+    "a User continues their Thread in their Personal space",
+    member,
+    "thread.continue",
+    owned("thread", "grace", { space: personalOf("grace") }),
+    allow,
+  ],
+  [
+    "a User archives in their Personal space",
+    member,
+    "project.archive",
+    owned("project", "grace", { space: personalOf("grace") }),
+    allow,
+  ],
+  [
+    "a User deletes what is archived in their Personal space",
+    member,
+    "thread.delete",
+    owned("thread", "grace", { space: personalOf("grace"), archived: true }),
+    allow,
+  ],
+  [
+    "nobody else acts in a Personal space",
+    admin,
+    "thread.stop",
+    owned("thread", "grace", { space: personalOf("grace") }),
+    deny("not-your-personal-space"),
+  ],
+  ["Thread rules need a Thread", member, "thread.continue", organization, deny("wrong-resource")],
+
+  // Guest links: Admins, only in Organizations; never from a Personal space.
+  ["Admin creates a guest link", admin, "guestLink.create", organization, allow],
+  [
+    "Member cannot create a guest link",
+    member,
+    "guestLink.create",
+    organization,
+    deny("role-not-allowed"),
+  ],
+  [
+    "Guest cannot create a guest link",
+    guest,
+    "guestLink.create",
+    organization,
+    deny("role-not-allowed"),
+  ],
+  [
+    "the Owner creates a guest link in an Organization",
+    owner,
+    "guestLink.create",
+    organization,
+    allow,
+  ],
+  [
+    "no guest link from a Personal space, not even the Owner's",
+    owner,
+    "guestLink.create",
+    personalOf("owner"),
+    deny("wrong-resource"),
+  ],
+  [
+    "no guest link from an archived Organization",
+    admin,
+    "guestLink.create",
+    archivedOrganization,
+    deny("space-archived"),
   ],
 ];
 

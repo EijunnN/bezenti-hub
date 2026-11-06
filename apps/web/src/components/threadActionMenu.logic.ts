@@ -95,6 +95,38 @@ export interface ThreadActionMenuState {
   readonly canShareWithGuest?: boolean;
   /** A No project thread with its own folder, on a server that can promote it. */
   readonly canTurnIntoProject?: boolean;
+  /**
+   * What the User's Role allows on this Thread (`threadRolePermissions`); everything when absent.
+   * Only its creator changes it; archive and delete may also be an Admin's.
+   */
+  readonly role?: {
+    readonly canContinue: boolean;
+    readonly canArchive: boolean;
+    readonly canDelete: boolean;
+    readonly canCreateGuestLink: boolean;
+  };
+}
+
+/** Actions that only read, copy or navigate, which every viewer keeps. */
+const READ_ONLY_ACTIONS: ReadonlySet<ThreadActionMenuId> = new Set([
+  "find",
+  "new-thread-on-branch",
+  "project-settings",
+  "filter-by-project",
+  "copy",
+  "copy-path",
+  "copy-branch",
+  "copy-thread",
+  "copy-thread-id",
+]);
+
+/** Whether the Role lets the viewer take `action`; the server refuses the rest. */
+function roleAllows(role: ThreadActionMenuState["role"], action: ThreadActionMenuId): boolean {
+  if (role === undefined) return true;
+  if (action === "archive") return role.canArchive;
+  if (action === "delete") return role.canDelete;
+  if (action === "share-guest") return role.canCreateGuestLink;
+  return role.canContinue || READ_ONLY_ACTIONS.has(action);
 }
 
 /** Local navigation, read markers, and copying remain available to read-only clients. */
@@ -252,9 +284,11 @@ export function buildThreadActionMenuItems(
       icon: "trash",
     },
   ];
+  // Hidden rather than disabled: the User can see the Thread but it is not theirs to change.
+  const permitted = items.filter((item) => roleAllows(state.role, item.id));
   return state.canOperate
-    ? items
-    : items.map((item) =>
+    ? permitted
+    : permitted.map((item) =>
         threadActionRequiresOperate(item.id)
           ? {
               ...item,

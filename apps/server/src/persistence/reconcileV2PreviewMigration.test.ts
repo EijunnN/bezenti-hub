@@ -66,6 +66,7 @@ describe("V2 preview upgrade", () => {
         [84, "Spaces"],
         [85, "PersonalSpaceWithUser"],
         [86, "SpaceInvitations"],
+        [87, "CommandReceiptActor"],
       ]);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
@@ -175,6 +176,7 @@ describe("V2 preview upgrade", () => {
         [84, "Spaces"],
         [85, "PersonalSpaceWithUser"],
         [86, "SpaceInvitations"],
+        [87, "CommandReceiptActor"],
       ]);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

@@ -3969,12 +3969,20 @@ export class OrchestrationV2StopWorkflowError extends Schema.TaggedError<Orchest
   {
     threadId: ThreadId,
     subagentId: NodeId,
-    reason: Schema.Literals(["not-running", "unsupported", "unavailable", "stop-failed"]),
+    reason: Schema.Literals([
+      "not-running",
+      "unsupported",
+      "unavailable",
+      "stop-failed",
+      "not-permitted",
+    ]),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message(): string {
     switch (this.reason) {
+      case "not-permitted":
+        return "Only the Thread's creator or an Admin can stop this workflow.";
       case "not-running":
         return "This workflow is no longer running.";
       case "unsupported":
@@ -4010,15 +4018,20 @@ export class OrchestrationV2ForceStopThreadError extends Schema.TaggedError<Orch
   "OrchestrationV2ForceStopThreadError",
   {
     threadId: ThreadId,
-    /** `superseded`: a newer run started since the user asked; nothing was stopped. */
-    reason: Schema.optional(Schema.Literal("superseded")),
+    /**
+     * `superseded`: a newer run started since the user asked; nothing was stopped.
+     * `not-permitted`: only the Thread's creator or an Admin stops it.
+     */
+    reason: Schema.optional(Schema.Literals(["superseded", "not-permitted"])),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message(): string {
     return this.reason === "superseded"
       ? "A new turn started, so nothing was force stopped."
-      : "Failed to force stop the agent.";
+      : this.reason === "not-permitted"
+        ? "Only the Thread's creator or an Admin can stop it."
+        : "Failed to force stop the agent.";
   }
 }
 

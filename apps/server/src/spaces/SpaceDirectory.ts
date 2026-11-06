@@ -1,6 +1,8 @@
 import {
   type ProjectId,
   SpaceId,
+  SpaceResourceNotFoundError,
+  type ThreadId,
   type SpaceDirectoryView,
   SpaceKind,
   SpaceRole,
@@ -36,6 +38,35 @@ const DENIED_ACTION_LABELS: Record<string, string> = {
   "organization.create": "create Organizations",
   "invitation.create": "invite people",
   "invitation.manage": "manage Invitations",
+  "guestLink.create": "create guest links",
+  "thread.continue": "continue this Thread",
+  "thread.archive": "archive or restore this Thread",
+  "thread.stop": "stop this Thread",
+  "thread.delete": "permanently delete this Thread",
+  "project.archive": "archive or restore this Project",
+  "project.manage": "change this Project",
+  "project.delete": "permanently delete this Project",
+};
+
+/** What to tell someone who can see the item but may not act on it. */
+const deniedMessage = (action: string, reason: string): string | undefined => {
+  if (action === "thread.continue" && reason === "not-yours") {
+    return "Only the person who started this Thread can continue it. Start a new Thread to build on it.";
+  }
+  if (reason === "not-yours") {
+    return `Only its creator or an Admin can ${DENIED_ACTION_LABELS[action] ?? "do that"}.`;
+  }
+  if (reason === "not-archived") return "Archive it before deleting it permanently.";
+  if (
+    (action === "thread.delete" || action === "project.delete") &&
+    reason === "role-not-allowed"
+  ) {
+    return "Only an Admin can permanently delete.";
+  }
+  if (action === "guestLink.create") {
+    return "Only an Admin can create guest links, and only in an Organization.";
+  }
+  return undefined;
 };
 
 export class SpaceAccessDeniedError extends Schema.TaggedError<SpaceAccessDeniedError>()(
@@ -43,6 +74,8 @@ export class SpaceAccessDeniedError extends Schema.TaggedError<SpaceAccessDenied
   { action: Schema.String, reason: Schema.String },
 ) {
   override get message(): string {
+    const specific = deniedMessage(this.action, this.reason);
+    if (specific !== undefined) return specific;
     const what = DENIED_ACTION_LABELS[this.action] ?? "do that";
     return `You can't ${what} in this Space.`;
   }
@@ -76,6 +109,16 @@ export const spaceRefusalMessage = (cause: unknown): string | undefined => {
 export type SpaceClaimError =
   | SpaceAccessDeniedError
   | SpaceNotFoundError
+  | SpaceDirectoryStorageError;
+
+/** A Thread or Project a command acts on. */
+export type ItemRef =
+  | { readonly kind: "thread"; readonly id: ThreadId }
+  | { readonly kind: "project"; readonly id: ProjectId };
+
+export type ItemAccessError =
+  | SpaceAccessDeniedError
+  | SpaceResourceNotFoundError
   | SpaceDirectoryStorageError;
 
 /** The Space a new Project or Thread belongs to and the User who owns it. */
@@ -141,6 +184,20 @@ export class SpaceDirectory extends Context.Service<
     readonly claimCreation: (
       claim: CreationClaim,
     ) => Effect.Effect<CreationStamp | undefined, SpaceClaimError>;
+    /**
+     * Refuses the action on a Thread or Project the User may not take: not found when its Space
+     * is hidden from them, a permission error when they can see it. A missing item passes, so
+     * the command fails as it would without Spaces.
+     */
+    readonly authorizeItem: (
+      userId: UserId,
+      action: AccessPolicy.Action,
+      item: ItemRef,
+    ) => Effect.Effect<void, ItemAccessError>;
+    /** The User who created the Thread (its root's for a child, the Owner's from before Spaces). */
+    readonly threadOwner: (
+      threadId: ThreadId,
+    ) => Effect.Effect<Option.Option<UserId>, SpaceDirectoryStorageError>;
     /** The Space, once the policy allows the User the action there. */
     readonly authorize: (
       userId: UserId,
@@ -292,6 +349,7 @@ const make = Effect.gen(function* () {
       spaces,
       personalSpaceId,
       canCreateOrganization: allows(principal, "organization.create", AccessPolicy.installation),
+      isOwner: principal.isOwner,
     } satisfies SpaceDirectoryView;
   });
 
@@ -383,6 +441,88 @@ const make = Effect.gen(function* () {
     return { id: space.value.spaceId, name: space.value.name };
   });
 
+  const ItemRow = Schema.Struct({
+    spaceId: Schema.NullOr(SpaceId),
+    ownerUserId: Schema.NullOr(UserId),
+    archived: Schema.BooleanFromBit,
+  });
+  // A child Thread the server made carries its root's owner; check the root's too.
+  const findThreadItem = SqlSchema.findOneOption({
+    Request: Schema.String,
+    Result: ItemRow,
+    execute: (threadId) => sql`
+      SELECT COALESCE(t.space_id, p.space_id) AS "spaceId",
+        COALESCE(t.owner_user_id, (
+          SELECT root.owner_user_id FROM orchestration_v2_projection_threads root
+          WHERE root.thread_id = json_extract(t.payload_json, '$.lineage.rootThreadId')
+        )) AS "ownerUserId",
+        t.archived_at IS NOT NULL AS "archived"
+      FROM orchestration_v2_projection_threads t
+      LEFT JOIN projection_projects p ON p.project_id = t.project_id
+      WHERE t.thread_id = ${threadId}
+    `,
+  });
+  const findProjectItem = SqlSchema.findOneOption({
+    Request: Schema.String,
+    Result: ItemRow,
+    execute: (projectId) => sql`
+      SELECT space_id AS "spaceId", owner_user_id AS "ownerUserId",
+        archived_at IS NOT NULL AS "archived"
+      FROM projection_projects WHERE project_id = ${projectId}
+    `,
+  });
+
+  const threadOwner = Effect.fn("SpaceDirectory.threadOwner")(function* (threadId: ThreadId) {
+    const row = yield* findThreadItem(threadId).pipe(Effect.mapError(storageError));
+    if (Option.isNone(row)) return Option.none<UserId>();
+    return Option.fromNullishOr(row.value.ownerUserId ?? Option.getOrUndefined(yield* ownerId));
+  });
+
+  const authorizeItem = Effect.fn("SpaceDirectory.authorizeItem")(function* (
+    userId: UserId,
+    action: AccessPolicy.Action,
+    item: ItemRef,
+  ) {
+    const row = yield* (item.kind === "thread" ? findThreadItem : findProjectItem)(item.id).pipe(
+      Effect.mapError(storageError),
+    );
+    if (Option.isNone(row)) return;
+    const principal = yield* principalOf(userId);
+    // Only what even the Owner may not do needs the Space read.
+    if (principal.isOwner && action !== "thread.continue" && action !== "guestLink.create") return;
+    // Rows from before Spaces are the Owner's, in the Owner's Personal space.
+    const owner = Option.getOrUndefined(yield* ownerId);
+    const spaceId =
+      row.value.spaceId ?? (owner === undefined ? undefined : personalSpaceIdOf(owner));
+    const space =
+      spaceId === undefined
+        ? Option.none()
+        : yield* findSpace(spaceId).pipe(Effect.mapError(storageError));
+    if (Option.isNone(space)) {
+      if (principal.isOwner) return;
+      return yield* new SpaceResourceNotFoundError({
+        message: "That Project or Thread does not exist.",
+      });
+    }
+    const resource = toResource(space.value);
+    if (!allows(principal, "space.view", resource)) {
+      return yield* new SpaceResourceNotFoundError({
+        message: "That Project or Thread does not exist.",
+      });
+    }
+    // A Space-wide action (a guest link) is decided on the item's Space.
+    if (!AccessPolicy.isItemAction(action))
+      return yield* requireAllowed(principal, action, resource);
+    const itemOwner = row.value.ownerUserId ?? owner;
+    if (itemOwner === undefined) return;
+    yield* requireAllowed(principal, action, {
+      kind: item.kind,
+      space: resource,
+      ownerUserId: itemOwner,
+      archived: row.value.archived,
+    });
+  });
+
   const addMembership = Effect.fn("SpaceDirectory.addMembership")(function* (input: {
     readonly spaceId: SpaceId;
     readonly userId: UserId;
@@ -404,6 +544,8 @@ const make = Effect.gen(function* () {
     createOrganization,
     claimCreation,
     authorize,
+    authorizeItem,
+    threadOwner,
     addMembership,
     viewableSpaces,
     revision: Ref.get(revision),

@@ -9,7 +9,8 @@ until you send or dismiss it.
 Guest links are a beta. Turn on **Settings → Labs → Guest links** for the machine that runs the
 thread. They also need a public address for that machine, because the link points at it. That
 address will come from the Hub; until then, guest links cannot be created. The machine must stay
-online while the guest uses it.
+online while the guest uses it. Only an organization's Admins (and the Owner) create guest links,
+and only for threads in an organization; nothing in a Personal space is shared this way.
 While the setting is off, every guest link on that machine stops working; links that have not
 expired work again when you turn it back on.
 

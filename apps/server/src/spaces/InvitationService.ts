@@ -204,6 +204,8 @@ const DENIED_REASONS: Record<AccessPolicy.DenyReason, string> = {
   "space-archived": "This Organization is archived.",
   "space-frozen": "This Space is frozen.",
   "wrong-resource": "Only Organizations take Invitations; nothing is shared from a Personal space.",
+  "not-yours": "Only the Owner invites people to this Organization.",
+  "not-archived": "Only the Owner invites people to this Organization.",
 };
 
 const deniedReason = (reason: string) =>

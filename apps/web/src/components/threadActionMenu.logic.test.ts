@@ -65,6 +65,25 @@ describe("buildThreadActionMenuItems", () => {
     },
   );
 
+  it("hides what the Role does not allow on someone else's Thread", () => {
+    const ids = (role: ThreadActionMenuState["role"]) =>
+      buildThreadActionMenuItems(role === undefined ? baseState : { ...baseState, role }).map(
+        (item) => item.id,
+      );
+    // A Member reading a teammate's Thread keeps only reading, copying and navigating.
+    expect(
+      ids({ canContinue: false, canArchive: false, canDelete: false, canCreateGuestLink: false }),
+    ).toEqual(["copy", "project-settings"]);
+    // An Admin also archives and deletes it, but still cannot change it.
+    expect(
+      ids({ canContinue: false, canArchive: true, canDelete: true, canCreateGuestLink: true }),
+    ).toEqual(["copy", "project-settings", "archive", "delete"]);
+    // The creator keeps every action.
+    expect(
+      ids({ canContinue: true, canArchive: true, canDelete: false, canCreateGuestLink: false }),
+    ).toEqual(ids(undefined).filter((id) => id !== "delete"));
+  });
+
   it("disables archive and turning into a project while the thread is running", () => {
     const items = buildThreadActionMenuItems({
       ...baseState,

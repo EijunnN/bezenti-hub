@@ -32,7 +32,9 @@ export const layer = HttpApiBuilder.group(
         if (!visible.has(args.payload.projectId)) {
           return yield* new PullRequestUnavailableError({ reason: "provider-unsupported" });
         }
-        return yield* pullRequests.diff(args.payload);
+        return yield* pullRequests
+          .diff(args.payload)
+          .pipe(Effect.provideService(SpaceVisibility.RequestVisibility, visibility));
       }),
     );
   }),

@@ -35,6 +35,7 @@ import * as Layer from "effect/Layer";
 import type * as RpcGroup from "effect/rpc/RpcGroup";
 
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
+import * as CommandActor from "./CommandActor.ts";
 import { guardRpcPayload } from "./RpcSpaceAccess.ts";
 
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
@@ -279,10 +280,17 @@ export const layer = Layer.effect(RpcScopeAuthorization)(
       const requiredScope = requiredScopes.find((scope) => !principal.scopes.has(scope));
       if (requiredScope !== undefined) return Effect.fail(rpcAuthorizationError(requiredScope));
       return viewer.visibility.pipe(
-        Effect.flatMap((visibility) =>
-          guardRpcPayload(rpc._tag, payload, visibility, spaceVisibility),
+        Effect.tap((visibility) =>
+          guardRpcPayload(rpc._tag, payload, visibility, spaceVisibility, principal.userId),
         ),
-        Effect.andThen(effect),
+        // Every command the handler sends acts for this session's User (`CommandActor`), and
+        // services that pick Projects themselves read what the session may see.
+        Effect.flatMap((visibility) =>
+          effect.pipe(
+            CommandActor.actAs(principal.userId),
+            Effect.provideService(SpaceVisibility.RequestVisibility, visibility),
+          ),
+        ),
       );
     };
     return middleware;

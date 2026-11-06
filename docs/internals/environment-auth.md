@@ -149,10 +149,43 @@ bumps, so a new Membership shows on the next read without reconnecting. An open
 shell keeps rows it already sent when a Membership ends; removing Members
 (ticket 09) must close or resubscribe those connections.
 
+#### Who changes what
+
+Every write meets the Role rules where all transports meet: thread commands in the
+orchestrator's dispatch, under the Thread's lock
+([commandAccess](../../apps/server/src/orchestration-v2/commandAccess.ts) maps each
+command to an action), Project changes in `ProjectService`, and Force stop in
+`ThreadManagementService` before it kills the agent. Who acts is the fiber's
+[CommandActor](../../apps/server/src/auth/CommandActor.ts): the RPC middleware sets
+it to the session's User, the HTTP mutate route likewise, an MCP call acts as its
+credential's User (an agent as its Thread's owner), and
+`ServerRuntimeStartup.enqueueCommand` carries it into its worker. No actor is the
+server's own work and goes unchecked. The receipt store stamps the actor on every
+command receipt (`actor_user_id`); nothing a client sends sets it.
+
+Only a Thread's creator speaks in it or changes it (not even an Admin); archiving,
+restoring and stopping are the creator's or an Admin's; permanent deletion is an
+Admin's and only from the archive. A command not named in `commandAccess` counts
+as continuing, so a new command is owner-only until someone decides otherwise. A
+refusal on something the User can see is a `SpaceAccessDeniedError` that says
+why; a hidden target still fails as not found. Refusals record no receipt, since
+a Role can change and the retry should pass.
+
+Terminals, previews, devices, chat attachments and worktree setup are `work` RPCs
+in `RpcSpaceAccess`: only the Thread's owner works them. A draft has no row to
+carry an owner, so the first User to work it holds it in memory
+(`SpaceVisibility.claimWork`); it is hidden from everyone else, and the terminal
+and preview streams show each User only what they may work. A launch whose
+client-chosen id names a hidden Thread fails like any taken id, and Pull Request
+calls routed by repository see only visible Projects (`RequestVisibility`).
+
 Spaces are read and Organizations created over HTTP (`/api/spaces`), beside the
 account endpoints, rather than as guarded WS commands: creating an Organization
 depends on who the User is, not on a session scope, so clients show controls from
 the server's `canCreateOrganization`, `canCreateThreads` and `canInvite` answers.
+Per-Thread controls come from `threadRolePermissions` in the client runtime, which
+mirrors the policy from the directory's Roles and `isOwner`; the server stays the
+judge.
 
 ### Invitations
 

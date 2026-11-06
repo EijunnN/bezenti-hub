@@ -20,6 +20,7 @@ it.effect("lets only the Owner create Organizations, which then show in the Spac
     const ownerBefore = yield* server.request("/api/spaces", { cookie: owner });
     expect(ownerBefore.body).toMatchObject({
       canCreateOrganization: true,
+      isOwner: true,
       spaces: [{ kind: "personal", isOwn: true }],
     });
 
@@ -44,6 +45,7 @@ it.effect("lets only the Owner create Organizations, which then show in the Spac
     const memberView = yield* server.request("/api/spaces", { cookie: member });
     expect(memberView.body).toMatchObject({
       canCreateOrganization: false,
+      isOwner: false,
       spaces: [{ kind: "personal", isOwn: true }],
     });
     expect(memberView.body.spaces).toHaveLength(1);

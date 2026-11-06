@@ -1,8 +1,8 @@
 /**
- * Who may do what in which Space. Pure: callers load the principal and the
- * resource, this decides. Each rule of the Role table is one case here and one
- * row in AccessPolicy.test.ts. The Owner is allowed everything except creating
- * in an archived or frozen Space.
+ * Who may do what in which Space. Pure: callers load the principal and the resource, this
+ * decides. Each rule of the Role table is one case here and one row in AccessPolicy.test.ts.
+ * The Owner is allowed everything except creating in an archived or frozen Space and sharing
+ * from a Personal space.
  */
 import type {
   InstallationPermission,
@@ -33,7 +33,16 @@ export interface SpaceResource {
 export const installation = { kind: "installation" } as const;
 export type InstallationResource = typeof installation;
 
-export type Resource = SpaceResource | InstallationResource;
+/** A Thread or Project, with the Space it is in and the User who created it. */
+export interface OwnedResource {
+  readonly kind: "thread" | "project";
+  readonly space: SpaceResource;
+  /** Rows from before Spaces belong to the Owner. */
+  readonly ownerUserId: UserId;
+  readonly archived: boolean;
+}
+
+export type Resource = SpaceResource | InstallationResource | OwnedResource;
 
 export type Action =
   | "space.view"
@@ -43,7 +52,23 @@ export type Action =
   /** Create an Invitation into an Organization. */
   | "invitation.create"
   /** List and revoke an Organization's Invitations. */
-  | "invitation.manage";
+  | "invitation.manage"
+  /** Create or close a guest link (read one Thread for 24h). */
+  | "guestLink.create"
+  /** Anything that speaks in or changes a Thread: messages, turns, settings, metadata. */
+  | "thread.continue"
+  /** Archive or restore a Thread. */
+  | "thread.archive"
+  /** Stop a running Thread. */
+  | "thread.stop"
+  /** Permanently delete an archived Thread. */
+  | "thread.delete"
+  /** Archive or restore a Project. */
+  | "project.archive"
+  /** Change a Project's settings. */
+  | "project.manage"
+  /** Permanently delete an archived Project. */
+  | "project.delete";
 
 /** Actions that read or manage rather than add something to the Space. */
 const NON_CREATING: ReadonlySet<Action> = new Set([
@@ -59,6 +84,20 @@ const OWNER_ONLY: ReadonlySet<Action> = new Set([
   "invitation.manage",
 ]);
 
+/** Actions on one Thread or Project, decided against an `OwnedResource`. */
+const OWNED_ACTIONS: ReadonlySet<Action> = new Set([
+  "thread.continue",
+  "thread.archive",
+  "thread.stop",
+  "thread.delete",
+  "project.archive",
+  "project.manage",
+  "project.delete",
+]);
+
+/** Whether `action` is decided on a Thread or Project rather than on its Space. */
+export const isItemAction = (action: Action) => OWNED_ACTIONS.has(action);
+
 export type DenyReason =
   | "owner-only"
   | "not-a-member"
@@ -67,6 +106,10 @@ export type DenyReason =
   | "missing-installation-permission"
   | "space-archived"
   | "space-frozen"
+  /** Someone else's Thread or Project. */
+  | "not-yours"
+  /** Only archived items are deleted permanently. */
+  | "not-archived"
   | "wrong-resource";
 
 export type Decision =
@@ -78,8 +121,11 @@ export const deny = (reason: DenyReason): Decision => ({ _tag: "Deny", reason })
 
 const isSpace = (resource: Resource): resource is SpaceResource =>
   resource.kind === "organization" || resource.kind === "personal";
+const isOwned = (resource: Resource): resource is OwnedResource =>
+  resource.kind === "thread" || resource.kind === "project";
 
 const ROLES_THAT_CREATE_PROJECTS: ReadonlySet<SpaceRole> = new Set(["admin", "member"]);
+const ADMIN_ONLY: ReadonlySet<SpaceRole> = new Set(["admin"]);
 
 const inPersonalSpace = (principal: Principal, space: SpaceResource, creates: boolean) => {
   if (space.personalOwnerUserId !== principal.userId) return deny("not-your-personal-space");
@@ -100,15 +146,67 @@ const inOrganization = (
   return allow;
 };
 
+/**
+ * Rules on one Thread or Project. Only its creator continues a Thread, not even an Admin; each
+ * archives and stops their own; Admins also archive and stop others' and delete what is
+ * archived. A Personal space's User runs their own space as an Admin runs an Organization.
+ */
+const decideOwned = (principal: Principal, action: Action, item: OwnedResource): Decision => {
+  const { space } = item;
+  if (action === "thread.continue") {
+    if (space.archived) return deny("space-archived");
+    if (space.frozen) return deny("space-frozen");
+  }
+  if (principal.isOwner) return allow;
+  if (space.archived) return deny("space-archived");
+  const deletes = action === "thread.delete" || action === "project.delete";
+  if (space.kind === "personal") {
+    if (space.personalOwnerUserId !== principal.userId) return deny("not-your-personal-space");
+    if (action === "thread.continue" && item.ownerUserId !== principal.userId) {
+      return deny("not-yours");
+    }
+    return deletes && !item.archived ? deny("not-archived") : allow;
+  }
+  const role = principal.roles.get(space.id);
+  if (role === undefined) return deny("not-a-member");
+  const own = item.ownerUserId === principal.userId;
+  switch (action) {
+    case "thread.continue":
+      return own ? allow : deny("not-yours");
+    case "thread.archive":
+    case "thread.stop":
+      return own || role === "admin" ? allow : deny("not-yours");
+    case "project.archive":
+    case "project.manage":
+      if (role === "admin") return allow;
+      if (!own) return deny("not-yours");
+      return ROLES_THAT_CREATE_PROJECTS.has(role) ? allow : deny("role-not-allowed");
+    case "thread.delete":
+    case "project.delete":
+      if (role !== "admin") return deny("role-not-allowed");
+      return item.archived ? allow : deny("not-archived");
+    default:
+      return deny("wrong-resource");
+  }
+};
+
 export const decide = (principal: Principal, action: Action, resource: Resource): Decision => {
-  const creates = !NON_CREATING.has(action);
-  // Nothing is shared from a Personal space directly, so nobody is invited into one.
+  if (OWNED_ACTIONS.has(action) || isOwned(resource)) {
+    return OWNED_ACTIONS.has(action) && isOwned(resource)
+      ? decideOwned(principal, action, resource)
+      : deny("wrong-resource");
+  }
+  // Nothing is shared from a Personal space directly, so nobody is invited into one and no
+  // guest link is made from one.
   if (
-    (action === "invitation.create" || action === "invitation.manage") &&
+    (action === "invitation.create" ||
+      action === "invitation.manage" ||
+      action === "guestLink.create") &&
     (!isSpace(resource) || resource.kind !== "organization")
   ) {
     return deny("wrong-resource");
   }
+  const creates = !NON_CREATING.has(action);
   if (creates && isSpace(resource)) {
     if (resource.archived) return deny("space-archived");
     if (resource.frozen) return deny("space-frozen");
@@ -124,9 +222,9 @@ export const decide = (principal: Principal, action: Action, resource: Resource)
       return inOrganization(principal, resource);
     case "project.create":
       return inOrganization(principal, resource, ROLES_THAT_CREATE_PROJECTS);
-    case "organization.create":
-    case "invitation.create":
-    case "invitation.manage":
+    case "guestLink.create":
+      return inOrganization(principal, resource, ADMIN_ONLY);
+    default:
       return deny("owner-only");
   }
 };

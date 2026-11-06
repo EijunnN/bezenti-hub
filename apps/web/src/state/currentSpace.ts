@@ -6,6 +6,10 @@ import {
 } from "@t3tools/contracts";
 import { setCurrentSpace } from "@t3tools/client-runtime/spaces/current-space";
 import {
+  type ThreadRoleSubject,
+  threadRolePermissions,
+} from "@t3tools/client-runtime/spaces/role-permissions";
+import {
   chooseCurrentSpace,
   createOrganization,
   currentSpaceStorageKey,
@@ -90,4 +94,27 @@ export async function createAndSelectOrganization(name: string): Promise<void> {
   const { environmentId } = useCurrentSpace.getState();
   if (environmentId !== null) await loadSpaces(environmentId);
   selectSpace(created.id);
+}
+
+/**
+ * What the signed-in User's Role lets them do with a Thread of this environment. Spaces are read
+ * from the primary environment only; elsewhere the server's refusal is the only guard.
+ */
+export function useThreadRolePermissions(
+  environmentId: EnvironmentId | null,
+  thread: ThreadRoleSubject | null,
+) {
+  const view = useCurrentSpace((state) =>
+    environmentId !== null && state.environmentId === environmentId ? state.view : null,
+  );
+  return threadRolePermissions(view, thread);
+}
+
+/** `useThreadRolePermissions` for event handlers that build menus outside render. */
+export function readThreadRolePermissions(
+  environmentId: EnvironmentId,
+  thread: ThreadRoleSubject | null,
+) {
+  const state = useCurrentSpace.getState();
+  return threadRolePermissions(state.environmentId === environmentId ? state.view : null, thread);
 }

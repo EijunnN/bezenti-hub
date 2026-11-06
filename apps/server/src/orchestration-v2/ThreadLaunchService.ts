@@ -245,9 +245,17 @@ const make = Effect.gen(function* () {
     input: ThreadLaunchInput,
     threadId: ThreadId,
   ) {
-    const projection = yield* threads
-      .getThreadRecords(threadId, ["runs"])
-      .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
+    const refused = mapError(
+      input,
+      "update-thread",
+      threadId,
+    )("Only an empty active thread in the target project can change workspace during launch.");
+    // A Thread the launcher may not continue answers like a missing one, which also hides
+    // whether a Thread with that id exists in another Space.
+    const projection = yield* threads.authorizeThread(threadId, "thread.continue").pipe(
+      Effect.andThen(threads.getThreadRecords(threadId, ["runs"])),
+      Effect.mapError(() => refused),
+    );
     if (
       projection.thread.projectId !== input.projectId ||
       projection.thread.archivedAt !== null ||
@@ -257,11 +265,7 @@ const make = Effect.gen(function* () {
         .pipe(Effect.mapError(mapError(input, "update-thread", threadId)))) > 0 ||
       projection.runs.length > 0
     ) {
-      return yield* mapError(
-        input,
-        "update-thread",
-        threadId,
-      )("Only an empty active thread in the target project can change workspace during launch.");
+      return yield* refused;
     }
   });
 
