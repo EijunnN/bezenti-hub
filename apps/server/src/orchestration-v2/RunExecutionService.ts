@@ -1,5 +1,5 @@
 import { makeAssistantStreamingFilter } from "./assistantStreaming.ts";
-import { ProviderSessionReleasedDuringStartError } from "./ProviderSessionManager.ts";
+import { ProviderSessionReleasedDuringStartError } from "./ProviderSessionReleasedDuringStart.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   findEnvironmentSessionLost,
