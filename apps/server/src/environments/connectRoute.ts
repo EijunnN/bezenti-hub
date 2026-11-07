@@ -102,6 +102,8 @@ const makeHandler = Effect.fnUntraced(function* (
           hubEnvironmentId: registry.hubId,
           environmentId,
           name: current.name,
+          mode: current.mode,
+          ...(current.spaceId === null ? {} : { spaceId: current.spaceId }),
         }),
       );
       // After the welcome, so the machine reads its welcome before any request.

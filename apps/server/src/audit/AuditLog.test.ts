@@ -579,13 +579,14 @@ it.effect(
 
       // Every action in the closed list is recorded by its flow: here, by the orchestrator's
       // tests (audit/AuditedThreadCommands.test.ts) or the Environments tests
-      // (environments/EnvironmentJoin.test.ts, HubWithEnvironments.test.ts), or by a later spec
+      // (environments/EnvironmentJoin.test.ts, HubWithEnvironments*.test.ts), or by a later spec
       // through the hook.
       const recordedElsewhere = [
         "guestLink.create",
         "environment.register",
         "environment.rename",
         "environment.remove",
+        "environment.mode.change",
         "thread.move",
         "sandbox.create",
         "sandbox.start",

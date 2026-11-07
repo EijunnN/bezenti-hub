@@ -4,6 +4,7 @@ import {
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
   EnvironmentHttpForbiddenError,
+  EnvironmentModeChangeRefusedError,
   EnvironmentRateLimitedError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -106,6 +107,33 @@ const handlers = HttpApiBuilder.group(
               }),
             );
           return { environments };
+        }),
+      )
+      .handle(
+        "changeMode",
+        Effect.fn("environment.environments.changeMode")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          return yield* registry
+            .changeMode({
+              actorUserId: yield* requireUser(AuthAccessWriteScope),
+              environmentId: args.payload.environmentId,
+              mode: args.payload.mode,
+              spaceId: args.payload.spaceId,
+            })
+            .pipe(
+              Effect.catchTags({
+                EnvironmentAccessDeniedError: failForbidden,
+                EnvironmentNotFoundError: () => failEnvironmentNotFound("environment_not_found"),
+                EnvironmentModeChangeRefusedError: (error) =>
+                  Effect.fail(
+                    new EnvironmentModeChangeRefusedError({
+                      message: error.message,
+                      threads: error.threads,
+                    }),
+                  ),
+                EnvironmentStorageError: failStorage,
+              }),
+            );
         }),
       )
       .handle(

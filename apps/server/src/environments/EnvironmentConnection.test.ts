@@ -15,7 +15,7 @@ import * as Fiber from "effect/Fiber";
 import { addMember, type Server } from "../auth/UserAuth.testkit.ts";
 import { formatEnvironmentCredential } from "@t3tools/shared/environmentJoin";
 import { hubWithOwner, joinMachine, listEnvironments } from "./environments.testkit.ts";
-import { connectOnce } from "./JoinedHub.ts";
+import { connectOnce, mustRestartAsDedicated } from "./JoinedHub.ts";
 
 const hostResources = {
   sampledAt: 0,
@@ -113,6 +113,33 @@ it.effect("a joined machine says hello and shows online, and removing it closes 
     assert.equal(outcome.reason, "credential-revoked");
     assert.isFalse(outcome.welcomed);
   }),
+);
+
+it.effect(
+  "a dedicated machine is welcomed with its mode and Space, which a server running work itself stops on",
+  () =>
+    Effect.gen(function* () {
+      const { server, authenticator, owner } = yield* hubWithOwner({ listen: true });
+      const acme = (yield* server.request("/api/spaces/organizations", {
+        body: { name: "Acme" },
+        cookie: owner,
+      })).body.id as string;
+      const personal = yield* joinMachine(server, authenticator, owner, "Laptop");
+      const dedicated = yield* joinMachine(server, authenticator, owner, "Acme VPS", acme);
+      const personalWelcome = yield* Deferred.await((yield* connect(server, personal)).welcomed);
+      assert.equal(personalWelcome.mode, "personal");
+      assert.isUndefined(personalWelcome.spaceId);
+      const welcome = yield* Deferred.await((yield* connect(server, dedicated)).welcomed);
+      assert.equal(welcome.mode, "dedicated");
+      assert.equal(welcome.spaceId, acme);
+      // A server joined as personal (or from before modes) serves no work for a dedicated
+      // machine; the Sandbox's server and a server already dedicated do.
+      assert.isTrue(mustRestartAsDedicated({}, welcome));
+      assert.isTrue(mustRestartAsDedicated({ mode: "personal" }, welcome));
+      assert.isFalse(mustRestartAsDedicated({ sandboxed: true }, welcome));
+      assert.isFalse(mustRestartAsDedicated({ mode: "dedicated" }, welcome));
+      assert.isFalse(mustRestartAsDedicated({}, personalWelcome));
+    }),
 );
 
 it.effect("a credential another Hub issued is refused", () =>

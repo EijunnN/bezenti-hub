@@ -1,11 +1,13 @@
 // @effect-diagnostics nodeBuiltinImport:off -- a raw HTTP proxy on a UNIX socket, upgrades included.
 /**
  * A container's only way to its Hub: a UNIX socket per Sandbox, forwarding the Environment
- * connection, git and MCP to the Hub's loopback listener and answering 404 to any other path.
- * Forwarding headers from the container are dropped. See docs/internals/sandboxes.md.
+ * connection, git and MCP to the Hub's loopback listener (or, on a dedicated machine, to the
+ * Hub's own https address) and answering 404 to any other path. Forwarding headers from the
+ * container are dropped. See docs/internals/sandboxes.md.
  */
 import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
+import * as NodeHttps from "node:https";
 import type * as NodeNet from "node:net";
 
 import { ENVIRONMENT_CONNECT_PATH } from "@t3tools/contracts";
@@ -73,10 +75,25 @@ const rawResponseHead = (response: NodeHttp.IncomingMessage, closing = false) =>
 const makeProxy = (hubUrl: () => string) => {
   const target = () => {
     const url = new URL(hubUrl());
+    const secure = url.protocol === "https:";
+    const hostname = url.hostname.replace(/^\[(.*)\]$/u, "$1");
     return {
-      hostname: url.hostname.replace(/^\[(.*)\]$/u, "$1"),
-      port: Number(url.port || 80),
+      secure,
+      options: {
+        hostname,
+        port: Number(url.port || (secure ? 443 : 80)),
+        // The Host the Hub's address names, as a reverse proxy in front of it expects.
+        ...(secure ? { servername: hostname } : {}),
+      },
     };
+  };
+  /** A request to the Hub over its address's own scheme. */
+  const toHub = (
+    options: NodeHttp.RequestOptions,
+    onResponse?: (response: NodeHttp.IncomingMessage) => void,
+  ) => {
+    const { secure, options: base } = target();
+    return (secure ? NodeHttps.request : NodeHttp.request)({ ...base, ...options }, onResponse);
   };
   const server = NodeHttp.createServer((request, response) => {
     const path = allowedPath(request.url);
@@ -85,9 +102,8 @@ const makeProxy = (hubUrl: () => string) => {
       response.end("Not reachable from a Sandbox.\n");
       return;
     }
-    const upstream = NodeHttp.request(
+    const upstream = toHub(
       {
-        ...target(),
         method: request.method,
         path,
         headers: requestHeaders(request.headers, false),
@@ -114,8 +130,7 @@ const makeProxy = (hubUrl: () => string) => {
       return;
     }
     client.on("error", () => client.destroy());
-    const upstream = NodeHttp.request({
-      ...target(),
+    const upstream = toHub({
       method: request.method,
       path,
       headers: requestHeaders(request.headers, true),

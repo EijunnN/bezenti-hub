@@ -74,9 +74,14 @@ export interface MoveResource {
 export interface EnvironmentResource {
   readonly kind: "environment";
   readonly environmentKind: "hub" | "external" | "sandbox";
-  /** Null for the Hub machine, which belongs to the Installation, and for Sandboxes. */
+  /** An external machine's: `dedicated` to `space`, or (the default) `personal` to its owner. */
+  readonly mode?: "personal" | "dedicated" | "sandbox";
+  /**
+   * Null for the Hub machine, which belongs to the Installation, and for Sandboxes. A dedicated
+   * machine's is the Owner who dedicated it, which gives them nothing more there.
+   */
   readonly ownerUserId: UserId | null;
-  /** A Sandbox's Space. */
+  /** A Sandbox's or dedicated machine's Space. */
   readonly space?: SpaceResource;
   /** For `environment.use`: the Space of the Thread that would run there. */
   readonly workSpaceId?: SpaceId;
@@ -150,6 +155,11 @@ export type Action =
    * with the `environments.registerOwn` Installation permission.
    */
   | "environment.register"
+  /**
+   * Register a machine dedicated to an Organization, or change a machine's mode or Space: the
+   * Owner's alone, decided on the Installation.
+   */
+  | "environment.dedicate"
   /** See an Environment in Settings and where Threads may run. */
   | "environment.view"
   /** Run a Thread on the Environment. */
@@ -257,10 +267,11 @@ const isEnvironment = (resource: Resource): resource is EnvironmentResource =>
   resource.kind === "environment";
 
 /**
- * A Sandbox is for the Users who work in its Space (not its Guests), and only for that Space's
- * Threads. Everyone who sees the Space sees it; the Owner sees every one.
+ * A Sandbox, and a machine dedicated to a Space, is for the Users who work in its Space (not its
+ * Guests), and only for that Space's Threads. Everyone who sees the Space sees it; the Owner sees
+ * every one, and renames and removes a dedicated machine (a Sandbox is the Hub's own).
  */
-const decideSandbox = (
+const decideSpaceBound = (
   principal: Principal,
   action: Action,
   environment: EnvironmentResource,
@@ -270,7 +281,10 @@ const decideSandbox = (
   if (action === "environment.view") {
     return principal.isOwner ? allow : decide(principal, "space.view", space);
   }
-  if (action !== "environment.use") return principal.isOwner ? deny("sandbox") : deny("owner-only");
+  if (action !== "environment.use") {
+    if (!principal.isOwner) return deny("owner-only");
+    return environment.environmentKind === "sandbox" ? deny("sandbox") : allow;
+  }
   if (environment.workSpaceId !== space.id) return deny("other-space");
   if (space.archived) return deny("space-archived");
   if (space.frozen) return deny("space-frozen");
@@ -292,8 +306,8 @@ const decideEnvironment = (
   action: Action,
   environment: EnvironmentResource,
 ): Decision => {
-  if (environment.environmentKind === "sandbox") {
-    return decideSandbox(principal, action, environment);
+  if (environment.environmentKind === "sandbox" || environment.mode === "dedicated") {
+    return decideSpaceBound(principal, action, environment);
   }
   const own = environment.ownerUserId === principal.userId;
   // A personal machine runs only its owner's work: the Owner sees every one, uses only their own.
@@ -477,6 +491,10 @@ export function decide(principal: Principal, action: Action, resource: Resource)
     return principal.isOwner || principal.installationPermissions.has("environments.registerOwn")
       ? allow
       : deny("missing-installation-permission");
+  }
+  if (action === "environment.dedicate") {
+    if (resource.kind !== "installation") return deny("wrong-resource");
+    return principal.isOwner ? allow : deny("owner-only");
   }
   if (action === "project.move" || isMove(resource)) {
     return action === "project.move" && isMove(resource)

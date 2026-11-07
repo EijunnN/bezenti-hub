@@ -1,11 +1,11 @@
 /**
- * `t3 join`, the Hub's half. The machine sends the SHA-256 of its own credential and a PKCE
- * challenge; the Owner or a User with `environments.registerOwn` approves it with a strong factor;
- * the machine, told who approved it, accepts them and is registered as their personal machine.
- * The credential never leaves the machine, and asking again after a lost answer changes nothing.
+ * `t3 join`, the Hub's half: the machine sends its credential's SHA-256 and a PKCE challenge, a
+ * User who may approves it with a strong factor (dedicating it to an Organization, if the Owner),
+ * and the machine accepts that approver before it is registered. The credential never leaves it.
  */
 import type {
   EnvironmentId,
+  HubEnvironmentDedicatedSpace,
   EnvironmentJoinApprover,
   EnvironmentJoinApproveRequest,
   EnvironmentJoinConfirmRequest,
@@ -29,6 +29,7 @@ import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import type { HttpServerRequest } from "effect/http";
@@ -52,8 +53,14 @@ type Decision =
       readonly _tag: "awaiting-confirmation";
       readonly name: string;
       readonly approvedBy: EnvironmentJoinApprover;
+      readonly dedicatedSpace: HubEnvironmentDedicatedSpace | undefined;
     }
-  | { readonly _tag: "approved"; readonly environmentId: EnvironmentId; readonly name: string };
+  | {
+      readonly _tag: "approved";
+      readonly environmentId: EnvironmentId;
+      readonly name: string;
+      readonly dedicatedSpace: HubEnvironmentDedicatedSpace | undefined;
+    };
 
 interface PendingJoin {
   readonly codeChallenge: string;
@@ -63,6 +70,8 @@ interface PendingJoin {
   readonly hostname: string;
   readonly redirectUri: string | undefined;
   readonly state: string | undefined;
+  /** What `t3 join --dedicated` asked for, as typed: a suggestion for the page. */
+  readonly requestedDedicatedSpace: string | undefined;
   readonly requestedAt: string;
   readonly expiresAtMs: number;
   readonly decision: Decision;
@@ -193,6 +202,7 @@ const make = Effect.gen(function* () {
           hostname: input.hostname,
           redirectUri: input.redirectUri,
           state: input.state,
+          requestedDedicatedSpace: input.dedicatedSpace,
           requestedAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
           expiresAtMs: now + JOIN_REQUEST_TTL_MS,
           decision: { _tag: "pending" },
@@ -232,12 +242,18 @@ const make = Effect.gen(function* () {
           environmentId: decision.environmentId,
           hubEnvironmentId: registry.hubId,
           name: decision.name,
+          ...(decision.dedicatedSpace === undefined
+            ? {}
+            : { dedicatedSpace: decision.dedicatedSpace }),
         };
       case "awaiting-confirmation":
         return {
           status: "awaiting-confirmation",
           name: decision.name,
           approvedBy: decision.approvedBy,
+          ...(decision.dedicatedSpace === undefined
+            ? {}
+            : { dedicatedSpace: decision.dedicatedSpace }),
         };
       default:
         return { status: decision._tag };
@@ -249,17 +265,21 @@ const make = Effect.gen(function* () {
       const found = yield* find(requestId);
       // A hint for the page only: approving asks again. Not knowing (signed out, or the session
       // or the User could not be read) is no answer rather than a failure.
-      const viewer = yield* browserUser(request).pipe(
-        Effect.flatMap((user) => registry.authorizeRegister(user.userId)),
-        Effect.as({ mayApprove: true as boolean | undefined, denialMessage: undefined }),
-        Effect.catch((error) =>
-          Effect.succeed(
-            error._tag === "EnvironmentAccessDeniedError"
-              ? { mayApprove: false, denialMessage: error.message }
-              : { mayApprove: undefined, denialMessage: undefined },
-          ),
-        ),
-      );
+      const user = yield* browserUser(request).pipe(Effect.option);
+      const unknown = { mayApprove: undefined, denialMessage: undefined };
+      const viewer: { mayApprove: boolean | undefined; denialMessage: string | undefined } =
+        Option.isNone(user)
+          ? unknown
+          : yield* registry.authorizeRegister(user.value.userId).pipe(
+              Effect.as({ mayApprove: true, denialMessage: undefined }),
+              Effect.catch((error) =>
+                Effect.succeed(
+                  error._tag === "EnvironmentAccessDeniedError"
+                    ? { mayApprove: false, denialMessage: error.message }
+                    : unknown,
+                ),
+              ),
+            );
       const status = found.decision._tag;
       // Only someone who may approve learns what machine asks.
       if (viewer.mayApprove !== true) {
@@ -270,6 +290,21 @@ const make = Effect.gen(function* () {
           ...(viewer.denialMessage === undefined ? {} : { denialMessage: viewer.denialMessage }),
         };
       }
+      // Only the Owner dedicates machines: the Organizations come for them alone, the one
+      // `t3 join --dedicated` named first.
+      const offered = Option.isNone(user)
+        ? []
+        : yield* registry
+            .dedicatedSpaces(user.value.userId)
+            .pipe(Effect.orElseSucceed((): ReadonlyArray<HubEnvironmentDedicatedSpace> => []));
+      const requested = found.requestedDedicatedSpace;
+      const asked = (space: HubEnvironmentDedicatedSpace) =>
+        requested !== undefined &&
+        (space.id === requested || space.name.toLowerCase() === requested.toLowerCase());
+      const dedicatedSpaces = [
+        ...offered.filter(asked),
+        ...offered.filter((space) => !asked(space)),
+      ];
       return {
         requestId,
         name: found.name,
@@ -278,6 +313,8 @@ const make = Effect.gen(function* () {
         requestedAt: found.requestedAt,
         status,
         viewerMayApprove: true,
+        ...(requested === undefined ? {} : { requestedDedicatedSpace: requested }),
+        ...(offered.length === 0 ? {} : { dedicatedSpaces }),
       };
     },
   );
@@ -296,6 +333,21 @@ const make = Effect.gen(function* () {
       const user = yield* browserUser(request);
       // Who may comes before the factor, so the proof of a User without the right is never checked.
       yield* registry.authorizeRegister(user.userId);
+      const dedicatedSpace =
+        input.dedicatedSpaceId === undefined
+          ? undefined
+          : yield* registry.dedicatedSpaces(user.userId).pipe(
+              Effect.flatMap((offered) => {
+                const space = offered.find((entry) => entry.id === input.dedicatedSpaceId);
+                return space === undefined
+                  ? Effect.fail(
+                      new EnvironmentRegistry.EnvironmentAccessDeniedError({
+                        reason: "not-an-organization",
+                      }),
+                    )
+                  : Effect.succeed(space);
+              }),
+            );
       yield* find(input.requestId);
       yield* userDirectory.confirmStrongFactor(
         { ...user, origin: request.headers.origin ?? "" },
@@ -326,6 +378,7 @@ const make = Effect.gen(function* () {
                 displayName: account.user.displayName,
                 loginName: account.loginName,
               },
+              dedicatedSpace,
             },
           }));
           return returnTo(found, true);
@@ -363,6 +416,7 @@ const make = Effect.gen(function* () {
               os: current.os,
               hostname: current.hostname,
               credentialHash: current.credentialHash,
+              dedicatedSpaceId: decision.dedicatedSpace?.id,
             })
             .pipe(
               // The approver lost the right since: this request is over.
@@ -372,7 +426,12 @@ const make = Effect.gen(function* () {
                   : Effect.void,
               ),
             );
-          const approved = { _tag: "approved", environmentId, name: decision.name } as const;
+          const approved = {
+            _tag: "approved",
+            environmentId,
+            name: decision.name,
+            dedicatedSpace: decision.dedicatedSpace,
+          } as const;
           yield* decide(approved);
           return statusOf(approved);
         }),

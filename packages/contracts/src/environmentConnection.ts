@@ -5,7 +5,13 @@
  */
 import * as Schema from "effect/Schema";
 
-import { EnvironmentId, NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  EnvironmentId,
+  NonNegativeInt,
+  SpaceId,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { OrchestrationV2ProviderCapabilities } from "./orchestrationV2.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { HostResourcesSnapshot } from "./resourceTelemetry.ts";
@@ -126,6 +132,13 @@ export const EnvironmentWelcomeFrame = Schema.Struct({
   hubEnvironmentId: EnvironmentId,
   environmentId: EnvironmentId,
   name: TrimmedNonEmptyString,
+  /**
+   * How the Hub uses this machine. A server joined as personal that hears `dedicated` stops
+   * serving: a dedicated machine runs its work in a Sandbox container. Absent from older Hubs.
+   */
+  mode: Schema.optionalKey(Schema.Literals(["personal", "dedicated", "sandbox"])),
+  /** A dedicated machine's or Sandbox's Space. Absent from older Hubs. */
+  spaceId: Schema.optionalKey(SpaceId),
 });
 export type EnvironmentWelcomeFrame = typeof EnvironmentWelcomeFrame.Type;
 
@@ -193,6 +206,7 @@ export const ENVIRONMENT_CLOSE_REASONS = {
   "heartbeat-timeout": { code: 4412, final: false },
   replaced: { code: 4413, final: true },
   "hub-shutting-down": { code: 4414, final: false },
+  "environment-mode-changed": { code: 4415, final: false },
 } as const;
 
 export type EnvironmentCloseReason = keyof typeof ENVIRONMENT_CLOSE_REASONS;
@@ -223,6 +237,8 @@ export const ENVIRONMENT_CLOSE_MESSAGES: Record<EnvironmentCloseReason, string> 
   replaced:
     "Another process is using this machine's credential, and the Hub kept the newer connection.",
   "hub-shutting-down": "The Hub is restarting.",
+  "environment-mode-changed":
+    "The Owner changed this machine's mode or Space; it reconnects to learn the new one.",
 };
 
 /**

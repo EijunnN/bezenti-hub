@@ -37,7 +37,11 @@ export const hubWithOwner = (options: Parameters<typeof serveAuthHttpWith>[0] = 
 /** What `t3 join` does first: a credential of its own, known to the Hub only by its hash. */
 export const startJoin = Effect.fn(function* (
   server: Server,
-  options: { readonly loopback?: boolean } = {},
+  options: {
+    readonly loopback?: boolean;
+    /** `t3 join --dedicated <this>`. */
+    readonly dedicatedSpace?: string;
+  } = {},
 ) {
   const hubId = Context.get(server.services, EnvironmentRegistry.EnvironmentRegistry).hubId;
   const credential = formatEnvironmentCredential(
@@ -53,6 +57,7 @@ export const startJoin = Effect.fn(function* (
       os: "linux",
       hostname: "ada-laptop",
       ...(options.loopback === true ? { redirectUri: REDIRECT, state: STATE } : {}),
+      ...(options.dedicatedSpace === undefined ? {} : { dedicatedSpace: options.dedicatedSpace }),
     },
   });
   assert.equal(started.status, 200);
@@ -64,7 +69,12 @@ export const approveJoin = Effect.fn(function* (
   server: Server,
   cookie: string,
   requestId: string,
-  input: { readonly reauth?: unknown; readonly name?: string } = {},
+  input: {
+    readonly reauth?: unknown;
+    readonly name?: string;
+    /** Dedicates it to this Organization, as the Owner may choose on the page. */
+    readonly dedicatedSpaceId?: string;
+  } = {},
 ) {
   return yield* server.request("/api/environments/join/approve", {
     cookie,
@@ -72,6 +82,7 @@ export const approveJoin = Effect.fn(function* (
       requestId,
       name: input.name ?? "Laptop",
       ...(input.reauth === undefined ? {} : { reauth: input.reauth }),
+      ...(input.dedicatedSpaceId === undefined ? {} : { dedicatedSpaceId: input.dedicatedSpaceId }),
     },
   });
 });
@@ -96,11 +107,17 @@ export const joinMachine = Effect.fn(function* (
   authenticator: Authenticator,
   owner: string,
   name = "Laptop",
+  /** `t3 join --dedicated`, approved by the Owner for this Organization. */
+  dedicatedSpaceId?: string,
 ) {
-  const { requestId, credential } = yield* startJoin(server);
+  const { requestId, credential } = yield* startJoin(
+    server,
+    dedicatedSpaceId === undefined ? {} : { dedicatedSpace: dedicatedSpaceId },
+  );
   const approved = yield* approveJoin(server, owner, requestId, {
     name,
     reauth: yield* passkeyReauth(server, authenticator),
+    ...(dedicatedSpaceId === undefined ? {} : { dedicatedSpaceId }),
   });
   assert.equal(approved.status, 200);
   assert.equal((yield* joinStatus(server, requestId)).body.status, "awaiting-confirmation");
@@ -184,6 +201,8 @@ export const listEnvironments = Effect.fn(function* (server: Server, cookie: str
     status: string;
     startError?: string | null;
     ownerUserId: string | null;
+    mode: string;
+    spaceId?: string | null;
     hostname: string | null;
     providers: ReadonlyArray<{ instanceId: string }>;
   }>;

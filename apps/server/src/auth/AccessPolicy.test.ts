@@ -145,6 +145,16 @@ const personalSandbox = (userId: string): AccessPolicy.EnvironmentResource => ({
   workSpaceId: personalOf(userId).id,
 });
 
+/** A machine the Owner dedicated to Acme, asked to run a Thread of `workSpaceId`. */
+const acmeVps = (workSpaceId: SpaceId | undefined): AccessPolicy.EnvironmentResource => ({
+  kind: "environment",
+  environmentKind: "external",
+  mode: "dedicated",
+  ownerUserId: UserId.make("owner"),
+  space: organization,
+  ...(workSpaceId === undefined ? {} : { workSpaceId }),
+});
+
 const allow = AccessPolicy.allow;
 const deny = AccessPolicy.deny;
 
@@ -1226,6 +1236,109 @@ const rows: ReadonlyArray<
     admin,
     "environment.remove",
     acmeSandbox(ORG),
+    deny("owner-only"),
+  ],
+  // Dedicated machines: the Owner gives one to an Organization, whose Users who work there use it
+  // for its Threads, as its Sandbox; other Spaces neither see nor use it.
+  ["Owner dedicates machines", owner, "environment.dedicate", AccessPolicy.installation, allow],
+  [
+    "a User with `registerOwn` does not dedicate machines",
+    principal("grace", { roles: [[ORG, "admin"]], permissions: ["environments.registerOwn"] }),
+    "environment.dedicate",
+    AccessPolicy.installation,
+    deny("owner-only"),
+  ],
+  [
+    "dedicating is decided on the Installation",
+    owner,
+    "environment.dedicate",
+    organization,
+    deny("wrong-resource"),
+  ],
+  [
+    "a Member runs a Thread on Acme's dedicated machine",
+    member,
+    "environment.use",
+    acmeVps(ORG),
+    allow,
+  ],
+  [
+    "an Admin runs a Thread on Acme's dedicated machine",
+    admin,
+    "environment.use",
+    acmeVps(ORG),
+    allow,
+  ],
+  [
+    "a Guest runs nothing on the dedicated machine",
+    guest,
+    "environment.use",
+    acmeVps(ORG),
+    deny("role-not-allowed"),
+  ],
+  ["a Member sees Acme's dedicated machine", member, "environment.view", acmeVps(ORG), allow],
+  [
+    "another Organization's Admin does not see the dedicated machine",
+    outsider,
+    "environment.view",
+    acmeVps(ORG),
+    deny("not-a-member"),
+  ],
+  [
+    "another Organization's Admin runs nothing there, even for their own Space",
+    outsider,
+    "environment.use",
+    acmeVps(OTHER_ORG),
+    deny("other-space"),
+  ],
+  [
+    "a dedicated machine runs no Thread of another Space, even its Members'",
+    personalAdmin,
+    "environment.use",
+    acmeVps(personalOf("grace").id),
+    deny("other-space"),
+  ],
+  [
+    "a dedicated machine is not its registrar's personal machine",
+    owner,
+    "environment.use",
+    acmeVps(personalOf("owner").id),
+    deny("other-space"),
+  ],
+  [
+    "nothing runs on an archived Organization's dedicated machine",
+    owner,
+    "environment.use",
+    { ...acmeVps(ORG), space: archivedOrganization },
+    deny("space-archived"),
+  ],
+  [
+    "a dedicated machine whose Space is gone runs nothing",
+    member,
+    "environment.use",
+    {
+      kind: "environment",
+      environmentKind: "external",
+      mode: "dedicated",
+      ownerUserId: UserId.make("owner"),
+      workSpaceId: ORG,
+    },
+    deny("wrong-resource"),
+  ],
+  ["Owner renames a dedicated machine", owner, "environment.rename", acmeVps(ORG), allow],
+  ["Owner removes a dedicated machine", owner, "environment.remove", acmeVps(ORG), allow],
+  [
+    "an Admin does not remove the dedicated machine",
+    admin,
+    "environment.remove",
+    acmeVps(ORG),
+    deny("owner-only"),
+  ],
+  [
+    "an Admin does not rename the dedicated machine",
+    admin,
+    "environment.rename",
+    acmeVps(ORG),
     deny("owner-only"),
   ],
 ];

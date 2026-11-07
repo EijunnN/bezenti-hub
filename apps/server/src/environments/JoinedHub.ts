@@ -31,6 +31,7 @@ import * as Context from "effect/Context";
 import * as Random from "effect/Random";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -45,7 +46,11 @@ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as HostResources from "../resourceTelemetry/HostResources.ts";
 import * as EnvironmentAgent from "./EnvironmentAgent.ts";
 import { makeFrameReader } from "./socketFrames.ts";
-import { ENVIRONMENT_CREDENTIAL_SECRET, type JoinedHubState } from "./joinedHubState.ts";
+import {
+  ENVIRONMENT_CREDENTIAL_SECRET,
+  type JoinedHubState,
+  writeJoinedHubState,
+} from "./joinedHubState.ts";
 
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 60_000;
@@ -206,7 +211,17 @@ export type JoinedConnectionState =
   | { readonly _tag: "connecting"; readonly attempt: number; readonly lastError: string | null }
   | { readonly _tag: "connected"; readonly since: string }
   /** The Hub refused this machine for good (removed, wrong Hub, version); `t3 join` fixes it. */
-  | { readonly _tag: "stopped"; readonly reason: EnvironmentCloseReason; readonly message: string };
+  | { readonly _tag: "stopped"; readonly reason: EnvironmentCloseReason; readonly message: string }
+  /**
+   * A dedicated machine: its Sandbox container's server is the one connected to the Hub. `failed`
+   * after too many crashes; restarting `t3 serve` tries again.
+   */
+  | {
+      readonly _tag: "sandbox";
+      readonly state: "starting" | "running" | "restarting" | "failed";
+      readonly since: string;
+      readonly message: string | null;
+    };
 
 export class HubConnector extends Context.Service<
   HubConnector,
@@ -260,17 +275,33 @@ const makeReports = Effect.gen(function* () {
   return { hello, heartbeat, serve: agent.attach };
 });
 
-const readCredential = (secrets: ServerSecretStore.ServerSecretStore["Service"]) =>
+export const readCredential = (secrets: ServerSecretStore.ServerSecretStore["Service"]) =>
   secrets.get(ENVIRONMENT_CREDENTIAL_SECRET).pipe(
     Effect.map(Option.map((bytes) => new TextDecoder().decode(bytes))),
     Effect.orElseSucceed(() => Option.none<string>()),
   );
+
+/**
+ * The Hub dedicated this machine to a Space while its server runs work itself: it serves nothing
+ * more, and runs that work in a Sandbox container once restarted (DedicatedHost). A server inside
+ * a Sandbox serves whatever mode the Hub names.
+ */
+export const mustRestartAsDedicated = (
+  joined: Pick<JoinedHubState, "mode" | "sandboxed">,
+  welcome: Pick<EnvironmentWelcomeFrame, "mode">,
+) => welcome.mode === "dedicated" && joined.mode !== "dedicated" && joined.sandboxed !== true;
+
+/** What a server joined as personal says once the Hub dedicated its machine to a Space. */
+const DEDICATED_RESTART_MESSAGE =
+  "The Hub's Owner dedicated this machine to a Space: it runs that Space's work in a Sandbox container. Restart its server (`t3 serve`); it needs rootless Podman and the Sandbox image.";
 
 const layerConnector = (joined: JoinedHubState, credential: Option.Option<string>) =>
   Layer.effect(
     HubConnector,
     Effect.gen(function* () {
       const reports = yield* makeReports;
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
       const state = yield* Ref.make<JoinedConnectionState>({
         _tag: "connecting",
         attempt: 0,
@@ -293,12 +324,30 @@ const layerConnector = (joined: JoinedHubState, credential: Option.Option<string
             hello: reports.hello,
             heartbeat: reports.heartbeat,
             serve: reports.serve,
-            onWelcome: () =>
-              DateTime.now.pipe(
-                Effect.flatMap((now) =>
-                  Ref.set(state, { _tag: "connected", since: DateTime.formatIso(now) }),
-                ),
-              ),
+            onWelcome: (welcome) =>
+              mustRestartAsDedicated(joined, welcome)
+                ? Effect.gen(function* () {
+                    yield* writeJoinedHubState(config.joinedHubPath, {
+                      ...joined,
+                      mode: "dedicated",
+                      ...(welcome.spaceId === undefined ? {} : { spaceId: welcome.spaceId }),
+                    }).pipe(
+                      Effect.provideService(FileSystem.FileSystem, fileSystem),
+                      Effect.ignore,
+                    );
+                    yield* Effect.logWarning(DEDICATED_RESTART_MESSAGE);
+                    yield* Ref.set(state, {
+                      _tag: "stopped",
+                      reason: "environment-mode-changed",
+                      message: DEDICATED_RESTART_MESSAGE,
+                    });
+                    return yield* Effect.interrupt;
+                  })
+                : DateTime.now.pipe(
+                    Effect.flatMap((now) =>
+                      Ref.set(state, { _tag: "connected", since: DateTime.formatIso(now) }),
+                    ),
+                  ),
           });
           if (outcome.reason !== undefined && ENVIRONMENT_CLOSE_REASONS[outcome.reason].final) {
             yield* Effect.logWarning("The Hub refused this machine", { reason: outcome.reason });
@@ -350,6 +399,7 @@ export const layerHealthRoute = HttpRouter.use((router) =>
       Effect.gen(function* () {
         return yield* HttpServerResponse.json({
           mode: "joined",
+          environmentMode: connector.joined.mode ?? "personal",
           hubUrl: connector.joined.hubUrl,
           environmentId: connector.joined.environmentId,
           name: connector.joined.name,

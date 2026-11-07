@@ -78,11 +78,23 @@ export const environmentJoinApproverMatches = (
   );
 };
 
-/** The question `t3 join` asks before registering; the desktop app reads it from its output. */
-export const environmentJoinConfirmationPrompt = (approverLabel: string) =>
-  `Approved by ${approverLabel} as their personal machine. Register it as theirs? [y/N] `;
+/**
+ * The question `t3 join` asks before registering; the desktop app reads it from its output. A
+ * machine the Owner dedicated to a Space says so instead.
+ */
+export const environmentJoinConfirmationPrompt = (approverLabel: string, dedicatedTo?: string) =>
+  dedicatedTo === undefined
+    ? `Approved by ${approverLabel} as their personal machine. Register it as theirs? [y/N] `
+    : `Approved by ${approverLabel} as a machine dedicated to ${dedicatedTo}. Register it for ${dedicatedTo}? [y/N] `;
 
-const CONFIRMATION_PROMPT = /Approved by (.+) as their personal machine\. Register it as theirs\?/;
+/** What `t3 join` prints of the approval when it does not ask. */
+export const environmentJoinApprovalLine = (approverLabel: string, dedicatedTo?: string) =>
+  dedicatedTo === undefined
+    ? `Approved by ${approverLabel} as their personal machine.`
+    : `Approved by ${approverLabel} as a machine dedicated to ${dedicatedTo}.`;
+
+const CONFIRMATION_PROMPT =
+  /Approved by (.+?) as (?:their personal machine\. Register it as theirs|a machine dedicated to .+\. Register it for .+)\?/;
 
 /** The approver a `t3 join` output line asks about, or null. */
 export const readEnvironmentJoinConfirmationPrompt = (line: string): string | null =>

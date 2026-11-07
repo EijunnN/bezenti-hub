@@ -15,6 +15,17 @@ export const JoinedHubState = Schema.Struct({
   environmentId: EnvironmentId,
   name: Schema.String,
   joinedAt: Schema.String,
+  /**
+   * `dedicated`: the Owner gave this machine to `spaceId`, and its server runs no work itself but
+   * one Sandbox container whose server does (see DedicatedHost). Absent means personal.
+   */
+  mode: Schema.optionalKey(Schema.Literals(["personal", "dedicated"])),
+  spaceId: Schema.optionalKey(Schema.String),
+  /**
+   * This server runs inside a Sandbox (a Hub's, or a dedicated machine's container), whose host
+   * wrote this file: it serves whatever mode the Hub names.
+   */
+  sandboxed: Schema.optionalKey(Schema.Boolean),
 });
 export type JoinedHubState = typeof JoinedHubState.Type;
 const JoinedHubStateJson = Schema.fromJsonString(JoinedHubState);

@@ -17,6 +17,7 @@ import { base64UrlEncode } from "@t3tools/shared/base64Url";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   assertEnvironmentHubUrl,
+  environmentJoinApprovalLine,
   environmentJoinApproverLabel,
   environmentJoinApproverMatches,
   environmentJoinConfirmationPrompt,
@@ -45,6 +46,7 @@ import {
   writeJoinedHubState,
 } from "../environments/joinedHubState.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import { rootlessPodmanHere } from "../sandboxes/sandboxRuntimeFromConfig.ts";
 import { authLocationFlags, type CliAuthLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
 /** As long as the Hub keeps the request. */
@@ -214,6 +216,25 @@ const readLine = Effect.callback<string>((resume) => {
 const decodeJoinError = Schema.decodeUnknownOption(Schema.Struct({ message: Schema.String }));
 
 /**
+ * A dedicated machine runs its work in a Sandbox container: rootless Podman must be here. Only a
+ * development machine asking for the process runtime (`T3CODE_SANDBOX_RUNTIME=process`) goes
+ * without, and it isolates nothing.
+ */
+const requirePodmanForDedicated = Effect.fn("cli.join.requirePodmanForDedicated")(function* () {
+  if (process.env.T3CODE_SANDBOX_RUNTIME === "process") {
+    yield* Console.warn(
+      "T3CODE_SANDBOX_RUNTIME=process: this dedicated machine will run its work as a plain process, isolating nothing. Use it for development only.",
+    );
+    return;
+  }
+  if (!(yield* rootlessPodmanHere())) {
+    return yield* userError(
+      "A dedicated machine runs its work in a Sandbox container, which needs rootless Podman here (`podman info` must say rootless). Install it and run `t3 join --dedicated` again.",
+    );
+  }
+});
+
+/**
  * The Hub says who approved this machine. Anyone who may add machines could have opened the link,
  * so nothing is registered until this machine accepts that User: `--owner` names whom it expects,
  * otherwise the person at the terminal (or the desktop app) answers.
@@ -225,30 +246,50 @@ const confirmApprover = Effect.fn("cli.join.confirmApprover")(function* (input: 
   readonly approval: Extract<EnvironmentJoinStatus, { readonly status: "awaiting-confirmation" }>;
   readonly owner: Option.Option<string>;
   readonly confirmOnStdin: boolean;
+  /** `--dedicated`: what this machine asked to be dedicated to. */
+  readonly dedicated: Option.Option<string>;
 }) {
   const approver = input.approval.approvedBy;
   const label = environmentJoinApproverLabel(approver);
+  const dedicatedTo = input.approval.dedicatedSpace?.name;
+  // Asked as dedicated, approved as someone's personal machine: not what this machine is for.
+  const wrongMode = Option.isSome(input.dedicated) && dedicatedTo === undefined;
+  if (dedicatedTo !== undefined && Option.isNone(input.dedicated)) {
+    // Dedicated on the page without `--dedicated` here: its Podman was never checked.
+    yield* requirePodmanForDedicated().pipe(
+      Effect.tapError(() =>
+        callHub(new URL("/api/environments/join/confirm", input.hubUrl), {
+          body: { requestId: input.requestId, codeVerifier: input.codeVerifier, accept: false },
+        }).pipe(Effect.ignore),
+      ),
+    );
+  }
   let accept: boolean;
-  if (Option.isSome(input.owner)) {
+  if (wrongMode) {
+    accept = false;
+    yield* Console.log(environmentJoinApprovalLine(label));
+  } else if (Option.isSome(input.owner)) {
     accept = environmentJoinApproverMatches(input.owner.value, approver);
-    yield* Console.log(`Approved by ${label} as their personal machine.`);
+    yield* Console.log(environmentJoinApprovalLine(label, dedicatedTo));
   } else if (input.confirmOnStdin || process.stdin.isTTY === true) {
-    yield* Console.log(environmentJoinConfirmationPrompt(label));
+    yield* Console.log(environmentJoinConfirmationPrompt(label, dedicatedTo));
     accept = /^\s*y(es)?\s*$/i.test(yield* readLine);
   } else {
     accept = false;
-    yield* Console.log(`Approved by ${label} as their personal machine.`);
+    yield* Console.log(environmentJoinApprovalLine(label, dedicatedTo));
   }
   const answer = yield* callHub(new URL("/api/environments/join/confirm", input.hubUrl), {
     body: { requestId: input.requestId, codeVerifier: input.codeVerifier, accept },
   });
   if (!accept) {
     return yield* userError(
-      Option.isSome(input.owner)
-        ? `Not registered: ${label} approved it, not ${input.owner.value}. Run \`t3 join\` again and approve it with that account.`
-        : input.confirmOnStdin || process.stdin.isTTY === true
-          ? `Not registered: you did not accept ${label}. Run \`t3 join\` again.`
-          : `Not registered: without a terminal to ask, name whom you expect with --owner <sign-in name>. Run \`t3 join\` again.`,
+      wrongMode
+        ? `Not registered: ${label} approved it as their personal machine, not as one dedicated to ${Option.getOrElse(input.dedicated, () => "a Space")}. Only the Owner dedicates machines; run \`t3 join --dedicated\` again and have the Owner approve it.`
+        : Option.isSome(input.owner)
+          ? `Not registered: ${label} approved it, not ${input.owner.value}. Run \`t3 join\` again and approve it with that account.`
+          : input.confirmOnStdin || process.stdin.isTTY === true
+            ? `Not registered: you did not accept ${label}. Run \`t3 join\` again.`
+            : `Not registered: without a terminal to ask, name whom you expect with --owner <sign-in name>. Run \`t3 join\` again.`,
     );
   }
   const status = answer.status === 200 ? decodeStatus(answer.body) : Option.none();
@@ -269,6 +310,7 @@ const runJoin = (
     readonly force: boolean;
     readonly owner: Option.Option<string>;
     readonly confirmOnStdin: boolean;
+    readonly dedicated: Option.Option<string>;
   },
 ) =>
   runWithSecrets(flags, (config) =>
@@ -296,6 +338,7 @@ const runJoin = (
       if (hubId === (yield* readLocalEnvironmentId(config.environmentIdPath))) {
         return yield* userError("That address is this server itself; a Hub cannot join itself.");
       }
+      if (Option.isSome(flags.dedicated)) yield* requirePodmanForDedicated();
       const local = yield* localData(config);
       if ((local.users > 0 || local.threads > 0) && !flags.force) {
         return yield* userError(
@@ -329,6 +372,7 @@ const runJoin = (
           hostname,
           redirectUri: listener.redirectUri,
           state,
+          ...(Option.isSome(flags.dedicated) ? { dedicatedSpace: flags.dedicated.value } : {}),
         } satisfies EnvironmentJoinStartRequest,
       });
       const request = decodeStarted(started.body);
@@ -373,6 +417,7 @@ const runJoin = (
               approval,
               owner: flags.owner,
               confirmOnStdin: flags.confirmOnStdin,
+              dedicated: flags.dedicated,
             })
           : approval;
       if (decision.status !== "approved") {
@@ -390,9 +435,14 @@ const runJoin = (
         environmentId: decision.environmentId,
         name: decision.name,
         joinedAt: DateTime.formatIso(yield* DateTime.now),
+        ...(decision.dedicatedSpace === undefined
+          ? {}
+          : { mode: "dedicated", spaceId: decision.dedicatedSpace.id }),
       });
       yield* Console.log(
-        `Joined ${hubUrl.origin} as ${decision.name}. Start (or restart) this machine's server with \`t3 serve\` to connect; \`t3 status\` shows the connection.`,
+        decision.dedicatedSpace === undefined
+          ? `Joined ${hubUrl.origin} as ${decision.name}. Start (or restart) this machine's server with \`t3 serve\` to connect; \`t3 status\` shows the connection.`
+          : `Joined ${hubUrl.origin} as ${decision.name}, dedicated to ${decision.dedicatedSpace.name}. Start (or restart) this machine's server with \`t3 serve\`: it runs that Space's work in a Sandbox container, which connects to the Hub; \`t3 status\` shows it.`,
       );
     }).pipe(Effect.scoped),
   );
@@ -456,6 +506,12 @@ export const joinCommand = Command.make("join", {
   owner: Flag.String("owner").pipe(
     Flag.withDescription(
       "The sign-in name (or user id) of whoever will approve it. Without a terminal to ask, the machine is registered only when the approver is this User.",
+    ),
+    Flag.optional,
+  ),
+  dedicated: Flag.String("dedicated").pipe(
+    Flag.withDescription(
+      "Ask to dedicate this machine to an Organization (its name or id), for all its Members, instead of joining it as your own. Only the Owner approves it; it needs rootless Podman, since its work runs in a Sandbox container.",
     ),
     Flag.optional,
   ),

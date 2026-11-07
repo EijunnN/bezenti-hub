@@ -12,6 +12,7 @@ import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
@@ -89,6 +90,53 @@ const podmanForHub = (config: { readonly devUrl: URL | undefined }, image: strin
     devUrl: config.devUrl?.toString(),
   });
 };
+
+/**
+ * The runtime a dedicated machine runs its one Sandbox with, reaching the Hub at `hubUrl` (its
+ * https address): Podman by default, which must be rootless with the Sandbox image built; the
+ * process one only when `T3CODE_SANDBOX_RUNTIME=process` asks for it (development and tests).
+ * Fails with why there is none, as `t3 status` shows it.
+ */
+export const dedicatedRuntimeFromConfig = Effect.fn("dedicatedRuntimeFromConfig")(function* (
+  hubUrl: string,
+) {
+  const setting = Option.getOrUndefined(yield* optionalSetting(SANDBOX_RUNTIME_SETTING));
+  const config = yield* ServerConfig.ServerConfig;
+  const address = Layer.succeed(
+    SandboxHubAddress,
+    SandboxHubAddress.of({ loopbackUrl: Effect.succeed(hubUrl) }),
+  );
+  if (setting === "process") {
+    const processRuntime = ProcessSandboxRuntime.forHub(config);
+    return Option.isNone(processRuntime)
+      ? Result.fail("this server has no entry point to run its Sandbox's server with.")
+      : Result.succeed(processRuntime.value.pipe(Layer.provide(address)));
+  }
+  if (setting !== undefined && setting !== "podman") {
+    return Result.fail(
+      `a dedicated machine runs its work in a Sandbox container, and ${SANDBOX_RUNTIME_SETTING}=${setting} runs none.`,
+    );
+  }
+  const image = Option.getOrElse(
+    yield* optionalSetting(SANDBOX_IMAGE_SETTING),
+    () => defaultSandboxImage,
+  );
+  const detected = yield* detectPodman(image);
+  if (!detected.rootless) {
+    return Result.fail(
+      "a dedicated machine runs its work in a Sandbox container, and rootless Podman is not available here.",
+    );
+  }
+  if (!detected.image) {
+    return Result.fail(
+      `Podman is here but the Sandbox image ${image} is not: build it (\`t3 sandbox image build\`) or set ${SANDBOX_IMAGE_SETTING}.`,
+    );
+  }
+  return Result.succeed(podmanForHub(config, image).pipe(Layer.provide(address)));
+});
+
+/** Whether rootless Podman is here, as `t3 join --dedicated` checks before asking. */
+export const rootlessPodmanHere = () => PodmanSandboxRuntime.detectRootlessPodman();
 
 export const fromConfig = Effect.gen(function* () {
   const setting = Option.getOrUndefined(yield* optionalSetting(SANDBOX_RUNTIME_SETTING));

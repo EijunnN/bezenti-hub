@@ -265,15 +265,25 @@ const make = Effect.gen(function* () {
   const previewEvents = yield* PubSub.unbounded<PreviewEvent>();
 
   /**
-   * A Sandbox runs only its own Space's Threads: one whose Project moved to another Space since
-   * it was placed starts nothing new there (spec 3, until ticket 12 moves such Threads).
+   * A Sandbox, and a machine dedicated to a Space, runs only its own Space's Threads: one whose
+   * Project moved to another Space since it was placed (or a machine dedicated elsewhere since)
+   * starts nothing new there (spec 3, until ticket 12 moves such Threads).
    */
   const requireSandboxSpace = Effect.fn("RemoteEnvironments.requireSandboxSpace")(function* (
     link: Link,
     driver: ProviderDriverKind,
     threadId: ThreadId,
   ) {
-    const sandboxSpace = sandboxSpaceOf(link.environmentId);
+    const sandboxSpace =
+      sandboxSpaceOf(link.environmentId) ??
+      (yield* sql<{ readonly spaceId: string }>`
+        SELECT space_id AS "spaceId" FROM environments
+        WHERE environment_id = ${link.environmentId} AND mode = 'dedicated'
+          AND space_id IS NOT NULL
+      `.pipe(
+        Effect.map((rows) => rows[0]?.spaceId),
+        Effect.orElseSucceed(() => undefined),
+      ));
     if (sandboxSpace === undefined) return;
     const [row] = yield* sql<{ readonly spaceId: string | null }>`
       SELECT COALESCE(t.space_id, p.space_id,

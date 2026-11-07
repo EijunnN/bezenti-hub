@@ -358,6 +358,7 @@ const make = Effect.fn("PodmanSandboxRuntime.make")(function* (
         environmentId: spec.environmentId,
         name: spec.name,
         joinedAt: DateTime.formatIso(yield* DateTime.now),
+        sandboxed: true,
       }).pipe(Effect.provideService(FileSystem.FileSystem, fs));
     },
     (effect, spec) => Effect.mapError(effect, failure("be created", spec.sandboxId)),

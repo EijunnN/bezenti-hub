@@ -1,0 +1,433 @@
+/**
+ * «Hub con Environments», spec 3 ticket 09: machines the Owner dedicates to an Organization. Its
+ * joined server runs one Sandbox (process runtime here) whose server connects as the machine; only
+ * that Space uses it, and its mode or Space changes only once no Thread is on it.
+ */
+import { assert, describe, it } from "@effect/vitest";
+import {
+  CommandId,
+  type EnvironmentId,
+  ProjectId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type SpaceId,
+  ThreadId,
+  UserId,
+} from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
+
+import * as AuditLog from "../audit/AuditLog.ts";
+import * as CommandActor from "../auth/CommandActor.ts";
+import { addMember, joinOrganization, passkeyReauth } from "../auth/UserAuth.testkit.ts";
+import * as HubRepository from "../checkpointing/HubRepository.ts";
+import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
+import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as EnvironmentRegistry from "./EnvironmentRegistry.ts";
+import {
+  approveJoin,
+  confirmJoin,
+  joinStatus,
+  listEnvironments,
+  memberWithPasskey,
+  setRegisterOwn,
+  startJoin,
+} from "./environments.testkit.ts";
+import { makeHub, seedProject, type Hub } from "./HubWithEnvironments.testkit.ts";
+
+const CLAUDE = ProviderDriverKind.make("claudeAgent");
+const INSTANCE = ProviderInstanceId.make("claudeAgent");
+
+/** The provider, with no recorded turns: these tests run none. */
+const idleAdapters = ProviderAdapterRegistry.layerFromAdapters([
+  {
+    instanceId: INSTANCE,
+    driver: CLAUDE,
+    getCapabilities: () => Effect.succeed(ClaudeProviderCapabilitiesV2),
+    planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
+    openSession: () => Effect.die("no turns run here"),
+  },
+]);
+
+const ownerIdOf = Effect.fn(function* (hub: Hub) {
+  const [row] = yield* hub.server.sql<{ readonly userId: string }>`
+    SELECT user_id AS "userId" FROM users WHERE is_owner = 1
+  `;
+  assert.isDefined(row);
+  return UserId.make(row.userId);
+});
+
+const createOrganization = Effect.fn(function* (hub: Hub, name: string) {
+  const created = yield* hub
+    .service(SpaceDirectory.SpaceDirectory)
+    .createOrganization(yield* ownerIdOf(hub), name)
+    .pipe(Effect.orDie);
+  return created.id;
+});
+
+/** A client's command, through the Hub's placement, as `actor`. */
+const dispatchAs = (hub: Hub, actor: UserId, command: unknown) =>
+  hub
+    .service(ThreadManagementService.ThreadManagementService)
+    .dispatch({ ...(command as object), ownerUserId: actor } as never)
+    .pipe(CommandActor.actAs(actor));
+
+const createThread = (
+  hub: Hub,
+  actor: UserId,
+  input: {
+    readonly threadId: string;
+    readonly projectId: ProjectId;
+    readonly spaceId: SpaceId;
+    readonly environmentId: EnvironmentId;
+    readonly title: string;
+  },
+) =>
+  dispatchAs(hub, actor, {
+    type: "thread.create",
+    createdBy: "user",
+    creationSource: "web",
+    commandId: CommandId.make(`command:${input.threadId}`),
+    threadId: ThreadId.make(input.threadId),
+    projectId: input.projectId,
+    spaceId: input.spaceId,
+    title: input.title,
+    modelSelection: { instanceId: INSTANCE, model: "claude-sonnet-4-6" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    activeEnvironmentId: input.environmentId,
+  });
+
+const listedIds = (hub: Hub, cookie: string) =>
+  listEnvironments(hub.server, cookie).pipe(Effect.map((listed) => listed.map(({ id }) => id)));
+
+/** The Hub sees the machine online: its Sandbox's server was welcomed before this is asked. */
+const assertOnline = (hub: Hub, environmentId: string) =>
+  listEnvironments(hub.server, hub.owner).pipe(
+    Effect.map((listed) => {
+      assert.equal(listed.find((entry) => entry.id === environmentId)?.status, "online");
+    }),
+  );
+
+describe("Hub con Environments: a machine dedicated to a Space", () => {
+  it.live(
+    "only the Owner dedicates one, choosing its Space on the page, and `t3 join` confirms it as dedicated",
+    () =>
+      Effect.gen(function* () {
+        const hub = yield* makeHub();
+        const acme = yield* createOrganization(hub, "Acme");
+        yield* createOrganization(hub, "Globex");
+        const grace = yield* memberWithPasskey(hub.server, hub.owner, {
+          displayName: "Grace Hopper",
+          spaceId: acme,
+        });
+        yield* setRegisterOwn(hub.server, hub.owner, grace.userId, true);
+
+        const { requestId } = yield* startJoin(hub.server, { dedicatedSpace: "acme" });
+        // The Owner is offered every Organization, the one `--dedicated` named first.
+        const ownersView = yield* hub.server.request("/api/environments/join/request", {
+          cookie: hub.owner,
+          body: { requestId },
+        });
+        assert.equal(ownersView.status, 200);
+        assert.equal(ownersView.body.requestedDedicatedSpace, "acme");
+        assert.deepEqual(
+          (ownersView.body.dedicatedSpaces as ReadonlyArray<{ name: string }>).map(
+            ({ name }) => name,
+          ),
+          ["Acme", "Globex"],
+        );
+        // A User who registers their own machines is offered none, and dedicates nothing.
+        const gracesView = yield* hub.server.request("/api/environments/join/request", {
+          cookie: grace.cookie,
+          body: { requestId },
+        });
+        assert.equal(gracesView.body.viewerMayApprove, true);
+        assert.isUndefined(gracesView.body.dedicatedSpaces);
+        const refused = yield* approveJoin(hub.server, grace.cookie, requestId, {
+          name: "Acme VPS",
+          dedicatedSpaceId: acme,
+          reauth: yield* passkeyReauth(hub.server, grace.authenticator),
+        });
+        assert.equal(refused.status, 403);
+        assert.equal((yield* joinStatus(hub.server, requestId)).body.status, "pending");
+
+        // The Owner dedicates it to Acme; the machine is told so before anything is registered.
+        const approved = yield* approveJoin(hub.server, hub.owner, requestId, {
+          name: "Acme VPS",
+          dedicatedSpaceId: acme,
+          reauth: yield* passkeyReauth(hub.server, hub.authenticator),
+        });
+        assert.equal(approved.status, 200);
+        const awaiting = (yield* joinStatus(hub.server, requestId)).body;
+        assert.equal(awaiting.status, "awaiting-confirmation");
+        assert.deepEqual(awaiting.dedicatedSpace, { id: acme, name: "Acme" });
+        const confirmed = yield* confirmJoin(hub.server, requestId, true);
+        assert.equal(confirmed.status, 200);
+        assert.equal(confirmed.body.status, "approved");
+        assert.deepEqual(confirmed.body.dedicatedSpace, { id: acme, name: "Acme" });
+
+        const vps = (yield* listEnvironments(hub.server, hub.owner)).find(
+          (entry) => entry.name === "Acme VPS",
+        );
+        assert.isDefined(vps);
+        assert.equal(vps.mode, "dedicated");
+        assert.equal(vps.spaceId, acme);
+        // Its Space's, not the Owner's who dedicated it.
+        assert.isNull(vps.ownerUserId);
+        const entries = yield* hub
+          .service(AuditLog.AuditLog)
+          .list({ viewer: yield* ownerIdOf(hub), query: { action: "environment.register" } })
+          .pipe(Effect.orDie);
+        assert.deepInclude(entries.entries[0]?.detail, {
+          mode: "dedicated",
+          spaceId: acme,
+          via: "join",
+        });
+      }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "its Space's Members see and use it for their Space's Threads; other Spaces neither see nor use it",
+    () =>
+      Effect.gen(function* () {
+        const hub = yield* makeHub();
+        const registry = hub.service(EnvironmentRegistry.EnvironmentRegistry);
+        const owner = yield* ownerIdOf(hub);
+        const acme = yield* createOrganization(hub, "Acme");
+        const globex = yield* createOrganization(hub, "Globex");
+        const grace = UserId.make("member-1");
+        const linus = UserId.make("guest-1");
+        const hedy = UserId.make("member-2");
+        const graceCookie = yield* addMember(hub.server, { id: grace, displayName: "Grace" });
+        const linusCookie = yield* addMember(hub.server, { id: linus, displayName: "Linus" });
+        const hedyCookie = yield* addMember(hub.server, { id: hedy, displayName: "Hedy" });
+        yield* joinOrganization(hub.server, acme, grace, "member");
+        yield* joinOrganization(hub.server, acme, linus, "guest");
+        yield* joinOrganization(hub.server, globex, hedy, "member");
+        yield* hub.service(SpaceDirectory.SpaceDirectory).changed;
+        const acmeProject = ProjectId.make("project:acme");
+        const globexProject = ProjectId.make("project:globex");
+        yield* seedProject(hub.server, {
+          projectId: acmeProject,
+          title: "Acme",
+          defaultModelSelection: null,
+          spaceId: acme,
+        });
+        yield* seedProject(hub.server, {
+          projectId: globexProject,
+          title: "Globex",
+          defaultModelSelection: null,
+          spaceId: globex,
+        });
+
+        const dedicated = yield* hub.joinDedicated({
+          name: "Acme VPS",
+          spaceId: acme,
+          adapters: idleAdapters,
+        });
+        const vps = dedicated.environment.environmentId;
+        yield* assertOnline(hub, vps);
+        // The machine's server ran no work itself: one Sandbox, over the machine's own credential
+        // and Hub, whose server is the Environment the Hub sees.
+        assert.equal(dedicated.launches.length, 1);
+        const [launch] = dedicated.launches;
+        assert.equal(launch?.joined.environmentId, vps);
+        assert.isTrue(launch?.joined.sandboxed);
+        assert.equal(launch?.joined.hubUrl, hub.server.url);
+        assert.equal(launch?.credential, dedicated.environment.credential);
+        assert.equal((yield* dedicated.hostState)._tag, "sandbox");
+
+        // Acme's Member and Guest see it; Globex's Member does not.
+        assert.include(yield* listedIds(hub, graceCookie), vps);
+        assert.include(yield* listedIds(hub, linusCookie), vps);
+        assert.notInclude(yield* listedIds(hub, hedyCookie), vps);
+
+        const choose = (userId: UserId, projectId: ProjectId) =>
+          registry.chooseForThread({
+            userId,
+            requested: vps,
+            projectId,
+            providerInstanceId: INSTANCE,
+          });
+        const refusal = (userId: UserId, projectId: ProjectId) =>
+          choose(userId, projectId).pipe(
+            Effect.flip,
+            Effect.map((error) =>
+              error._tag === "ThreadEnvironmentUnavailableError" ? error.reason : error._tag,
+            ),
+          );
+        assert.equal(yield* choose(grace, acmeProject), vps);
+        assert.equal(yield* refusal(linus, acmeProject), "not-usable");
+        assert.equal(yield* refusal(hedy, globexProject), "not-usable");
+        // Not for another Space's Thread, though the Owner works in both.
+        assert.equal(yield* choose(owner, acmeProject), vps);
+        assert.equal(yield* refusal(owner, globexProject), "not-usable");
+
+        // A Member's Thread runs there; a Globex Member gets no way onto it through a Thread.
+        yield* createThread(hub, grace, {
+          threadId: "thread:acme-vps",
+          projectId: acmeProject,
+          spaceId: acme,
+          environmentId: vps,
+          title: "Acme on the VPS",
+        });
+        const placed = yield* hub
+          .service(Orchestrator.OrchestratorV2)
+          .getThreadProjection(ThreadId.make("thread:acme-vps"))
+          .pipe(Effect.orDie);
+        assert.equal(placed.thread.activeEnvironmentId, vps);
+        const globexRefused = yield* createThread(hub, hedy, {
+          threadId: "thread:globex-vps",
+          projectId: globexProject,
+          spaceId: globex,
+          environmentId: vps,
+          title: "Globex on the VPS",
+        }).pipe(Effect.flip);
+        assert.equal(
+          EnvironmentRegistry.environmentRefusalMessage(globexRefused),
+          "You can't run Threads on this Environment.",
+        );
+        assert.isTrue(
+          Option.isNone(
+            yield* registry.usableBy({
+              userId: hedy,
+              environmentId: vps,
+              threadId: ThreadId.make("thread:acme-vps"),
+            }),
+          ),
+        );
+
+        // Its credential reaches its Space's repositories and no other's.
+        const advertised = (projectId: ProjectId) =>
+          HttpClient.HttpClient.pipe(
+            Effect.flatMap((client) =>
+              client.execute(
+                HttpClientRequest.get(
+                  `${HubRepository.hubRepositoryUrl(hub.server.url, { projectId })}/info/refs?service=git-upload-pack`,
+                ).pipe(HttpClientRequest.bearerToken(dedicated.environment.credential)),
+              ),
+            ),
+            Effect.map((response) => response.status),
+            Effect.provide(FetchHttpClient.layer),
+            Effect.orDie,
+          );
+        assert.equal(yield* advertised(acmeProject), 200);
+        assert.equal(yield* advertised(globexProject), 403);
+      }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "its mode or Space changes only once no Thread is on it, naming those that are, and is audited",
+    () =>
+      Effect.gen(function* () {
+        const hub = yield* makeHub();
+        const registry = hub.service(EnvironmentRegistry.EnvironmentRegistry);
+        const owner = yield* ownerIdOf(hub);
+        const acme = yield* createOrganization(hub, "Acme");
+        const globex = yield* createOrganization(hub, "Globex");
+        const grace = UserId.make("member-1");
+        const graceCookie = yield* addMember(hub.server, { id: grace, displayName: "Grace" });
+        yield* joinOrganization(hub.server, acme, grace, "admin");
+        yield* hub.service(SpaceDirectory.SpaceDirectory).changed;
+        const acmeProject = ProjectId.make("project:acme");
+        yield* seedProject(hub.server, {
+          projectId: acmeProject,
+          title: "Acme",
+          defaultModelSelection: null,
+          spaceId: acme,
+        });
+        const dedicated = yield* hub.joinDedicated({
+          name: "Acme VPS",
+          spaceId: acme,
+          adapters: idleAdapters,
+        });
+        const vps = dedicated.environment.environmentId;
+        yield* assertOnline(hub, vps);
+        yield* createThread(hub, grace, {
+          threadId: "thread:busy",
+          projectId: acmeProject,
+          spaceId: acme,
+          environmentId: vps,
+          title: "Busy on the VPS",
+        });
+
+        const changeMode = (cookie: string, body: Record<string, unknown>) =>
+          hub.server.request("/api/environments/mode", {
+            cookie,
+            body: { environmentId: vps, ...body },
+          });
+        // Only the Owner changes it, not even an Admin of its Space.
+        assert.equal((yield* changeMode(graceCookie, { mode: "personal" })).status, 403);
+        // Refused while a Thread is on it, naming it.
+        const busy = yield* changeMode(hub.owner, { mode: "personal" });
+        assert.equal(busy.status, 409);
+        assert.deepEqual(busy.body.threads, [
+          { threadId: "thread:busy", title: "Busy on the VPS" },
+        ]);
+        assert.include(busy.body.message, "«Busy on the VPS»");
+        assert.equal(
+          (yield* changeMode(hub.owner, { mode: "dedicated", spaceId: globex })).status,
+          409,
+        );
+        const stillAcme = (yield* listEnvironments(hub.server, hub.owner)).find(
+          (entry) => entry.id === vps,
+        );
+        assert.equal(stillAcme?.mode, "dedicated");
+        assert.equal(stillAcme?.spaceId, acme);
+
+        // Once the Thread is gone it moves to Globex, and then becomes the Owner's own.
+        yield* hub
+          .service(Orchestrator.OrchestratorV2)
+          .dispatch({
+            type: "thread.delete",
+            commandId: CommandId.make("command:delete-busy"),
+            threadId: ThreadId.make("thread:busy"),
+          })
+          .pipe(CommandActor.actAs(owner), Effect.orDie);
+        const toGlobex = yield* changeMode(hub.owner, { mode: "dedicated", spaceId: globex });
+        assert.equal(toGlobex.status, 200);
+        assert.equal(toGlobex.body.spaceId, globex);
+        assert.notInclude(
+          (yield* listEnvironments(hub.server, graceCookie)).map(({ id }) => id),
+          vps,
+        );
+        const toPersonal = yield* changeMode(hub.owner, { mode: "personal" });
+        assert.equal(toPersonal.status, 200);
+        assert.equal(toPersonal.body.mode, "personal");
+        assert.equal(toPersonal.body.ownerUserId, owner);
+        // Each change closed its socket, so it reconnects and its welcome names the new mode.
+        assert.notEqual(
+          (yield* listEnvironments(hub.server, hub.owner)).find((entry) => entry.id === vps)
+            ?.status,
+          "online",
+        );
+        yield* dedicated.environment.connect;
+        yield* assertOnline(hub, vps);
+        assert.equal(
+          yield* registry.chooseForThread({
+            userId: owner,
+            requested: vps,
+            projectId: acmeProject,
+            providerInstanceId: INSTANCE,
+          }),
+          vps,
+        );
+
+        const changes = yield* hub
+          .service(AuditLog.AuditLog)
+          .list({ viewer: owner, query: { action: "environment.mode.change" } })
+          .pipe(Effect.orDie);
+        assert.deepEqual(changes.entries.map((entry) => entry.detail).reverse(), [
+          { from: "dedicated", to: "dedicated", fromSpaceId: acme, toSpaceId: globex },
+          { from: "dedicated", to: "personal", fromSpaceId: globex, toSpaceId: null },
+        ]);
+      }).pipe(Effect.scoped),
+  );
+});
