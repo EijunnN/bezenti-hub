@@ -538,6 +538,39 @@ internet, and the Hub only through a private socket. A Sandbox clones a
 Project from the Project's own remote, so use a remote it can reach over the
 internet.
 
+### Dedicate a machine to an organization
+
+A server of your own, such as a VPS, can serve a whole organization instead of
+one person: every Admin and Member of that organization can run its Threads
+there, and nobody else sees it. On that machine, with rootless Podman and the
+Sandbox image installed (as for Sandboxes, above), run:
+
+```bash
+t3 join --dedicated Acme https://hub.example.com
+```
+
+`t3 join` checks Podman first. Open the link as the Owner: under **Used by**,
+**Everyone in Acme (dedicated)** is already chosen (only the Owner is offered
+organizations; anyone else registers machines only as their own). Confirm, and
+back on the machine answer `y` to `Approved by … as a machine dedicated to
+Acme. Register it for Acme? [y/N]`. Then start it with `t3 serve`: it runs the
+organization's work inside a Sandbox container, with the same isolation as the
+Hub's Sandboxes, so the agents see none of the machine's own files or users.
+`t3 status` shows whether that container is running.
+
+The organization's Admins and Members see it in the composer's **Environment**
+picker for that organization's Threads, and can make it a Project's
+**Preferred environment**; Guests see it but run nothing there, and other
+organizations never see it. New Threads never land on it unless someone picks
+it or the Project prefers it.
+
+In **Settings → Environments** the Owner's **Change use** makes a machine
+personal again, or dedicates it to another organization. It works only once no
+Thread is on the machine: otherwise it names the Threads to move (or delete)
+first. Each change is recorded in the audit log. A personal machine dedicated
+this way stops taking work until you restart its server with `t3 serve`, which
+then runs that work in a Sandbox container.
+
 ### Move a Thread to another machine
 
 To go on with a Thread elsewhere, open its menu (its title in the header, or
