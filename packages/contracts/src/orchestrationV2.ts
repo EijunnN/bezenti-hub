@@ -3556,6 +3556,18 @@ const OrchestrationV2InternalCommand = Schema.Union([
       }),
     ),
   }),
+  /**
+   * Ends an app-owned task that has no child thread here, such as one that ran over a removed
+   * Peer Link: the parent half of a local finalize, so the parent wakes as for a child here. A
+   * task that already has its result keeps it.
+   */
+  Schema.Struct({
+    type: Schema.Literal("delegated_task.orphan.settle"),
+    commandId: CommandId,
+    parentThreadId: ThreadId,
+    taskId: NodeId,
+    result: Schema.String,
+  }),
   Schema.Struct({
     type: Schema.Literal("checkpoint.rollback.fail"),
     commandId: CommandId,

@@ -21,11 +21,21 @@ it.effect("revokes Peer Link credentials, then drops their rows and cards", () =
         ${at}, '2027-10-01T00:00:00.000Z', 1
       )
     `;
-    // Another server linked to this one, and its agent started a Thread here.
-    for (const sessionId of ["session-link", "session-outside-agent"]) {
+    // Other servers linked to this one. One's agent started a Thread here; another linked before
+    // the fence, so neither its token nor any Thread marks it, only the name its server gave it.
+    for (const [sessionId, label] of [
+      ["session-link", "T3 Code · Laptop"],
+      ["session-pre-fence-link", "T3 Code · VPS"],
+      ["session-outside-agent", "Claude Code"],
+    ] as const) {
       yield* sql`
-        INSERT INTO auth_sessions (session_id, subject, scopes, method, issued_at, expires_at)
-        VALUES (${sessionId}, 'mcp-client', '[]', 'bearer-access-token', ${at}, '2027-10-01')
+        INSERT INTO auth_sessions (
+          session_id, subject, scopes, method, issued_at, expires_at, client_label,
+          client_device_type
+        ) VALUES (
+          ${sessionId}, 'mcp-client', '[]', 'bearer-access-token', ${at}, '2027-10-01', ${label},
+          'bot'
+        )
       `;
     }
     yield* sql`
@@ -48,14 +58,39 @@ it.effect("revokes Peer Link credentials, then drops their rows and cards", () =
         ) VALUES (${threadId}, 'project-web', 'T', 'codex', 'full-access', 'default', ${at}, ${at}, ${payload})
       `;
     }
-    for (const [itemId, type] of [
-      ["item-link", "link_request"],
-      ["item-secret", "secret_request"],
+    for (const [itemId, type, ordinal] of [
+      ["item-link", "link_request", 1],
+      ["item-secret", "secret_request", 2],
     ] as const) {
       yield* sql`
         INSERT INTO orchestration_v2_projection_turn_items (
           turn_item_id, thread_id, ordinal, type, status, updated_at, payload_json
-        ) VALUES (${itemId}, 'thread-own', 1, ${type}, 'waiting', ${at}, '{}')
+        ) VALUES (${itemId}, 'thread-own', ${ordinal}, ${type}, 'waiting', ${at}, '{}')
+      `;
+      yield* sql`
+        INSERT INTO orchestration_v2_turn_item_positions (thread_id, turn_item_id, ordinal)
+        VALUES ('thread-own', ${itemId}, ${ordinal})
+      `;
+    }
+    // Tasks delegated over a link: one still running there, one that already has its result.
+    const remoteChild = {
+      environmentId: "environment-box",
+      threadId: "thread-there",
+      label: "Box",
+    };
+    for (const [taskId, result] of [
+      ["task-running-there", null],
+      ["task-finished-there", "Done there."],
+    ] as const) {
+      yield* sql`
+        INSERT INTO orchestration_v2_projection_subagents (
+          subagent_id, thread_id, parent_node_id, provider, child_thread_id, origin, status,
+          updated_at, payload_json
+        ) VALUES (
+          ${taskId}, 'thread-own', 'node-root', 'codex', NULL, 'app_owned',
+          ${result === null ? "running" : "completed"}, ${at},
+          ${JSON.stringify({ id: taskId, childThreadId: null, remoteChild, result })}
+        )
       `;
     }
 
@@ -67,6 +102,7 @@ it.effect("revokes Peer Link credentials, then drops their rows and cards", () =
     assert.deepEqual(sessions, [
       { id: "session-link", revoked: 1 },
       { id: "session-outside-agent", revoked: 0 },
+      { id: "session-pre-fence-link", revoked: 1 },
     ]);
     const retired = yield* sql<{ readonly name: string }>`
       SELECT secret_name AS name FROM retired_server_secrets
@@ -81,6 +117,15 @@ it.effect("revokes Peer Link credentials, then drops their rows and cards", () =
       SELECT turn_item_id AS id FROM orchestration_v2_projection_turn_items
     `;
     assert.deepEqual(items, [{ id: "item-secret" }]);
+    const positions = yield* sql<{ readonly id: string }>`
+      SELECT turn_item_id AS id FROM orchestration_v2_turn_item_positions WHERE thread_id = 'thread-own'
+    `;
+    assert.deepEqual(positions, [{ id: "item-secret" }]);
+    // The running task is settled at startup, through the orchestrator, so its parent wakes.
+    const tasks = yield* sql<{ readonly threadId: string; readonly taskId: string }>`
+      SELECT thread_id AS "threadId", task_id AS "taskId" FROM retired_remote_tasks
+    `;
+    assert.deepEqual(tasks, [{ threadId: "thread-own", taskId: "task-running-there" }]);
     const threads = yield* sql<{ readonly id: string; readonly payload: string }>`
       SELECT thread_id AS id, payload_json AS payload FROM orchestration_v2_projection_threads
       ORDER BY thread_id

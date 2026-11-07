@@ -885,6 +885,12 @@ const make = Effect.gen(function* () {
         });
       }
       if (claims.plk === 1) {
+        // Revoked once, at refusal, so the session stops listing as active.
+        yield* revoke(claims.sid).pipe(
+          Effect.mapError(
+            (cause) => new SessionCredentialVerificationError({ sessionId: claims.sid, cause }),
+          ),
+        );
         return yield* new SessionTokenRevokedError({
           sessionId: claims.sid,
           revokedAt: observedAt,

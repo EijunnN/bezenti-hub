@@ -640,6 +640,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
       return command.threadId;
     case "delegated_task.request":
     case "delegated_task.wake-policy":
+    case "delegated_task.orphan.settle":
     case "delegated_task.completion-delivery.acknowledge":
     case "delegated_task.completion-delivery.dispose":
     case "thread.created.record":
@@ -8388,6 +8389,140 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
   });
 
+  /**
+   * Ends an app-owned task with no child thread here: the parent half of
+   * `finalizeAppOwnedSubagent`, interrupted with `command.result`. It runs under the parent's
+   * lock, so it never interleaves with a wake policy change or a delivery on the same task.
+   */
+  const dispatchOrphanDelegatedTaskSettle = Effect.fn(
+    "orchestrationV2.dispatch.orphanDelegatedTaskSettle",
+  )(function* (
+    command: Extract<
+      OrchestrationV2InternalCommand,
+      { readonly type: "delegated_task.orphan.settle" }
+    >,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    // Delivery planning reads only this task and the undelivered tasks of the queued delivery;
+    // the task's own node and turn item are all it updates besides.
+    const parentProjection = yield* projectionStore
+      .getThreadRecords(
+        command.parentThreadId,
+        ["runs", "messages", "subagents", "providerTurns", "nodes", "turnItems"],
+        {
+          turnItemTypes: ["subagent"],
+          messageRoles: ["user"],
+          omitSettledSubagents: { except: [command.taskId] },
+          nodeIds: [command.taskId],
+          turnItemNodeIds: [command.taskId],
+        },
+      )
+      .pipe(
+        Effect.mapError(
+          (cause) => new OrchestratorProjectionError({ threadId: command.parentThreadId, cause }),
+        ),
+      );
+    const task = parentProjection.subagents.find(
+      (candidate) =>
+        candidate.id === command.taskId &&
+        candidate.origin === "app_owned" &&
+        candidate.childThreadId === null,
+    );
+    if (task === undefined) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: `Delegated task ${command.taskId} is not a childless task of thread ${command.parentThreadId}.`,
+      });
+    }
+    if (task.result !== null) return;
+    const now = yield* DateTime.now;
+    const status = "interrupted" as const;
+    const updatedTask: OrchestrationV2Subagent = {
+      ...task,
+      status,
+      result: command.result,
+      completedAt: now,
+      updatedAt: now,
+    };
+    const parentRun =
+      task.runId === null
+        ? undefined
+        : parentProjection.runs.find((candidate) => candidate.id === task.runId);
+    const plan = yield* planDelegatedCompletionDelivery({
+      parentProjection,
+      parentRun,
+      task,
+      updatedTask,
+      now,
+    }).pipe(mapDispatchError(command));
+    const emitEvent = emit(events, command);
+    yield* emitEvent({
+      type: "subagent.updated",
+      threadId: command.parentThreadId,
+      ...(task.runId === null ? {} : { runId: task.runId }),
+      nodeId: task.id,
+      driver: task.driver,
+      occurredAt: now,
+      payload: plan.task,
+    });
+    if (plan.parentRun !== undefined) {
+      yield* emitEvent({
+        type: "run.updated",
+        threadId: command.parentThreadId,
+        runId: plan.parentRun.id,
+        ...(plan.parentRun.rootNodeId === null ? {} : { nodeId: plan.parentRun.rootNodeId }),
+        providerInstanceId: plan.parentRun.providerInstanceId,
+        occurredAt: now,
+        payload: plan.parentRun,
+      });
+    }
+    if (plan.message !== undefined) {
+      yield* emitEvent({
+        type: "message.updated",
+        threadId: command.parentThreadId,
+        ...(plan.message.runId === null ? {} : { runId: plan.message.runId }),
+        ...(plan.message.nodeId === null ? {} : { nodeId: plan.message.nodeId }),
+        providerInstanceId:
+          plan.parentRun?.providerInstanceId ?? parentProjection.thread.providerInstanceId,
+        occurredAt: now,
+        payload: plan.message,
+      });
+    }
+    const node = parentProjection.nodes.find((candidate) => candidate.id === task.id);
+    if (node !== undefined) {
+      yield* emitEvent({
+        type: "node.updated",
+        threadId: command.parentThreadId,
+        ...(node.runId === null ? {} : { runId: node.runId }),
+        nodeId: node.id,
+        driver: task.driver,
+        occurredAt: now,
+        payload: { ...node, status, completedAt: now },
+      });
+    }
+    const item = parentProjection.turnItems.find(
+      (candidate) => candidate.type === "subagent" && candidate.subagentId === task.id,
+    );
+    if (item !== undefined) {
+      yield* emitEvent({
+        type: "turn-item.updated",
+        threadId: command.parentThreadId,
+        ...(item.runId === null ? {} : { runId: item.runId }),
+        ...(item.nodeId === null ? {} : { nodeId: item.nodeId }),
+        driver: task.driver,
+        occurredAt: now,
+        payload: {
+          ...item,
+          status,
+          result: command.result,
+          completedAt: now,
+          updatedAt: now,
+        } as OrchestrationV2TurnItem,
+      });
+    }
+  });
+
   // After blocking waits time out, enable later completions to wake the parent.
   // Hold the parent dispatch lock shared with finalization to serialize full-row writes.
   const dispatchDelegatedTaskWakePolicy = Effect.fn(
@@ -13170,6 +13305,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "secret_request.record":
         yield* dispatchSecretRequestRecord(command, events);
         break;
+      case "delegated_task.orphan.settle":
+        yield* dispatchOrphanDelegatedTaskSettle(command, events);
+        break;
       default:
         return yield* dispatchUnsupported(command);
     }
@@ -13493,7 +13631,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     if (command.type === "notification.delivery.accept") {
       yield* mapDispatchError(command)(offerDelegatedCompletionDeliveries(command.threadId));
     }
-    if (command.type === "delegated_task.wake-policy") {
+    if (
+      command.type === "delegated_task.wake-policy" ||
+      command.type === "delegated_task.orphan.settle"
+    ) {
       yield* mapDispatchError(command)(offerDelegatedCompletionDeliveries(command.parentThreadId));
     }
 

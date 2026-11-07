@@ -144,7 +144,12 @@ const ClientIdPayload = Schema.Struct({
   v: Schema.Literal(1),
   n: Schema.String,
   r: Schema.Array(Schema.String),
+  /** Registered as a Peer Link, before they were removed: such a client id is refused. */
+  p: Schema.optionalKey(Schema.Literal(1)),
 });
+
+/** What a linking server registered with; Peer Links were removed, so it is refused. */
+const RETIRED_PEER_LINK_SOFTWARE_ID = "t3code-peer-link";
 const decodeClientIdPayload = Schema.decodeUnknownOption(Schema.fromJsonString(ClientIdPayload));
 
 export interface McpOAuthClient {
@@ -296,6 +301,7 @@ const make = Effect.gen(function* () {
     if (Option.isNone(json)) return undefined;
     return Option.getOrUndefined(
       decodeClientIdPayload(json.value).pipe(
+        Option.filter((payload) => payload.p === undefined),
         Option.map((payload) => ({
           clientId,
           name: payload.n,
@@ -343,6 +349,13 @@ const make = Effect.gen(function* () {
           error: "invalid_redirect_uri",
           error_description:
             "Redirect URIs must be https, or http on localhost, 127.0.0.1 or [::1].",
+        });
+      }
+      if (metadata.software_id === RETIRED_PEER_LINK_SOFTWARE_ID) {
+        return yield* new AuthMcpRegistrationError({
+          error: "invalid_client_metadata",
+          error_description:
+            "Peer Links were removed: servers reach each other only through their Hub.",
         });
       }
       // RFC 7591 allows ignoring unsupported registration options; all clients use public PKCE.

@@ -101,7 +101,7 @@ const ProjectDeleteTool = Tool.make("t3_project_delete", {
 const ProjectCloneTool = Tool.make("t3_project_clone", {
   ...shared,
   description:
-    "Clone a repository (`destinationPath` new or empty). Register after with `t3_project_create`, with the same `environmentId`.",
+    "Clone a repository (`destinationPath` new or empty). Register after with `t3_project_create`.",
   parameters: Schema.Struct({
     ...SourceControlCloneRepositoryInput.fields,
   }),

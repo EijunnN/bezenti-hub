@@ -339,3 +339,30 @@ it.effect("refuses a change when the calling thread cannot be read", () =>
     ),
   ),
 );
+
+// Tools took `environmentId` while Peer Links let them act on another server. The MCP server
+// refuses arguments a tool does not declare, so a call that still names one fails rather than
+// running here with it dropped.
+it.effect("refuses an environmentId, which tools no longer take, instead of ignoring it", () =>
+  McpServer.McpServer.pipe(
+    Effect.flatMap((server) =>
+      server.callTool({ name: "reads", arguments: { environmentId: "environment-box" } }),
+    ),
+    Effect.provideService(McpInvocationContext.McpInvocationContext, supervised),
+    Effect.provideService(McpSchema.McpServerClient, mcpClient),
+    Effect.exit,
+    Effect.map((exit) => {
+      const seen = JSON.stringify(exit);
+      expect(seen).toContain("InvalidParams");
+      expect(seen).toContain("environmentId");
+      expect(seen).not.toContain('"ran"');
+    }),
+    Effect.provide(
+      probeServer(
+        Layer.mock(ThreadManagement.ThreadManagementService)({
+          getThreadShell: (threadId) => Effect.succeed(shells.get(threadId) ?? null),
+        }),
+      ),
+    ),
+  ),
+);

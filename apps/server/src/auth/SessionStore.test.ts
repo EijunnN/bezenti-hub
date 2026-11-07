@@ -433,6 +433,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("SessionStore.lay
       expect((yield* sessions.verify(issued.token)).sessionId).toBe(issued.sessionId);
       const refused = yield* sessions.verify(linkToken).pipe(Effect.flip);
       expect(refused._tag).toBe("SessionTokenRevokedError");
+      // The refusal is recorded once, so the session no longer lists as active.
+      expect(
+        (yield* sessions.listActive()).some((session) => session.sessionId === issued.sessionId),
+      ).toBe(false);
+      const again = yield* sessions.verify(issued.token).pipe(Effect.flip);
+      expect(again._tag).toBe("SessionTokenRevokedError");
     }).pipe(
       Effect.provide(
         SessionStore.layer.pipe(

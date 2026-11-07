@@ -127,6 +127,7 @@ import * as AuthHttp from "./auth/http.ts";
 import * as AppSignInHttp from "./auth/appSignInHttp.ts";
 import * as ReplayMarkers from "./auth/replayMarkers.ts";
 import * as RetiredSecrets from "./auth/RetiredSecrets.ts";
+import * as RetiredRemoteTasks from "./orchestration-v2/RetiredRemoteTasks.ts";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as CodexManagedTokenBroker from "./provider/CodexManagedTokenBroker.ts";
 import * as WebhookRoute from "./scheduledTasks/webhookRoute.ts";
@@ -595,6 +596,8 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   ReplayMarkers.layer,
   Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),
   Layer.effectDiscard(RetiredSecrets.removeRetiredSecrets),
+  // Tasks that ran over removed Peer Links: settled, so their parents wake.
+  Layer.effectDiscard(RetiredRemoteTasks.settleRetiredRemoteTasks),
 ).pipe(
   Layer.provideMerge(layerOrchestrationApplication),
   Layer.provideMerge(RuntimeLayer.layerEventInfrastructure),

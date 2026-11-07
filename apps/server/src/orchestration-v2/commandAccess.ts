@@ -66,6 +66,7 @@ export function threadAccessOf(command: OrchestrationV2ServerCommand): ReadonlyA
       return [...on(command.sourceThreadId), ...on(command.targetThreadId)];
     case "delegated_task.request":
     case "delegated_task.wake-policy":
+    case "delegated_task.orphan.settle":
     case "delegated_task.completion-delivery.acknowledge":
     case "delegated_task.completion-delivery.dispose":
     case "thread.created.record":

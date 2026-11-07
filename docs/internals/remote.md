@@ -13,7 +13,9 @@ connections are local to a client profile; the server's identity and state are
 not. A repository identity can correlate clones across environments, but never
 routes work between them. Servers reach each other only through the Hub: Peer
 Links, which let one server's agents sign in to another's `/mcp`, were removed
-in spec 3 (migration 102 revoked their sessions and tokens).
+in spec 3. Migration 102 revoked their sessions and tokens, and a task still running
+over a link ends interrupted at the next start, waking its parent. A client registering
+as a link (`t3code-peer-link`) or holding a link's client id is refused.
 The canonical key follows the `upstream` remote when one exists, so pull request
 features target the repository a fork tracks. A fork also reports its own
 `origin`, and clients group and label by that, so a fork never collapses into a
