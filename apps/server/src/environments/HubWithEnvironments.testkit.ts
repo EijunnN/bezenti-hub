@@ -66,7 +66,7 @@ import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import type * as PtyAdapter from "@t3tools/shared/PtyAdapter";
-import type { HubServices, Server } from "../auth/UserAuth.testkit.ts";
+import type { Authenticator, HubServices, Server } from "../auth/UserAuth.testkit.ts";
 import * as EnvironmentAgent from "./EnvironmentAgent.ts";
 import { joinMachine, hubWithOwner } from "./environments.testkit.ts";
 import { connectOnce } from "./JoinedHub.ts";
@@ -386,8 +386,12 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     listen: true,
     extend: withOrchestration(options.textGeneration),
   });
-  /** Joins a machine as the Owner (`t3 join`, approved with a passkey) and connects it. */
+  /**
+   * Joins a machine (`t3 join`, approved with a passkey) and connects it: the Owner's, or that of
+   * the User signed in as `as`, who needs `environments.registerOwn`.
+   */
   const join = Effect.fn("HubWithEnvironments.join")(function* (input: {
+    readonly as?: { readonly cookie: string; readonly authenticator: Authenticator };
     readonly name: string;
     readonly adapters: Layer.Layer<
       ProviderAdapterRegistry.ProviderAdapterRegistryV2,
@@ -399,7 +403,12 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     /** The machine's own text generation (with its providers); none by default. */
     readonly textGeneration?: ProviderTextGeneration;
   }) {
-    const joined = yield* joinMachine(server, authenticator, owner, input.name);
+    const joined = yield* joinMachine(
+      server,
+      input.as?.authenticator ?? authenticator,
+      input.as?.cookie ?? owner,
+      input.name,
+    );
     return yield* startEnvironment({
       hubUrl: server.url,
       credential: joined.credential,

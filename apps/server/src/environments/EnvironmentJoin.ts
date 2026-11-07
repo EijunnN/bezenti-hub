@@ -1,8 +1,8 @@
 /**
- * `t3 join`, the Hub's half. The machine starts a request with the SHA-256 of a credential it made
- * and a PKCE challenge; the Owner approves it on «Register this machine» with a strong factor in
- * the same request, which registers the machine; the machine asks with its verifier until then.
- * The credential never leaves the machine, and asking again after a lost answer changes nothing.
+ * `t3 join`, the Hub's half. The machine sends the SHA-256 of its own credential and a PKCE
+ * challenge; the Owner or a User with `environments.registerOwn` approves it, with a strong factor,
+ * as their personal machine; the machine asks with its verifier until then. The credential never
+ * leaves the machine, and asking again after a lost answer changes nothing.
  */
 import type {
   EnvironmentId,
@@ -106,9 +106,16 @@ export class EnvironmentJoin extends Context.Service<
     readonly start: (
       input: EnvironmentJoinStartRequest,
     ) => Effect.Effect<{ readonly requestId: string }, EnvironmentJoinRequestError>;
+    /** The request, and whether the browser's signed-in User may approve it. */
     readonly view: (
+      request: HttpServerRequest.HttpServerRequest,
       requestId: string,
-    ) => Effect.Effect<EnvironmentJoinRequestView, EnvironmentJoinRequestNotFoundError>;
+    ) => Effect.Effect<
+      EnvironmentJoinRequestView,
+      | EnvironmentJoinRequestNotFoundError
+      | EnvironmentRegistry.EnvironmentStorageError
+      | EnvironmentAuth.ServerAuthInternalError
+    >;
     /** Registers the machine; answers where the browser goes next, if anywhere. */
     readonly approve: (
       request: HttpServerRequest.HttpServerRequest,
@@ -184,20 +191,6 @@ const make = Effect.gen(function* () {
     return found;
   });
 
-  const view: EnvironmentJoin["Service"]["view"] = Effect.fn("EnvironmentJoin.view")(
-    function* (requestId) {
-      const found = yield* find(requestId);
-      return {
-        requestId,
-        name: found.name,
-        os: found.os,
-        hostname: found.hostname,
-        requestedAt: found.requestedAt,
-        status: found.decision._tag,
-      };
-    },
-  );
-
   // The browser's own cookie, never a token an app holds.
   const browserUser = Effect.fn("EnvironmentJoin.browserUser")(function* (
     request: HttpServerRequest.HttpServerRequest,
@@ -213,6 +206,30 @@ const make = Effect.gen(function* () {
     return { userId: session.userId as UserId, sessionId: session.sessionId };
   });
 
+  const view: EnvironmentJoin["Service"]["view"] = Effect.fn("EnvironmentJoin.view")(
+    function* (request, requestId) {
+      const found = yield* find(requestId);
+      // A hint for the page only: approving asks again.
+      const viewerMayApprove = yield* browserUser(request).pipe(
+        Effect.flatMap((user) => registry.authorizeRegister(user.userId)),
+        Effect.as(true),
+        Effect.catchTags({
+          EnvironmentAccessDeniedError: () => Effect.succeed(false),
+          EnvironmentJoinNotSignedInError: () => Effect.succeed(undefined),
+        }),
+      );
+      return {
+        requestId,
+        name: found.name,
+        os: found.os,
+        hostname: found.hostname,
+        requestedAt: found.requestedAt,
+        status: found.decision._tag,
+        ...(viewerMayApprove === undefined ? {} : { viewerMayApprove }),
+      };
+    },
+  );
+
   const returnTo = (found: PendingJoin, approved: boolean) =>
     found.redirectUri === undefined || found.state === undefined
       ? null
@@ -223,12 +240,8 @@ const make = Effect.gen(function* () {
   const approve: EnvironmentJoin["Service"]["approve"] = Effect.fn("EnvironmentJoin.approve")(
     function* (request, input) {
       const user = yield* browserUser(request);
-      // Who may comes before the factor, so a Member's proof is never even checked.
-      if (!(yield* registry.mayRegister(user.userId))) {
-        return yield* new EnvironmentRegistry.EnvironmentAccessDeniedError({
-          reason: "owner-only",
-        });
-      }
+      // Who may comes before the factor, so the proof of a User without the right is never checked.
+      yield* registry.authorizeRegister(user.userId);
       yield* find(input.requestId);
       yield* userDirectory.confirmStrongFactor(
         { ...user, origin: request.headers.origin ?? "" },

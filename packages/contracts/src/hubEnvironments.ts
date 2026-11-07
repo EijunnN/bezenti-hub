@@ -114,10 +114,15 @@ export const EnvironmentJoinRequestView = Schema.Struct({
   hostname: TrimmedNonEmptyString,
   requestedAt: IsoDateTime,
   status: Schema.Literals(["pending", "approved", "denied"]),
+  /**
+   * Whether the browser's signed-in User may approve it (the Owner, or `environments.registerOwn`);
+   * absent when nobody is signed in. Approving checks again.
+   */
+  viewerMayApprove: Schema.optionalKey(Schema.Boolean),
 });
 export type EnvironmentJoinRequestView = typeof EnvironmentJoinRequestView.Type;
 
-/** The Owner's approval, with a passkey or a password and code in the same request. */
+/** The approval, with a passkey or a password and code in the same request. */
 export const EnvironmentJoinApproveRequest = Schema.Struct({
   requestId: TrimmedNonEmptyString,
   name: HubEnvironmentName,

@@ -409,12 +409,19 @@ t3 join https://hub.example.com
 
 It prints a link to the Hub's **Register this machine** page and opens it in a
 browser on that machine; add `--no-browser` to only print it, and open the link
-on any device, your phone included. Sign in as the Owner, check the operating
-system, hostname and request time, change the name if you like, and confirm with
-your passkey, or your password and authenticator code. `t3 join` finishes by
-itself once you approve. Only the Owner can add machines, and each one is its
-owner's: Members never see it. The Hub's address must be `https://`; plain
-`http://` is accepted only for a Hub on the same machine.
+on any device, your phone included. Sign in with your own account, check the
+operating system, hostname and request time, change the name if you like, and
+confirm with your passkey, or your password and authenticator code. `t3 join`
+finishes by itself once you approve. The Owner can add machines, and so can any
+user the Owner gave **Register their own Environments** in **Users**; without
+it the page says so. The machine becomes the personal machine of whoever
+approved it: only they run work on it, in any of their Spaces. Other users never
+see it; the Owner sees every machine but runs nothing on someone else's. Each
+user sees their machines in **Settings → Environments**, where they rename and
+remove them. Taking the permission away stops new machines but keeps the ones
+already joined; turning a user off or removing them also removes their
+machines. The Hub's address must be `https://`; plain `http://` is accepted
+only for a Hub on the same machine.
 
 Joining a server that already has its own users or threads cuts them off, since
 a joined machine serves no sign-in; `t3 join` refuses unless you add `--force`.

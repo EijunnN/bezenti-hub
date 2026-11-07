@@ -1,8 +1,10 @@
 import { assert, it } from "@effect/vitest";
-import { HUB_MACHINE_ENVIRONMENT_ID } from "@t3tools/contracts";
+import { HUB_MACHINE_ENVIRONMENT_ID, UserId } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
 import { addMember, passkeyReauth } from "../auth/UserAuth.testkit.ts";
+import * as EnvironmentRegistry from "./EnvironmentRegistry.ts";
 import {
   approveJoin,
   hubWithOwner,
@@ -10,10 +12,13 @@ import {
   joinStatus,
   listEnvironments,
   loopbackStateOf,
+  memberWithPasskey,
+  setRegisterOwn,
   startJoin,
 } from "./environments.testkit.ts";
 
-const OWNER_ONLY = "Only the Owner manages this Hub's Environments.";
+const NEEDS_REGISTER_OWN =
+  'Adding your own machines needs the "Register their own Environments" permission. Ask this Hub\'s Owner for it.';
 const STRONG_FACTOR = "Confirm with your passkey, or with your password and a code from your app.";
 
 it.effect("the Owner registers a machine with a passkey and it joins as their personal one", () =>
@@ -57,17 +62,153 @@ it.effect("the Owner registers a machine with a passkey and it joins as their pe
   }),
 );
 
-it.effect("a Member cannot approve a machine, whatever proof they bring", () =>
+it.effect(
+  "a Member without the permission cannot approve a machine, whatever proof they bring",
+  () =>
+    Effect.gen(function* () {
+      const { server } = yield* hubWithOwner();
+      const member = yield* addMember(server);
+      const { requestId } = yield* startJoin(server);
+      // The page knows before anything is posted.
+      const view = yield* server.request("/api/environments/join/request", {
+        cookie: member,
+        body: { requestId },
+      });
+      assert.equal(view.body.viewerMayApprove, false);
+      const refused = yield* approveJoin(server, member, requestId, {
+        reauth: { method: "password", password: "anything", totpCode: "123456" },
+      });
+      assert.equal(refused.status, 403);
+      assert.equal(refused.body.message, NEEDS_REGISTER_OWN);
+      assert.notProperty(refused.body, "redirectTo");
+    }),
+);
+
+it.effect("a User with `environments.registerOwn` approves their own machine, theirs alone", () =>
   Effect.gen(function* () {
-    const { server } = yield* hubWithOwner();
-    const member = yield* addMember(server);
+    const { server, owner } = yield* hubWithOwner();
+    const grace = yield* memberWithPasskey(server, owner, { displayName: "Grace Hopper" });
+    const linus = yield* memberWithPasskey(server, owner, {
+      displayName: "Linus",
+      spaceId: grace.spaceId,
+    });
+    yield* setRegisterOwn(server, owner, grace.userId, true);
+
     const { requestId } = yield* startJoin(server);
-    const refused = yield* approveJoin(server, member, requestId, {
-      reauth: { method: "password", password: "anything", totpCode: "123456" },
+    const view = yield* server.request("/api/environments/join/request", {
+      cookie: grace.cookie,
+      body: { requestId },
+    });
+    assert.equal(view.body.viewerMayApprove, true);
+    // Still a strong factor in the same request.
+    assert.equal((yield* approveJoin(server, grace.cookie, requestId)).body.message, STRONG_FACTOR);
+    const approved = yield* approveJoin(server, grace.cookie, requestId, {
+      name: "Grace's laptop",
+      reauth: yield* passkeyReauth(server, grace.authenticator),
+    });
+    assert.equal(approved.status, 200);
+    const status = yield* joinStatus(server, requestId);
+    assert.equal(status.body.status, "approved");
+    const environmentId = status.body.environmentId as string;
+
+    const external = (cookie: string) =>
+      Effect.map(listEnvironments(server, cookie), (list) =>
+        list
+          .filter((environment) => environment.kind === "external")
+          .map(({ id, ownerUserId }) => ({ id, ownerUserId })),
+      );
+    const mine = [{ id: environmentId, ownerUserId: grace.userId }];
+    assert.deepEqual(yield* external(grace.cookie), mine);
+    // The Owner sees every machine; another Member does not see this one.
+    assert.deepEqual(yield* external(owner), mine);
+    assert.deepEqual(yield* external(linus.cookie), []);
+
+    const audit = yield* server.request("/api/installation/audit?action=environment.register", {
+      cookie: owner,
+    });
+    const [entry] = audit.body.entries as ReadonlyArray<{
+      actor: { userId: string };
+      target: { id: string };
+    }>;
+    assert.equal(entry!.actor.userId, grace.userId);
+    assert.equal(entry!.target.id, environmentId);
+
+    // Their own to rename and remove; nobody else's.
+    const renamed = yield* server.request("/api/environments/rename", {
+      cookie: grace.cookie,
+      body: { environmentId, name: "Work laptop" },
+    });
+    assert.equal(renamed.status, 200);
+    assert.equal(renamed.body.name, "Work laptop");
+    const linusRemoves = yield* server.request("/api/environments/remove", {
+      cookie: linus.cookie,
+      body: { environmentId },
+    });
+    assert.equal(linusRemoves.status, 404);
+    const hubRename = yield* server.request("/api/environments/rename", {
+      cookie: grace.cookie,
+      body: { environmentId: HUB_MACHINE_ENVIRONMENT_ID, name: "Mine" },
+    });
+    assert.equal(hubRename.status, 403);
+    const removed = yield* server.request("/api/environments/remove", {
+      cookie: grace.cookie,
+      body: { environmentId },
+    });
+    assert.equal(removed.status, 200);
+    assert.deepEqual(yield* external(owner), []);
+  }),
+);
+
+it.effect("revoking the permission keeps the User's machines; removing the User does not", () =>
+  Effect.gen(function* () {
+    const { server, owner } = yield* hubWithOwner();
+    const grace = yield* memberWithPasskey(server, owner, { displayName: "Grace Hopper" });
+    yield* setRegisterOwn(server, owner, grace.userId, true);
+    const joined = yield* joinMachine(server, grace.authenticator, grace.cookie);
+
+    yield* setRegisterOwn(server, owner, grace.userId, false);
+    const kept = yield* listEnvironments(server, grace.cookie);
+    assert.include(
+      kept.map((environment) => environment.id),
+      joined.environmentId,
+    );
+    // No new one, though.
+    const { requestId } = yield* startJoin(server);
+    const refused = yield* approveJoin(server, grace.cookie, requestId, {
+      reauth: yield* passkeyReauth(server, grace.authenticator),
     });
     assert.equal(refused.status, 403);
-    assert.equal(refused.body.message, OWNER_ONLY);
-    assert.notProperty(refused.body, "redirectTo");
+    assert.equal(refused.body.message, NEEDS_REGISTER_OWN);
+
+    const removedUser = yield* server.request(`/api/installation/users/${grace.userId}/status`, {
+      cookie: owner,
+      body: { status: "removed" },
+    });
+    assert.equal(removedUser.status, 200);
+    assert.notInclude(
+      (yield* listEnvironments(server, owner)).map((environment) => environment.id),
+      joined.environmentId,
+    );
+  }),
+);
+
+it.effect("a permission revoked between the factor and the write registers nothing", () =>
+  Effect.gen(function* () {
+    const { server, owner } = yield* hubWithOwner();
+    const grace = yield* memberWithPasskey(server, owner, { displayName: "Grace Hopper" });
+    // Granted to the view, gone by the write: the registry asks again in its transaction.
+    const registry = Context.get(server.services, EnvironmentRegistry.EnvironmentRegistry);
+    const refused = yield* registry
+      .register({
+        approvedBy: UserId.make(grace.userId),
+        name: "Laptop",
+        os: "linux",
+        hostname: "grace-laptop",
+        credentialHash: "DeB41nTVkPwpbbYecrnqtVq7VXLezustdHAK4SWt13c",
+      })
+      .pipe(Effect.flip);
+    assert.equal(refused._tag, "EnvironmentAccessDeniedError");
+    assert.equal(refused.message, NEEDS_REGISTER_OWN);
   }),
 );
 

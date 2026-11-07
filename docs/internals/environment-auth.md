@@ -150,12 +150,18 @@ close that gap and are the next step if it matters.
 ([EnvironmentJoin](../../apps/server/src/environments/EnvironmentJoin.ts)). The
 machine makes its credential itself, `t3env.<issuing Hub's id>.<secret>`, and
 starts a join request carrying only its SHA-256 and a PKCE challenge; the
-credential never travels. The Owner approves on «Register this machine», from
-any device. The policy asks `environment.register` (Owner only) first, so a
-Member's proof is never checked; then `UserDirectory.confirmStrongFactor` needs a
+credential never travels. The Owner, or a User with the `environments.registerOwn`
+Installation permission, approves on «Register this machine», from any device,
+and the machine becomes the approver's personal one. The policy asks
+`environment.register` first (`missing-installation-permission` otherwise, whose
+message names the permission; the page learns it beforehand from the request's
+`viewerMayApprove`), so the proof of a User without the right is never checked;
+then `UserDirectory.confirmStrongFactor` needs a
 fresh passkey assertion or a password _with_ a TOTP code in the same request, so
-a stolen browser session cannot add a machine. Approval writes the row and its
-`environment.register` entry; the machine asks the outcome with its verifier
+a stolen browser session cannot add a machine. The registry asks the policy again
+in the transaction that writes the row, so a permission revoked mid-approval adds
+nothing. Approval writes the row and its `environment.register` entry, whose
+actor is the approver; the machine asks the outcome with its verifier
 until then, and asking again after a lost answer gets the same machine, never a
 second one. A browser on the machine itself is also sent to `t3 join`'s loopback
 port (as app sign-in does), only as a nudge to ask now. The PKCE store is shared
@@ -171,7 +177,11 @@ another id gets the socket closed by the machine. `leave` refuses plain HTTP
 from off the Hub's machine, as the socket does (`isSecureEnvironmentTransport`).
 A machine belongs to its owner: turning off or removing that User revokes their
 machines in the same transaction and closes their sockets after it commits, and
-the credential check refuses a machine whose owner is off in any case.
+the credential check refuses a machine whose owner is off in any case. Revoking
+`environments.registerOwn` only stops new approvals: the permission gates
+joining, not having, so machines already joined keep working, and their owner
+still sees, renames and removes them in Settings (the Owner sees and manages
+every one, but uses only their own).
 
 The socket ([connectRoute](../../apps/server/src/environments/connectRoute.ts))
 upgrades before it checks the credential, so every refusal reaches the machine
@@ -256,8 +266,9 @@ permission: without it the space is hidden (`space.view` is denied, so what it
 holds from before a revoke reads as missing too). The Owner grants and revokes
 permissions (`installation_permissions` rows) over HTTP
 (`/api/installation/users`, which also needs the `access:read`/`access:write`
-scope) through `SpaceDirectory.setInstallationPermission`. `environments.registerOwn` is
-only stored. The Owner reads every
+scope) through `SpaceDirectory.setInstallationPermission`. `environments.registerOwn`
+lets a User approve their own machine joining (see
+[Joined environments](#joined-environments)). The Owner reads every
 Personal space and lists them in the selector, but changes nothing in another
 User's (`personal-space-read-only`). Naming a Space one cannot see, a
 `personal:<id>` included, answers exactly like naming a missing one.

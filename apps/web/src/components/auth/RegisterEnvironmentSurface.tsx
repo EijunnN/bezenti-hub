@@ -2,7 +2,6 @@ import type { AuthAccount, EnvironmentJoinRequestView } from "@t3tools/contracts
 import { readEnvironmentJoinPageRequest } from "@t3tools/shared/environmentJoin";
 import { useEffect, useState } from "react";
 
-import { usePrimarySessionState } from "~/environments/primary";
 import {
   approveEnvironmentJoin,
   denyEnvironmentJoin,
@@ -20,14 +19,12 @@ import { SignInSurface } from "./SignInSurface";
 type Outcome = "approved" | "cancelled" | null;
 
 /**
- * The page `t3 join` links to, from any device. The Owner checks the machine, may rename it, and
- * confirms with a passkey or password and code. `t3 join` learns the outcome by asking the Hub;
- * a browser on that machine is also sent back to it.
+ * The page `t3 join` links to, from any device. The Owner, or a User allowed to register their own
+ * machines, checks the machine, may rename it, and confirms with a passkey or password and code.
+ * `t3 join` learns the outcome by asking the Hub; a browser on that machine is also sent back to it.
  */
 export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: boolean }) {
   const [requestId] = useState(() => readEnvironmentJoinPageRequest(window.location.href));
-  const session = usePrimarySessionState();
-  const isOwner = session.data?.authenticated === true && session.data.isOwner === true;
   const [request, setRequest] = useState<EnvironmentJoinRequestView | null>(null);
   const [account, setAccount] = useState<AuthAccount | null>(null);
   const [name, setName] = useState("");
@@ -38,7 +35,7 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the join request and the account's sign-in methods from the server.
   useEffect(() => {
-    if (!signedIn || !isOwner || requestId === null) return;
+    if (!signedIn || requestId === null) return;
     let current = true;
     void Promise.all([fetchEnvironmentJoinRequest(requestId), fetchAccount()]).then(
       ([loaded, loadedAccount]) => {
@@ -55,7 +52,7 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
     return () => {
       current = false;
     };
-  }, [signedIn, isOwner, requestId]);
+  }, [signedIn, requestId]);
 
   const ended = (title: string, description: string) => (
     <StandalonePage>
@@ -80,17 +77,17 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
         onSignedIn={() => window.location.reload()}
         description={
           <>
-            Sign in as the Owner to add a machine to{" "}
+            Sign in to add your machine to{" "}
             <span className="font-medium text-foreground">{window.location.host}</span>.
           </>
         }
       />
     );
   }
-  if (session.data !== undefined && !isOwner) {
+  if (request !== null && request.status === "pending" && request.viewerMayApprove === false) {
     return ended(
-      "Only the Owner adds machines",
-      "Ask this Hub's Owner to run `t3 join` and approve the machine.",
+      "You need permission to add machines",
+      'Adding your own machines needs the "Register their own Environments" permission. Ask this Hub\'s Owner for it, then open this link again.',
     );
   }
   if (outcome === "approved") {

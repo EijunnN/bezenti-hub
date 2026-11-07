@@ -68,6 +68,8 @@ export class EnvironmentAccessDeniedError extends Schema.TaggedError<Environment
         return "The Hub machine runs the Hub itself and can't be removed.";
       case "user-inactive":
         return "This account is turned off.";
+      case "missing-installation-permission":
+        return 'Adding your own machines needs the "Register their own Environments" permission. Ask this Hub\'s Owner for it.';
       default:
         return "Only the Owner manages this Hub's Environments.";
     }
@@ -229,9 +231,17 @@ export class EnvironmentRegistry extends Context.Service<
       void,
       EnvironmentNotFoundError | EnvironmentAccessDeniedError | EnvironmentStorageError
     >;
-    /** Whether the User may approve a machine joining; checked before the strong factor. */
-    readonly mayRegister: (userId: UserId) => Effect.Effect<boolean, EnvironmentStorageError>;
-    /** Stores a newly joined machine by its credential's hash, recording who approved it. */
+    /**
+     * Whether the User may approve their own machine joining (the Owner, or `registerOwn`);
+     * checked before the strong factor. Refuses with the reason.
+     */
+    readonly authorizeRegister: (
+      userId: UserId,
+    ) => Effect.Effect<void, EnvironmentAccessDeniedError | EnvironmentStorageError>;
+    /**
+     * Stores a newly joined machine by its credential's hash as a personal machine of the User who
+     * approved it, recording them.
+     */
     readonly register: (input: {
       readonly approvedBy: UserId;
       readonly name: string;
@@ -488,14 +498,18 @@ const make = Effect.gen(function* () {
     },
   );
 
-  const mayRegister: EnvironmentRegistry["Service"]["mayRegister"] = (userId) =>
-    principalOf(userId).pipe(
-      Effect.map((principal) =>
-        AccessPolicy.isAllowed(
-          decide(principal, "environment.register", AccessPolicy.installation),
-        ),
-      ),
+  const authorizeRegister: EnvironmentRegistry["Service"]["authorizeRegister"] = Effect.fn(
+    "EnvironmentRegistry.authorizeRegister",
+  )(function* (userId) {
+    const decision = decide(
+      yield* principalOf(userId),
+      "environment.register",
+      AccessPolicy.installation,
     );
+    if (decision._tag === "Deny") {
+      return yield* new EnvironmentAccessDeniedError({ reason: decision.reason });
+    }
+  });
 
   const register: EnvironmentRegistry["Service"]["register"] = Effect.fn(
     "EnvironmentRegistry.register",
@@ -505,9 +519,7 @@ const make = Effect.gen(function* () {
       .withTransaction(
         Effect.gen(function* () {
           // Asked again in the transaction: the approver may have lost the right since approving.
-          if (!(yield* mayRegister(approvedBy))) {
-            return yield* new EnvironmentAccessDeniedError({ reason: "owner-only" });
-          }
+          yield* authorizeRegister(approvedBy);
           const now = yield* nowIso;
           yield* sql`
           INSERT INTO environments (
@@ -727,7 +739,7 @@ const make = Effect.gen(function* () {
     list,
     rename,
     remove,
-    mayRegister,
+    authorizeRegister,
     register,
     revokeOwnedBy,
     checkCredential,

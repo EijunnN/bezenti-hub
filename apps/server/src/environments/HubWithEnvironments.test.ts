@@ -101,6 +101,7 @@ import {
   type Hub,
   type TestEnvironment,
 } from "./HubWithEnvironments.testkit.ts";
+import { memberWithPasskey, setRegisterOwn } from "./environments.testkit.ts";
 
 const CLAUDE = ProviderDriverKind.make("claudeAgent");
 
@@ -553,6 +554,77 @@ describe("Hub con Environments", () => {
         "provider-missing",
       );
     }).pipe(Effect.scoped),
+  );
+  it.live(
+    "a Member's own machine runs their Threads in any of their Spaces, and nobody else's",
+    () =>
+      Effect.gen(function* () {
+        const instanceId = ProviderInstanceId.make("claudeAgent");
+        const hub = yield* makeHub();
+        const grace = yield* memberWithPasskey(hub.server, hub.owner, {
+          displayName: "Grace Hopper",
+        });
+        const linus = yield* memberWithPasskey(hub.server, hub.owner, {
+          displayName: "Linus",
+          spaceId: grace.spaceId,
+        });
+        yield* setRegisterOwn(hub.server, hub.owner, grace.userId, true);
+        const laptop = yield* hub.join({
+          name: "Grace's laptop",
+          adapters: idleAdapters(instanceId),
+          as: grace,
+        });
+        const registry = hub.service(EnvironmentRegistry.EnvironmentRegistry);
+        const graceId = UserId.make(grace.userId);
+        const choose = (userId: UserId, projectId: ProjectId) =>
+          registry.chooseForThread({
+            userId,
+            requested: laptop.environmentId,
+            projectId,
+            providerInstanceId: instanceId,
+          });
+        const refusal = (userId: UserId) =>
+          choose(userId, ProjectId.make("project:acme")).pipe(
+            Effect.flip,
+            Effect.map((error) =>
+              error._tag === "ThreadEnvironmentUnavailableError" ? error.reason : error._tag,
+            ),
+          );
+
+        // In the Organization and in her Personal space alike.
+        yield* seedProject(hub.server, {
+          projectId: ProjectId.make("project:acme"),
+          title: "Acme",
+          defaultModelSelection: null,
+          spaceId: SpaceId.make(grace.spaceId),
+        });
+        yield* seedProject(hub.server, {
+          projectId: ProjectId.make("project:grace-notes"),
+          title: "Notes",
+          defaultModelSelection: null,
+          spaceId: SpaceId.make(`personal:${grace.userId}`),
+        });
+        assert.equal(yield* choose(graceId, ProjectId.make("project:acme")), laptop.environmentId);
+        assert.equal(
+          yield* choose(graceId, ProjectId.make("project:grace-notes")),
+          laptop.environmentId,
+        );
+        // The Owner sees it but runs nothing there; another Member of her Space neither.
+        assert.equal(yield* refusal(yield* ownerIdOf(hub)), "not-usable");
+        assert.equal(yield* refusal(UserId.make(linus.userId)), "not-usable");
+        assert.isTrue(
+          Option.isNone(
+            yield* registry.usableBy({
+              userId: UserId.make(linus.userId),
+              environmentId: laptop.environmentId,
+            }),
+          ),
+        );
+
+        // Revoking the permission stops new machines, not the ones already joined.
+        yield* setRegisterOwn(hub.server, hub.owner, grace.userId, false);
+        assert.equal(yield* choose(graceId, ProjectId.make("project:acme")), laptop.environmentId);
+      }).pipe(Effect.scoped),
   );
   it.live("an effect's call resends on the next socket with the same key, and once only", () =>
     Effect.gen(function* () {

@@ -136,11 +136,14 @@ const handlers = HttpApiBuilder.group(
         "joinRequest",
         Effect.fn("environment.environments.joinRequest")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          return yield* join.view(args.payload.requestId).pipe(
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          return yield* join.view(request, args.payload.requestId).pipe(
             Effect.catchTags({
               EnvironmentJoinRequestNotFoundError: () =>
                 failEnvironmentNotFound("join_request_not_found"),
+              EnvironmentStorageError: failStorage,
             }),
+            Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, failStorage),
           );
         }),
       )

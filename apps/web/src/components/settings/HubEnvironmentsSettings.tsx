@@ -33,9 +33,13 @@ const STATUS_BADGES = {
 
 const gigabytes = (bytes: number) => `${(bytes / 1_000_000_000).toFixed(1)} GB`;
 
-function describe(environment: HubEnvironmentSummary) {
+function describe(environment: HubEnvironmentSummary, viewerUserId: string | undefined) {
   const parts = [
-    environment.kind === "hub" ? "Runs the Hub" : "Personal",
+    environment.kind === "hub"
+      ? "Runs the Hub"
+      : environment.ownerUserId === viewerUserId
+        ? "Your personal machine"
+        : "Another User's personal machine",
     environment.os,
     environment.lastSeenAt === null
       ? "never connected"
@@ -81,10 +85,17 @@ function describe(environment: HubEnvironmentSummary) {
   );
 }
 
-/** Settings → Environments: the machines joined to this Hub. The Owner's. */
+/**
+ * Settings → Environments: the machines joined to this Hub. The Owner sees and manages every one;
+ * each User sees the Hub machine and their own personal machines, and renames and removes those.
+ */
 export function HubEnvironmentsSettings() {
   const session = usePrimarySessionState();
-  const isOwner = session.data?.authenticated === true && session.data.isOwner === true;
+  const signedIn = session.data?.authenticated === true && session.data.userId !== undefined;
+  const isOwner = signedIn && session.data?.isOwner === true;
+  const userId = session.data?.userId;
+  const manages = (environment: HubEnvironmentSummary) =>
+    isOwner || (environment.kind === "external" && environment.ownerUserId === userId);
   const [environments, setEnvironments] = useState<ReadonlyArray<HubEnvironmentSummary> | null>(
     null,
   );
@@ -95,7 +106,7 @@ export function HubEnvironmentsSettings() {
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- polls the Hub for each machine's live status while Settings is open.
   useEffect(() => {
-    if (!isOwner) return;
+    if (!signedIn) return;
     let current = true;
     const load = () =>
       void fetchHubEnvironments().then(
@@ -114,9 +125,9 @@ export function HubEnvironmentsSettings() {
       current = false;
       window.clearInterval(timer);
     };
-  }, [isOwner]);
+  }, [signedIn]);
 
-  if (!isOwner) return null;
+  if (!signedIn) return null;
 
   const run = async (change: () => Promise<void>) => {
     setPending(true);
@@ -147,28 +158,30 @@ export function HubEnvironmentsSettings() {
                 </Badge>
               </span>
             }
-            description={describe(environment)}
+            description={describe(environment, userId)}
             control={
-              <div className="flex gap-1">
-                <Button
-                  aria-label={`Rename ${environment.name}`}
-                  size="xs"
-                  variant="outline"
-                  onClick={() => setRenaming({ id: environment.id, name: environment.name })}
-                >
-                  Rename
-                </Button>
-                {environment.kind === "external" ? (
+              manages(environment) ? (
+                <div className="flex gap-1">
                   <Button
-                    aria-label={`Remove ${environment.name}`}
+                    aria-label={`Rename ${environment.name}`}
                     size="xs"
-                    variant="destructive-outline"
-                    onClick={() => setRemoving(environment)}
+                    variant="outline"
+                    onClick={() => setRenaming({ id: environment.id, name: environment.name })}
                   >
-                    Remove
+                    Rename
                   </Button>
-                ) : null}
-              </div>
+                  {environment.kind === "external" ? (
+                    <Button
+                      aria-label={`Remove ${environment.name}`}
+                      size="xs"
+                      variant="destructive-outline"
+                      onClick={() => setRemoving(environment)}
+                    >
+                      Remove
+                    </Button>
+                  ) : null}
+                </div>
+              ) : null
             }
           />
         );
