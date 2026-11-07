@@ -83,8 +83,13 @@ export class SandboxRuntime extends Context.Service<
      * on the next start.
      */
     readonly create: (spec: SandboxSpec) => Effect.Effect<void, SandboxRuntimeError>;
-    /** Starts its server; nothing when it already runs. */
-    readonly start: (sandboxId: string) => Effect.Effect<void, SandboxRuntimeError>;
+    /**
+     * Starts its server (nothing when it already runs). `exited` completes with its exit code when
+     * that server ends, so a start that dies at once is not waited on.
+     */
+    readonly start: (
+      sandboxId: string,
+    ) => Effect.Effect<{ readonly exited: Effect.Effect<number | null> }, SandboxRuntimeError>;
     /** Stops its server, keeping its home; nothing when it is not running. */
     readonly stop: (sandboxId: string) => Effect.Effect<void, SandboxRuntimeError>;
     /** Stops it and removes its home with everything in it. */

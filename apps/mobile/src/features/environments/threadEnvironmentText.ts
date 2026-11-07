@@ -6,14 +6,14 @@ import {
   activeEnvironmentLabel,
   threadEnvironmentState,
 } from "@t3tools/client-runtime/environment/hub-environments";
-import type { EnvironmentConnectionStatus } from "@t3tools/contracts";
+import type { HubEnvironmentStatus } from "@t3tools/contracts";
 
 export interface ThreadEnvironmentPresentation {
   /** What a row or header shows: «Laptop», «Laptop · Offline», «Paused, environment offline». */
   readonly text: string;
   /** What its accessible name ends with: «runs on Laptop, offline». */
   readonly accessibilityText: string;
-  readonly status: EnvironmentConnectionStatus;
+  readonly status: HubEnvironmentStatus;
   readonly state: "needs-environment" | "paused-offline" | null;
 }
 

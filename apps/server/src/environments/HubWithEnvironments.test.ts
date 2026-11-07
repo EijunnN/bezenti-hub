@@ -95,6 +95,7 @@ import {
 } from "../orchestration-v2/testkit/ProviderReplayFixtures.ts";
 import { materializeReplayTranscriptRuntimeInstructions } from "../orchestration-v2/testkit/ReplayRuntimeInstructions.ts";
 import * as ProcessSandboxRuntime from "../sandboxes/ProcessSandboxRuntime.ts";
+import * as OrganizationLifecycle from "../spaces/OrganizationLifecycle.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as EnvironmentRegistry from "./EnvironmentRegistry.ts";
@@ -3097,7 +3098,7 @@ describe("Hub con Environments: the Sandbox of a Space", () => {
       const before = yield* listEnvironments(hub.server, hub.owner);
       assert.deepInclude(
         before.map(({ id, name, kind, status }) => ({ id, name, kind, status })),
-        { id: sandboxId, name: "Acme Sandbox", kind: "sandbox", status: "offline" },
+        { id: sandboxId, name: "Acme Sandbox", kind: "sandbox", status: "stopped" },
       );
 
       const created = loaded.materialized.commands.find(
@@ -3153,7 +3154,7 @@ describe("Hub con Environments: the Sandbox of a Space", () => {
       assert.isNotEmpty(projection?.checkpointScopes);
       for (const scope of projection?.checkpointScopes ?? []) {
         assert.isTrue(scope.cwd.startsWith(sandbox.workspaceRoot), scope.cwd);
-        assert.include(scope.cwd, `/sandboxes/sandbox-${acme}/`);
+        assert.isTrue(scope.cwd.startsWith(`${hub.sandboxRoot}/sandbox-${acme}/`), scope.cwd);
       }
       yield* awaitUploaded(hub, threadId!, 1);
       // Chosen again, the running Sandbox is the same one: nothing is made twice.
@@ -3400,6 +3401,197 @@ describe("Hub con Environments: the Sandbox of a Space", () => {
         (environment) => environment.id === sandboxEnvironmentIdOf(acme),
       );
       assert.equal(sandbox?.status, "online");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("is not offered by a Hub without a runtime that runs Sandboxes", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub({ sandboxes: false });
+      const acme = yield* createOrganization(hub, "Acme");
+      const projectId = ProjectId.make("project:acme");
+      yield* seedProject(hub.server, {
+        projectId,
+        title: "Acme",
+        defaultModelSelection: null,
+        spaceId: acme,
+      });
+      const listed = yield* listEnvironments(hub.server, hub.owner);
+      assert.deepEqual(
+        listed.map((environment) => environment.kind),
+        ["hub"],
+      );
+      const refused = yield* hub
+        .service(EnvironmentRegistry.EnvironmentRegistry)
+        .chooseForThread({
+          userId: yield* ownerIdOf(hub),
+          requested: sandboxEnvironmentIdOf(acme),
+          projectId,
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        })
+        .pipe(Effect.flip);
+      assert.equal(
+        refused._tag === "ThreadEnvironmentUnavailableError" && refused.reason,
+        "sandbox-unavailable",
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a server that exits before connecting fails the start at once, with its exit code", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub({
+        sandboxLauncher: () => Effect.succeed({ pid: null, exited: Effect.succeed(3) }),
+      });
+      const acme = yield* createOrganization(hub, "Acme");
+      const projectId = ProjectId.make("project:acme");
+      yield* seedProject(hub.server, {
+        projectId,
+        title: "Acme",
+        defaultModelSelection: null,
+        spaceId: acme,
+      });
+      const failed = yield* hub
+        .service(EnvironmentRegistry.EnvironmentRegistry)
+        .chooseForThread({
+          userId: yield* ownerIdOf(hub),
+          requested: sandboxEnvironmentIdOf(acme),
+          projectId,
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        })
+        .pipe(Effect.flip);
+      assert.equal(
+        failed._tag === "ThreadEnvironmentUnavailableError" && failed.reason,
+        "sandbox-failed",
+      );
+      assert.include(failed.message, "exit code 3");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "stops when its Organization is archived and is deleted with it, home and credential",
+    () =>
+      Effect.gen(function* () {
+        const instanceId = ProviderInstanceId.make("claudeAgent");
+        const hub = yield* makeHub({ sandboxAdapters: idleAdapters(instanceId) });
+        const registry = hub.service(EnvironmentRegistry.EnvironmentRegistry);
+        const lifecycle = hub.service(OrganizationLifecycle.OrganizationLifecycle);
+        const owner = yield* ownerIdOf(hub);
+        const acme = yield* createOrganization(hub, "Acme");
+        const projectId = ProjectId.make("project:acme");
+        yield* seedProject(hub.server, {
+          projectId,
+          title: "Acme",
+          defaultModelSelection: null,
+          spaceId: acme,
+        });
+        const sandboxId = sandboxEnvironmentIdOf(acme);
+        const choose = registry.chooseForThread({
+          userId: owner,
+          requested: sandboxId,
+          projectId,
+          providerInstanceId: instanceId,
+        });
+        yield* choose;
+        const sandbox = yield* hub.sandboxOf(acme);
+        const status = hub.server.sql<{ readonly status: string }>`
+        SELECT status FROM sandboxes WHERE space_id = ${acme}
+      `.pipe(Effect.map((rows) => rows.map((row) => row.status)));
+
+        yield* lifecycle.archive(owner, acme);
+        assert.deepEqual(yield* status, ["stopped"]);
+        // Nothing starts it while archived.
+        const refused = yield* choose.pipe(Effect.flip);
+        assert.equal(
+          refused._tag === "ThreadEnvironmentUnavailableError" && refused.reason,
+          "not-usable",
+        );
+        yield* lifecycle.restore(owner, acme);
+        assert.equal(yield* choose, sandboxId);
+        assert.deepEqual(yield* status, ["running"]);
+
+        yield* lifecycle.archive(owner, acme);
+        yield* lifecycle.delete(owner, acme);
+        assert.deepEqual(yield* status, []);
+        const [row] = yield* hub.server.sql<{ readonly revokedAt: string | null }>`
+        SELECT revoked_at AS "revokedAt" FROM environments WHERE environment_id = ${sandboxId}
+      `;
+        assert.isNotNull(row?.revokedAt ?? null);
+        assert.isFalse(
+          yield* Effect.promise(() =>
+            NodeFSP.access(`${hub.sandboxRoot}/sandbox-${acme}`).then(
+              () => true,
+              () => false,
+            ),
+          ),
+        );
+        const checked = yield* registry.checkCredential(sandbox.credential);
+        assert.equal(checked._tag === "refused" && checked.reason, "credential-revoked");
+        const audited = yield* hub.server.sql<{ readonly action: string }>`
+        SELECT action FROM audit_log WHERE action LIKE 'sandbox.%' ORDER BY rowid
+      `;
+        assert.deepEqual(
+          audited.map((entry) => entry.action),
+          ["sandbox.create", "sandbox.stop", "sandbox.stop", "sandbox.delete"],
+        );
+      }).pipe(Effect.scoped),
+  );
+
+  it.live("starts nothing for a Thread whose Space is no longer the Sandbox's", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const hub = yield* makeHub({ sandboxAdapters: idleAdapters(instanceId) });
+      const owner = yield* ownerIdOf(hub);
+      const acme = yield* createOrganization(hub, "Acme");
+      const globex = yield* createOrganization(hub, "Globex");
+      const projectId = ProjectId.make("project:acme");
+      yield* seedProject(hub.server, {
+        projectId,
+        title: "Acme",
+        defaultModelSelection: null,
+        spaceId: acme,
+      });
+      const sandboxId = sandboxEnvironmentIdOf(acme);
+      yield* hub.service(EnvironmentRegistry.EnvironmentRegistry).chooseForThread({
+        userId: owner,
+        requested: sandboxId,
+        projectId,
+        providerInstanceId: instanceId,
+      });
+      const threadId = ThreadId.make("thread:acme");
+      const modelSelection = { instanceId, model: "claude-sonnet-4-6" };
+      yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("command:acme-thread"),
+        threadId,
+        projectId,
+        title: "Acme",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        activeEnvironmentId: sandboxId,
+      });
+      // Its Project went to Globex (ticket 12 moves such Threads; until then nothing runs).
+      yield* hub.server
+        .sql`UPDATE projection_projects SET space_id = ${globex} WHERE project_id = ${projectId}`;
+      const executors = hub.service(EnvironmentExecutor.EnvironmentExecutorRegistry);
+      const adapter = yield* (yield* executors.get(sandboxId)).provider.adapters.get(instanceId);
+      const refused = yield* adapter
+        .openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("provider-session:acme"),
+          modelSelection,
+          runtimePolicy: { runtimeMode: "full-access", interactionMode: "default", cwd: "/x" },
+        })
+        .pipe(Effect.provideService(Scope.Scope, yield* Effect.scope), Effect.flip);
+      const causes: Array<string> = [];
+      for (let current: unknown = refused; typeof current === "object" && current !== null;) {
+        causes.push(String((current as { readonly _tag?: unknown })._tag));
+        current = (current as { readonly cause?: unknown }).cause;
+      }
+      assert.include(causes, "SandboxSpaceMismatchError");
     }).pipe(Effect.scoped),
   );
 });

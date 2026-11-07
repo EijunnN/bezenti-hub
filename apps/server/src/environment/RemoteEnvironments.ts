@@ -57,6 +57,7 @@ import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as RuntimePolicy from "../orchestration-v2/RuntimePolicy.ts";
+import { SandboxSpaceMismatchError, sandboxSpaceOf } from "../sandboxes/sandboxSpace.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as EnvironmentExecutor from "./EnvironmentExecutor.ts";
 import type * as MovedWorkspace from "./MovedWorkspace.ts";
@@ -252,6 +253,36 @@ const make = Effect.gen(function* () {
   const grants = new Map<EnvironmentId, ReadonlyArray<RecoveryGrant>>();
   let streamCount = 0;
   const previewEvents = yield* PubSub.unbounded<PreviewEvent>();
+
+  /**
+   * A Sandbox runs only its own Space's Threads: one whose Project moved to another Space since
+   * it was placed starts nothing new there (spec 3, until ticket 12 moves such Threads).
+   */
+  const requireSandboxSpace = Effect.fn("RemoteEnvironments.requireSandboxSpace")(function* (
+    link: Link,
+    driver: ProviderDriverKind,
+    threadId: ThreadId,
+  ) {
+    const sandboxSpace = sandboxSpaceOf(link.environmentId);
+    if (sandboxSpace === undefined) return;
+    const [row] = yield* sql<{ readonly spaceId: string | null }>`
+      SELECT COALESCE(t.space_id, p.space_id,
+        'personal:' || (SELECT user_id FROM users WHERE is_owner = 1)) AS "spaceId"
+      FROM orchestration_v2_projection_threads t
+      LEFT JOIN projection_projects p ON p.project_id = t.project_id
+      WHERE t.thread_id = ${threadId}
+    `.pipe(Effect.orElseSucceed(() => []));
+    if (row?.spaceId === sandboxSpace) return;
+    const mismatch = new SandboxSpaceMismatchError({
+      environmentId: link.environmentId,
+      threadId,
+    });
+    return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+      driver,
+      detail: mismatch.message,
+      cause: mismatch,
+    });
+  });
 
   const sha256Hex = (bytes: Uint8Array) =>
     digester.digest(Digest.sha256, bytes).pipe(
@@ -484,7 +515,8 @@ const make = Effect.gen(function* () {
       ensureThread: (input) => onSession("provider.ensureThread", input),
       resumeThread: (input) => onSession("provider.resumeThread", input),
       startTurn: (input) =>
-        grantAttachments(sink, input.message.attachments).pipe(
+        requireSandboxSpace(link, driver, sink.threadId).pipe(
+          Effect.andThen(grantAttachments(sink, input.message.attachments)),
           Effect.flatMap((attachments) =>
             callProvider<void>(link, driver, "provider.startTurn", {
               providerSessionId,
@@ -549,6 +581,16 @@ const make = Effect.gen(function* () {
     // Deciding makes no network call: a model change that may need a new session restarts it.
     planSelectionTransition: () => Effect.succeed({ type: "restart_session" }),
     openSession: Effect.fn("RemoteEnvironments.openSession")(function* (input) {
+      yield* requireSandboxSpace(link, driver, input.threadId).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapter.ProviderAdapterOpenSessionError({
+              driver,
+              providerSessionId: input.providerSessionId,
+              cause,
+            }),
+        ),
+      );
       const thread = yield* projections.getThread(input.threadId).pipe(Effect.option);
       const checkout = Option.isNone(thread)
         ? undefined

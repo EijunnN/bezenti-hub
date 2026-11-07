@@ -87,7 +87,7 @@ const makeHandler = Effect.fnUntraced(function* (
         return yield* closeWith("protocol-error");
       }
       const closeRequested = yield* Deferred.make<EnvironmentCloseReason>();
-      yield* connections.attach(environmentId, (reason) =>
+      const attached = yield* connections.attach(environmentId, (reason) =>
         Deferred.succeed(closeRequested, reason).pipe(Effect.asVoid),
       );
       // Asked again once the socket is tracked: a removal since the upgrade found nothing to
@@ -112,7 +112,7 @@ const makeHandler = Effect.fnUntraced(function* (
             hello: hello.value,
             write: (text) => writer.write(text).pipe(Effect.ignore),
           });
-      yield* connections.markReady(environmentId);
+      yield* attached.markReady;
       const end = yield* Effect.raceFirst(
         Deferred.await(closeRequested),
         receive(environmentId, nextFrame, registry, connection),

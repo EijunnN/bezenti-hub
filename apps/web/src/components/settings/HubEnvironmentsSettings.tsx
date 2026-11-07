@@ -29,6 +29,7 @@ const STATUS_BADGES = {
   online: { label: "Online", variant: "success" },
   reconnecting: { label: "Reconnecting", variant: "warning" },
   offline: { label: "Offline", variant: "outline" },
+  stopped: { label: "Stopped", variant: "outline" },
 } as const;
 
 const gigabytes = (bytes: number) => `${(bytes / 1_000_000_000).toFixed(1)} GB`;

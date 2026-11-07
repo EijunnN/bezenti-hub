@@ -43,6 +43,8 @@ import { base64UrlEncode } from "../auth/utils.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import type * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
 import * as Sandboxes from "../sandboxes/Sandboxes.ts";
+import * as ProcessSandboxRuntime from "../sandboxes/ProcessSandboxRuntime.ts";
+import { sandboxSpaceOf } from "../sandboxes/sandboxSpace.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as EnvironmentConnections from "./EnvironmentConnections.ts";
 
@@ -95,6 +97,7 @@ export class ThreadEnvironmentUnavailableError extends Schema.TaggedError<Thread
       "provider-missing",
       "worktree-unsupported",
       "sandbox-failed",
+      "sandbox-unavailable",
     ]),
     providerInstanceId: Schema.optional(Schema.String),
     /** Why a Sandbox did not start. */
@@ -112,6 +115,8 @@ export class ThreadEnvironmentUnavailableError extends Schema.TaggedError<Thread
         return `${name} can't run ${this.providerInstanceId ?? "this provider"}. Choose another provider or Environment.`;
       case "worktree-unsupported":
         return "New worktrees are made only on the Hub machine for now. Start this Thread in the Project's checkout.";
+      case "sandbox-unavailable":
+        return "Sandboxes need Podman on the Hub, which this Hub does not have yet. See «Run Threads in your Space's Sandbox» in the install guide.";
       case "sandbox-failed":
         return `${name} could not start${this.detail === undefined ? "." : `: ${this.detail}`}`;
     }
@@ -182,9 +187,22 @@ const encodeProviders = Schema.encodeSync(
 );
 
 /**
- * The machine as the policy decides on it: a Sandbox with its Space (none when the Space is
+ * The machine as the policy decides on it: a Sandbox with its Space (absent when the Space is
  * gone, which the policy refuses), and `workSpaceId` the Space of the Thread it would run.
  */
+const environmentResource = (
+  row: PolicyRow,
+  space: AccessPolicy.SpaceResource | undefined,
+  workSpaceId?: SpaceId,
+): AccessPolicy.EnvironmentResource => ({
+  kind: "environment",
+  environmentKind: row.kind,
+  ownerUserId: row.ownerUserId === null ? null : UserId.make(row.ownerUserId),
+  ...(space === undefined ? {} : { space }),
+  ...(workSpaceId === undefined ? {} : { workSpaceId }),
+});
+
+/** `environmentResource` with a Sandbox's Space read for it. */
 const resourceFor = Effect.fn("EnvironmentRegistry.resourceFor")(function* (
   row: PolicyRow,
   workSpaceId?: SpaceId,
@@ -195,21 +213,12 @@ const resourceFor = Effect.fn("EnvironmentRegistry.resourceFor")(function* (
           .spaceById(SpaceId.make(row.spaceId))
           .pipe(Effect.mapError((cause) => new EnvironmentStorageError({ cause })))
       : Option.none<{ readonly resource: AccessPolicy.SpaceResource }>();
-  const resource: AccessPolicy.EnvironmentResource = {
-    kind: "environment",
-    environmentKind: row.kind,
-    ownerUserId: row.ownerUserId === null ? null : UserId.make(row.ownerUserId),
-    ...(Option.isSome(space) ? { space: space.value.resource } : {}),
-    ...(workSpaceId === undefined ? {} : { workSpaceId }),
-  };
-  return resource;
+  return environmentResource(
+    row,
+    Option.isSome(space) ? space.value.resource : undefined,
+    workSpaceId,
+  );
 });
-
-/** The Space a Sandbox's id names, whether or not the Sandbox exists yet. */
-const sandboxSpaceOf = (environmentId: EnvironmentId) =>
-  environmentId.startsWith("sandbox:")
-    ? SpaceId.make(environmentId.slice("sandbox:".length))
-    : undefined;
 
 /**
  * Whether the User may run Threads on the Environment (a Sandbox: for `workSpaceId`'s Threads), as
@@ -341,6 +350,19 @@ export class EnvironmentRegistry extends Context.Service<
      * off): its Threads then need an environment.
      */
     readonly removed: Stream.Stream<EnvironmentId>;
+    /** Its Organization was archived: its Sandbox stops, and starts no more while archived. */
+    readonly stopSandbox: (input: {
+      readonly spaceId: SpaceId;
+      readonly actor: AuditLog.AuditActor;
+    }) => Effect.Effect<void, EnvironmentStorageError>;
+    /**
+     * Its Space is deleted: its Sandbox stops, its credential is revoked, its row and home go.
+     * Its Threads then need an environment, as for a removed machine.
+     */
+    readonly deleteSandbox: (input: {
+      readonly spaceId: SpaceId;
+      readonly actor: AuditLog.AuditActor;
+    }) => Effect.Effect<void, EnvironmentStorageError>;
   }
 >()("t3/environments/EnvironmentRegistry") {}
 
@@ -428,6 +450,7 @@ const make = Effect.gen(function* () {
       } satisfies HubEnvironmentSummary;
     }
     const environmentId = EnvironmentId.make(row.environmentId);
+    const connected = yield* connections.isConnected(environmentId);
     return {
       id: environmentId,
       name: name ?? row.name,
@@ -435,11 +458,15 @@ const make = Effect.gen(function* () {
       mode: row.kind === "sandbox" ? "sandbox" : "personal",
       ownerUserId: row.ownerUserId === null ? null : UserId.make(row.ownerUserId),
       spaceId: row.spaceId === null ? null : SpaceId.make(row.spaceId),
-      status: environmentConnectionStatus({
-        connected: yield* connections.isConnected(environmentId),
-        lastSeenAtMs: row.lastSeenAt === null ? null : Date.parse(row.lastSeenAt),
-        nowMs,
-      }),
+      status:
+        row.kind === "sandbox" && !connected
+          ? // The Hub starts it when work needs it.
+            "stopped"
+          : environmentConnectionStatus({
+              connected,
+              lastSeenAtMs: row.lastSeenAt === null ? null : Date.parse(row.lastSeenAt),
+              nowMs,
+            }),
       registeredAt: row.registeredAt,
       lastSeenAt: row.lastSeenAt,
       os: row.lastOs,
@@ -474,9 +501,23 @@ const make = Effect.gen(function* () {
       // Each Space by the name this viewer knows it by (another User's Personal space included).
       const viewed = (yield* spaces.view(viewer).pipe(Effect.mapError(storageError))).spaces;
       const spaceNames = new Map<string, string>(viewed.map((space) => [space.id, space.name]));
+      // One read for every Sandbox's Space and every Space that may get one.
+      const spaceResources = yield* spaces
+        .spacesById([
+          ...rows.flatMap((row) =>
+            row.kind === "sandbox" && row.spaceId !== null ? [SpaceId.make(row.spaceId)] : [],
+          ),
+          ...viewed.map((space) => space.id),
+        ])
+        .pipe(Effect.mapError(storageError));
+      const spaceOf = (spaceId: string | null) =>
+        spaceId === null ? undefined : spaceResources.get(SpaceId.make(spaceId))?.resource;
       const summaries: Array<HubEnvironmentSummary> = [];
       for (const row of rows) {
-        const resource = yield* resourceOf(row);
+        const resource = environmentResource(
+          row,
+          row.kind === "sandbox" ? spaceOf(row.spaceId) : undefined,
+        );
         if (!AccessPolicy.isAllowed(decide(principal, "environment.view", resource))) continue;
         const spaceName =
           row.kind === "sandbox" && row.spaceId !== null ? spaceNames.get(row.spaceId) : undefined;
@@ -488,11 +529,14 @@ const make = Effect.gen(function* () {
         );
       }
       const made = new Set(rows.flatMap((row) => (row.kind === "sandbox" ? [row.spaceId] : [])));
+      // Without a runtime that can run them, Sandboxes not made yet are not offered.
+      if (Option.isNone(sandboxes)) return summaries;
       const now = yield* nowIso;
       for (const space of viewed) {
         if (made.has(space.id)) continue;
-        const resource = yield* resourceOf(
+        const resource = environmentResource(
           { kind: "sandbox", ownerUserId: null, spaceId: space.id },
+          spaceOf(space.id),
           space.id,
         );
         if (!AccessPolicy.isAllowed(decide(principal, "environment.use", resource))) continue;
@@ -503,7 +547,7 @@ const make = Effect.gen(function* () {
           mode: "sandbox",
           ownerUserId: null,
           spaceId: space.id,
-          status: "offline",
+          status: "stopped",
           registeredAt: now,
           lastSeenAt: null,
           os: null,
@@ -807,7 +851,10 @@ const make = Effect.gen(function* () {
     }
     if (requested !== undefined && row.kind === "sandbox" && row.spaceId !== null) {
       if (Option.isNone(sandboxes)) {
-        return yield* new ThreadEnvironmentUnavailableError({ environmentId, reason: "offline" });
+        return yield* new ThreadEnvironmentUnavailableError({
+          environmentId,
+          reason: "sandbox-unavailable",
+        });
       }
       yield* sandboxes.value
         .ensureRunning({ spaceId: SpaceId.make(row.spaceId), actorUserId: userId })
@@ -896,6 +943,26 @@ const make = Effect.gen(function* () {
     recordHeartbeat,
     leave,
     removed: Stream.fromPubSub(removals),
+    stopSandbox: Effect.fn("EnvironmentRegistry.stopSandbox")(function* (input) {
+      if (Option.isNone(sandboxes)) return;
+      yield* sandboxes.value.stop(input).pipe(Effect.mapError(storageError));
+    }),
+    deleteSandbox: Effect.fn("EnvironmentRegistry.deleteSandbox")(function* (input) {
+      const environmentId = sandboxEnvironmentIdOf(input.spaceId);
+      if (Option.isSome(sandboxes)) {
+        yield* sandboxes.value.delete(input).pipe(Effect.mapError(storageError));
+      } else {
+        // Made by a runtime this Hub no longer runs: its rows still go.
+        yield* sql`
+          UPDATE environments SET revoked_at = ${yield* nowIso}
+          WHERE environment_id = ${environmentId} AND revoked_at IS NULL
+        `.pipe(Effect.mapError(storageError));
+        yield* sql`DELETE FROM sandboxes WHERE space_id = ${input.spaceId}`.pipe(
+          Effect.mapError(storageError),
+        );
+      }
+      yield* PubSub.publish(removals, environmentId);
+    }),
   });
 });
 
@@ -908,6 +975,13 @@ export const layer = Layer.effect(EnvironmentRegistry, make).pipe(
  * The registry with each Space's Sandbox run by `runtime`. The Sandboxes share the registry's
  * connections, so a Sandbox counts as started once its socket is the registry's.
  */
+/** The registry as the server runs it: with Sandboxes only when a runtime that runs them is on. */
+export const layerFromConfig = Layer.unwrap(
+  Effect.map(ProcessSandboxRuntime.fromConfig, (runtime) =>
+    Option.isNone(runtime) ? layer : layerWithSandboxes(runtime.value),
+  ),
+);
+
 export const layerWithSandboxes = <E, R>(
   runtime: Layer.Layer<SandboxRuntime.SandboxRuntime, E, R>,
 ) =>

@@ -3,7 +3,7 @@
 // name and live status), a Thread's Active environment read from it, and the words and steps of
 // moving a Thread to another machine. Web and mobile share these so they say the same things.
 import {
-  type EnvironmentConnectionStatus,
+  type HubEnvironmentStatus,
   type EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
   type HubEnvironmentList,
@@ -160,7 +160,7 @@ export function canMoveThread(input: {
 /** What a Thread's header and row say about where it runs. */
 export interface ActiveEnvironmentView {
   readonly name: string;
-  readonly status: EnvironmentConnectionStatus;
+  readonly status: HubEnvironmentStatus;
   readonly isHubMachine: boolean;
   /** Its Environment was removed: it runs nowhere until it moves («needs an environment»). */
   readonly needsEnvironment: boolean;
@@ -171,10 +171,11 @@ export const NEEDS_ENVIRONMENT_LABEL = "Needs an environment";
 /** The words for a Thread whose turn waits for its machine to come back. */
 export const PAUSED_OFFLINE_LABEL = "Paused, environment offline";
 
-export const ENVIRONMENT_STATUS_LABELS: Record<EnvironmentConnectionStatus, string> = {
+export const ENVIRONMENT_STATUS_LABELS: Record<HubEnvironmentStatus, string> = {
   online: "Online",
   reconnecting: "Reconnecting",
   offline: "Offline",
+  stopped: "Stopped",
 };
 
 /**

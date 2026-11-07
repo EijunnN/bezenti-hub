@@ -10,6 +10,15 @@ interface Live {
   ready: boolean;
 }
 
+/** One attached socket, as long as it is the Environment's current one. */
+export interface AttachedConnection {
+  /**
+   * The socket was welcomed and its executor serves: work can be placed on it. Nothing when a
+   * newer socket of the same Environment replaced this one meanwhile.
+   */
+  readonly markReady: Effect.Effect<void>;
+}
+
 /**
  * The open sockets of joined Environments, one per Environment. A second connection for the same
  * Environment replaces the first, so a machine that reconnects before the Hub noticed it left
@@ -22,15 +31,14 @@ export class EnvironmentConnections extends Context.Service<
     readonly attach: (
       environmentId: EnvironmentId,
       close: Live["close"],
-    ) => Effect.Effect<void, never, Scope.Scope>;
-    /** The attached socket was welcomed and its executor serves: work can be placed on it. */
-    readonly markReady: (environmentId: EnvironmentId) => Effect.Effect<void>;
+    ) => Effect.Effect<AttachedConnection, never, Scope.Scope>;
     readonly close: (
       environmentId: EnvironmentId,
       reason: EnvironmentCloseReason,
     ) => Effect.Effect<void>;
     readonly isConnected: (environmentId: EnvironmentId) => Effect.Effect<boolean>;
-    /** Completes once the Environment's socket is ready: at once when it already is. */
+    readonly isReady: (environmentId: EnvironmentId) => Effect.Effect<boolean>;
+    /** Completes once the Environment's current socket is ready: at once when it already is. */
     readonly awaitReady: (environmentId: EnvironmentId) => Effect.Effect<void>;
   }
 >()("t3/environments/EnvironmentConnections") {}
@@ -62,23 +70,27 @@ export const layer = Layer.sync(EnvironmentConnections, () => {
         Effect.sync(() => {
           if (live.get(environmentId) === entry) live.delete(environmentId);
         }),
-    ).pipe(Effect.asVoid);
+    ).pipe(
+      Effect.map((entry): AttachedConnection => ({
+        markReady: Effect.sync(() => {
+          // A replaced socket's welcome says nothing about the one that replaced it.
+          if (live.get(environmentId) !== entry) return;
+          entry.ready = true;
+          const waiters = waiting.get(environmentId);
+          waiting.delete(environmentId);
+          for (const wake of waiters ?? []) wake();
+        }),
+      })),
+    );
 
   return EnvironmentConnections.of({
     attach,
-    markReady: Effect.fn("EnvironmentConnections.markReady")(function* (environmentId) {
-      yield* Effect.sync(() => {
-        const entry = live.get(environmentId);
-        if (entry === undefined) return;
-        entry.ready = true;
-        const waiters = waiting.get(environmentId);
-        waiting.delete(environmentId);
-        for (const wake of waiters ?? []) wake();
-      });
-    }),
     close,
     isConnected: Effect.fn("EnvironmentConnections.isConnected")(function* (environmentId) {
       return yield* Effect.sync(() => live.has(environmentId));
+    }),
+    isReady: Effect.fn("EnvironmentConnections.isReady")(function* (environmentId) {
+      return yield* Effect.sync(() => live.get(environmentId)?.ready === true);
     }),
     awaitReady: Effect.fn("EnvironmentConnections.awaitReady")(function* (environmentId) {
       yield* Effect.callback<void>((resume) => {

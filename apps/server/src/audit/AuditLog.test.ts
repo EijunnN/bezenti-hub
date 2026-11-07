@@ -588,6 +588,8 @@ it.effect(
         "environment.remove",
         "thread.move",
         "sandbox.create",
+        "sandbox.stop",
+        "sandbox.delete",
       ];
       const hooks = ["secret.reveal", "secret.edit"];
       assert.sameMembers(

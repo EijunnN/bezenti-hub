@@ -119,6 +119,8 @@ export const AUDIT_ACTION_LABELS: Record<AuditAction, string> = {
   "environment.remove": "Removed an Environment",
   "thread.move": "Moved a Thread to another Environment",
   "sandbox.create": "Created a Sandbox",
+  "sandbox.stop": "Stopped a Sandbox",
+  "sandbox.delete": "Deleted a Sandbox",
 };
 
 export const INSTALLATION_PERMISSION_LABELS: Record<InstallationPermission, string> = {

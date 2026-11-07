@@ -190,7 +190,6 @@ import * as EnvironmentRegistry from "./environments/EnvironmentRegistry.ts";
 import * as HubEnvironmentsHttp from "./environments/http.ts";
 import * as JoinedHub from "./environments/JoinedHub.ts";
 import type { JoinedHubState } from "./environments/joinedHubState.ts";
-import * as ProcessSandboxRuntime from "./sandboxes/ProcessSandboxRuntime.ts";
 import * as NetService from "@t3tools/shared/Net";
 import {
   disableTailscaleServe,
@@ -483,8 +482,8 @@ const layerAuth = Layer.mergeAll(
   InstallationUserService.layer,
   SpaceVisibility.layer,
   AuditLog.layer,
-  // Each Space's Sandbox runs as a child process of the Hub until the Podman runtime.
-  EnvironmentRegistry.layerWithSandboxes(ProcessSandboxRuntime.layerChildProcess),
+  // Sandboxes only with a runtime that runs them (`T3CODE_SANDBOX_RUNTIME`, dev only for now).
+  EnvironmentRegistry.layerFromConfig,
 ).pipe(
   Layer.provideMerge(EnvironmentAuth.layer.pipe(Layer.provideMerge(SpaceDirectory.layer))),
   Layer.provideMerge(layerPersistence),

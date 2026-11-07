@@ -493,8 +493,9 @@ for later, so start the machine and try again.
 ### Run Threads in your Space's Sandbox
 
 Every Space has a **Sandbox**: a server of its own that the Hub runs for that
-Space, with its own files, Project checkouts and provider sign-ins. The
-composer's **Environment** picker lists it as **<Space> Sandbox** (for example
+Space, with its own files, Project checkouts and provider sign-ins. Sandboxes
+need Podman on the Hub's machine; until the Hub can run them they are not
+listed, and choosing one says so. The composer's **Environment** picker lists it as **<Space> Sandbox** (for example
 **Acme Sandbox**) beside your machines. Pick it and send: the first time, the
 Hub creates the Sandbox, which takes a few seconds, and later Threads reuse it.
 Only Admins and Members of the Space can run Threads there (not Guests), and

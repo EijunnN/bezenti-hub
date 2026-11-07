@@ -1,11 +1,12 @@
-import type { EnvironmentConnectionStatus } from "@t3tools/contracts";
+import type { HubEnvironmentStatus } from "@t3tools/contracts";
 
 import { cn } from "~/lib/utils";
 
-const DOT_CLASS: Record<EnvironmentConnectionStatus, string> = {
+const DOT_CLASS: Record<HubEnvironmentStatus, string> = {
   online: "bg-success",
   reconnecting: "bg-warning",
   offline: "bg-muted-foreground/50",
+  stopped: "bg-muted-foreground/50",
 };
 
 /** An Active environment's live status as a dot; the words go in the accessible name nearby. */
@@ -13,7 +14,7 @@ export function EnvironmentStatusDot({
   status,
   className,
 }: {
-  status: EnvironmentConnectionStatus;
+  status: HubEnvironmentStatus;
   className?: string;
 }) {
   return (

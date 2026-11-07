@@ -64,6 +64,19 @@ export class Sandboxes extends Context.Service<
     }) => Effect.Effect<EnvironmentId, SandboxStartError>;
     /** The Sandboxes that exist, by Space. */
     readonly list: Effect.Effect<ReadonlyArray<SandboxStatusRow>, SandboxStartError>;
+    /** Stops the Space's Sandbox, keeping its home: its Organization was archived. */
+    readonly stop: (input: {
+      readonly spaceId: SpaceId;
+      readonly actor: AuditLog.AuditActor;
+    }) => Effect.Effect<void, SandboxStartError>;
+    /**
+     * Stops it, revokes its credential and removes its row and home: its Space is deleted. True
+     * when there was one.
+     */
+    readonly delete: (input: {
+      readonly spaceId: SpaceId;
+      readonly actor: AuditLog.AuditActor;
+    }) => Effect.Effect<boolean, SandboxStartError>;
   }
 >()("t3/sandboxes/Sandboxes") {}
 
@@ -130,6 +143,9 @@ const make = Effect.gen(function* () {
     const sandboxId = sandboxIdOf(spaceId);
     const space = yield* spaces.spaceById(spaceId);
     if (Option.isNone(space)) return yield* Effect.fail("its Space no longer exists.");
+    // Nothing starts in an archived Organization or a frozen Personal space.
+    if (space.value.resource.archived) return yield* Effect.fail("its Space is archived.");
+    if (space.value.resource.frozen) return yield* Effect.fail("its Space is frozen.");
     const name = sandboxEnvironmentName(space.value.name);
     const existing = yield* selectRow(spaceId);
     const inspected = yield* runtime.inspect(sandboxId);
@@ -181,16 +197,21 @@ const make = Effect.gen(function* () {
       });
     }
     const wasRunning = inspected.state._tag === "running";
-    if (!wasRunning) {
-      yield* setStatus(spaceId, "starting");
-      yield* runtime.start(sandboxId);
-    }
-    // Ready once welcomed with its executor serving, so a Thread can be placed on it at once.
-    const ready = yield* connections
-      .awaitReady(environmentId)
-      .pipe(Effect.timeoutOption(START_TIMEOUT));
+    if (!wasRunning) yield* setStatus(spaceId, "starting");
+    const started = yield* runtime.start(sandboxId);
+    // Ready once welcomed with its executor serving, so a Thread can be placed on it at once; a
+    // server that ends first fails the start at once, with its exit code.
+    const ready = yield* Effect.raceFirst(
+      connections.awaitReady(environmentId).pipe(Effect.as("ready" as const)),
+      started.exited.pipe(Effect.map((exitCode) => ({ exitCode }))),
+    ).pipe(Effect.timeoutOption(START_TIMEOUT));
     if (Option.isNone(ready)) {
       return yield* Effect.fail("it did not connect to the Hub in time.");
+    }
+    if (ready.value !== "ready") {
+      return yield* Effect.fail(
+        `its server exited before connecting (exit code ${ready.value.exitCode ?? "unknown"}).`,
+      );
     }
     if (!wasRunning) yield* setStatus(spaceId, "running");
     return environmentId;
@@ -220,6 +241,63 @@ const make = Effect.gen(function* () {
     FROM sandboxes ORDER BY created_at
   `.pipe(Effect.mapError((cause) => new SandboxStartError({ spaceId: "", detail: String(cause) })));
 
+  const stop: Sandboxes["Service"]["stop"] = Effect.fn("Sandboxes.stop")(
+    function* ({ spaceId, actor }) {
+      const row = yield* selectRow(spaceId);
+      if (row === undefined) return;
+      const sandboxId = sandboxIdOf(spaceId);
+      const wasRunning = (yield* runtime.inspect(sandboxId)).state._tag === "running";
+      yield* runtime.stop(sandboxId);
+      yield* setStatus(spaceId, "stopped");
+      if (!wasRunning) return;
+      yield* audit.record({
+        actor,
+        action: "sandbox.stop",
+        spaceId,
+        target: { kind: "environment", id: row.environmentId },
+        detail: { via: "archived" },
+      });
+    },
+    (effect, input) => lockOf(input.spaceId).withPermits(1)(effect),
+    (effect, input) =>
+      Effect.mapError(
+        effect,
+        (cause) => new SandboxStartError({ spaceId: input.spaceId, detail: String(cause) }),
+      ),
+  );
+
+  const remove: Sandboxes["Service"]["delete"] = Effect.fn("Sandboxes.delete")(
+    function* ({ spaceId, actor }) {
+      const row = yield* selectRow(spaceId);
+      const environmentId = sandboxEnvironmentIdOf(spaceId);
+      yield* runtime.delete(sandboxIdOf(spaceId));
+      yield* sql.withTransaction(
+        Effect.gen(function* () {
+          yield* sql`
+            UPDATE environments SET revoked_at = ${yield* nowIso}
+            WHERE environment_id = ${environmentId} AND revoked_at IS NULL
+          `;
+          yield* sql`DELETE FROM sandboxes WHERE space_id = ${spaceId}`;
+          if (row === undefined) return;
+          yield* audit.record({
+            actor,
+            action: "sandbox.delete",
+            spaceId,
+            target: { kind: "environment", id: environmentId },
+          });
+        }),
+      );
+      yield* connections.close(environmentId, "environment-removed");
+      return row !== undefined;
+    },
+    (effect, input) => lockOf(input.spaceId).withPermits(1)(effect),
+    (effect, input) =>
+      Effect.mapError(
+        effect,
+        (cause) => new SandboxStartError({ spaceId: input.spaceId, detail: String(cause) }),
+      ),
+  );
+
   // What the runtime does not run is not running, whatever the last Hub recorded.
   const recorded = yield* list.pipe(Effect.orElseSucceed(() => []));
   for (const row of recorded) {
@@ -246,7 +324,7 @@ const make = Effect.gen(function* () {
     Effect.forkScoped,
   );
 
-  return Sandboxes.of({ ensureRunning, list });
+  return Sandboxes.of({ ensureRunning, list, stop, delete: remove });
 });
 
 export const layer = Layer.effect(Sandboxes, make).pipe(Layer.provide(AuditLog.layer));

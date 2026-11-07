@@ -1,10 +1,10 @@
-import type { EnvironmentConnectionStatus } from "@t3tools/contracts";
+import type { HubEnvironmentStatus } from "@t3tools/contracts";
 
 import { ConnectionStatusDot } from "../connection/ConnectionStatusDot";
 
 /** An Environment's live status as a dot; the words go in the accessible name nearby. */
 export function EnvironmentStatusDot(props: {
-  readonly status: EnvironmentConnectionStatus;
+  readonly status: HubEnvironmentStatus;
   readonly size?: number;
 }) {
   return (

@@ -397,6 +397,7 @@ const makeSandboxRuntime = (
   >,
   /** A real launcher instead, such as `t3 serve` children. */
   realLauncher: ProcessSandboxRuntime.SandboxLauncher | undefined,
+  rootDir: string,
 ) => {
   let hubUrl = "";
   const started = new Map<string, TestEnvironment>();
@@ -425,7 +426,10 @@ const makeSandboxRuntime = (
       started.set(launch.sandboxId, environment);
       return { pid: null, exited: Effect.never };
     }).pipe(Effect.provide(NodeServices.layer));
-  const runtime = ProcessSandboxRuntime.layer({ launcher: realLauncher ?? testkitLauncher }).pipe(
+  const runtime = ProcessSandboxRuntime.layer({
+    launcher: realLauncher ?? testkitLauncher,
+    rootDir,
+  }).pipe(
     Layer.provide(
       Layer.succeed(
         SandboxRuntime.SandboxHubAddress,
@@ -457,16 +461,24 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     >;
     /** Runs each Sandbox's server with this launcher instead of in the test's process. */
     readonly sandboxLauncher?: ProcessSandboxRuntime.SandboxLauncher;
+    /** False: no Sandbox runtime, as a production Hub without Podman. */
+    readonly sandboxes?: boolean;
   } = {},
 ) {
+  const sandboxRoot = yield* FileSystem.FileSystem.pipe(
+    Effect.flatMap((fs) => fs.makeTempDirectoryScoped({ prefix: "t3-sandboxes-" })),
+    Effect.provide(NodeServices.layer),
+    Effect.orDie,
+  );
   const sandboxes = makeSandboxRuntime(
     options.sandboxAdapters ?? ProviderAdapterRegistry.layerFromAdapters([]),
     options.sandboxLauncher,
+    sandboxRoot,
   );
   const { server, authenticator, owner } = yield* hubWithOwner({
     listen: true,
     extend: withOrchestration(options.textGeneration),
-    sandboxRuntime: sandboxes.runtime,
+    ...(options.sandboxes === false ? {} : { sandboxRuntime: sandboxes.runtime }),
   });
   sandboxes.setHubUrl(server.url);
   /** Joins a machine as the Owner (`t3 join`, approved with a passkey) and connects it. */
@@ -502,6 +514,8 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     service: serviceOf(server),
     /** The running server of the Space's Sandbox, once the Hub started it. */
     sandboxOf: sandboxes.environmentOf,
+    /** Where the Sandboxes' homes are. */
+    sandboxRoot,
   };
 });
 

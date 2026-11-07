@@ -32,6 +32,13 @@ export type HubEnvironmentMode = typeof HubEnvironmentMode.Type;
 
 export const HubEnvironmentName = TrimmedNonEmptyString.check(Schema.isMaxLength(64));
 
+/** A machine's connection, or `stopped`: a Sandbox not running, which the Hub starts for work. */
+export const HubEnvironmentStatus = Schema.Literals([
+  ...EnvironmentConnectionStatus.literals,
+  "stopped",
+]);
+export type HubEnvironmentStatus = typeof HubEnvironmentStatus.Type;
+
 /** A Space's Sandbox has one id for its whole life, known before the Sandbox exists. */
 export const sandboxEnvironmentIdOf = (spaceId: SpaceId): EnvironmentId =>
   EnvironmentId.make(`sandbox:${spaceId}`);
@@ -49,7 +56,7 @@ export const HubEnvironmentSummary = Schema.Struct({
   ownerUserId: Schema.NullOr(UserId),
   /** A Sandbox's Space; it runs only that Space's Threads. Absent from older Hubs. */
   spaceId: Schema.optionalKey(Schema.NullOr(SpaceId)),
-  status: EnvironmentConnectionStatus,
+  status: HubEnvironmentStatus,
   registeredAt: IsoDateTime,
   lastSeenAt: Schema.NullOr(IsoDateTime),
   os: Schema.NullOr(TrimmedNonEmptyString),

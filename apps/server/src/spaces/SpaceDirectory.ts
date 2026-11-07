@@ -408,6 +408,16 @@ export class SpaceDirectory extends Context.Service<
       Option.Option<{ readonly resource: AccessPolicy.SpaceResource; readonly name: string }>,
       SpaceDirectoryStorageError
     >;
+    /** Several Spaces in one read, as `spaceById`; missing ones are left out. */
+    readonly spacesById: (
+      spaceIds: ReadonlyArray<SpaceId>,
+    ) => Effect.Effect<
+      ReadonlyMap<
+        SpaceId,
+        { readonly resource: AccessPolicy.SpaceResource; readonly name: string }
+      >,
+      SpaceDirectoryStorageError
+    >;
     /** The state of the Thread's or Project's Space; work runs only in an open one. */
     readonly spaceState: (
       item: ItemRef,
@@ -1604,6 +1614,28 @@ const make = Effect.gen(function* () {
     return Option.map(row, (found) => ({ resource: toResource(found), name: found.name }));
   });
 
+  const findSpaces = SqlSchema.findAll({
+    Request: Schema.Array(SpaceId),
+    Result: SpaceRow,
+    execute: (spaceIds) =>
+      sql`SELECT ${sql.literal(SPACE_COLUMNS)} FROM spaces WHERE ${sql.in("space_id", spaceIds)}`,
+  });
+
+  const spacesById = Effect.fn("SpaceDirectory.spacesById")(function* (
+    spaceIds: ReadonlyArray<SpaceId>,
+  ) {
+    if (spaceIds.length === 0) {
+      return new Map<
+        SpaceId,
+        { readonly resource: AccessPolicy.SpaceResource; readonly name: string }
+      >();
+    }
+    const rows = yield* findSpaces([...new Set(spaceIds)]).pipe(Effect.mapError(storageError));
+    return new Map(
+      rows.map((row) => [row.spaceId, { resource: toResource(row), name: row.name }] as const),
+    );
+  });
+
   const workBlocked = Effect.fn("SpaceDirectory.workBlocked")(function* (threadId: ThreadId) {
     const row = yield* findThreadItem(threadId).pipe(Effect.mapError(storageError));
     if (Option.isNone(row)) return undefined;
@@ -1624,6 +1656,7 @@ const make = Effect.gen(function* () {
     whileProjectMoves,
     spaceOf,
     spaceById,
+    spacesById,
     spaceState,
     workBlocked,
     members,
