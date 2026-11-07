@@ -88,6 +88,10 @@ export class EnvironmentAccessDeniedError extends Schema.TaggedError<Environment
         return "A Space's Sandbox is run by the Hub: it is not renamed or removed as a machine.";
       case "not-usable":
         return "You can't run Threads in this Sandbox's Space.";
+      case "space-archived":
+        return "Its Organization is archived: restore it to start its Sandbox.";
+      case "space-frozen":
+        return "Its Personal space is frozen: nothing starts in it.";
       case "missing-installation-permission":
         return REGISTER_OWN_REQUIRED_MESSAGE;
       default:
@@ -1171,14 +1175,28 @@ const make = Effect.gen(function* () {
       return yield* new EnvironmentAccessDeniedError({ reason: decision.reason });
     }
     if (Option.isNone(sandboxes)) return yield* new EnvironmentNotFoundError({});
-    return { spaceId: SpaceId.make(row.spaceId), sandboxes: sandboxes.value };
+    return {
+      spaceId: SpaceId.make(row.spaceId),
+      sandboxes: sandboxes.value,
+      space: resource.space,
+    };
   });
 
   const sandboxAction: EnvironmentRegistry["Service"]["sandboxAction"] = Effect.fn(
     "EnvironmentRegistry.sandboxAction",
   )(function* ({ actorUserId, environmentId, action }) {
-    const { spaceId, sandboxes: service } = yield* authorizeSandbox(actorUserId, environmentId);
+    const {
+      spaceId,
+      sandboxes: service,
+      space,
+    } = yield* authorizeSandbox(actorUserId, environmentId);
     const actor = AuditLog.userActor(actorUserId);
+    // An archived Organization's Sandbox stays stopped until it is restored.
+    if (action !== "stop" && (space?.archived === true || space?.frozen === true)) {
+      return yield* new EnvironmentAccessDeniedError({
+        reason: space.archived ? "space-archived" : "space-frozen",
+      });
+    }
     switch (action) {
       case "start":
         // Answers once it is `starting`; how the start ends shows in the list.

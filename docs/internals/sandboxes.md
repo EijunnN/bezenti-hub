@@ -58,8 +58,8 @@ server in its own rootless container, `t3-<sandboxId>` (labels `io.t3code.sandbo
 - **Home.** `<Hub home>-sandboxes/<sandboxId>` is bind mounted as `/home/sandbox`, the server's
   base dir, `HOME` and workspace root (`/home/sandbox/projects`). A bind-mounted directory rather
   than a named volume: no Podman call to create or inspect it, and it survives the container
-  (stop/start keeps it). Ticket 05's disk limit has to watch the directory, or move it onto a
-  volume with a quota.
+  (stop/start keeps it). No runtime limits a directory's size, so the disk limit is the Hub's own
+  check (see [Limits](#limits)).
 - **What the Hub writes stays out of the home.** The credential and `joined-hub.json` live in
   `<Sandboxes root>/.state/<sandboxId>/`, which only the Hub writes, and are mounted read-only
   over their paths in the home (`userdata/secrets/environment-credential.bin`,
@@ -103,8 +103,7 @@ server in its own rootless container, `t3-<sandboxId>` (labels `io.t3code.sandbo
 Requirements: rootless Podman 3.4 or newer (Ubuntu 22.04's works) with `slirp4netns`, subuid and
 subgid ranges for the Hub's user (`/etc/subuid`, `/etc/subgid`), and `XDG_RUNTIME_DIR`. Without a
 systemd user session (a `wsl -e` shell, a service without lingering) the runtime passes
-`--cgroup-manager=cgroupfs`; CPU and memory limits (ticket 05) may need `loginctl enable-linger`
-and delegated cgroup controllers. Newer Podman defaults to pasta; this runtime asks for slirp4netns
+`--cgroup-manager=cgroupfs`, and then enforces no CPU, memory or PIDs limit (see [Limits](#limits)). Newer Podman defaults to pasta; this runtime asks for slirp4netns
 explicitly, so it must be installed.
 
 The [process runtime](../../apps/server/src/sandboxes/ProcessSandboxRuntime.ts) is for tests and
@@ -122,6 +121,59 @@ replaced one) after the welcome, the recorded hello and the executor's registrat
 waited for it finds its providers and executor. A server that ends first fails the start at once
 with its exit code. A launch runs with the runtime's own services, never those of whoever asked
 for the start.
+
+## Limits
+
+Each Sandbox has CPU, memory, PIDs and disk limits
+([sandboxLimits](../../apps/server/src/sandboxes/sandboxLimits.ts)): the Installation's defaults
+(`sandbox_limit_defaults`, migration 104, one row: 2 CPUs, 4 GiB, 4096 processes and threads,
+20 GiB; null there is no limit) and each Space's override in its `sandboxes` row (null there takes
+the default). `Sandboxes` reads them at every start and passes the effective ones to the runtime
+as `start(sandboxId, { limits })` (`SandboxStartOptions`), so a change applies on the next start;
+ticket 09's dedicated machines can pass the same options to their own container.
+
+- **CPU, memory, PIDs** are the runtime's. `SandboxRuntime.limitSupport` says which ones it
+  enforces on this host and why not, in words for the Owner; Settings and the Hub's log (one
+  warning at startup, `Sandbox limits not enforced on this host`) show it, never a limit that is
+  not applied. The process runtime enforces none. Podman reads `podman info` once
+  ([podmanLimitSupport](../../apps/server/src/sandboxes/PodmanSandboxRuntime.ts)): only cgroups v2
+  with the **systemd** cgroup manager gives a rootless container a cgroup of its own, and then
+  each of `cpu`, `memory`, `pids` counts if it is delegated to the Hub's user
+  (`/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service/cgroup.controllers`). Under
+  **cgroupfs** (no systemd user bus at `$XDG_RUNTIME_DIR/bus`, as in a `wsl -e` session, where
+  `dbus-user-session` is not installed) a rootless container shares its caller's cgroup: Podman
+  3.4 records `--memory`/`--pids-limit` and ignores them, or fails the run outright with
+  «could not find cgroup mount» from the root cgroup, and `--cpus` is dropped. So the runtime passes
+  `--cpus`, `--memory` (with `--memory-swap` equal: no swap beyond it) and `--pids-limit` only
+  for what is enforced, and labels every container with what it was started with
+  (`io.t3code.limit.cpus`, `.memory-bytes`, `.pids`, `io.t3code.limits-enforced`) for
+  `podman inspect`. A container killed under an enforced memory limit (exit 137) is reported as
+  having gone over it. To enforce them on a host: run the Hub as a systemd user service (or
+  `loginctl enable-linger`) with `dbus-user-session` installed, and delegate the controllers
+  (`Delegate=cpu cpuset io memory pids` for `user@.service`, the default on recent systemd).
+  Measured in the dev WSL (Ubuntu 22.04, Podman 3.4.4): cgroup v2, user slice delegates
+  `memory pids`, no user bus from `wsl -e`, so nothing is enforced there and the Podman test that
+  checks enforcement skips with that reason.
+- **Disk** is the Hub's: a home is a bind-mounted directory, so `Sandboxes` measures it with
+  `du -skx` every `T3CODE_SANDBOX_DISK_CHECK_SECONDS` (default 60) for running Sandboxes, at once
+  when a limit changes, and before each start. One over its limit is stopped (audit
+  `sandbox.stop`, via `disk-full`) and left `failed` with «Its disk is full: it uses … of its …
+  limit», which its Threads show as for any failed start; it starts again only once its home fits
+  (the Owner raises the limit, then starts it). Without `du` the disk limit is not enforced and
+  Settings says so.
+- **Use** shown in Settings: CPU and resident memory summed over the container's processes
+  (`podman top … rss pcpu`, CPU averaged over each process's life; read from processes, since a
+  cgroupfs container's cgroup is shared), the home's size at its last measurement, and uptime from
+  `sandboxes.started_at`. The process runtime reports no CPU or memory.
+
+**Settings → Environments «Sandboxes»** (`GET /api/environments/sandboxes`,
+`POST …/sandboxes/action` with `start`, `stop` or `restart`, `POST …/sandboxes/limits` with or
+without an `environmentId`): `sandbox.inspect` (the Owner, an Organization's Admins, a Personal
+space's User) sees status, uptime, use, limits, image version (`image_version`, filled by ticket 06) and the enforcement note; `sandbox.manage` (the Owner) acts and changes limits and defaults.
+Someone who may not inspect a Sandbox gets 404 for it; a start of an archived Organization's
+Sandbox is refused until it is restored. Audit: `sandbox.start`/`sandbox.stop` with via
+`settings` or `restart`, and `sandbox.limits.change` with scope (`defaults` or `space`) and
+the new values.
 
 ## Lifecycle: started for work, stopped when idle
 

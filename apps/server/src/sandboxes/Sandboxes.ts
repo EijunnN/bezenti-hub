@@ -861,6 +861,7 @@ const make = Effect.gen(function* () {
       const environmentId = sandboxEnvironmentIdOf(spaceId);
       yield* runtime.delete(sandboxIdOf(spaceId));
       lastUse.delete(environmentId);
+      diskUse.delete(spaceId);
       yield* sql.withTransaction(
         Effect.gen(function* () {
           yield* sql`

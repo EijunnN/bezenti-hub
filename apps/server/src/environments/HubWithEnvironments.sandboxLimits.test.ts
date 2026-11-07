@@ -22,6 +22,7 @@ import * as Effect from "effect/Effect";
 import type * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
 import { sandboxIdOf } from "../sandboxes/SandboxRuntime.ts";
 import * as Sandboxes from "../sandboxes/Sandboxes.ts";
+import * as OrganizationLifecycle from "../spaces/OrganizationLifecycle.ts";
 import { memberWithPasskey } from "./environments.testkit.ts";
 import { type Hub, makeHub } from "./HubWithEnvironments.testkit.ts";
 
@@ -276,6 +277,19 @@ describe("Hub con Environments: Settings → Environments «Sandboxes»", () => 
         actors.map((row) => row.actor),
         [owner, owner, owner, owner, owner],
       );
+
+      // Archiving its Organization stops it, and not even the Owner starts it until restored.
+      const lifecycle = hub.service(OrganizationLifecycle.OrganizationLifecycle);
+      yield* lifecycle.archive(owner, spaceId).pipe(Effect.orDie);
+      assert.equal(sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId).status, "stopped");
+      for (const action of ["start", "restart"]) {
+        const refused = yield* act(hub, hub.owner, environmentId, action);
+        assert.equal(refused.status, 403, action);
+        assert.include(JSON.stringify(refused.body), "archived");
+      }
+      yield* lifecycle.restore(owner, spaceId).pipe(Effect.orDie);
+      assert.equal((yield* act(hub, hub.owner, environmentId, "start")).status, 200);
+      assert.equal((yield* awaitStarted(hub, spaceId)).status, "online");
     }).pipe(Effect.scoped),
   );
 
