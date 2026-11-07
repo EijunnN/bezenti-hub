@@ -26,14 +26,15 @@ shared by web and mobile with the move dialog's wording and steps).
 
 ## Mobile holds one connection too
 
-Mobile connects only to its Hub. Its connection storage lists at most one saved
-connection: the first saved Hub whose descriptor answers for itself, else the
-first one reached over a bearer route
-([single Hub](../../packages/client-runtime/src/connection/singleHub.ts), the same
-rule the desktop uses). Connections saved before (several Hubs, or servers paired
-with a code) stay saved and unconnected, never deleted; Settings → Environments
-shows a one-time notice about them, and removing the Hub lets the next saved one
-connect on the next start. Registering a second Hub is refused. «Add a Hub» signs
+Mobile connects only to its Hub, decided once and stored
+([mobile single Hub](../../apps/mobile/src/connection/singleHub.ts)): later starts
+connect the stored Hub without probing anything. A phone that saved several
+connections before asks each once, in parallel and within a bounded time, and
+stores the first that answers as a Hub; when none does, none connects and Settings
+→ Environments asks the User to choose. Kept connections are never deleted
+silently and never connect on their own: each can be removed, or, while there is
+no Hub, chosen with «Use as my Hub». Only the Hub may register again, and after it
+is removed the next Hub the User adds becomes the stored one. «Add a Hub» signs
 in in the system browser; scanning or pasting pairing codes is gone, and only a
 development build's dev link (mobile e2e runs) and the showcase capture still
 pair. Thread rows and the Thread screen show the Active environment from the same
