@@ -64,7 +64,12 @@ it.effect("the Owner registers a machine with a passkey and it joins as their pe
       id: joined.environmentId,
       name: "Laptop",
     });
-    assert.deepEqual(entry!.detail, { kind: "external", os: "linux" });
+    assert.deepEqual(entry!.detail, {
+      kind: "external",
+      os: "linux",
+      mode: "personal",
+      via: "join",
+    });
   }),
 );
 
@@ -521,7 +526,10 @@ it.effect("renaming and removing are audited, and the Hub machine stays", () =>
       [
         { action: "environment.remove", detail: { via: "settings" } },
         { action: "environment.rename", detail: { from: "Laptop", to: "Work laptop" } },
-        { action: "environment.register", detail: { kind: "external", os: "linux" } },
+        {
+          action: "environment.register",
+          detail: { kind: "external", os: "linux", mode: "personal", via: "join" },
+        },
       ],
     );
   }),

@@ -36,8 +36,14 @@ export function ProjectPreferredEnvironmentSettings({
   const project = group.memberProjects.find(
     (member) => member.environmentId === primaryEnvironmentId,
   );
+  // The Hub machine, the User's own machines, and those dedicated to the Project's Space.
   const usable = environments.filter(
-    (environment) => environment.kind === "hub" || environment.ownerUserId === userId,
+    (environment) =>
+      environment.kind === "hub" ||
+      (environment.mode !== "dedicated" && environment.ownerUserId === userId) ||
+      (environment.mode === "dedicated" &&
+        project !== undefined &&
+        environment.spaceId === project.spaceId),
   );
   // With only the Hub machine there is nothing to prefer.
   if (project === undefined || usable.length < 2) return null;

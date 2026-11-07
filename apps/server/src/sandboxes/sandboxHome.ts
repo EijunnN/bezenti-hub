@@ -50,6 +50,9 @@ export const writeSandboxHome = Effect.fn("writeSandboxHome")(function* (input: 
     environmentId: input.spec.environmentId,
     name: input.spec.name,
     joinedAt: DateTime.formatIso(yield* DateTime.now),
+    spaceId: input.spec.spaceId,
+    sandboxed: true,
+    sandboxRuntime: "process",
   });
 });
 

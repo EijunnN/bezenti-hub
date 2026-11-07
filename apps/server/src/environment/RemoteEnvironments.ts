@@ -57,7 +57,11 @@ import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as RuntimePolicy from "../orchestration-v2/RuntimePolicy.ts";
-import { SandboxSpaceMismatchError, sandboxSpaceOf } from "../sandboxes/sandboxSpace.ts";
+import {
+  boundSpaceOf,
+  SandboxSpaceMismatchError,
+  SpaceCheckUnavailableError,
+} from "../sandboxes/sandboxSpace.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as EnvironmentExecutor from "./EnvironmentExecutor.ts";
 import type * as MovedWorkspace from "./MovedWorkspace.ts";
@@ -265,15 +269,22 @@ const make = Effect.gen(function* () {
   const previewEvents = yield* PubSub.unbounded<PreviewEvent>();
 
   /**
-   * A Sandbox runs only its own Space's Threads: one whose Project moved to another Space since
-   * it was placed starts nothing new there (spec 3, until ticket 12 moves such Threads).
+   * A Sandbox, and a machine dedicated to a Space, runs only its own Space's Threads: one whose
+   * Project moved to another Space since it was placed (or a machine dedicated elsewhere since)
+   * starts nothing new there (spec 3, until ticket 12 moves such Threads).
    */
   const requireSandboxSpace = Effect.fn("RemoteEnvironments.requireSandboxSpace")(function* (
     link: Link,
     driver: ProviderDriverKind,
     threadId: ThreadId,
   ) {
-    const sandboxSpace = sandboxSpaceOf(link.environmentId);
+    // Fails closed: a Space the Hub could not read refuses the turn, retryably.
+    const refuse = (cause: SpaceCheckUnavailableError) =>
+      new ProviderAdapter.ProviderAdapterProtocolError({ driver, detail: cause.message, cause });
+    const sandboxSpace = yield* boundSpaceOf(link.environmentId).pipe(
+      Effect.provideService(SqlClient.SqlClient, sql),
+      Effect.mapError(refuse),
+    );
     if (sandboxSpace === undefined) return;
     const [row] = yield* sql<{ readonly spaceId: string | null }>`
       SELECT COALESCE(t.space_id, p.space_id,
@@ -281,7 +292,11 @@ const make = Effect.gen(function* () {
       FROM orchestration_v2_projection_threads t
       LEFT JOIN projection_projects p ON p.project_id = t.project_id
       WHERE t.thread_id = ${threadId}
-    `.pipe(Effect.orElseSucceed(() => []));
+    `.pipe(
+      Effect.mapError((cause) =>
+        refuse(new SpaceCheckUnavailableError({ environmentId: link.environmentId, cause })),
+      ),
+    );
     if (row?.spaceId === sandboxSpace) return;
     const mismatch = new SandboxSpaceMismatchError({
       environmentId: link.environmentId,

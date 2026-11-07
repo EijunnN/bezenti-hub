@@ -4,6 +4,7 @@ import {
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
   EnvironmentHttpForbiddenError,
+  EnvironmentModeChangeRefusedError,
   EnvironmentRateLimitedError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -106,6 +107,33 @@ const handlers = HttpApiBuilder.group(
               }),
             );
           return { environments };
+        }),
+      )
+      .handle(
+        "changeMode",
+        Effect.fn("environment.environments.changeMode")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          return yield* registry
+            .changeMode({
+              actorUserId: yield* requireUser(AuthAccessWriteScope),
+              environmentId: args.payload.environmentId,
+              mode: args.payload.mode,
+              spaceId: args.payload.spaceId,
+            })
+            .pipe(
+              Effect.catchTags({
+                EnvironmentAccessDeniedError: failForbidden,
+                EnvironmentNotFoundError: () => failEnvironmentNotFound("environment_not_found"),
+                EnvironmentModeChangeRefusedError: (error) =>
+                  Effect.fail(
+                    new EnvironmentModeChangeRefusedError({
+                      message: error.message,
+                      threads: error.threads,
+                    }),
+                  ),
+                EnvironmentStorageError: failStorage,
+              }),
+            );
         }),
       )
       .handle(
@@ -223,6 +251,21 @@ const handlers = HttpApiBuilder.group(
               EnvironmentStorageError: failStorage,
             }),
           );
+        }),
+      )
+      .handle(
+        "self",
+        Effect.fn("environment.environments.self")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          if (!isSecureEnvironmentTransport(request)) {
+            return yield* failEnvironmentInvalidRequest("insecure_transport");
+          }
+          const self = yield* registry
+            .selfOf(bearerOf(args.headers.authorization))
+            .pipe(Effect.catchTags({ EnvironmentStorageError: failStorage }));
+          if (Option.isNone(self)) return yield* failEnvironmentAuthInvalid("invalid_credential");
+          return self.value;
         }),
       )
       .handle(

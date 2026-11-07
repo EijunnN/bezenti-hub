@@ -1,8 +1,11 @@
+// @effect-diagnostics nodeBuiltinImport:off -- whether this machine joined a Hub.
 /**
  * `t3 sandbox image build`: builds the Sandboxes' base image. With this Hub running it asks the Hub
  * (which builds it, as Settings does) and follows its output; otherwise it builds it here and
  * records the build in the Hub's audit log. See docs/internals/sandboxes.md, «Base image».
  */
+import * as NodeFS from "node:fs";
+
 import {
   AuthStandardClientScopes,
   EnvironmentHttpApi,
@@ -94,6 +97,21 @@ const errorText = (error: unknown) =>
     ? String(error.message)
     : String(error);
 
+/**
+ * A joined machine (a dedicated one runs its Sandbox here) builds its own image in this process,
+ * whether or not its server runs: that server serves only `/health`; the audit log is the Hub's.
+ */
+const buildOnJoinedMachine = Effect.fn("cli.sandbox.buildOnJoinedMachine")(function* () {
+  const image = yield* SandboxImage.configuredSandboxImage;
+  const built = yield* SandboxImage.buildSandboxImage({
+    image,
+    onLine: (line) => process.stdout.write(`${line}\n`),
+  }).pipe(Effect.mapError((error) => userError(error.message)));
+  yield* Console.log(
+    `Built ${image} (${built.version}). This machine's Sandbox runs it from its next start.`,
+  );
+});
+
 /** No Hub running: builds it in this process, then records it as the Hub would. */
 const buildHere = Effect.fn("cli.sandbox.buildHere")(function* (
   config: ServerConfig.ServerConfig["Service"],
@@ -141,6 +159,7 @@ const buildCommand = Command.make("build", { ...authLocationFlags }).pipe(
       const config = yield* resolveCliAuthConfig(flags, yield* GlobalFlag.LogLevel, {
         quietLogs: true,
       });
+      if (NodeFS.existsSync(config.joinedHubPath)) return yield* buildOnJoinedMachine();
       return yield* Effect.gen(function* () {
         const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
         const runtimeState = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath);

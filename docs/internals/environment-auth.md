@@ -224,6 +224,14 @@ accepts a provider event only from the Thread's Active environment. The agent
 there calls the Hub's MCP with the per-Thread credential the Hub issued, so it
 acts with exactly its User's permissions.
 
+A machine the Owner dedicated to an Organization (`t3 join --dedicated`, chosen under **Used by**
+on «Register this machine», or later with **Change use**) is that Space's, not its registrar's:
+`environment.dedicate` (the Owner, on the Installation) is asked before the strong factor and again
+when the row is written, its policy is a Sandbox's (seen with its Space, used by its Admins and
+Members for its Threads only), and its credential reaches only its Space's repositories. Its mode or
+Space changes only while no Thread is on it. See
+[Sandboxes: dedicated machines](sandboxes.md#dedicated-machines).
+
 A Project's preferred Environment (`project.update` with
 `preferredEnvironmentId`) may be set only to a machine its setter may use
 ([`mayUseEnvironment`](../../apps/server/src/environments/EnvironmentRegistry.ts));

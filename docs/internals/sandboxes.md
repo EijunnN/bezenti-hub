@@ -199,6 +199,12 @@ Each Sandbox records the version it started with; the Owner's view shows them an
 - Only the Owner (signed in, enabled) or the Hub's shell sees or does any of this; anyone else, an
   Admin of the Sandbox's Organization included, gets 403 «Only the Owner manages the Sandbox image.».
 
+**Dedicated machines** run their Sandbox from the same image, built on that machine: `t3 join
+--dedicated` refuses until `T3CODE_SANDBOX_IMAGE` (default `localhost/t3code-sandbox:<version>`)
+exists there and says to run `t3 sandbox image build`. On a joined machine that command always
+builds in its own process (its server answers only `/health`, and the audit log is the Hub's), with
+the same tags and versions; the machine's Sandbox runs it from its next start.
+
 **Provider logins** live in the Sandbox's home (`~/.claude`, `~/.codex`, …), its volume, not in the
 image: they outlive every new image.
 
@@ -342,3 +348,92 @@ any joined machine.
   answering 503; a start that fails answers 503 with why. Each request served is use (`touch`), and
   an open preview WebSocket holds the Sandbox (`hold`) until it closes, so it does not stop while
   the page is live. Nothing read-only starts it.
+
+## Dedicated machines
+
+A machine the Owner gave to one Organization (spec 3 ticket 09). On the Hub it is an External
+environment like any joined machine, `kind = 'external'` with `mode = 'dedicated'`, the
+Organization's `space_id` and **no owner** (migration 106): it is the Installation's, so turning a
+User off never takes it. Who dedicated it is in `credential_issued_by` and the audit log only. On
+the machine its server runs no work itself but one Sandbox for the Space it serves.
+
+**On the Hub.**
+
+- **Registering.** `t3 join --dedicated <Space>` sends the Space (name or id) as a suggestion only
+  (`dedicatedSpace`). «Register this machine» offers the Owner alone every Organization not
+  archived (`dedicatedSpaces`, the one asked for first) under **Used by**, preselected when it
+  matched. Approving with `dedicatedSpaceId` asks `environment.dedicate` (the Owner, on the
+  Installation) before the strong factor, and again with the Space (an Organization neither
+  archived nor frozen) in the transaction that writes the row. The awaiting-confirmation and
+  approved answers carry `dedicatedSpace`, so `t3 join` asks `Approved by Ada (ada) as a machine
+  dedicated to Acme. Register it for Acme? [y/N]`. A machine takes only the mode it asked for
+  (`joinModeRefusal`): a `--dedicated` join approved as personal, or a plain join approved as
+  dedicated, registers nothing. The audit entry is `environment.register` with `mode`, `spaceId`
+  and `via: "join"`.
+- **Who.** The policy decides on its Space, as for a Sandbox (`decideSpaceBound` in
+  [AccessPolicy](../../apps/server/src/auth/AccessPolicy.ts)): seen by whoever sees the Space (the
+  Owner sees every one), used by its Admins and Members (not Guests) for that Space's Threads only
+  (`workSpaceId`), renamed and removed by the Owner only. With its Space deleted it stays the
+  Installation's: the Owner still sees, renames and removes it, nothing runs there, and its
+  credential is refused at connect (`space-missing`). Clients offer it only for that Space's
+  Threads (`placeableEnvironments`) and as a preferred Environment only of its Space's Projects.
+  Placement never picks it by default.
+- **Its credential reaches its Space only.** `checkCredential` answers it with its `spaceId`, so
+  the git route serves it its Space's repositories alone. The executor refuses work there for a
+  Thread no longer in its Space, and **fails closed**: a Space it cannot read refuses the turn with
+  `SpaceCheckUnavailableError` (retryable), never skips the check (`boundSpaceOf`). Its `t3 leave`
+  is audited as the machine (`source: "cli"`, no User).
+- **Only its Sandbox connects.** The Hub accepts a dedicated machine's socket only when the hello
+  carries `sandbox: { runtime }`, which only a server whose host wrote `sandboxed: true` into its
+  state sends; anything else is closed with the final `not-sandboxed`. The host also keeps the
+  credential under another secret (`dedicated-environment-credential`), so its own server run as a
+  personal one (an older one, or `joined-hub.json` edited) finds none to present.
+- **Changing mode or Space** (`POST /api/environments/mode`, **Change use** in Settings) is the
+  Owner's, for joined machines only, to `personal` (the Owner's own) or `dedicated` (owned by
+  nobody) to an Organization neither archived nor frozen. Active Threads on it refuse it with 409
+  `EnvironmentModeChangeRefusedError`, naming them; archived ones do not block it and need an
+  environment from then on (`released`), so unarchiving one never lands on a machine no longer
+  its own. The dialog says the Space's work files on the machine will be deleted. It is audited as
+  `environment.mode.change`, and after the commit the socket closes (`environment-mode-changed`).
+- **The machine asks.** `POST /api/environments/self`, with its own credential, answers its mode
+  and Space as the Hub has them now; a dedicated host follows that, never what it remembers.
+
+**On the machine.** `t3 join` writes `mode: "dedicated"` and `spaceId` into `joined-hub.json`,
+after checking rootless Podman (only `T3CODE_SANDBOX_RUNTIME=process` skips that, for
+development, with a warning that it isolates nothing). A dedicated machine's `t3 serve`
+([DedicatedHost](../../apps/server/src/environments/DedicatedHost.ts)) serves `/health` as any
+joined server, but connects nothing of its own:
+
+- **One Sandbox per Space.** The Sandbox for Space S is `dedicated-<S>`, home
+  `<base dir>-sandboxes/dedicated-<S>`, run through the runtime a Hub runs a Space's Sandbox with
+  (`dedicatedRuntimeFromConfig`): Podman by default (rootless, with the Sandbox image), or the
+  process runtime when asked for. The container rules are the ones above: keep-id, no
+  capabilities, no new privileges, its own slirp4netns network without the host's loopback, only
+  its home mounted read-write, the credential and `joined-hub.json` written outside the home and
+  mounted read-only, and the Hub reached only through the UNIX socket proxy
+  (`/api/environment/connect`, `/api/git/…`, `/mcp`, 404 otherwise), which forwards to the Hub's
+  own address (`https://`, with SNI for a host name; plain `http://` only for a Hub on that
+  machine).
+- **A home is never reused.** At start, and whenever its Sandbox's server ends, the host asks the
+  Hub. Another Space: it deletes the old Space's home (and container) and makes a new one.
+  Personal: it deletes the home, moves the credential back to the personal secret, writes its
+  state as the Hub answered and serves as a personal machine from then on, without a restart.
+  Every other `dedicated-*` home on disk is deleted at start, so a change cut short leaves nothing.
+- **The Sandbox's server serves only its Space.** Its state names the Space; welcomed as
+  someone's personal machine or for another Space (`sandboxedServerRefuses`), it refuses and exits
+  with code 78, which is how its host learns to ask. A personal server whose credential the Hub
+  refuses as `not-sandboxed` (dedicated on the Hub since) moves the credential to the dedicated
+  secret, writes `mode: "dedicated"` and stops; restarted, it runs as above.
+- **Its network.** A container reaches every address of its host but the loopback, and rootless
+  Podman cannot firewall that. So, as a Hub runs Podman Sandboxes only when bound to loopback, a
+  dedicated machine runs its Sandbox only when nothing of the host listens beyond loopback
+  (`/proc/net/tcp*`, [hostExposure](../../apps/server/src/sandboxes/hostExposure.ts)), except its
+  own `/health` port and the ports the Owner names in `T3CODE_DEDICATED_HOST_PORTS` (for example
+  `22`). Otherwise `t3 status` names each `address:port` to bind to 127.0.0.1, and it runs
+  nothing. Other machines of its network stay reachable, as from a Hub's Sandbox.
+- **Lifecycle.** It starts and stops with the machine's server. When its server ends for any
+  other reason it starts again after 1, 2, 4… seconds (at most 30); more than three ends in ten
+  minutes leave it `failed` until `t3 serve` restarts. `t3 status` shows the Sandbox's state. There
+  is no idle stop: the machine is the Space's anyway.
+- **Limits.** It runs with the runtime's defaults: the Installation's Sandbox limits live on the
+  Hub, which does not send them to a machine it does not run. `DEDICATED_LIMITS` is where they go.

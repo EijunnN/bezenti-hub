@@ -17,6 +17,7 @@ import { base64UrlEncode } from "@t3tools/shared/base64Url";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   assertEnvironmentHubUrl,
+  environmentJoinApprovalLine,
   environmentJoinApproverLabel,
   environmentJoinApproverMatches,
   environmentJoinConfirmationPrompt,
@@ -39,12 +40,15 @@ import * as CliError from "effect/cli/CliError";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import {
+  DEDICATED_CREDENTIAL_SECRET,
   ENVIRONMENT_CREDENTIAL_SECRET,
   readJoinedHubState,
   removeJoinedHubState,
   writeJoinedHubState,
 } from "../environments/joinedHubState.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import { rootlessPodmanHere, sandboxImageHere } from "../sandboxes/sandboxRuntimeFromConfig.ts";
+import { joinModeRefusal } from "./joinMode.ts";
 import { authLocationFlags, type CliAuthLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
 /** As long as the Hub keeps the request. */
@@ -214,6 +218,32 @@ const readLine = Effect.callback<string>((resume) => {
 const decodeJoinError = Schema.decodeUnknownOption(Schema.Struct({ message: Schema.String }));
 
 /**
+ * A dedicated machine runs its work in a Sandbox container: rootless Podman must be here. Only a
+ * development machine asking for the process runtime (`T3CODE_SANDBOX_RUNTIME=process`) goes
+ * without, and it isolates nothing.
+ */
+const requirePodmanForDedicated = Effect.fn("cli.join.requirePodmanForDedicated")(function* () {
+  if (process.env.T3CODE_SANDBOX_RUNTIME === "process") {
+    yield* Console.warn(
+      "T3CODE_SANDBOX_RUNTIME=process: this dedicated machine will run its work as a plain process, isolating nothing. Use it for development only.",
+    );
+    return;
+  }
+  if (!(yield* rootlessPodmanHere())) {
+    return yield* userError(
+      "A dedicated machine runs its work in a Sandbox container, which needs rootless Podman here (`podman info` must say rootless). Install it and run `t3 join --dedicated` again.",
+    );
+  }
+  // Its container runs the Sandbox image, which the machine builds for itself.
+  const sandboxImage = yield* sandboxImageHere;
+  if (!sandboxImage.built) {
+    return yield* userError(
+      `A dedicated machine runs its work in the Sandbox image, and ${sandboxImage.image} is not on this machine. Build it here with \`t3 sandbox image build\` (or set T3CODE_SANDBOX_IMAGE to one that is), then run \`t3 join --dedicated\` again.`,
+    );
+  }
+});
+
+/**
  * The Hub says who approved this machine. Anyone who may add machines could have opened the link,
  * so nothing is registered until this machine accepts that User: `--owner` names whom it expects,
  * otherwise the person at the terminal (or the desktop app) answers.
@@ -225,30 +255,45 @@ const confirmApprover = Effect.fn("cli.join.confirmApprover")(function* (input: 
   readonly approval: Extract<EnvironmentJoinStatus, { readonly status: "awaiting-confirmation" }>;
   readonly owner: Option.Option<string>;
   readonly confirmOnStdin: boolean;
+  /** `--dedicated`: what this machine asked to be dedicated to. */
+  readonly dedicated: Option.Option<string>;
 }) {
   const approver = input.approval.approvedBy;
   const label = environmentJoinApproverLabel(approver);
+  const dedicatedTo = input.approval.dedicatedSpace?.name;
+  // The machine takes only the mode it asked for (`--dedicated` or not).
+  const refusal = joinModeRefusal({
+    asked: Option.getOrUndefined(input.dedicated),
+    dedicatedTo,
+    approverLabel: label,
+  });
+
   let accept: boolean;
-  if (Option.isSome(input.owner)) {
+  if (refusal !== undefined) {
+    accept = false;
+    yield* Console.log(environmentJoinApprovalLine(label, dedicatedTo));
+  } else if (Option.isSome(input.owner)) {
     accept = environmentJoinApproverMatches(input.owner.value, approver);
-    yield* Console.log(`Approved by ${label} as their personal machine.`);
+    yield* Console.log(environmentJoinApprovalLine(label, dedicatedTo));
   } else if (input.confirmOnStdin || process.stdin.isTTY === true) {
-    yield* Console.log(environmentJoinConfirmationPrompt(label));
+    yield* Console.log(environmentJoinConfirmationPrompt(label, dedicatedTo));
     accept = /^\s*y(es)?\s*$/i.test(yield* readLine);
   } else {
     accept = false;
-    yield* Console.log(`Approved by ${label} as their personal machine.`);
+    yield* Console.log(environmentJoinApprovalLine(label, dedicatedTo));
   }
   const answer = yield* callHub(new URL("/api/environments/join/confirm", input.hubUrl), {
     body: { requestId: input.requestId, codeVerifier: input.codeVerifier, accept },
   });
   if (!accept) {
     return yield* userError(
-      Option.isSome(input.owner)
-        ? `Not registered: ${label} approved it, not ${input.owner.value}. Run \`t3 join\` again and approve it with that account.`
-        : input.confirmOnStdin || process.stdin.isTTY === true
-          ? `Not registered: you did not accept ${label}. Run \`t3 join\` again.`
-          : `Not registered: without a terminal to ask, name whom you expect with --owner <sign-in name>. Run \`t3 join\` again.`,
+      refusal !== undefined
+        ? refusal
+        : Option.isSome(input.owner)
+          ? `Not registered: ${label} approved it, not ${input.owner.value}. Run \`t3 join\` again and approve it with that account.`
+          : input.confirmOnStdin || process.stdin.isTTY === true
+            ? `Not registered: you did not accept ${label}. Run \`t3 join\` again.`
+            : `Not registered: without a terminal to ask, name whom you expect with --owner <sign-in name>. Run \`t3 join\` again.`,
     );
   }
   const status = answer.status === 200 ? decodeStatus(answer.body) : Option.none();
@@ -269,6 +314,7 @@ const runJoin = (
     readonly force: boolean;
     readonly owner: Option.Option<string>;
     readonly confirmOnStdin: boolean;
+    readonly dedicated: Option.Option<string>;
   },
 ) =>
   runWithSecrets(flags, (config) =>
@@ -277,6 +323,7 @@ const runJoin = (
         try: () => assertEnvironmentHubUrl(flags.url),
         catch: (cause) => userError(cause instanceof Error ? cause.message : String(cause)),
       });
+      if (Option.isSome(flags.dedicated)) yield* requirePodmanForDedicated();
       const joined = yield* readJoinedHubState(config.joinedHubPath).pipe(Effect.result);
       if (joined._tag === "Success" && Option.isSome(joined.success)) {
         return yield* userError(
@@ -329,6 +376,7 @@ const runJoin = (
           hostname,
           redirectUri: listener.redirectUri,
           state,
+          ...(Option.isSome(flags.dedicated) ? { dedicatedSpace: flags.dedicated.value } : {}),
         } satisfies EnvironmentJoinStartRequest,
       });
       const request = decodeStarted(started.body);
@@ -373,6 +421,7 @@ const runJoin = (
               approval,
               owner: flags.owner,
               confirmOnStdin: flags.confirmOnStdin,
+              dedicated: flags.dedicated,
             })
           : approval;
       if (decision.status !== "approved") {
@@ -383,16 +432,28 @@ const runJoin = (
         );
       }
       const secrets = yield* ServerSecretStore.ServerSecretStore;
-      yield* secrets.set(ENVIRONMENT_CREDENTIAL_SECRET, new TextEncoder().encode(credential));
+      // A dedicated machine's credential is only for its Sandbox: the host's own server, as a
+      // personal one, never finds it.
+      yield* secrets.set(
+        decision.dedicatedSpace === undefined
+          ? ENVIRONMENT_CREDENTIAL_SECRET
+          : DEDICATED_CREDENTIAL_SECRET,
+        new TextEncoder().encode(credential),
+      );
       yield* writeJoinedHubState(config.joinedHubPath, {
         hubUrl: hubUrl.origin,
         hubEnvironmentId: decision.hubEnvironmentId,
         environmentId: decision.environmentId,
         name: decision.name,
         joinedAt: DateTime.formatIso(yield* DateTime.now),
+        ...(decision.dedicatedSpace === undefined
+          ? {}
+          : { mode: "dedicated", spaceId: decision.dedicatedSpace.id }),
       });
       yield* Console.log(
-        `Joined ${hubUrl.origin} as ${decision.name}. Start (or restart) this machine's server with \`t3 serve\` to connect; \`t3 status\` shows the connection.`,
+        decision.dedicatedSpace === undefined
+          ? `Joined ${hubUrl.origin} as ${decision.name}. Start (or restart) this machine's server with \`t3 serve\` to connect; \`t3 status\` shows the connection.`
+          : `Joined ${hubUrl.origin} as ${decision.name}, dedicated to ${decision.dedicatedSpace.name}. Start (or restart) this machine's server with \`t3 serve\`: it runs that Space's work in a Sandbox container, which connects to the Hub; \`t3 status\` shows it.`,
       );
     }).pipe(Effect.scoped),
   );
@@ -403,7 +464,10 @@ const runLeave = (flags: CliAuthLocationFlags) =>
       const secrets = yield* ServerSecretStore.ServerSecretStore;
       const forget = secrets
         .remove(ENVIRONMENT_CREDENTIAL_SECRET)
-        .pipe(Effect.andThen(removeJoinedHubState(config.joinedHubPath)));
+        .pipe(
+          Effect.andThen(secrets.remove(DEDICATED_CREDENTIAL_SECRET)),
+          Effect.andThen(removeJoinedHubState(config.joinedHubPath)),
+        );
       const joined = yield* readJoinedHubState(config.joinedHubPath).pipe(Effect.result);
       if (joined._tag === "Failure") {
         yield* forget;
@@ -415,9 +479,18 @@ const runLeave = (flags: CliAuthLocationFlags) =>
         return yield* Console.log("This machine is not joined to a Hub.");
       }
       const hub = joined.success.value;
-      const credential = yield* secrets
-        .get(ENVIRONMENT_CREDENTIAL_SECRET)
-        .pipe(Effect.map(Option.map((bytes) => new TextDecoder().decode(bytes))));
+      // A personal machine's credential, or a dedicated one's.
+      const credential = yield* Effect.all([
+        secrets.get(ENVIRONMENT_CREDENTIAL_SECRET),
+        secrets.get(DEDICATED_CREDENTIAL_SECRET),
+      ]).pipe(
+        Effect.map(([personal, dedicated]) =>
+          Option.map(
+            Option.orElse(personal, () => dedicated),
+            (bytes) => new TextDecoder().decode(bytes),
+          ),
+        ),
+      );
       const outcome = Option.isNone(credential)
         ? { status: 401 }
         : yield* callHub(new URL("/api/environments/leave", hub.hubUrl), {
@@ -456,6 +529,12 @@ export const joinCommand = Command.make("join", {
   owner: Flag.String("owner").pipe(
     Flag.withDescription(
       "The sign-in name (or user id) of whoever will approve it. Without a terminal to ask, the machine is registered only when the approver is this User.",
+    ),
+    Flag.optional,
+  ),
+  dedicated: Flag.String("dedicated").pipe(
+    Flag.withDescription(
+      "Ask to dedicate this machine to an Organization (its name or id), for all its Members, instead of joining it as your own. Only the Owner approves it; it needs rootless Podman, since its work runs in a Sandbox container.",
     ),
     Flag.optional,
   ),

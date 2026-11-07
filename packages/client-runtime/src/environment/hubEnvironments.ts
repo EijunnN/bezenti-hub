@@ -329,8 +329,9 @@ export function moveCandidates(
 }
 
 /**
- * The Environments a new Thread of the Space can be sent to: a Sandbox only runs its own Space's
- * Threads, so another Space's is left out. `spaceId` undefined (not known) leaves out every one.
+ * The Environments a new Thread of the Space can be sent to: a Sandbox, and a machine dedicated to
+ * a Space, only runs its own Space's Threads, so another Space's is left out. `spaceId` undefined
+ * (not known) leaves out every one.
  */
 export function placeableEnvironments(
   environments: ReadonlyArray<HubEnvironmentSummary>,
@@ -338,7 +339,8 @@ export function placeableEnvironments(
 ): ReadonlyArray<HubEnvironmentSummary> {
   return environments.filter(
     (environment) =>
-      environment.kind !== "sandbox" || (spaceId != null && environment.spaceId === spaceId),
+      (environment.kind !== "sandbox" && environment.mode !== "dedicated") ||
+      (spaceId != null && environment.spaceId === spaceId),
   );
 }
 
