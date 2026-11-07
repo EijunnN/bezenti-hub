@@ -79,7 +79,18 @@ export const approveJoin = Effect.fn(function* (
 export const joinStatus = (server: Server, requestId: string, codeVerifier = VERIFIER) =>
   server.request("/api/environments/join/status", { body: { requestId, codeVerifier } });
 
-/** The whole of `t3 join`, approved with a passkey: the machine's own credential and id. */
+/** `t3 join` accepts (or refuses) the approver the Hub named, which registers the machine. */
+export const confirmJoin = (
+  server: Server,
+  requestId: string,
+  accept: boolean,
+  codeVerifier = VERIFIER,
+) =>
+  server.request("/api/environments/join/confirm", {
+    body: { requestId, codeVerifier, accept },
+  });
+
+/** The whole of `t3 join`, approved with a passkey and confirmed: the machine's credential and id. */
 export const joinMachine = Effect.fn(function* (
   server: Server,
   authenticator: Authenticator,
@@ -92,6 +103,9 @@ export const joinMachine = Effect.fn(function* (
     reauth: yield* passkeyReauth(server, authenticator),
   });
   assert.equal(approved.status, 200);
+  assert.equal((yield* joinStatus(server, requestId)).body.status, "awaiting-confirmation");
+  const confirmed = yield* confirmJoin(server, requestId, true);
+  assert.equal(confirmed.status, 200);
   const status = yield* joinStatus(server, requestId);
   assert.equal(status.body.status, "approved");
   return {

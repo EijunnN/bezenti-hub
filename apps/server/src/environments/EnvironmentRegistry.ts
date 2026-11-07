@@ -18,7 +18,10 @@ import {
   type ProviderInstanceId,
   UserId,
 } from "@t3tools/contracts";
-import { environmentCredentialIssuer } from "@t3tools/shared/environmentJoin";
+import {
+  environmentCredentialIssuer,
+  REGISTER_OWN_REQUIRED_MESSAGE,
+} from "@t3tools/shared/environmentJoin";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
@@ -69,7 +72,7 @@ export class EnvironmentAccessDeniedError extends Schema.TaggedError<Environment
       case "user-inactive":
         return "This account is turned off.";
       case "missing-installation-permission":
-        return 'Adding your own machines needs the "Register their own Environments" permission. Ask this Hub\'s Owner for it.';
+        return REGISTER_OWN_REQUIRED_MESSAGE;
       default:
         return "Only the Owner manages this Hub's Environments.";
     }
@@ -350,8 +353,32 @@ const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => 0),
     );
 
-  const summaryOf = Effect.fn("EnvironmentRegistry.summaryOf")(function* (row: EnvironmentRow) {
+  /**
+   * One machine as a viewer sees it. The Hub machine's load, providers and running Threads are the
+   * whole Installation's, so only the Owner (`ownerView`) gets them.
+   */
+  const summaryOf = Effect.fn("EnvironmentRegistry.summaryOf")(function* (
+    row: EnvironmentRow,
+    ownerView = true,
+  ) {
     const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+    if (row.kind === "hub" && !ownerView) {
+      return {
+        id: EnvironmentId.make(row.environmentId),
+        name: row.name,
+        kind: row.kind,
+        mode: "personal",
+        ownerUserId: null,
+        status: "online",
+        registeredAt: row.registeredAt,
+        lastSeenAt: DateTime.formatIso(DateTime.makeUnsafe(nowMs)),
+        os: platform,
+        hostname: null,
+        providers: [],
+        resources: null,
+        runningThreadCount: 0,
+      } satisfies HubEnvironmentSummary;
+    }
     if (row.kind === "hub") {
       const snapshot = yield* HubMachineSnapshot;
       return {
@@ -411,7 +438,7 @@ const make = Effect.gen(function* () {
       const visible = rows.filter((row) =>
         AccessPolicy.isAllowed(decide(principal, "environment.view", resourceOf(row))),
       );
-      return yield* Effect.forEach(visible, summaryOf);
+      return yield* Effect.forEach(visible, (row) => summaryOf(row, principal.isOwner));
     },
   );
 

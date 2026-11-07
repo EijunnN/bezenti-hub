@@ -33,20 +33,28 @@ const STATUS_BADGES = {
 
 const gigabytes = (bytes: number) => `${(bytes / 1_000_000_000).toFixed(1)} GB`;
 
-function describe(environment: HubEnvironmentSummary, viewerUserId: string | undefined) {
+function describe(
+  environment: HubEnvironmentSummary,
+  viewer: { readonly userId: string | undefined; readonly isOwner: boolean },
+) {
   const parts = [
     environment.kind === "hub"
       ? "Runs the Hub"
-      : environment.ownerUserId === viewerUserId
-        ? "Your personal machine"
-        : "Another User's personal machine",
+      : viewer.userId === undefined
+        ? "Personal machine"
+        : environment.ownerUserId === viewer.userId
+          ? "Your personal machine"
+          : "Another User's personal machine",
     environment.os,
     environment.lastSeenAt === null
       ? "never connected"
       : environment.kind === "hub"
         ? null
         : `last seen ${new Date(environment.lastSeenAt).toLocaleString()}`,
-    `${environment.runningThreadCount} running Threads`,
+    // The Hub machine's Threads are everyone's: only the Owner gets that count.
+    environment.kind === "hub" && !viewer.isOwner
+      ? null
+      : `${environment.runningThreadCount} running Threads`,
   ];
   const resources = environment.resources;
   const providers = environment.providers
@@ -91,11 +99,13 @@ function describe(environment: HubEnvironmentSummary, viewerUserId: string | und
  */
 export function HubEnvironmentsSettings() {
   const session = usePrimarySessionState();
-  const signedIn = session.data?.authenticated === true && session.data.userId !== undefined;
+  const signedIn = session.data?.authenticated === true;
   const isOwner = signedIn && session.data?.isOwner === true;
-  const userId = session.data?.userId;
+  // Optional in the session: a session from before the Installation had an Owner names no User.
+  const userId = signedIn ? session.data?.userId : undefined;
   const manages = (environment: HubEnvironmentSummary) =>
-    isOwner || (environment.kind === "external" && environment.ownerUserId === userId);
+    isOwner ||
+    (userId !== undefined && environment.kind === "external" && environment.ownerUserId === userId);
   const [environments, setEnvironments] = useState<ReadonlyArray<HubEnvironmentSummary> | null>(
     null,
   );
@@ -158,7 +168,7 @@ export function HubEnvironmentsSettings() {
                 </Badge>
               </span>
             }
-            description={describe(environment, userId)}
+            description={describe(environment, { userId, isOwner })}
             control={
               manages(environment) ? (
                 <div className="flex gap-1">

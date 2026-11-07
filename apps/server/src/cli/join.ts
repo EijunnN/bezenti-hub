@@ -5,6 +5,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeHttp from "node:http";
 import type * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
+import * as NodeReadline from "node:readline";
 
 import {
   EnvironmentJoinStartResult,
@@ -16,6 +17,9 @@ import { base64UrlEncode } from "@t3tools/shared/base64Url";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   assertEnvironmentHubUrl,
+  environmentJoinApproverLabel,
+  environmentJoinApproverMatches,
+  environmentJoinConfirmationPrompt,
   environmentJoinPageUrl,
   formatEnvironmentCredential,
 } from "@t3tools/shared/environmentJoin";
@@ -192,12 +196,79 @@ const readLocalEnvironmentId = (path: string) =>
     Effect.orElseSucceed(() => ""),
   );
 
+/** One line typed on this terminal (or written by the desktop app); empty at end of input. */
+const readLine = Effect.callback<string>((resume) => {
+  const lines = NodeReadline.createInterface({ input: process.stdin, terminal: false });
+  let answered = false;
+  const answer = (line: string) => {
+    if (answered) return;
+    answered = true;
+    lines.close();
+    resume(Effect.succeed(line));
+  };
+  lines.once("line", answer);
+  lines.once("close", () => answer(""));
+  return Effect.sync(() => lines.close());
+});
+
+const decodeJoinError = Schema.decodeUnknownOption(Schema.Struct({ message: Schema.String }));
+
+/**
+ * The Hub says who approved this machine. Anyone who may add machines could have opened the link,
+ * so nothing is registered until this machine accepts that User: `--owner` names whom it expects,
+ * otherwise the person at the terminal (or the desktop app) answers.
+ */
+const confirmApprover = Effect.fn("cli.join.confirmApprover")(function* (input: {
+  readonly hubUrl: URL;
+  readonly requestId: string;
+  readonly codeVerifier: string;
+  readonly approval: Extract<EnvironmentJoinStatus, { readonly status: "awaiting-confirmation" }>;
+  readonly owner: Option.Option<string>;
+  readonly confirmOnStdin: boolean;
+}) {
+  const approver = input.approval.approvedBy;
+  const label = environmentJoinApproverLabel(approver);
+  let accept: boolean;
+  if (Option.isSome(input.owner)) {
+    accept = environmentJoinApproverMatches(input.owner.value, approver);
+    yield* Console.log(`Approved by ${label} as their personal machine.`);
+  } else if (input.confirmOnStdin || process.stdin.isTTY === true) {
+    yield* Console.log(environmentJoinConfirmationPrompt(label));
+    accept = /^\s*y(es)?\s*$/i.test(yield* readLine);
+  } else {
+    accept = false;
+    yield* Console.log(`Approved by ${label} as their personal machine.`);
+  }
+  const answer = yield* callHub(new URL("/api/environments/join/confirm", input.hubUrl), {
+    body: { requestId: input.requestId, codeVerifier: input.codeVerifier, accept },
+  });
+  if (!accept) {
+    return yield* userError(
+      Option.isSome(input.owner)
+        ? `Not registered: ${label} approved it, not ${input.owner.value}. Run \`t3 join\` again and approve it with that account.`
+        : input.confirmOnStdin || process.stdin.isTTY === true
+          ? `Not registered: you did not accept ${label}. Run \`t3 join\` again.`
+          : `Not registered: without a terminal to ask, name whom you expect with --owner <sign-in name>. Run \`t3 join\` again.`,
+    );
+  }
+  const status = answer.status === 200 ? decodeStatus(answer.body) : Option.none();
+  if (Option.isNone(status)) {
+    const refusal = Option.getOrUndefined(decodeJoinError(answer.body))?.message;
+    return yield* userError(
+      `The Hub did not register the machine (HTTP ${answer.status})${refusal === undefined ? "." : `: ${refusal}`}`,
+    );
+  }
+  return status.value;
+});
+
 const runJoin = (
   flags: CliAuthLocationFlags & {
     readonly url: string;
     readonly name: Option.Option<string>;
     readonly noBrowser: boolean;
     readonly force: boolean;
+    readonly owner: Option.Option<string>;
+    readonly confirmOnStdin: boolean;
   },
 ) =>
   runWithSecrets(flags, (config) =>
@@ -266,7 +337,7 @@ const runJoin = (
       }
       const page = environmentJoinPageUrl(hubUrl.toString(), request.value.requestId);
       yield* Console.log(
-        `Approve this machine on the Hub as its Owner, from any device. Open:\n  ${page}\nWaiting for approval…`,
+        `Approve this machine on the Hub with your account, from any device. Open:\n  ${page}\nWaiting for approval…`,
       );
       if (!flags.noBrowser) yield* openInBrowser(page, platform);
 
@@ -289,10 +360,21 @@ const runJoin = (
           );
         }
       });
-      const decision = yield* waitForDecision.pipe(
+      const approval = yield* waitForDecision.pipe(
         Effect.timeoutOption(APPROVAL_TIMEOUT_MS),
-        Effect.map(Option.getOrElse(() => ({ status: "expired" as const }))),
+        Effect.map(Option.getOrElse((): EnvironmentJoinStatus => ({ status: "expired" }))),
       );
+      const decision =
+        approval.status === "awaiting-confirmation"
+          ? yield* confirmApprover({
+              hubUrl,
+              requestId: request.value.requestId,
+              codeVerifier,
+              approval,
+              owner: flags.owner,
+              confirmOnStdin: flags.confirmOnStdin,
+            })
+          : approval;
       if (decision.status !== "approved") {
         return yield* userError(
           decision.status === "denied"
@@ -371,9 +453,21 @@ export const joinCommand = Command.make("join", {
     ),
     Flag.withDefault(false),
   ),
+  owner: Flag.String("owner").pipe(
+    Flag.withDescription(
+      "The sign-in name (or user id) of whoever will approve it. Without a terminal to ask, the machine is registered only when the approver is this User.",
+    ),
+    Flag.optional,
+  ),
+  confirmOnStdin: Flag.Boolean("confirm-on-stdin").pipe(
+    Flag.withDescription(
+      "Ask whether to accept the approver on standard input even without a terminal (used by the desktop app).",
+    ),
+    Flag.withDefault(false),
+  ),
 }).pipe(
   Command.withDescription(
-    "Join this machine to a Hub as one of your Environments. The Hub's Owner approves it in a browser, on any device.",
+    "Join this machine to a Hub as one of your Environments. You approve it in a browser, on any device, then confirm here who approved it.",
   ),
   Command.withHandler((flags) => runJoin(flags)),
 );

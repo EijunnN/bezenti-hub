@@ -25,6 +25,13 @@ export const joinAsEnvironment = makeIpcMethod({
   }),
 });
 
+export const confirmJoinAsEnvironment = makeIpcMethod({
+  channel: IpcChannels.CONFIRM_JOIN_AS_ENVIRONMENT_CHANNEL,
+  payload: Schema.Boolean,
+  result: DesktopJoinedEnvironmentStateSchema,
+  handler: (accept) => service.pipe(Effect.flatMap((joined) => joined.confirmJoin(accept))),
+});
+
 export const cancelJoinAsEnvironment = makeIpcMethod({
   channel: IpcChannels.CANCEL_JOIN_AS_ENVIRONMENT_CHANNEL,
   payload: Schema.Void,

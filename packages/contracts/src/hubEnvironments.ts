@@ -106,19 +106,24 @@ export type EnvironmentJoinStartResult = typeof EnvironmentJoinStartResult.Type;
 export const EnvironmentJoinRequestRef = Schema.Struct({ requestId: TrimmedNonEmptyString });
 export type EnvironmentJoinRequestRef = typeof EnvironmentJoinRequestRef.Type;
 
-/** What «Register this machine» shows. The labels come from `t3 join` on the machine. */
+/**
+ * What «Register this machine» shows. The labels come from `t3 join` on the machine, and only a
+ * viewer who may approve gets them.
+ */
 export const EnvironmentJoinRequestView = Schema.Struct({
   requestId: TrimmedNonEmptyString,
-  name: HubEnvironmentName,
-  os: TrimmedNonEmptyString,
-  hostname: TrimmedNonEmptyString,
-  requestedAt: IsoDateTime,
-  status: Schema.Literals(["pending", "approved", "denied"]),
+  name: Schema.optionalKey(HubEnvironmentName),
+  os: Schema.optionalKey(TrimmedNonEmptyString),
+  hostname: Schema.optionalKey(TrimmedNonEmptyString),
+  requestedAt: Schema.optionalKey(IsoDateTime),
+  status: Schema.Literals(["pending", "awaiting-confirmation", "approved", "denied"]),
   /**
    * Whether the browser's signed-in User may approve it (the Owner, or `environments.registerOwn`);
-   * absent when nobody is signed in. Approving checks again.
+   * absent when that is unknown, as when nobody is signed in. Approving checks again.
    */
   viewerMayApprove: Schema.optionalKey(Schema.Boolean),
+  /** Why they may not, when they may not. */
+  denialMessage: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type EnvironmentJoinRequestView = typeof EnvironmentJoinRequestView.Type;
 
@@ -142,9 +147,35 @@ export const EnvironmentJoinStatusRequest = Schema.Struct({
 });
 export type EnvironmentJoinStatusRequest = typeof EnvironmentJoinStatusRequest.Type;
 
-/** Asked again until it is not `pending`; the same approval answers every time. */
+/** Who approved a machine joining, so `t3 join` can check it is whom it expected. */
+export const EnvironmentJoinApprover = Schema.Struct({
+  userId: UserId,
+  displayName: TrimmedNonEmptyString,
+  /** Null for a User who signs in with a passkey only; they are named by `userId`. */
+  loginName: Schema.NullOr(Schema.String),
+});
+export type EnvironmentJoinApprover = typeof EnvironmentJoinApprover.Type;
+
+/** `t3 join` accepts the approver it was told about, registering the machine, or refuses them. */
+export const EnvironmentJoinConfirmRequest = Schema.Struct({
+  requestId: TrimmedNonEmptyString,
+  codeVerifier: TrimmedNonEmptyString,
+  accept: Schema.Boolean,
+});
+export type EnvironmentJoinConfirmRequest = typeof EnvironmentJoinConfirmRequest.Type;
+
+/**
+ * Asked again until it is neither `pending` nor `awaiting-confirmation`; the same approval answers
+ * every time. Once approved on the page the machine is told by whom and confirms (or refuses)
+ * before anything is registered.
+ */
 export const EnvironmentJoinStatus = Schema.Union([
   Schema.Struct({ status: Schema.Literals(["pending", "denied", "expired"]) }),
+  Schema.Struct({
+    status: Schema.Literal("awaiting-confirmation"),
+    name: HubEnvironmentName,
+    approvedBy: EnvironmentJoinApprover,
+  }),
   Schema.Struct({
     status: Schema.Literal("approved"),
     environmentId: EnvironmentId,

@@ -154,16 +154,29 @@ credential never travels. The Owner, or a User with the `environments.registerOw
 Installation permission, approves on «Register this machine», from any device,
 and the machine becomes the approver's personal one. The policy asks
 `environment.register` first (`missing-installation-permission` otherwise, whose
-message names the permission; the page learns it beforehand from the request's
-`viewerMayApprove`), so the proof of a User without the right is never checked;
-then `UserDirectory.confirmStrongFactor` needs a
+message names the permission and is the one `REGISTER_OWN_REQUIRED_MESSAGE` the
+page also gets as the request's `denialMessage`; the page learns it beforehand
+from `viewerMayApprove`, and only a viewer who may approve sees the machine's
+name, hostname, OS and time), so the proof of a User without the right is never
+checked; then `UserDirectory.confirmStrongFactor` needs a
 fresh passkey assertion or a password _with_ a TOTP code in the same request, so
-a stolen browser session cannot add a machine. The registry asks the policy again
-in the transaction that writes the row, so a permission revoked mid-approval adds
-nothing. Approval writes the row and its `environment.register` entry, whose
-actor is the approver; the machine asks the outcome with its verifier
-until then, and asking again after a lost answer gets the same machine, never a
-second one. A browser on the machine itself is also sent to `t3 join`'s loopback
+a stolen browser session cannot add a machine. Only such a User denies a request,
+and only while it is pending.
+
+Anyone allowed to add machines who gets hold of the link could approve someone
+else's machine as their own, so approving registers nothing: the request becomes
+`awaiting-confirmation` and the machine's status answer names the approver
+(display name, sign-in name, id). `t3 join` asks `Approved by Grace (grace) as
+their personal machine. Register it as theirs? [y/N]` on a terminal; without
+one it registers only with `--owner <sign-in name or id>` naming that approver,
+and refuses otherwise. The desktop app passes `--confirm-on-stdin` and shows the
+question with «Register as theirs» and «Not me». `POST /api/environments/join/confirm`
+(with the verifier) accepts, which writes the row and its `environment.register`
+entry, whose actor is the approver, or refuses, which ends the request. The
+registry asks the policy again in the transaction that writes the row, so a
+permission revoked between the approval and the confirmation adds nothing. The
+machine asks the outcome with its verifier until then, and asking again after a
+lost answer gets the same machine, never a second one. A browser on the machine itself is also sent to `t3 join`'s loopback
 port (as app sign-in does), only as a nudge to ask now. The PKCE store is shared
 with app sign-in ([pkceGrants](../../apps/server/src/auth/pkceGrants.ts)).
 
@@ -181,7 +194,9 @@ the credential check refuses a machine whose owner is off in any case. Revoking
 `environments.registerOwn` only stops new approvals: the permission gates
 joining, not having, so machines already joined keep working, and their owner
 still sees, renames and removes them in Settings (the Owner sees and manages
-every one, but uses only their own).
+every one, but uses only their own). The Hub machine's load, providers and
+running Threads are the whole Installation's, so only the Owner's list carries
+them; everyone else gets the row without them.
 
 The socket ([connectRoute](../../apps/server/src/environments/connectRoute.ts))
 upgrades before it checks the credential, so every refusal reaches the machine

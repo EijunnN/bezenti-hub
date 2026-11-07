@@ -41,7 +41,7 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
       ([loaded, loadedAccount]) => {
         if (!current) return;
         setRequest(loaded);
-        setName(loaded.name);
+        setName(loaded.name ?? "");
         setAccount(loadedAccount);
         setStepUp(emptyStepUp(loadedAccount));
       },
@@ -84,25 +84,45 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
       />
     );
   }
-  if (request !== null && request.status === "pending" && request.viewerMayApprove === false) {
-    return ended(
-      "You need permission to add machines",
-      'Adding your own machines needs the "Register their own Environments" permission. Ask this Hub\'s Owner for it, then open this link again.',
-    );
-  }
   if (outcome === "approved") {
     return ended(
-      "Machine registered",
-      "Return to its terminal: `t3 join` finishes there. You can close this tab.",
+      "Approved",
+      "Return to the machine's terminal and confirm there: `t3 join` registers it once you do. You can close this tab.",
     );
   }
   if (outcome === "cancelled") {
     return ended("Registration cancelled", "The machine was not added. You can close this tab.");
   }
+  if (request !== null && request.status === "pending" && request.viewerMayApprove === false) {
+    return ended(
+      "You need permission to add machines",
+      `${request.denialMessage ?? "You may not add machines to this Hub."} Then open this link again.`,
+    );
+  }
+  // Signed in, yet the Hub could not tell who this is: never offer the form on a guess.
+  if (request !== null && request.status === "pending" && request.viewerMayApprove !== true) {
+    return (
+      <SignInSurface
+        onSignedIn={() => window.location.reload()}
+        description={
+          <>
+            Sign in again to add your machine to{" "}
+            <span className="font-medium text-foreground">{window.location.host}</span>.
+          </>
+        }
+      />
+    );
+  }
   if (request !== null && request.status !== "pending") {
     return ended(
-      request.status === "approved" ? "Machine registered" : "Registration cancelled",
-      "This registration was already decided. You can close this tab.",
+      request.status === "approved"
+        ? "Machine registered"
+        : request.status === "awaiting-confirmation"
+          ? "Approved"
+          : "Registration cancelled",
+      request.status === "awaiting-confirmation"
+        ? "This registration was approved and waits for the machine to confirm. You can close this tab."
+        : "This registration was already decided. You can close this tab.",
     );
   }
 
@@ -163,7 +183,11 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
             <dt className="text-muted-foreground">Hostname</dt>
             <dd>{request.hostname}</dd>
             <dt className="text-muted-foreground">Requested</dt>
-            <dd>{new Date(request.requestedAt).toLocaleString()}</dd>
+            <dd>
+              {request.requestedAt === undefined
+                ? null
+                : new Date(request.requestedAt).toLocaleString()}
+            </dd>
           </dl>
           <StepUpFields account={account} disabled={pending} value={stepUp} onChange={setStepUp} />
           <div className="flex flex-wrap gap-2">

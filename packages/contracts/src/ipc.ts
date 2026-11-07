@@ -472,9 +472,16 @@ export const DesktopJoinedEnvironmentStateSchema = Schema.Struct({
       detail: Schema.NullOr(Schema.String),
     }),
   ),
-  /** A `t3 join` in progress: the approval page opens in the system browser. */
+  /**
+   * A `t3 join` in progress: the approval page opens in the system browser. Once someone approves
+   * it, `approvedBy` names them («Grace (grace)») and nothing registers until the User accepts.
+   */
   joining: Schema.NullOr(
-    Schema.Struct({ hubUrl: Schema.String, approvalUrl: Schema.NullOr(Schema.String) }),
+    Schema.Struct({
+      hubUrl: Schema.String,
+      approvalUrl: Schema.NullOr(Schema.String),
+      approvedBy: Schema.NullOr(Schema.String),
+    }),
   ),
   /** What the last join, start or leave said when it did not go as asked. */
   error: Schema.NullOr(Schema.String),
@@ -1017,6 +1024,8 @@ export interface DesktopBridge {
     readonly hubUrl: string;
     readonly name?: string;
   }) => Promise<DesktopJoinedEnvironmentState>;
+  /** Accepts (or refuses) the User who approved this computer: it registers as theirs only then. */
+  confirmJoinAsEnvironment: (accept: boolean) => Promise<DesktopJoinedEnvironmentState>;
   cancelJoinAsEnvironment: () => Promise<DesktopJoinedEnvironmentState>;
   setJoinedEnvironmentEnabled: (enabled: boolean) => Promise<DesktopJoinedEnvironmentState>;
   setJoinedEnvironmentKeepRunning: (keep: boolean) => Promise<DesktopJoinedEnvironmentState>;

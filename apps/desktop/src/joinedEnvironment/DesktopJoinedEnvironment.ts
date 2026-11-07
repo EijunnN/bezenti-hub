@@ -7,6 +7,7 @@
 import * as NodeOS from "node:os";
 
 import type { DesktopJoinedEnvironmentState } from "@t3tools/contracts";
+import { readEnvironmentJoinConfirmationPrompt } from "@t3tools/shared/environmentJoin";
 import * as NetService from "@t3tools/shared/Net";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -18,6 +19,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -76,6 +78,10 @@ export class DesktopJoinedEnvironment extends Context.Service<
       readonly hubUrl: string;
       readonly name?: string;
     }) => Effect.Effect<State, DesktopJoinedEnvironmentError>;
+    /**
+     * Once the Hub says who approved this computer, accept them (it registers as theirs) or not.
+     */
+    readonly confirmJoin: (accept: boolean) => Effect.Effect<State, DesktopJoinedEnvironmentError>;
     readonly cancelJoin: Effect.Effect<State>;
     readonly setEnabled: (enabled: boolean) => Effect.Effect<State, DesktopJoinedEnvironmentError>;
     readonly setKeepRunning: (keep: boolean) => Effect.Effect<State, DesktopJoinedEnvironmentError>;
@@ -178,13 +184,22 @@ const tailOf = (lines: ReadonlyArray<string>) =>
     .slice(-ERROR_TAIL_LINES)
     .join("\n");
 
-/** One CLI run: its output lines as they come, then its exit code. */
+/** One CLI run: its output lines as they come, then its exit code. `input` is written to it. */
 const runCli = Effect.fn("desktop.joinedEnvironment.runCli")(function* (
   command: ChildProcess.Command,
   onLine: (line: string) => Effect.Effect<void> = () => Effect.void,
+  input?: Stream.Stream<string>,
 ) {
   const lines: Array<string> = [];
   const handle = yield* command;
+  if (input !== undefined) {
+    yield* input.pipe(
+      Stream.encodeText,
+      Stream.run(handle.stdin),
+      Effect.ignore,
+      Effect.forkScoped,
+    );
+  }
   yield* handle.all.pipe(
     Stream.decodeText(),
     Stream.splitLines,
@@ -217,6 +232,10 @@ export const make = Effect.fn("desktop.joinedEnvironment.make")(function* (
     Option.none<{
       readonly hubUrl: string;
       readonly approvalUrl: string | null;
+      /** Who approved it on the Hub, once `t3 join` asks whether to accept them. */
+      readonly approvedBy: string | null;
+      /** Answers for `t3 join`'s question, written to its input. */
+      readonly answers: Queue.Queue<string>;
       readonly fiber: Fiber.Fiber<void> | null;
     }>(),
   );
@@ -299,7 +318,7 @@ export const make = Effect.fn("desktop.joinedEnvironment.make")(function* (
       connection: snapshot.ready ? yield* readConnection : null,
       joining: Option.match(pending, {
         onNone: () => null,
-        onSome: ({ hubUrl, approvalUrl }) => ({ hubUrl, approvalUrl }),
+        onSome: ({ hubUrl, approvalUrl, approvedBy }) => ({ hubUrl, approvalUrl, approvedBy }),
       }),
       error: (process === "failed" ? failure : null) ?? (yield* Ref.get(lastError)),
       baseDir: launch.baseDir,
@@ -356,6 +375,7 @@ export const make = Effect.fn("desktop.joinedEnvironment.make")(function* (
     readonly hubUrl: string;
     readonly hubOrigin: string;
     readonly name?: string;
+    readonly answers: Queue.Queue<string>;
   }) {
     const name = input.name?.trim() || NodeOS.hostname() || "This computer";
     const result = yield* runCli(
@@ -365,10 +385,19 @@ export const make = Effect.fn("desktop.joinedEnvironment.make")(function* (
         "--base-dir",
         launch.baseDir,
         "--no-browser",
+        // Whoever approved it is shown here and accepted (or not) before anything registers.
+        "--confirm-on-stdin",
         "--name",
         name.slice(0, 64),
       ]),
       (line) => {
+        const approvedBy = readEnvironmentJoinConfirmationPrompt(line.replace(ANSI, ""));
+        if (approvedBy !== null) {
+          return Ref.update(
+            joining,
+            Option.map((pending) => ({ ...pending, approvedBy })),
+          );
+        }
         const approvalUrl = approvalLinkIn(line, input.hubOrigin);
         if (approvalUrl === null) return Effect.void;
         return Ref.modify(joining, (current) => {
@@ -381,6 +410,7 @@ export const make = Effect.fn("desktop.joinedEnvironment.make")(function* (
           Effect.asVoid,
         );
       },
+      Stream.fromQueue(input.answers),
     ).pipe(provideSpawner);
     if (result.exitCode !== 0) {
       yield* Ref.set(lastError, tailOf(result.lines) || `t3 join ended with ${result.exitCode}.`);
@@ -411,9 +441,19 @@ export const make = Effect.fn("desktop.joinedEnvironment.make")(function* (
       });
     }
     const hubOrigin = new URL(input.hubUrl).origin;
+    const answers = yield* Queue.unbounded<string>();
     yield* Ref.set(lastError, null);
-    yield* Ref.set(joining, Option.some({ hubUrl: input.hubUrl, approvalUrl: null, fiber: null }));
-    const fiber = yield* runJoin({ ...input, hubOrigin }).pipe(
+    yield* Ref.set(
+      joining,
+      Option.some({
+        hubUrl: input.hubUrl,
+        approvalUrl: null,
+        approvedBy: null,
+        answers,
+        fiber: null,
+      }),
+    );
+    const fiber = yield* runJoin({ ...input, hubOrigin, answers }).pipe(
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)
           ? Effect.void
@@ -428,6 +468,25 @@ export const make = Effect.fn("desktop.joinedEnvironment.make")(function* (
     yield* Ref.update(
       joining,
       Option.map((pending) => ({ ...pending, fiber })),
+    );
+    return yield* state;
+  });
+
+  /** The User answers `t3 join`'s question: register this computer as the approver's, or not. */
+  const confirmJoin: DesktopJoinedEnvironment["Service"]["confirmJoin"] = Effect.fn(
+    "desktop.joinedEnvironment.confirmJoin",
+  )(function* (accept) {
+    const pending = Option.getOrNull(yield* Ref.get(joining));
+    if (pending === null || pending.approvedBy === null) {
+      return yield* new DesktopJoinedEnvironmentError({
+        detail: "Nobody has approved this computer on the Hub yet.",
+      });
+    }
+    yield* Queue.offer(pending.answers, accept ? "y\n" : "n\n");
+    // Asked once: the answer is on its way.
+    yield* Ref.update(
+      joining,
+      Option.map((current) => ({ ...current, approvedBy: null })),
     );
     return yield* state;
   });
@@ -507,6 +566,7 @@ export const make = Effect.fn("desktop.joinedEnvironment.make")(function* (
   return DesktopJoinedEnvironment.of({
     state,
     join,
+    confirmJoin,
     cancelJoin,
     setEnabled,
     setKeepRunning,
