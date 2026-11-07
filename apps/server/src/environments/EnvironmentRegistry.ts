@@ -13,6 +13,7 @@ import {
   type EnvironmentHeartbeatFrame,
   type EnvironmentHelloFrame,
   HUB_MACHINE_ENVIRONMENT_ID,
+  type EnvironmentSelfResult,
   type HubEnvironmentDedicatedSpace,
   type HubEnvironmentSummary,
   previewThreadPlacement,
@@ -21,7 +22,7 @@ import {
   sandboxEnvironmentIdOf,
   sandboxEnvironmentName,
   SpaceId,
-  type ThreadId,
+  ThreadId,
   UserId,
 } from "@t3tools/contracts";
 import {
@@ -210,6 +211,12 @@ interface EnvironmentRow {
 }
 
 type PolicyRow = Pick<EnvironmentRow, "kind" | "mode" | "ownerUserId" | "spaceId">;
+
+/** Threads a machine no longer serves since its mode or Space changed. */
+export interface ReleasedThreads {
+  readonly environmentId: EnvironmentId;
+  readonly threadIds: ReadonlyArray<ThreadId>;
+}
 
 /** A Sandbox or a dedicated machine: it belongs to its Space and runs only that Space's Threads. */
 const isSpaceBound = (row: Pick<PolicyRow, "kind" | "mode">) =>
@@ -430,6 +437,15 @@ export class EnvironmentRegistry extends Context.Service<
      */
     readonly removed: Stream.Stream<EnvironmentId>;
     /**
+     * Archived Threads left on a machine whose mode or Space changed: they need an environment
+     * from now on, as on a removed machine.
+     */
+    readonly released: Stream.Stream<ReleasedThreads>;
+    /** How the Hub uses the machine a credential names now; None when it is refused. */
+    readonly selfOf: (
+      credential: string | undefined,
+    ) => Effect.Effect<Option.Option<EnvironmentSelfResult>, EnvironmentStorageError>;
+    /**
      * «Try again» on a Sandbox that failed to start: a User who may run Threads in its Space starts
      * it. Answers at once with it `starting`; how the start ends shows in the list.
      */
@@ -470,6 +486,7 @@ const make = Effect.gen(function* () {
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const platform = yield* HostProcess.Platform;
   const removals = yield* PubSub.unbounded<EnvironmentId>();
+  const releases = yield* PubSub.unbounded<ReleasedThreads>();
 
   const sha256 = (value: string) =>
     digester.digest(Digest.sha256, new TextEncoder().encode(value)).pipe(
@@ -811,7 +828,8 @@ const make = Effect.gen(function* () {
     if (
       Option.isNone(space) ||
       space.value.resource.kind !== "organization" ||
-      space.value.resource.archived
+      space.value.resource.archived ||
+      space.value.resource.frozen
     ) {
       return yield* new EnvironmentAccessDeniedError({ reason: "not-an-organization" });
     }
@@ -843,16 +861,16 @@ const make = Effect.gen(function* () {
           }
           const mode = dedicatedSpaceId === undefined ? "personal" : "dedicated";
           const now = yield* nowIso;
-          // A dedicated machine keeps the Owner who dedicated it as its owner, on record and for
-          // its credential; the policy gives them nothing more for it.
+          // A dedicated machine is the Installation's, owned by nobody: who dedicated it is on
+          // record in `credential_issued_by` and the audit log only.
           yield* sql`
           INSERT INTO environments (
             environment_id, name, kind, mode, owner_user_id, space_id, credential_hash,
             credential_issued_at, credential_issued_by, registered_at, last_os, last_hostname
           ) VALUES (
-            ${environmentId}, ${name}, 'external', ${mode}, ${approvedBy},
-            ${dedicatedSpaceId ?? null}, ${credentialHash}, ${now}, ${approvedBy}, ${now}, ${os},
-            ${hostname}
+            ${environmentId}, ${name}, 'external', ${mode},
+            ${dedicatedSpaceId === undefined ? approvedBy : null}, ${dedicatedSpaceId ?? null},
+            ${credentialHash}, ${now}, ${approvedBy}, ${now}, ${os}, ${hostname}
           )
         `;
           yield* audit
@@ -877,10 +895,10 @@ const make = Effect.gen(function* () {
 
   /** Threads that have the machine as their Active environment, newest first. */
   const threadsOn = (environmentId: EnvironmentId) =>
-    sql<{ readonly threadId: string; readonly title: string }>`
-      SELECT thread_id AS "threadId", title FROM orchestration_v2_projection_threads
+    sql<{ readonly threadId: string; readonly title: string; readonly archived: number }>`
+      SELECT thread_id AS "threadId", title, archived_at IS NOT NULL AS archived
+      FROM orchestration_v2_projection_threads
       WHERE active_environment_id = ${environmentId} AND deleted_at IS NULL
-        AND archived_at IS NULL
       ORDER BY updated_at DESC, thread_id
     `.pipe(Effect.mapError(storageError));
 
@@ -910,17 +928,21 @@ const make = Effect.gen(function* () {
           }
           const fromSpaceId = row.mode === "dedicated" ? row.spaceId : null;
           if (row.mode === mode && fromSpaceId === (toSpaceId ?? null)) {
-            return { row, changed: false };
+            return { row, changed: false, archived: [] as Array<ThreadId> };
           }
           const threads = yield* threadsOn(environmentId);
-          if (threads.length > 0) {
-            return yield* new EnvironmentModeChangeRefusedError({ threads });
+          // Active Threads move first; archived ones would wake on a machine no longer theirs, so
+          // they need an environment from now on instead.
+          const active = threads.filter((thread) => thread.archived !== 1);
+          if (active.length > 0) {
+            return yield* new EnvironmentModeChangeRefusedError({
+              threads: active.map(({ threadId, title }) => ({ threadId, title })),
+            });
           }
-          // The machine becomes the actor's: theirs alone when personal, theirs on record when
-          // dedicated, so no User turned off later takes a Space's machine with them.
+          // Personal: the actor's own. Dedicated: the Installation's, owned by nobody.
           yield* sql`
             UPDATE environments SET mode = ${mode}, space_id = ${toSpaceId ?? null},
-              owner_user_id = ${actorUserId}
+              owner_user_id = ${mode === "personal" ? actorUserId : null}
             WHERE environment_id = ${environmentId} AND revoked_at IS NULL
           `;
           yield* audit
@@ -940,14 +962,23 @@ const make = Effect.gen(function* () {
             ...row,
             mode,
             spaceId: toSpaceId ?? null,
-            ownerUserId: actorUserId,
+            ownerUserId: mode === "personal" ? actorUserId : null,
           };
-          return { row: next, changed: true };
+          return {
+            row: next,
+            changed: true,
+            archived: threads.map(({ threadId }) => ThreadId.make(threadId)),
+          };
         }),
       )
       .pipe(Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }));
     // After the commit: the machine reconnects, and its welcome names the new mode.
-    if (changed.changed) yield* connections.close(environmentId, "environment-mode-changed");
+    if (changed.changed) {
+      yield* connections.close(environmentId, "environment-mode-changed");
+      if (changed.archived.length > 0) {
+        yield* PubSub.publish(releases, { environmentId, threadIds: changed.archived });
+      }
+    }
     return yield* summaryOf(changed.row);
   });
 
@@ -994,16 +1025,22 @@ const make = Effect.gen(function* () {
       return { _tag: "refused", reason: "credential-other-hub" } as const;
     }
     const row = yield* findByCredential(credential);
-    // A machine has its owner; a Sandbox, its Space; a dedicated machine, both.
+    // A personal machine has its owner; a Sandbox and a dedicated machine, their Space.
     if (
       row === undefined ||
-      (row.kind !== "sandbox" && row.ownerUserId === null) ||
-      (isSpaceBound(row) && row.spaceId === null)
+      (isSpaceBound(row) ? row.spaceId === null : row.ownerUserId === null)
     ) {
       return { _tag: "refused", reason: "credential-unknown" } as const;
     }
     if (row.revokedAt !== null) return { _tag: "refused", reason: "credential-revoked" } as const;
     if (row.ownerInactive === 1) return { _tag: "refused", reason: "owner-inactive" } as const;
+    // A dedicated machine whose Space was deleted works for nobody until the Owner acts.
+    if (row.mode === "dedicated" && row.spaceId !== null) {
+      const space = yield* spaces
+        .spaceById(SpaceId.make(row.spaceId))
+        .pipe(Effect.mapError(storageError));
+      if (Option.isNone(space)) return { _tag: "refused", reason: "space-missing" } as const;
+    }
     // A dedicated machine works for its Space, never as the Owner who dedicated it.
     const spaceId = isSpaceBound(row) && row.spaceId !== null ? SpaceId.make(row.spaceId) : null;
     return {
@@ -1053,10 +1090,14 @@ const make = Effect.gen(function* () {
         .withTransaction(
           Effect.gen(function* () {
             const row = yield* liveRow(check.environmentId);
-            if (row === undefined || row.ownerUserId === null) return false;
-            const ownerUserId = UserId.make(row.ownerUserId);
-            // Run on the machine by its owner, through the credential the Owner approved.
-            yield* revoke({ row, actor: { source: "cli", userId: ownerUserId }, via: "leave" });
+            if (row === undefined) return false;
+            // Run on the machine, with its own credential: by its owner, or by the machine itself
+            // for a dedicated one, which nobody owns.
+            const actor: AuditLog.AuditActor =
+              row.ownerUserId === null
+                ? AuditLog.cliActor
+                : { source: "cli", userId: UserId.make(row.ownerUserId) };
+            yield* revoke({ row, actor, via: "leave" });
             return true;
           }),
         )
@@ -1252,6 +1293,17 @@ const make = Effect.gen(function* () {
     recordHeartbeat,
     leave,
     removed: Stream.fromPubSub(removals),
+    released: Stream.fromPubSub(releases),
+    selfOf: Effect.fn("EnvironmentRegistry.selfOf")(function* (credential) {
+      const check = yield* checkCredential(credential);
+      if (check._tag === "refused") return Option.none();
+      return Option.some({
+        environmentId: check.environmentId,
+        name: check.name,
+        mode: check.mode,
+        spaceId: check.spaceId,
+      });
+    }),
     stopSandbox: Effect.fn("EnvironmentRegistry.stopSandbox")(function* (input) {
       if (Option.isNone(sandboxes)) return;
       yield* sandboxes.value.stop(input).pipe(Effect.mapError(storageError));

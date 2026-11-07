@@ -104,6 +104,7 @@ import Migration0097 from "./Migrations/097_CheckpointUploads.ts";
 import Migration0099 from "./Migrations/099_MoveHandoffs.ts";
 import Migration0100 from "./Migrations/100_Sandboxes.ts";
 import Migration0102 from "./Migrations/102_RemovePeerLinks.ts";
+import Migration0106 from "./Migrations/106_DedicatedMachines.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -209,6 +210,7 @@ const migrationEntries = [
   [100, "Sandboxes", Migration0100],
   // 101 is unused.
   [102, "RemovePeerLinks", Migration0102],
+  [106, "DedicatedMachines", Migration0106],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

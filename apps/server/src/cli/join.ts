@@ -47,6 +47,7 @@ import {
 } from "../environments/joinedHubState.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { rootlessPodmanHere } from "../sandboxes/sandboxRuntimeFromConfig.ts";
+import { joinModeRefusal } from "./joinMode.ts";
 import { authLocationFlags, type CliAuthLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
 /** As long as the Hub keeps the request. */
@@ -252,22 +253,17 @@ const confirmApprover = Effect.fn("cli.join.confirmApprover")(function* (input: 
   const approver = input.approval.approvedBy;
   const label = environmentJoinApproverLabel(approver);
   const dedicatedTo = input.approval.dedicatedSpace?.name;
-  // Asked as dedicated, approved as someone's personal machine: not what this machine is for.
-  const wrongMode = Option.isSome(input.dedicated) && dedicatedTo === undefined;
-  if (dedicatedTo !== undefined && Option.isNone(input.dedicated)) {
-    // Dedicated on the page without `--dedicated` here: its Podman was never checked.
-    yield* requirePodmanForDedicated().pipe(
-      Effect.tapError(() =>
-        callHub(new URL("/api/environments/join/confirm", input.hubUrl), {
-          body: { requestId: input.requestId, codeVerifier: input.codeVerifier, accept: false },
-        }).pipe(Effect.ignore),
-      ),
-    );
-  }
+  // The machine takes only the mode it asked for (`--dedicated` or not).
+  const refusal = joinModeRefusal({
+    asked: Option.getOrUndefined(input.dedicated),
+    dedicatedTo,
+    approverLabel: label,
+  });
+
   let accept: boolean;
-  if (wrongMode) {
+  if (refusal !== undefined) {
     accept = false;
-    yield* Console.log(environmentJoinApprovalLine(label));
+    yield* Console.log(environmentJoinApprovalLine(label, dedicatedTo));
   } else if (Option.isSome(input.owner)) {
     accept = environmentJoinApproverMatches(input.owner.value, approver);
     yield* Console.log(environmentJoinApprovalLine(label, dedicatedTo));
@@ -283,8 +279,8 @@ const confirmApprover = Effect.fn("cli.join.confirmApprover")(function* (input: 
   });
   if (!accept) {
     return yield* userError(
-      wrongMode
-        ? `Not registered: ${label} approved it as their personal machine, not as one dedicated to ${Option.getOrElse(input.dedicated, () => "a Space")}. Only the Owner dedicates machines; run \`t3 join --dedicated\` again and have the Owner approve it.`
+      refusal !== undefined
+        ? refusal
         : Option.isSome(input.owner)
           ? `Not registered: ${label} approved it, not ${input.owner.value}. Run \`t3 join\` again and approve it with that account.`
           : input.confirmOnStdin || process.stdin.isTTY === true

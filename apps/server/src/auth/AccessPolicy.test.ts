@@ -150,10 +150,19 @@ const acmeVps = (workSpaceId: SpaceId | undefined): AccessPolicy.EnvironmentReso
   kind: "environment",
   environmentKind: "external",
   mode: "dedicated",
-  ownerUserId: UserId.make("owner"),
+  ownerUserId: null,
   space: organization,
   ...(workSpaceId === undefined ? {} : { workSpaceId }),
 });
+
+/** A dedicated machine whose Organization was deleted under it. */
+const spacelessVps: AccessPolicy.EnvironmentResource = {
+  kind: "environment",
+  environmentKind: "external",
+  mode: "dedicated",
+  ownerUserId: null,
+  workSpaceId: ORG,
+};
 
 const allow = AccessPolicy.allow;
 const deny = AccessPolicy.deny;
@@ -1316,13 +1325,24 @@ const rows: ReadonlyArray<
     "a dedicated machine whose Space is gone runs nothing",
     member,
     "environment.use",
-    {
-      kind: "environment",
-      environmentKind: "external",
-      mode: "dedicated",
-      ownerUserId: UserId.make("owner"),
-      workSpaceId: ORG,
-    },
+    spacelessVps,
+    deny("wrong-resource"),
+  ],
+  [
+    "Owner still sees a dedicated machine whose Space is gone",
+    owner,
+    "environment.view",
+    spacelessVps,
+    allow,
+  ],
+  ["…and renames it", owner, "environment.rename", spacelessVps, allow],
+  ["…and removes it", owner, "environment.remove", spacelessVps, allow],
+  ["…and runs nothing there", owner, "environment.use", spacelessVps, deny("wrong-resource")],
+  [
+    "nobody else sees a dedicated machine whose Space is gone",
+    member,
+    "environment.view",
+    spacelessVps,
     deny("wrong-resource"),
   ],
   ["Owner renames a dedicated machine", owner, "environment.rename", acmeVps(ORG), allow],

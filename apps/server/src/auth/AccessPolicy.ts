@@ -77,8 +77,8 @@ export interface EnvironmentResource {
   /** An external machine's: `dedicated` to `space`, or (the default) `personal` to its owner. */
   readonly mode?: "personal" | "dedicated" | "sandbox";
   /**
-   * Null for the Hub machine, which belongs to the Installation, and for Sandboxes. A dedicated
-   * machine's is the Owner who dedicated it, which gives them nothing more there.
+   * Null for the Hub machine and dedicated machines, which belong to the Installation, and for
+   * Sandboxes.
    */
   readonly ownerUserId: UserId | null;
   /** A Sandbox's or dedicated machine's Space. */
@@ -277,7 +277,15 @@ const decideSpaceBound = (
   environment: EnvironmentResource,
 ): Decision => {
   const space = environment.space;
-  if (space === undefined) return deny("wrong-resource");
+  if (space === undefined) {
+    // A dedicated machine outlives a deleted Space as the Installation's: the Owner still sees,
+    // renames and removes it, and nothing runs there.
+    return environment.environmentKind === "external" &&
+      principal.isOwner &&
+      action !== "environment.use"
+      ? allow
+      : deny("wrong-resource");
+  }
   if (action === "environment.view") {
     return principal.isOwner ? allow : decide(principal, "space.view", space);
   }

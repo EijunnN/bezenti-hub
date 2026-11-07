@@ -91,6 +91,7 @@ import {
   EnvironmentJoinStatus,
   EnvironmentJoinStatusRequest,
   EnvironmentLeaveResult,
+  EnvironmentSelfResult,
   HubEnvironmentList,
   HubEnvironmentSummary,
   RemoveHubEnvironmentRequest,
@@ -1160,6 +1161,14 @@ class EnvironmentHubEnvironmentsHttpApi extends HttpApiGroup.make("environments"
         EnvironmentHttpForbiddenError,
         EnvironmentInternalError,
       ],
+    }),
+  )
+  // A machine asks how the Hub uses it now, with its own credential.
+  .add(
+    HttpApiEndpoint.post("self", "/api/environments/self", {
+      headers: OptionalBearerHeaders,
+      success: EnvironmentSelfResult,
+      error: EnvironmentTokenExchangeErrors,
     }),
   )
   // `t3 leave`: the machine unregisters itself with its own credential.

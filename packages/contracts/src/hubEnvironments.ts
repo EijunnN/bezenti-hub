@@ -269,5 +269,17 @@ export const EnvironmentJoinStatus = Schema.Union([
 ]);
 export type EnvironmentJoinStatus = typeof EnvironmentJoinStatus.Type;
 
+/**
+ * A machine asks, with its own credential, how the Hub uses it now: a dedicated machine's host
+ * follows this, never what it remembers.
+ */
+export const EnvironmentSelfResult = Schema.Struct({
+  environmentId: EnvironmentId,
+  name: HubEnvironmentName,
+  mode: HubEnvironmentMode,
+  spaceId: Schema.NullOr(SpaceId),
+});
+export type EnvironmentSelfResult = typeof EnvironmentSelfResult.Type;
+
 export const EnvironmentLeaveResult = Schema.Struct({ removed: Schema.Boolean });
 export type EnvironmentLeaveResult = typeof EnvironmentLeaveResult.Type;

@@ -113,6 +113,11 @@ export const EnvironmentHelloFrame = Schema.Struct({
    * from before it was sent runs 7. Operations newer than it are refused on the Hub.
    */
   executorContractVersion: Schema.optionalKey(Schema.Int),
+  /**
+   * Set only by a server running inside a Sandbox (a Hub's, or a dedicated machine's container),
+   * from the state its host wrote: a dedicated machine connects only this way.
+   */
+  sandbox: Schema.optionalKey(Schema.Struct({ runtime: Schema.Literals(["podman", "process"]) })),
 });
 export type EnvironmentHelloFrame = typeof EnvironmentHelloFrame.Type;
 
@@ -207,6 +212,8 @@ export const ENVIRONMENT_CLOSE_REASONS = {
   replaced: { code: 4413, final: true },
   "hub-shutting-down": { code: 4414, final: false },
   "environment-mode-changed": { code: 4415, final: false },
+  "space-missing": { code: 4416, final: true },
+  "not-sandboxed": { code: 4417, final: true },
 } as const;
 
 export type EnvironmentCloseReason = keyof typeof ENVIRONMENT_CLOSE_REASONS;
@@ -239,6 +246,10 @@ export const ENVIRONMENT_CLOSE_MESSAGES: Record<EnvironmentCloseReason, string> 
   "hub-shutting-down": "The Hub is restarting.",
   "environment-mode-changed":
     "The Owner changed this machine's mode or Space; it reconnects to learn the new one.",
+  "space-missing":
+    "This machine is dedicated to a Space the Hub no longer has. The Owner can remove it or dedicate it elsewhere.",
+  "not-sandboxed":
+    "This machine is dedicated to a Space, so only its Sandbox container's server may connect. Restart it with `t3 serve`.",
 };
 
 /**

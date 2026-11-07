@@ -254,6 +254,21 @@ const handlers = HttpApiBuilder.group(
         }),
       )
       .handle(
+        "self",
+        Effect.fn("environment.environments.self")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          if (!isSecureEnvironmentTransport(request)) {
+            return yield* failEnvironmentInvalidRequest("insecure_transport");
+          }
+          const self = yield* registry
+            .selfOf(bearerOf(args.headers.authorization))
+            .pipe(Effect.catchTags({ EnvironmentStorageError: failStorage }));
+          if (Option.isNone(self)) return yield* failEnvironmentAuthInvalid("invalid_credential");
+          return self.value;
+        }),
+      )
+      .handle(
         "leave",
         Effect.fn("environment.environments.leave")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
