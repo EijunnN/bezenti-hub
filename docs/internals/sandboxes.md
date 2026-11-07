@@ -58,8 +58,8 @@ server in its own rootless container, `t3-<sandboxId>` (labels `io.t3code.sandbo
 - **Home.** `<Hub home>-sandboxes/<sandboxId>` is bind mounted as `/home/sandbox`, the server's
   base dir, `HOME` and workspace root (`/home/sandbox/projects`). A bind-mounted directory rather
   than a named volume: no Podman call to create or inspect it, and it survives the container
-  (stop/start keeps it). Ticket 05's disk limit has to watch the directory, or move it onto a
-  volume with a quota.
+  (stop/start keeps it). No runtime limits a directory's size, so the disk limit is the Hub's own
+  check (see [Limits](#limits)).
 - **What the Hub writes stays out of the home.** The credential and `joined-hub.json` live in
   `<Sandboxes root>/.state/<sandboxId>/`, which only the Hub writes, and are mounted read-only
   over their paths in the home (`userdata/secrets/environment-credential.bin`,
@@ -103,8 +103,7 @@ server in its own rootless container, `t3-<sandboxId>` (labels `io.t3code.sandbo
 Requirements: rootless Podman 3.4 or newer (Ubuntu 22.04's works) with `slirp4netns`, subuid and
 subgid ranges for the Hub's user (`/etc/subuid`, `/etc/subgid`), and `XDG_RUNTIME_DIR`. Without a
 systemd user session (a `wsl -e` shell, a service without lingering) the runtime passes
-`--cgroup-manager=cgroupfs`; CPU and memory limits (ticket 05) may need `loginctl enable-linger`
-and delegated cgroup controllers. Newer Podman defaults to pasta; this runtime asks for slirp4netns
+`--cgroup-manager=cgroupfs`, and then enforces no CPU, memory or PIDs limit (see [Limits](#limits)). Newer Podman defaults to pasta; this runtime asks for slirp4netns
 explicitly, so it must be installed.
 
 The [process runtime](../../apps/server/src/sandboxes/ProcessSandboxRuntime.ts) is for tests and
@@ -178,6 +177,93 @@ While off, the Hub machine runs nothing, whatever asks:
   machine, or a Sandbox this Hub has no runtime for, needs an environment, as for a removed machine
   (`EnvironmentReturnService`, built before `serverRuntimeStartup` recovers anything): its history
   stays, unfinished turns end, and it moves to the Sandbox or a machine of its User's.
+
+## Limits
+
+Each Sandbox has CPU, memory, PIDs and disk limits
+([sandboxLimits](../../apps/server/src/sandboxes/sandboxLimits.ts)): the Installation's defaults
+(`sandbox_limit_defaults`, migration 104, one row: 2 CPUs, 4 GiB, 4096 processes and threads,
+20 GiB; null there is no limit) and each Space's override in its `sandboxes` row (null there takes
+the default). `Sandboxes` reads them at every start and passes the effective ones to the runtime
+as `start(sandboxId, { limits })` (`SandboxStartOptions`), so a change applies on the next start;
+ticket 09's dedicated machines can pass the same options to their own container.
+
+- **CPU, memory, PIDs** are the runtime's. `SandboxRuntime.limitSupport` says which ones it
+  enforces on this host and why not, in words for the Owner; Settings and the Hub's log (one
+  warning at startup, `Sandbox limits not enforced on this host`) show it, never a limit that is
+  not applied. The process runtime enforces none. Podman reads `podman info` once
+  ([podmanLimitSupport](../../apps/server/src/sandboxes/PodmanSandboxRuntime.ts)): only cgroups v2
+  with the **systemd** cgroup manager gives a rootless container a cgroup of its own, and then
+  each of `cpu`, `memory`, `pids` counts if it is delegated to the Hub's user
+  (`/sys/fs/cgroup/user.slice/user-<uid>.slice/user@<uid>.service/cgroup.controllers`). Under
+  **cgroupfs** (no systemd user bus at `$XDG_RUNTIME_DIR/bus`, as in a `wsl -e` session, where
+  `dbus-user-session` is not installed) a rootless container shares its caller's cgroup: Podman
+  3.4 records `--memory`/`--pids-limit` and ignores them, or fails the run outright with
+  «could not find cgroup mount» from the root cgroup, and `--cpus` is dropped. So the runtime passes
+  `--cpus`, `--memory` (with `--memory-swap` equal: no swap beyond it) and `--pids-limit` only
+  for what is enforced, and labels every container with what it was started with
+  (`io.t3code.limit.cpus`, `.memory-bytes`, `.pids`, `io.t3code.limits-enforced`) for
+  `podman inspect`. A container killed under an enforced memory limit (exit 137) is reported as
+  having gone over it. To enforce them on a host: run the Hub as a systemd user service (or
+  `loginctl enable-linger`) with `dbus-user-session` installed, and delegate the controllers
+  (`Delegate=cpu cpuset io memory pids` for `user@.service`, the default on recent systemd).
+  Measured in the dev WSL (Ubuntu 22.04, Podman 3.4.4): cgroup v2, user slice delegates
+  `memory pids`, no user bus from `wsl -e`, so nothing is enforced there and the Podman test that
+  checks enforcement skips with that reason.
+- **Disk** is the Hub's: a home is a bind-mounted directory, so `Sandboxes` measures it
+  (`SandboxRuntime.measureHome`): Podman with `podman unshare du -skx`, as root of the Hub user's
+  namespace, so a directory the Sandbox made unreadable is still read (checked on Podman 3.4);
+  the process runtime with plain `du`. A measurement is either a total from a clean exit or a
+  failure (any non-zero exit, a timeout, too much output; stderr is discarded), never a smaller
+  size. Each failure is counted per Sandbox; three in a row count as over the limit (fail closed:
+  «Its disk use could not be measured 3 times in a row …»), so a Sandbox cannot make itself
+  unmeasurable. At most two `du` run at once. Checks run every
+  `T3CODE_SANDBOX_DISK_CHECK_SECONDS` (default 60) for running Sandboxes, at once when a limit
+  changes, and before each start; a check reads the limit, status and start again under the
+  Sandbox's lock before it stops anything, so a limit raised or a restart meanwhile is never
+  stopped on a stale reading. One over its limit is stopped (audit `sandbox.stop`, via
+  `disk-full`) and set `failed` with why in one status write (never `stopped` on the way, which
+  waiting work would start again); its provider sessions end first
+  (`Sandboxes.sessionsEnded` → `RemoteEnvironments.sandboxSessionsEnded`), so its turns end
+  interrupted with «… ran out of disk space …» (`EnvironmentSessionLostError`, reason
+  `sandbox-disk-full`), and its socket closes with the close reason `sandbox-disk-full` (4415,
+  final). It starts again only on a User's own action once its home fits (the Owner raises the
+  limit, or its files go). Without `du` the disk limit is not enforced and Settings says so.
+- **The Hub's own disk.** A bind-mounted home is on the Hub's filesystem, so between two checks a
+  Sandbox can fill it, with the Hub's database on it. No Sandbox starts while the Sandboxes root's
+  filesystem has less free than 5% of its size (at most 10 GiB) (`hostSpaceShortage`), and each
+  check stops every running Sandbox below that floor (via `host-disk-low`, failed with «The Hub's
+  disk for Sandboxes is almost full …»). This is a limitation, not a quota: for a real one put the
+  Sandboxes root (`<Hub home>-sandboxes`) on a filesystem of its own, sized for them, apart from
+  the Hub's home: a separate disk or partition, an XFS filesystem with a project quota per home
+  (`xfs_quota -x -c 'project -s …'`), or a size-capped mount (a loop-mounted image). Moving homes
+  onto Podman volumes with a quota is later work.
+- **Use** shown in Settings comes from two background samplers, never from the request: CPU and
+  resident memory every 10 s for running Sandboxes, summed over the container's processes
+  (`podman top … rss pcpu`, CPU averaged over each process's life; read from processes, since a
+  cgroupfs container's cgroup is shared), and each home's size from the disk checks (a stopped
+  one measured once). Uptime is from `sandboxes.started_at`. The process runtime reports no CPU or
+  memory. Settings shows the limits a running Sandbox was started with and, when they changed
+  since, «Applies on next restart: …»; an exit 137 under an enforced memory limit names that
+  container's limit.
+- **Validation.** CPUs at least 0.1, memory at least 256 MiB, processes and threads at least 64,
+  disk at least 1 GiB, and none above what the Hub's machine has (its CPUs, its memory, the size
+  of the Sandboxes' disk); anything else is refused with which (400
+  `EnvironmentSandboxLimitsInvalidError`).
+- **The Owner's stop holds.** A stop from Settings sets `sandboxes.held_at`: waiting work
+  (`EnvironmentDemand.request`, work that is not a User's own action) does not start it again;
+  a User's message, «Try again» or the Owner's Start does, and ends the hold. Audit
+  `sandbox.stop` with `hold: true`. Settings asks before stopping or restarting a Sandbox with
+  turns running, saying how many.
+
+**Settings → Environments «Sandboxes»** (`GET /api/environments/sandboxes`,
+`POST …/sandboxes/action` with `start`, `stop` or `restart`, `POST …/sandboxes/limits` with or
+without an `environmentId`): `sandbox.inspect` (the Owner, an Organization's Admins, a Personal
+space's User) sees status, uptime, use, limits, image version (`image_version`, filled by ticket 06) and the enforcement note; `sandbox.manage` (the Owner) acts and changes limits and defaults.
+Someone who may not inspect a Sandbox gets 404 for it; a start of an archived Organization's
+Sandbox is refused until it is restored. Audit: `sandbox.start`/`sandbox.stop` with via
+`settings` (with `hold`), `restart`, `disk-full` or `host-disk-low`, and `sandbox.limits.change` with scope (`defaults` or `space`) and
+the new values.
 
 ## Lifecycle: started for work, stopped when idle
 
@@ -397,5 +483,10 @@ joined server, but connects nothing of its own:
   other reason it starts again after 1, 2, 4… seconds (at most 30); more than three ends in ten
   minutes leave it `failed` until `t3 serve` restarts. `t3 status` shows the Sandbox's state. There
   is no idle stop: the machine is the Space's anyway.
-- **Limits.** It runs with the runtime's defaults: the Installation's Sandbox limits live on the
-  Hub, which does not send them to a machine it does not run. `DEDICATED_LIMITS` is where they go.
+- **Limits.** The Hub sends the Space's effective Sandbox limits (its override over the
+  Installation's defaults, as for a Hub's Sandbox) in the `/api/environments/self` answer
+  (`limits`), which the host asks for at start and after each end of its Sandbox's server; it
+  starts the Sandbox with them as `SandboxStartOptions`, so its Podman runtime passes what that
+  machine enforces (`podmanLimitArgs`) and labels the rest, and a change applies on the next
+  start. The disk limit is not enforced there: that is the Hub's own check, for its own
+  Sandboxes. An older Hub sends none, and the Sandbox runs without limits.

@@ -592,6 +592,7 @@ it.effect(
         "sandbox.start",
         "sandbox.stop",
         "sandbox.delete",
+        "sandbox.limits.change",
       ];
       const hooks = ["secret.reveal", "secret.edit"];
       assert.sameMembers(

@@ -94,6 +94,10 @@ import {
   EnvironmentSelfResult,
   HubEnvironmentList,
   HubEnvironmentSummary,
+  HubSandboxActionRequest,
+  HubSandboxDetail,
+  HubSandboxLimitsRequest,
+  HubSandboxList,
   RemoveHubEnvironmentRequest,
   StartHubEnvironmentRequest,
   RenameHubEnvironmentRequest,
@@ -374,6 +378,21 @@ export class EnvironmentHttpForbiddenError extends Schema.TaggedError<Environmen
 ) {
   [HttpServerRespondable.symbol]() {
     return HttpServerResponse.schemaJson(EnvironmentHttpForbiddenError)(this, { status: 403 });
+  }
+}
+
+/** Sandbox limits outside what a Sandbox needs or the Hub's machine has; `message` says which. */
+export class EnvironmentSandboxLimitsInvalidError extends Schema.TaggedError<EnvironmentSandboxLimitsInvalidError>()(
+  "EnvironmentSandboxLimitsInvalidError",
+  {
+    message: Schema.String,
+  },
+  { httpApiStatus: 400 },
+) {
+  [HttpServerRespondable.symbol]() {
+    return HttpServerResponse.schemaJson(EnvironmentSandboxLimitsInvalidError)(this, {
+      status: 400,
+    });
   }
 }
 
@@ -1099,6 +1118,35 @@ class EnvironmentHubEnvironmentsHttpApi extends HttpApiGroup.make("environments"
       payload: StartHubEnvironmentRequest,
       success: HubEnvironmentSummary,
       error: [...EnvironmentHubEnvironmentErrors, EnvironmentResourceNotFoundError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  // Settings → Environments «Sandboxes»: the Owner sees every one and manages them; an Admin sees
+  // their Space's.
+  .add(
+    HttpApiEndpoint.get("sandboxes", "/api/environments/sandboxes", {
+      headers: OptionalBearerHeaders,
+      success: HubSandboxList,
+      error: EnvironmentHubEnvironmentErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("sandboxAction", "/api/environments/sandboxes/action", {
+      headers: OptionalBearerHeaders,
+      payload: HubSandboxActionRequest,
+      success: HubSandboxDetail,
+      error: [...EnvironmentHubEnvironmentErrors, EnvironmentResourceNotFoundError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("sandboxLimits", "/api/environments/sandboxes/limits", {
+      headers: OptionalBearerHeaders,
+      payload: HubSandboxLimitsRequest,
+      success: HubSandboxList,
+      error: [
+        ...EnvironmentHubEnvironmentErrors,
+        EnvironmentResourceNotFoundError,
+        EnvironmentSandboxLimitsInvalidError,
+      ],
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   // `t3 join` on the machine: start a request, then ask until the Owner decides.

@@ -24,6 +24,7 @@ import {
   SandboxRuntime,
   type SandboxRuntimeError,
 } from "../sandboxes/SandboxRuntime.ts";
+import { NO_LIMITS } from "../sandboxes/sandboxLimits.ts";
 import * as JoinedHub from "./JoinedHub.ts";
 import {
   DEDICATED_CREDENTIAL_SECRET,
@@ -37,17 +38,6 @@ const DEDICATED_PREFIX = "dedicated-";
 /** The Sandbox a dedicated machine runs for a Space: one home per Space, never shared. */
 export const dedicatedSandboxIdOf = (spaceId: string) =>
   `${DEDICATED_PREFIX}${spaceId.replace(/[^A-Za-z0-9_.-]/gu, "-")}`;
-
-/**
- * The runtime's defaults. The Installation's Sandbox limits (spec 3 ticket 05) live on the Hub,
- * which does not send them to a machine it does not run; this is where they would go in.
- */
-const DEDICATED_LIMITS: SandboxLimits = {
-  cpus: null,
-  memoryBytes: null,
-  pids: null,
-  diskBytes: null,
-};
 
 /** As for a Hub's Sandbox: more than this many ends in the window, and it stays failed. */
 const CRASH_LIMIT = 3;
@@ -65,6 +55,8 @@ export type HubAnswer =
       readonly _tag: "uses";
       readonly mode: EnvironmentSelfResult["mode"];
       readonly spaceId: string | null;
+      /** The Space's Sandbox limits, as the Hub has them now; none from an older Hub. */
+      readonly limits: SandboxLimits;
     }
   | { readonly _tag: "removed" }
   | { readonly _tag: "unreachable" };
@@ -89,6 +81,7 @@ export const askHubAt = (hubUrl: string, credential: string): Effect.Effect<HubA
               _tag: "uses" as const,
               mode: self.mode,
               spaceId: self.spaceId,
+              limits: self.limits ?? NO_LIMITS,
             }))
           : Effect.succeed({ _tag: "unreachable" }),
     ),
@@ -117,6 +110,8 @@ export const superviseDedicatedSandbox = Effect.fn("DedicatedHost.supervise")(fu
   const runtime = yield* SandboxRuntime;
   const { state } = input;
   let current = input.joined;
+  // Asked of the Hub with each answer, so a change applies on the Sandbox's next start.
+  let limits: SandboxLimits = NO_LIMITS;
   const set = (next: {
     readonly state: "starting" | "running" | "restarting" | "failed";
     readonly message: string | null;
@@ -142,6 +137,7 @@ export const superviseDedicatedSandbox = Effect.fn("DedicatedHost.supervise")(fu
       });
       return "stop" as const;
     }
+    limits = answer.limits;
     if (answer.mode !== "dedicated" || answer.spaceId === null) {
       if (current.spaceId !== undefined) yield* remove(dedicatedSandboxIdOf(current.spaceId));
       const { spaceId: _spaceId, ...rest } = current;
@@ -191,7 +187,6 @@ export const superviseDedicatedSandbox = Effect.fn("DedicatedHost.supervise")(fu
           name: current.name,
           hubEnvironmentId: current.hubEnvironmentId,
           credential: Redacted.make(input.credential),
-          limits: DEDICATED_LIMITS,
         })
         .pipe(Effect.result);
       if (Result.isFailure(made)) {
@@ -200,7 +195,8 @@ export const superviseDedicatedSandbox = Effect.fn("DedicatedHost.supervise")(fu
       created = sandboxId;
     }
     yield* set({ state: "starting", message: null });
-    const started = yield* runtime.start(sandboxId).pipe(Effect.result);
+    // The same start options a Hub gives its own Sandboxes: the runtime passes what it enforces.
+    const started = yield* runtime.start(sandboxId, { limits }).pipe(Effect.result);
     let message: string;
     if (Result.isFailure(started)) {
       message = failedWith(started.failure);
