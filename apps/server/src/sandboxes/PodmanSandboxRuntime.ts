@@ -56,6 +56,9 @@ const SANDBOX_NETWORK = "slirp4netns:allow_host_loopback=false";
 const STOP_GRACE_SECONDS = 5;
 /** A container log beyond this is rotated by Podman. */
 const LOG_MAX_SIZE = "10mb";
+/** How often a container checks its Hub still answers, and how many misses end it. */
+const HUB_GONE_CHECK_MS = 10_000;
+const HUB_GONE_CHECKS = 3;
 
 /**
  * Runs inside the container as its first process, under the image's Node: forwards the container's
@@ -79,6 +82,19 @@ forward.listen(Number(port), "127.0.0.1", () => {
   for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => child.kill(signal));
   child.on("error", (error) => { console.error("t3 sandbox: the server did not start:", error); process.exit(127); });
   child.on("exit", (code, signal) => process.exit(code ?? 128 + (os.constants.signals[signal] ?? 0)));
+  // A Hub that died without stopping it (killed, crashed) no longer answers on its socket: the
+  // Sandbox stops by itself after ${HUB_GONE_CHECKS} missed checks rather than run on unwatched.
+  let missed = 0;
+  setInterval(() => {
+    const probe = net.connect(socketPath);
+    probe.on("connect", () => { missed = 0; probe.destroy(); });
+    probe.on("error", () => {
+      if (++missed < ${HUB_GONE_CHECKS}) return;
+      console.error("t3 sandbox: its Hub is gone; stopping.");
+      child.kill("SIGTERM");
+      setTimeout(() => process.exit(75), 5000);
+    });
+  }, ${HUB_GONE_CHECK_MS});
 });
 `;
 

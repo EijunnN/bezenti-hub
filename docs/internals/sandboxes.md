@@ -95,8 +95,8 @@ server in its own rootless container, `t3-<sandboxId>` (labels `io.t3code.sandbo
   container that ends without `stop` has its scope (container, socket) closed under the runtime's
   lock before the exit is reported. On start the runtime removes every container labelled with its
   root (a Hub that crashed left them), and before each start that Sandbox's; a container of that
-  name with another root is another Hub's and fails the start. The Hub's containers stop with it.
-  Logs go to `<Sandboxes root>/<sandboxId>.log`, rotated at 10 MB.
+  name with another root is another Hub's and fails the start. The Hub's containers stop with it; one whose Hub died without stopping it (killed, crashed) stops by
+  itself once its Hub socket has not answered for 30 seconds. Logs go to `<Sandboxes root>/<sandboxId>.log`, rotated at 10 MB.
 
 Requirements: rootless Podman 3.4 or newer (Ubuntu 22.04's works) with `slirp4netns`, subuid and
 subgid ranges for the Hub's user (`/etc/subuid`, `/etc/subgid`), and `XDG_RUNTIME_DIR`. Without a
