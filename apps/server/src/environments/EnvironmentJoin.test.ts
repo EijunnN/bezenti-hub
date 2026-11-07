@@ -29,6 +29,8 @@ it.effect("the Owner registers a machine with a passkey and it joins as their pe
         { name: "Hub machine", kind: "hub", status: "online" },
         // Never connected yet.
         { name: "Laptop", kind: "external", status: "offline" },
+        // The Owner's Personal space's Sandbox, not made until chosen.
+        { name: "Personal Sandbox", kind: "sandbox", status: "offline" },
       ],
     );
     assert.equal(environments[0]!.id, HUB_MACHINE_ENVIRONMENT_ID);
@@ -91,7 +93,7 @@ it.effect("the Owner's approval needs a strong factor in the same request", () =
     assert.equal((yield* joinStatus(server, requestId)).body.status, "pending");
     assert.deepEqual(
       (yield* listEnvironments(server, owner)).map((environment) => environment.kind),
-      ["hub"],
+      ["hub", "sandbox"],
     );
   }),
 );
@@ -215,7 +217,7 @@ it.effect("renaming and removing are audited, and the Hub machine stays", () =>
     assert.equal(removed.status, 200);
     assert.deepEqual(
       (removed.body.environments as ReadonlyArray<{ kind: string }>).map((entry) => entry.kind),
-      ["hub"],
+      ["hub", "sandbox"],
     );
     // A removed machine's credential no longer even unregisters it.
     const left = yield* server.request("/api/environments/leave", {
@@ -257,7 +259,7 @@ it.effect("`t3 leave` unregisters the machine with its own credential", () =>
     assert.equal(left.status, 200);
     assert.deepEqual(
       (yield* listEnvironments(server, owner)).map((environment) => environment.kind),
-      ["hub"],
+      ["hub", "sandbox"],
     );
   }),
 );

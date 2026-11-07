@@ -490,6 +490,18 @@ machine it runs on, in that machine's copy of the Project. When the machine is
 off they say **Environment offline** instead; nothing you type or save is kept
 for later, so start the machine and try again.
 
+### Run Threads in your Space's Sandbox
+
+Every Space has a **Sandbox**: a server of its own that the Hub runs for that
+Space, with its own files, Project checkouts and provider sign-ins. The
+composer's **Environment** picker lists it as **<Space> Sandbox** (for example
+**Acme Sandbox**) beside your machines. Pick it and send: the first time, the
+Hub creates the Sandbox, which takes a few seconds, and later Threads reuse it.
+Only Admins and Members of the Space can run Threads there (not Guests), and
+only that Space's Threads run in it; another Space's Sandbox never shows in the
+picker. A Sandbox reaches only its own Space's repositories on the Hub. Turns,
+checkpoints, terminals and moves work as on a joined machine.
+
 ### Move a Thread to another machine
 
 To go on with a Thread elsewhere, open its menu (its title in the header, or

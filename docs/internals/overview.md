@@ -117,8 +117,9 @@ Hub from the reported checkout and runtime modes, never by asking the machine.
 The Hub decides where a new Thread runs (`EnvironmentRegistry.chooseForThread`, called by
 `ThreadManagementService` for every `thread.create`): the User's choice, else the Project's
 preferred Environment, else the Hub machine. Another Environment must be one the User may use
-(`environment.use`: a personal machine is its owner's alone, the Owner included), online, and have
-the provider. The client never picks by load.
+for the Thread's Space (`environment.use`: a personal machine is its owner's alone, the Owner
+included; a [Sandbox](./sandboxes.md) runs only its own Space's Threads), online, and have the
+provider. The client never picks by load.
 
 On the machine, the [agent](../../apps/server/src/environments/EnvironmentAgent.ts) runs each call
 on its own in-process executor. Constraints that span both halves:
