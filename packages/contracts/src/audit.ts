@@ -38,6 +38,10 @@ export const AuditAction = Schema.Literals([
   "environment.rename",
   "environment.remove",
   "thread.move",
+  "sandbox.create",
+  "sandbox.start",
+  "sandbox.stop",
+  "sandbox.delete",
 ]);
 export type AuditAction = typeof AuditAction.Type;
 
@@ -111,6 +115,12 @@ export const AUDIT_DETAIL_KEYS = {
     "sourceOffline",
     "setAside",
   ],
+  /** Which Sandbox runtime made it (process or podman). */
+  "sandbox.create": ["runtime"],
+  /** What started or stopped it: a User's work, being idle, or by hand. */
+  "sandbox.start": ["via"],
+  "sandbox.stop": ["via"],
+  "sandbox.delete": [],
 } as const satisfies Record<AuditAction, ReadonlyArray<string>>;
 
 export type AuditDetailOf<A extends AuditAction> = {

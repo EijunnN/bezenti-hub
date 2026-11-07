@@ -1,7 +1,8 @@
 /**
  * `/api/git/<projectId>` and `/api/git/thread/<threadId>` (a Thread without a Project): the Hub
  * repository over git smart HTTP, relayed to `git http-backend`. A machine sees and writes only the
- * refs of Threads it runs, in Projects where its owner may start Threads; nobody deletes.
+ * refs of Threads it runs, in Projects where its owner may start Threads (a Sandbox: in its own
+ * Space); nobody deletes.
  */
 import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -268,13 +269,27 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
   const { projectId } = key.value;
   const project = yield* deps.projects.get(projectId).pipe(Effect.orElseSucceed(Option.none));
   if (Option.isNone(project)) return HttpServerResponse.text("Not Found", { status: 404 });
-  // The machine works for its owner only: in Spaces where they may start Threads.
-  const allowed = yield* deps.spaces
-    .claimCreation({ action: "thread.create", actorUserId: check.ownerUserId, projectId })
-    .pipe(
-      Effect.as(true),
-      Effect.orElseSucceed(() => false),
-    );
+  // A machine works for its owner only, in Spaces where they may start Threads; a Sandbox only in
+  // its own Space, the repository's (a Thread's own repository is in the Thread's Space).
+  const ownerUserId = check.ownerUserId;
+  const allowed =
+    ownerUserId === null
+      ? yield* deps.spaces
+          .spaceOf(
+            key.value.scratchThreadId === undefined
+              ? { kind: "project", id: projectId }
+              : { kind: "thread", id: key.value.scratchThreadId },
+          )
+          .pipe(
+            Effect.map((space) => Option.isSome(space) && space.value.id === check.spaceId),
+            Effect.orElseSucceed(() => false),
+          )
+      : yield* deps.spaces
+          .claimCreation({ action: "thread.create", actorUserId: ownerUserId, projectId })
+          .pipe(
+            Effect.as(true),
+            Effect.orElseSucceed(() => false),
+          );
   if (!allowed) return HttpServerResponse.text("Forbidden", { status: 403 });
 
   const prefixes = yield* refPrefixesFor(deps, key.value, check.environmentId);

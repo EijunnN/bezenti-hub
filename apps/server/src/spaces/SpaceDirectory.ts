@@ -394,6 +394,20 @@ export class SpaceDirectory extends Context.Service<
      * open connections show (the origin's lose it, the destination's gain it).
      */
     readonly projectMoved: (move: ProjectMove) => Effect.Effect<void, SpaceDirectoryStorageError>;
+    /**
+     * The Space a Thread or Project is in: a Thread's own, else its Project's, else the Owner's
+     * Personal space. None when the item or its Space is missing.
+     */
+    readonly spaceOf: (
+      item: ItemRef,
+    ) => Effect.Effect<Option.Option<AccessPolicy.SpaceResource>, SpaceDirectoryStorageError>;
+    /** A Space as the policy decides on it, with its stored name; None when missing. */
+    readonly spaceById: (
+      spaceId: SpaceId,
+    ) => Effect.Effect<
+      Option.Option<{ readonly resource: AccessPolicy.SpaceResource; readonly name: string }>,
+      SpaceDirectoryStorageError
+    >;
     /** The state of the Thread's or Project's Space; work runs only in an open one. */
     readonly spaceState: (
       item: ItemRef,
@@ -1571,6 +1585,25 @@ const make = Effect.gen(function* () {
     return row.value.frozen ? ("frozen" as const) : ("open" as const);
   });
 
+  const spaceOf = Effect.fn("SpaceDirectory.spaceOf")(function* (item: ItemRef) {
+    const row = yield* findItem(item);
+    if (Option.isNone(row) || row.value.spaceId === null || row.value.kind === null) {
+      return Option.none<AccessPolicy.SpaceResource>();
+    }
+    return Option.some<AccessPolicy.SpaceResource>({
+      id: row.value.spaceId,
+      kind: row.value.kind,
+      personalOwnerUserId: row.value.personalOwnerUserId,
+      archived: row.value.spaceArchived,
+      frozen: row.value.frozen,
+    });
+  });
+
+  const spaceById = Effect.fn("SpaceDirectory.spaceById")(function* (spaceId: SpaceId) {
+    const row = yield* findSpace(spaceId).pipe(Effect.mapError(storageError));
+    return Option.map(row, (found) => ({ resource: toResource(found), name: found.name }));
+  });
+
   const workBlocked = Effect.fn("SpaceDirectory.workBlocked")(function* (threadId: ThreadId) {
     const row = yield* findThreadItem(threadId).pipe(Effect.mapError(storageError));
     if (Option.isNone(row)) return undefined;
@@ -1589,6 +1622,8 @@ const make = Effect.gen(function* () {
     authorizeProjectMove,
     projectMoved,
     whileProjectMoves,
+    spaceOf,
+    spaceById,
     spaceState,
     workBlocked,
     members,

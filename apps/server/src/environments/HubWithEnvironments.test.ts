@@ -13,6 +13,7 @@ import {
   EnvironmentId,
   EventId,
   HUB_MACHINE_ENVIRONMENT_ID,
+  sandboxEnvironmentIdOf,
   type OrchestrationV2AppThread,
   type OrchestrationV2Command,
   ProjectId,
@@ -61,6 +62,7 @@ import * as CheckpointDiffQuery from "../checkpointing/CheckpointDiffQuery.ts";
 import * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as CommandActor from "../auth/CommandActor.ts";
 import { addMember, joinOrganization } from "../auth/UserAuth.testkit.ts";
+import { listEnvironments } from "./environments.testkit.ts";
 import * as ServerConfig from "../config.ts";
 import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
@@ -92,6 +94,8 @@ import {
   readReplayFixtureTranscript,
 } from "../orchestration-v2/testkit/ProviderReplayFixtures.ts";
 import { materializeReplayTranscriptRuntimeInstructions } from "../orchestration-v2/testkit/ReplayRuntimeInstructions.ts";
+import * as ProcessSandboxRuntime from "../sandboxes/ProcessSandboxRuntime.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as EnvironmentRegistry from "./EnvironmentRegistry.ts";
 import {
@@ -217,7 +221,7 @@ const replayOn = Effect.fn(function* (
   hub: Hub,
   environment: TestEnvironment,
   loaded: LoadedFixture,
-  options: { readonly scratchFolder?: string } = {},
+  options: { readonly scratchFolder?: string; readonly spaceId?: SpaceId } = {},
 ) {
   const created = loaded.materialized.commands.find((command) => command.type === "thread.create");
   assert.isDefined(created);
@@ -226,6 +230,7 @@ const replayOn = Effect.fn(function* (
     title: options.scratchFolder === undefined ? "Remote project" : "No project",
     defaultModelSelection: loaded.variant.modelSelection,
     ...(options.scratchFolder === undefined ? {} : { scratch: true }),
+    ...(options.spaceId === undefined ? {} : { spaceId: options.spaceId }),
   });
   let worktreePath: string | undefined;
   if (options.scratchFolder !== undefined) {
@@ -3067,5 +3072,334 @@ describe("Hub con Environments: where a Thread elsewhere works", () => {
           ),
         );
       }).pipe(Effect.scoped),
+  );
+});
+
+/** An Organization of the Owner's, as `/api/spaces` makes one. */
+const createOrganization = Effect.fn(function* (hub: Hub, name: string) {
+  const owner = yield* ownerIdOf(hub);
+  const created = yield* hub
+    .service(SpaceDirectory.SpaceDirectory)
+    .createOrganization(owner, name)
+    .pipe(Effect.orDie);
+  return created.id;
+});
+
+describe("Hub con Environments: the Sandbox of a Space", () => {
+  it.live("is made when first chosen, and a turn runs there with its checkpoints on the Hub", () =>
+    Effect.gen(function* () {
+      const loaded = yield* loadFixture("simple");
+      const hub = yield* makeHub({ sandboxAdapters: loaded.adapters });
+      const acme = yield* createOrganization(hub, "Acme");
+      const owner = yield* ownerIdOf(hub);
+      const sandboxId = sandboxEnvironmentIdOf(acme);
+      // Listed before it exists, so it can be chosen.
+      const before = yield* listEnvironments(hub.server, hub.owner);
+      assert.deepInclude(
+        before.map(({ id, name, kind, status }) => ({ id, name, kind, status })),
+        { id: sandboxId, name: "Acme Sandbox", kind: "sandbox", status: "offline" },
+      );
+
+      const created = loaded.materialized.commands.find(
+        (command) => command.type === "thread.create",
+      );
+      assert.isDefined(created);
+      yield* seedProject(hub.server, {
+        projectId: created.projectId,
+        title: "Acme web",
+        defaultModelSelection: loaded.variant.modelSelection,
+        spaceId: acme,
+      });
+      const placed = yield* hub.service(EnvironmentRegistry.EnvironmentRegistry).chooseForThread({
+        userId: owner,
+        requested: sandboxId,
+        projectId: created.projectId,
+        providerInstanceId: loaded.variant.modelSelection.instanceId,
+      });
+      assert.equal(placed, sandboxId);
+      const [row] = yield* hub.server.sql<{
+        readonly kind: string;
+        readonly spaceId: string;
+        readonly ownerUserId: string | null;
+        readonly status: string;
+      }>`
+        SELECT environments.kind, environments.space_id AS "spaceId",
+          environments.owner_user_id AS "ownerUserId", sandboxes.status
+        FROM environments JOIN sandboxes USING (environment_id)
+        WHERE environment_id = ${sandboxId}
+      `;
+      assert.deepEqual(row, {
+        kind: "sandbox",
+        spaceId: acme,
+        ownerUserId: null,
+        status: "running",
+      });
+      const audited = yield* hub.server.sql<{ readonly action: string; readonly actor: string }>`
+        SELECT action, actor_user_id AS actor FROM audit_log WHERE action = 'sandbox.create'
+      `;
+      assert.deepEqual(audited, [{ action: "sandbox.create", actor: owner }]);
+
+      const sandbox = yield* hub.sandboxOf(acme);
+      const result = yield* replayOn(hub, sandbox, loaded, { spaceId: acme });
+      loaded.variant.assertOutput(result, loaded.transcript);
+      const [threadId] = loaded.materialized.projectionThreadIds;
+      const projection = result.projections.get(threadId!);
+      assert.equal(projection?.thread.activeEnvironmentId, sandboxId);
+      // Its checkout is in the Sandbox's own home, the workspace root of its server.
+      const home = (yield* listEnvironments(hub.server, hub.owner)).find(
+        (environment) => environment.id === sandboxId,
+      );
+      assert.equal(home?.status, "online");
+      assert.isNotEmpty(projection?.checkpointScopes);
+      for (const scope of projection?.checkpointScopes ?? []) {
+        assert.isTrue(scope.cwd.startsWith(sandbox.workspaceRoot), scope.cwd);
+        assert.include(scope.cwd, `/sandboxes/sandbox-${acme}/`);
+      }
+      yield* awaitUploaded(hub, threadId!, 1);
+      // Chosen again, the running Sandbox is the same one: nothing is made twice.
+      yield* hub.service(EnvironmentRegistry.EnvironmentRegistry).chooseForThread({
+        userId: owner,
+        requested: sandboxId,
+        projectId: created.projectId,
+        providerInstanceId: loaded.variant.modelSelection.instanceId,
+      });
+      const sandboxes = yield* hub.server.sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM sandboxes
+      `;
+      assert.equal(sandboxes[0]?.count, 1);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "is used by those who work in its Space, for its Threads, and its credential reaches no other Space",
+    () =>
+      Effect.gen(function* () {
+        const instanceId = ProviderInstanceId.make("claudeAgent");
+        const hub = yield* makeHub({ sandboxAdapters: idleAdapters(instanceId) });
+        const registry = hub.service(EnvironmentRegistry.EnvironmentRegistry);
+        const owner = yield* ownerIdOf(hub);
+        const acme = yield* createOrganization(hub, "Acme");
+        const globex = yield* createOrganization(hub, "Globex");
+        const grace = UserId.make("member-1");
+        const linus = UserId.make("guest-1");
+        const graceCookie = yield* addMember(hub.server, {
+          id: grace,
+          displayName: "Grace Hopper",
+        });
+        yield* addMember(hub.server, { id: linus, displayName: "Linus" });
+        yield* joinOrganization(hub.server, acme, grace, "member");
+        yield* joinOrganization(hub.server, acme, linus, "guest");
+        yield* hub.service(SpaceDirectory.SpaceDirectory).changed;
+        const acmeProject = ProjectId.make("project:acme");
+        const globexProject = ProjectId.make("project:globex");
+        const { workspaceRoot: acmeRoot } = yield* seedProject(hub.server, {
+          projectId: acmeProject,
+          title: "Acme",
+          defaultModelSelection: null,
+          spaceId: acme,
+        });
+        yield* seedProject(hub.server, {
+          projectId: globexProject,
+          title: "Globex",
+          defaultModelSelection: null,
+          spaceId: globex,
+        });
+        const acmeSandbox = sandboxEnvironmentIdOf(acme);
+        const choose = (userId: UserId, projectId: ProjectId, requested = acmeSandbox) =>
+          registry.chooseForThread({
+            userId,
+            requested,
+            projectId,
+            providerInstanceId: instanceId,
+          });
+        const refusal = (userId: UserId, projectId: ProjectId, requested = acmeSandbox) =>
+          choose(userId, projectId, requested).pipe(
+            Effect.flip,
+            Effect.map((error) =>
+              error._tag === "ThreadEnvironmentUnavailableError" ? error.reason : error._tag,
+            ),
+          );
+
+        // Grace sees her Space's Sandbox, not Globex's; a Guest runs nothing there.
+        const graces = (yield* listEnvironments(hub.server, graceCookie)).map(({ id }) => id);
+        assert.include(graces, acmeSandbox);
+        assert.notInclude(graces, sandboxEnvironmentIdOf(globex));
+        assert.equal(yield* refusal(linus, acmeProject), "not-usable");
+        assert.equal(yield* choose(grace, acmeProject), acmeSandbox);
+        // Not for a Thread of another Space, though the Owner may use both.
+        assert.equal(yield* refusal(owner, globexProject), "not-usable");
+        assert.equal(
+          yield* refusal(grace, globexProject, sandboxEnvironmentIdOf(globex)),
+          "not-usable",
+        );
+
+        const sandbox = yield* hub.sandboxOf(acme);
+        const remote = (projectId: ProjectId) =>
+          HubRepository.withEnvironmentCredential(
+            HubRepository.hubRepositoryUrl(hub.server.url, { projectId }),
+            sandbox.credential,
+          );
+        const advertised = (url: string) =>
+          HttpClient.HttpClient.pipe(
+            Effect.flatMap((client) =>
+              client.execute(
+                HttpClientRequest.get(`${url}/info/refs?service=git-upload-pack`).pipe(
+                  HttpClientRequest.bearerToken(sandbox.credential),
+                ),
+              ),
+            ),
+            Effect.map((response) => response.status),
+            Effect.provide(FetchHttpClient.layer),
+            Effect.orDie,
+          );
+        // Its own Space's repository, and nothing of Globex's: neither a Project's nor a Thread's.
+        assert.equal(yield* advertised(remote(acmeProject).url), 200);
+        assert.equal(yield* advertised(remote(globexProject).url), 403);
+        assert.notEqual(
+          (yield* git(acmeRoot, ["ls-remote", remote(globexProject).url], {
+            env: remote(globexProject).env ?? {},
+          })).exitCode,
+          0,
+        );
+        // A Globex Thread without a Project, in a folder of its own with its own repository.
+        const scratchProject = ProjectId.make("project:scratch");
+        const scratch = yield* seedProject(hub.server, {
+          projectId: scratchProject,
+          title: "No project",
+          defaultModelSelection: null,
+          scratch: true,
+        });
+        const folder = `${scratch.workspaceRoot}/globex-notes`;
+        yield* Effect.promise(() => NodeFSP.mkdir(folder, { recursive: true }));
+        yield* git(folder, ["init", "--quiet"]);
+        const globexThread = ThreadId.make("thread:globex");
+        yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:globex-thread"),
+          threadId: globexThread,
+          projectId: scratchProject,
+          spaceId: globex,
+          title: "Globex notes",
+          modelSelection: { instanceId, model: "claude-sonnet-4-6" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: folder,
+        });
+        assert.equal(
+          yield* advertised(
+            HubRepository.hubRepositoryUrl(hub.server.url, {
+              projectId: scratchProject,
+              scratchThreadId: globexThread,
+            }),
+          ),
+          403,
+        );
+        // A Thread of Globex never moves onto Acme's Sandbox, nor is it worked through it.
+        const moved = yield* registry
+          .chooseForThread({
+            userId: owner,
+            requested: acmeSandbox,
+            projectId: globexProject,
+            providerInstanceId: instanceId,
+            threadId: globexThread,
+          })
+          .pipe(Effect.flip);
+        assert.equal(
+          moved._tag === "ThreadEnvironmentUnavailableError" && moved.reason,
+          "not-usable",
+        );
+        assert.isTrue(
+          Option.isNone(
+            yield* registry.usableBy({
+              userId: owner,
+              environmentId: acmeSandbox,
+              threadId: globexThread,
+            }),
+          ),
+        );
+        // A Sandbox does not remove itself, and is not removed as a machine.
+        assert.isFalse(yield* registry.leave(sandbox.credential));
+        const removed = yield* registry
+          .remove({ actorUserId: owner, environmentId: acmeSandbox })
+          .pipe(Effect.flip);
+        assert.equal(removed._tag, "EnvironmentAccessDeniedError");
+      }).pipe(Effect.scoped),
+  );
+
+  it.live("a second Space gets a Sandbox of its own", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const hub = yield* makeHub({ sandboxAdapters: idleAdapters(instanceId) });
+      const registry = hub.service(EnvironmentRegistry.EnvironmentRegistry);
+      const owner = yield* ownerIdOf(hub);
+      const homes: Array<string> = [];
+      for (const name of ["Acme", "Globex"]) {
+        const spaceId = yield* createOrganization(hub, name);
+        const projectId = ProjectId.make(`project:${name}`);
+        yield* seedProject(hub.server, {
+          projectId,
+          title: name,
+          defaultModelSelection: null,
+          spaceId,
+        });
+        yield* registry.chooseForThread({
+          userId: owner,
+          requested: sandboxEnvironmentIdOf(spaceId),
+          projectId,
+          providerInstanceId: instanceId,
+        });
+        homes.push((yield* hub.sandboxOf(spaceId)).workspaceRoot);
+      }
+      assert.equal(new Set(homes).size, 2);
+      const online = (yield* listEnvironments(hub.server, hub.owner)).filter(
+        (environment) => environment.kind === "sandbox" && environment.status === "online",
+      );
+      assert.deepEqual(
+        online.map(({ name }) => name),
+        ["Acme Sandbox", "Globex Sandbox"],
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("the process runtime runs it as a joined `t3 serve` child with its own base dir", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub({
+        sandboxLauncher: ProcessSandboxRuntime.childProcessLauncher({
+          command: process.execPath,
+          args: [new URL("../bin.ts", import.meta.url).pathname],
+        }),
+      });
+      const acme = yield* createOrganization(hub, "Acme");
+      const projectId = ProjectId.make("project:acme");
+      yield* seedProject(hub.server, {
+        projectId,
+        title: "Acme",
+        defaultModelSelection: null,
+        spaceId: acme,
+      });
+      const placed = yield* hub
+        .service(EnvironmentRegistry.EnvironmentRegistry)
+        .chooseForThread({
+          userId: yield* ownerIdOf(hub),
+          requested: sandboxEnvironmentIdOf(acme),
+          projectId,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+        })
+        .pipe(Effect.result);
+      // It connected; whether it has Codex is up to the machine the test runs on.
+      if (Result.isFailure(placed)) {
+        assert.equal(
+          placed.failure._tag === "ThreadEnvironmentUnavailableError" && placed.failure.reason,
+          "provider-missing",
+        );
+      }
+      const sandbox = (yield* listEnvironments(hub.server, hub.owner)).find(
+        (environment) => environment.id === sandboxEnvironmentIdOf(acme),
+      );
+      assert.equal(sandbox?.status, "online");
+    }).pipe(Effect.scoped),
   );
 });

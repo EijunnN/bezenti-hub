@@ -112,6 +112,7 @@ const makeHandler = Effect.fnUntraced(function* (
             hello: hello.value,
             write: (text) => writer.write(text).pipe(Effect.ignore),
           });
+      yield* connections.markReady(environmentId);
       const end = yield* Effect.raceFirst(
         Deferred.await(closeRequested),
         receive(environmentId, nextFrame, registry, connection),

@@ -500,6 +500,7 @@ export const make = Effect.gen(function* () {
         const usable = yield* EnvironmentRegistry.mayUseEnvironment(
           Option.getOrUndefined(actor),
           preferredEnvironmentId,
+          existing.value.spaceId ?? undefined,
         ).pipe(
           Effect.provideService(SqlClient.SqlClient, sql),
           Effect.provideService(SpaceDirectory.SpaceDirectory, spaces),

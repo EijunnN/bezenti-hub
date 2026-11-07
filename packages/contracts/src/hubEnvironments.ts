@@ -4,6 +4,7 @@ import {
   EnvironmentId,
   IsoDateTime,
   NonNegativeInt,
+  SpaceId,
   TrimmedNonEmptyString,
   UserId,
 } from "./baseSchemas.ts";
@@ -15,23 +16,39 @@ import {
 import { HUB_MACHINE_ENVIRONMENT_ID } from "./environmentExecutor.ts";
 import { AuthReauth } from "./userAccounts.ts";
 
-/** The Hub machine runs in the Hub's own process; every other one joined with `t3 join`. */
-export const HubEnvironmentKind = Schema.Literals(["hub", "external"]);
+/**
+ * The Hub machine runs in the Hub's own process; an external one joined with `t3 join`; a
+ * Sandbox is the Space's own joined server, which the Hub runs for it.
+ */
+export const HubEnvironmentKind = Schema.Literals(["hub", "external", "sandbox"]);
 export type HubEnvironmentKind = typeof HubEnvironmentKind.Type;
 
-/** `personal`: only its owner uses it, in any of their Spaces. `dedicated` comes later. */
-export const HubEnvironmentMode = Schema.Literals(["personal"]);
+/**
+ * `personal`: only its owner uses it, in any of their Spaces. `sandbox`: the Users who work in
+ * its Space use it, for that Space's Threads. `dedicated` comes later.
+ */
+export const HubEnvironmentMode = Schema.Literals(["personal", "sandbox"]);
 export type HubEnvironmentMode = typeof HubEnvironmentMode.Type;
 
 export const HubEnvironmentName = TrimmedNonEmptyString.check(Schema.isMaxLength(64));
+
+/** A Space's Sandbox has one id for its whole life, known before the Sandbox exists. */
+export const sandboxEnvironmentIdOf = (spaceId: SpaceId): EnvironmentId =>
+  EnvironmentId.make(`sandbox:${spaceId}`);
+
+/** «<Space> Sandbox», as every client names it. */
+export const sandboxEnvironmentName = (spaceName: string) =>
+  `${spaceName.slice(0, 64 - " Sandbox".length).trim()} Sandbox`;
 
 export const HubEnvironmentSummary = Schema.Struct({
   id: EnvironmentId,
   name: HubEnvironmentName,
   kind: HubEnvironmentKind,
   mode: HubEnvironmentMode,
-  /** Null for the Hub machine, which belongs to the Installation. */
+  /** Null for the Hub machine, which belongs to the Installation, and for Sandboxes. */
   ownerUserId: Schema.NullOr(UserId),
+  /** A Sandbox's Space; it runs only that Space's Threads. Absent from older Hubs. */
+  spaceId: Schema.optionalKey(Schema.NullOr(SpaceId)),
   status: EnvironmentConnectionStatus,
   registeredAt: IsoDateTime,
   lastSeenAt: Schema.NullOr(IsoDateTime),

@@ -30,6 +30,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
@@ -46,7 +47,7 @@ import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as McpSessionRegistryTestkit from "../mcp/McpSessionRegistry.testkit.ts";
 import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
-import type * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
 import * as RuntimePolicy from "../orchestration-v2/RuntimePolicy.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -65,6 +66,9 @@ import * as KnownWorkspaces from "../workspace/KnownWorkspaces.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as ProcessSandboxRuntime from "../sandboxes/ProcessSandboxRuntime.ts";
+import * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
+import { ENVIRONMENT_CREDENTIAL_SECRET, readJoinedHubState } from "./joinedHubState.ts";
 import type * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 import type { HubServices, Server } from "../auth/UserAuth.testkit.ts";
 import * as EnvironmentAgent from "./EnvironmentAgent.ts";
@@ -235,6 +239,8 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
   >;
   readonly connect: boolean;
   readonly textGeneration?: ProviderTextGeneration;
+  /** Its T3 home; a fresh temporary one by default. */
+  readonly baseDir?: string;
 }) {
   const scope = yield* Effect.scope;
   const mcpConfigs: Array<McpProviderSessionConfig> = [];
@@ -275,7 +281,10 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
     Layer.provideMerge(JoinedWorkspaceRoots.layer),
     Layer.provideMerge(SqlitePersistence.layerMemory),
     Layer.provideMerge(
-      ServerConfig.layerTest(process.cwd(), { prefix: `t3-environment-${input.name}-` }),
+      ServerConfig.layerTest(
+        process.cwd(),
+        input.baseDir ?? { prefix: `t3-environment-${input.name.replace(/\W/gu, "-")}-` },
+      ),
     ),
     Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
@@ -375,17 +384,91 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
   } satisfies TestEnvironment;
 });
 
+/**
+ * The process Sandbox runtime as the testkit runs it: the Hub makes each Sandbox's home with its
+ * credential and Hub as for a child process, and its server is a testkit Environment started from
+ * that home, over `adapters`, instead of a `t3 serve` child.
+ */
+const makeSandboxRuntime = (
+  adapters: Layer.Layer<
+    ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+    never,
+    McpProviderSessions.McpProviderSessions
+  >,
+  /** A real launcher instead, such as `t3 serve` children. */
+  realLauncher: ProcessSandboxRuntime.SandboxLauncher | undefined,
+) => {
+  let hubUrl = "";
+  const started = new Map<string, TestEnvironment>();
+  const testkitLauncher: ProcessSandboxRuntime.SandboxLauncher = (launch) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const paths = yield* ServerConfig.deriveServerPaths(launch.homePath, undefined, {
+        baseDirIsExplicit: true,
+      });
+      const joined = yield* readJoinedHubState(paths.joinedHubPath).pipe(Effect.orDie);
+      if (Option.isNone(joined)) return yield* Effect.die("the Sandbox's home has no Hub");
+      const credential = yield* fs
+        .readFileString(path.join(paths.secretsDir, `${ENVIRONMENT_CREDENTIAL_SECRET}.bin`))
+        .pipe(Effect.orDie);
+      const environment = yield* startEnvironment({
+        hubUrl: joined.value.hubUrl,
+        credential,
+        environmentId: joined.value.environmentId,
+        hubEnvironmentId: joined.value.hubEnvironmentId,
+        name: joined.value.name,
+        adapters,
+        connect: true,
+        baseDir: launch.homePath,
+      });
+      started.set(launch.sandboxId, environment);
+      return { pid: null, exited: Effect.never };
+    }).pipe(Effect.provide(NodeServices.layer));
+  const runtime = ProcessSandboxRuntime.layer({ launcher: realLauncher ?? testkitLauncher }).pipe(
+    Layer.provide(
+      Layer.succeed(
+        SandboxRuntime.SandboxHubAddress,
+        SandboxRuntime.SandboxHubAddress.of({ loopbackUrl: Effect.sync(() => hubUrl) }),
+      ),
+    ),
+  );
+  return {
+    runtime,
+    setHubUrl: (url: string) => {
+      hubUrl = url;
+    },
+    /** The server the runtime last started for the Space's Sandbox. */
+    environmentOf: (spaceId: SpaceId) =>
+      Effect.fromNullishOr(started.get(SandboxRuntime.sandboxIdOf(spaceId))).pipe(Effect.orDie),
+  };
+};
+
 /** A Hub with its Owner signed in, running the orchestration, listening on loopback. */
 export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
   options: {
     /** The Hub machine's own text generation; none by default, as it runs no providers. */
     readonly textGeneration?: ProviderTextGeneration;
+    /** What each Sandbox's server runs its providers with; none by default. */
+    readonly sandboxAdapters?: Layer.Layer<
+      ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+      never,
+      McpProviderSessions.McpProviderSessions
+    >;
+    /** Runs each Sandbox's server with this launcher instead of in the test's process. */
+    readonly sandboxLauncher?: ProcessSandboxRuntime.SandboxLauncher;
   } = {},
 ) {
+  const sandboxes = makeSandboxRuntime(
+    options.sandboxAdapters ?? ProviderAdapterRegistry.layerFromAdapters([]),
+    options.sandboxLauncher,
+  );
   const { server, authenticator, owner } = yield* hubWithOwner({
     listen: true,
     extend: withOrchestration(options.textGeneration),
+    sandboxRuntime: sandboxes.runtime,
   });
+  sandboxes.setHubUrl(server.url);
   /** Joins a machine as the Owner (`t3 join`, approved with a passkey) and connects it. */
   const join = Effect.fn("HubWithEnvironments.join")(function* (input: {
     readonly name: string;
@@ -411,7 +494,15 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
       ...(input.textGeneration === undefined ? {} : { textGeneration: input.textGeneration }),
     });
   });
-  return { server, authenticator, owner, join, service: serviceOf(server) };
+  return {
+    server,
+    authenticator,
+    owner,
+    join,
+    service: serviceOf(server),
+    /** The running server of the Space's Sandbox, once the Hub started it. */
+    sandboxOf: sandboxes.environmentOf,
+  };
 });
 
 /** A Hub service, as the routes and orchestration share it. */
