@@ -105,27 +105,24 @@ export const fromConfig = Effect.gen(function* () {
     return Option.none();
   }
   const hubUrl = ProcessSandboxRuntime.sandboxHubLoopbackUrl(config);
-  if (hubUrl === undefined) {
-    if (setting !== undefined) {
-      yield* Effect.logWarning("Sandboxes are off: the Hub does not listen on loopback.");
-    }
-    return Option.none();
-  }
-  const address = Layer.succeed(
-    SandboxHubAddress,
-    SandboxHubAddress.of({ loopbackUrl: Effect.succeed(hubUrl) }),
-  );
+  const addressOf = (url: string) =>
+    Layer.succeed(SandboxHubAddress, SandboxHubAddress.of({ loopbackUrl: Effect.succeed(url) }));
   if (setting === "process") {
-    return Option.map(ProcessSandboxRuntime.forHub(config), Layer.provide(address));
+    if (hubUrl === undefined) {
+      yield* Effect.logWarning("Sandboxes are off: the Hub does not listen on loopback.");
+      return Option.none();
+    }
+    return Option.map(ProcessSandboxRuntime.forHub(config), Layer.provide(addressOf(hubUrl)));
   }
   const image = Option.getOrElse(
     yield* optionalSetting(SANDBOX_IMAGE_SETTING),
     () => defaultSandboxImage,
   );
-  if (!hubHostAllowsPodman(config.host)) {
-    if (setting === "podman") {
+  if (hubUrl === undefined || !hubHostAllowsPodman(config.host)) {
+    // Said whenever Podman could have run them, so a Hub left on 0.0.0.0 learns why it has none.
+    if (setting === "podman" || (yield* detectPodman(image)).rootless) {
       yield* Effect.logWarning(
-        "Sandboxes are off: Podman Sandboxes need the Hub to listen on loopback only (T3CODE_HOST=127.0.0.1), since a container reaches the host's other addresses.",
+        "Sandboxes are off: Podman is here, but Podman Sandboxes need the Hub to listen on loopback only (T3CODE_HOST=127.0.0.1, published through a reverse proxy or `t3 up`), since a container reaches every other address of this machine.",
       );
     }
     return Option.none();
@@ -137,13 +134,9 @@ export const fromConfig = Effect.gen(function* () {
     }
     return Option.none();
   }
-  if (setting === undefined) {
-    if (!detected.image) {
-      yield* Effect.logInfo(
-        `Sandboxes are off: Podman is here but the image ${image} is not built.`,
-      );
-      return Option.none();
-    }
+  if (setting === undefined && !detected.image) {
+    yield* Effect.logInfo(`Sandboxes are off: Podman is here but the image ${image} is not built.`);
+    return Option.none();
   }
-  return Option.some(podmanForHub(config, image).pipe(Layer.provide(address)));
+  return Option.some(podmanForHub(config, image).pipe(Layer.provide(addressOf(hubUrl))));
 });

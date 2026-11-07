@@ -45,7 +45,9 @@ joined) runs Podman when `podman info` says rootless and the image (`T3CODE_SAND
 run once per Hub, together, with a 5-second timeout each. Every runtime needs the Hub to answer on
 loopback; Podman Sandboxes need it to listen on loopback **only** (`T3CODE_HOST=127.0.0.1`, or `::1`),
 since a container reaches every address of the host but its loopback: a Hub on `0.0.0.0` or a LAN
-address offers none and logs why. Publish such a Hub through a reverse proxy or `t3 up`.
+address offers none. A production Hub binds loopback and is published through a reverse proxy
+(or `t3 up`); one that binds elsewhere while rootless Podman is here warns at startup that its
+Sandboxes are off for that reason.
 
 ### Podman
 

@@ -515,6 +515,24 @@ only that Space's Threads run in it; another Space's Sandbox never shows in the
 picker. A Sandbox reaches only its own Space's repositories on the Hub. Turns,
 checkpoints, terminals and moves work as on a joined machine.
 
+To run Sandboxes, the Hub's machine needs:
+
+- **Rootless Podman** 3.4 or newer with `slirp4netns`, and subuid/subgid ranges
+  for the user the Hub runs as (`/etc/subuid`, `/etc/subgid`).
+- **The Sandbox image**, `localhost/t3code-sandbox:<version>` (or another one
+  named in `T3CODE_SANDBOX_IMAGE`).
+- **A Hub that listens on loopback only.** A Sandbox's container can reach every
+  other address of the machine, so start the Hub with `T3CODE_HOST=127.0.0.1`
+  and publish it through a reverse proxy (or `t3 up`). A Hub listening on
+  `0.0.0.0` or a LAN address runs no Sandboxes, and `t3 serve` warns at startup
+  when Podman is there but Sandboxes are off for that reason.
+
+Each Sandbox runs in a container of its own, with no access to the Hub's
+files, other Sandboxes, or anything on the machine's loopback. It reaches the
+internet, and the Hub only through a private socket. A Sandbox clones a
+Project from the Project's own remote, so use a remote it can reach over the
+internet.
+
 ### Move a Thread to another machine
 
 To go on with a Thread elsewhere, open its menu (its title in the header, or
