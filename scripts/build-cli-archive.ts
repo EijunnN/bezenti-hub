@@ -122,7 +122,7 @@ const requireInput = Effect.fn("requireInput")(function* (inputPath: string, hin
 });
 
 /** Installed runtimes cannot rely on pnpm's store layout surviving archival. */
-const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (input: {
+export const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (input: {
   readonly repoRoot: string;
   readonly stageDir: string;
   readonly platform: BuildPlatform;
@@ -522,6 +522,8 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
   yield* fs.copyFile(builtExecutable, path.join(contentDir, executableName));
   yield* stageWebClient(webClient, path.join(contentDir, "client"));
   yield* fs.copy(resourceMonitorDir, path.join(contentDir, "resource-monitor"));
+  // `t3 sandbox image build` builds the Sandbox image from this Containerfile and this tree.
+  yield* fs.copy(path.join(serverDir, "sandbox-image"), path.join(contentDir, "sandbox-image"));
   yield* stageRuntimeExternals({
     repoRoot,
     stageDir: contentDir,

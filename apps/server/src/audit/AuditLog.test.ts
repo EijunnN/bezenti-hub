@@ -591,6 +591,8 @@ it.effect(
         "sandbox.start",
         "sandbox.stop",
         "sandbox.delete",
+        // environments/HubWithEnvironments.sandboxImage.test.ts
+        "sandbox.image.update",
       ];
       const hooks = ["secret.reveal", "secret.edit"];
       assert.sameMembers(

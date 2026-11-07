@@ -38,6 +38,7 @@ import { AccountSettingsSection } from "./AccountSettingsSection";
 import { AuditLogSettingsSection } from "./AuditLogSettingsSection";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { HubEnvironmentsSettings } from "./HubEnvironmentsSettings";
+import { SandboxImageSettings } from "./SandboxImageSettings";
 import { JoinedEnvironmentSetting } from "./JoinedEnvironmentSetting";
 import { PullRequestRoutingSettings } from "./PullRequestRoutingSettings";
 import { Input } from "../ui/input";
@@ -1389,6 +1390,7 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
   return (
     <SettingsPageContainer>
       <HubEnvironmentsSettings />
+      <SandboxImageSettings />
       {desktopBridge ? (
         <SettingsSection id="this-app" title="This app">
           <LocalEnvironmentSetting />

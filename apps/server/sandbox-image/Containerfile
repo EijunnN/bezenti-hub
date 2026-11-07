@@ -1,0 +1,74 @@
+# The base image of every Sandbox (docs/internals/sandboxes.md, «Base image»): Debian, Node, git,
+# ripgrep, common build tools, the AI CLIs of the providers T3 Code runs, and the T3 server of the
+# Hub's own version. `t3 sandbox image build` (or Settings → Environments) prepares the context and
+# builds it with rootless Podman 3.4 or newer; nothing here needs BuildKit.
+#
+# The context the Hub prepares:
+#   server/   the T3 server of the Hub's version, without its node_modules: the release tree a
+#             `t3` executable runs from, or a bundle built from a checkout (`dist/bin.mjs`).
+#   modules/  that server's runtime node_modules, for Linux on this machine's architecture.
+#   extras/   files laid out under /opt/t3 (a checkout's dev Replay agent); may be empty.
+#
+# Every version is pinned. To update one, change its ARG here (and the table in
+# docs/internals/sandboxes.md) and rebuild; a Sandbox picks the new image up at its next start.
+
+FROM docker.io/library/debian:bookworm-slim
+
+# Node of the repository's `engines` (package.json).
+ARG NODE_VERSION=26.12.1
+# The providers' CLIs, as their drivers name the npm packages (Claude, Codex, OpenCode, Pi, Grok).
+ARG CLAUDE_CODE_VERSION=2.1.319
+ARG CODEX_VERSION=0.167.0
+ARG OPENCODE_VERSION=1.19.5
+ARG PI_VERSION=1.5.0
+ARG GROK_VERSION=1.0.77
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      bash build-essential ca-certificates curl file git git-lfs jq less libatomic1 \
+      openssh-client pkg-config procps python3 ripgrep unzip xz-utils zip \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) node_arch=x64 ;; \
+      arm64) node_arch=arm64 ;; \
+      *) echo "No Node build for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    file="node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"; \
+    cd /tmp; \
+    curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/${file}"; \
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" | grep " ${file}\$" | sha256sum -c -; \
+    tar -xJf "${file}" -C /usr/local --strip-components=1 --no-same-owner \
+      --exclude='*/CHANGELOG.md' --exclude='*/README.md' --exclude='*/LICENSE' --exclude='*/doc'; \
+    rm "${file}"; \
+    node --version; npm --version
+
+# Their install scripts fetch or link each CLI's platform binary, so they are allowed by name.
+RUN npm install --global --no-fund --no-audit \
+      --allow-scripts=@anthropic-ai/claude-code,@xai-official/grok,opencode-ai,protobufjs \
+      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+      "@openai/codex@${CODEX_VERSION}" \
+      "opencode-ai@${OPENCODE_VERSION}" \
+      "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+      "@xai-official/grok@${GROK_VERSION}" \
+ && npm cache clean --force \
+ && rm -rf /root/.npm \
+ && claude --version && codex --version && opencode --version && pi --version && grok --version
+
+# The server last, so a new Hub version rebuilds only these layers.
+COPY modules/ /opt/t3/app/node_modules/
+COPY server/ /opt/t3/app/
+COPY extras/ /opt/t3/
+RUN set -eu; \
+    if [ -x /opt/t3/app/t3 ]; then \
+      ln -s /opt/t3/app/t3 /usr/local/bin/t3; \
+    else \
+      printf '#!/bin/sh\nexec node /opt/t3/app/dist/bin.mjs "$@"\n' > /usr/local/bin/t3; \
+      chmod 755 /usr/local/bin/t3; \
+    fi; \
+    t3 --version

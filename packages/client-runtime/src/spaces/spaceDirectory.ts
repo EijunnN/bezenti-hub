@@ -122,6 +122,7 @@ export const AUDIT_ACTION_LABELS: Record<AuditAction, string> = {
   "sandbox.start": "Started a Sandbox",
   "sandbox.stop": "Stopped a Sandbox",
   "sandbox.delete": "Deleted a Sandbox",
+  "sandbox.image.update": "Updated the Sandbox image",
 };
 
 export const INSTALLATION_PERMISSION_LABELS: Record<InstallationPermission, string> = {

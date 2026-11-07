@@ -13,32 +13,19 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
-import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
 import * as PodmanSandboxRuntime from "./PodmanSandboxRuntime.ts";
 import * as ProcessSandboxRuntime from "./ProcessSandboxRuntime.ts";
+import { checkoutOf, configuredSandboxImage } from "./SandboxImage.ts";
 import { SandboxHubAddress } from "./SandboxRuntime.ts";
 
 const SANDBOX_RUNTIME_SETTING = "T3CODE_SANDBOX_RUNTIME";
-/** The image Sandboxes run; by default the one built for this Hub's version. */
-const SANDBOX_IMAGE_SETTING = "T3CODE_SANDBOX_IMAGE";
-const defaultSandboxImage = `localhost/t3code-sandbox:${packageJson.version}`;
 
 const optionalSetting = (name: string) =>
   Config.String(name).pipe(
     Config.option,
     Effect.orElseSucceed(() => Option.none<string>()),
   );
-
-/** The checkout a Hub run from source lives in: the nearest directory with the pnpm workspace. */
-const checkoutOf = (entry: string) => {
-  let dir = NodePath.dirname(NodePath.resolve(entry));
-  while (dir !== NodePath.dirname(dir)) {
-    if (NodeFS.existsSync(NodePath.join(dir, "pnpm-workspace.yaml"))) return dir;
-    dir = NodePath.dirname(dir);
-  }
-  return undefined;
-};
 
 /**
  * What a dev Hub mounts of its checkout, read-only, for its Sandboxes to run the server from
@@ -74,9 +61,9 @@ const detectPodman = (image: string) =>
   });
 
 /**
- * The Podman runtime as a Hub runs it. A Hub run from source (`src/bin.ts`, a dev Hub) mounts
- * {@link devCodeMounts} and runs it with the image's Node, so a dev image needs only node and git;
- * otherwise the image's `t3` runs.
+ * The Podman runtime as a Hub runs it. The base image runs its own `t3`. A Hub run from source
+ * (`src/bin.ts`, a dev Hub) given a dev image (one it did not build: node and git only) mounts
+ * {@link devCodeMounts} and runs its source with the image's Node.
  */
 const podmanForHub = (config: { readonly devUrl: URL | undefined }, image: string) => {
   const entry = process.argv[1];
@@ -85,7 +72,12 @@ const podmanForHub = (config: { readonly devUrl: URL | undefined }, image: strin
     image,
     ...(checkout === undefined || entry === undefined
       ? {}
-      : { serverCommand: ["node", NodePath.resolve(entry)], codeMounts: devCodeMounts(checkout) }),
+      : {
+          devServer: {
+            serverCommand: ["node", NodePath.resolve(entry)],
+            codeMounts: devCodeMounts(checkout),
+          },
+        }),
     devUrl: config.devUrl?.toString(),
   });
 };
@@ -114,10 +106,7 @@ export const fromConfig = Effect.gen(function* () {
     }
     return Option.map(ProcessSandboxRuntime.forHub(config), Layer.provide(addressOf(hubUrl)));
   }
-  const image = Option.getOrElse(
-    yield* optionalSetting(SANDBOX_IMAGE_SETTING),
-    () => defaultSandboxImage,
-  );
+  const image = yield* configuredSandboxImage;
   if (hubUrl === undefined || !hubHostAllowsPodman(config.host)) {
     // Said whenever Podman could have run them, so a Hub left on 0.0.0.0 learns why it has none.
     if (setting === "podman" || (yield* detectPodman(image)).rootless) {
@@ -135,7 +124,9 @@ export const fromConfig = Effect.gen(function* () {
     return Option.none();
   }
   if (setting === undefined && !detected.image) {
-    yield* Effect.logInfo(`Sandboxes are off: Podman is here but the image ${image} is not built.`);
+    yield* Effect.logInfo(
+      `Sandboxes are off: Podman is here but the image ${image} is not built. Build it with \`t3 sandbox image build\` and restart the Hub.`,
+    );
     return Option.none();
   }
   return Option.some(podmanForHub(config, image).pipe(Layer.provide(addressOf(hubUrl))));

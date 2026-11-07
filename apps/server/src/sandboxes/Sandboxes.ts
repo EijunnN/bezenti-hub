@@ -36,7 +36,7 @@ import * as EnvironmentDemand from "../environment/EnvironmentDemand.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as EnvironmentConnections from "../environments/EnvironmentConnections.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
-import { SandboxRuntime, sandboxIdOf } from "./SandboxRuntime.ts";
+import { SandboxRuntime, type SandboxRuntimeKind, sandboxIdOf } from "./SandboxRuntime.ts";
 import { sandboxSpaceOf } from "./sandboxSpace.ts";
 
 /** How long a starting Sandbox has to connect before its start counts as failed. */
@@ -68,8 +68,36 @@ export interface SandboxStatusRow {
   readonly lastError: string | null;
 }
 
-/** Why a start happened, as the audit log records it. */
-export type SandboxStartVia = "demand" | "retry";
+/** Why a start happened, as the audit log records it; `update`: moving it to a new image. */
+export type SandboxStartVia = "demand" | "retry" | "update";
+
+/**
+ * Why a running Sandbox was not moved to the newest image: it has none (`missing`), a turn is in
+ * progress on it (`busy`), or it is starting or stopping (`transition`).
+ */
+export class SandboxImageUpdateRefusedError extends Schema.TaggedError<SandboxImageUpdateRefusedError>()(
+  "SandboxImageUpdateRefusedError",
+  {
+    spaceId: Schema.String,
+    kind: Schema.Literals(["missing", "busy", "transition"]),
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
+/** A Sandbox and the image it runs, for the Owner's image view. */
+export interface SandboxImageRow {
+  readonly spaceId: SpaceId;
+  readonly environmentId: EnvironmentId;
+  readonly name: string;
+  readonly status: SandboxStatusRow["status"];
+  readonly imageVersion: string | null;
+  /** A turn is in progress on it. */
+  readonly busy: boolean;
+}
 
 /**
  * How long a Sandbox may idle and may take to start, and the clock the idle stop reads (a test's
@@ -128,6 +156,25 @@ export class Sandboxes extends Context.Service<
     }) => Effect.Effect<boolean, SandboxStartError>;
     /** Stops every running Sandbox that has been idle for the timeout; run on a schedule. */
     readonly stopIdle: Effect.Effect<void>;
+    readonly runtimeKind: SandboxRuntimeKind;
+    /** Each Sandbox with the image version it last started with. */
+    readonly listImages: Effect.Effect<ReadonlyArray<SandboxImageRow>, SandboxStartError>;
+    /**
+     * Moves a running Sandbox to the newest image by starting it again, at the Owner's request,
+     * never with a turn in progress on it (refused, saying why). A stopped one is left as it is:
+     * its next start runs the newest image anyway.
+     */
+    readonly updateImage: (input: {
+      readonly spaceId: SpaceId;
+      readonly actorUserId: UserId | undefined;
+      readonly actor: AuditLog.AuditActor;
+    }) => Effect.Effect<
+      {
+        readonly outcome: "updated" | "next-start" | "up-to-date";
+        readonly imageVersion: string | null;
+      },
+      SandboxStartError | SandboxImageUpdateRefusedError
+    >;
   }
 >()("t3/sandboxes/Sandboxes") {}
 
@@ -351,6 +398,8 @@ const make = Effect.gen(function* () {
       name = created.name;
       launched = true;
       const started = yield* runtime.start(sandboxId);
+      // Which image it runs, recorded once it is running.
+      const imageVersion = started.imageVersion;
       // Ready once welcomed with its executor serving; a server that ends first fails at once.
       const ready = yield* Effect.raceFirst(
         connections.awaitReady(environmentId).pipe(Effect.as("ready" as const)),
@@ -371,6 +420,9 @@ const make = Effect.gen(function* () {
           failedAt.delete(spaceId);
           if (created.running) return;
           yield* setStatus(spaceId, "running");
+          yield* sql`
+            UPDATE sandboxes SET image_version = ${imageVersion} WHERE space_id = ${spaceId}
+          `;
           yield* audit.record({
             actor: actorOf(input.actorUserId),
             action: "sandbox.start",
@@ -479,7 +531,7 @@ const make = Effect.gen(function* () {
   const stopLocked = Effect.fn("Sandboxes.stopLocked")(function* (input: {
     readonly spaceId: SpaceId;
     readonly actor: AuditLog.AuditActor;
-    readonly via: "archived" | "idle";
+    readonly via: "archived" | "idle" | "update";
   }) {
     const { spaceId } = input;
     const row = yield* selectRow(spaceId);
@@ -665,6 +717,95 @@ const make = Effect.gen(function* () {
   const readyNow = (spaceId: SpaceId, environmentId: EnvironmentId) =>
     stopping.has(spaceId) ? Effect.succeed(false) : connections.isReady(environmentId);
 
+  const listImages: Sandboxes["Service"]["listImages"] = Effect.gen(function* () {
+    const rows = yield* sql<Omit<SandboxImageRow, "busy">>`
+      SELECT sandbox.space_id AS "spaceId", sandbox.environment_id AS "environmentId",
+        environment.name AS name, sandbox.status, sandbox.image_version AS "imageVersion"
+      FROM sandboxes AS sandbox
+      JOIN environments AS environment ON environment.environment_id = sandbox.environment_id
+      ORDER BY sandbox.created_at
+    `;
+    return yield* Effect.forEach(rows, (row) =>
+      unfinishedRuns(row.environmentId).pipe(Effect.map((runs) => ({ ...row, busy: runs > 0 }))),
+    );
+  }).pipe(
+    Effect.mapError((cause) => new SandboxStartError({ spaceId: "", detail: String(cause) })),
+  );
+
+  const imageVersionOf = (spaceId: SpaceId) =>
+    sql<{ readonly imageVersion: string | null }>`
+      SELECT image_version AS "imageVersion" FROM sandboxes WHERE space_id = ${spaceId}
+    `.pipe(Effect.map((rows) => rows[0]?.imageVersion ?? null));
+
+  const updateImage: Sandboxes["Service"]["updateImage"] = Effect.fn("Sandboxes.updateImage")(
+    function* (input) {
+      const { spaceId } = input;
+      const environmentId = sandboxEnvironmentIdOf(spaceId);
+      const refuse = (kind: SandboxImageUpdateRefusedError["kind"], detail: string) =>
+        new SandboxImageUpdateRefusedError({ spaceId, kind, detail });
+      const busyDetail = (runs: number) =>
+        `A turn is in progress on it (${runs} ${runs === 1 ? "Thread" : "Threads"}). Update it once its turns end.`;
+      const row = yield* selectRow(spaceId).pipe(Effect.orDie);
+      if (row === undefined) return yield* refuse("missing", "This Space has no Sandbox.");
+      const newest = yield* runtime.imageVersion.pipe(
+        Effect.mapError((error) => new SandboxStartError({ spaceId, detail: error.message })),
+      );
+      if (inFlight.has(spaceId) || stopping.has(spaceId)) {
+        return yield* refuse("transition", "It is starting or stopping; try again in a moment.");
+      }
+      // A stopped Sandbox runs the newest image from its next start: nothing to do now.
+      if (row.status !== "running") return { outcome: "next-start" as const, imageVersion: newest };
+      const from = yield* imageVersionOf(spaceId).pipe(Effect.orDie);
+      if (from === newest) return { outcome: "up-to-date" as const, imageVersion: newest };
+      const runs = yield* unfinishedRuns(environmentId);
+      if (runs > 0) return yield* refuse("busy", busyDetail(runs));
+      // Stopped under its lock and marked stopping, as an idle stop: work that arrives meanwhile
+      // waits for the stop, then starts it again, on the newest image.
+      const done = Deferred.makeUnsafe<void>();
+      yield* locked(
+        spaceId,
+        Effect.gen(function* () {
+          stopping.set(spaceId, done);
+          const runsNow = yield* unfinishedRuns(environmentId);
+          if (runsNow > 0) return yield* refuse("busy", busyDetail(runsNow));
+          yield* stopLocked({ spaceId, actor: input.actor, via: "update" }).pipe(
+            Effect.mapError((cause) => new SandboxStartError({ spaceId, detail: String(cause) })),
+          );
+        }),
+      ).pipe(
+        Effect.ensuring(
+          Effect.suspend(() => {
+            if (stopping.get(spaceId) === done) stopping.delete(spaceId);
+            return Deferred.succeed(done, undefined);
+          }),
+        ),
+      );
+      const record = (detail: {
+        readonly outcome: string;
+        readonly version?: string | null;
+        readonly reason?: string;
+      }) =>
+        audit
+          .record({
+            actor: input.actor,
+            action: "sandbox.image.update",
+            spaceId,
+            target: { kind: "environment", id: environmentId },
+            detail: { via: "restart", from, ...detail },
+          })
+          .pipe(Effect.ignore);
+      const entry = yield* startOnce({ spaceId, actorUserId: input.actorUserId, via: "update" });
+      yield* awaitStart(entry, spaceId).pipe(
+        Effect.tapError((error) =>
+          record({ outcome: "failed", reason: error.detail.slice(0, 200) }),
+        ),
+      );
+      const version = yield* imageVersionOf(spaceId).pipe(Effect.orDie);
+      yield* record({ outcome: "updated", version });
+      return { outcome: "updated" as const, imageVersion: version };
+    },
+  );
+
   const service = Sandboxes.of({
     ensureCreated,
     ensureRunning,
@@ -673,6 +814,9 @@ const make = Effect.gen(function* () {
     stop,
     delete: remove,
     stopIdle,
+    runtimeKind: runtime.kind,
+    listImages,
+    updateImage,
   });
 
   const demand = EnvironmentDemand.EnvironmentDemand.of({

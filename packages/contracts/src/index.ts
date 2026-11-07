@@ -11,6 +11,7 @@ export * from "./invitations.ts";
 export * from "./audit.ts";
 export * from "./environmentConnection.ts";
 export * from "./hubEnvironments.ts";
+export * from "./sandboxImage.ts";
 export * from "./environment.ts";
 export * from "./environmentHttp.ts";
 export * from "./environmentExecutor.ts";

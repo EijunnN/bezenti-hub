@@ -1,0 +1,431 @@
+// @effect-diagnostics nodeBuiltinImport:off -- stages the build context and streams `podman build`.
+/**
+ * The Sandboxes' base image (apps/server/sandbox-image/Containerfile), built by the Hub one build
+ * at a time from `t3 sandbox image build` or Settings, tagged with its version and audited. A
+ * Sandbox runs the newest one from its next start. See docs/internals/sandboxes.md, «Base image».
+ */
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeReadline from "node:readline";
+import * as NodeSea from "node:sea";
+
+import {
+  HUB_MACHINE_ENVIRONMENT_ID,
+  type SandboxImageBuild,
+  type SandboxImageInfo,
+} from "@t3tools/contracts";
+import * as Config from "effect/Config";
+import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+
+import packageJson from "../../package.json" with { type: "json" };
+import * as AuditLog from "../audit/AuditLog.ts";
+import {
+  detectRootlessPodman,
+  inspectSandboxImage,
+  podmanGlobalArgs,
+  runPodman,
+  SANDBOX_IMAGE_VERSION_LABEL,
+  type SandboxImageFound,
+} from "./PodmanSandboxRuntime.ts";
+
+/** The image Sandboxes run; by default the one built for this Hub's version. */
+const SANDBOX_IMAGE_SETTING = "T3CODE_SANDBOX_IMAGE";
+const DEFAULT_SANDBOX_IMAGE = `localhost/t3code-sandbox:${packageJson.version}`;
+/** On every image the Hub builds, so it removes only its own old ones. */
+const SANDBOX_IMAGE_LABEL = "io.t3code.sandbox-image";
+/** A first build downloads Debian, Node and the CLIs; later ones reuse those layers. */
+const BUILD_TIMEOUT_MS = 60 * 60 * 1000;
+const LOG_LINES_KEPT = 400;
+
+export const configuredSandboxImage = Config.String(SANDBOX_IMAGE_SETTING).pipe(
+  Config.option,
+  Effect.map(Option.getOrElse(() => DEFAULT_SANDBOX_IMAGE)),
+  Effect.orElseSucceed(() => DEFAULT_SANDBOX_IMAGE),
+);
+
+/** The checkout a Hub run from source lives in: the nearest directory with the pnpm workspace. */
+export const checkoutOf = (entry: string) => {
+  let dir = NodePath.dirname(NodePath.resolve(entry));
+  while (dir !== NodePath.dirname(dir)) {
+    if (NodeFS.existsSync(NodePath.join(dir, "pnpm-workspace.yaml"))) return dir;
+    dir = NodePath.dirname(dir);
+  }
+  return undefined;
+};
+
+export class SandboxImageBuildError extends Schema.TaggedError<SandboxImageBuildError>()(
+  "SandboxImageBuildError",
+  { detail: Schema.String },
+) {
+  override get message(): string {
+    return `The Sandbox image could not be built: ${this.detail}`;
+  }
+}
+
+/** `localhost/t3code-sandbox:0.1.7` → `localhost/t3code-sandbox`. */
+const repositoryOf = (image: string) => {
+  const slash = image.lastIndexOf("/");
+  const colon = image.lastIndexOf(":");
+  return colon > slash ? image.slice(0, colon) : image;
+};
+
+/** `<Hub version>-<UTC time>`: one per build, so a Sandbox's version tells which build it runs. */
+const buildVersion = (now: DateTime.Utc) =>
+  `${packageJson.version}-${DateTime.formatIso(now)
+    .replace(/\.\d+Z$/u, "")
+    .replace(/[-:T]/gu, "")}`;
+
+/** Runs a command, handing each line of its output to `onLine`; fails on a non-zero exit. */
+const streamCommand = (
+  command: string,
+  args: ReadonlyArray<string>,
+  onLine: (line: string) => void,
+  options: { readonly cwd?: string; readonly timeoutMs: number },
+) =>
+  Effect.callback<void, SandboxImageBuildError>((resume) => {
+    const child = NodeChildProcess.spawn(command, [...args], {
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    for (const stream of [child.stdout, child.stderr]) {
+      NodeReadline.createInterface({ input: stream }).on("line", (line) => onLine(line));
+    }
+    child.on("error", (error) => {
+      resume(Effect.fail(new SandboxImageBuildError({ detail: error.message })));
+    });
+    child.on("close", (code, signal) => {
+      resume(
+        code === 0
+          ? Effect.void
+          : Effect.fail(
+              new SandboxImageBuildError({
+                detail: `${NodePath.basename(command)} ${args[0] ?? ""} ${
+                  signal === null ? `exited with code ${code}` : `was stopped (${signal})`
+                }.`,
+              }),
+            ),
+      );
+    });
+    return Effect.sync(() => child.kill("SIGKILL"));
+  }).pipe(
+    // Interrupted (the timeout, or the Hub stopping), the command is killed.
+    Effect.timeoutOrElse({
+      duration: options.timeoutMs,
+      orElse: () =>
+        Effect.fail(
+          new SandboxImageBuildError({
+            detail: `${NodePath.basename(command)} ${args[0] ?? ""} took too long.`,
+          }),
+        ),
+    }),
+  );
+
+/**
+ * The context: the Containerfile, and the server of this Hub's version. A `t3` release runs from
+ * its own tree, which is copied as it is; a Hub run from a checkout (source or its `dist`) stages
+ * that checkout's server (scripts/stage-sandbox-server.ts).
+ */
+const prepareContext = Effect.fn("SandboxImage.prepareContext")(function* (
+  contextDir: string,
+  onLine: (line: string) => void,
+) {
+  const copy = (from: string, to: string) =>
+    Effect.try({
+      try: () => NodeFS.cpSync(from, to, { recursive: true, dereference: true }),
+      catch: (cause) => new SandboxImageBuildError({ detail: String(cause) }),
+    });
+  if (NodeSea.isSea()) {
+    const tree = NodePath.dirname(process.execPath);
+    const containerfile = NodePath.join(tree, "sandbox-image", "Containerfile");
+    if (!NodeFS.existsSync(containerfile)) {
+      return yield* new SandboxImageBuildError({
+        detail: `this installation has no ${containerfile}; install T3 Code again.`,
+      });
+    }
+    onLine(`Copying the T3 server ${packageJson.version} from ${tree}...`);
+    yield* copy(containerfile, NodePath.join(contextDir, "Containerfile"));
+    for (const entry of NodeFS.readdirSync(tree)) {
+      if (entry === "sandbox-image" || entry === "node_modules" || entry.startsWith(".")) continue;
+      yield* copy(NodePath.join(tree, entry), NodePath.join(contextDir, "server", entry));
+    }
+    const modules = NodePath.join(tree, "node_modules");
+    if (NodeFS.existsSync(modules)) yield* copy(modules, NodePath.join(contextDir, "modules"));
+    for (const dir of ["server", "modules", "extras"]) {
+      NodeFS.mkdirSync(NodePath.join(contextDir, dir), { recursive: true });
+    }
+    return;
+  }
+  const entry = process.argv[1];
+  const checkout = entry === undefined ? undefined : checkoutOf(entry);
+  if (checkout === undefined) {
+    return yield* new SandboxImageBuildError({
+      detail:
+        "this t3 is neither a release install nor run from a checkout, so there is no server of its version to put in the image.",
+    });
+  }
+  onLine(`Staging the T3 server ${packageJson.version} from ${checkout}...`);
+  yield* streamCommand(
+    process.execPath,
+    [NodePath.join(checkout, "scripts", "stage-sandbox-server.ts"), "--output-dir", contextDir],
+    onLine,
+    { cwd: checkout, timeoutMs: 20 * 60 * 1000 },
+  );
+  yield* copy(
+    NodePath.join(checkout, "apps", "server", "sandbox-image", "Containerfile"),
+    NodePath.join(contextDir, "Containerfile"),
+  );
+});
+
+/**
+ * Builds the image and tags it `image` and `<repository>:<version>`, then removes this Hub's older
+ * builds of that repository that no container runs. Output goes to `onLine` as it comes.
+ */
+export const buildSandboxImage = Effect.fn("SandboxImage.build")(function* (input: {
+  readonly image: string;
+  readonly onLine: (line: string) => void;
+  readonly podmanCommand?: string;
+}) {
+  const podmanCommand = input.podmanCommand ?? "podman";
+  if (!(yield* detectRootlessPodman(input.podmanCommand))) {
+    return yield* new SandboxImageBuildError({ detail: "rootless Podman is not available here." });
+  }
+  const version = buildVersion(yield* DateTime.now);
+  const repository = repositoryOf(input.image);
+  const contextDir = yield* Effect.acquireRelease(
+    Effect.sync(() => NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-sandbox-image-"))),
+    (dir) => Effect.sync(() => NodeFS.rmSync(dir, { recursive: true, force: true })),
+  );
+  yield* prepareContext(contextDir, input.onLine);
+  input.onLine(`Building ${input.image} (${version})...`);
+  yield* streamCommand(
+    podmanCommand,
+    [
+      ...podmanGlobalArgs(),
+      "build",
+      "--file",
+      NodePath.join(contextDir, "Containerfile"),
+      "--tag",
+      input.image,
+      "--tag",
+      `${repository}:${version}`,
+      "--label",
+      `${SANDBOX_IMAGE_VERSION_LABEL}=${version}`,
+      "--label",
+      `${SANDBOX_IMAGE_LABEL}=1`,
+      contextDir,
+    ],
+    input.onLine,
+    { timeoutMs: BUILD_TIMEOUT_MS },
+  );
+  const built = yield* inspectSandboxImage(input.image, input.podmanCommand);
+  if (built === null || built.version !== version) {
+    return yield* new SandboxImageBuildError({ detail: `${input.image} is not the new build.` });
+  }
+  // Older builds go once no container runs them; one a running Sandbox uses stays until the next.
+  const tags = yield* runPodman(
+    [
+      "images",
+      "--filter",
+      `reference=${repository}`,
+      "--filter",
+      `label=${SANDBOX_IMAGE_LABEL}=1`,
+      "--format",
+      "{{.Repository}}:{{.Tag}}",
+    ],
+    { podmanCommand },
+  );
+  for (const tag of tags.stdout.split("\n").map((line) => line.trim())) {
+    if (tag === input.image || tag === `${repository}:${version}`) continue;
+    // Only a build's own tag, `<repository>:<version>-<time>`: never one someone else set.
+    if (!tag.startsWith(`${repository}:`) || !/-\d{14}$/u.test(tag)) continue;
+    yield* runPodman(["image", "rm", tag], { podmanCommand }).pipe(Effect.ignore);
+  }
+  input.onLine(`Built ${input.image} (${version}).`);
+  return built;
+}, Effect.scoped);
+
+/**
+ * How the Hub builds and reads the image: Podman's by default, a fake in tests that build none.
+ */
+export class SandboxImageBuilder extends Context.Service<
+  SandboxImageBuilder,
+  {
+    /** Why this Hub cannot build it (no rootless Podman), or none. */
+    readonly cannotBuildReason: Effect.Effect<string | null>;
+    readonly inspect: (image: string) => Effect.Effect<SandboxImageFound | null>;
+    readonly build: (input: {
+      readonly image: string;
+      readonly onLine: (line: string) => void;
+    }) => Effect.Effect<SandboxImageFound, SandboxImageBuildError>;
+  }
+>()("t3/sandboxes/SandboxImage/SandboxImageBuilder") {}
+
+const podmanBuilder = SandboxImageBuilder.of({
+  cannotBuildReason: detectRootlessPodman().pipe(
+    Effect.map((rootless) => (rootless ? null : "Rootless Podman is not available on the Hub.")),
+  ),
+  inspect: inspectSandboxImage,
+  build: buildSandboxImage,
+});
+
+/** A Hub that builds nothing, as one without Podman: the testkit's default. */
+export const unavailableBuilder = SandboxImageBuilder.of({
+  cannotBuildReason: Effect.succeed("Rootless Podman is not available on the Hub."),
+  inspect: Effect.fn("SandboxImageBuilder.inspect")(function* (_image: string) {
+    yield* Effect.void;
+    return null;
+  }),
+  build: Effect.fn("SandboxImageBuilder.build")(function* () {
+    return yield* new SandboxImageBuildError({ detail: "rootless Podman is not available here." });
+  }),
+});
+
+export class SandboxImageBuildInProgressError extends Schema.TaggedError<SandboxImageBuildInProgressError>()(
+  "SandboxImageBuildInProgressError",
+  {},
+) {
+  override get message(): string {
+    return "The Sandbox image is already being built.";
+  }
+}
+
+/** Where the request to build came from, as the audit log records it. */
+export type SandboxImageBuildVia = "settings" | "cli";
+
+/**
+ * The Hub's builds of the image: one at a time, in the Hub's own scope (a client that stops
+ * following it does not stop it), with its output kept for whoever follows.
+ */
+export class SandboxImageBuilds extends Context.Service<
+  SandboxImageBuilds,
+  {
+    readonly image: string;
+    readonly builder: SandboxImageBuilder["Service"];
+    /** The image the tag names now. */
+    readonly current: Effect.Effect<SandboxImageInfo>;
+    readonly lastBuild: Effect.Effect<SandboxImageBuild>;
+    /** Starts a build and answers at once; refused while one runs. */
+    readonly start: (input: {
+      readonly actor: AuditLog.AuditActor;
+      readonly via: SandboxImageBuildVia;
+    }) => Effect.Effect<void, SandboxImageBuildInProgressError>;
+  }
+>()("t3/sandboxes/SandboxImage/SandboxImageBuilds") {}
+
+const make = Effect.gen(function* () {
+  const audit = yield* AuditLog.AuditLog;
+  const builder = Option.getOrElse(
+    yield* Effect.serviceOption(SandboxImageBuilder),
+    () => podmanBuilder,
+  );
+  const image = yield* configuredSandboxImage;
+  const scope = yield* Effect.scope;
+  const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+  let state: SandboxImageBuild = {
+    state: "idle",
+    startedAt: null,
+    finishedAt: null,
+    error: null,
+    log: [],
+    logLines: 0,
+  };
+  let log: Array<string> = [];
+  let logLines = 0;
+  const onLine = (line: string) => {
+    logLines += 1;
+    log.push(line);
+    if (log.length > LOG_LINES_KEPT) log = log.slice(-LOG_LINES_KEPT);
+  };
+
+  const current: SandboxImageBuilds["Service"]["current"] = builder.inspect(image).pipe(
+    Effect.map((found) => ({
+      image,
+      version: found?.version ?? null,
+      builtAt: found === null || found.createdAt === null ? null : toIso(found.createdAt),
+    })),
+  );
+
+  // The build is recorded on the Hub machine, which runs it; the image tag is its name.
+  const target = { kind: "environment", id: HUB_MACHINE_ENVIRONMENT_ID, name: image } as const;
+  const finish = Effect.fn("SandboxImageBuilds.finish")(function* (
+    input: { readonly actor: AuditLog.AuditActor; readonly via: SandboxImageBuildVia },
+    outcome: { readonly built: SandboxImageFound } | { readonly error: string },
+  ) {
+    if ("error" in outcome) onLine(`The build failed: ${outcome.error}`);
+    state = {
+      ...state,
+      state: "built" in outcome ? "succeeded" : "failed",
+      finishedAt: yield* nowIso,
+      error: "error" in outcome ? outcome.error : null,
+    };
+    yield* audit
+      .record({
+        actor: input.actor,
+        action: "sandbox.image.update",
+        target,
+        detail:
+          "built" in outcome
+            ? { via: input.via, outcome: "built", version: outcome.built.version }
+            : { via: input.via, outcome: "failed", reason: outcome.error.slice(0, 200) },
+      })
+      .pipe(Effect.ignore({ log: true }));
+  });
+
+  const start: SandboxImageBuilds["Service"]["start"] = Effect.fn("SandboxImageBuilds.start")(
+    function* (input) {
+      if (state.state === "building") return yield* new SandboxImageBuildInProgressError({});
+      log = [];
+      logLines = 0;
+      state = {
+        ...state,
+        state: "building",
+        startedAt: yield* nowIso,
+        finishedAt: null,
+        error: null,
+      };
+      yield* builder.build({ image, onLine }).pipe(
+        Effect.matchEffect({
+          onSuccess: (built) => finish(input, { built }),
+          onFailure: (error) => finish(input, { error: error.detail }),
+        }),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("The Sandbox image build stopped", { cause }).pipe(
+            Effect.andThen(finish(input, { error: "the build stopped unexpectedly." })),
+          ),
+        ),
+        Effect.onInterrupt(() =>
+          Effect.sync(() => {
+            state = { ...state, state: "failed", error: "the Hub stopped during the build." };
+          }),
+        ),
+        Effect.forkIn(scope),
+      );
+    },
+  );
+
+  return SandboxImageBuilds.of({
+    image,
+    builder,
+    current,
+    lastBuild: Effect.sync(() => ({ ...state, log: [...log], logLines })),
+    start,
+  });
+});
+
+/** Podman prints `2026-11-07 14:35:09.69 +0000 UTC` or ISO; clients get ISO. */
+const toIso = (created: string) =>
+  Option.getOrNull(
+    Option.map(
+      DateTime.make(created.replace(/ \+0000 UTC$/u, "Z").replace(" ", "T")),
+      DateTime.formatIso,
+    ),
+  );
+
+export const layer = Layer.effect(SandboxImageBuilds, make).pipe(Layer.provide(AuditLog.layer));
