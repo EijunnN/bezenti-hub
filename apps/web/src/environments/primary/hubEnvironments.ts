@@ -7,6 +7,7 @@ import type {
   HubSandboxDetail,
   HubSandboxList,
   SandboxLimits,
+  SpaceId,
 } from "@t3tools/contracts";
 
 import { request, type StepUp, toReauth, UserSignInError } from "./userAccounts";
@@ -28,6 +29,19 @@ export function renameHubEnvironment(
 export function removeHubEnvironment(environmentId: EnvironmentId): Promise<HubEnvironmentList> {
   return request((client) =>
     client.environments.remove({ headers: {}, payload: { environmentId } }),
+  );
+}
+
+/**
+ * The Owner makes a machine personal (their own) or dedicates it to an Organization. Refused while
+ * Threads are on it; the refusal names them.
+ */
+export function changeHubEnvironmentMode(
+  environmentId: EnvironmentId,
+  target: { readonly mode: "personal" } | { readonly mode: "dedicated"; readonly spaceId: SpaceId },
+): Promise<HubEnvironmentSummary> {
+  return request((client) =>
+    client.environments.changeMode({ headers: {}, payload: { environmentId, ...target } }),
   );
 }
 
@@ -84,13 +98,22 @@ export async function approveEnvironmentJoin(input: {
   readonly requestId: string;
   readonly name: string;
   readonly stepUp: StepUp;
+  /** Dedicates it to this Organization instead (the Owner only). */
+  readonly dedicatedSpaceId?: SpaceId | undefined;
 }): Promise<string | null> {
   const reauth = await toReauth(input.stepUp);
   if (reauth === undefined) throw new UserSignInError({ message: STRONG_FACTOR_REQUIRED });
   const result = await request(
     (client) =>
       client.environments.approveJoin({
-        payload: { requestId: input.requestId, name: input.name, reauth },
+        payload: {
+          requestId: input.requestId,
+          name: input.name,
+          reauth,
+          ...(input.dedicatedSpaceId === undefined
+            ? {}
+            : { dedicatedSpaceId: input.dedicatedSpaceId }),
+        },
       }),
     "Sign in to this Hub again, then approve the machine.",
   );

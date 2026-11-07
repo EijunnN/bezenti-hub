@@ -86,6 +86,11 @@ const makeHandler = Effect.fnUntraced(function* (
       if (Option.isNone(hello) || hello.value.type !== "hello") {
         return yield* closeWith("protocol-error");
       }
+      // A dedicated machine runs its Space's work only in its Sandbox container, whose server
+      // alone says so: its host's own server (or an older one) is refused.
+      if (check.mode === "dedicated" && hello.value.sandbox === undefined) {
+        return yield* closeWith("not-sandboxed");
+      }
       const closeRequested = yield* Deferred.make<EnvironmentCloseReason>();
       const attached = yield* connections.attach(environmentId, (reason) =>
         Deferred.succeed(closeRequested, reason).pipe(Effect.asVoid),
@@ -102,6 +107,8 @@ const makeHandler = Effect.fnUntraced(function* (
           hubEnvironmentId: registry.hubId,
           environmentId,
           name: current.name,
+          mode: current.mode,
+          ...(current.spaceId === null ? {} : { spaceId: current.spaceId }),
         }),
       );
       // After the welcome, so the machine reads its welcome before any request.

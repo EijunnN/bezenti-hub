@@ -5,7 +5,13 @@
  */
 import * as Schema from "effect/Schema";
 
-import { EnvironmentId, NonNegativeInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  EnvironmentId,
+  NonNegativeInt,
+  SpaceId,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
 import { OrchestrationV2ProviderCapabilities } from "./orchestrationV2.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { HostResourcesSnapshot } from "./resourceTelemetry.ts";
@@ -107,6 +113,11 @@ export const EnvironmentHelloFrame = Schema.Struct({
    * from before it was sent runs 7. Operations newer than it are refused on the Hub.
    */
   executorContractVersion: Schema.optionalKey(Schema.Int),
+  /**
+   * Set only by a server running inside a Sandbox (a Hub's, or a dedicated machine's container),
+   * from the state its host wrote: a dedicated machine connects only this way.
+   */
+  sandbox: Schema.optionalKey(Schema.Struct({ runtime: Schema.Literals(["podman", "process"]) })),
 });
 export type EnvironmentHelloFrame = typeof EnvironmentHelloFrame.Type;
 
@@ -126,6 +137,13 @@ export const EnvironmentWelcomeFrame = Schema.Struct({
   hubEnvironmentId: EnvironmentId,
   environmentId: EnvironmentId,
   name: TrimmedNonEmptyString,
+  /**
+   * How the Hub uses this machine. A server joined as personal that hears `dedicated` stops
+   * serving: a dedicated machine runs its work in a Sandbox container. Absent from older Hubs.
+   */
+  mode: Schema.optionalKey(Schema.Literals(["personal", "dedicated", "sandbox"])),
+  /** A dedicated machine's or Sandbox's Space. Absent from older Hubs. */
+  spaceId: Schema.optionalKey(SpaceId),
 });
 export type EnvironmentWelcomeFrame = typeof EnvironmentWelcomeFrame.Type;
 
@@ -193,7 +211,10 @@ export const ENVIRONMENT_CLOSE_REASONS = {
   "heartbeat-timeout": { code: 4412, final: false },
   replaced: { code: 4413, final: true },
   "hub-shutting-down": { code: 4414, final: false },
-  "sandbox-disk-full": { code: 4415, final: true },
+  "environment-mode-changed": { code: 4415, final: false },
+  "space-missing": { code: 4416, final: true },
+  "not-sandboxed": { code: 4417, final: true },
+  "sandbox-disk-full": { code: 4418, final: true },
 } as const;
 
 export type EnvironmentCloseReason = keyof typeof ENVIRONMENT_CLOSE_REASONS;
@@ -224,6 +245,12 @@ export const ENVIRONMENT_CLOSE_MESSAGES: Record<EnvironmentCloseReason, string> 
   replaced:
     "Another process is using this machine's credential, and the Hub kept the newer connection.",
   "hub-shutting-down": "The Hub is restarting.",
+  "environment-mode-changed":
+    "The Owner changed this machine's mode or Space; it reconnects to learn the new one.",
+  "space-missing":
+    "This machine is dedicated to a Space the Hub no longer has. The Owner can remove it or dedicate it elsewhere.",
+  "not-sandboxed":
+    "This machine is dedicated to a Space, so only its Sandbox container's server may connect. Restart it with `t3 serve`.",
   "sandbox-disk-full":
     "The Hub stopped this Sandbox: its disk is over its limit, or the Hub's disk is almost full.",
 };

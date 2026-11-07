@@ -25,10 +25,11 @@ export const HubEnvironmentKind = Schema.Literals(["hub", "external", "sandbox"]
 export type HubEnvironmentKind = typeof HubEnvironmentKind.Type;
 
 /**
- * `personal`: only its owner uses it, in any of their Spaces. `sandbox`: the Users who work in
- * its Space use it, for that Space's Threads. `dedicated` comes later.
+ * `personal`: only its owner uses it, in any of their Spaces. `dedicated`: an external machine the
+ * Owner gave to one Organization, used like its `sandbox` (which the Hub runs for its Space) by the
+ * Users who work there, for that Space's Threads.
  */
-export const HubEnvironmentMode = Schema.Literals(["personal", "sandbox"]);
+export const HubEnvironmentMode = Schema.Literals(["personal", "dedicated", "sandbox"]);
 export type HubEnvironmentMode = typeof HubEnvironmentMode.Type;
 
 export const HubEnvironmentName = TrimmedNonEmptyString.check(Schema.isMaxLength(64));
@@ -58,9 +59,15 @@ export const HubEnvironmentSummary = Schema.Struct({
   name: HubEnvironmentName,
   kind: HubEnvironmentKind,
   mode: HubEnvironmentMode,
-  /** Null for the Hub machine, which belongs to the Installation, and for Sandboxes. */
+  /**
+   * Null for the Hub machine, which belongs to the Installation, and for Sandboxes and dedicated
+   * machines, which belong to their Space.
+   */
   ownerUserId: Schema.NullOr(UserId),
-  /** A Sandbox's Space; it runs only that Space's Threads. Absent from older Hubs. */
+  /**
+   * A Sandbox's or dedicated machine's Space; it runs only that Space's Threads. Absent from older
+   * Hubs.
+   */
   spaceId: Schema.optionalKey(Schema.NullOr(SpaceId)),
   status: HubEnvironmentStatus,
   /** Why a `failed` Sandbox's last start failed. Absent from older Hubs. */
@@ -120,6 +127,25 @@ export type RenameHubEnvironmentRequest = typeof RenameHubEnvironmentRequest.Typ
 
 export const RemoveHubEnvironmentRequest = Schema.Struct({ environmentId: EnvironmentId });
 export type RemoveHubEnvironmentRequest = typeof RemoveHubEnvironmentRequest.Type;
+
+/**
+ * The Owner turns a machine personal (their own) or dedicates it to an Organization, or moves it
+ * to another one. Refused while it has Threads, which are named to be moved first.
+ */
+export const ChangeHubEnvironmentModeRequest = Schema.Struct({
+  environmentId: EnvironmentId,
+  mode: Schema.Literals(["personal", "dedicated"]),
+  /** The Organization, for `dedicated`. */
+  spaceId: Schema.optionalKey(SpaceId),
+});
+export type ChangeHubEnvironmentModeRequest = typeof ChangeHubEnvironmentModeRequest.Type;
+
+/** A Space a machine can be dedicated to, as «Register this machine» offers it to the Owner. */
+export const HubEnvironmentDedicatedSpace = Schema.Struct({
+  id: SpaceId,
+  name: TrimmedNonEmptyString,
+});
+export type HubEnvironmentDedicatedSpace = typeof HubEnvironmentDedicatedSpace.Type;
 
 /** «Try again» on a Sandbox that failed to start: the Hub starts it, and answers at once. */
 export const StartHubEnvironmentRequest = Schema.Struct({ environmentId: EnvironmentId });
@@ -235,6 +261,11 @@ export const EnvironmentJoinStartRequest = Schema.Struct({
   /** A loopback port `t3 join` listens on, so a browser on the machine returns at once. */
   redirectUri: Schema.optionalKey(TrimmedNonEmptyString),
   state: Schema.optionalKey(TrimmedNonEmptyString),
+  /**
+   * `t3 join --dedicated <Space>`: the Space (its name or id) the machine asks to be dedicated to.
+   * Only a suggestion for the page: the Owner chooses the Space when approving.
+   */
+  dedicatedSpace: Schema.optionalKey(TrimmedNonEmptyString.check(Schema.isMaxLength(128))),
 });
 export type EnvironmentJoinStartRequest = typeof EnvironmentJoinStartRequest.Type;
 
@@ -262,6 +293,13 @@ export const EnvironmentJoinRequestView = Schema.Struct({
   viewerMayApprove: Schema.optionalKey(Schema.Boolean),
   /** Why they may not, when they may not. */
   denialMessage: Schema.optionalKey(TrimmedNonEmptyString),
+  /** What `t3 join --dedicated` asked for, as typed there; only for a viewer who may approve. */
+  requestedDedicatedSpace: Schema.optionalKey(TrimmedNonEmptyString),
+  /**
+   * The Organizations the viewer may dedicate the machine to: only the Owner gets them. The one
+   * `requestedDedicatedSpace` names, if any, comes first.
+   */
+  dedicatedSpaces: Schema.optionalKey(Schema.Array(HubEnvironmentDedicatedSpace)),
 });
 export type EnvironmentJoinRequestView = typeof EnvironmentJoinRequestView.Type;
 
@@ -270,6 +308,8 @@ export const EnvironmentJoinApproveRequest = Schema.Struct({
   requestId: TrimmedNonEmptyString,
   name: HubEnvironmentName,
   reauth: Schema.optionalKey(AuthReauth),
+  /** Dedicates the machine to this Organization instead of making it the approver's (Owner only). */
+  dedicatedSpaceId: Schema.optionalKey(SpaceId),
 });
 export type EnvironmentJoinApproveRequest = typeof EnvironmentJoinApproveRequest.Type;
 
@@ -313,15 +353,36 @@ export const EnvironmentJoinStatus = Schema.Union([
     status: Schema.Literal("awaiting-confirmation"),
     name: HubEnvironmentName,
     approvedBy: EnvironmentJoinApprover,
+    /** Dedicated to this Space, rather than the approver's personal machine. */
+    dedicatedSpace: Schema.optionalKey(HubEnvironmentDedicatedSpace),
   }),
   Schema.Struct({
     status: Schema.Literal("approved"),
     environmentId: EnvironmentId,
     hubEnvironmentId: EnvironmentId,
     name: HubEnvironmentName,
+    dedicatedSpace: Schema.optionalKey(HubEnvironmentDedicatedSpace),
   }),
 ]);
 export type EnvironmentJoinStatus = typeof EnvironmentJoinStatus.Type;
+
+/**
+ * A machine asks, with its own credential, how the Hub uses it now: a dedicated machine's host
+ * follows this, never what it remembers.
+ */
+export const EnvironmentSelfResult = Schema.Struct({
+  environmentId: EnvironmentId,
+  name: HubEnvironmentName,
+  mode: HubEnvironmentMode,
+  spaceId: Schema.NullOr(SpaceId),
+  /**
+   * A dedicated machine's: its Space's effective Sandbox limits, which its host starts the
+   * Sandbox with (CPU, memory and PIDs; disk is the Hub's own check, for its own Sandboxes).
+   * Absent from older Hubs and for personal machines.
+   */
+  limits: Schema.optionalKey(Schema.NullOr(SandboxLimits)),
+});
+export type EnvironmentSelfResult = typeof EnvironmentSelfResult.Type;
 
 export const EnvironmentLeaveResult = Schema.Struct({ removed: Schema.Boolean });
 export type EnvironmentLeaveResult = typeof EnvironmentLeaveResult.Type;

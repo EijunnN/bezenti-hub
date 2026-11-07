@@ -166,6 +166,38 @@ export const layer: Layer.Layer<
     });
 
     /**
+     * Archived Threads left on a machine dedicated elsewhere (or made personal): they need an
+     * environment from now on, so unarchiving one never puts it back on a machine not its own.
+     */
+    const releaseThreads = Effect.fn("EnvironmentReturns.releaseThreads")(function* (
+      environmentId: EnvironmentId,
+      threadIds: ReadonlyArray<ThreadId>,
+    ) {
+      for (const threadId of threadIds) {
+        yield* threadLocks.withLock(
+          threadId,
+          Effect.gen(function* () {
+            const thread = yield* projections.getThread(threadId);
+            if (thread.activeEnvironmentId !== environmentId) return;
+            const now = yield* DateTime.now;
+            yield* eventSink.write({
+              events: [
+                {
+                  id: yield* ids.allocate.event({ threadId }),
+                  type: "thread.metadata-updated",
+                  threadId,
+                  providerInstanceId: thread.providerInstanceId,
+                  occurredAt: now,
+                  payload: { ...thread, activeEnvironmentId: null },
+                },
+              ],
+            });
+          }),
+        );
+      }
+    });
+
+    /**
      * The Threads that moved away from the machine and run elsewhere now, with what each was
      * last known to hold there: the checkpoint it continued from, or what was recovered since.
      */
@@ -463,6 +495,16 @@ export const layer: Layer.Layer<
     // A removed machine's sessions end and its Threads need an environment, at once and after a
     // restart for removals the Hub did not get to.
     if (Option.isSome(environments)) {
+      yield* environments.value.released.pipe(
+        Stream.runForEach(({ environmentId, threadIds }) =>
+          releaseThreads(environmentId, threadIds).pipe(
+            logged("Could not release a rededicated machine's archived Threads", {
+              environmentId,
+            }),
+          ),
+        ),
+        Effect.forkIn(scope),
+      );
       yield* environments.value.removed.pipe(
         Stream.runForEach((environmentId) =>
           (Option.isSome(remote)

@@ -341,6 +341,8 @@ interface JoinedStatus {
   readonly hubUrl: string;
   readonly name: string;
   readonly environmentId: string;
+  /** `dedicated`: the machine runs its Space's work in a Sandbox container. */
+  readonly dedicated: boolean;
   /** From the running server's `/health`; null when it is not running. */
   readonly connection: { readonly _tag: string; readonly [key: string]: unknown } | null;
 }
@@ -361,6 +363,7 @@ const readJoinedStatus = Effect.fn("cli.status.joined")(function* (
       hubUrl: `unreadable (${config.joinedHubPath}) · run \`t3 leave\` to forget it`,
       name: "",
       environmentId: "",
+      dedicated: false,
       connection: null,
     } satisfies JoinedStatus;
   }
@@ -382,6 +385,7 @@ const readJoinedStatus = Effect.fn("cli.status.joined")(function* (
     hubUrl: joined.value.hubUrl,
     name: joined.value.name,
     environmentId: joined.value.environmentId,
+    dedicated: joined.value.mode === "dedicated",
     connection,
   } satisfies JoinedStatus;
 });
@@ -393,6 +397,10 @@ const describeConnection = (connection: JoinedStatus["connection"]) => {
       return `connected since ${String(connection.since)}`;
     case "stopped":
       return `refused · ${String(connection.message)}`;
+    case "sandbox":
+      return connection.state === "running"
+        ? `Sandbox container running since ${String(connection.since)}; it connects to the Hub`
+        : `Sandbox container ${String(connection.state)}${connection.message ? ` · ${String(connection.message)}` : ""}`;
     default:
       return connection.lastError ? `reconnecting · ${String(connection.lastError)}` : "connecting";
   }
@@ -402,6 +410,9 @@ const formatJoined = (joined: JoinedStatus) =>
   [
     `  ${"Hub".padEnd(15)}${joined.hubUrl}`,
     `  ${"Name".padEnd(15)}${joined.name}`,
+    ...(joined.dedicated
+      ? [`  ${"Mode".padEnd(15)}dedicated to a Space; its work runs in a Sandbox container`]
+      : []),
     `  ${"Connection".padEnd(15)}${describeConnection(joined.connection)}`,
   ].join("\n");
 

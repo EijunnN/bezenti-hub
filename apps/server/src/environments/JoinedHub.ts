@@ -31,6 +31,7 @@ import * as Context from "effect/Context";
 import * as Random from "effect/Random";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -45,7 +46,12 @@ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as HostResources from "../resourceTelemetry/HostResources.ts";
 import * as EnvironmentAgent from "./EnvironmentAgent.ts";
 import { makeFrameReader } from "./socketFrames.ts";
-import { ENVIRONMENT_CREDENTIAL_SECRET, type JoinedHubState } from "./joinedHubState.ts";
+import {
+  DEDICATED_CREDENTIAL_SECRET,
+  ENVIRONMENT_CREDENTIAL_SECRET,
+  type JoinedHubState,
+  writeJoinedHubState,
+} from "./joinedHubState.ts";
 
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 60_000;
@@ -206,7 +212,17 @@ export type JoinedConnectionState =
   | { readonly _tag: "connecting"; readonly attempt: number; readonly lastError: string | null }
   | { readonly _tag: "connected"; readonly since: string }
   /** The Hub refused this machine for good (removed, wrong Hub, version); `t3 join` fixes it. */
-  | { readonly _tag: "stopped"; readonly reason: EnvironmentCloseReason; readonly message: string };
+  | { readonly _tag: "stopped"; readonly reason: EnvironmentCloseReason; readonly message: string }
+  /**
+   * A dedicated machine: its Sandbox container's server is the one connected to the Hub. `failed`
+   * after too many crashes; restarting `t3 serve` tries again.
+   */
+  | {
+      readonly _tag: "sandbox";
+      readonly state: "starting" | "running" | "restarting" | "failed";
+      readonly since: string;
+      readonly message: string | null;
+    };
 
 export class HubConnector extends Context.Service<
   HubConnector,
@@ -217,7 +233,7 @@ export class HubConnector extends Context.Service<
 >()("t3/environments/JoinedHub/HubConnector") {}
 
 /** What this machine tells the Hub about itself. */
-const makeReports = Effect.gen(function* () {
+const makeReports = Effect.fn("JoinedHub.makeReports")(function* (joined: JoinedHubState) {
   const agent = yield* EnvironmentAgent.EnvironmentAgent;
   const providers = yield* ProviderRegistry.ProviderRegistry;
   const hostResources = yield* HostResources.HostResources;
@@ -245,6 +261,10 @@ const makeReports = Effect.gen(function* () {
       workspaceRoot: report.workspaceRoot,
       orchestration: report.orchestration,
       executorContractVersion: ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
+      // Only a server whose host wrote it into its Sandbox's state says it runs in one.
+      ...(joined.sandboxed === true
+        ? { sandbox: { runtime: joined.sandboxRuntime ?? "process" } }
+        : {}),
     };
   });
   const heartbeat: Effect.Effect<EnvironmentHeartbeatFrame> = Effect.gen(function* () {
@@ -260,17 +280,44 @@ const makeReports = Effect.gen(function* () {
   return { hello, heartbeat, serve: agent.attach };
 });
 
-const readCredential = (secrets: ServerSecretStore.ServerSecretStore["Service"]) =>
-  secrets.get(ENVIRONMENT_CREDENTIAL_SECRET).pipe(
+export const readCredential = (
+  secrets: ServerSecretStore.ServerSecretStore["Service"],
+  name: string = ENVIRONMENT_CREDENTIAL_SECRET,
+) =>
+  secrets.get(name).pipe(
     Effect.map(Option.map((bytes) => new TextDecoder().decode(bytes))),
     Effect.orElseSucceed(() => Option.none<string>()),
   );
+
+/**
+ * A server inside a Sandbox serves only the Space its host wrote: welcomed as someone's personal
+ * machine, or for another Space, it refuses and exits, so its host asks the Hub and follows it.
+ */
+export const sandboxedServerRefuses = (
+  joined: Pick<JoinedHubState, "sandboxed" | "spaceId">,
+  welcome: Pick<EnvironmentWelcomeFrame, "mode" | "spaceId">,
+) =>
+  joined.sandboxed === true &&
+  (welcome.mode === "personal" ||
+    (welcome.spaceId !== undefined &&
+      joined.spaceId !== undefined &&
+      welcome.spaceId !== joined.spaceId));
+
+/** The exit code a Sandbox's server ends with when its mode or Space is no longer the Hub's. */
+export const SANDBOX_MODE_CHANGED_EXIT = 78;
+
+/** What a server joined as personal says once the Hub dedicated its machine to a Space. */
+const DEDICATED_RESTART_MESSAGE =
+  "The Hub's Owner dedicated this machine to a Space: it runs that Space's work in a Sandbox container. Restart its server (`t3 serve`); it needs rootless Podman and the Sandbox image.";
 
 const layerConnector = (joined: JoinedHubState, credential: Option.Option<string>) =>
   Layer.effect(
     HubConnector,
     Effect.gen(function* () {
-      const reports = yield* makeReports;
+      const reports = yield* makeReports(joined);
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const secrets = yield* ServerSecretStore.ServerSecretStore;
       const state = yield* Ref.make<JoinedConnectionState>({
         _tag: "connecting",
         attempt: 0,
@@ -293,13 +340,47 @@ const layerConnector = (joined: JoinedHubState, credential: Option.Option<string
             hello: reports.hello,
             heartbeat: reports.heartbeat,
             serve: reports.serve,
-            onWelcome: () =>
-              DateTime.now.pipe(
-                Effect.flatMap((now) =>
-                  Ref.set(state, { _tag: "connected", since: DateTime.formatIso(now) }),
-                ),
-              ),
+            onWelcome: (welcome) =>
+              sandboxedServerRefuses(joined, welcome)
+                ? Effect.gen(function* () {
+                    yield* Effect.logWarning(
+                      "The Hub no longer uses this machine for this Sandbox's Space; stopping.",
+                    );
+                    yield* Ref.set(state, {
+                      _tag: "stopped",
+                      reason: "environment-mode-changed",
+                      message: ENVIRONMENT_CLOSE_MESSAGES["environment-mode-changed"],
+                    });
+                    // Its host sees the exit, asks the Hub and follows it.
+                    return yield* Effect.sync(() => process.exit(SANDBOX_MODE_CHANGED_EXIT));
+                  })
+                : DateTime.now.pipe(
+                    Effect.flatMap((now) =>
+                      Ref.set(state, { _tag: "connected", since: DateTime.formatIso(now) }),
+                    ),
+                  ),
           });
+          // Dedicated on the Hub while this server runs work itself: its credential goes where
+          // only a dedicated host reads it, and once restarted it runs that work in a Sandbox.
+          if (outcome.reason === "not-sandboxed" && joined.sandboxed !== true) {
+            yield* secrets
+              .set(DEDICATED_CREDENTIAL_SECRET, new TextEncoder().encode(credential.value))
+              .pipe(
+                Effect.andThen(secrets.remove(ENVIRONMENT_CREDENTIAL_SECRET)),
+                Effect.andThen(
+                  writeJoinedHubState(config.joinedHubPath, { ...joined, mode: "dedicated" }).pipe(
+                    Effect.provideService(FileSystem.FileSystem, fileSystem),
+                  ),
+                ),
+                Effect.ignore,
+              );
+            yield* Effect.logWarning(DEDICATED_RESTART_MESSAGE);
+            return yield* Ref.set(state, {
+              _tag: "stopped",
+              reason: "environment-mode-changed",
+              message: DEDICATED_RESTART_MESSAGE,
+            });
+          }
           if (outcome.reason !== undefined && ENVIRONMENT_CLOSE_REASONS[outcome.reason].final) {
             yield* Effect.logWarning("The Hub refused this machine", { reason: outcome.reason });
             return yield* Ref.set(state, {
@@ -350,6 +431,7 @@ export const layerHealthRoute = HttpRouter.use((router) =>
       Effect.gen(function* () {
         return yield* HttpServerResponse.json({
           mode: "joined",
+          environmentMode: connector.joined.mode ?? "personal",
           hubUrl: connector.joined.hubUrl,
           environmentId: connector.joined.environmentId,
           name: connector.joined.name,

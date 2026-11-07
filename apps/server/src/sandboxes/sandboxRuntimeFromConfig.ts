@@ -12,10 +12,12 @@ import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
 import * as PodmanSandboxRuntime from "./PodmanSandboxRuntime.ts";
+import { hostExposureRefusal, listeningOutsideLoopback } from "./hostExposure.ts";
 import * as ProcessSandboxRuntime from "./ProcessSandboxRuntime.ts";
 import { SandboxHubAddress } from "./SandboxRuntime.ts";
 
@@ -23,6 +25,8 @@ const SANDBOX_RUNTIME_SETTING = "T3CODE_SANDBOX_RUNTIME";
 /** The image Sandboxes run; by default the one built for this Hub's version. */
 const SANDBOX_IMAGE_SETTING = "T3CODE_SANDBOX_IMAGE";
 const defaultSandboxImage = `localhost/t3code-sandbox:${packageJson.version}`;
+/** Ports of a dedicated machine its Sandbox may reach, comma-separated (for example `22`). */
+const DEDICATED_HOST_PORTS_SETTING = "T3CODE_DEDICATED_HOST_PORTS";
 
 const optionalSetting = (name: string) =>
   Config.String(name).pipe(
@@ -90,6 +94,67 @@ const podmanForHub = (config: { readonly devUrl: URL | undefined }, image: strin
   });
 };
 
+/**
+ * The runtime a dedicated machine runs its one Sandbox with, reaching the Hub at `hubUrl` (its
+ * https address): Podman by default, which must be rootless with the Sandbox image built; the
+ * process one only when `T3CODE_SANDBOX_RUNTIME=process` asks for it (development and tests).
+ * Fails with why there is none, as `t3 status` shows it.
+ */
+export const dedicatedRuntimeFromConfig = Effect.fn("dedicatedRuntimeFromConfig")(function* (
+  hubUrl: string,
+) {
+  const setting = Option.getOrUndefined(yield* optionalSetting(SANDBOX_RUNTIME_SETTING));
+  const config = yield* ServerConfig.ServerConfig;
+  const address = Layer.succeed(
+    SandboxHubAddress,
+    SandboxHubAddress.of({ loopbackUrl: Effect.succeed(hubUrl) }),
+  );
+  if (setting === "process") {
+    const processRuntime = ProcessSandboxRuntime.forHub(config);
+    return Option.isNone(processRuntime)
+      ? Result.fail("this server has no entry point to run its Sandbox's server with.")
+      : Result.succeed(processRuntime.value.pipe(Layer.provide(address)));
+  }
+  if (setting !== undefined && setting !== "podman") {
+    return Result.fail(
+      `a dedicated machine runs its work in a Sandbox container, and ${SANDBOX_RUNTIME_SETTING}=${setting} runs none.`,
+    );
+  }
+  const image = Option.getOrElse(
+    yield* optionalSetting(SANDBOX_IMAGE_SETTING),
+    () => defaultSandboxImage,
+  );
+  const detected = yield* detectPodman(image);
+  if (!detected.rootless) {
+    return Result.fail(
+      "a dedicated machine runs its work in a Sandbox container, and rootless Podman is not available here.",
+    );
+  }
+  if (!detected.image) {
+    return Result.fail(
+      `Podman is here but the Sandbox image ${image} is not: build it (\`t3 sandbox image build\`) or set ${SANDBOX_IMAGE_SETTING}.`,
+    );
+  }
+  // The container reaches every address of this machine but its loopback, and rootless Podman
+  // cannot firewall that: nothing may listen there unless the Owner named it.
+  const allowed = new Set(
+    Option.getOrElse(yield* optionalSetting(DEDICATED_HOST_PORTS_SETTING), () => "")
+      .split(",")
+      .map((port) => Number.parseInt(port.trim(), 10))
+      .filter(Number.isFinite),
+  );
+  const exposed = hostExposureRefusal(
+    // This server's own port answers only `/health`.
+    listeningOutsideLoopback().filter((listener) => listener.port !== config.port),
+    allowed,
+  );
+  if (exposed !== undefined) return Result.fail(exposed);
+  return Result.succeed(podmanForHub(config, image).pipe(Layer.provide(address)));
+});
+
+/** Whether rootless Podman is here, as `t3 join --dedicated` checks before asking. */
+export const rootlessPodmanHere = () => PodmanSandboxRuntime.detectRootlessPodman();
+
 export const fromConfig = Effect.gen(function* () {
   const setting = Option.getOrUndefined(yield* optionalSetting(SANDBOX_RUNTIME_SETTING));
   const config = yield* ServerConfig.ServerConfig;
@@ -100,8 +165,9 @@ export const fromConfig = Effect.gen(function* () {
     );
     return Option.none();
   }
-  // Unset, only a production Hub looks for Podman: a dev Hub or a joined machine runs none.
-  if (setting === undefined && (config.devUrl !== undefined || config.joinedHub !== undefined)) {
+  // A joined machine runs no Hub Sandboxes (a dedicated one runs its own, through
+  // `dedicatedRuntimeFromConfig`); unset, only a production Hub looks for Podman, not a dev Hub.
+  if (config.joinedHub !== undefined || (setting === undefined && config.devUrl !== undefined)) {
     return Option.none();
   }
   const hubUrl = ProcessSandboxRuntime.sandboxHubLoopbackUrl(config);

@@ -12,6 +12,7 @@ import {
   type JoinInvitationResult,
   EnvironmentHttpCommonError,
   EnvironmentHttpConflictError,
+  EnvironmentModeChangeRefusedError,
   EnvironmentHttpForbiddenError,
   EnvironmentRateLimitedError,
 } from "@t3tools/contracts";
@@ -31,6 +32,8 @@ export class UserSignInError extends Schema.TaggedError<UserSignInError>()("User
 const isUserSignInError = Schema.is(UserSignInError);
 const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
 const isEnvironmentHttpConflictError = Schema.is(EnvironmentHttpConflictError);
+// A machine that keeps Threads names them in its message.
+const isEnvironmentModeChangeRefusedError = Schema.is(EnvironmentModeChangeRefusedError);
 const isEnvironmentHttpForbiddenError = Schema.is(EnvironmentHttpForbiddenError);
 const isEnvironmentRateLimitedError = Schema.is(EnvironmentRateLimitedError);
 
@@ -38,6 +41,7 @@ function toUserSignInError(cause: unknown, rejectedMessage: string): UserSignInE
   if (isUserSignInError(cause)) return cause;
   if (
     isEnvironmentHttpConflictError(cause) ||
+    isEnvironmentModeChangeRefusedError(cause) ||
     isEnvironmentHttpForbiddenError(cause) ||
     isEnvironmentRateLimitedError(cause)
   ) {
