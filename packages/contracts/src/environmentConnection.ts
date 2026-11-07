@@ -214,6 +214,7 @@ export const ENVIRONMENT_CLOSE_REASONS = {
   "environment-mode-changed": { code: 4415, final: false },
   "space-missing": { code: 4416, final: true },
   "not-sandboxed": { code: 4417, final: true },
+  "sandbox-disk-full": { code: 4418, final: true },
 } as const;
 
 export type EnvironmentCloseReason = keyof typeof ENVIRONMENT_CLOSE_REASONS;
@@ -250,6 +251,8 @@ export const ENVIRONMENT_CLOSE_MESSAGES: Record<EnvironmentCloseReason, string> 
     "This machine is dedicated to a Space the Hub no longer has. The Owner can remove it or dedicate it elsewhere.",
   "not-sandboxed":
     "This machine is dedicated to a Space, so only its Sandbox container's server may connect. Restart it with `t3 serve`.",
+  "sandbox-disk-full":
+    "The Hub stopped this Sandbox: its disk is over its limit, or the Hub's disk is almost full.",
 };
 
 /**

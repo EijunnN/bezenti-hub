@@ -25,6 +25,7 @@ import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
 import { pointSandboxHomeAt, writeSandboxHome } from "./sandboxHome.ts";
+import { hostSpaceOf, measureWithDu } from "./sandboxLimits.ts";
 import {
   type SandboxExit,
   SandboxHubAddress,
@@ -58,6 +59,16 @@ export type SandboxLauncher = (
 ) => Effect.Effect<LaunchedSandbox, SandboxRuntimeError, Scope.Scope>;
 
 const STOP_GRACE_MS = 5_000;
+
+const NO_RESOURCE_USE = Effect.succeed(null);
+
+/** The process runtime is for development and tests: it enforces no limit but the Hub's disk check. */
+const PROCESS_LIMIT_SUPPORT = {
+  cpus: false,
+  memory: false,
+  pids: false,
+  note: "The process Sandbox runtime (development only) runs Sandboxes as plain processes of the Hub's user: CPU, memory and PIDs limits are not enforced on this host.",
+} as const;
 
 /** The Hub's environment a Sandbox may see: never its secrets, tokens or ports. */
 const childEnvironment = (launch: SandboxLaunch) => {
@@ -387,6 +398,15 @@ export const make = Effect.fn("ProcessSandboxRuntime.make")(function* (options: 
     stop,
     delete: remove,
     inspect,
+    // Plain processes of the Hub's user: nothing limits them.
+    limitSupport: Effect.succeed(PROCESS_LIMIT_SUPPORT),
+    // @effect-diagnostics-next-line effectFnOpportunity:off -- a constant answer, nothing to trace.
+    resourceUse: () => NO_RESOURCE_USE,
+    // As the Hub's user, which is the Sandbox's: a directory it made unreadable fails the measure.
+    measureHome: Effect.fn("ProcessSandboxRuntime.measureHome")(function* (sandboxId) {
+      return yield* measureWithDu("du", ["-s", "-k", "-x", homeOf(sandboxId)]);
+    }),
+    hostSpace: Effect.sync(() => hostSpaceOf(rootDir)),
     exits: Stream.fromPubSub(exits),
   });
 });

@@ -592,6 +592,7 @@ it.effect(
         "sandbox.start",
         "sandbox.stop",
         "sandbox.delete",
+        "sandbox.limits.change",
         // environments/HubWithEnvironments.sandboxImage.test.ts
         "sandbox.image.update",
       ];

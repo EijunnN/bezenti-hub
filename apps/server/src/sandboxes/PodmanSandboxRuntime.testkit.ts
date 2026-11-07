@@ -11,7 +11,7 @@ import * as NodePath from "node:path";
 
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
-import { podmanGlobalArgs } from "./PodmanSandboxRuntime.ts";
+import { podmanGlobalArgs, podmanLimitSupport } from "./PodmanSandboxRuntime.ts";
 
 /** The label on every container a test run makes, with the run's id. */
 const TEST_RUN_LABEL = "io.t3code.test";
@@ -112,3 +112,28 @@ export const podmanResult = (args: ReadonlyArray<string>, timeout = 60_000) => {
   });
   return { exitCode: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 };
+
+/** Which limits rootless Podman enforces here, as the runtime decides it (no limits without it). */
+export const podmanLimitSupportHere = (() => {
+  if (!rootlessPodmanAvailable) {
+    return podmanLimitSupport({
+      cgroupManager: undefined,
+      cgroupVersion: undefined,
+      cgroupControllers: [],
+    });
+  }
+  const host = (
+    JSON.parse(podmanSync(["info", "--format", "json"], 30_000)) as {
+      readonly host: {
+        readonly cgroupManager?: string;
+        readonly cgroupVersion?: string;
+        readonly cgroupControllers?: ReadonlyArray<string>;
+      };
+    }
+  ).host;
+  return podmanLimitSupport({
+    cgroupManager: host.cgroupManager,
+    cgroupVersion: host.cgroupVersion,
+    cgroupControllers: host.cgroupControllers ?? [],
+  });
+})();

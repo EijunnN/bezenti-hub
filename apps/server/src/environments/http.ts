@@ -6,6 +6,7 @@ import {
   EnvironmentHttpForbiddenError,
   EnvironmentModeChangeRefusedError,
   EnvironmentRateLimitedError,
+  EnvironmentSandboxLimitsInvalidError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -150,6 +151,59 @@ const handlers = HttpApiBuilder.group(
                 EnvironmentAccessDeniedError: failForbidden,
                 EnvironmentNotFoundError: () => failEnvironmentNotFound("environment_not_found"),
                 EnvironmentStorageError: failStorage,
+              }),
+            );
+        }),
+      )
+      .handle(
+        "sandboxes",
+        Effect.fn("environment.environments.sandboxes")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const viewer = yield* requireUser(AuthOrchestrationReadScope);
+          return yield* registry.sandboxes(viewer).pipe(
+            Effect.catchTags({
+              EnvironmentAccessDeniedError: failForbidden,
+              EnvironmentStorageError: failStorage,
+            }),
+          );
+        }),
+      )
+      .handle(
+        "sandboxAction",
+        Effect.fn("environment.environments.sandboxAction")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          return yield* registry
+            .sandboxAction({
+              actorUserId: yield* requireUser(AuthAccessWriteScope),
+              environmentId: args.payload.environmentId,
+              action: args.payload.action,
+            })
+            .pipe(
+              Effect.catchTags({
+                EnvironmentAccessDeniedError: failForbidden,
+                EnvironmentNotFoundError: () => failEnvironmentNotFound("environment_not_found"),
+                EnvironmentStorageError: failStorage,
+              }),
+            );
+        }),
+      )
+      .handle(
+        "sandboxLimits",
+        Effect.fn("environment.environments.sandboxLimits")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          return yield* registry
+            .setSandboxLimits({
+              actorUserId: yield* requireUser(AuthAccessWriteScope),
+              environmentId: args.payload.environmentId,
+              limits: args.payload.limits,
+            })
+            .pipe(
+              Effect.catchTags({
+                EnvironmentAccessDeniedError: failForbidden,
+                EnvironmentNotFoundError: () => failEnvironmentNotFound("environment_not_found"),
+                EnvironmentStorageError: failStorage,
+                SandboxLimitsInvalidError: (error) =>
+                  Effect.fail(new EnvironmentSandboxLimitsInvalidError({ message: error.reason })),
               }),
             );
         }),

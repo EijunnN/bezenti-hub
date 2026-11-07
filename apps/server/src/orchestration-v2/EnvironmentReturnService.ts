@@ -518,6 +518,17 @@ export const layer: Layer.Layer<
         Effect.forkIn(scope),
       );
     }
+    // A Sandbox the Hub stopped for its disk: its turns end interrupted, with why.
+    if (Option.isSome(environments) && Option.isSome(remote)) {
+      yield* environments.value.sandboxSessionsEnded.pipe(
+        Stream.runForEach(({ environmentId, reason }) =>
+          remote.value
+            .sandboxSessionsEnded(environmentId, reason)
+            .pipe(logged("Could not end a stopped Sandbox's sessions", { environmentId })),
+        ),
+        Effect.forkIn(scope),
+      );
+    }
     yield* releaseRemoved().pipe(
       logged("Could not release the Threads of removed Environments", {}),
       Effect.forkIn(scope),

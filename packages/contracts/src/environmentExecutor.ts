@@ -51,7 +51,12 @@ export class EnvironmentSessionLostError extends Schema.TaggedError<EnvironmentS
   {
     environmentId: EnvironmentId,
     environmentName: Schema.String,
-    reason: Schema.Literals(["process-ended", "environment-removed", "moved-while-offline"]),
+    reason: Schema.Literals([
+      "process-ended",
+      "environment-removed",
+      "moved-while-offline",
+      "sandbox-disk-full",
+    ]),
   },
 ) {
   override get message(): string {
@@ -60,6 +65,8 @@ export class EnvironmentSessionLostError extends Schema.TaggedError<EnvironmentS
         return `${this.environmentName} was removed from the Hub while this turn ran there. Move the Thread to another Environment to continue.`;
       case "moved-while-offline":
         return `This turn was paused on ${this.environmentName}, which was offline, and was stopped to move the Thread.`;
+      case "sandbox-disk-full":
+        return `${this.environmentName} ran out of disk space (over its limit, or the Hub's disk is almost full), so this turn was stopped. See Settings → Environments → Sandboxes.`;
       case "process-ended":
         return `The agent on ${this.environmentName} stopped while ${this.environmentName} was offline. Send a message to continue here, or move the Thread to another Environment.`;
     }

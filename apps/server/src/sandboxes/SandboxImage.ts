@@ -485,11 +485,12 @@ const make = Effect.gen(function* () {
     image,
     cannotBuildReason,
     current,
-    lastBuild: (after = 0) =>
-      Effect.sync(() => {
+    lastBuild: Effect.fn("SandboxImageBuilds.lastBuild")(function* (after = 0) {
+      return yield* Effect.sync(() => {
         const first = logLines - log.length;
         return { ...state, log: log.slice(Math.max(0, after - first)), logLines };
-      }),
+      });
+    }),
     start,
   });
 });

@@ -10,7 +10,12 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
-import { SandboxRuntime, type SandboxSpec } from "../sandboxes/SandboxRuntime.ts";
+import {
+  type SandboxLimits,
+  SandboxRuntime,
+  type SandboxSpec,
+  type SandboxStartOptions,
+} from "../sandboxes/SandboxRuntime.ts";
 import {
   dedicatedSandboxIdOf,
   type HubAnswer,
@@ -29,10 +34,13 @@ const joined: JoinedHubState = {
   spaceId: "org-acme",
 };
 
-const uses = (spaceId: string | null): HubAnswer => ({
+const NO_LIMITS: SandboxLimits = { cpus: null, memoryBytes: null, pids: null, diskBytes: null };
+
+const uses = (spaceId: string | null, limits: SandboxLimits = NO_LIMITS): HubAnswer => ({
   _tag: "uses",
   mode: spaceId === null ? "personal" : "dedicated",
   spaceId,
+  limits,
 });
 
 /**
@@ -43,25 +51,31 @@ const makeRuntime = Effect.fn(function* () {
   const created: Array<SandboxSpec> = [];
   const deleted: Array<string> = [];
   const started: Array<string> = [];
+  const startOptions: Array<SandboxStartOptions | undefined> = [];
   const ends = yield* Queue.unbounded<number>();
   const layer = Layer.succeed(
     SandboxRuntime,
     SandboxRuntime.of({
       kind: "process",
       create: (spec) => Effect.sync(() => void created.push(spec)),
-      start: (sandboxId) =>
+      start: (sandboxId, options) =>
         Effect.sync(() => {
           started.push(sandboxId);
+          startOptions.push(options);
           return { exited: Queue.take(ends), imageVersion: null };
         }),
       imageVersion: Effect.succeed(null),
       stop: () => Effect.void,
       delete: (sandboxId) => Effect.sync(() => void deleted.push(sandboxId)),
       inspect: () => Effect.succeed({ state: { _tag: "missing" }, homePath: "/nowhere" }),
+      limitSupport: Effect.succeed({ cpus: true, memory: true, pids: true, note: null }),
+      resourceUse: () => Effect.succeed(null),
+      measureHome: () => Effect.succeed({ _tag: "unavailable" }),
+      hostSpace: Effect.succeed(null),
       exits: Stream.empty,
     }),
   );
-  return { created, deleted, started, ends, layer };
+  return { created, deleted, started, startOptions, ends, layer };
 });
 
 const supervise = Effect.fn(function* (
@@ -182,4 +196,22 @@ it.effect("a machine the Hub no longer accepts runs nothing", () =>
     const failed = yield* Ref.get(state);
     assert.equal(failed._tag === "sandbox" && failed.state, "failed");
   }),
+);
+
+it.effect(
+  "its Sandbox starts with the Space's limits the Hub answers, and a change applies on its next start",
+  () =>
+    Effect.gen(function* () {
+      const runtime = yield* makeRuntime();
+      const limits = { cpus: 2, memoryBytes: 4 * 1024 ** 3, pids: 4096, diskBytes: 20 * 1024 ** 3 };
+      const answers = yield* Ref.make(uses("org-acme", limits));
+      yield* supervise(runtime, answers);
+      assert.deepEqual(runtime.startOptions, [{ limits }]);
+      // The Owner gives Acme 1 GiB: the next start (after its server ends) has it.
+      const lower = { ...limits, memoryBytes: 1024 ** 3 };
+      yield* Ref.set(answers, uses("org-acme", lower));
+      yield* Queue.offer(runtime.ends, 1);
+      yield* TestClock.adjust("2 seconds");
+      assert.deepEqual(runtime.startOptions.at(-1), { limits: lower });
+    }),
 );

@@ -11,14 +11,37 @@ import type * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import type * as Stream from "effect/Stream";
 
+import type { HomeMeasurement, HostSpace, SandboxLimits } from "./sandboxLimits.ts";
+
+export type { HomeMeasurement, HostSpace, SandboxLimits };
+
 export type SandboxRuntimeKind = "process" | "podman";
 
-/** Null means the runtime's default (none, for the process runtime). */
-export interface SandboxLimits {
-  readonly cpus: number | null;
+/**
+ * What one start of a Sandbox runs with. Read at each start, so a change applies on the next one.
+ * `limits` are the effective ones (null: none); a runtime enforces what `limitSupport` says and
+ * records the rest.
+ */
+export interface SandboxStartOptions {
+  readonly limits?: SandboxLimits;
+}
+
+/**
+ * Which of CPU, memory and PIDs a runtime enforces on this host, and why not when it does not, in
+ * words for the Owner (Settings and the Hub's log show it). Disk is the Hub's own check.
+ */
+export interface SandboxLimitSupport {
+  readonly cpus: boolean;
+  readonly memory: boolean;
+  readonly pids: boolean;
+  readonly note: string | null;
+}
+
+/** What a running Sandbox uses now; null where the runtime cannot tell. */
+export interface SandboxResourceUse {
+  /** Percent of one CPU. */
+  readonly cpuPercent: number | null;
   readonly memoryBytes: number | null;
-  readonly pids: number | null;
-  readonly diskBytes: number | null;
 }
 
 /**
@@ -43,7 +66,6 @@ export interface SandboxSpec {
   readonly hubEnvironmentId: EnvironmentId;
   /** Kept in the Sandbox's home; the Hub keeps only its hash. */
   readonly credential: Redacted.Redacted<string>;
-  readonly limits: SandboxLimits;
 }
 
 export type SandboxState =
@@ -93,7 +115,10 @@ export class SandboxRuntime extends Context.Service<
      * that server ends, so a start that dies at once is not waited on. `imageVersion` is the
      * version of the base image it runs (null without one, as the process runtime).
      */
-    readonly start: (sandboxId: string) => Effect.Effect<SandboxStarted, SandboxRuntimeError>;
+    readonly start: (
+      sandboxId: string,
+      options?: SandboxStartOptions,
+    ) => Effect.Effect<SandboxStarted, SandboxRuntimeError>;
     /** The base image version a start would run now: the newest built. */
     readonly imageVersion: Effect.Effect<string | null, SandboxRuntimeError>;
     /** Stops its server, keeping its home; nothing when it is not running. */
@@ -101,6 +126,17 @@ export class SandboxRuntime extends Context.Service<
     /** Stops it and removes its home with everything in it. */
     readonly delete: (sandboxId: string) => Effect.Effect<void, SandboxRuntimeError>;
     readonly inspect: (sandboxId: string) => Effect.Effect<SandboxInspection, SandboxRuntimeError>;
+    /** Which limits it enforces here; asked once and kept. */
+    readonly limitSupport: Effect.Effect<SandboxLimitSupport>;
+    /** What the running Sandbox uses now; null when it is not running or cannot be told. */
+    readonly resourceUse: (sandboxId: string) => Effect.Effect<SandboxResourceUse | null>;
+    /**
+     * The size of its home, measured so that nothing the Sandbox does to its files (an unreadable
+     * directory) hides them; a failure is reported, never a smaller size.
+     */
+    readonly measureHome: (sandboxId: string) => Effect.Effect<HomeMeasurement>;
+    /** The filesystem its homes are on: the Hub keeps it from filling. */
+    readonly hostSpace: Effect.Effect<HostSpace | null>;
     /** Each server that ended without `stop` or `delete`. */
     readonly exits: Stream.Stream<SandboxExit>;
   }

@@ -183,6 +183,14 @@ export class RemoteEnvironments extends Context.Service<
      */
     readonly environmentRemoved: (environmentId: EnvironmentId) => Effect.Effect<void>;
     /**
+     * The Hub stopped a Sandbox for its disk: its sessions end now, their turns interrupted with
+     * that reason, rather than paused for a return it will not make by itself.
+     */
+    readonly sandboxSessionsEnded: (
+      environmentId: EnvironmentId,
+      reason: "sandbox-disk-full",
+    ) => Effect.Effect<void>;
+    /**
      * The Thread leaves a machine that is away while its turn is paused there: the Thread's
      * sessions on it end here (the turn is interrupted) and the machine drops them on return.
      */
@@ -1279,11 +1287,13 @@ const make = Effect.gen(function* () {
     );
   });
 
-  const retire = (link: Link) =>
+  const retire = (
+    link: Link,
+    reason: EnvironmentSessionLostError["reason"] = "environment-removed",
+  ) =>
     Effect.forEach(
       [...link.sessions.entries()],
-      ([providerSessionId, sink]) =>
-        loseSession(link, providerSessionId, sink, "environment-removed"),
+      ([providerSessionId, sink]) => loseSession(link, providerSessionId, sink, reason),
       { discard: true },
     ).pipe(Effect.andThen(Effect.sync(() => link.sessions.clear())));
 
@@ -1428,6 +1438,13 @@ const make = Effect.gen(function* () {
         yield* retire(link);
         // A socket still open is closed by the removal; its finalizer finds nothing left to end.
         if (link.channel === undefined) links.delete(environmentId);
+      },
+    ),
+    sandboxSessionsEnded: Effect.fn("RemoteEnvironments.sandboxSessionsEnded")(
+      function* (environmentId, reason) {
+        const link = links.get(environmentId);
+        if (link === undefined) return;
+        yield* retire(link, reason);
       },
     ),
     forgetSessions: Effect.fn("RemoteEnvironments.forgetSessions")(function* (environmentId) {
