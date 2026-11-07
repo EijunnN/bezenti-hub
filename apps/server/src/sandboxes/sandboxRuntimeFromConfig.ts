@@ -93,8 +93,17 @@ const podmanForHub = (config: { readonly devUrl: URL | undefined }, image: strin
  * process one only when `T3CODE_SANDBOX_RUNTIME=process` asks for it (development and tests).
  * Fails with why there is none, as `t3 status` shows it.
  */
+/** Why a dedicated machine runs nothing, and whether only its image is missing (waited for). */
+export interface DedicatedRuntimeRefusal {
+  readonly message: string;
+  readonly awaitsImage: boolean;
+}
+const refused = (message: string, awaitsImage = false) =>
+  Result.fail<DedicatedRuntimeRefusal>({ message, awaitsImage });
+
 export const dedicatedRuntimeFromConfig = Effect.fn("dedicatedRuntimeFromConfig")(function* (
   hubUrl: string,
+  options: { readonly recheck?: boolean } = {},
 ) {
   const setting = Option.getOrUndefined(yield* optionalSetting(SANDBOX_RUNTIME_SETTING));
   const config = yield* ServerConfig.ServerConfig;
@@ -105,24 +114,27 @@ export const dedicatedRuntimeFromConfig = Effect.fn("dedicatedRuntimeFromConfig"
   if (setting === "process") {
     const processRuntime = ProcessSandboxRuntime.forHub(config);
     return Option.isNone(processRuntime)
-      ? Result.fail("this server has no entry point to run its Sandbox's server with.")
+      ? refused("this server has no entry point to run its Sandbox's server with.")
       : Result.succeed(processRuntime.value.pipe(Layer.provide(address)));
   }
   if (setting !== undefined && setting !== "podman") {
-    return Result.fail(
+    return refused(
       `a dedicated machine runs its work in a Sandbox container, and ${SANDBOX_RUNTIME_SETTING}=${setting} runs none.`,
     );
   }
   const image = yield* configuredSandboxImage;
+  // Asked again, Podman answers anew: what it said when this server started is not kept.
+  if (options.recheck === true) podmanDetection = undefined;
   const detected = yield* detectPodman(image);
   if (!detected.rootless) {
-    return Result.fail(
+    return refused(
       "a dedicated machine runs its work in a Sandbox container, and rootless Podman is not available here.",
     );
   }
   if (!detected.image) {
-    return Result.fail(
+    return refused(
       `Podman is here but the Sandbox image ${image} is not: build it (\`t3 sandbox image build\`) or set T3CODE_SANDBOX_IMAGE.`,
+      true,
     );
   }
   // The container reaches every address of this machine but its loopback, and rootless Podman
@@ -138,7 +150,7 @@ export const dedicatedRuntimeFromConfig = Effect.fn("dedicatedRuntimeFromConfig"
     listeningOutsideLoopback().filter((listener) => listener.port !== config.port),
     allowed,
   );
-  if (exposed !== undefined) return Result.fail(exposed);
+  if (exposed !== undefined) return refused(exposed);
   return Result.succeed(podmanForHub(config, image).pipe(Layer.provide(address)));
 });
 

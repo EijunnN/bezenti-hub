@@ -7,6 +7,7 @@ import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Redacted from "effect/Redacted";
 import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -17,6 +18,8 @@ import {
   type SandboxStartOptions,
 } from "../sandboxes/SandboxRuntime.ts";
 import {
+  awaitDedicatedRuntime,
+  DEDICATED_IMAGE_RECHECK_MS,
   dedicatedSandboxIdOf,
   type HubAnswer,
   superviseDedicatedSandbox,
@@ -214,4 +217,51 @@ it.effect(
       yield* TestClock.adjust("2 seconds");
       assert.deepEqual(runtime.startOptions.at(-1), { limits: lower });
     }),
+);
+
+it.effect("a machine waiting for its image starts once it is built, without a restart", () =>
+  Effect.gen(function* () {
+    const rechecks: Array<boolean> = [];
+    const waiting: Array<string> = [];
+    let built = false;
+    const fiber = yield* awaitDedicatedRuntime({
+      check: (recheck) =>
+        Effect.sync(() => {
+          rechecks.push(recheck);
+          return built
+            ? Result.succeed("the runtime")
+            : Result.fail({ message: "the image is not built.", awaitsImage: true });
+        }),
+      onWaiting: (message) => Effect.sync(() => void waiting.push(message)),
+    }).pipe(Effect.forkChild);
+    yield* TestClock.adjust("1 millis");
+    assert.deepEqual(rechecks, [false]);
+    assert.include(waiting[0] ?? "", "the image is not built.");
+    assert.include(waiting[0] ?? "", "starts by itself once it is built");
+    yield* TestClock.adjust(DEDICATED_IMAGE_RECHECK_MS);
+    // Each later look asks Podman again: what it said at startup is not kept.
+    assert.deepEqual(rechecks, [false, true]);
+    built = true;
+    yield* TestClock.adjust(DEDICATED_IMAGE_RECHECK_MS);
+    assert.deepEqual(yield* Fiber.join(fiber), Result.succeed("the runtime"));
+    yield* TestClock.adjust("1 hour");
+    assert.lengthOf(rechecks, 3);
+  }),
+);
+
+it.effect("any other reason it cannot run is final", () =>
+  Effect.gen(function* () {
+    const checks = yield* Ref.make(0);
+    const result = yield* awaitDedicatedRuntime({
+      check: () =>
+        Ref.update(checks, (n) => n + 1).pipe(
+          Effect.as(
+            Result.fail({ message: "rootless Podman is not available.", awaitsImage: false }),
+          ),
+        ),
+      onWaiting: () => Effect.void,
+    });
+    assert.deepEqual(result, Result.fail("rootless Podman is not available."));
+    assert.equal(yield* Ref.get(checks), 1);
+  }),
 );

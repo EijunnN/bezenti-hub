@@ -4,7 +4,8 @@
 # builds it with rootless Podman 3.4 or newer; nothing here needs BuildKit.
 #
 # The context the Hub prepares:
-#   clis/     the providers' CLIs: package.json and its package-lock.json (this directory's clis/).
+#   clis/     the providers' CLIs: package.json and its package-lock.json (this directory's clis/),
+#             only those two files.
 #   server/   the T3 server of the Hub's version, without its node_modules: the release tree a
 #             `t3` executable runs from, or a bundle built from a checkout (`dist/bin.mjs`).
 #   modules/  that server's runtime node_modules, for Linux on this machine's architecture.
@@ -48,9 +49,11 @@ RUN set -eu; \
 # OpenCode ship a placeholder `bin` that their postinstall replaces with the platform binary of
 # their (locked, already verified) optional dependency; neither downloads anything. Grok's
 # postinstall only copies its binary into the installing user's ~/.grok, and its `bin` launches
-# the locked platform binary without it; protobufjs's only checks its version. Codex and Pi have
-# no install script.
-COPY clis/ /opt/t3/clis/
+# the locked platform binary without it; protobufjs's only checks its version; @google/genai's
+# (Pi's) is an `echo`. Codex and Pi have no install script. clis/package.json's `allowScripts`
+# allows those two and denies the rest, as npm 12 requires (npm refuses `--allow-scripts` on a
+# project's `rebuild`). Only the two files are copied: nothing else of that directory gets in.
+COPY clis/package.json clis/package-lock.json /opt/t3/clis/
 RUN set -eu; \
     cd /opt/t3/clis; \
     npm ci --omit=dev --ignore-scripts --no-audit --no-fund; \

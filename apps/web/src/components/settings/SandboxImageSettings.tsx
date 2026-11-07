@@ -10,6 +10,7 @@ import {
 import { errorMessageOf } from "../../lib/errorMessage";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { receiveBuildLog, type ShownBuildLog } from "./sandboxImageLog";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
 // A build reports its output as it goes; between builds the view only needs to stay current.
@@ -66,23 +67,23 @@ export function SandboxImageSettings() {
   const [pending, setPending] = useState<string | null>(null);
   const [log, setLog] = useState<ReadonlyArray<string>>([]);
   // The build the shown lines are of, and how many it had printed: the Hub sends only newer ones.
-  const shown = useRef<{ readonly startedAt: string | null; readonly lines: number } | null>(null);
+  const shown = useRef<ShownBuildLog | null>(null);
+  const logRef = useRef<ReadonlyArray<string>>([]);
   const building = status?.build.state === "building";
 
   /** Takes a status in, appending the build's new lines (or starting over for another build). */
   const receive = (next: SandboxImageStatus, askedAfter: number | undefined) => {
     setStatus(next);
-    const same = shown.current !== null && shown.current.startedAt === next.build.startedAt;
-    if (same && askedAfter !== undefined) {
-      setLog((lines) => [...lines, ...next.build.log].slice(-LOG_LINES_SHOWN));
-    } else {
-      setLog(next.build.log.slice(-LOG_LINES_SHOWN));
-    }
-    // Lines asked for relative to another build are not these: ask for all of this one next.
-    shown.current =
-      same || askedAfter === undefined
-        ? { startedAt: next.build.startedAt, lines: next.build.logLines }
-        : null;
+    const received = receiveBuildLog({
+      shown: shown.current,
+      log: logRef.current,
+      build: next.build,
+      askedAfter,
+      keep: LOG_LINES_SHOWN,
+    });
+    shown.current = received.shown;
+    logRef.current = received.log;
+    setLog(received.log);
   };
 
   const polled = useEffectEvent((next: SandboxImageStatus, after: number | undefined) =>
@@ -223,7 +224,9 @@ export function SandboxImageSettings() {
                   disabled={pending !== null || sandbox.busy}
                   size="xs"
                   title={
-                    sandbox.busy ? "A turn is running in it; update it once it ends." : undefined
+                    sandbox.busy
+                      ? "A turn is running in it, or work was just sent to it; update it once that ends."
+                      : undefined
                   }
                   variant="outline"
                   onClick={() => void update(sandbox)}

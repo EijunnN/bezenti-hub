@@ -28,13 +28,17 @@ export class EnvironmentDemand extends Context.Service<
      */
     readonly ready: (environmentId: EnvironmentId) => Effect.Effect<boolean>;
     /**
-     * Starts it unless it runs (joining a start under way) and waits until its executor serves;
-     * counts as use. A failed Sandbox starts again only for a User's own action (`explicit`), after
-     * a short backoff. The start is the Hub's: a caller that stops waiting does not stop it.
+     * Starts it unless it runs and waits until its executor serves. A failed Sandbox starts again
+     * only for a User's own action (`explicit`), after a backoff. `dispatch` (work sent to it, not
+     * previews or terminals) claims it against an image update until a turn reports in.
      */
     readonly awaitStarted: (
       environmentId: EnvironmentId,
-      options: { readonly actorUserId?: UserId | undefined; readonly explicit: boolean },
+      options: {
+        readonly actorUserId?: UserId | undefined;
+        readonly explicit: boolean;
+        readonly dispatch?: boolean;
+      },
     ) => Effect.Effect<void, EnvironmentStartError>;
     /**
      * Starts the startable ones among them that are stopped, without waiting; one whose last start

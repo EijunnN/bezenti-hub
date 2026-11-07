@@ -18,7 +18,7 @@ import {
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
-import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { makeProviderReplayGate } from "@t3tools/provider-testing/replayGate";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -32,7 +32,10 @@ import * as Stream from "effect/Stream";
 import { addMember, joinOrganization } from "../auth/UserAuth.testkit.ts";
 import * as CommandActor from "../auth/CommandActor.ts";
 import * as EnvironmentDemand from "../environment/EnvironmentDemand.ts";
-import { ClaudeOrchestratorReplayHarness } from "../orchestration-v2/Adapters/ClaudeAdapterV2.testkit.ts";
+import {
+  ClaudeOrchestratorReplayHarness,
+  makeClaudeRestartReplayHarness,
+} from "../orchestration-v2/Adapters/ClaudeAdapterV2.testkit.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
@@ -82,7 +85,7 @@ const loadFixture = Effect.fn(function* (name: string) {
     transcript,
     { replayGate: makeProviderReplayGate([]) },
   ).pipe(Layer.orDie);
-  return { variant, materialized, adapters };
+  return { variant, materialized, adapters, transcript };
 });
 type LoadedFixture = Effect.Success<ReturnType<typeof loadFixture>>;
 
@@ -125,6 +128,37 @@ const holdingEvents = (adapters: Adapters, afterEvents: number) =>
     ).pipe(Layer.provide(adapters));
     return { layer, reached };
   });
+
+/** The machine's agent refuses to start any turn. */
+const refusingTurns = (adapters: Adapters): Adapters =>
+  Layer.effect(
+    ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+    Effect.map(ProviderAdapterRegistry.ProviderAdapterRegistryV2, (registry) => ({
+      ...registry,
+      get: (instanceId: Parameters<typeof registry.get>[0]) =>
+        registry.get(instanceId).pipe(
+          Effect.map((adapter) => ({
+            ...adapter,
+            openSession: (open: ProviderAdapter.ProviderAdapterV2OpenSessionInput) =>
+              adapter.openSession(open).pipe(
+                Effect.map((runtime) => ({
+                  ...runtime,
+                  startTurn: (input: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+                    Effect.fail(
+                      new ProviderAdapter.ProviderAdapterTurnStartError({
+                        driver: runtime.driver,
+                        threadId: input.threadId,
+                        providerThreadId: input.providerThread.id,
+                        runId: input.runId,
+                        cause: "refused by the test",
+                      }),
+                    ),
+                })),
+              ),
+          })),
+        ),
+    })),
+  ).pipe(Layer.provide(adapters));
 
 const ownerIdOf = Effect.fn(function* (hub: Hub) {
   const [row] = yield* hub.server.sql<{ readonly userId: string }>`
@@ -503,13 +537,125 @@ describe("Hub con Environments: the Sandboxes' base image", () => {
           .awaitStarted(sandboxEnvironmentIdOf(acme), {
             actorUserId: yield* ownerIdOf(hub),
             explicit: true,
+            dispatch: true,
           })
           .pipe(Effect.orDie);
+        // The Owner's view says so before the Owner asks.
+        assert.isTrue(sandboxImageRow((yield* imageStatus(hub)).body, acme)?.busy);
         const refused = yield* updateImage(hub, acme);
         assert.equal(refused.status, 409);
         assert.include(refused.body.message ?? "", "Work was just sent to it");
         assert.deepEqual(yield* auditedStarts(hub), ["sandbox.start:demand"]);
       }).pipe(Effect.scoped),
+  );
+
+  it.live("each User's dispatch is its own claim: another's turn starting leaves it", () =>
+    Effect.gen(function* () {
+      let newest = "0.1.7-20261101000000";
+      const hub = yield* makeHub({ sandboxImageVersion: () => newest });
+      const acme = yield* createOrganization(hub, "Acme");
+      yield* hub
+        .service(Sandboxes.Sandboxes)
+        .ensureRunning({ spaceId: acme, actorUserId: undefined })
+        .pipe(Effect.orDie);
+      newest = "0.1.7-20261107000000";
+      const demand = hub.service(EnvironmentDemand.EnvironmentDemand);
+      const environmentId = sandboxEnvironmentIdOf(acme);
+      const owner = yield* ownerIdOf(hub);
+      // Two messages sent to it; the first one's turn reports in and ends at once.
+      for (let sent = 0; sent < 2; sent += 1) {
+        yield* demand
+          .awaitStarted(environmentId, { actorUserId: owner, explicit: true, dispatch: true })
+          .pipe(Effect.orDie);
+      }
+      yield* demand.turnStarted(environmentId, "session-a:1");
+      yield* demand.turnEnded(environmentId, "session-a:1");
+      const refused = yield* updateImage(hub, acme);
+      assert.equal(refused.status, 409);
+      assert.include(refused.body.message ?? "", "Work was just sent to it");
+      // Its turn reports in too: nothing is claimed any more.
+      yield* demand.turnStarted(environmentId, "session-b:1");
+      yield* demand.turnEnded(environmentId, "session-b:1");
+      const updated = yield* updateImage(hub, acme);
+      assert.equal(updated.status, 200);
+      assert.equal(updated.body.outcome, "updated");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a preview or a terminal reaching a Sandbox claims nothing: it can be updated", () =>
+    Effect.gen(function* () {
+      let newest = "0.1.7-20261101000000";
+      const hub = yield* makeHub({ sandboxImageVersion: () => newest });
+      const acme = yield* createOrganization(hub, "Acme");
+      yield* hub
+        .service(Sandboxes.Sandboxes)
+        .ensureRunning({ spaceId: acme, actorUserId: undefined })
+        .pipe(Effect.orDie);
+      newest = "0.1.7-20261107000000";
+      // As HubPreviews and ThreadWorkspace ask: a User's own action, but no work dispatched.
+      yield* hub
+        .service(EnvironmentDemand.EnvironmentDemand)
+        .awaitStarted(sandboxEnvironmentIdOf(acme), {
+          actorUserId: yield* ownerIdOf(hub),
+          explicit: true,
+        })
+        .pipe(Effect.orDie);
+      assert.isFalse(sandboxImageRow((yield* imageStatus(hub)).body, acme)?.busy);
+      const updated = yield* updateImage(hub, acme);
+      assert.equal(updated.status, 200);
+      assert.equal(updated.body.outcome, "updated");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a turn that failed to start leaves the Sandbox free to update", () =>
+    Effect.gen(function* () {
+      const loaded = yield* loadFixture("simple");
+      let newest = "0.1.7-20261101000000";
+      const hub = yield* makeHub({
+        // Its replay is never played (no turn starts), so it is not asserted complete.
+        sandboxAdapters: refusingTurns(
+          makeClaudeRestartReplayHarness(loaded.transcript)
+            .harness.makeProviderAdapterRegistryLayer(loaded.transcript)
+            .pipe(Layer.orDie),
+        ),
+        sandboxImageVersion: () => newest,
+      });
+      const acme = yield* createOrganization(hub, "Acme");
+      const threadId = yield* runTurnOnSandbox(hub, loaded, acme);
+      assert.notEqual(yield* awaitRunSettled(hub, threadId, 1), "completed");
+      newest = "0.1.7-20261107000000";
+      assert.isFalse(sandboxImageRow((yield* imageStatus(hub)).body, acme)?.busy);
+      const updated = yield* updateImage(hub, acme);
+      assert.equal(updated.status, 200);
+      assert.equal(updated.body.outcome, "updated");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a Hub that could not build the image can once rootless Podman answers", () =>
+    Effect.gen(function* () {
+      let reason: string | null = "Rootless Podman is not available on the Hub.";
+      const hub = yield* makeHub({
+        sandboxImageBuilder: SandboxImage.SandboxImageBuilder.of({
+          // `podman info` timed out, or Podman was set up after the Hub started.
+          cannotBuildReason: Effect.sync(() => reason),
+          inspect: Effect.fn(function* () {
+            yield* Effect.void;
+            return null;
+          }),
+          build: Effect.fn(function* () {
+            yield* Effect.void;
+            return { id: "abc", version: "0.1.7-20261107000000", createdAt: null };
+          }),
+        }),
+      });
+      const before = yield* imageStatus(hub);
+      assert.isFalse(before.body.canBuild);
+      assert.equal(before.body.cannotBuildReason, "Rootless Podman is not available on the Hub.");
+      reason = null;
+      const after = yield* imageStatus(hub);
+      assert.isTrue(after.body.canBuild);
+      assert.equal(after.body.cannotBuildReason, null);
+    }).pipe(Effect.scoped),
   );
 
   it.live("two builds asked at once: one runs, the other is refused", () =>
@@ -539,13 +685,11 @@ describe("Hub con Environments: the Sandboxes' base image", () => {
         answers.map((answer) => answer.status),
         [200, 409],
       );
+      // The refused one answered 409 before either returned: only the running one ever builds.
       yield* Deferred.await(started);
-      yield* Deferred.succeed(release, undefined);
-      yield* imageStatus(hub).pipe(
-        // oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- the build runs in the Hub's own fiber; its status is what clients poll
-        Effect.repeat({ schedule: Schedule.spaced("20 millis"), until: buildEnded }),
-      );
       assert.equal(yield* Ref.get(builds), 1);
+      assert.equal((yield* requestBuild(hub)).status, 409);
+      yield* Deferred.succeed(release, undefined);
     }).pipe(Effect.scoped),
   );
 

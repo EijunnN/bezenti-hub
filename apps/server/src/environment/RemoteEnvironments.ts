@@ -583,6 +583,8 @@ const make = Effect.gen(function* () {
               attachments,
             }),
           ),
+          // A turn that never started (refused, timed out, the link dropped) never reports its end.
+          Effect.onError(() => turnEnded(link, providerSessionId, sink, input.runOrdinal)),
         ),
       steerTurn: (input) =>
         grantAttachments(sink, input.message.attachments).pipe(
@@ -1295,6 +1297,8 @@ const make = Effect.gen(function* () {
     sink: SessionSink,
     reason: EnvironmentSessionLostError["reason"],
   ) {
+    // Its turns end with it: none of them reports a `turn.terminal` now.
+    yield* sessionTurnsEnded(link, providerSessionId, sink);
     yield* Queue.fail(
       sink.queue,
       new ProviderAdapter.ProviderAdapterEventStreamError({

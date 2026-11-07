@@ -108,7 +108,7 @@ const buildOnJoinedMachine = Effect.fn("cli.sandbox.buildOnJoinedMachine")(funct
     onLine: (line) => process.stdout.write(`${line}\n`),
   }).pipe(Effect.mapError((error) => userError(error.message)));
   yield* Console.log(
-    `Built ${image} (${built.version}). This machine's Sandbox runs it from its next start.`,
+    `Built ${image} (${built.version}). This machine's Sandbox runs it from its next start; one that was waiting for the image starts within 15 seconds (its \`t3 serve\` asks Podman again).`,
   );
 });
 

@@ -145,8 +145,9 @@ const streamCommand = (
   );
 
 /**
- * The staging's environment: only what pnpm and vp need, never the Hub's provider keys, tokens or
- * build settings. Its tools resolve `node` from PATH, the Hub's own first; in WSL the PATH the Hub
+ * The staging's environment: only what pnpm and vp need (a proxy and private CA to reach the
+ * registry included, and the package managers' own settings), never the Hub's provider keys,
+ * tokens or build settings. Its tools resolve `node` from PATH, the Hub's own first; in WSL the PATH the Hub
  * took from the login shell also lists Windows directories, whose `node` and `pnpm` cannot run.
  */
 const STAGING_ENV_KEPT = [
@@ -159,8 +160,19 @@ const STAGING_ENV_KEPT = [
   "XDG_CACHE_HOME",
   "XDG_DATA_HOME",
   "XDG_CONFIG_HOME",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
 ];
-const stagingEnvironment = (env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv => {
+/** Settings of npm and pnpm themselves (`npm_config_registry`, `PNPM_HOME`, …). */
+const STAGING_ENV_PREFIXES = ["npm_config_", "NPM_CONFIG_", "PNPM_"];
+export const stagingEnvironment = (env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv => {
   const entries = (env.PATH ?? "").split(NodePath.delimiter).filter((entry) => entry !== "");
   const usable =
     env.WSL_DISTRO_NAME === undefined
@@ -168,11 +180,19 @@ const stagingEnvironment = (env: NodeJS.ProcessEnv = process.env): NodeJS.Proces
       : entries.filter((entry) => !entry.startsWith("/mnt/"));
   const kept: NodeJS.ProcessEnv = {};
   for (const key of STAGING_ENV_KEPT) if (env[key] !== undefined) kept[key] = env[key];
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined && STAGING_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))) {
+      kept[key] = value;
+    }
+  }
   return {
     ...kept,
     PATH: [NodePath.dirname(process.execPath), ...usable].join(NodePath.delimiter),
   };
 };
+
+/** What the build context takes of `sandbox-image/` (the release archive carries the same). */
+const SANDBOX_IMAGE_FILES = ["Containerfile", "clis/package.json", "clis/package-lock.json"];
 
 /**
  * The context: the Containerfile, and the server of this Hub's version. A `t3` release runs from
@@ -189,6 +209,17 @@ const prepareContext = Effect.fn("SandboxImage.prepareContext")(function* (
       try: () => NodeFS.cpSync(from, to, { recursive: true, dereference: true }),
       catch: (cause) => new SandboxImageBuildError({ detail: String(cause) }),
     });
+  /** The image's definition: its files only, whatever else lies in that directory. */
+  const copyDefinition = (from: string) =>
+    Effect.forEach(SANDBOX_IMAGE_FILES, (file) =>
+      Effect.try({
+        try: () => {
+          NodeFS.mkdirSync(NodePath.dirname(NodePath.join(contextDir, file)), { recursive: true });
+          NodeFS.copyFileSync(NodePath.join(from, file), NodePath.join(contextDir, file));
+        },
+        catch: (cause) => new SandboxImageBuildError({ detail: String(cause) }),
+      }),
+    );
   if (fromCheckout === undefined && NodeSea.isSea()) {
     const tree = NodePath.dirname(process.execPath);
     const definition = NodePath.join(tree, "sandbox-image");
@@ -198,7 +229,7 @@ const prepareContext = Effect.fn("SandboxImage.prepareContext")(function* (
       });
     }
     onLine(`Copying the T3 server ${packageJson.version} from ${tree}...`);
-    yield* copy(definition, contextDir);
+    yield* copyDefinition(definition);
     for (const entry of NodeFS.readdirSync(tree)) {
       if (entry === "sandbox-image" || entry === "node_modules" || entry.startsWith(".")) continue;
       yield* copy(NodePath.join(tree, entry), NodePath.join(contextDir, "server", entry));
@@ -226,7 +257,7 @@ const prepareContext = Effect.fn("SandboxImage.prepareContext")(function* (
     { cwd: checkout, env: stagingEnvironment(), timeoutMs: 20 * 60 * 1000 },
   );
   // The Containerfile and the CLIs' lockfile.
-  yield* copy(NodePath.join(checkout, "apps", "server", "sandbox-image"), contextDir);
+  yield* copyDefinition(NodePath.join(checkout, "apps", "server", "sandbox-image"));
 });
 
 /**
@@ -354,7 +385,10 @@ export class SandboxImageBuilds extends Context.Service<
   SandboxImageBuilds,
   {
     readonly image: string;
-    /** Why this Hub cannot build it, asked once (rootless Podman does not come and go). */
+    /**
+     * Why this Hub cannot build it. Asked until rootless Podman answers, then never again: a slow
+     * `podman info` or a Podman set up after the Hub started is not kept as an answer.
+     */
     readonly cannotBuildReason: Effect.Effect<string | null>;
     /** The image the tag names now, read again at most every few seconds and after each build. */
     readonly current: Effect.Effect<SandboxImageInfo>;
@@ -399,7 +433,18 @@ const make = Effect.gen(function* () {
     }
   };
 
-  const cannotBuildReason = yield* Effect.cached(builder.cannotBuildReason);
+  let canBuild = false;
+  const cannotBuildReason = Effect.suspend(() =>
+    canBuild
+      ? Effect.succeed(null)
+      : builder.cannotBuildReason.pipe(
+          Effect.tap((reason) =>
+            Effect.sync(() => {
+              if (reason === null) canBuild = true;
+            }),
+          ),
+        ),
+  );
 
   let currentRead: { readonly at: number; readonly value: SandboxImageInfo } | undefined;
   const readCurrent = builder.inspect(image).pipe(

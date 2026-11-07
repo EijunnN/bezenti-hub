@@ -40,7 +40,7 @@ export const SandboxImageSandbox = Schema.Struct({
   status: Schema.Literals(["stopped", "starting", "running", "failed"]),
   /** Null before its first start, or when its runtime runs no image (the process runtime). */
   imageVersion: Schema.NullOr(Schema.String),
-  /** A turn is in progress on it: updating it now is refused. */
+  /** A turn is in progress on it, or work was just sent to it: updating it now is refused. */
   busy: Schema.Boolean,
 });
 export type SandboxImageSandbox = typeof SandboxImageSandbox.Type;

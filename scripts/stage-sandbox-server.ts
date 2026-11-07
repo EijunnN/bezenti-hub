@@ -56,8 +56,16 @@ export const stageSandboxServer = Effect.fn("stageSandboxServer")(function* (out
       detail: `${out} does not exist; make it (privately, as with mkdtemp) first.`,
     });
   }
+  // Staged once: a second run into the same context would fail halfway (its `modules/` exists).
+  if ((yield* fs.readDirectory(out)).length > 0) {
+    return yield* new SandboxServerStageError({
+      detail: `${out} is not empty; stage into a new private directory.`,
+    });
+  }
   for (const dir of ["server", "extras/scripts"]) {
-    yield* fs.makeDirectory(path.join(out, dir), { recursive: true, mode: 0o700 });
+    // Readable by all inside: the image keeps these modes, and its Sandbox runs as a plain user. The
+    // context itself (0700) is what keeps them the Hub's alone on this machine.
+    yield* fs.makeDirectory(path.join(out, dir), { recursive: true, mode: 0o755 });
   }
 
   // The bundle, as `vp pack` builds it for npm, into the context rather than apps/server/dist.
@@ -111,7 +119,9 @@ const command = Command.make(
   "stage-sandbox-server",
   {
     outputDir: Flag.String("output-dir").pipe(
-      Flag.withDescription("Where to put server/, modules/ and extras/ (emptied first)."),
+      Flag.withDescription(
+        "An empty private directory (as mkdtemp makes) to put server/, modules/ and extras/ in.",
+      ),
     ),
   },
   ({ outputDir }) => stageSandboxServer(outputDir).pipe(Effect.scoped),

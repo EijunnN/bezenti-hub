@@ -1006,6 +1006,7 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
           .awaitStarted(environmentId, {
             actorUserId: "ownerUserId" in command ? command.ownerUserId : undefined,
             explicit: true,
+            dispatch: true,
           })
           .pipe(
             Effect.mapError(
