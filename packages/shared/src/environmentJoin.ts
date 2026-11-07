@@ -55,6 +55,39 @@ export const environmentCredentialIssuer = (credential: string): string | undefi
   return fromBase64Url(hub);
 };
 
+/** Why a User may not approve a machine joining: the one wording the Hub and its pages use. */
+export const REGISTER_OWN_REQUIRED_MESSAGE =
+  'Adding your own machines needs the "Register their own Environments" permission. Ask this Hub\'s Owner for it.';
+
+/** How `t3 join` names the User who approved it: their sign-in name, or their id without one. */
+export const environmentJoinApproverLabel = (approver: {
+  readonly userId: string;
+  readonly displayName: string;
+  readonly loginName: string | null;
+}) => `${approver.displayName} (${approver.loginName ?? approver.userId})`;
+
+/** Whether `--owner` names the approver: their sign-in name (any case) or their id. */
+export const environmentJoinApproverMatches = (
+  owner: string,
+  approver: { readonly userId: string; readonly loginName: string | null },
+) => {
+  const named = owner.trim();
+  return (
+    named === approver.userId ||
+    (approver.loginName !== null && named.toLowerCase() === approver.loginName.toLowerCase())
+  );
+};
+
+/** The question `t3 join` asks before registering; the desktop app reads it from its output. */
+export const environmentJoinConfirmationPrompt = (approverLabel: string) =>
+  `Approved by ${approverLabel} as their personal machine. Register it as theirs? [y/N] `;
+
+const CONFIRMATION_PROMPT = /Approved by (.+) as their personal machine\. Register it as theirs\?/;
+
+/** The approver a `t3 join` output line asks about, or null. */
+export const readEnvironmentJoinConfirmationPrompt = (line: string): string | null =>
+  CONFIRMATION_PROMPT.exec(line)?.[1] ?? null;
+
 export const isEnvironmentCredentialHash = (value: string) => CREDENTIAL_HASH_PATTERN.test(value);
 const isEnvironmentJoinRequestId = (value: string) => REQUEST_ID_PATTERN.test(value);
 

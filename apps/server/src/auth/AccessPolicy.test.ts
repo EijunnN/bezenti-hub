@@ -1037,13 +1037,47 @@ const rows: ReadonlyArray<
     organization,
     deny("wrong-resource"),
   ],
-  // Environments: only the Owner joins machines, and a personal one is its owner's alone.
+  // Environments: the Owner and Users with `environments.registerOwn` join their own machines, and
+  // a personal one is its owner's alone.
   ["Owner registers a machine", owner, "environment.register", AccessPolicy.installation, allow],
   [
-    "an Admin does not register a machine",
+    "an Admin without the permission does not register a machine",
     admin,
     "environment.register",
     AccessPolicy.installation,
+    deny("missing-installation-permission"),
+  ],
+  [
+    "a User with `environments.registerOwn` registers their own machine",
+    principal("grace", { roles: [[ORG, "member"]], permissions: ["environments.registerOwn"] }),
+    "environment.register",
+    AccessPolicy.installation,
+    allow,
+  ],
+  [
+    "a disabled User with the permission registers nothing",
+    {
+      ...principal("grace", { permissions: ["environments.registerOwn"] }),
+      inactive: true,
+    },
+    "environment.register",
+    AccessPolicy.installation,
+    deny("user-inactive"),
+  ],
+  [
+    "registering is decided on the Installation",
+    principal("grace", { permissions: ["environments.registerOwn"] }),
+    "environment.register",
+    organization,
+    deny("wrong-resource"),
+  ],
+  ["a Member renames their own machine", member, "environment.rename", gracesLaptop, allow],
+  ["a Member removes their own machine", member, "environment.remove", gracesLaptop, allow],
+  [
+    "a Member does not remove another User's machine",
+    member,
+    "environment.remove",
+    ownersLaptop,
     deny("owner-only"),
   ],
   ["a Member uses the Hub machine", member, "environment.view", hubMachine, allow],

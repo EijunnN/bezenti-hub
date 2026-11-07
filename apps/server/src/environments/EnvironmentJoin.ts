@@ -1,12 +1,14 @@
 /**
- * `t3 join`, the Hub's half. The machine starts a request with the SHA-256 of a credential it made
- * and a PKCE challenge; the Owner approves it on «Register this machine» with a strong factor in
- * the same request, which registers the machine; the machine asks with its verifier until then.
+ * `t3 join`, the Hub's half. The machine sends the SHA-256 of its own credential and a PKCE
+ * challenge; the Owner or a User with `environments.registerOwn` approves it with a strong factor;
+ * the machine, told who approved it, accepts them and is registered as their personal machine.
  * The credential never leaves the machine, and asking again after a lost answer changes nothing.
  */
 import type {
   EnvironmentId,
+  EnvironmentJoinApprover,
   EnvironmentJoinApproveRequest,
+  EnvironmentJoinConfirmRequest,
   EnvironmentJoinRequestView,
   EnvironmentJoinStartRequest,
   EnvironmentJoinStatus,
@@ -45,6 +47,12 @@ const MAX_PENDING_REQUESTS = 200;
 type Decision =
   | { readonly _tag: "pending" }
   | { readonly _tag: "denied" }
+  /** Approved on the page; registered once the machine accepts this approver. */
+  | {
+      readonly _tag: "awaiting-confirmation";
+      readonly name: string;
+      readonly approvedBy: EnvironmentJoinApprover;
+    }
   | { readonly _tag: "approved"; readonly environmentId: EnvironmentId; readonly name: string };
 
 interface PendingJoin {
@@ -106,14 +114,29 @@ export class EnvironmentJoin extends Context.Service<
     readonly start: (
       input: EnvironmentJoinStartRequest,
     ) => Effect.Effect<{ readonly requestId: string }, EnvironmentJoinRequestError>;
+    /** The request, and whether the browser's signed-in User may approve it. */
     readonly view: (
+      request: HttpServerRequest.HttpServerRequest,
       requestId: string,
     ) => Effect.Effect<EnvironmentJoinRequestView, EnvironmentJoinRequestNotFoundError>;
-    /** Registers the machine; answers where the browser goes next, if anywhere. */
+    /**
+     * Names the approver for the machine to accept; answers where the browser goes next, if
+     * anywhere.
+     */
     readonly approve: (
       request: HttpServerRequest.HttpServerRequest,
       input: EnvironmentJoinApproveRequest,
     ) => Effect.Effect<string | null, ApproveError>;
+    /** `t3 join` accepts the approver, which registers the machine as theirs, or refuses them. */
+    readonly confirm: (
+      input: EnvironmentJoinConfirmRequest,
+    ) => Effect.Effect<
+      EnvironmentJoinStatus,
+      | EnvironmentJoinRequestNotFoundError
+      | EnvironmentJoinInvalidGrantError
+      | EnvironmentRegistry.EnvironmentAccessDeniedError
+      | EnvironmentRegistry.EnvironmentStorageError
+    >;
     readonly deny: (
       request: HttpServerRequest.HttpServerRequest,
       requestId: string,
@@ -121,6 +144,8 @@ export class EnvironmentJoin extends Context.Service<
       string | null,
       | EnvironmentJoinNotSignedInError
       | EnvironmentJoinRequestNotFoundError
+      | EnvironmentRegistry.EnvironmentAccessDeniedError
+      | EnvironmentRegistry.EnvironmentStorageError
       | EnvironmentAuth.ServerAuthInternalError
     >;
     readonly status: (
@@ -184,20 +209,6 @@ const make = Effect.gen(function* () {
     return found;
   });
 
-  const view: EnvironmentJoin["Service"]["view"] = Effect.fn("EnvironmentJoin.view")(
-    function* (requestId) {
-      const found = yield* find(requestId);
-      return {
-        requestId,
-        name: found.name,
-        os: found.os,
-        hostname: found.hostname,
-        requestedAt: found.requestedAt,
-        status: found.decision._tag,
-      };
-    },
-  );
-
   // The browser's own cookie, never a token an app holds.
   const browserUser = Effect.fn("EnvironmentJoin.browserUser")(function* (
     request: HttpServerRequest.HttpServerRequest,
@@ -213,6 +224,64 @@ const make = Effect.gen(function* () {
     return { userId: session.userId as UserId, sessionId: session.sessionId };
   });
 
+  const statusOf = (decision: Decision): EnvironmentJoinStatus => {
+    switch (decision._tag) {
+      case "approved":
+        return {
+          status: "approved",
+          environmentId: decision.environmentId,
+          hubEnvironmentId: registry.hubId,
+          name: decision.name,
+        };
+      case "awaiting-confirmation":
+        return {
+          status: "awaiting-confirmation",
+          name: decision.name,
+          approvedBy: decision.approvedBy,
+        };
+      default:
+        return { status: decision._tag };
+    }
+  };
+
+  const view: EnvironmentJoin["Service"]["view"] = Effect.fn("EnvironmentJoin.view")(
+    function* (request, requestId) {
+      const found = yield* find(requestId);
+      // A hint for the page only: approving asks again. Not knowing (signed out, or the session
+      // or the User could not be read) is no answer rather than a failure.
+      const viewer = yield* browserUser(request).pipe(
+        Effect.flatMap((user) => registry.authorizeRegister(user.userId)),
+        Effect.as({ mayApprove: true as boolean | undefined, denialMessage: undefined }),
+        Effect.catch((error) =>
+          Effect.succeed(
+            error._tag === "EnvironmentAccessDeniedError"
+              ? { mayApprove: false, denialMessage: error.message }
+              : { mayApprove: undefined, denialMessage: undefined },
+          ),
+        ),
+      );
+      const status = found.decision._tag;
+      // Only someone who may approve learns what machine asks.
+      if (viewer.mayApprove !== true) {
+        return {
+          requestId,
+          status,
+          ...(viewer.mayApprove === undefined ? {} : { viewerMayApprove: viewer.mayApprove }),
+          ...(viewer.denialMessage === undefined ? {} : { denialMessage: viewer.denialMessage }),
+        };
+      }
+      return {
+        requestId,
+        name: found.name,
+        os: found.os,
+        hostname: found.hostname,
+        requestedAt: found.requestedAt,
+        status,
+        viewerMayApprove: true,
+      };
+    },
+  );
+
   const returnTo = (found: PendingJoin, approved: boolean) =>
     found.redirectUri === undefined || found.state === undefined
       ? null
@@ -220,39 +289,44 @@ const make = Effect.gen(function* () {
         ? appSignInCallbackUrl(found.redirectUri, "approved", found.state)
         : appSignInCancelledUrl(found.redirectUri, found.state);
 
+  // Approving only names the approver: the machine registers once `t3 join` accepts them, so a
+  // User who got hold of someone else's link cannot take that machine as theirs unnoticed.
   const approve: EnvironmentJoin["Service"]["approve"] = Effect.fn("EnvironmentJoin.approve")(
     function* (request, input) {
       const user = yield* browserUser(request);
-      // Who may comes before the factor, so a Member's proof is never even checked.
-      if (!(yield* registry.mayRegister(user.userId))) {
-        return yield* new EnvironmentRegistry.EnvironmentAccessDeniedError({
-          reason: "owner-only",
-        });
-      }
+      // Who may comes before the factor, so the proof of a User without the right is never checked.
+      yield* registry.authorizeRegister(user.userId);
       yield* find(input.requestId);
       yield* userDirectory.confirmStrongFactor(
         { ...user, origin: request.headers.origin ?? "" },
         input.reauth,
       );
+      const account = yield* userDirectory.getAccount(user.userId);
       return yield* decisions.withPermits(1)(
         Effect.gen(function* () {
           const found = yield* find(input.requestId);
-          if (found.decision._tag === "approved") return returnTo(found, true);
-          if (found.decision._tag === "denied") {
+          const { decision } = found;
+          // Asking again after a lost answer changes nothing; someone else decides nothing.
+          if (decision._tag === "approved") return returnTo(found, true);
+          if (decision._tag === "awaiting-confirmation") {
+            if (decision.approvedBy.userId === user.userId) return returnTo(found, true);
             return yield* new EnvironmentJoinRequestNotFoundError({});
           }
-          const environmentId = yield* registry.register({
-            approvedBy: user.userId,
-            name: input.name,
-            os: found.os,
-            hostname: found.hostname,
-            credentialHash: found.credentialHash,
-          });
-          const now = yield* Clock.currentTimeMillis;
-          yield* requests.update(input.requestId, now, (current) => ({
+          if (decision._tag === "denied") {
+            return yield* new EnvironmentJoinRequestNotFoundError({});
+          }
+          yield* requests.update(input.requestId, yield* Clock.currentTimeMillis, (current) => ({
             ...current,
             name: input.name,
-            decision: { _tag: "approved", environmentId, name: input.name },
+            decision: {
+              _tag: "awaiting-confirmation",
+              name: input.name,
+              approvedBy: {
+                userId: user.userId,
+                displayName: account.user.displayName,
+                loginName: account.loginName,
+              },
+            },
           }));
           return returnTo(found, true);
         }),
@@ -260,13 +334,61 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const confirm: EnvironmentJoin["Service"]["confirm"] = Effect.fn("EnvironmentJoin.confirm")(
+    function* (input) {
+      const found = yield* find(input.requestId);
+      if (!(yield* pkce.verifies(input.codeVerifier, found.codeChallenge))) {
+        return yield* new EnvironmentJoinInvalidGrantError({});
+      }
+      return yield* decisions.withPermits(1)(
+        Effect.gen(function* () {
+          const current = yield* find(input.requestId);
+          const { decision } = current;
+          if (decision._tag === "approved" && input.accept) return statusOf(decision);
+          if (decision._tag !== "awaiting-confirmation") {
+            return yield* new EnvironmentJoinRequestNotFoundError({});
+          }
+          const decide = (next: Decision) =>
+            Effect.flatMap(Clock.currentTimeMillis, (now) =>
+              requests.update(input.requestId, now, (pending) => ({ ...pending, decision: next })),
+            );
+          if (!input.accept) {
+            yield* decide({ _tag: "denied" });
+            return { status: "denied" } as const;
+          }
+          const environmentId = yield* registry
+            .register({
+              approvedBy: decision.approvedBy.userId,
+              name: decision.name,
+              os: current.os,
+              hostname: current.hostname,
+              credentialHash: current.credentialHash,
+            })
+            .pipe(
+              // The approver lost the right since: this request is over.
+              Effect.tapError((error) =>
+                error._tag === "EnvironmentAccessDeniedError"
+                  ? decide({ _tag: "denied" })
+                  : Effect.void,
+              ),
+            );
+          const approved = { _tag: "approved", environmentId, name: decision.name } as const;
+          yield* decide(approved);
+          return statusOf(approved);
+        }),
+      );
+    },
+  );
+
   const deny: EnvironmentJoin["Service"]["deny"] = Effect.fn("EnvironmentJoin.deny")(
     function* (request, requestId) {
-      yield* browserUser(request);
+      const user = yield* browserUser(request);
+      // As for approving: only someone who may approve turns a request down.
+      yield* registry.authorizeRegister(user.userId);
       return yield* decisions.withPermits(1)(
         Effect.gen(function* () {
           const found = yield* find(requestId);
-          if (found.decision._tag === "approved") {
+          if (found.decision._tag !== "pending") {
             return yield* new EnvironmentJoinRequestNotFoundError({});
           }
           yield* requests.update(requestId, yield* Clock.currentTimeMillis, (current) => ({
@@ -286,18 +408,11 @@ const make = Effect.gen(function* () {
       if (!(yield* pkce.verifies(input.codeVerifier, found.codeChallenge))) {
         return yield* new EnvironmentJoinInvalidGrantError({});
       }
-      const { decision } = found;
-      if (decision._tag !== "approved") return { status: decision._tag } as const;
-      return {
-        status: "approved",
-        environmentId: decision.environmentId,
-        hubEnvironmentId: registry.hubId,
-        name: decision.name,
-      } as const;
+      return statusOf(found.decision);
     },
   );
 
-  return EnvironmentJoin.of({ start, view, approve, deny, status });
+  return EnvironmentJoin.of({ start, view, approve, confirm, deny, status });
 });
 
 export const layer = Layer.effect(EnvironmentJoin, make);

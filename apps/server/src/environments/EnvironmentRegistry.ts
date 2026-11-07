@@ -23,7 +23,10 @@ import {
   type ThreadId,
   UserId,
 } from "@t3tools/contracts";
-import { environmentCredentialIssuer } from "@t3tools/shared/environmentJoin";
+import {
+  environmentCredentialIssuer,
+  REGISTER_OWN_REQUIRED_MESSAGE,
+} from "@t3tools/shared/environmentJoin";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
@@ -79,6 +82,8 @@ export class EnvironmentAccessDeniedError extends Schema.TaggedError<Environment
         return "This account is turned off.";
       case "sandbox":
         return "A Space's Sandbox is run by the Hub: it is not renamed or removed as a machine.";
+      case "missing-installation-permission":
+        return REGISTER_OWN_REQUIRED_MESSAGE;
       default:
         return "Only the Owner manages this Hub's Environments.";
     }
@@ -284,9 +289,17 @@ export class EnvironmentRegistry extends Context.Service<
       void,
       EnvironmentNotFoundError | EnvironmentAccessDeniedError | EnvironmentStorageError
     >;
-    /** Whether the User may approve a machine joining; checked before the strong factor. */
-    readonly mayRegister: (userId: UserId) => Effect.Effect<boolean, EnvironmentStorageError>;
-    /** Stores a newly joined machine by its credential's hash, recording who approved it. */
+    /**
+     * Whether the User may approve their own machine joining (the Owner, or `registerOwn`);
+     * checked before the strong factor. Refuses with the reason.
+     */
+    readonly authorizeRegister: (
+      userId: UserId,
+    ) => Effect.Effect<void, EnvironmentAccessDeniedError | EnvironmentStorageError>;
+    /**
+     * Stores a newly joined machine by its credential's hash as a personal machine of the User who
+     * approved it, recording them.
+     */
     readonly register: (input: {
       readonly approvedBy: UserId;
       readonly name: string;
@@ -424,12 +437,35 @@ const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => 0),
     );
 
-  /** `name` replaces the stored one: a Sandbox is named after its Space as the viewer calls it. */
+  /**
+   * One machine as a viewer sees it. The Hub machine's load, providers and running Threads are the
+   * whole Installation's, so only the Owner (`ownerView`) gets them. `name` replaces the stored
+   * one: a Sandbox is named after its Space as the viewer calls it.
+   */
   const summaryOf = Effect.fn("EnvironmentRegistry.summaryOf")(function* (
     row: EnvironmentRow,
+    ownerView = true,
     name?: string,
   ) {
     const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
+    if (row.kind === "hub" && !ownerView) {
+      return {
+        id: EnvironmentId.make(row.environmentId),
+        name: row.name,
+        kind: row.kind,
+        mode: "personal",
+        ownerUserId: null,
+        spaceId: null,
+        status: "online",
+        registeredAt: row.registeredAt,
+        lastSeenAt: DateTime.formatIso(DateTime.makeUnsafe(nowMs)),
+        os: platform,
+        hostname: null,
+        providers: [],
+        resources: null,
+        runningThreadCount: 0,
+      } satisfies HubEnvironmentSummary;
+    }
     if (row.kind === "hub") {
       const snapshot = yield* HubMachineSnapshot;
       return {
@@ -524,6 +560,7 @@ const make = Effect.gen(function* () {
         summaries.push(
           yield* summaryOf(
             row,
+            principal.isOwner,
             spaceName === undefined ? undefined : sandboxEnvironmentName(spaceName),
           ),
         );
@@ -640,14 +677,18 @@ const make = Effect.gen(function* () {
     },
   );
 
-  const mayRegister: EnvironmentRegistry["Service"]["mayRegister"] = (userId) =>
-    principalOf(userId).pipe(
-      Effect.map((principal) =>
-        AccessPolicy.isAllowed(
-          decide(principal, "environment.register", AccessPolicy.installation),
-        ),
-      ),
+  const authorizeRegister: EnvironmentRegistry["Service"]["authorizeRegister"] = Effect.fn(
+    "EnvironmentRegistry.authorizeRegister",
+  )(function* (userId) {
+    const decision = decide(
+      yield* principalOf(userId),
+      "environment.register",
+      AccessPolicy.installation,
     );
+    if (decision._tag === "Deny") {
+      return yield* new EnvironmentAccessDeniedError({ reason: decision.reason });
+    }
+  });
 
   const register: EnvironmentRegistry["Service"]["register"] = Effect.fn(
     "EnvironmentRegistry.register",
@@ -657,9 +698,7 @@ const make = Effect.gen(function* () {
       .withTransaction(
         Effect.gen(function* () {
           // Asked again in the transaction: the approver may have lost the right since approving.
-          if (!(yield* mayRegister(approvedBy))) {
-            return yield* new EnvironmentAccessDeniedError({ reason: "owner-only" });
-          }
+          yield* authorizeRegister(approvedBy);
           const now = yield* nowIso;
           yield* sql`
           INSERT INTO environments (
@@ -935,7 +974,7 @@ const make = Effect.gen(function* () {
     list,
     rename,
     remove,
-    mayRegister,
+    authorizeRegister,
     register,
     revokeOwnedBy,
     checkCredential,

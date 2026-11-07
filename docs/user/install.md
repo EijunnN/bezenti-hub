@@ -409,12 +409,23 @@ t3 join https://hub.example.com
 
 It prints a link to the Hub's **Register this machine** page and opens it in a
 browser on that machine; add `--no-browser` to only print it, and open the link
-on any device, your phone included. Sign in as the Owner, check the operating
-system, hostname and request time, change the name if you like, and confirm with
-your passkey, or your password and authenticator code. `t3 join` finishes by
-itself once you approve. Only the Owner can add machines, and each one is its
-owner's: Members never see it. The Hub's address must be `https://`; plain
-`http://` is accepted only for a Hub on the same machine.
+on any device, your phone included. Sign in with your own account, check the
+operating system, hostname and request time, change the name if you like, and
+confirm with your passkey, or your password and authenticator code. Back on the
+machine, `t3 join` says who approved it (`Approved by Grace (grace) as their
+personal machine. Register it as theirs? [y/N]`); answer `y` only if that is
+you, since anyone who saw the link could have approved it. Without a terminal,
+add `--owner <your sign-in name>` (or your user id if you sign in only with a
+passkey): the machine is registered only if that user approved it. The Owner can add machines, and so can any
+user the Owner gave **Register their own Environments** in **Users**; without
+it the page says so. The machine becomes the personal machine of whoever
+approved it: only they run work on it, in any of their Spaces. Other users never
+see it; the Owner sees every machine but runs nothing on someone else's. Each
+user sees their machines in **Settings → Environments**, where they rename and
+remove them. Taking the permission away stops new machines but keeps the ones
+already joined; turning a user off or removing them also removes their
+machines. The Hub's address must be `https://`; plain `http://` is accepted
+only for a Hub on the same machine.
 
 Joining a server that already has its own users or threads cuts them off, since
 a joined machine serves no sign-in; `t3 join` refuses unless you add `--force`.
@@ -428,7 +439,8 @@ connected; `t3 leave` removes it from the Hub.
 In the desktop app you can do the same without a terminal: in **Settings →
 Environments**, under **This app**, turn on **Use this computer as an
 Environment**, enter the Hub's address and choose **Join**. The approval page
-opens in your browser; once you approve, the app starts this computer's
+opens in your browser; once you approve, the app shows who approved it: choose
+**Register as theirs** if that is you (or **Not me**), and it starts this computer's
 Environment server by itself and shows whether it is connected. It runs apart
 from the app's own local environment, in the `joined-environment` folder of
 the T3 home, and the app stays connected to your Hub as before. Turning the

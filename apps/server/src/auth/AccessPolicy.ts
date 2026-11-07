@@ -145,7 +145,10 @@ export type Action =
   | "organization.restore"
   /** Permanently delete an archived Organization with everything in it. */
   | "organization.delete"
-  /** Approve a machine joining the Hub (`t3 join`). */
+  /**
+   * Approve one's own machine joining the Hub as a personal one (`t3 join`): the Owner, or a User
+   * with the `environments.registerOwn` Installation permission.
+   */
   | "environment.register"
   /** See an Environment in Settings and where Threads may run. */
   | "environment.view"
@@ -163,14 +166,12 @@ const NON_CREATING: ReadonlySet<Action> = new Set([
   "invitation.manage",
   // Checked beside `invitation.create`, which refuses archived Organizations.
   "admin.manage",
-  "environment.register",
 ]);
 
 const OWNER_ONLY: ReadonlySet<Action> = new Set([
   "organization.create",
   "admin.manage",
   "installationPermission.manage",
-  "environment.register",
 ]);
 
 /** Actions on one registered Environment, decided against an `EnvironmentResource`. */
@@ -283,7 +284,8 @@ const decideSandbox = (
 
 /**
  * Everyone uses the Hub machine. A personal machine is its owner's: nobody else sees it but the
- * Owner, who sees, renames and removes every one, and never removes the Hub machine.
+ * Owner, who sees, renames and removes every one, and never removes the Hub machine. Its owner
+ * renames and removes it too.
  */
 const decideEnvironment = (
   principal: Principal,
@@ -303,10 +305,13 @@ const decideEnvironment = (
       ? allow
       : deny("not-yours");
   }
-  if (!principal.isOwner) return deny("owner-only");
-  return environment.environmentKind === "hub" && action === "environment.remove"
-    ? deny("hub-machine")
-    : allow;
+  if (principal.isOwner) {
+    return environment.environmentKind === "hub" && action === "environment.remove"
+      ? deny("hub-machine")
+      : allow;
+  }
+  // A User renames and removes their own personal machine, even once `registerOwn` is revoked.
+  return environment.environmentKind === "external" && own ? allow : deny("owner-only");
 };
 
 const ROLES_THAT_CREATE_PROJECTS: ReadonlySet<SpaceRole> = new Set(["admin", "member"]);
@@ -466,6 +471,12 @@ export function decide(principal: Principal, action: Action, resource: Resource)
     return ENVIRONMENT_ACTIONS.has(action) && isEnvironment(resource)
       ? decideEnvironment(principal, action, resource)
       : deny("wrong-resource");
+  }
+  if (action === "environment.register") {
+    if (resource.kind !== "installation") return deny("wrong-resource");
+    return principal.isOwner || principal.installationPermissions.has("environments.registerOwn")
+      ? allow
+      : deny("missing-installation-permission");
   }
   if (action === "project.move" || isMove(resource)) {
     return action === "project.move" && isMove(resource)

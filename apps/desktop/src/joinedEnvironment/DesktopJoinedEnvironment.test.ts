@@ -1,5 +1,6 @@
 import type { DesktopJoinedEnvironmentState } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
+import { environmentJoinConfirmationPrompt } from "@t3tools/shared/environmentJoin";
 import * as NetService from "@t3tools/shared/Net";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -39,6 +40,8 @@ interface Run {
  */
 const makeHarness = Effect.fn(function* (options?: {
   readonly joinOutcome?: "approve" | "deny";
+  /** Once approved, `t3 join` asks whether to accept this approver and waits for the answer. */
+  readonly confirmAs?: string;
   readonly connection?: Record<string, unknown>;
   /** Lines `t3 join` prints before its approval link. */
   readonly joinPreamble?: ReadonlyArray<string>;
@@ -69,6 +72,16 @@ const makeHarness = Effect.fn(function* (options?: {
   const joinKilled = yield* Deferred.make<void>();
   const servers = yield* Ref.make(0);
 
+  // What the app wrote to `t3 join`, and its first full line once there is one.
+  const written: Array<string> = [];
+  const answered = yield* Deferred.make<string>();
+  const stdin = Sink.forEach((chunk: Uint8Array) =>
+    Effect.sync(() => {
+      written.push(new TextDecoder().decode(chunk));
+      const text = written.join("");
+      if (text.includes("\n")) Deferred.doneUnsafe(answered, Effect.succeed(text.split("\n")[0]!));
+    }),
+  );
   const handle = (input: {
     readonly output?: Stream.Stream<Uint8Array>;
     readonly exitCode: Effect.Effect<number>;
@@ -82,7 +95,7 @@ const makeHarness = Effect.fn(function* (options?: {
       exitCode: input.exitCode.pipe(Effect.map(ChildProcessSpawner.ExitCode)),
       isRunning: Effect.succeed(true),
       kill: () => input.kill ?? Effect.void,
-      stdin: Sink.drain,
+      stdin,
       getInputFd: () => Sink.drain,
       getOutputFd: () => Stream.empty,
       unref: Effect.succeed(Effect.void),
@@ -113,12 +126,17 @@ const makeHarness = Effect.fn(function* (options?: {
                 Stream.concat(
                   options?.joinOutcome === "deny"
                     ? lines("The registration was cancelled on the Hub.")
-                    : Stream.empty,
+                    : options?.confirmAs !== undefined
+                      ? lines(environmentJoinConfirmationPrompt(options.confirmAs))
+                      : Stream.empty,
                 ),
               ),
               exitCode: Deferred.await(approve).pipe(
-                Effect.map(() => {
-                  if (options?.joinOutcome === "deny") return 1;
+                Effect.andThen(
+                  options?.confirmAs === undefined ? Effect.succeed("y") : Deferred.await(answered),
+                ),
+                Effect.map((answer) => {
+                  if (options?.joinOutcome === "deny" || answer !== "y") return 1;
                   files.set(
                     joinedHubPath,
                     JSON.stringify({
@@ -277,6 +295,7 @@ const makeHarness = Effect.fn(function* (options?: {
     runs,
     opened,
     approve,
+    written,
     serverKills,
     joinKilled,
     servers,
@@ -315,6 +334,47 @@ const waitUntil = (
   });
 
 describe("DesktopJoinedEnvironment", () => {
+  it.effect("shows who approved this computer and registers it only once the User accepts", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ confirmAs: "Grace (grace)" });
+        const { service } = harness;
+        yield* service.join({ hubUrl: HUB, name: "Laptop" });
+        yield* waitUntil(service, (state) => state.joining?.approvalUrl === APPROVAL);
+        // Not before anyone approved it.
+        assert.include((yield* service.confirmJoin(true).pipe(Effect.flip)).message, "Nobody");
+        yield* Deferred.succeed(harness.approve, undefined);
+        const asked = yield* waitUntil(
+          service,
+          (state) => state.joining?.approvedBy === "Grace (grace)",
+        );
+        assert.isNull(asked.hub);
+        assert.deepEqual(harness.written, []);
+        yield* service.confirmJoin(true);
+        const running = yield* waitUntil(service, (state) => state.process === "running");
+        assert.deepEqual(harness.written, ["y\n"]);
+        assert.deepEqual(running.hub, { url: HUB, name: "Laptop" });
+      }),
+    ),
+  );
+
+  it.effect("a computer approved by someone else is not registered when the User refuses", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ confirmAs: "Mallory (mallory)" });
+        const { service } = harness;
+        yield* service.join({ hubUrl: HUB, name: "Laptop" });
+        yield* Deferred.succeed(harness.approve, undefined);
+        yield* waitUntil(service, (state) => state.joining?.approvedBy === "Mallory (mallory)");
+        yield* service.confirmJoin(false);
+        const done = yield* waitUntil(service, (state) => state.joining === null);
+        assert.deepEqual(harness.written, ["n\n"]);
+        assert.isNull(done.hub);
+        assert.equal(done.process, "stopped");
+      }),
+    ),
+  );
+
   it.effect(
     "joins through the system browser, then runs the joined server and shows its connection",
     () =>
@@ -335,7 +395,16 @@ describe("DesktopJoinedEnvironment", () => {
           assert.equal(waiting.process, "stopped");
           assert.deepEqual(harness.runs[0], {
             command: "t3",
-            args: ["join", HUB, "--base-dir", harness.baseDir, "--no-browser", "--name", "Laptop"],
+            args: [
+              "join",
+              HUB,
+              "--base-dir",
+              harness.baseDir,
+              "--no-browser",
+              "--confirm-on-stdin",
+              "--name",
+              "Laptop",
+            ],
           });
 
           yield* Deferred.succeed(harness.approve, undefined);

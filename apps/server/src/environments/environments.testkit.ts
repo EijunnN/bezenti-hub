@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import {
   type Authenticator,
   bootstrapOwner,
+  type CreationOptions,
   makeAuthenticator,
   passkeyReauth,
   type Server,
@@ -78,7 +79,18 @@ export const approveJoin = Effect.fn(function* (
 export const joinStatus = (server: Server, requestId: string, codeVerifier = VERIFIER) =>
   server.request("/api/environments/join/status", { body: { requestId, codeVerifier } });
 
-/** The whole of `t3 join`, approved with a passkey: the machine's own credential and id. */
+/** `t3 join` accepts (or refuses) the approver the Hub named, which registers the machine. */
+export const confirmJoin = (
+  server: Server,
+  requestId: string,
+  accept: boolean,
+  codeVerifier = VERIFIER,
+) =>
+  server.request("/api/environments/join/confirm", {
+    body: { requestId, codeVerifier, accept },
+  });
+
+/** The whole of `t3 join`, approved with a passkey and confirmed: the machine's credential and id. */
 export const joinMachine = Effect.fn(function* (
   server: Server,
   authenticator: Authenticator,
@@ -91,6 +103,9 @@ export const joinMachine = Effect.fn(function* (
     reauth: yield* passkeyReauth(server, authenticator),
   });
   assert.equal(approved.status, 200);
+  assert.equal((yield* joinStatus(server, requestId)).body.status, "awaiting-confirmation");
+  const confirmed = yield* confirmJoin(server, requestId, true);
+  assert.equal(confirmed.status, 200);
   const status = yield* joinStatus(server, requestId);
   assert.equal(status.body.status, "approved");
   return {
@@ -100,6 +115,57 @@ export const joinMachine = Effect.fn(function* (
     hubEnvironmentId: status.body.hubEnvironmentId as string,
     name: status.body.name as string,
   };
+});
+
+/**
+ * A Member of an Organization (a new «Acme» unless one is named) who joined by Invitation with a
+ * passkey of their own, so they can confirm a strong factor.
+ */
+export const memberWithPasskey = Effect.fn(function* (
+  server: Server,
+  owner: string,
+  input: { readonly displayName: string; readonly spaceId?: string },
+) {
+  const spaceId =
+    input.spaceId ??
+    ((yield* server.request("/api/spaces/organizations", { body: { name: "Acme" }, cookie: owner }))
+      .body.id as string);
+  const invitation = yield* server.request(`/api/spaces/${spaceId}/invitations`, {
+    body: { role: "member" },
+    cookie: owner,
+  });
+  const token = invitation.body.token as string;
+  const authenticator = yield* makeAuthenticator();
+  const ceremony = yield* server.request("/api/invitations/registration", {
+    body: { token, displayName: input.displayName },
+  });
+  const response = yield* Effect.promise(() =>
+    authenticator.create(ceremony.body.options as CreationOptions),
+  );
+  const accepted = yield* server.request("/api/invitations/accept", {
+    body: { token, method: "passkey", ceremonyId: ceremony.body.ceremonyId, response },
+  });
+  assert.equal(accepted.status, 200);
+  return {
+    cookie: accepted.cookie ?? "",
+    userId: accepted.body.userId as string,
+    authenticator,
+    spaceId,
+  };
+});
+
+/** The Owner grants or revokes «Register their own Environments» (spec 1's Users admin). */
+export const setRegisterOwn = Effect.fn(function* (
+  server: Server,
+  owner: string,
+  userId: string,
+  granted: boolean,
+) {
+  const changed = yield* server.request(`/api/installation/users/${userId}/permissions`, {
+    cookie: owner,
+    body: { permission: "environments.registerOwn", granted },
+  });
+  assert.equal(changed.status, 200);
 });
 
 export const loopbackStateOf = (redirectTo: unknown) => {
