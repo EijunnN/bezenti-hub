@@ -9,6 +9,8 @@ import {
   type RunId,
   type ServerSettingsError,
   type ThreadId,
+  HUB_RUNS_NO_AGENTS_MESSAGE,
+  TextGenerationError,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -18,6 +20,9 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 
+import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
+import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
+import * as ProjectCheckouts from "../environment/ProjectCheckouts.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import type { OrchestratorV2Error } from "./Orchestrator.ts";
@@ -52,6 +57,51 @@ const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const textGeneration = yield* TextGeneration.TextGeneration;
   const fileSystem = yield* FileSystem.FileSystem;
+  // Without agents on the Hub machine, the Thread's own machine titles it.
+  const runsAgents = yield* HubRunsAgents.HubRunsAgents;
+  const executors = yield* Effect.serviceOption(EnvironmentExecutor.EnvironmentExecutorRegistry);
+  const checkouts = yield* Effect.serviceOption(ProjectCheckouts.ProjectCheckouts);
+
+  /** The title, written on the Thread's Active environment; refused when it can't be reached. */
+  const titleOnThreadMachine = Effect.fn("ThreadTitleRegeneration.titleOnThreadMachine")(function* (
+    thread: OrchestrationV2AppThread,
+    request: {
+      readonly message: string;
+      readonly previousTitle?: string;
+      readonly forkSource?: { readonly title: string; readonly history: string };
+      readonly instructions?: string;
+      readonly modelSelection: OrchestrationV2AppThread["modelSelection"];
+    },
+  ) {
+    const unavailable = (detail: string) =>
+      new TextGenerationError({ operation: "generateThreadTitle", detail });
+    if (Option.isNone(executors) || Option.isNone(checkouts)) {
+      return yield* unavailable(HUB_RUNS_NO_AGENTS_MESSAGE);
+    }
+    const environmentId = yield* executors.value.activeEnvironment(thread.id);
+    const executor = yield* executors.value
+      .get(environmentId)
+      .pipe(Effect.mapError(() => unavailable("The Thread's Environment is not connected.")));
+    const textGeneration = executor.textGeneration;
+    if (textGeneration === undefined) {
+      return yield* unavailable("The Thread's Environment has no text generation.");
+    }
+    const worktree = yield* EnvironmentExecutor.worktreeOn(
+      executors.value,
+      checkouts.value,
+      executor,
+      thread,
+    ).pipe(Effect.orElseSucceed(() => null));
+    const cwd =
+      worktree ??
+      Option.getOrNull(
+        yield* executor.workspace.paths
+          .checkout(thread.projectId)
+          .pipe(Effect.orElseSucceed(() => Option.none<string>())),
+      );
+    if (cwd === null) return yield* unavailable("The Project has no checkout there yet.");
+    return yield* textGeneration.threadTitle({ cwd, ...request });
+  });
 
   const complete = (input: {
     readonly threadId: ThreadId;
@@ -167,15 +217,26 @@ const make = Effect.gen(function* () {
       const worktreeExists =
         worktreePath !== null &&
         (yield* fileSystem.exists(worktreePath).pipe(Effect.orElseSucceed(() => false)));
-      const result = yield* textGeneration.generateThreadTitle({
-        cwd: worktreeExists ? worktreePath : project.value.workspaceRoot,
-        message: context.message,
-        attachments: context.attachments,
-        ...(input.kind.type === "regenerate" ? { previousTitle: projection.thread.title } : {}),
-        ...(inherited === undefined ? {} : { forkSource: inherited }),
-        instructions: settings.threadTitleInstructions,
-        modelSelection: settings.textGenerationModelSelection,
-      });
+      const result = runsAgents
+        ? yield* textGeneration.generateThreadTitle({
+            cwd: worktreeExists ? worktreePath : project.value.workspaceRoot,
+            message: context.message,
+            attachments: context.attachments,
+            ...(input.kind.type === "regenerate" ? { previousTitle: projection.thread.title } : {}),
+            ...(inherited === undefined ? {} : { forkSource: inherited }),
+            instructions: settings.threadTitleInstructions,
+            modelSelection: settings.textGenerationModelSelection,
+          })
+        : // Not the Hub's own CLI: the Thread's machine, or no title until it can (it stays default).
+          yield* titleOnThreadMachine(projection.thread, {
+            message: context.message,
+            ...(input.kind.type === "regenerate" ? { previousTitle: projection.thread.title } : {}),
+            ...(inherited === undefined ? {} : { forkSource: inherited }),
+            ...(settings.threadTitleInstructions === undefined
+              ? {}
+              : { instructions: settings.threadTitleInstructions }),
+            modelSelection: settings.textGenerationModelSelection,
+          });
       const generatedTitle = result.title.trim();
       return generatedTitle === "New thread" ||
         (input.kind.type === "regenerate" && generatedTitle === projection.thread.title.trim())

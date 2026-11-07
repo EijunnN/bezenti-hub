@@ -15,10 +15,9 @@ import { usePrimaryEnvironmentId } from "../../state/environments";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
 /**
- * «Preferred environment»: where the Project's new Threads start when nobody picks one in the
- * composer. Only machines the User may run Threads on are offered (the Hub machine, and their own
- * personal machines); the Hub checks the choice again. Someone who may not use the preferred
- * machine still starts on the Hub machine.
+ * «Preferred environment»: where the Project's new Threads start when nobody picks one. Offered:
+ * the User's own machines, and no preference (the Space's Sandbox, or the Hub machine where it
+ * runs Threads). The Hub checks the choice again.
  */
 export function ProjectPreferredEnvironmentSettings({
   group,
@@ -36,16 +35,32 @@ export function ProjectPreferredEnvironmentSettings({
   const project = group.memberProjects.find(
     (member) => member.environmentId === primaryEnvironmentId,
   );
-  // The Hub machine, the User's own machines, and those dedicated to the Project's Space.
-  const usable = environments.filter(
+  // No preference is the Hub machine where it runs Threads, else the Space's Sandbox.
+  const hubMachine = environments.find((environment) => environment.kind === "hub");
+  const spaceSandbox = environments.find(
     (environment) =>
-      environment.kind === "hub" ||
-      (environment.mode !== "dedicated" && environment.ownerUserId === userId) ||
-      (environment.mode === "dedicated" &&
-        project !== undefined &&
-        environment.spaceId === project.spaceId),
+      environment.kind === "sandbox" &&
+      project !== undefined &&
+      environment.spaceId === project.spaceId,
   );
-  // With only the Hub machine there is nothing to prefer.
+  const noPreference = {
+    id: HUB_MACHINE_ENVIRONMENT_ID,
+    name:
+      hubMachine?.name ??
+      (spaceSandbox === undefined ? "No preference" : `${spaceSandbox.name} (no preference)`),
+  };
+  const usable = [
+    noPreference,
+    // The User's own machines, and those dedicated to the Project's Space.
+    ...environments.filter(
+      (environment) =>
+        (environment.kind === "external" &&
+          environment.mode !== "dedicated" &&
+          environment.ownerUserId === userId) ||
+        (environment.mode === "dedicated" && environment.spaceId === project?.spaceId),
+    ),
+  ];
+  // With nothing but the default there is nothing to prefer.
   if (project === undefined || usable.length < 2) return null;
   const current = project.preferredEnvironmentId ?? HUB_MACHINE_ENVIRONMENT_ID;
   const currentListed = environments.find((environment) => environment.id === current);
@@ -77,7 +92,7 @@ export function ProjectPreferredEnvironmentSettings({
     <SettingsSection title="Environment">
       <SettingsRow
         title="Preferred environment"
-        description="New Threads in this project start here unless you pick another Environment in the composer. While it is offline or lacks the provider, they start on the Hub machine."
+        description={`New Threads in this project start here unless you pick another Environment in the composer. While it is offline or lacks the provider, they start ${hubMachine !== undefined ? "on the Hub machine" : "in the Space's Sandbox"}.`}
         status={
           error === null ? null : (
             <span role="alert" className="text-destructive">

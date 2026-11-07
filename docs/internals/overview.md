@@ -116,7 +116,9 @@ Hub from the reported checkout and runtime modes, never by asking the machine.
 
 The Hub decides where a new Thread runs (`EnvironmentRegistry.chooseForThread`, called by
 `ThreadManagementService` for every `thread.create`): the User's choice, else the Project's
-preferred Environment, else the Hub machine. Another Environment must be one the User may use
+preferred Environment while it can take the Thread, else the Space's Sandbox. The Hub machine runs
+Threads only with the development setting `T3CODE_HUB_RUNS_AGENTS`, and is then the fallback instead
+of the Sandbox ([Sandboxes](./sandboxes.md#the-hub-runs-no-agents)). Another Environment must be one the User may use
 for the Thread's Space (`environment.use`: a personal machine is its owner's alone, the Owner
 included; a [Sandbox](./sandboxes.md) runs only its own Space's Threads, and counts while stopped:
 the work starts it), online, and have the

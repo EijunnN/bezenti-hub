@@ -35,7 +35,7 @@ only, so a container gets its own volume and nothing else of the Hub's (the Podm
 ## Runtime
 
 Only implementations of [SandboxRuntime](../../apps/server/src/sandboxes/SandboxRuntime.ts) touch
-processes or containers. Without one that runs Sandboxes the Hub offers none and placement refuses
+processes or containers. Without one that runs Sandboxes the Hub offers none (not even one made earlier) and placement refuses
 them (`sandbox-unavailable`).
 
 [Which one runs](../../apps/server/src/sandboxes/sandboxRuntimeFromConfig.ts):
@@ -127,6 +127,62 @@ replaced one) after the welcome, the recorded hello and the executor's registrat
 waited for it finds its providers and executor. A server that ends first fails the start at once
 with its exit code. A launch runs with the runtime's own services, never those of whoever asked
 for the start.
+
+## The Hub runs no agents
+
+What nobody places on another machine runs in its Space's Sandbox, never in the Hub's process
+([EnvironmentRegistry](../../apps/server/src/environments/EnvironmentRegistry.ts) `chooseForThread`,
+previewed by clients with `previewThreadPlacement`): the User's choice, else the Project's preferred
+Environment while it can take the Thread (usable, online or a Sandbox not failed, with the
+provider, and never a Sandbox this Hub has no runtime for), else the Space's Sandbox, made if
+missing and counted while stopped or even failed (its work starts it, or says why). Work the Hub
+places with no User (a scheduled task without a creator) goes to the Sandbox of the Thread's Space
+too. Every path that makes a Thread goes through it: the composer, MCP-launched Threads
+(`thread.create` through `ThreadManagementService`), scheduled tasks and other launches
+(`ThreadLaunchService`), Threads without a Project (their scratch Project's Space). Forks,
+delegated subagents and Threads an agent creates over MCP run where their parent runs (the Hub
+checks that choice like any other); a parent with no Environment leaves it to placement. A new
+worktree is made only on the Hub machine until Environments check out from the Hub repository, so
+a worktree Thread anywhere else is refused when it is made (MCP, the composer), and a scheduled
+task with a worktree strategy is refused when it is saved.
+
+**`HubRunsAgents`** ([HubRunsAgents](../../apps/server/src/environment/HubRunsAgents.ts)) says whether
+the server's own machine runs agents. A joined machine (a Sandbox included) always does. A Hub does
+only in development: `T3CODE_HUB_RUNS_AGENTS` (`1`/`true`, `0`/`false`) is honored only for a server
+the dev runner started (`T3CODE_DEV_RUNNER=1`, set by `vp run dev`, with `--dev-url`); anywhere else
+a value that turns it on is ignored with an error in the log. Under the dev runner it is on by
+default only with no Sandbox runtime (`T3CODE_SANDBOX_RUNTIME` unset or `off`), so contributors
+without Podman keep working as before Sandboxes; with `process` or `podman` it is off. While on, the
+Hub machine is listed and is the fallback instead of the Sandbox. Tests keep it on by default (the
+testkit's `hubRunsAgents`), and the tests of this rule turn it off.
+
+While off, the Hub machine runs nothing, whatever asks:
+
+- Its executor opens no provider session (`HubRunsNoAgentsError`, «The Hub runs no agents»), has no
+  text generation and prepares no moved workspace; `TerminalManager` opens no shell (setup scripts
+  included) and `TextGeneration` runs no provider CLI (`hub_runs_no_agents`).
+- Workspace calls (`ThreadWorkspace`) for a draft (a Thread not placed yet) or with no Thread still
+  read the Hub's copy of the Project: listings, search, reading files, browsing folders, which run
+  no code. Anything that acts (writing a file, opening or typing in a terminal, opening a preview)
+  is refused until the Thread is placed. A Thread not projected yet resolves to no Environment
+  (`ActiveEnvironmentResolver`), never the Hub machine.
+- Titles are written on the Thread's Active environment (`textGeneration.threadTitle`, in its
+  workspace there; attachments stay on the Hub); a machine away or without text generation leaves
+  the title as it is. A moved Thread whose source is offline gets its summary from the target
+  (`writtenBy: target`), or an assembled one. A pull request's text comes from its commits, and a
+  review guide says the Hub runs no agents.
+- The Hub machine is not in the Environments list, and choosing it (a new Thread or a move) is
+  refused (`hub-machine`). A Project's «Preferred environment» offers no preference, named after the
+  Space's Sandbox, and the User's own machines.
+- With no Sandboxes either, a new Thread nobody placed is refused, never run on the Hub:
+  «No Environment can run this Thread: <why>» (`no-environment`). The why is the Sandbox runtime's
+  own (`sandboxRuntimeFromConfig`: no rootless Podman or image, the Hub not on loopback only,
+  turned off), also in the list as `sandboxesUnavailable`, so the composer says it before sending
+  and still offers the User's own machines. The Hub logs it at startup.
+- As the Hub starts, before it recovers its runs, every Thread whose Active environment is the Hub
+  machine, or a Sandbox this Hub has no runtime for, needs an environment, as for a removed machine
+  (`EnvironmentReturnService`, built before `serverRuntimeStartup` recovers anything): its history
+  stays, unfinished turns end, and it moves to the Sandbox or a machine of its User's.
 
 ## Limits
 

@@ -86,6 +86,15 @@ To add a scenario, point a `SCENARIOS` entry at a generic ACP replay fixture
 The agent replays session updates, permission requests, and questions. It drops session setup
 and vendor frames, so Grok and fx recordings lose their vendor-only behavior.
 
+### Where dev Threads run
+
+A production Hub runs no agents itself: Threads run in their Space's Sandbox or on joined
+machines. `vp run dev` with no Sandbox runtime keeps the Hub machine running them in the Hub's
+process, so it works without Podman (`T3CODE_HUB_RUNS_AGENTS`, on by default only there). To work
+on Sandboxes, start it with `T3CODE_SANDBOX_RUNTIME=process` (or `podman`): new Threads then go to
+the Space's Sandbox; `T3CODE_HUB_RUNS_AGENTS=1` makes the Hub machine their default again. See
+[Sandboxes](../internals/sandboxes.md#the-hub-runs-no-agents).
+
 ### Profiling dev startup
 
 Run `vp run profile:startup` to capture the first 20 seconds of inherited Node processes under

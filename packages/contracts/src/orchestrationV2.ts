@@ -438,7 +438,12 @@ export type OrchestrationV2ThreadMoveCheckpoint = typeof OrchestrationV2ThreadMo
  * machine (the source was offline), or nobody (`fallback`: the text generation failed, so the
  * summary was assembled from the Thread's history).
  */
-export const OrchestrationV2ThreadHandoffWriter = Schema.Literals(["source", "hub", "fallback"]);
+export const OrchestrationV2ThreadHandoffWriter = Schema.Literals([
+  "source",
+  "target",
+  "hub",
+  "fallback",
+]);
 export type OrchestrationV2ThreadHandoffWriter = typeof OrchestrationV2ThreadHandoffWriter.Type;
 
 /**

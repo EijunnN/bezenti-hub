@@ -1699,15 +1699,19 @@ const turnOnLaptop = Effect.fn(function* (input: {
   readonly desktop: boolean;
   readonly laptopTextGeneration?: ProviderTextGeneration;
   readonly hubTextGeneration?: ProviderTextGeneration;
+  readonly desktopTextGeneration?: ProviderTextGeneration;
+  /** Off: the Hub machine runs no agents (`T3CODE_HUB_RUNS_AGENTS`). */
+  readonly hubRunsAgents?: boolean;
   /** The Desktop's provider; by default one that runs no turn. */
   readonly desktopAdapters?: (
     instanceId: ProviderInstanceId,
   ) => Layer.Layer<ProviderAdapterRegistry.ProviderAdapterRegistryV2>;
 }) {
   const loaded = yield* loadFixture("simple");
-  const hub = yield* makeHub(
-    input.hubTextGeneration === undefined ? {} : { textGeneration: input.hubTextGeneration },
-  );
+  const hub = yield* makeHub({
+    ...(input.hubTextGeneration === undefined ? {} : { textGeneration: input.hubTextGeneration }),
+    ...(input.hubRunsAgents === undefined ? {} : { hubRunsAgents: input.hubRunsAgents }),
+  });
   const laptop = yield* hub.join({
     name: "Laptop",
     adapters: withEditingTurns(loaded.adapters, {
@@ -1723,6 +1727,9 @@ const turnOnLaptop = Effect.fn(function* (input: {
       yield* hub.join({
         name: "Desktop",
         adapters: (input.desktopAdapters ?? idleAdapters)(loaded.variant.modelSelection.instanceId),
+        ...(input.desktopTextGeneration === undefined
+          ? {}
+          : { textGeneration: input.desktopTextGeneration }),
       })
     : undefined;
   yield* replayOn(hub, laptop, loaded);
@@ -2410,6 +2417,36 @@ describe("Hub con Environments: the agent's memory after a move", () => {
       assert.equal(item.writtenBy, "hub");
       assert.equal(item.summary, "Written on the Hub from the history.");
       assert.equal(moved.move?.handoff?.preview, "Written on the Hub from the history.");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("with the source offline and no agents on the Hub, the target writes the summary", () =>
+    Effect.gen(function* () {
+      const hubAsked: Array<ThreadHandoffGenerationInput> = [];
+      const desktopAsked: Array<ThreadHandoffGenerationInput> = [];
+      const { hub, laptop, desktop, threadId, owner } = yield* turnOnLaptop({
+        desktop: true,
+        hubRunsAgents: false,
+        hubTextGeneration: recordingTextGeneration(hubAsked, { summary: "Never on the Hub." }),
+        desktopTextGeneration: recordingTextGeneration(desktopAsked, {
+          summary: "Written on the Desktop from the history.",
+        }),
+      });
+      assert.isDefined(desktop);
+      yield* laptop.disconnect;
+      yield* dispatchMove(hub, {
+        commandId: "command:move-offline-no-hub",
+        threadId,
+        target: desktop.environmentId,
+        actor: owner,
+      });
+      const moved = yield* settledMove(hub, threadId);
+      assert.equal(moved.move?.status, "switched", moved.move?.failure?.message);
+      assert.lengthOf(hubAsked, 0);
+      assert.lengthOf(desktopAsked, 1);
+      const { item } = yield* handoffItemOf(hub, threadId);
+      assert.equal(item.writtenBy, "target");
+      assert.equal(item.summary, "Written on the Desktop from the history.");
     }).pipe(Effect.scoped),
   );
 

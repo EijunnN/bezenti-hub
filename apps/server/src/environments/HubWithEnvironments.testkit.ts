@@ -43,6 +43,7 @@ import * as CheckpointDiffQuery from "../checkpointing/CheckpointDiffQuery.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as ServerConfig from "../config.ts";
+import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
 import { scratchRootOf } from "../environment/ScratchWorkspace.ts";
@@ -341,6 +342,8 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
     ),
     Layer.provideMerge(layerRecordingMcp),
     Layer.provideMerge(VcsProcess.layer),
+    // A joined machine runs agents: that is its job, whatever its Hub does.
+    Layer.provideMerge(Layer.succeed(HubRunsAgents.HubRunsAgents, true)),
     // The agent shares the workspace services' roots (memoized: one instance per machine).
     Layer.provideMerge(JoinedWorkspaceRoots.layer),
     Layer.provideMerge(SqlitePersistence.layerMemory),
@@ -651,6 +654,13 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     readonly sandboxImageBuilder?: SandboxImage.SandboxImageBuilder["Service"];
     /** False: no Sandbox runtime, as a production Hub without Podman. */
     readonly sandboxes?: boolean;
+    /**
+     * Whether the Hub machine runs Threads (`T3CODE_HUB_RUNS_AGENTS`). On by default, as the
+     * tests written before Sandboxes expect; off as a production Hub.
+     */
+    readonly hubRunsAgents?: boolean;
+    /** Why there are no Sandboxes, as the Hub says it (with `sandboxes: false`). */
+    readonly sandboxesUnavailable?: string;
   } = {},
 ) {
   const sandboxRoot = yield* FileSystem.FileSystem.pipe(
@@ -681,6 +691,12 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     listen: true,
     extend: withOrchestration(options.textGeneration),
     ...(options.sandboxes === false ? {} : { sandboxRuntime }),
+    registry: {
+      ...(options.hubRunsAgents === undefined ? {} : { hubRunsAgents: options.hubRunsAgents }),
+      ...(options.sandboxesUnavailable === undefined
+        ? {}
+        : { sandboxesUnavailable: options.sandboxesUnavailable }),
+    },
     ...(options.sandboxImageBuilder === undefined
       ? {}
       : { sandboxImageBuilder: options.sandboxImageBuilder }),

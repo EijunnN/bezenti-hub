@@ -1,5 +1,6 @@
 import {
   CommandId,
+  type EnvironmentId,
   type RunId,
   isProviderAvailable,
   MessageId,
@@ -222,6 +223,15 @@ export class OrchestratorMcpService extends Context.Service<
 >()("t3/mcp/OrchestratorMcpService") {}
 
 const isThreadManagementError = Schema.is(ThreadManagementService.ThreadManagementError);
+
+/**
+ * Where a Thread an agent creates asks to run: where its parent runs (the Hub checks the choice),
+ * as forks and delegated subagents copy it; a parent on no Environment leaves it to placement.
+ */
+export const childPlacement = (parent: {
+  readonly activeEnvironmentId?: EnvironmentId | null | undefined;
+}): { readonly activeEnvironmentId?: EnvironmentId } =>
+  parent.activeEnvironmentId == null ? {} : { activeEnvironmentId: parent.activeEnvironmentId };
 
 function failure(code: OrchestratorMcpFailure["code"], message: string): OrchestratorMcpFailure {
   return new OrchestratorMcpFailure({ code, message });
@@ -2700,6 +2710,9 @@ const make = Effect.gen(function* () {
                   interactionMode,
                   branch: parent.thread.branch,
                   worktreePath: parent.thread.worktreePath,
+                  // A child runs where its parent runs (the Hub checks it may), like forks and
+                  // delegated subagents; a parent with no Environment leaves it to placement.
+                  ...childPlacement(parent.thread),
                   // A child belongs to the User the parent's agent acts as.
                   ...(scope.userId === undefined ? {} : { ownerUserId: scope.userId }),
                 })

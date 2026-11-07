@@ -70,6 +70,7 @@ import {
   renderHistory,
   selectHistory,
 } from "@t3tools/provider-core/server/handoffBudget";
+import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import {
   conventionalCommitsTextGenerationPolicy,
@@ -652,6 +653,8 @@ export const make = Effect.gen(function* () {
   const gitCore = yield* GitVcsDriver.GitVcsDriver;
   const sourceControlProviders = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
   const textGeneration = yield* TextGeneration.TextGeneration;
+  // A Hub that runs no agents writes no PR text with a provider: the commits say it instead.
+  const runsAgents = yield* HubRunsAgents.HubRunsAgents;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
   const random = yield* SecureRandom.SecureRandom;
@@ -2325,18 +2328,34 @@ export const make = Effect.gen(function* () {
         : undefined;
     const threadContext = yield* readThreadContext(threadId);
 
-    const generated = yield* textGeneration.generatePrContent({
-      cwd,
-      baseBranch,
-      headBranch: headContext.headBranch,
-      commitSummary: limitContext(rangeContext.commitSummary, 20_000),
-      diffSummary: limitContext(rangeContext.diffSummary, 20_000),
-      diffPatch: limitContext(rangeContext.diffPatch, 60_000),
-      ...(changeRequestTemplate ? { changeRequestTemplate } : {}),
-      ...(threadContext ? { threadContext } : {}),
-      ...(policy ? { policy } : {}),
-      modelSelection: settings.modelSelection,
-    });
+    const generated = yield* textGeneration
+      .generatePrContent({
+        cwd,
+        baseBranch,
+        headBranch: headContext.headBranch,
+        commitSummary: limitContext(rangeContext.commitSummary, 20_000),
+        diffSummary: limitContext(rangeContext.diffSummary, 20_000),
+        diffPatch: limitContext(rangeContext.diffPatch, 60_000),
+        ...(changeRequestTemplate ? { changeRequestTemplate } : {}),
+        ...(threadContext ? { threadContext } : {}),
+        ...(policy ? { policy } : {}),
+        modelSelection: settings.modelSelection,
+      })
+      .pipe(
+        Effect.catchIf(
+          () => !runsAgents,
+          () =>
+            Effect.succeed({
+              title:
+                rangeContext.commitSummary
+                  .split("\n")
+                  .map((line) => line.replace(/^[\s*-]+/, "").trim())
+                  .find((line) => line.length > 0)
+                  ?.slice(0, 120) ?? headContext.headBranch,
+              body: rangeContext.commitSummary,
+            }),
+        ),
+      );
 
     const bodyFile = path.join(
       tempDir,

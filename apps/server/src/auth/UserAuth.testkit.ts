@@ -31,6 +31,7 @@ import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as EnvironmentConnectRoute from "../environments/connectRoute.ts";
 import * as EnvironmentGitRoute from "../environments/gitRoute.ts";
+import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as HubEnvironmentsHttp from "../environments/http.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -168,9 +169,15 @@ export type TestSandboxRuntime = Layer.Layer<
   ServerConfig.ServerConfig | FileSystem.FileSystem | Path.Path
 >;
 
+/** Whether the Hub machine runs Threads (`T3CODE_HUB_RUNS_AGENTS`), and why there are no Sandboxes. */
+type TestRegistryOptions = EnvironmentRegistry.RegistryOptions & {
+  readonly hubRunsAgents?: boolean;
+};
+
 const makeLayerServices = (
   config: { readonly publicUrl?: URL },
   sandboxRuntime?: TestSandboxRuntime,
+  { hubRunsAgents = true, ...registryOptions }: TestRegistryOptions = {},
   sandboxImageBuilder?: SandboxImage.SandboxImageBuilder["Service"],
 ) =>
   // Archive and delete reach Projects and Thread reads; no Thread in these tests runs.
@@ -185,8 +192,9 @@ const makeLayerServices = (
           InstallationUserService.layer,
           SpaceVisibility.layer,
           AuditLog.layer,
+          // The Hub machine runs Threads here unless a test says otherwise (the dev setting).
           sandboxRuntime === undefined
-            ? EnvironmentRegistry.layer
+            ? EnvironmentRegistry.layerWith(registryOptions)
             : EnvironmentRegistry.layerWithSandboxes(sandboxRuntime),
           // Without a builder of its own, the image builds nothing: there is no Podman to ask.
           SandboxImage.layer.pipe(
@@ -224,6 +232,8 @@ const makeLayerServices = (
       ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-owner-test-" }))),
     ),
     Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+    // Everything built over these services (the orchestration too) sees the same setting.
+    Layer.provideMerge(Layer.succeed(HubRunsAgents.HubRunsAgents, hubRunsAgents)),
   );
 
 /** What the testkit Hub's services provide. */
@@ -246,6 +256,11 @@ export const serveAuthHttpWith = Effect.fn(function* (
     ) => Effect.Effect<Context.Context<HubServices>, never, Scope.Scope>;
     /** Runs each Space's Sandbox (the «Hub con Environments» testkit's process runtime). */
     readonly sandboxRuntime?: TestSandboxRuntime;
+    /**
+     * Whether the Hub machine runs Threads (`T3CODE_HUB_RUNS_AGENTS`), and why there are no
+     * Sandboxes; by default it runs them, as the tests written before Sandboxes expect.
+     */
+    readonly registry?: TestRegistryOptions;
     /** Builds and reads the Sandbox image instead of Podman. */
     readonly sandboxImageBuilder?: SandboxImage.SandboxImageBuilder["Service"];
   } = {},
@@ -254,6 +269,7 @@ export const serveAuthHttpWith = Effect.fn(function* (
     makeLayerServices(
       config.publicUrl === undefined ? {} : { publicUrl: config.publicUrl },
       config.sandboxRuntime,
+      config.registry,
       config.sandboxImageBuilder,
     ),
   );

@@ -2213,6 +2213,16 @@ describe("OrchestratorMcpService provider resolution", () => {
       ),
   );
 
+  it("a created Thread asks to run where its parent runs, unless its parent runs nowhere", () => {
+    const laptop = EnvironmentId.make("environment:laptop");
+    assert.deepEqual(OrchestratorMcpService.childPlacement({ activeEnvironmentId: laptop }), {
+      activeEnvironmentId: laptop,
+    });
+    // On the Hub machine (named by no id) or needing an environment: the Hub places it.
+    assert.deepEqual(OrchestratorMcpService.childPlacement({}), {});
+    assert.deepEqual(OrchestratorMcpService.childPlacement({ activeEnvironmentId: null }), {});
+  });
+
   it.effect(
     "inherits an available parent instance for driver-only targets and otherwise selects a healthy peer",
     () =>

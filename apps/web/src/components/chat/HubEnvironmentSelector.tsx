@@ -4,9 +4,12 @@ import { memo } from "react";
 import {
   chooseHubEnvironment,
   environmentUnavailableReason,
+  noPlacementReason,
   placeableEnvironments,
   useHubEnvironmentChoice,
   useHubEnvironments,
+  useHubEnvironmentsReady,
+  useSandboxesUnavailable,
   previewDefaultEnvironment,
 } from "../../environments/primary/useHubEnvironments";
 import { useCurrentSpace } from "../../state/currentSpace";
@@ -23,6 +26,47 @@ import {
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ComposerSelectControl } from "./ComposerControl";
 import { useComposerMenuProps } from "./composerEventScope";
+
+/**
+ * The Space a new Thread of the Project is claimed in, as the Hub claims it: the Project's, or for
+ * a Project without one (the scratch Project, one from before Spaces) the Owner's Personal space,
+ * which only the Owner knows (anyone else may run nothing there). Null: unknown.
+ */
+function useNewThreadSpaceId(projectSpaceId: SpaceId | null): SpaceId | null {
+  const ownersSpaceId = useCurrentSpace((state) =>
+    state.view?.isOwner === true ? state.view.personalSpaceId : null,
+  );
+  return projectSpaceId ?? ownersSpaceId;
+}
+
+/**
+ * Why a new Thread nobody placed could run nowhere (the Hub has no Sandbox for it and does not
+ * run it itself), as the composer says it before sending; null when it can run somewhere, when
+ * the User chose a machine, or until the Environments list is read.
+ */
+export function useNoPlacementMessage(input: {
+  readonly draftThreadId: string | null;
+  readonly providerInstanceId: ProviderInstanceId | null;
+  readonly preferredEnvironmentId: EnvironmentId | null;
+  readonly spaceId: SpaceId | null;
+}): string | null {
+  const userId = useCurrentSpace((state) => state.view?.userId ?? null);
+  const spaceId = useNewThreadSpaceId(input.spaceId);
+  const all = useHubEnvironments();
+  const ready = useHubEnvironmentsReady();
+  const unavailable = useSandboxesUnavailable();
+  const chosen = useHubEnvironmentChoice(input.draftThreadId ?? "");
+  if (!ready || input.draftThreadId === null || input.providerInstanceId === null) return null;
+  if (chosen !== undefined) return null;
+  const placed = previewDefaultEnvironment({
+    environments: placeableEnvironments(all, spaceId),
+    preferredEnvironmentId: input.preferredEnvironmentId,
+    providerInstanceId: input.providerInstanceId,
+    userId,
+    sandboxesUnavailable: unavailable,
+  });
+  return placed === null ? noPlacementReason(unavailable) : null;
+}
 
 /**
  * Where a new Thread runs, among the Environments the User may use for the Project's Space (the
@@ -42,20 +86,19 @@ export const HubEnvironmentSelector = memo(function HubEnvironmentSelector({
   spaceId: SpaceId | null;
 }) {
   const userId = useCurrentSpace((state) => state.view?.userId ?? null);
-  const ownersSpaceId = useCurrentSpace((state) =>
-    state.view?.isOwner === true ? state.view.personalSpaceId : null,
-  );
-  const environments = placeableEnvironments(useHubEnvironments(), spaceId ?? ownersSpaceId);
+  const environments = placeableEnvironments(useHubEnvironments(), useNewThreadSpaceId(spaceId));
+  const sandboxesUnavailable = useSandboxesUnavailable();
   const chosen = useHubEnvironmentChoice(draftThreadId);
   const floatingLayerProps = useComposerMenuProps();
-  // One machine to pick from is no choice.
-  if (environments.length < 2) return null;
   const defaultId = previewDefaultEnvironment({
     environments,
     preferredEnvironmentId,
     providerInstanceId,
     userId,
+    sandboxesUnavailable,
   });
+  // One machine to pick from is no choice, unless the Thread would otherwise run nowhere.
+  if (environments.length === 0 || (environments.length < 2 && defaultId !== null)) return null;
   const selectedId = chosen ?? defaultId;
   const selected = environments.find((environment) => environment.id === selectedId);
   const items = environments.map((environment) => ({
@@ -85,10 +128,12 @@ export const HubEnvironmentSelector = memo(function HubEnvironmentSelector({
             className="size-3 shrink-0"
           />
           <ComposerContextLabel>
-            <SelectValue />
+            <SelectValue placeholder="No Environment" />
           </ComposerContextLabel>
         </TooltipTrigger>
-        <TooltipPopup>Runs on {selected?.name ?? "the Hub machine"}</TooltipPopup>
+        <TooltipPopup>
+          {selected === undefined ? "Choose where this Thread runs" : `Runs on ${selected.name}`}
+        </TooltipPopup>
       </Tooltip>
       <SelectPopup alignItemWithTrigger={false} {...floatingLayerProps}>
         <SelectGroup>

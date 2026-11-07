@@ -26,6 +26,7 @@ export {
   activeEnvironmentLabel,
   activeEnvironmentOf,
   environmentUnavailableReason,
+  noPlacementReason,
   placeableEnvironments,
   threadEnvironmentState,
 } from "@t3tools/client-runtime/environment/hub-environments";
@@ -50,6 +51,21 @@ export function useActiveEnvironment(
   return JSON.parse(key) as ActiveEnvironmentView | null;
 }
 
+/** Whether the list has been read (and the last read did not fail). */
+export function useHubEnvironmentsReady(): boolean {
+  const read = () => poller.status() === "ready";
+  return useSyncExternalStore(poller.subscribe, read, read);
+}
+
+/** Why the Hub runs no Sandboxes, from the same list; null while it runs them. */
+export function useSandboxesUnavailable(): string | null {
+  return useSyncExternalStore(
+    poller.subscribe,
+    poller.sandboxesUnavailable,
+    poller.sandboxesUnavailable,
+  );
+}
+
 /** Reads the list now, as after asking the Hub to start a Sandbox. */
 export function refreshHubEnvironments(): void {
   poller.refresh();
@@ -67,28 +83,37 @@ export function useHasJoinedEnvironments(): boolean {
 }
 
 /**
- * Where the Hub will start a new Thread nobody placed, by the Hub's own rule: the Project's
- * preferred Environment when this User may use it (the Hub machine, or their own machine), it is
- * online and it has the provider; otherwise the Hub machine.
+ * Where the Hub will start a new Thread nobody placed (`previewThreadPlacement`), among the
+ * `placeableEnvironments` of its Space. The Hub machine is listed only while it runs Threads.
+ * Null: nowhere.
  */
 export function previewDefaultEnvironment(input: {
   readonly environments: ReadonlyArray<HubEnvironmentSummary>;
   readonly preferredEnvironmentId: EnvironmentId | null;
   readonly providerInstanceId: ProviderInstanceId;
   readonly userId: UserId | null;
-}): EnvironmentId {
+  /** Why the Hub runs no Sandboxes (its list says); a Sandbox then takes nothing, as on the Hub. */
+  readonly sandboxesUnavailable?: string | null;
+}): EnvironmentId | null {
   const preferred = input.environments.find(
     (environment) => environment.id === input.preferredEnvironmentId,
   );
+  const spaceSandbox = input.environments.find((environment) => environment.kind === "sandbox");
   return previewThreadPlacement({
     preferred:
       preferred === undefined
         ? undefined
         : {
             ...preferred,
-            usable: preferred.kind === "hub" || preferred.ownerUserId === input.userId,
+            usable:
+              preferred.kind === "hub" ||
+              preferred.kind === "sandbox" ||
+              preferred.ownerUserId === input.userId,
           },
     providerInstanceId: input.providerInstanceId,
+    hubMachine: input.environments.some((environment) => environment.kind === "hub"),
+    spaceSandbox,
+    sandboxesRun: input.sandboxesUnavailable == null,
   });
 }
 
