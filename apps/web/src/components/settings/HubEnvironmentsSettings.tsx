@@ -1,13 +1,15 @@
-import type { HubEnvironmentSummary } from "@t3tools/contracts";
+import type { HubEnvironmentSummary, SpaceId } from "@t3tools/contracts";
 import { useEffect, useState } from "react";
 
 import { usePrimarySessionState } from "../../environments/primary";
 import {
+  changeHubEnvironmentMode,
   fetchHubEnvironments,
   removeHubEnvironment,
   renameHubEnvironment,
 } from "../../environments/primary/hubEnvironments";
 import { errorMessageOf } from "../../lib/errorMessage";
+import { useCurrentSpace } from "../../state/currentSpace";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
@@ -39,17 +41,20 @@ const gigabytes = (bytes: number) => `${(bytes / 1_000_000_000).toFixed(1)} GB`;
 function describe(
   environment: HubEnvironmentSummary,
   viewer: { readonly userId: string | undefined; readonly isOwner: boolean },
+  spaceName: (spaceId: string | null | undefined) => string,
 ) {
   const parts = [
     environment.kind === "hub"
       ? "Runs the Hub"
       : environment.kind === "sandbox"
         ? "Sandbox"
-        : viewer.userId === undefined
-          ? "Personal machine"
-          : environment.ownerUserId === viewer.userId
-            ? "Your personal machine"
-            : "Another User's personal machine",
+        : environment.mode === "dedicated"
+          ? `Dedicated to ${spaceName(environment.spaceId)}`
+          : viewer.userId === undefined
+            ? "Personal machine"
+            : environment.ownerUserId === viewer.userId
+              ? "Your personal machine"
+              : "Another User's personal machine",
     environment.os,
     environment.lastSeenAt === null
       ? "never connected"
@@ -99,8 +104,9 @@ function describe(
 }
 
 /**
- * Settings → Environments: the machines joined to this Hub. The Owner sees and manages every one;
- * each User sees the Hub machine and their own personal machines, and renames and removes those.
+ * Settings → Environments: the machines joined to this Hub. The Owner sees and manages every one,
+ * and dedicates machines to Organizations; each User sees the Hub machine, their own personal
+ * machines (which they rename and remove) and the machines dedicated to their Spaces.
  */
 export function HubEnvironmentsSettings() {
   const session = usePrimarySessionState();
@@ -117,7 +123,19 @@ export function HubEnvironmentsSettings() {
   const [error, setError] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<{ readonly id: string; readonly name: string }>();
   const [removing, setRemoving] = useState<HubEnvironmentSummary>();
+  // The machine whose mode the Owner changes, and to what: "personal" or an Organization.
+  const [changingMode, setChangingMode] = useState<{
+    readonly environment: HubEnvironmentSummary;
+    readonly use: "personal" | SpaceId;
+  }>();
+  const [modeError, setModeError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const spaces = useCurrentSpace((state) => state.view?.spaces);
+  const organizations = (spaces ?? []).filter(
+    (space) => space.kind === "organization" && space.archived !== true,
+  );
+  const spaceName = (spaceId: string | null | undefined) =>
+    spaces?.find((space) => space.id === spaceId)?.name ?? "a Space";
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- polls the Hub for each machine's live status while Settings is open.
   useEffect(() => {
@@ -176,10 +194,29 @@ export function HubEnvironmentsSettings() {
                   </Badge>
                 </span>
               }
-              description={describe(environment, { userId, isOwner })}
+              description={describe(environment, { userId, isOwner }, spaceName)}
               control={
                 manages(environment) && environment.kind !== "sandbox" ? (
                   <div className="flex gap-1">
+                    {isOwner && environment.kind === "external" ? (
+                      <Button
+                        aria-label={`Change who uses ${environment.name}`}
+                        size="xs"
+                        variant="outline"
+                        onClick={() => {
+                          setModeError(null);
+                          setChangingMode({
+                            environment,
+                            use:
+                              environment.mode === "dedicated" && environment.spaceId
+                                ? environment.spaceId
+                                : "personal",
+                          });
+                        }}
+                      >
+                        Change use
+                      </Button>
+                    ) : null}
                     <Button
                       aria-label={`Rename ${environment.name}`}
                       size="xs"
@@ -206,7 +243,7 @@ export function HubEnvironmentsSettings() {
         })}
       <SettingsRow
         title="Add a machine"
-        description="Run `t3 join <this Hub's address>` on it, then approve it here in the browser."
+        description="Run `t3 join <this Hub's address>` on it, then approve it here in the browser. For a machine all of an Organization uses, run `t3 join --dedicated <Organization> <this Hub's address>` and approve it as the Owner."
       />
       {error ? <SettingsRow title="Something went wrong" description={error} /> : null}
       {renaming !== undefined ? (
@@ -248,6 +285,85 @@ export function HubEnvironmentsSettings() {
                   Cancel
                 </Button>
                 <Button disabled={pending || renaming.name.trim() === ""} type="submit">
+                  Save
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogPopup>
+        </Dialog>
+      ) : null}
+      {changingMode !== undefined ? (
+        <Dialog open onOpenChange={(open) => (open ? undefined : setChangingMode(undefined))}>
+          <DialogPopup className="sm:max-w-sm">
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                const { environment, use } = changingMode;
+                setPending(true);
+                setModeError(null);
+                void changeHubEnvironmentMode(
+                  environment.id,
+                  use === "personal" ? { mode: "personal" } : { mode: "dedicated", spaceId: use },
+                ).then(
+                  (changed) => {
+                    setEnvironments(
+                      (list) =>
+                        list?.map((entry) => (entry.id === changed.id ? changed : entry)) ?? null,
+                    );
+                    setChangingMode(undefined);
+                    setPending(false);
+                  },
+                  (cause: unknown) => {
+                    // A machine with Threads on it says which to move first.
+                    setModeError(errorMessageOf(cause, "That change did not go through."));
+                    setPending(false);
+                  },
+                );
+              }}
+            >
+              <DialogHeader>
+                <DialogTitle>{`Who uses ${changingMode.environment.name}`}</DialogTitle>
+                <DialogDescription>
+                  A personal machine runs only its owner's work. One dedicated to an Organization
+                  runs the work of everyone there, in a Sandbox container. It changes only once no
+                  Thread is on it.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogPanel>
+                <label className="text-xs font-medium" htmlFor="hub-environment-use">
+                  Used by
+                </label>
+                <select
+                  className="mt-1 h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                  id="hub-environment-use"
+                  disabled={pending}
+                  value={changingMode.use}
+                  onChange={(event) => {
+                    const value = event.currentTarget.value;
+                    setChangingMode({
+                      environment: changingMode.environment,
+                      use: value === "personal" ? "personal" : (value as SpaceId),
+                    });
+                  }}
+                >
+                  <option value="personal">Only me (personal machine)</option>
+                  {organizations.map((space) => (
+                    <option key={space.id} value={space.id}>
+                      {`Everyone in ${space.name} (dedicated)`}
+                    </option>
+                  ))}
+                </select>
+                {modeError !== null ? (
+                  <p className="mt-2 text-sm text-destructive-foreground" role="alert">
+                    {modeError}
+                  </p>
+                ) : null}
+              </DialogPanel>
+              <DialogFooter>
+                <Button type="button" variant="ghost" onClick={() => setChangingMode(undefined)}>
+                  Cancel
+                </Button>
+                <Button disabled={pending} type="submit">
                   Save
                 </Button>
               </DialogFooter>

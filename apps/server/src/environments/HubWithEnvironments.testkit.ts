@@ -677,6 +677,8 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
       never,
       McpProviderSessions.McpProviderSessions
     >;
+    /** The machine runs its Sandbox with this runtime instead, such as Podman's. */
+    readonly runtime?: SandboxRuntimeOverRoot;
   }) {
     const joined = yield* joinMachine(server, authenticator, owner, input.name, input.spaceId);
     const rootDir = yield* FileSystem.FileSystem.pipe(
@@ -717,7 +719,7 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
       ServerConfig.ServerConfig,
     );
     const runtime = yield* Layer.build(
-      ProcessSandboxRuntime.layer({ launcher, rootDir }).pipe(
+      (input.runtime?.(rootDir) ?? ProcessSandboxRuntime.layer({ launcher, rootDir })).pipe(
         Layer.provide(
           Layer.succeed(
             SandboxRuntime.SandboxHubAddress,
@@ -746,8 +748,16 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
       credential: joined.credential,
       state: hostState,
     }).pipe(Effect.provide(runtime), Effect.forkScoped);
-    const environment = yield* Deferred.await(started);
-    return { environment, launches, hostState: Ref.get(hostState) };
+    // The testkit's own server is known once it started; another runtime's is only seen online.
+    const environment = input.runtime === undefined ? yield* Deferred.await(started) : undefined;
+    return {
+      environmentId: EnvironmentId.make(joined.environmentId),
+      credential: joined.credential,
+      environment,
+      launches,
+      rootDir,
+      hostState: Ref.get(hostState),
+    };
   });
   return {
     server,

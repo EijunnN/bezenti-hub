@@ -1,9 +1,12 @@
+// @effect-diagnostics nodeBuiltinImport:off -- reads the credential a Podman container mounts.
 /**
  * «Hub con Environments», spec 3 ticket 09: machines the Owner dedicates to an Organization. Its
  * joined server runs one Sandbox (process runtime here) whose server connects as the machine; only
  * that Space uses it, and its mode or Space changes only once no Thread is on it.
  */
-import { assert, describe, it } from "@effect/vitest";
+import * as NodeFS from "node:fs";
+
+import { afterAll, assert, beforeAll, describe, it } from "@effect/vitest";
 import {
   CommandId,
   type EnvironmentId,
@@ -26,7 +29,17 @@ import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/Claud
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as PodmanSandboxRuntime from "../sandboxes/PodmanSandboxRuntime.ts";
+import {
+  ensureDevImage,
+  makeTestRun,
+  podmanResult,
+  removeTestRunContainers,
+  rootlessPodmanAvailable,
+} from "../sandboxes/PodmanSandboxRuntime.testkit.ts";
+import { devCodeMounts } from "../sandboxes/sandboxRuntimeFromConfig.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as EnvironmentConnections from "./EnvironmentConnections.ts";
 import * as EnvironmentRegistry from "./EnvironmentRegistry.ts";
 import {
   approveJoin,
@@ -232,7 +245,7 @@ describe("Hub con Environments: a machine dedicated to a Space", () => {
           spaceId: acme,
           adapters: idleAdapters,
         });
-        const vps = dedicated.environment.environmentId;
+        const vps = dedicated.environmentId;
         yield* assertOnline(hub, vps);
         // The machine's server ran no work itself: one Sandbox, over the machine's own credential
         // and Hub, whose server is the Environment the Hub sees.
@@ -241,7 +254,7 @@ describe("Hub con Environments: a machine dedicated to a Space", () => {
         assert.equal(launch?.joined.environmentId, vps);
         assert.isTrue(launch?.joined.sandboxed);
         assert.equal(launch?.joined.hubUrl, hub.server.url);
-        assert.equal(launch?.credential, dedicated.environment.credential);
+        assert.equal(launch?.credential, dedicated.credential);
         assert.equal((yield* dedicated.hostState)._tag, "sandbox");
 
         // Acme's Member and Guest see it; Globex's Member does not.
@@ -311,7 +324,7 @@ describe("Hub con Environments: a machine dedicated to a Space", () => {
               client.execute(
                 HttpClientRequest.get(
                   `${HubRepository.hubRepositoryUrl(hub.server.url, { projectId })}/info/refs?service=git-upload-pack`,
-                ).pipe(HttpClientRequest.bearerToken(dedicated.environment.credential)),
+                ).pipe(HttpClientRequest.bearerToken(dedicated.credential)),
               ),
             ),
             Effect.map((response) => response.status),
@@ -348,7 +361,7 @@ describe("Hub con Environments: a machine dedicated to a Space", () => {
           spaceId: acme,
           adapters: idleAdapters,
         });
-        const vps = dedicated.environment.environmentId;
+        const vps = dedicated.environmentId;
         yield* assertOnline(hub, vps);
         yield* createThread(hub, grace, {
           threadId: "thread:busy",
@@ -408,6 +421,7 @@ describe("Hub con Environments: a machine dedicated to a Space", () => {
             ?.status,
           "online",
         );
+        assert.isDefined(dedicated.environment);
         yield* dedicated.environment.connect;
         yield* assertOnline(hub, vps);
         assert.equal(
@@ -428,6 +442,78 @@ describe("Hub con Environments: a machine dedicated to a Space", () => {
           { from: "dedicated", to: "dedicated", fromSpaceId: acme, toSpaceId: globex },
           { from: "dedicated", to: "personal", fromSpaceId: globex, toSpaceId: null },
         ]);
+      }).pipe(Effect.scoped),
+  );
+});
+
+describe.skipIf(!rootlessPodmanAvailable)("a dedicated machine in Podman", () => {
+  const run = makeTestRun();
+  let image = "";
+  beforeAll(() => {
+    image = ensureDevImage();
+  });
+  afterAll(() => removeTestRunContainers(run));
+
+  it.live(
+    "runs its work in a Sandbox container that holds the machine's credential and reaches the Hub only by its socket",
+    () =>
+      Effect.gen(function* () {
+        const entry = new URL("../bin.ts", import.meta.url).pathname;
+        const checkout = new URL("../../../../", import.meta.url).pathname.replace(/\/$/u, "");
+        const hub = yield* makeHub();
+        const acme = yield* createOrganization(hub, "Acme");
+        const dedicated = yield* hub.joinDedicated({
+          name: "Acme VPS",
+          spaceId: acme,
+          adapters: idleAdapters,
+          runtime: (rootDir) =>
+            PodmanSandboxRuntime.layer({
+              image,
+              serverCommand: ["node", entry],
+              codeMounts: devCodeMounts(checkout),
+              rootDir,
+              namePrefix: run.namePrefix,
+              labels: run.labels,
+            }),
+        });
+        // The container's server connects as the machine.
+        yield* hub
+          .service(EnvironmentConnections.EnvironmentConnections)
+          .awaitReady(dedicated.environmentId)
+          .pipe(Effect.timeout("150 seconds"), Effect.orDie);
+        assert.equal(
+          (yield* listEnvironments(hub.server, hub.owner)).find(
+            (environment) => environment.id === dedicated.environmentId,
+          )?.status,
+          "online",
+        );
+        const state = yield* dedicated.hostState;
+        assert.equal(state._tag === "sandbox" && state.state, "running");
+        const container = `${run.namePrefix}dedicated`;
+        const mounts = JSON.parse(
+          podmanResult(["container", "inspect", "--format", "{{json .Mounts}}", container]).stdout,
+        ) as Array<{ Source: string; Destination: string; RW: boolean }>;
+        // Its home, the credential and Hub file read-only, the socket's directory, and the code
+        // a dev machine runs from: nothing else of the machine.
+        const credential = mounts.find((mount) =>
+          mount.Destination.endsWith("/secrets/environment-credential.bin"),
+        );
+        assert.isDefined(credential);
+        assert.isFalse(credential.RW);
+        assert.equal(NodeFS.readFileSync(credential.Source, "utf8"), dedicated.credential);
+        const others = mounts.filter(
+          (mount) =>
+            !mount.Source.startsWith(dedicated.rootDir) && !mount.Source.startsWith(checkout),
+        );
+        assert.deepEqual(others, []);
+        const inspected = podmanResult([
+          "container",
+          "inspect",
+          "--format",
+          "{{json .HostConfig.CapDrop}} {{.HostConfig.NetworkMode}}",
+          container,
+        ]).stdout;
+        assert.include(inspected, "slirp4netns");
       }).pipe(Effect.scoped),
   );
 });
