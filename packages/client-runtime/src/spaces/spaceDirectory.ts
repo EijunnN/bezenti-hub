@@ -117,6 +117,7 @@ export const AUDIT_ACTION_LABELS: Record<AuditAction, string> = {
   "environment.register": "Registered an Environment",
   "environment.rename": "Renamed an Environment",
   "environment.remove": "Removed an Environment",
+  "environment.mode.change": "Changed who uses an Environment",
   "thread.move": "Moved a Thread to another Environment",
   "sandbox.create": "Created a Sandbox",
   "sandbox.start": "Started a Sandbox",

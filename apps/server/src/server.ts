@@ -189,6 +189,7 @@ import * as EnvironmentConnectRoute from "./environments/connectRoute.ts";
 import * as EnvironmentGitRoute from "./environments/gitRoute.ts";
 import * as EnvironmentRegistry from "./environments/EnvironmentRegistry.ts";
 import * as HubEnvironmentsHttp from "./environments/http.ts";
+import * as DedicatedHost from "./environments/DedicatedHost.ts";
 import * as JoinedHub from "./environments/JoinedHub.ts";
 import type { JoinedHubState } from "./environments/joinedHubState.ts";
 import * as NetService from "@t3tools/shared/Net";
@@ -710,9 +711,14 @@ const layerHubMachineSnapshot = Layer.effect(
   }),
 );
 
-// Joined mode serves `/health` and nothing else: no client, sign-in or user WebSocket.
+// Joined mode serves `/health` and nothing else: no client, sign-in or user WebSocket. A dedicated
+// machine runs no work itself: its Sandbox's server is the one connected to the Hub.
 const layerJoinedRoutes = (joined: JoinedHubState) =>
-  JoinedHub.layerHealthRoute.pipe(Layer.provide(JoinedHub.layer(joined)));
+  JoinedHub.layerHealthRoute.pipe(
+    Layer.provide(
+      joined.mode === "dedicated" ? DedicatedHost.layer(joined) : JoinedHub.layer(joined),
+    ),
+  );
 
 const layerMakeRoutes = Layer.mergeAll(
   Layer.mergeAll(

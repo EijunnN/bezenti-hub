@@ -235,6 +235,20 @@ describe("a Space's Sandbox in the composer", () => {
     expect(placeableEnvironments([hub, acme], undefined)).toEqual([hub]);
   });
 
+  it("as a machine dedicated to a Space is, which other Spaces' Threads never get", () => {
+    const vps = environment({
+      id: EnvironmentId.make("env-vps"),
+      name: "Acme VPS",
+      mode: "dedicated",
+      ownerUserId: null,
+      spaceId: SpaceId.make("org-acme"),
+      status: "online",
+    });
+    expect(placeableEnvironments([hub, laptop, vps], "org-acme")).toEqual([hub, laptop, vps]);
+    expect(placeableEnvironments([hub, laptop, vps], "org-globex")).toEqual([hub, laptop]);
+    expect(placeableEnvironments([hub, vps], undefined)).toEqual([hub]);
+  });
+
   it("can be chosen while stopped, since sending starts it; once running it needs the provider", () => {
     expect(environmentUnavailableReason(acme, ProviderInstanceId.make("claudeAgent"))).toBeNull();
     expect(

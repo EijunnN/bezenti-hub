@@ -13,6 +13,7 @@ import {
   EventId,
   type EnvironmentHeartbeatFrame,
   type EnvironmentHelloFrame,
+  type EnvironmentWelcomeFrame,
   type ModelSelection,
   OrchestrationV2ProviderCapabilities,
   type ProjectId,
@@ -34,6 +35,7 @@ import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
 import * as Schema from "effect/Schema";
 
@@ -72,7 +74,13 @@ import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as ProcessSandboxRuntime from "../sandboxes/ProcessSandboxRuntime.ts";
 import * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
 import * as Sandboxes from "../sandboxes/Sandboxes.ts";
-import { ENVIRONMENT_CREDENTIAL_SECRET, readJoinedHubState } from "./joinedHubState.ts";
+import {
+  ENVIRONMENT_CREDENTIAL_SECRET,
+  type JoinedHubState,
+  readJoinedHubState,
+} from "./joinedHubState.ts";
+import * as DedicatedHost from "./DedicatedHost.ts";
+import * as JoinedHub from "./JoinedHub.ts";
 import type * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 import type { Authenticator, HubServices, Server } from "../auth/UserAuth.testkit.ts";
 import * as EnvironmentAgent from "./EnvironmentAgent.ts";
@@ -266,6 +274,10 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
   readonly textGeneration?: ProviderTextGeneration;
   /** Its T3 home; a fresh temporary one by default. */
   readonly baseDir?: string;
+  /** It runs in a Sandbox, and its hello says so. */
+  readonly sandbox?: { readonly runtime: "podman" | "process" };
+  /** Runs after each welcome, as a server checks the mode the Hub names. */
+  readonly onWelcome?: (welcome: EnvironmentWelcomeFrame) => Effect.Effect<void>;
 }) {
   const scope = yield* Effect.scope;
   const mcpConfigs: Array<McpProviderSessionConfig> = [];
@@ -376,6 +388,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
     workspaceRoot: described.workspaceRoot,
     orchestration: described.orchestration,
     executorContractVersion: ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
+    ...(input.sandbox === undefined ? {} : { sandbox: input.sandbox }),
   }));
   const heartbeat: Effect.Effect<EnvironmentHeartbeatFrame> = Effect.map(report, (described) => ({
     type: "heartbeat",
@@ -393,7 +406,10 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
       expectedHubId: input.hubEnvironmentId,
       hello,
       heartbeat,
-      onWelcome: () => Deferred.succeed(welcomed, undefined).pipe(Effect.asVoid),
+      onWelcome: (welcome) =>
+        Deferred.succeed(welcomed, undefined).pipe(
+          Effect.andThen(input.onWelcome?.(welcome) ?? Effect.void),
+        ),
       serve: (write) =>
         Effect.map(
           running.agent.attach((text) => write(text).pipe(Effect.andThen(noteAnswer(text)))),
@@ -455,6 +471,13 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
  * credential and Hub as for a child process, and its server is a testkit Environment started from
  * that home, over `adapters`, instead of a `t3 serve` child.
  */
+/** What a dedicated machine's Sandbox server started with: its home, its Hub, its credential. */
+export interface SandboxLaunchRecord {
+  readonly homePath: string;
+  readonly joined: JoinedHubState;
+  readonly credential: string;
+}
+
 /** A Sandbox runtime over the testkit's Sandboxes root, reaching the Hub at its address. */
 export type SandboxRuntimeOverRoot = (
   rootDir: string,
@@ -512,6 +535,7 @@ const makeSandboxRuntime = (
         adapters,
         connect: true,
         baseDir: launch.homePath,
+        sandbox: { runtime: "process" },
       });
       started.set(launch.sandboxId, environment);
       const exited = yield* Deferred.make<number | null>();
@@ -666,11 +690,136 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
       ...(input.textGeneration === undefined ? {} : { textGeneration: input.textGeneration }),
     });
   });
+  /**
+   * `t3 join --dedicated`, approved by the Owner for `spaceId`, and the machine's joined server as
+   * a dedicated machine runs it (`DedicatedHost`): no work of its own, one Sandbox through the
+   * process runtime whose server, over the machine's credential, is the Environment the Hub sees.
+   */
+  const joinDedicated = Effect.fn("HubWithEnvironments.joinDedicated")(function* (input: {
+    readonly name: string;
+    readonly spaceId: SpaceId;
+    readonly adapters: Layer.Layer<
+      ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+      never,
+      McpProviderSessions.McpProviderSessions
+    >;
+    /** The machine runs its Sandbox with this runtime instead, such as Podman's. */
+    readonly runtime?: SandboxRuntimeOverRoot;
+  }) {
+    const joined = yield* joinMachine(server, authenticator, owner, input.name, input.spaceId);
+    const rootDir = yield* FileSystem.FileSystem.pipe(
+      Effect.flatMap((fs) => fs.makeTempDirectoryScoped({ prefix: "t3-dedicated-" })),
+      Effect.provide(NodeServices.layer),
+      Effect.orDie,
+    );
+    const started = yield* Deferred.make<TestEnvironment>();
+    const launches: Array<SandboxLaunchRecord> = [];
+    const environments: Array<TestEnvironment> = [];
+    const launched = yield* Queue.unbounded<TestEnvironment>();
+    const persisted: Array<JoinedHubState> = [];
+    const turnedPersonal = yield* Deferred.make<JoinedHubState>();
+    const launcher: ProcessSandboxRuntime.SandboxLauncher = (launch) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const paths = yield* ServerConfig.deriveServerPaths(launch.homePath, undefined, {
+          baseDirIsExplicit: true,
+        });
+        const home = yield* readJoinedHubState(paths.joinedHubPath).pipe(Effect.orDie);
+        if (Option.isNone(home)) return yield* Effect.die("the dedicated Sandbox has no Hub");
+        const credential = yield* fs
+          .readFileString(path.join(paths.secretsDir, `${ENVIRONMENT_CREDENTIAL_SECRET}.bin`))
+          .pipe(Effect.orDie);
+        launches.push({ homePath: launch.homePath, joined: home.value, credential });
+        const exited = yield* Deferred.make<number | null>();
+        const environment = yield* startEnvironment({
+          hubUrl: home.value.hubUrl,
+          credential,
+          environmentId: home.value.environmentId,
+          hubEnvironmentId: home.value.hubEnvironmentId,
+          name: home.value.name,
+          adapters: input.adapters,
+          connect: true,
+          baseDir: launch.homePath,
+          sandbox: { runtime: "process" },
+          // As the real server does: welcomed for another Space, or as personal, it exits.
+          onWelcome: (welcome) =>
+            JoinedHub.sandboxedServerRefuses(home.value, welcome)
+              ? Deferred.succeed(exited, JoinedHub.SANDBOX_MODE_CHANGED_EXIT).pipe(Effect.asVoid)
+              : Effect.void,
+        });
+        environments.push(environment);
+        yield* Queue.offer(launched, environment);
+        yield* Deferred.succeed(started, environment);
+        return { pid: null, exited: Deferred.await(exited) };
+      }).pipe(Effect.provide(NodeServices.layer));
+    const hubConfig = Context.get(
+      server.services as unknown as Context.Context<ServerConfig.ServerConfig>,
+      ServerConfig.ServerConfig,
+    );
+    const runtime = yield* Layer.build(
+      (input.runtime?.(rootDir) ?? ProcessSandboxRuntime.layer({ launcher, rootDir })).pipe(
+        Layer.provide(
+          Layer.succeed(
+            SandboxRuntime.SandboxHubAddress,
+            SandboxRuntime.SandboxHubAddress.of({ loopbackUrl: Effect.succeed(server.url) }),
+          ),
+        ),
+        Layer.provide(Layer.succeed(ServerConfig.ServerConfig, hubConfig)),
+        Layer.provide(NodeServices.layer),
+      ),
+    );
+    const hostState = yield* Ref.make<JoinedHub.JoinedConnectionState>({
+      _tag: "connecting",
+      attempt: 0,
+      lastError: null,
+    });
+    yield* DedicatedHost.superviseDedicatedSandbox({
+      joined: {
+        hubUrl: server.url,
+        hubEnvironmentId: EnvironmentId.make(joined.hubEnvironmentId),
+        environmentId: EnvironmentId.make(joined.environmentId),
+        name: joined.name,
+        joinedAt: "2026-01-01T00:00:00.000Z",
+        mode: "dedicated",
+        spaceId: input.spaceId,
+      },
+      credential: joined.credential,
+      state: hostState,
+      askHub: DedicatedHost.askHubAt(server.url, joined.credential),
+      homesOnDisk: FileSystem.FileSystem.pipe(
+        Effect.flatMap((fs) => fs.readDirectory(rootDir)),
+        Effect.provide(NodeServices.layer),
+        Effect.orElseSucceed(() => []),
+      ),
+      persist: (next) => Effect.sync(() => void persisted.push(next)),
+      becomePersonal: (personal) => Deferred.succeed(turnedPersonal, personal).pipe(Effect.asVoid),
+    }).pipe(Effect.provide(runtime), Effect.forkScoped);
+    // The testkit's own server is known once it started; another runtime's is only seen online.
+    const environment = input.runtime === undefined ? yield* Deferred.await(started) : undefined;
+    return {
+      environmentId: EnvironmentId.make(joined.environmentId),
+      credential: joined.credential,
+      environment,
+      /** Every server its Sandboxes started, the latest last. */
+      environments,
+      /** The next server its Sandboxes start, in order: the first one first. */
+      nextLaunch: Queue.take(launched),
+      launches,
+      rootDir,
+      /** The joined states it wrote, as the Hub answered. */
+      persisted,
+      /** Completes once the Hub made the machine personal and its server serves as one. */
+      turnedPersonal: Deferred.await(turnedPersonal),
+      hostState: Ref.get(hostState),
+    };
+  });
   return {
     server,
     authenticator,
     owner,
     join,
+    joinDedicated,
     service: serviceOf(server),
     /** The running server of the Space's Sandbox, once the Hub started it. */
     sandboxOf: sandboxes.environmentOf,

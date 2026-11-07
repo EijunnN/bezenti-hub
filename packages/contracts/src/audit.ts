@@ -37,6 +37,7 @@ export const AuditAction = Schema.Literals([
   "environment.register",
   "environment.rename",
   "environment.remove",
+  "environment.mode.change",
   "thread.move",
   "sandbox.create",
   "sandbox.start",
@@ -96,10 +97,13 @@ export const AUDIT_DETAIL_KEYS = {
   "cliSession.issue": ["sessionId", "label", "scopes"],
   "secret.reveal": ["vault"],
   "secret.edit": ["vault"],
-  "environment.register": ["kind", "os"],
+  /** `mode` personal or dedicated (with its `spaceId`), `via` join (or, later, ssh). */
+  "environment.register": ["kind", "os", "mode", "spaceId", "via"],
   "environment.rename": ["from", "to"],
   /** `settings` from the Hub, `leave` from the machine, `userTurnedOff` with its owner. */
   "environment.remove": ["via"],
+  /** Modes (`personal`, `dedicated`) and Spaces (null for personal) before and after. */
+  "environment.mode.change": ["from", "to", "fromSpaceId", "toSpaceId"],
   /**
    * Environment ids; `started`, `switched`, `failed` or `cancelled`; the failed step and its
    * trimmed message; what the target continues from; whether the source was offline; set-aside refs.

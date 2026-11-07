@@ -1,4 +1,4 @@
-import type { AuthAccount, EnvironmentJoinRequestView } from "@t3tools/contracts";
+import type { AuthAccount, EnvironmentJoinRequestView, SpaceId } from "@t3tools/contracts";
 import { readEnvironmentJoinPageRequest } from "@t3tools/shared/environmentJoin";
 import { useEffect, useState } from "react";
 
@@ -28,6 +28,8 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
   const [request, setRequest] = useState<EnvironmentJoinRequestView | null>(null);
   const [account, setAccount] = useState<AuthAccount | null>(null);
   const [name, setName] = useState("");
+  // "personal", or the Organization the Owner dedicates it to.
+  const [use, setUse] = useState<"personal" | SpaceId>("personal");
   const [stepUp, setStepUp] = useState<ReturnType<typeof emptyStepUp> | null>(null);
   const [pending, setPending] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
@@ -42,6 +44,15 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
         if (!current) return;
         setRequest(loaded);
         setName(loaded.name ?? "");
+        // `t3 join --dedicated <Space>` preselects that Space when the Hub found it.
+        const requested = loaded.requestedDedicatedSpace?.toLowerCase();
+        const asked = loaded.dedicatedSpaces?.[0];
+        if (
+          asked !== undefined &&
+          (asked.id === loaded.requestedDedicatedSpace || asked.name.toLowerCase() === requested)
+        ) {
+          setUse(asked.id);
+        }
         setAccount(loadedAccount);
         setStepUp(emptyStepUp(loadedAccount));
       },
@@ -126,6 +137,7 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
     );
   }
 
+  const dedicatedTo = request?.dedicatedSpaces?.find((space) => space.id === use);
   const decide = async (decision: () => Promise<string | null>, next: Outcome) => {
     setPending(true);
     setErrorMessage("");
@@ -145,8 +157,19 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
       <StandalonePageHeader
         context={window.location.host}
         title="Register this machine"
-        description="It becomes one of your personal Environments: only you run work on it. Only continue with a `t3 join` you just started."
+        description={
+          dedicatedTo === undefined
+            ? "It becomes one of your personal Environments: only you run work on it. Only continue with a `t3 join` you just started."
+            : `It becomes ${dedicatedTo.name}'s: its Members run that Space's work on it, inside a Sandbox container. Only continue with a \`t3 join\` you just started.`
+        }
       />
+      {request?.requestedDedicatedSpace !== undefined && request.dedicatedSpaces === undefined ? (
+        <Alert className="mt-4" variant="warning">
+          <AlertDescription>
+            {`The machine asks to be dedicated to ${request.requestedDedicatedSpace}. Only the Owner dedicates machines; registering it here makes it your personal machine, which \`t3 join --dedicated\` refuses.`}
+          </AlertDescription>
+        </Alert>
+      ) : null}
       {request === null && errorMessage === "" ? (
         <p className="mt-4 text-sm text-muted-foreground">Loading…</p>
       ) : null}
@@ -161,6 +184,7 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
                   requestId,
                   name: name.trim(),
                   stepUp: toStepUp(account, stepUp),
+                  dedicatedSpaceId: dedicatedTo?.id,
                 }),
               "approved",
             );
@@ -177,6 +201,33 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
             onChange={(event) => setName(event.currentTarget.value)}
             value={name}
           />
+          {request.dedicatedSpaces !== undefined ? (
+            <>
+              <label className="text-xs font-medium" htmlFor="register-environment-use">
+                Used by
+              </label>
+              <select
+                className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+                disabled={pending}
+                id="register-environment-use"
+                onChange={(event) =>
+                  setUse(
+                    event.currentTarget.value === "personal"
+                      ? "personal"
+                      : (event.currentTarget.value as SpaceId),
+                  )
+                }
+                value={use}
+              >
+                <option value="personal">Only me (personal machine)</option>
+                {request.dedicatedSpaces.map((space) => (
+                  <option key={space.id} value={space.id}>
+                    {`Everyone in ${space.name} (dedicated)`}
+                  </option>
+                ))}
+              </select>
+            </>
+          ) : null}
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
             <dt className="text-muted-foreground">Operating system</dt>
             <dd>{request.os}</dd>

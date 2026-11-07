@@ -1,0 +1,184 @@
+import { assert, it } from "@effect/vitest";
+import { EnvironmentId } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
+import * as Queue from "effect/Queue";
+import * as Redacted from "effect/Redacted";
+import * as Ref from "effect/Ref";
+import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
+
+import { SandboxRuntime, type SandboxSpec } from "../sandboxes/SandboxRuntime.ts";
+import {
+  dedicatedSandboxIdOf,
+  type HubAnswer,
+  superviseDedicatedSandbox,
+} from "./DedicatedHost.ts";
+import type { JoinedConnectionState } from "./JoinedHub.ts";
+import type { JoinedHubState } from "./joinedHubState.ts";
+
+const joined: JoinedHubState = {
+  hubUrl: "https://hub.example.com",
+  hubEnvironmentId: EnvironmentId.make("hub-1"),
+  environmentId: EnvironmentId.make("env-vps"),
+  name: "Acme VPS",
+  joinedAt: "2026-01-01T00:00:00.000Z",
+  mode: "dedicated",
+  spaceId: "org-acme",
+};
+
+const uses = (spaceId: string | null): HubAnswer => ({
+  _tag: "uses",
+  mode: spaceId === null ? "personal" : "dedicated",
+  spaceId,
+});
+
+/**
+ * A runtime recording what it was asked. Each start's server ends with the exit code the test
+ * puts in `ends` (at once when one is waiting).
+ */
+const makeRuntime = Effect.fn(function* () {
+  const created: Array<SandboxSpec> = [];
+  const deleted: Array<string> = [];
+  const started: Array<string> = [];
+  const ends = yield* Queue.unbounded<number>();
+  const layer = Layer.succeed(
+    SandboxRuntime,
+    SandboxRuntime.of({
+      kind: "process",
+      create: (spec) => Effect.sync(() => void created.push(spec)),
+      start: (sandboxId) =>
+        Effect.sync(() => {
+          started.push(sandboxId);
+          return { exited: Queue.take(ends) };
+        }),
+      stop: () => Effect.void,
+      delete: (sandboxId) => Effect.sync(() => void deleted.push(sandboxId)),
+      inspect: () => Effect.succeed({ state: { _tag: "missing" }, homePath: "/nowhere" }),
+      exits: Stream.empty,
+    }),
+  );
+  return { created, deleted, started, ends, layer };
+});
+
+const supervise = Effect.fn(function* (
+  runtime: Effect.Success<ReturnType<typeof makeRuntime>>,
+  answers: Ref.Ref<HubAnswer>,
+  homes: ReadonlyArray<string> = [],
+) {
+  const state = yield* Ref.make<JoinedConnectionState>({
+    _tag: "connecting",
+    attempt: 0,
+    lastError: null,
+  });
+  const persisted: Array<JoinedHubState> = [];
+  const personal = yield* Deferred.make<JoinedHubState>();
+  const fiber = yield* superviseDedicatedSandbox({
+    joined,
+    credential: "t3env.secret",
+    state,
+    askHub: Ref.get(answers),
+    homesOnDisk: Effect.succeed(homes),
+    persist: (next) => Effect.sync(() => void persisted.push(next)),
+    becomePersonal: (next) => Deferred.succeed(personal, next).pipe(Effect.asVoid),
+  }).pipe(Effect.provide(runtime.layer), Effect.forkChild);
+  yield* TestClock.adjust("1 millis");
+  return { state, persisted, personal, fiber };
+});
+
+it.effect(
+  "its Sandbox gets the machine's credential, restarts with a backoff, and stays failed after too many ends",
+  () =>
+    Effect.gen(function* () {
+      const runtime = yield* makeRuntime();
+      for (let end = 0; end < 4; end += 1) yield* Queue.offer(runtime.ends, 1);
+      const { state, fiber } = yield* supervise(runtime, yield* Ref.make(uses("org-acme")));
+      assert.equal(runtime.created.length, 1);
+      assert.equal(runtime.created[0]?.sandboxId, dedicatedSandboxIdOf("org-acme"));
+      assert.equal(runtime.created[0]?.spaceId, "org-acme");
+      assert.equal(Redacted.value(runtime.created[0]!.credential), "t3env.secret");
+      assert.equal(runtime.started.length, 1);
+      // 1, 2 and 4 seconds apart; the fourth end in ten minutes leaves it failed.
+      yield* TestClock.adjust("1 second");
+      assert.equal(runtime.started.length, 2);
+      yield* TestClock.adjust("2 seconds");
+      assert.equal(runtime.started.length, 3);
+      yield* TestClock.adjust("4 seconds");
+      assert.equal(runtime.started.length, 4);
+      yield* Fiber.join(fiber);
+      const failed = yield* Ref.get(state);
+      assert.equal(failed._tag === "sandbox" && failed.state, "failed");
+      assert.include(failed._tag === "sandbox" ? failed.message : "", "exit code 1");
+      yield* TestClock.adjust("1 hour");
+      assert.equal(runtime.started.length, 4);
+    }),
+);
+
+it.effect(
+  "a new Space gets a home of its own and the old one is deleted; other Spaces' homes never stay",
+  () =>
+    Effect.gen(function* () {
+      const runtime = yield* makeRuntime();
+      const answers = yield* Ref.make(uses("org-acme"));
+      const { persisted } = yield* supervise(runtime, answers, [
+        dedicatedSandboxIdOf("org-acme"),
+        dedicatedSandboxIdOf("org-old"),
+        ".state",
+      ]);
+      // A home left from an earlier dedication goes before anything starts.
+      assert.deepEqual(runtime.deleted, [dedicatedSandboxIdOf("org-old")]);
+      assert.deepEqual(runtime.started, [dedicatedSandboxIdOf("org-acme")]);
+      // Dedicated to Globex on the Hub: its server ends, the host asks and follows.
+      yield* Ref.set(answers, uses("org-globex"));
+      yield* Queue.offer(runtime.ends, 78);
+      yield* TestClock.adjust("1 millis");
+      assert.deepEqual(runtime.deleted, [
+        dedicatedSandboxIdOf("org-old"),
+        dedicatedSandboxIdOf("org-acme"),
+      ]);
+      assert.deepEqual(
+        runtime.created.map((spec) => [spec.sandboxId, spec.spaceId]),
+        [
+          [dedicatedSandboxIdOf("org-acme"), "org-acme"],
+          [dedicatedSandboxIdOf("org-globex"), "org-globex"],
+        ],
+      );
+      assert.equal(runtime.started.at(-1), dedicatedSandboxIdOf("org-globex"));
+      assert.equal(persisted.at(-1)?.spaceId, "org-globex");
+    }),
+);
+
+it.effect("made personal on the Hub, it deletes the Space's home and serves as personal", () =>
+  Effect.gen(function* () {
+    const runtime = yield* makeRuntime();
+    const answers = yield* Ref.make(uses("org-acme"));
+    const { persisted, personal, fiber } = yield* supervise(runtime, answers);
+    yield* Ref.set(answers, uses(null));
+    yield* Queue.offer(runtime.ends, 78);
+    yield* TestClock.adjust("1 millis");
+    yield* Fiber.join(fiber);
+    assert.deepEqual(runtime.deleted, [dedicatedSandboxIdOf("org-acme")]);
+    const became = yield* Deferred.await(personal);
+    assert.equal(became.mode, "personal");
+    assert.isUndefined(became.spaceId);
+    assert.equal(persisted.at(-1)?.mode, "personal");
+    // Its stale home is never started again.
+    assert.equal(runtime.started.length, 1);
+  }),
+);
+
+it.effect("a machine the Hub no longer accepts runs nothing", () =>
+  Effect.gen(function* () {
+    const runtime = yield* makeRuntime();
+    const { state, fiber } = yield* supervise(
+      runtime,
+      yield* Ref.make<HubAnswer>({ _tag: "removed" }),
+    );
+    yield* Fiber.join(fiber);
+    assert.deepEqual(runtime.started, []);
+    const failed = yield* Ref.get(state);
+    assert.equal(failed._tag === "sandbox" && failed.state, "failed");
+  }),
+);

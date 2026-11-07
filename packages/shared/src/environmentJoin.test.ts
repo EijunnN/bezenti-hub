@@ -3,8 +3,10 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   assertEnvironmentHubUrl,
   environmentCredentialIssuer,
+  environmentJoinConfirmationPrompt,
   environmentJoinPageUrl,
   formatEnvironmentCredential,
+  readEnvironmentJoinConfirmationPrompt,
   readEnvironmentJoinPageRequest,
 } from "./environmentJoin.ts";
 
@@ -50,5 +52,18 @@ describe("readEnvironmentJoinPageRequest", () => {
     expect(readEnvironmentJoinPageRequest("https://hub.example.com/register-environment")).toBe(
       null,
     );
+  });
+});
+
+describe("the confirmation `t3 join` asks", () => {
+  it("names the approver, for a personal machine and one dedicated to a Space alike", () => {
+    const personal = environmentJoinConfirmationPrompt("Ada (ada)");
+    const dedicated = environmentJoinConfirmationPrompt("Ada (ada)", "Acme");
+    expect(dedicated).toBe(
+      "Approved by Ada (ada) as a machine dedicated to Acme. Register it for Acme? [y/N] ",
+    );
+    expect(readEnvironmentJoinConfirmationPrompt(personal)).toBe("Ada (ada)");
+    expect(readEnvironmentJoinConfirmationPrompt(dedicated)).toBe("Ada (ada)");
+    expect(readEnvironmentJoinConfirmationPrompt("Approved by Ada (ada).")).toBeNull();
   });
 });

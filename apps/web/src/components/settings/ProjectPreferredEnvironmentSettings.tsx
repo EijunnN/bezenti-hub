@@ -51,8 +51,13 @@ export function ProjectPreferredEnvironmentSettings({
   };
   const usable = [
     noPreference,
+    // The User's own machines, and those dedicated to the Project's Space.
     ...environments.filter(
-      (environment) => environment.kind !== "hub" && environment.ownerUserId === userId,
+      (environment) =>
+        (environment.kind === "external" &&
+          environment.mode !== "dedicated" &&
+          environment.ownerUserId === userId) ||
+        (environment.mode === "dedicated" && environment.spaceId === project?.spaceId),
     ),
   ];
   // With nothing but the default there is nothing to prefer.

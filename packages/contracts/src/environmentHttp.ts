@@ -80,6 +80,7 @@ import {
 } from "./spaces.ts";
 import { AuditLogPage, AuditLogQuery } from "./audit.ts";
 import {
+  ChangeHubEnvironmentModeRequest,
   EnvironmentJoinApproveRequest,
   EnvironmentJoinConfirmRequest,
   EnvironmentJoinDecisionResult,
@@ -90,6 +91,7 @@ import {
   EnvironmentJoinStatus,
   EnvironmentJoinStatusRequest,
   EnvironmentLeaveResult,
+  EnvironmentSelfResult,
   HubEnvironmentList,
   HubEnvironmentSummary,
   RemoveHubEnvironmentRequest,
@@ -396,6 +398,23 @@ export class EnvironmentHttpConflictError extends Schema.TaggedError<Environment
 ) {
   [HttpServerRespondable.symbol]() {
     return HttpServerResponse.schemaJson(EnvironmentHttpConflictError)(this, { status: 409 });
+  }
+}
+
+/**
+ * A machine's mode or Space can't change while Threads have it as their Active environment:
+ * these are the ones to move first (or delete).
+ */
+export class EnvironmentModeChangeRefusedError extends Schema.TaggedError<EnvironmentModeChangeRefusedError>()(
+  "EnvironmentModeChangeRefusedError",
+  {
+    message: Schema.String,
+    threads: Schema.Array(Schema.Struct({ threadId: Schema.String, title: Schema.String })),
+  },
+  { httpApiStatus: 409 },
+) {
+  [HttpServerRespondable.symbol]() {
+    return HttpServerResponse.schemaJson(EnvironmentModeChangeRefusedError)(this, { status: 409 });
   }
 }
 
@@ -1060,6 +1079,19 @@ class EnvironmentHubEnvironmentsHttpApi extends HttpApiGroup.make("environments"
       error: [...EnvironmentHubEnvironmentErrors, EnvironmentResourceNotFoundError],
     }).middleware(EnvironmentAuthenticatedAuth),
   )
+  // The Owner makes a machine personal or dedicates it to an Organization (environment.mode.change).
+  .add(
+    HttpApiEndpoint.post("changeMode", "/api/environments/mode", {
+      headers: OptionalBearerHeaders,
+      payload: ChangeHubEnvironmentModeRequest,
+      success: HubEnvironmentSummary,
+      error: [
+        ...EnvironmentHubEnvironmentErrors,
+        EnvironmentResourceNotFoundError,
+        EnvironmentModeChangeRefusedError,
+      ],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
   // «Try again» on a Sandbox whose start failed: answers at once, as it starts.
   .add(
     HttpApiEndpoint.post("start", "/api/environments/start", {
@@ -1129,6 +1161,14 @@ class EnvironmentHubEnvironmentsHttpApi extends HttpApiGroup.make("environments"
         EnvironmentHttpForbiddenError,
         EnvironmentInternalError,
       ],
+    }),
+  )
+  // A machine asks how the Hub uses it now, with its own credential.
+  .add(
+    HttpApiEndpoint.post("self", "/api/environments/self", {
+      headers: OptionalBearerHeaders,
+      success: EnvironmentSelfResult,
+      error: EnvironmentTokenExchangeErrors,
     }),
   )
   // `t3 leave`: the machine unregisters itself with its own credential.
