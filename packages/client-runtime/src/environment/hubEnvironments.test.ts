@@ -72,15 +72,24 @@ describe("makeHubEnvironmentsPoller", () => {
       await flush();
       expect(poller.snapshot()).toEqual([hub, laptop]);
       expect(listener).toHaveBeenCalledTimes(2);
+      expect(poller.sandboxesUnavailable()).toBeNull();
+
+      // Why the Hub has no Sandboxes is part of the list: a change of it notifies too.
+      answer = { environments: [hub, laptop], sandboxesUnavailable: "No Podman here." };
+      vi.advanceTimersByTime(1000);
+      await flush();
+      expect(poller.sandboxesUnavailable()).toBe("No Podman here.");
+      expect(listener).toHaveBeenCalledTimes(3);
 
       poller.reset();
       expect(poller.snapshot()).toEqual([]);
-      expect(listener).toHaveBeenCalledTimes(3);
+      expect(poller.sandboxesUnavailable()).toBeNull();
+      expect(listener).toHaveBeenCalledTimes(4);
 
       unsubscribe();
       vi.advanceTimersByTime(5000);
       await flush();
-      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(fetch).toHaveBeenCalledTimes(4);
     } finally {
       vi.useRealTimers();
     }

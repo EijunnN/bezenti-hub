@@ -8,6 +8,7 @@ import {
   HUB_MACHINE_ENVIRONMENT_ID,
   type HubEnvironmentList,
   type HubEnvironmentSummary,
+  NO_ENVIRONMENT_ADVICE,
   type OrchestrationV2ThreadMove,
   type OrchestrationV2ThreadMoveStep,
   type ProviderInstanceId,
@@ -48,6 +49,8 @@ export type HubEnvironmentsStatus = "loading" | "ready" | "error";
 export interface HubEnvironmentsPoller {
   readonly subscribe: (listener: () => void) => () => void;
   readonly snapshot: () => ReadonlyArray<HubEnvironmentSummary>;
+  /** Why the Hub runs no Sandboxes, from the last list; null while it runs them or until known. */
+  readonly sandboxesUnavailable: () => string | null;
   readonly status: () => HubEnvironmentsStatus;
   /** Reads the list now, as a view that just changed something asks. */
   readonly refresh: () => void;
@@ -69,6 +72,7 @@ export function makeHubEnvironmentsPoller(options: {
   readonly idleIntervalMs?: number;
 }): HubEnvironmentsPoller {
   let environments: ReadonlyArray<HubEnvironmentSummary> = [];
+  let sandboxesUnavailable: string | null = null;
   let status: HubEnvironmentsStatus = "loading";
   let generation = 0;
   let active = true;
@@ -104,9 +108,13 @@ export function makeHubEnvironmentsPoller(options: {
     void pending.then(
       (list) => {
         if (started !== generation) return;
+        const unavailable = list.sandboxesUnavailable ?? null;
         const changed =
-          status !== "ready" || JSON.stringify(list.environments) !== JSON.stringify(environments);
+          status !== "ready" ||
+          unavailable !== sandboxesUnavailable ||
+          JSON.stringify(list.environments) !== JSON.stringify(environments);
         environments = list.environments;
+        sandboxesUnavailable = unavailable;
         status = "ready";
         schedule();
         if (changed) notify();
@@ -131,12 +139,14 @@ export function makeHubEnvironmentsPoller(options: {
       };
     },
     snapshot: () => environments,
+    sandboxesUnavailable: () => sandboxesUnavailable,
     status: () => status,
     refresh,
     reset: () => {
       generation += 1;
       const changed = environments.length > 0 || status !== "loading";
       environments = [];
+      sandboxesUnavailable = null;
       status = "loading";
       if (changed) notify();
     },
@@ -342,6 +352,14 @@ export function placeableEnvironments(
   );
 }
 
+/**
+ * Why a new Thread has nowhere to run (no Sandboxes, and the Hub machine runs none), as the Hub
+ * says it after «No Environment can run this Thread»: why there are no Sandboxes, and what to do.
+ */
+export function noPlacementReason(sandboxesUnavailable: string | null): string {
+  return `${sandboxesUnavailable ?? "There is no Sandbox you can run Threads in for this Space."} ${NO_ENVIRONMENT_ADVICE}`;
+}
+
 /** What the move dialog explains before the User chooses. */
 export function moveExplanation(input: {
   readonly sourceRemoved: boolean;
@@ -349,7 +367,7 @@ export function moveExplanation(input: {
   readonly withoutProject: boolean;
 }): string {
   if (input.sourceRemoved) {
-    return "The machine this Thread ran on was removed. The Thread keeps its history and goes on on the machine you choose, from the last checkpoint it uploaded.";
+    return "The machine this Thread ran on was removed or no longer runs Threads. The Thread keeps its history and goes on on the machine you choose, from the last checkpoint it uploaded.";
   }
   const fetches = input.withoutProject
     ? "The new machine fetches it into the Thread's own folder there, with the folder's branches; repositories nested in the folder stay behind."

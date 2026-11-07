@@ -168,6 +168,7 @@ export type TestSandboxRuntime = Layer.Layer<
 const makeLayerServices = (
   config: { readonly publicUrl?: URL },
   sandboxRuntime?: TestSandboxRuntime,
+  registryOptions: EnvironmentRegistry.RegistryOptions = {},
 ) =>
   // Archive and delete reach Projects and Thread reads; no Thread in these tests runs.
   OrganizationLifecycle.layer.pipe(
@@ -181,9 +182,10 @@ const makeLayerServices = (
           InstallationUserService.layer,
           SpaceVisibility.layer,
           AuditLog.layer,
+          // The Hub machine runs Threads here unless a test says otherwise (the dev setting).
           sandboxRuntime === undefined
-            ? EnvironmentRegistry.layer
-            : EnvironmentRegistry.layerWithSandboxes(sandboxRuntime),
+            ? EnvironmentRegistry.layerWith(registryOptions)
+            : EnvironmentRegistry.layerWithSandboxes(sandboxRuntime, registryOptions),
           Layer.merge(McpOAuth.layer, McpOAuth.layerMcpClientAuthenticator).pipe(
             Layer.provide(ServerSettings.layerTest()),
             Layer.provide(
@@ -233,12 +235,18 @@ export const serveAuthHttpWith = Effect.fn(function* (
     ) => Effect.Effect<Context.Context<HubServices>, never, Scope.Scope>;
     /** Runs each Space's Sandbox (the «Hub con Environments» testkit's process runtime). */
     readonly sandboxRuntime?: TestSandboxRuntime;
+    /**
+     * Whether the Hub machine runs Threads (`T3CODE_HUB_RUNS_AGENTS`), and why there are no
+     * Sandboxes; by default it runs them, as the tests written before Sandboxes expect.
+     */
+    readonly registry?: EnvironmentRegistry.RegistryOptions;
   } = {},
 ) {
   const base = yield* Layer.build(
     makeLayerServices(
       config.publicUrl === undefined ? {} : { publicUrl: config.publicUrl },
       config.sandboxRuntime,
+      config.registry,
     ),
   );
   const services = config.extend === undefined ? base : yield* config.extend(base);

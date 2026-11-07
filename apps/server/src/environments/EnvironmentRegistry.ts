@@ -14,9 +14,12 @@ import {
   type EnvironmentHelloFrame,
   HUB_MACHINE_ENVIRONMENT_ID,
   type HubEnvironmentSummary,
-  previewThreadPlacement,
+  canStartThreadOn,
+  NO_ENVIRONMENT_ADVICE,
+  noEnvironmentMessage,
   type ProjectId,
   type ProviderInstanceId,
+  SANDBOXES_NEED_PODMAN,
   sandboxEnvironmentIdOf,
   sandboxEnvironmentName,
   SpaceId,
@@ -105,15 +108,23 @@ export class ThreadEnvironmentUnavailableError extends Schema.TaggedError<Thread
       "worktree-unsupported",
       "sandbox-failed",
       "sandbox-unavailable",
+      "hub-machine",
+      "no-environment",
     ]),
     providerInstanceId: Schema.optional(Schema.String),
-    /** Why a Sandbox did not start. */
+    /** Why a Sandbox did not start, or why this Hub runs no Sandboxes. */
     detail: Schema.optional(Schema.String),
   },
 ) {
   override get message(): string {
     const name = this.name ?? "This Environment";
     switch (this.reason) {
+      case "hub-machine":
+        return "The Hub machine does not run Threads on this Hub. Choose your Space's Sandbox or one of your own machines.";
+      case "no-environment":
+        return noEnvironmentMessage(
+          `${this.detail ?? SANDBOXES_NEED_PODMAN} ${NO_ENVIRONMENT_ADVICE}`,
+        );
       case "not-usable":
         return "You can't run Threads on this Environment.";
       case "offline":
@@ -123,7 +134,9 @@ export class ThreadEnvironmentUnavailableError extends Schema.TaggedError<Thread
       case "worktree-unsupported":
         return "New worktrees are made only on the Hub machine for now. Start this Thread in the Project's checkout.";
       case "sandbox-unavailable":
-        return "Sandboxes need Podman on the Hub, which this Hub does not have yet. See «Run Threads in your Space's Sandbox» in the install guide.";
+        return this.detail === undefined
+          ? "Sandboxes need Podman on the Hub, which this Hub does not have yet. See «Run Threads in your Space's Sandbox» in the install guide."
+          : `${this.detail} See «Run Threads in your Space's Sandbox» in the install guide.`;
       case "sandbox-failed":
         return `${name} could not start${this.detail === undefined ? "." : `: ${this.detail}`}`;
     }
@@ -269,8 +282,15 @@ export class EnvironmentRegistry extends Context.Service<
      */
     readonly hubId: EnvironmentId;
     /**
-     * What the User may see, the Hub machine first. A Space the User works in whose Sandbox was
-     * never made lists it too, offline, so it can be chosen and made.
+     * Whether the Hub machine's in-process executor runs Threads (`T3CODE_HUB_RUNS_AGENTS`, for
+     * development). Off, it is neither listed nor placed on, and its Threads need an environment.
+     */
+    readonly hubRunsAgents: boolean;
+    /** Why this Hub runs no Sandboxes; null while it runs them. */
+    readonly sandboxesUnavailable: string | null;
+    /**
+     * What the User may see, the Hub machine first (only while it runs Threads). A Space the User
+     * works in whose Sandbox was never made lists it too, stopped, so it can be chosen and made.
      */
     readonly list: (
       viewer: UserId,
@@ -336,9 +356,9 @@ export class EnvironmentRegistry extends Context.Service<
       credential: string | undefined,
     ) => Effect.Effect<boolean, EnvironmentStorageError>;
     /**
-     * Where a new Thread runs: the User's choice, else the Project's preference, else the Hub
-     * machine. Usable by the User for the Thread's Space, online with the provider; a Sandbox is
-     * made if missing and counts while stopped (its work starts it), never started here.
+     * Where a new Thread runs: the User's choice, else the preference while it can take it, else
+     * the Space's Sandbox (the Hub machine while it runs agents), made if missing, never started
+     * here. Nowhere to go refuses (`no-environment`): nothing falls back to the Hub machine.
      */
     readonly chooseForThread: (input: {
       readonly userId: UserId | undefined;
@@ -394,7 +414,15 @@ export class EnvironmentRegistry extends Context.Service<
   }
 >()("t3/environments/EnvironmentRegistry") {}
 
-const make = Effect.gen(function* () {
+/** How a registry treats the Hub machine, and why it has no Sandboxes when it has none. */
+export interface RegistryOptions {
+  /** Whether the Hub machine runs Threads; on unless said otherwise (tests, the join flow). */
+  readonly hubRunsAgents?: boolean;
+  /** Why there are no Sandboxes, for a registry without a runtime. */
+  readonly sandboxesUnavailable?: string;
+}
+
+const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryOptions) {
   const sql = yield* SqlClient.SqlClient;
   const spaces = yield* SpaceDirectory.SpaceDirectory;
   const audit = yield* AuditLog.AuditLog;
@@ -404,6 +432,10 @@ const make = Effect.gen(function* () {
   const hubId = yield* (yield* ServerEnvironment.ServerEnvironmentIdentity).getEnvironmentId;
   // Without a Sandbox runtime (the join flow's tests) Sandboxes are listed but never made.
   const sandboxes = yield* Effect.serviceOption(Sandboxes.Sandboxes);
+  const hubRunsAgents = options.hubRunsAgents ?? true;
+  const sandboxesUnavailable = Option.isSome(sandboxes)
+    ? null
+    : (options.sandboxesUnavailable ?? SANDBOXES_NEED_PODMAN);
   const storageError = (cause: unknown) => new EnvironmentStorageError({ cause });
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const platform = yield* HostProcess.Platform;
@@ -586,6 +618,8 @@ const make = Effect.gen(function* () {
         spaceId === null ? undefined : spaceResources.get(SpaceId.make(spaceId))?.resource;
       const summaries: Array<HubEnvironmentSummary> = [];
       for (const row of rows) {
+        // A Hub machine that runs no Threads is nowhere to run one: it is not offered.
+        if (row.kind === "hub" && !hubRunsAgents) continue;
         const resource = environmentResource(
           row,
           row.kind === "sandbox" ? spaceOf(row.spaceId) : undefined,
@@ -887,48 +921,50 @@ const make = Effect.gen(function* () {
     return Option.getOrUndefined(Option.map(space, (found) => found.id));
   }, Effect.mapError(storageError));
 
-  const chooseForThread: EnvironmentRegistry["Service"]["chooseForThread"] = Effect.fn(
-    "EnvironmentRegistry.chooseForThread",
-  )(function* ({ userId, requested, projectId, providerInstanceId, spaceId, threadId }) {
-    const preferred =
-      requested === undefined
-        ? ((yield* sql<{ readonly environmentId: string | null }>`
-            SELECT preferred_environment_id AS "environmentId"
-            FROM projection_projects WHERE project_id = ${projectId}
-          `.pipe(Effect.mapError(storageError)))[0]?.environmentId ?? null)
-        : null;
-    const environmentId =
-      requested ??
-      (preferred === null ? HUB_MACHINE_ENVIRONMENT_ID : EnvironmentId.make(preferred));
-    if (environmentId === HUB_MACHINE_ENVIRONMENT_ID) return environmentId;
+  interface Placement {
+    readonly userId: UserId | undefined;
+    readonly projectId: ProjectId;
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly spaceId?: SpaceId | undefined;
+    readonly threadId?: ThreadId | undefined;
+  }
+
+  /**
+   * The Environment checked for the Thread: usable by the User for the Thread's Space (`byHub`:
+   * the Space's own Sandbox, which the Hub places on with or without a User), a Sandbox made if
+   * missing, online or a Sandbox that starts for the work, with the provider once known.
+   */
+  const placeOn = Effect.fn("EnvironmentRegistry.placeOn")(function* (
+    input: Placement & { readonly environmentId: EnvironmentId; readonly byHub: boolean },
+  ) {
+    const { environmentId, userId, providerInstanceId } = input;
     const existing = yield* liveRow(environmentId);
     // A Space's Sandbox can be chosen before it exists: choosing it makes it.
     const sandboxSpace = sandboxSpaceOf(environmentId);
     const row: PolicyRow | undefined =
       existing ??
-      (requested !== undefined && sandboxSpace !== undefined
+      (sandboxSpace !== undefined
         ? { kind: "sandbox", ownerUserId: null, spaceId: sandboxSpace }
         : undefined);
     const principal = userId === undefined ? undefined : yield* principalOf(userId);
-    const workSpaceId =
-      row?.kind === "sandbox" ? yield* workSpaceOf({ projectId, spaceId, threadId }) : undefined;
+    const workSpaceId = row?.kind === "sandbox" ? yield* workSpaceOf(input) : undefined;
     const usable =
       row !== undefined &&
-      principal !== undefined &&
-      principal.inactive !== true &&
-      AccessPolicy.isAllowed(
-        decide(principal, "environment.use", yield* resourceOf(row, workSpaceId)),
-      );
+      (principal === undefined
+        ? input.byHub
+        : principal.inactive !== true &&
+          AccessPolicy.isAllowed(
+            decide(principal, "environment.use", yield* resourceOf(row, workSpaceId)),
+          ));
     if (row === undefined || !usable) {
-      // Only a choice of the User's own is refused; a preference set by someone else falls back.
-      if (requested === undefined) return HUB_MACHINE_ENVIRONMENT_ID;
       return yield* new ThreadEnvironmentUnavailableError({ environmentId, reason: "not-usable" });
     }
-    if (requested !== undefined && row.kind === "sandbox" && row.spaceId !== null) {
+    if (row.kind === "sandbox" && row.spaceId !== null) {
       if (Option.isNone(sandboxes)) {
         return yield* new ThreadEnvironmentUnavailableError({
           environmentId,
           reason: "sandbox-unavailable",
+          ...(sandboxesUnavailable === null ? {} : { detail: sandboxesUnavailable }),
         });
       }
       // Made here, started by the Thread's first work: placing never waits for it to boot.
@@ -947,17 +983,9 @@ const make = Effect.gen(function* () {
     }
     const current = existing ?? (yield* liveRow(environmentId));
     if (current === undefined) {
-      if (requested === undefined) return HUB_MACHINE_ENVIRONMENT_ID;
       return yield* new ThreadEnvironmentUnavailableError({ environmentId, reason: "not-usable" });
     }
     const summary = yield* summaryOf(current);
-    // An unavailable preference starts the Thread on the Hub machine, as the composer previews.
-    if (requested === undefined) {
-      return previewThreadPlacement({
-        preferred: { ...summary, usable: true },
-        providerInstanceId,
-      });
-    }
     // A Sandbox not running starts for the work; its providers are known once it ran.
     const startsForWork = current.kind === "sandbox" && summary.status !== "online";
     if (summary.status !== "online" && !startsForWork) {
@@ -978,6 +1006,70 @@ const make = Effect.gen(function* () {
       });
     }
     return environmentId;
+  });
+
+  /** The Project's preferred Environment, when the User may use it and it can take the Thread now. */
+  const preferredFor = Effect.fn("EnvironmentRegistry.preferredFor")(function* (input: Placement) {
+    const [project] = yield* sql<{ readonly environmentId: string | null }>`
+      SELECT preferred_environment_id AS "environmentId"
+      FROM projection_projects WHERE project_id = ${input.projectId}
+    `.pipe(Effect.mapError(storageError));
+    const preferred = project?.environmentId ?? null;
+    // The Hub machine is stored as no preference.
+    if (preferred === null || preferred === HUB_MACHINE_ENVIRONMENT_ID) return undefined;
+    const environmentId = EnvironmentId.make(preferred);
+    const row = yield* liveRow(environmentId);
+    if (row === undefined || input.userId === undefined) return undefined;
+    const principal = yield* principalOf(input.userId);
+    const workSpaceId = row.kind === "sandbox" ? yield* workSpaceOf(input) : undefined;
+    // A preference set by someone else, for a machine this User may not use, is passed over.
+    const usable =
+      principal.inactive !== true &&
+      AccessPolicy.isAllowed(
+        decide(principal, "environment.use", yield* resourceOf(row, workSpaceId)),
+      );
+    const summary = yield* summaryOf(row);
+    return canStartThreadOn({ ...summary, usable }, input.providerInstanceId)
+      ? environmentId
+      : undefined;
+  });
+
+  const chooseForThread: EnvironmentRegistry["Service"]["chooseForThread"] = Effect.fn(
+    "EnvironmentRegistry.chooseForThread",
+  )(function* (input) {
+    const { requested } = input;
+    if (requested === HUB_MACHINE_ENVIRONMENT_ID) {
+      if (hubRunsAgents) return requested;
+      return yield* new ThreadEnvironmentUnavailableError({
+        environmentId: requested,
+        name: "The Hub machine",
+        reason: "hub-machine",
+      });
+    }
+    if (requested !== undefined) {
+      return yield* placeOn({ ...input, environmentId: requested, byHub: false });
+    }
+    // Nobody chose: the Project's preference while it can take the Thread, as the composer previews.
+    const preferred = yield* preferredFor(input);
+    if (preferred !== undefined) return preferred;
+    // Otherwise where the Space's work runs: its Sandbox (the Hub machine while it runs agents).
+    if (hubRunsAgents) return HUB_MACHINE_ENVIRONMENT_ID;
+    const workSpaceId = yield* workSpaceOf(input);
+    if (Option.isNone(sandboxes) || workSpaceId === undefined) {
+      return yield* new ThreadEnvironmentUnavailableError({
+        environmentId:
+          workSpaceId === undefined
+            ? HUB_MACHINE_ENVIRONMENT_ID
+            : sandboxEnvironmentIdOf(workSpaceId),
+        reason: "no-environment",
+        detail: sandboxesUnavailable ?? "This Thread's Project belongs to no Space.",
+      });
+    }
+    return yield* placeOn({
+      ...input,
+      environmentId: sandboxEnvironmentIdOf(workSpaceId),
+      byHub: true,
+    });
   });
 
   const usableBy: EnvironmentRegistry["Service"]["usableBy"] = Effect.fn(
@@ -1036,6 +1128,8 @@ const make = Effect.gen(function* () {
 
   return EnvironmentRegistry.of({
     hubId,
+    hubRunsAgents,
+    sandboxesUnavailable,
     startSandbox,
     chooseForThread,
     usableBy,
@@ -1073,26 +1167,54 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(EnvironmentRegistry, make).pipe(
-  Layer.provide(AuditLog.layer),
-  Layer.provideMerge(EnvironmentConnections.layer),
+/** The registry without Sandboxes (the join flow's tests, a Hub without a runtime). */
+export const layerWith = (options: RegistryOptions = {}) =>
+  Layer.effect(EnvironmentRegistry, make(options)).pipe(
+    Layer.provide(AuditLog.layer),
+    Layer.provideMerge(EnvironmentConnections.layer),
+  );
+
+/** The registry without Sandboxes, its Hub machine running Threads: tests and the join flow. */
+export const layer = layerWith();
+
+/**
+ * The registry as the server runs it: with Sandboxes only when a runtime that runs them is on,
+ * and the Hub machine running Threads only with `T3CODE_HUB_RUNS_AGENTS` (or a dev Hub without
+ * Sandboxes).
+ */
+export const layerFromConfig = Layer.unwrap(
+  Effect.gen(function* () {
+    const sandboxes = yield* SandboxRuntimeFromConfig.fromConfig;
+    const hubRunsAgents = yield* SandboxRuntimeFromConfig.hubRunsAgentsFromConfig;
+    if (hubRunsAgents) {
+      yield* Effect.logWarning(
+        "The Hub machine runs Threads in the Hub's own process (development only: T3CODE_HUB_RUNS_AGENTS).",
+      );
+    } else if (sandboxes.unavailable !== null) {
+      yield* Effect.logWarning(
+        `No Environment runs new Threads by default: ${sandboxes.unavailable} Threads run only on machines their Users choose.`,
+      );
+    }
+    return Option.isNone(sandboxes.runtime)
+      ? layerWith({
+          hubRunsAgents,
+          ...(sandboxes.unavailable === null
+            ? {}
+            : { sandboxesUnavailable: sandboxes.unavailable }),
+        })
+      : layerWithSandboxes(sandboxes.runtime.value, { hubRunsAgents });
+  }),
 );
 
 /**
  * The registry with each Space's Sandbox run by `runtime`. The Sandboxes share the registry's
  * connections, so a Sandbox counts as started once its socket is the registry's.
  */
-/** The registry as the server runs it: with Sandboxes only when a runtime that runs them is on. */
-export const layerFromConfig = Layer.unwrap(
-  Effect.map(SandboxRuntimeFromConfig.fromConfig, (runtime) =>
-    Option.isNone(runtime) ? layer : layerWithSandboxes(runtime.value),
-  ),
-);
-
 export const layerWithSandboxes = <E, R>(
   runtime: Layer.Layer<SandboxRuntime.SandboxRuntime, E, R>,
+  options: Pick<RegistryOptions, "hubRunsAgents"> = {},
 ) =>
-  Layer.effect(EnvironmentRegistry, make).pipe(
+  Layer.effect(EnvironmentRegistry, make(options)).pipe(
     // Sandboxes start for work and stop when idle: the orchestration and the workspace RPCs ask
     // through `EnvironmentDemand`, which they see beside the registry.
     Layer.provideMerge(Sandboxes.layer.pipe(Layer.provide(runtime))),

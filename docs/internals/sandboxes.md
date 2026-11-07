@@ -123,6 +123,42 @@ waited for it finds its providers and executor. A server that ends first fails t
 with its exit code. A launch runs with the runtime's own services, never those of whoever asked
 for the start.
 
+## The Hub runs no agents
+
+What nobody places on another machine runs in its Space's Sandbox, never in the Hub's process
+([EnvironmentRegistry](../../apps/server/src/environments/EnvironmentRegistry.ts) `chooseForThread`,
+previewed by clients with `previewThreadPlacement`): the User's choice, else the Project's preferred
+Environment while it can take the Thread (usable, online or a Sandbox not failed, with the
+provider), else the Space's Sandbox, made if missing and counted while stopped or even failed (its
+work starts it, or says why). Work the Hub places with no User (a scheduled task without a creator)
+goes to the Sandbox of the Thread's Space too. Every path that makes a Thread goes through it: the
+composer, MCP-launched Threads and their children (`thread.create` through `ThreadManagementService`),
+scheduled tasks and other launches (`ThreadLaunchService`), Threads without a Project (their scratch
+Project's Space). Forks and delegated subagents copy their parent's Active environment.
+
+**`T3CODE_HUB_RUNS_AGENTS`** keeps the Hub machine's in-process executor running Threads, for
+development only (it isolates nothing from the Hub): `1`/`true` on, `0`/`false` off. Unset, it is on
+only for a dev Hub (`--dev-url`, so `vp run dev`) with no Sandbox runtime (`T3CODE_SANDBOX_RUNTIME`
+unset or `off`): contributors without Podman keep working as before Sandboxes. A production Hub,
+and a dev Hub with `T3CODE_SANDBOX_RUNTIME=process` or `podman`, do not offer it. While on, the Hub
+machine is listed and is the fallback instead of the Sandbox (a Sandbox runs only when chosen or
+preferred); the Hub logs it at startup. Tests keep it on by default (the testkit's `hubRunsAgents`,
+`EnvironmentRegistry.layer`), and the tests of this rule turn it off.
+
+While off:
+
+- The Hub machine is not in the Environments list, and choosing it (a new Thread or a move) is
+  refused (`hub-machine`). A Project's «Preferred environment» offers no preference, named after the
+  Space's Sandbox, and the User's own machines.
+- With no Sandboxes either, a new Thread nobody placed is refused, never run on the Hub:
+  «No Environment can run this Thread: <why>» (`no-environment`). The why is the Sandbox runtime's
+  own (`sandboxRuntimeFromConfig`: no rootless Podman or image, the Hub not on loopback only,
+  turned off), also in the list as `sandboxesUnavailable`, so the composer says it before sending
+  and still offers the User's own machines. The Hub logs it at startup.
+- At startup every Thread whose Active environment is the Hub machine needs an environment, as for a
+  removed machine (`EnvironmentReturnService`): its history stays, unfinished turns end, and it
+  moves to the Sandbox or a machine of its User's.
+
 ## Lifecycle: started for work, stopped when idle
 
 `sandboxes.status` is `stopped`, `starting`, `running` or `failed` (with `last_error`). The

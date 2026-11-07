@@ -505,11 +505,20 @@ for later, so start the machine and try again.
 ### Run Threads in your Space's Sandbox
 
 Every Space has a **Sandbox**: a server of its own that the Hub runs for that
-Space, with its own files, Project checkouts and provider sign-ins. Sandboxes
-need Podman on the Hub's machine; until the Hub can run them they are not
-listed, and choosing one says so. The composer's **Environment** picker lists it as **<Space> Sandbox** (for example
-**Acme Sandbox**) beside your machines. Pick it and send: the first time, the
-Hub creates the Sandbox, and later Threads reuse it. A Sandbox stops by itself
+Space, with its own files, Project checkouts and provider sign-ins. The Hub
+itself runs no agents: a Thread you start without choosing a machine runs in its
+Space's Sandbox (or on the Project's **Preferred environment**, while that one
+can take it). The composer's **Environment** picker lists it as **<Space> Sandbox** (for example
+**Acme Sandbox**) beside your machines. The first time, the
+Hub creates the Sandbox, and later Threads reuse it. Threads that ran on the Hub
+machine before Sandboxes say **Needs an environment**; move them to the Sandbox
+or one of your machines to go on.
+
+Sandboxes need Podman on the Hub's machine (see below). Until the Hub can run
+them they are not listed, and a new Thread can only run on a machine of your
+own: the composer says **No Environment can run this Thread** with the reason
+(for example that the Hub has no Podman, or does not listen on loopback only)
+until you pick one. A Sandbox stops by itself
 after 30 minutes with no turns, open terminals or previews
 (`T3CODE_SANDBOX_IDLE_SECONDS` on the Hub changes it), and starts again when you
 send a message, open a terminal or browse its files; meanwhile the Thread says

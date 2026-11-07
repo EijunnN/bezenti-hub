@@ -453,8 +453,8 @@ export const ChatHeader = memo(function ChatHeader({
                 {NEEDS_ENVIRONMENT_LABEL}
               </TooltipTrigger>
               <TooltipPopup side="top">
-                The machine this Thread ran on was removed. Its history is kept; move it to another
-                Environment to continue.
+                The machine this Thread ran on was removed or no longer runs Threads. Its history is
+                kept; move it to another Environment to continue.
               </TooltipPopup>
             </Tooltip>
           ) : null}

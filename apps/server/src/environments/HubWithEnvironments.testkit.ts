@@ -587,6 +587,13 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     readonly sandboxRuntime?: SandboxRuntimeOverRoot;
     /** False: no Sandbox runtime, as a production Hub without Podman. */
     readonly sandboxes?: boolean;
+    /**
+     * Whether the Hub machine runs Threads (`T3CODE_HUB_RUNS_AGENTS`). On by default, as the
+     * tests written before Sandboxes expect; off as a production Hub.
+     */
+    readonly hubRunsAgents?: boolean;
+    /** Why there are no Sandboxes, as the Hub says it (with `sandboxes: false`). */
+    readonly sandboxesUnavailable?: string;
   } = {},
 ) {
   const sandboxRoot = yield* FileSystem.FileSystem.pipe(
@@ -614,6 +621,12 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     listen: true,
     extend: withOrchestration(options.textGeneration),
     ...(options.sandboxes === false ? {} : { sandboxRuntime }),
+    registry: {
+      ...(options.hubRunsAgents === undefined ? {} : { hubRunsAgents: options.hubRunsAgents }),
+      ...(options.sandboxesUnavailable === undefined
+        ? {}
+        : { sandboxesUnavailable: options.sandboxesUnavailable }),
+    },
   });
   sandboxes.setHubUrl(server.url);
   /**

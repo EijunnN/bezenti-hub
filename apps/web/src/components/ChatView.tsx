@@ -62,6 +62,7 @@ import {
   orchestrationV2WorktreePending,
   type EnvironmentId,
   type MessageId,
+  NO_ENVIRONMENT_TITLE,
   type ModelSelection,
   type PreviewAnnotationPayload,
   ProviderInstanceId,
@@ -387,7 +388,7 @@ import { startHubEnvironment } from "../environments/primary/hubEnvironments";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/models";
 import { openMoveThreadDialog } from "./chat/MoveThreadDialog";
 import { Button } from "./ui/button";
-import { HubEnvironmentSelector } from "./chat/HubEnvironmentSelector";
+import { HubEnvironmentSelector, useNoPlacementMessage } from "./chat/HubEnvironmentSelector";
 
 const EMPTY_FEEDBACK_SUBMISSIONS: ReadonlyArray<CodexFeedbackSubmission> = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
@@ -1259,6 +1260,13 @@ export default function ChatView(props: ChatViewProps) {
   const selectedProvider = selectedProviderEntry?.driverKind ?? requestedDriverKind;
   const activeProviderInstanceId = selectedProviderEntry?.instanceId ?? null;
   const activeProviderStatus = selectedProviderEntry?.snapshot ?? null;
+  // A new Thread that would run nowhere (no Sandboxes, nothing chosen) says so before it is sent.
+  const newThreadNowhere = useNoPlacementMessage({
+    draftThreadId: isServerThread || !activeThread ? null : activeThread.id,
+    providerInstanceId: activeProviderInstanceId,
+    preferredEnvironmentId: activeProject?.preferredEnvironmentId ?? null,
+    spaceId: activeProject?.spaceId ?? null,
+  });
   const { enabled: interactionModeEnabled, interactionMode } = resolveComposerInteractionMode({
     planModeEnabled: settings.planModeEnabled,
     provider: activeProviderStatus,
@@ -2623,7 +2631,7 @@ export default function ChatView(props: ChatViewProps) {
                       : PAUSED_OFFLINE_LABEL,
                   description:
                     threadEnvState === "needs-environment"
-                      ? "The machine this Thread ran on was removed. Its history is kept: move it to another Environment to continue."
+                      ? "The machine this Thread ran on was removed or no longer runs Threads. Its history is kept: move it to another Environment to continue."
                       : `${threadActiveEnvironment?.name ?? "Its Environment"} is offline. The turn goes on when it comes back; messages you send now are queued until then, or until you move the Thread.`,
                   actions: (
                     <Button
@@ -2641,6 +2649,19 @@ export default function ChatView(props: ChatViewProps) {
                   ),
                 },
               ];
+    const placementItems: ComposerBannerStackItem[] =
+      newThreadNowhere === null
+        ? []
+        : [
+            {
+              id: "thread-environment:none",
+              variant: "error",
+              group: "environment",
+              icon: <TriangleAlertIcon />,
+              title: NO_ENVIRONMENT_TITLE,
+              description: newThreadNowhere,
+            },
+          ];
     // Someone else's Thread: say why the composer is closed, whatever state the Thread is in.
     const roleItems: ComposerBannerStackItem[] =
       threadRole.continueBlockedReason === null
@@ -2656,6 +2677,7 @@ export default function ChatView(props: ChatViewProps) {
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
       return [
         ...roleItems,
+        ...placementItems,
         ...environmentItems,
         ...feedbackBannerItems,
         ...fallbackItems,
@@ -2667,6 +2689,7 @@ export default function ChatView(props: ChatViewProps) {
     }
     return [
       ...roleItems,
+      ...placementItems,
       ...environmentItems,
       ...feedbackBannerItems,
       ...fallbackItems,

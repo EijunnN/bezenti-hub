@@ -6,6 +6,7 @@ import { HUB_MACHINE_ENVIRONMENT_ID } from "./environmentExecutor.ts";
 import { previewThreadPlacement } from "./hubEnvironments.ts";
 
 const laptop = EnvironmentId.make("laptop");
+const sandbox = EnvironmentId.make("sandbox:acme");
 const claude = ProviderInstanceId.make("claudeAgent");
 const provider = {
   instanceId: claude,
@@ -26,70 +27,80 @@ const preferred = (overrides: object = {}) => ({
 });
 
 describe("previewThreadPlacement", () => {
+  const onHub = (candidate: ReturnType<typeof preferred> | undefined) =>
+    previewThreadPlacement({
+      preferred: candidate,
+      providerInstanceId: claude,
+      hubMachine: true,
+      spaceSandbox: undefined,
+    });
+  const inSandbox = (candidate: ReturnType<typeof preferred> | undefined) =>
+    previewThreadPlacement({
+      preferred: candidate,
+      providerInstanceId: claude,
+      hubMachine: false,
+      spaceSandbox: { id: sandbox },
+    });
+
   it("starts on the preferred Environment only while it can run the Thread", () => {
-    expect(previewThreadPlacement({ preferred: preferred(), providerInstanceId: claude })).toBe(
-      laptop,
-    );
+    expect(onHub(preferred())).toBe(laptop);
+    expect(inSandbox(preferred())).toBe(laptop);
     for (const unavailable of [
       preferred({ usable: false }),
       preferred({ status: "offline" }),
       preferred({ status: "reconnecting" }),
       preferred({ providers: [{ ...provider, enabled: false }] }),
       preferred({ providers: [] }),
+      undefined,
     ]) {
-      expect(previewThreadPlacement({ preferred: unavailable, providerInstanceId: claude })).toBe(
-        HUB_MACHINE_ENVIRONMENT_ID,
-      );
+      expect(onHub(unavailable)).toBe(HUB_MACHINE_ENVIRONMENT_ID);
+      expect(inSandbox(unavailable)).toBe(sandbox);
     }
-    expect(previewThreadPlacement({ preferred: undefined, providerInstanceId: claude })).toBe(
-      HUB_MACHINE_ENVIRONMENT_ID,
-    );
+  });
+
+  it("falls back to the Space's Sandbox, and to nothing on a Hub that runs neither", () => {
+    expect(inSandbox(undefined)).toBe(sandbox);
+    // Not on the Hub machine unless it runs agents (the development setting).
+    expect(
+      previewThreadPlacement({
+        preferred: undefined,
+        providerInstanceId: claude,
+        hubMachine: false,
+        spaceSandbox: undefined,
+      }),
+    ).toBeNull();
+    expect(
+      previewThreadPlacement({
+        preferred: preferred({ status: "offline" }),
+        providerInstanceId: claude,
+        hubMachine: false,
+        spaceSandbox: undefined,
+      }),
+    ).toBeNull();
   });
 
   it("counts a Sandbox that is not running as available: the Hub starts it for the work", () => {
     for (const status of ["stopped", "starting"] as const) {
-      expect(
-        previewThreadPlacement({
-          preferred: preferred({ kind: "sandbox", status, providers: [] }),
-          providerInstanceId: claude,
-        }),
-      ).toBe(laptop);
+      expect(onHub(preferred({ kind: "sandbox", status, providers: [] }))).toBe(laptop);
     }
     // Not once its start failed, nor stopped without the provider it reported.
+    expect(onHub(preferred({ kind: "sandbox", status: "failed", providers: [] }))).toBe(
+      HUB_MACHINE_ENVIRONMENT_ID,
+    );
     expect(
-      previewThreadPlacement({
-        preferred: preferred({ kind: "sandbox", status: "failed", providers: [] }),
-        providerInstanceId: claude,
-      }),
-    ).toBe(HUB_MACHINE_ENVIRONMENT_ID);
-    expect(
-      previewThreadPlacement({
-        preferred: preferred({
+      onHub(
+        preferred({
           kind: "sandbox",
           status: "stopped",
           providers: [{ ...provider, enabled: false }],
         }),
-        providerInstanceId: claude,
-      }),
+      ),
     ).toBe(HUB_MACHINE_ENVIRONMENT_ID);
-    expect(
-      previewThreadPlacement({
-        preferred: preferred({ kind: "sandbox", status: "stopped" }),
-        providerInstanceId: claude,
-      }),
-    ).toBe(laptop);
+    expect(onHub(preferred({ kind: "sandbox", status: "stopped" }))).toBe(laptop);
     // Running, it is held to its providers like any machine; nobody may use it, nothing.
-    expect(
-      previewThreadPlacement({
-        preferred: preferred({ kind: "sandbox", providers: [] }),
-        providerInstanceId: claude,
-      }),
-    ).toBe(HUB_MACHINE_ENVIRONMENT_ID);
-    expect(
-      previewThreadPlacement({
-        preferred: preferred({ kind: "sandbox", status: "stopped", usable: false }),
-        providerInstanceId: claude,
-      }),
-    ).toBe(HUB_MACHINE_ENVIRONMENT_ID);
+    expect(onHub(preferred({ kind: "sandbox", providers: [] }))).toBe(HUB_MACHINE_ENVIRONMENT_ID);
+    expect(onHub(preferred({ kind: "sandbox", status: "stopped", usable: false }))).toBe(
+      HUB_MACHINE_ENVIRONMENT_ID,
+    );
   });
 });

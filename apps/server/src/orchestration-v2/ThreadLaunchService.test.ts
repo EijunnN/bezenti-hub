@@ -562,6 +562,8 @@ it.effect("places a launch for the Space its Thread will be claimed in, not the 
       }),
       Layer.mock(EnvironmentRegistry.EnvironmentRegistry)({
         hubId: EnvironmentId.make("hub"),
+        hubRunsAgents: true,
+        sandboxesUnavailable: null,
         chooseForThread: (input) =>
           Effect.sync(() => {
             asked.push(input.spaceId);

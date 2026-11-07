@@ -68,7 +68,7 @@ const handlers = HttpApiBuilder.group(
               EnvironmentStorageError: failStorage,
             }),
           );
-          return { environments };
+          return { environments, sandboxesUnavailable: registry.sandboxesUnavailable };
         }),
       )
       .handle(
@@ -105,7 +105,7 @@ const handlers = HttpApiBuilder.group(
                 EnvironmentStorageError: failStorage,
               }),
             );
-          return { environments };
+          return { environments, sandboxesUnavailable: registry.sandboxesUnavailable };
         }),
       )
       .handle(

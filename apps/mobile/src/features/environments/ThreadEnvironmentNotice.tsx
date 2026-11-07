@@ -37,7 +37,7 @@ export function ThreadEnvironmentNotice(props: {
     move !== null
       ? `Moving to ${environmentNameOf(environments, move.targetEnvironmentId)}: ${moveStepLabel(move)}`
       : state === "needs-environment"
-        ? "Needs an environment: the machine this Thread ran on was removed. Move it to continue."
+        ? "Needs an environment: the machine this Thread ran on was removed or no longer runs Threads. Move it to continue."
         : `${props.runsOn?.text ?? ""}. The turn resumes when the machine comes back, or move the Thread.`;
   return (
     <View

@@ -100,29 +100,46 @@ export const layer: Layer.Layer<
       );
 
     /**
-     * Every Thread on a removed Environment (or only `environmentId`'s) has none from now on:
+     * Every Thread on a removed Environment (or only `environmentId`'s), and at startup every
+     * Thread on a Hub machine that no longer runs Threads, has none from now on:
      * «needs an environment», its history intact, until it moves. Its unfinished turns end on the
      * Hub, whatever the Hub still knows of their sessions (nothing, after a restart).
      */
     const releaseRemoved = Effect.fn("EnvironmentReturns.releaseRemoved")(function* (
       environmentId?: EnvironmentId,
     ) {
+      // A Hub machine that runs no Threads (`T3CODE_HUB_RUNS_AGENTS` off) is gone for its Threads
+      // as a removed machine is: checked as the Hub starts.
+      const hubMachineGone =
+        environmentId === undefined &&
+        Option.isSome(environments) &&
+        !environments.value.hubRunsAgents;
       const rows = yield* sql<{ readonly threadId: string; readonly environmentId: string }>`
         SELECT thread.thread_id AS "threadId", thread.active_environment_id AS "environmentId"
         FROM orchestration_v2_projection_threads thread
         JOIN environments ON environments.environment_id = thread.active_environment_id
-        WHERE environments.revoked_at IS NOT NULL AND thread.deleted_at IS NULL
+        WHERE thread.deleted_at IS NULL
+          AND (environments.revoked_at IS NOT NULL
+            OR (${hubMachineGone ? 1 : 0} = 1 AND environments.kind = 'hub'))
           AND (${environmentId ?? null} IS NULL OR environments.environment_id = ${environmentId ?? null})
       `;
-      const released: Array<{ readonly threadId: ThreadId; readonly name: string }> = [];
+      const released: Array<{
+        readonly threadId: ThreadId;
+        readonly name: string;
+        readonly hubMachine: boolean;
+      }> = [];
       for (const row of rows) {
         const threadId = ThreadId.make(row.threadId);
+        const hubMachine = row.environmentId === HUB_MACHINE_ENVIRONMENT_ID;
         const name = yield* nameOf(row.environmentId as EnvironmentId);
         yield* threadLocks.withLock(
           threadId,
           Effect.gen(function* () {
             const thread = yield* projections.getThread(threadId);
-            if (thread.activeEnvironmentId !== row.environmentId) return;
+            // A Thread on the Hub machine may name none: absent means the Hub machine.
+            if ((thread.activeEnvironmentId ?? HUB_MACHINE_ENVIRONMENT_ID) !== row.environmentId) {
+              return;
+            }
             const now = yield* DateTime.now;
             yield* eventSink.write({
               events: [
@@ -138,7 +155,7 @@ export const layer: Layer.Layer<
             });
           }),
         );
-        released.push({ threadId, name });
+        released.push({ threadId, name, hubMachine });
       }
       // Threads already without an Environment (released before a restart) whose turns did not
       // end yet end now too.
@@ -153,13 +170,19 @@ export const layer: Layer.Layer<
                 AND run.status IN ('preparing', 'starting', 'running', 'waiting')
             `;
       for (const row of stranded) {
-        released.push({ threadId: ThreadId.make(row.threadId), name: "Its Environment" });
+        released.push({
+          threadId: ThreadId.make(row.threadId),
+          name: "Its Environment",
+          hubMachine: false,
+        });
       }
       // Outside the Thread's lock: ending a turn is a command, which takes it.
-      for (const { threadId, name } of released) {
+      for (const { threadId, name, hubMachine } of released) {
         yield* interruptRunsOnHub(orchestrator, {
           threadId,
-          reason: `${name} was removed from the Hub while this turn ran there. Move the Thread to another Environment to continue.`,
+          reason: hubMachine
+            ? "The Hub machine no longer runs Threads, so this turn ended. Move the Thread to another Environment to continue."
+            : `${name} was removed from the Hub while this turn ran there. Move the Thread to another Environment to continue.`,
           key: "environment-removed",
         });
       }

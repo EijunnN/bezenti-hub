@@ -8,6 +8,7 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
+import { SANDBOXES_NEED_PODMAN } from "@t3tools/contracts";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -90,29 +91,51 @@ const podmanForHub = (config: { readonly devUrl: URL | undefined }, image: strin
   });
 };
 
+/** Why a Hub runs no Sandboxes: logged at startup, and what placement and the composer say. */
+const LOOPBACK_ONLY =
+  "Podman Sandboxes need the Hub to listen on loopback only (T3CODE_HOST=127.0.0.1, published through a reverse proxy or `t3 up`), since a container reaches every other address of this machine.";
+
+/**
+ * The Sandbox runtime this Hub runs, or none with why (`unavailable`, which placement and the
+ * composer show). Unset, only a production Hub looks for Podman: a dev Hub or a joined machine
+ * runs none.
+ */
 export const fromConfig = Effect.gen(function* () {
   const setting = Option.getOrUndefined(yield* optionalSetting(SANDBOX_RUNTIME_SETTING));
   const config = yield* ServerConfig.ServerConfig;
-  if (setting === "off") return Option.none();
+  const none = (unavailable: string) => ({ runtime: Option.none(), unavailable }) as const;
+  if (setting === "off") {
+    return none(`Sandboxes are turned off on this Hub (${SANDBOX_RUNTIME_SETTING}=off).`);
+  }
   if (setting !== undefined && setting !== "process" && setting !== "podman") {
     yield* Effect.logWarning(
       `Sandboxes are off: ${SANDBOX_RUNTIME_SETTING}=${setting} is not podman, process or off.`,
     );
-    return Option.none();
+    return none(
+      `Sandboxes are off on this Hub: ${SANDBOX_RUNTIME_SETTING}=${setting} is not podman, process or off.`,
+    );
   }
-  // Unset, only a production Hub looks for Podman: a dev Hub or a joined machine runs none.
   if (setting === undefined && (config.devUrl !== undefined || config.joinedHub !== undefined)) {
-    return Option.none();
+    return none(
+      `This development Hub runs no Sandboxes: start it with ${SANDBOX_RUNTIME_SETTING}=process (or podman).`,
+    );
   }
   const hubUrl = ProcessSandboxRuntime.sandboxHubLoopbackUrl(config);
   const addressOf = (url: string) =>
     Layer.succeed(SandboxHubAddress, SandboxHubAddress.of({ loopbackUrl: Effect.succeed(url) }));
   if (setting === "process") {
+    const unavailable = "Sandboxes need the Hub to listen on loopback, and this Hub does not.";
     if (hubUrl === undefined) {
       yield* Effect.logWarning("Sandboxes are off: the Hub does not listen on loopback.");
-      return Option.none();
+      return none(unavailable);
     }
-    return Option.map(ProcessSandboxRuntime.forHub(config), Layer.provide(addressOf(hubUrl)));
+    const runtime = Option.map(
+      ProcessSandboxRuntime.forHub(config),
+      Layer.provide(addressOf(hubUrl)),
+    );
+    return Option.isNone(runtime)
+      ? none("The process Sandbox runtime needs the Hub's own entry point.")
+      : { runtime, unavailable: null };
   }
   const image = Option.getOrElse(
     yield* optionalSetting(SANDBOX_IMAGE_SETTING),
@@ -121,22 +144,49 @@ export const fromConfig = Effect.gen(function* () {
   if (hubUrl === undefined || !hubHostAllowsPodman(config.host)) {
     // Said whenever Podman could have run them, so a Hub left on 0.0.0.0 learns why it has none.
     if (setting === "podman" || (yield* detectPodman(image)).rootless) {
-      yield* Effect.logWarning(
-        "Sandboxes are off: Podman is here, but Podman Sandboxes need the Hub to listen on loopback only (T3CODE_HOST=127.0.0.1, published through a reverse proxy or `t3 up`), since a container reaches every other address of this machine.",
-      );
+      yield* Effect.logWarning(`Sandboxes are off: Podman is here, but ${LOOPBACK_ONLY}`);
+      return none(LOOPBACK_ONLY);
     }
-    return Option.none();
+    return none(SANDBOXES_NEED_PODMAN);
   }
   const detected = yield* detectPodman(image);
   if (!detected.rootless) {
     if (setting === "podman") {
       yield* Effect.logWarning("Sandboxes are off: rootless Podman is not available here.");
     }
-    return Option.none();
+    return none(SANDBOXES_NEED_PODMAN);
   }
   if (setting === undefined && !detected.image) {
     yield* Effect.logInfo(`Sandboxes are off: Podman is here but the image ${image} is not built.`);
-    return Option.none();
+    return none(`Sandboxes need the Sandbox image ${image}, which is not built on this Hub yet.`);
   }
-  return Option.some(podmanForHub(config, image).pipe(Layer.provide(addressOf(hubUrl))));
+  return {
+    runtime: Option.some(podmanForHub(config, image).pipe(Layer.provide(addressOf(hubUrl)))),
+    unavailable: null,
+  };
+});
+
+/**
+ * Whether the Hub machine's in-process executor still runs Threads (development only: it isolates
+ * nothing). Unset, only a dev Hub without a Sandbox runtime runs them, so `vp run dev` works
+ * without Podman. See docs/internals/sandboxes.md, «The Hub runs no agents».
+ */
+const HUB_RUNS_AGENTS_SETTING = "T3CODE_HUB_RUNS_AGENTS";
+
+export const hubRunsAgentsFromConfig = Effect.gen(function* () {
+  const setting = Option.getOrUndefined(yield* optionalSetting(HUB_RUNS_AGENTS_SETTING))
+    ?.trim()
+    .toLowerCase();
+  if (setting === "1" || setting === "true") return true;
+  if (setting === "0" || setting === "false") return false;
+  if (setting !== undefined && setting !== "") {
+    yield* Effect.logWarning(
+      `${HUB_RUNS_AGENTS_SETTING}=${setting} is not 1, true, 0 or false: the Hub machine runs no Threads.`,
+    );
+    return false;
+  }
+  const config = yield* ServerConfig.ServerConfig;
+  if (config.devUrl === undefined || config.joinedHub !== undefined) return false;
+  const runtime = Option.getOrUndefined(yield* optionalSetting(SANDBOX_RUNTIME_SETTING));
+  return runtime !== "process" && runtime !== "podman";
 });

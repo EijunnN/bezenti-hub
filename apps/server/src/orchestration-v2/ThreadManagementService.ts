@@ -962,7 +962,7 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
           const environmentId = thread.activeEnvironmentId;
           if (environmentId === null) {
             return yield* reject(
-              "This Thread needs an environment: the machine it ran on was removed. Move it to another Environment to continue.",
+              "This Thread needs an environment: the machine it ran on was removed or no longer runs Threads. Move it to another Environment to continue.",
             );
           }
           if (

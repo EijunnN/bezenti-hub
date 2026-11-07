@@ -17,8 +17,9 @@ import { HUB_MACHINE_ENVIRONMENT_ID } from "./environmentExecutor.ts";
 import { AuthReauth } from "./userAccounts.ts";
 
 /**
- * The Hub machine runs in the Hub's own process; an external one joined with `t3 join`; a
- * Sandbox is the Space's own joined server, which the Hub runs for it.
+ * The Hub machine runs in the Hub's own process (and runs Threads only in development,
+ * `T3CODE_HUB_RUNS_AGENTS`); an external one joined with `t3 join`; a Sandbox is the Space's own
+ * joined server, which the Hub runs for it.
  */
 export const HubEnvironmentKind = Schema.Literals(["hub", "external", "sandbox"]);
 export type HubEnvironmentKind = typeof HubEnvironmentKind.Type;
@@ -74,40 +75,72 @@ export const HubEnvironmentSummary = Schema.Struct({
 });
 export type HubEnvironmentSummary = typeof HubEnvironmentSummary.Type;
 
+type PlacementCandidate = Pick<HubEnvironmentSummary, "id" | "kind" | "status" | "providers"> & {
+  readonly usable: boolean;
+};
+
 /**
- * Where a new Thread nobody placed starts, by the Hub and as clients preview it: the Project's
- * preferred Environment when the User may use it, it is online (a Sandbox counts while stopped or
- * starting, not once its start failed) and it has the provider (as far as it is known); otherwise
- * the Hub machine.
+ * Whether a new Thread can start on the Environment now: the User may use it, it is online (a
+ * Sandbox counts while stopped or starting, not once its start failed: the Hub starts it for the
+ * work) and it has the provider, as far as it is known (a Sandbox that never ran reported none).
+ */
+export function canStartThreadOn(
+  candidate: PlacementCandidate,
+  providerInstanceId: string,
+): boolean {
+  if (!candidate.usable) return false;
+  if (candidate.kind === "hub") return true;
+  if (candidate.kind === "sandbox" && candidate.status !== "online") {
+    if (candidate.status === "failed") return false;
+    if (candidate.providers.length === 0) return true;
+  } else if (candidate.status !== "online") {
+    return false;
+  }
+  const provider = candidate.providers.find((entry) => entry.instanceId === providerInstanceId);
+  return provider !== undefined && provider.enabled && provider.installed;
+}
+
+/**
+ * Where a new Thread nobody placed starts, by the Hub and as clients preview it: the preferred
+ * Environment while it can take the Thread, else the Space's Sandbox (even stopped or failed: its
+ * work starts it), or the Hub machine instead while it runs agents (`T3CODE_HUB_RUNS_AGENTS`).
+ * Null: nothing can run it.
  */
 export function previewThreadPlacement(input: {
-  readonly preferred:
-    | (Pick<HubEnvironmentSummary, "id" | "kind" | "status" | "providers"> & {
-        readonly usable: boolean;
-      })
-    | undefined;
+  readonly preferred: PlacementCandidate | undefined;
   readonly providerInstanceId: string;
-}): EnvironmentId {
+  /** Whether the Hub machine runs Threads; the Hub lists it only then. */
+  readonly hubMachine: boolean;
+  /** The Space's Sandbox, when the Hub runs Sandboxes and the User may run Threads there. */
+  readonly spaceSandbox: { readonly id: EnvironmentId } | undefined;
+}): EnvironmentId | null {
   const preferred = input.preferred;
-  if (preferred === undefined || !preferred.usable) return HUB_MACHINE_ENVIRONMENT_ID;
-  if (preferred.kind === "hub") return preferred.id;
-  const provider = preferred.providers.find(
-    (entry) => entry.instanceId === input.providerInstanceId,
-  );
-  if (preferred.kind === "sandbox" && preferred.status !== "online") {
-    if (preferred.status === "failed") return HUB_MACHINE_ENVIRONMENT_ID;
-    // Before it ever ran its providers are unknown; after, it must have this one.
-    if (preferred.providers.length === 0) return preferred.id;
-  } else if (preferred.status !== "online") {
-    return HUB_MACHINE_ENVIRONMENT_ID;
+  if (preferred !== undefined && canStartThreadOn(preferred, input.providerInstanceId)) {
+    return preferred.id;
   }
-  return provider !== undefined && provider.enabled && provider.installed
-    ? preferred.id
-    : HUB_MACHINE_ENVIRONMENT_ID;
+  if (input.hubMachine) return HUB_MACHINE_ENVIRONMENT_ID;
+  return input.spaceSandbox?.id ?? null;
 }
+
+/** What the Hub and the composer say when a new Thread has nowhere to run, and why. */
+export const NO_ENVIRONMENT_TITLE = "No Environment can run this Thread";
+export const noEnvironmentMessage = (why: string) => `${NO_ENVIRONMENT_TITLE}: ${why}`;
+
+/** Why a Hub runs no Sandboxes, when it cannot say more (older Hubs, tests). */
+export const SANDBOXES_NEED_PODMAN =
+  "Sandboxes need Podman on the Hub, which this Hub does not have yet.";
+
+/** What a User without a place for a new Thread can do about it. */
+export const NO_ENVIRONMENT_ADVICE =
+  "Choose one of your own machines, or see «Run Threads in your Space's Sandbox» in the install guide.";
 
 export const HubEnvironmentList = Schema.Struct({
   environments: Schema.Array(HubEnvironmentSummary),
+  /**
+   * Why this Hub runs no Sandboxes (no rootless Podman or image, not on loopback only, turned
+   * off); null while it runs them. Absent from older Hubs.
+   */
+  sandboxesUnavailable: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 export type HubEnvironmentList = typeof HubEnvironmentList.Type;
 

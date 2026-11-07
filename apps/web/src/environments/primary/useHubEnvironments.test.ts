@@ -73,6 +73,36 @@ describe("previewDefaultEnvironment", () => {
       }),
     ).toBe(HUB_MACHINE_ENVIRONMENT_ID);
   });
+
+  it("starts in the Space's Sandbox on a Hub whose machine runs no Threads, and nowhere without one", () => {
+    const sandbox = machine("sandbox:acme", {
+      kind: "sandbox",
+      mode: "sandbox",
+      ownerUserId: null,
+      status: "stopped",
+      providers: [],
+    });
+    const offline = machine("laptop", { status: "offline" });
+    const preview = (environments: ReadonlyArray<HubEnvironmentSummary>) =>
+      previewDefaultEnvironment({
+        environments,
+        preferredEnvironmentId: offline.id,
+        providerInstanceId: claude,
+        userId: ada,
+      });
+    expect(preview([sandbox, offline])).toBe(sandbox.id);
+    expect(preview([offline])).toBeNull();
+    expect(preview([])).toBeNull();
+    // A preferred Sandbox that never ran counts: it starts for the Thread.
+    expect(
+      previewDefaultEnvironment({
+        environments: [sandbox],
+        preferredEnvironmentId: sandbox.id,
+        providerInstanceId: claude,
+        userId: ada,
+      }),
+    ).toBe(sandbox.id);
+  });
 });
 
 describe("threadEnvironmentState", () => {
