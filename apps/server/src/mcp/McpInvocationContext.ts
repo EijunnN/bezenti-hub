@@ -36,27 +36,11 @@ export interface McpClientCaller {
   readonly sessionId: string;
   readonly label: string;
   readonly access: AuthMcpClientAccess;
-  /**
-   * Another T3 Code environment's peer link. What it starts here carries its
-   * session as `linkOrigin`, and it changes only that work (`linkOrigin.ts`).
-   */
-  readonly linked?: boolean | undefined;
-  /**
-   * Narrower modes the client asked for on this request (`T3-Mode-Limit`):
-   * another environment passing on the limits of the agent it calls for.
-   */
+  /** Narrower modes than it was approved with: an administrator's runtime-mode ceiling. */
   readonly narrowedTo?: ClientModes | undefined;
   /** An outside client's thread links open on this Hub origin, as Copy thread's do. */
   readonly hubOrigin?: string | undefined;
 }
-
-/**
- * `T3-Mode-Limit: <runtimeMode>/<interactionMode>` lets an OAuth client cap
- * a request below what it was approved with: another environment passes on
- * the limits of the agent it calls for. It can only narrow (see
- * `clientModeCeiling`), so a client gains nothing by sending a broad one.
- */
-export const MODE_LIMIT_HEADER = "t3-mode-limit";
 
 export interface ClientModes {
   readonly runtimeMode: RuntimeMode;
@@ -73,7 +57,7 @@ const interactionModeRank: Record<ProviderInteractionMode, number> = { plan: 0, 
 
 /**
  * The modes a client caller's writes are capped at: what it was approved
- * with, narrowed by what it asked for on this request. A read-only client
+ * with, narrowed by `narrowedTo`. A read-only client
  * never reaches a write (`McpToolAccess` refuses it first), so it maps to the
  * lowest runtime mode rather than to nothing.
  */
@@ -137,8 +121,6 @@ export interface McpInvocationScope {
    * for a Thread with no owner), which reads as the Owner.
    */
   readonly userId?: UserId;
-  /** False while the Linked environments beta is off here; `/mcp` reads it per request. */
-  readonly linkedEnvironments?: boolean;
 }
 
 /**
@@ -167,13 +149,6 @@ export const hiddenFromSubagents = (): boolean => {
   const fiber = Fiber.getCurrent();
   const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
   return scope?.thread?.subagent !== true;
-};
-
-/** `McpSchema.EnabledWhen` for tools that only serve links, hidden while the beta is off. */
-export const hiddenWhileLinksOff = (): boolean => {
-  const fiber = Fiber.getCurrent();
-  const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
-  return scope?.linkedEnvironments !== false;
 };
 
 export type McpCapabilityError<C extends McpCapability> = C extends "preview"

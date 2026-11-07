@@ -25,7 +25,6 @@ import { AppText as Text } from "../../components/ui/AppText";
 import { environmentThreadDetails } from "../../state/threads";
 import { NativeStackScreenOptions, nativeHeaderScrollEdgeEffects } from "../../native/StackHeader";
 import { NativeHeader, NativeScreen } from "../../native/ThemedScreenStack";
-import { useEnvironments } from "../../state/environments";
 import { SubagentRow } from "./SubagentRow";
 import { useVisibleSecondClock } from "./use-visible-second-clock";
 import { SubagentStopButton } from "./SubagentStopButton";
@@ -179,17 +178,13 @@ function AgentRow(props: {
   readonly onOpen: (child: { environmentId: EnvironmentId; threadId: ThreadId }) => void;
 }) {
   const { subagent } = props;
-  const { presentationById } = useEnvironments();
-  const target = subagentThreadTarget(subagent, props.environmentId, (id) =>
-    presentationById.has(id),
-  );
+  const target = subagentThreadTarget(subagent, props.environmentId);
 
   const row = (
     <View className="py-3.5">
       <SubagentRow
         environmentId={props.environmentId}
         subagent={subagent}
-        canOpenRemote={target !== null}
         elapsed={<AgentElapsed subagent={subagent} tickSeconds={props.tickSeconds} />}
       />
     </View>
@@ -200,11 +195,7 @@ function AgentRow(props: {
       <View
         accessible
         className="min-w-0 flex-1"
-        accessibilityHint={
-          subagent.remoteChild === undefined
-            ? "Provider-managed agent. Its work appears in the transcript."
-            : `Runs on ${subagent.remoteChild.label}. Connect to it to open its thread.`
-        }
+        accessibilityHint="Provider-managed agent. Its work appears in the transcript."
       >
         {row}
       </View>

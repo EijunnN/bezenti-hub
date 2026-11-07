@@ -413,6 +413,44 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("SessionStore.lay
     ),
   );
 
+  it.effect("refuses a removed Peer Link's session as revoked", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const secrets = yield* ServerSecretStore.ServerSecretStore;
+      const issued = yield* sessions.issue({
+        subject: "mcp-client",
+        method: "bearer-access-token",
+        scopes: ["orchestration:read"],
+      });
+      const signer = yield* PayloadSigner.fromSecret(
+        yield* secrets.getOrCreateRandom("server-signing-key", 32),
+      );
+      // The claims another server's link was issued with: the same session, marked as a link.
+      const claims = base64UrlDecodeUtf8(issued.token.split(".")[0]!);
+      const payload = base64UrlEncode(claims.replace(/}$/, ',"plk":1}'));
+      const linkToken = `${payload}.${yield* signer.sign(payload)}`;
+
+      expect((yield* sessions.verify(issued.token)).sessionId).toBe(issued.sessionId);
+      const refused = yield* sessions.verify(linkToken).pipe(Effect.flip);
+      expect(refused._tag).toBe("SessionTokenRevokedError");
+      // The refusal is recorded once, so the session no longer lists as active.
+      expect(
+        (yield* sessions.listActive()).some((session) => session.sessionId === issued.sessionId),
+      ).toBe(false);
+      const again = yield* sessions.verify(issued.token).pipe(Effect.flip);
+      expect(again._tag).toBe("SessionTokenRevokedError");
+    }).pipe(
+      Effect.provide(
+        SessionStore.layer.pipe(
+          Layer.provideMerge(ServerSecretStore.layer),
+          Layer.provide(SqlitePersistence.layerMemory),
+          Layer.provide(layerServerEnvironment(EnvironmentId.make("test-environment"))),
+          Layer.provide(layerServerConfig()),
+        ),
+      ),
+    ),
+  );
+
   it.effect("atomically replaces active sessions with the same subject and method", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionStore.SessionStore;

@@ -26,60 +26,16 @@ const seedPreview = Effect.gen(function* () {
   `;
 });
 
+// Everything from the preview's 53 on, except V2 itself (55), which the preview already applied.
+const migrationsAfterPreview = migrationManifest.filter(([id]) => id >= 53 && id !== 55);
+
 describe("V2 preview upgrade", () => {
   it.effect("upgrades a published preview without replaying V2 or losing import progress", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* seedPreview;
       const imports = yield* sql`SELECT * FROM orchestration_v2_legacy_imports`;
-      assert.deepStrictEqual(yield* runMigrations(), [
-        [53, "PullRequestFilesViewed"],
-        [54, "ProjectionThreadsAutoSettleDisabledAt"],
-        [56, "RemoveRedundantProjectionIndexes"],
-        [57, "ScheduledTaskWebhooks"],
-        [58, "WebhookRelayDeliveries"],
-        [59, "McpAppModelContext"],
-        [60, "ThreadSnapshotWindowIndexes"],
-        [61, "PullRequestReviewGuides"],
-        [62, "ThreadFailureLookupIndex"],
-        [63, "DropUnusedV1Projections"],
-        [64, "CanonicalizeThreadPullRequestLinks"],
-        [65, "CodexUsageNativeTurnIndex"],
-        [66, "RepairClientSettlementTimestamps"],
-        [67, "WebhookDedupe"],
-        [68, "ShellStopRequestIndex"],
-        [69, "ThreadMessageSearch"],
-        [70, "PeerLinks"],
-        [71, "PeerLinkFence"],
-        [72, "WaitingLinkRequestIndex"],
-        [73, "ActiveTurnItemIndexes"],
-        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
-        [75, "SubagentDeliveryState"],
-        [76, "ProjectionProjectsPinArchive"],
-        [77, "RepairBooleanSettledOverride"],
-        [78, "DropOrchestrationEventCorrelationIndex"],
-        [79, "DelegatedRecoveryIndexes"],
-        [80, "Users"],
-        [81, "AuthSessionUserId"],
-        [82, "UserPasswordsTotpAndResetLinks"],
-        [83, "UserBoundSessions"],
-        [84, "Spaces"],
-        [85, "PersonalSpaceWithUser"],
-        [86, "SpaceInvitations"],
-        [87, "CommandReceiptActor"],
-        [88, "ScheduledTaskOwner"],
-        [89, "UserAccessNarrowed"],
-        [90, "InstallationPermissions"],
-        [91, "SpaceDeleting"],
-        [92, "InactiveUsers"],
-        [93, "AuditLog"],
-        [94, "Environments"],
-        [95, "ProjectCheckouts"],
-        [96, "ThreadActiveEnvironment"],
-        [97, "CheckpointUploads"],
-        [99, "MoveHandoffs"],
-        [100, "Sandboxes"],
-      ]);
+      assert.deepStrictEqual(yield* runMigrations(), migrationsAfterPreview);
       assert.deepStrictEqual(yield* runMigrations(), []);
       assert.deepStrictEqual(yield* sql`SELECT * FROM orchestration_v2_legacy_imports`, imports);
       const history = yield* sql<{ readonly migration_id: number; readonly name: string }>`
@@ -154,54 +110,7 @@ describe("V2 preview upgrade", () => {
       );
       assert.strictEqual((yield* sql`SELECT * FROM orchestration_v2_legacy_imports`).length, 1);
       yield* sql`DROP TRIGGER fail_preview_upgrade`;
-      assert.deepStrictEqual(yield* runMigrations(), [
-        [53, "PullRequestFilesViewed"],
-        [54, "ProjectionThreadsAutoSettleDisabledAt"],
-        [56, "RemoveRedundantProjectionIndexes"],
-        [57, "ScheduledTaskWebhooks"],
-        [58, "WebhookRelayDeliveries"],
-        [59, "McpAppModelContext"],
-        [60, "ThreadSnapshotWindowIndexes"],
-        [61, "PullRequestReviewGuides"],
-        [62, "ThreadFailureLookupIndex"],
-        [63, "DropUnusedV1Projections"],
-        [64, "CanonicalizeThreadPullRequestLinks"],
-        [65, "CodexUsageNativeTurnIndex"],
-        [66, "RepairClientSettlementTimestamps"],
-        [67, "WebhookDedupe"],
-        [68, "ShellStopRequestIndex"],
-        [69, "ThreadMessageSearch"],
-        [70, "PeerLinks"],
-        [71, "PeerLinkFence"],
-        [72, "WaitingLinkRequestIndex"],
-        [73, "ActiveTurnItemIndexes"],
-        [74, "ExcludeAttachmentPlaceholdersFromSearch"],
-        [75, "SubagentDeliveryState"],
-        [76, "ProjectionProjectsPinArchive"],
-        [77, "RepairBooleanSettledOverride"],
-        [78, "DropOrchestrationEventCorrelationIndex"],
-        [79, "DelegatedRecoveryIndexes"],
-        [80, "Users"],
-        [81, "AuthSessionUserId"],
-        [82, "UserPasswordsTotpAndResetLinks"],
-        [83, "UserBoundSessions"],
-        [84, "Spaces"],
-        [85, "PersonalSpaceWithUser"],
-        [86, "SpaceInvitations"],
-        [87, "CommandReceiptActor"],
-        [88, "ScheduledTaskOwner"],
-        [89, "UserAccessNarrowed"],
-        [90, "InstallationPermissions"],
-        [91, "SpaceDeleting"],
-        [92, "InactiveUsers"],
-        [93, "AuditLog"],
-        [94, "Environments"],
-        [95, "ProjectCheckouts"],
-        [96, "ThreadActiveEnvironment"],
-        [97, "CheckpointUploads"],
-        [99, "MoveHandoffs"],
-        [100, "Sandboxes"],
-      ]);
+      assert.deepStrictEqual(yield* runMigrations(), migrationsAfterPreview);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 

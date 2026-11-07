@@ -39,8 +39,6 @@ import { AuditLogSettingsSection } from "./AuditLogSettingsSection";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { HubEnvironmentsSettings } from "./HubEnvironmentsSettings";
 import { JoinedEnvironmentSetting } from "./JoinedEnvironmentSetting";
-import { LinkedEnvironmentsSettings } from "./LinkedEnvironmentsSettings";
-import { usePeerLinkHosts } from "~/state/peerLinks";
 import { PullRequestRoutingSettings } from "./PullRequestRoutingSettings";
 import { Input } from "../ui/input";
 import {
@@ -132,7 +130,6 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
   const desktopBridge = window.desktopBridge;
   const { environments } = useEnvironments();
   const primaryEnvironment = usePrimaryEnvironment();
-  const peerLinkHosts = usePeerLinkHosts();
   // Removing a saved environment also ends its session there (signing out of a Hub).
   const removeEnvironment = useAtomCommand(signOutAndRemoveEnvironment, { reportFailure: false });
   const setEnvironmentEnabled = useAtomCommand(environmentCatalog.setEnabled, {
@@ -1435,14 +1432,6 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
           {savedEnvironments.length === 0 ? <EmptyRemoteEnvironments /> : null}
         </SettingsSection>
       ) : null}
-      {peerLinkHosts.map((environment, index) => (
-        <LinkedEnvironmentsSettings
-          key={environment.environmentId}
-          environmentId={environment.environmentId}
-          environmentLabel={peerLinkHosts.length > 1 ? environment.label : null}
-          isSearchTarget={index === 0}
-        />
-      ))}
       <PullRequestRoutingSettings environments={pullRequestRoutingEnvironments} />
     </SettingsPageContainer>
   );

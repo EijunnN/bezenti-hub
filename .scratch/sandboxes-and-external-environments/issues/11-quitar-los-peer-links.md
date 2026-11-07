@@ -4,9 +4,9 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Código y UI de Peer Links eliminados; knip limpio.
-- [ ] Migración que revoca credenciales de Peer Links y borra sus filas, con test.
-- [ ] Delegación local entre Threads (Orchestrator) intacta: sus tests pasan.
-- [ ] Docs (`docs/internals/remote.md` y otras) actualizadas.
+- [x] Código y UI de Peer Links eliminados; knip limpio.
+- [x] Migración que revoca credenciales de Peer Links y borra sus filas, con test.
+- [x] Delegación local entre Threads (Orchestrator) intacta: sus tests pasan.
+- [x] Docs (`docs/internals/remote.md` y otras) actualizadas.

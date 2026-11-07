@@ -50,9 +50,6 @@ vi.mock(import("../state/threads"), async (original) => {
     environmentThreadShells: {
       ...actual.environmentThreadShells,
       pendingSubagentRequestsAtom: (() => noRequestsAtom) as never,
-      get delegatedUnderParentAtom() {
-        return noDelegatedAtom as never;
-      },
     },
   };
 });
@@ -80,7 +77,6 @@ let registry: AtomRegistry.AtomRegistry;
 const shellAtom = Atom.family((_id: string) => Atom.make<unknown>(null));
 const environmentIdsAtom = Atom.make<ReadonlyArray<string>>([]);
 const noRequestsAtom = Atom.make(new Map());
-const noDelegatedAtom = Atom.make<ReadonlySet<string>>(new Set<string>());
 state.shells = { set: (id, value) => registry.set(shellAtom(id), value) };
 
 class TestNotification extends EventTarget {
