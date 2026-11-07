@@ -27,9 +27,11 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
 import * as CommandActor from "../auth/CommandActor.ts";
+import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { ClaudeOrchestratorReplayHarness } from "../orchestration-v2/Adapters/ClaudeAdapterV2.testkit.ts";
 import * as EnvironmentReturnService from "../orchestration-v2/EnvironmentReturnService.ts";
@@ -183,18 +185,18 @@ const awaitThread = (
       .pipe(Effect.orDie);
     const current = (yield* projectionOf(hub, threadId)).thread;
     if (done(current)) return current;
-    const events = viaSink
-      ? hub.service(EventSink.EventSinkV2).stream({ threadId, afterSequence })
+    const events: Stream.Stream<unknown> = viaSink
+      ? hub.service(EventSink.EventSinkV2).stream({ threadId, afterSequence }).pipe(Stream.orDie)
       : hub
           .service(Orchestrator.OrchestratorV2)
-          .streamStoredEventsFrom({ threadId, afterSequence });
+          .streamStoredEventsFrom({ threadId, afterSequence })
+          .pipe(Stream.orDie);
     const next = yield* events.pipe(
       Stream.mapEffect(() => projectionOf(hub, threadId)),
       Stream.filterMap((projection) =>
         done(projection.thread) ? Result.succeed(projection.thread) : Result.failVoid,
       ),
       Stream.runHead,
-      Effect.orDie,
     );
     return Option.getOrThrow(next);
   });
@@ -371,8 +373,15 @@ describe("Hub con Environments: the Hub stops running agents", () => {
         // The Hub starts again with the setting off: what it does at startup for its Threads runs
         // again, over the same database, seeing a Hub machine that runs no Threads.
         const registry = hub.service(EnvironmentRegistry.EnvironmentRegistry);
+        // The orchestration's services are in the Hub's context, beside the testkit's own.
+        const services = hub.server.services as unknown as Context.Context<
+          | EnvironmentExecutor.EnvironmentExecutorRegistry
+          | EventSink.EventSinkV2
+          | Orchestrator.OrchestratorV2
+          | SqlClient.SqlClient
+        >;
         const restarted = Context.add(
-          hub.server.services as unknown as Context.Context<never>,
+          services,
           EnvironmentRegistry.EnvironmentRegistry,
           EnvironmentRegistry.EnvironmentRegistry.of({ ...registry, hubRunsAgents: false }),
         );
@@ -389,7 +398,7 @@ describe("Hub con Environments: the Hub stops running agents", () => {
               ),
             ),
             Layer.provide(Layer.succeedContext(restarted)),
-          ) as Layer.Layer<never>,
+          ),
         );
         const released = yield* awaitThread(
           hub,

@@ -4,9 +4,9 @@
 
 **Blocked by:** 02.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Colocación: elección del User → Environment preferido del Project → Sandbox del Space; `previewThreadPlacement` compartida actualizada; un Sandbox parado cuenta como disponible.
-- [ ] Ajuste de desarrollo (p. ej. `T3CODE_HUB_RUNS_AGENTS`) que mantiene el executor en proceso; producción no lo ofrece. El modo dev y los tests existentes siguen verdes.
-- [ ] Threads con Active environment = Hub machine pasan a «needs an environment» al arrancar el Hub con el ajuste desactivado.
-- [ ] Tests en el testkit; prueba real: un Thread nuevo sin elegir máquina corre en el Sandbox.
+- [x] Colocación: elección del User → Environment preferido del Project → Sandbox del Space; `previewThreadPlacement` compartida actualizada; un Sandbox parado cuenta como disponible.
+- [x] Ajuste de desarrollo (p. ej. `T3CODE_HUB_RUNS_AGENTS`) que mantiene el executor en proceso; producción no lo ofrece. El modo dev y los tests existentes siguen verdes.
+- [x] Threads con Active environment = Hub machine pasan a «needs an environment» al arrancar el Hub con el ajuste desactivado.
+- [x] Tests en el testkit; prueba real: un Thread nuevo sin elegir máquina corre en el Sandbox.

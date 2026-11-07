@@ -620,6 +620,8 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
       for (const row of rows) {
         // A Hub machine that runs no Threads is nowhere to run one: it is not offered.
         if (row.kind === "hub" && !hubRunsAgents) continue;
+        // Nor a Sandbox made by a runtime this Hub no longer runs.
+        if (row.kind === "sandbox" && Option.isNone(sandboxes)) continue;
         const resource = environmentResource(
           row,
           row.kind === "sandbox" ? spaceOf(row.spaceId) : undefined,

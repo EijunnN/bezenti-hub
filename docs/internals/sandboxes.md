@@ -35,7 +35,7 @@ only, so a container gets its own volume and nothing else of the Hub's (the Podm
 ## Runtime
 
 Only implementations of [SandboxRuntime](../../apps/server/src/sandboxes/SandboxRuntime.ts) touch
-processes or containers. Without one that runs Sandboxes the Hub offers none and placement refuses
+processes or containers. Without one that runs Sandboxes the Hub offers none (not even one made earlier) and placement refuses
 them (`sandbox-unavailable`).
 
 [Which one runs](../../apps/server/src/sandboxes/sandboxRuntimeFromConfig.ts):
