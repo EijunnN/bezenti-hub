@@ -1,9 +1,10 @@
-import type { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
+import type { EnvironmentId, ProviderInstanceId, SpaceId } from "@t3tools/contracts";
 import { memo } from "react";
 
 import {
   chooseHubEnvironment,
   environmentUnavailableReason,
+  placeableEnvironments,
   useHubEnvironmentChoice,
   useHubEnvironments,
   previewDefaultEnvironment,
@@ -24,23 +25,28 @@ import { ComposerSelectControl } from "./ComposerControl";
 import { useComposerMenuProps } from "./composerEventScope";
 
 /**
- * Where a new Thread runs, among the Hub's Environments the User may use. The Hub decides and
- * checks the choice; an Environment that is offline or lacks the provider shows why. Left alone,
- * it shows where the Hub will put the Thread, by the Hub's own rule (`previewThreadPlacement`);
- * a machine the User picks is sent as their choice, even the default.
+ * Where a new Thread runs, among the Environments the User may use for the Project's Space (the
+ * Hub decides and checks). Left alone it shows the Hub's own default (`previewThreadPlacement`);
+ * a pick is sent as the User's choice. A stopped Sandbox is offered: sending starts it.
  */
 export const HubEnvironmentSelector = memo(function HubEnvironmentSelector({
   draftThreadId,
   providerInstanceId,
   preferredEnvironmentId,
+  spaceId,
 }: {
   draftThreadId: string;
   providerInstanceId: ProviderInstanceId;
   preferredEnvironmentId: EnvironmentId | null;
+  /** The Project's Space; null for a Project from before Spaces, the Owner's Personal space. */
+  spaceId: SpaceId | null;
 }) {
-  const environments = useHubEnvironments();
-  const chosen = useHubEnvironmentChoice(draftThreadId);
   const userId = useCurrentSpace((state) => state.view?.userId ?? null);
+  const ownersSpaceId = useCurrentSpace((state) =>
+    state.view?.isOwner === true ? state.view.personalSpaceId : null,
+  );
+  const environments = placeableEnvironments(useHubEnvironments(), spaceId ?? ownersSpaceId);
+  const chosen = useHubEnvironmentChoice(draftThreadId);
   const floatingLayerProps = useComposerMenuProps();
   // One machine to pick from is no choice.
   if (environments.length < 2) return null;
@@ -75,7 +81,7 @@ export const HubEnvironmentSelector = memo(function HubEnvironmentSelector({
           }
         >
           <EnvironmentMachineIcon
-            kind={selected?.kind === "hub" ? "server" : "desktop"}
+            kind={selected === undefined || selected.kind !== "external" ? "server" : "desktop"}
             className="size-3 shrink-0"
           />
           <ComposerContextLabel>
@@ -98,7 +104,7 @@ export const HubEnvironmentSelector = memo(function HubEnvironmentSelector({
               >
                 <span className="inline-flex min-w-0 items-center gap-1.5">
                   <EnvironmentMachineIcon
-                    kind={environment.kind === "hub" ? "server" : "desktop"}
+                    kind={environment.kind === "external" ? "desktop" : "server"}
                     className="size-3 shrink-0"
                   />
                   <span className="truncate">{environment.name}</span>

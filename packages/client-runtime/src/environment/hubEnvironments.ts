@@ -235,6 +235,8 @@ export function environmentUnavailableReason(
   providerInstanceId: ProviderInstanceId,
 ): string | null {
   if (environment.kind === "hub") return null;
+  // A Space's Sandbox that is not running starts when a Thread is sent to it.
+  if (environment.kind === "sandbox" && environment.status !== "online") return null;
   if (environment.status !== "online") {
     return environment.status === "reconnecting" ? "Reconnecting" : "Offline";
   }
@@ -292,6 +294,20 @@ export function moveCandidates(
 ): ReadonlyArray<HubEnvironmentSummary> {
   const source = sourceId === undefined ? HUB_MACHINE_ENVIRONMENT_ID : sourceId;
   return environments.filter((environment) => environment.id !== source);
+}
+
+/**
+ * The Environments a new Thread of the Space can be sent to: a Sandbox only runs its own Space's
+ * Threads, so another Space's is left out. `spaceId` undefined (not known) leaves out every one.
+ */
+export function placeableEnvironments(
+  environments: ReadonlyArray<HubEnvironmentSummary>,
+  spaceId: string | null | undefined,
+): ReadonlyArray<HubEnvironmentSummary> {
+  return environments.filter(
+    (environment) =>
+      environment.kind !== "sandbox" || (spaceId != null && environment.spaceId === spaceId),
+  );
 }
 
 /** What the move dialog explains before the User chooses. */

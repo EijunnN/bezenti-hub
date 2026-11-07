@@ -35,7 +35,11 @@ const gigabytes = (bytes: number) => `${(bytes / 1_000_000_000).toFixed(1)} GB`;
 
 function describe(environment: HubEnvironmentSummary) {
   const parts = [
-    environment.kind === "hub" ? "Runs the Hub" : "Personal",
+    environment.kind === "hub"
+      ? "Runs the Hub"
+      : environment.kind === "sandbox"
+        ? "Sandbox"
+        : "Personal",
     environment.os,
     environment.lastSeenAt === null
       ? "never connected"
@@ -134,45 +138,50 @@ export function HubEnvironmentsSettings() {
   return (
     <SettingsSection id="hub-environments" title="Machines on this Hub">
       {environments === null && error === null ? <SettingsRow title="Loading…" /> : null}
-      {(environments ?? []).map((environment) => {
-        const badge = STATUS_BADGES[environment.status];
-        return (
-          <SettingsRow
-            key={environment.id}
-            title={
-              <span className="flex items-center gap-2">
-                {environment.name}
-                <Badge size="sm" variant={badge.variant}>
-                  {badge.label}
-                </Badge>
-              </span>
-            }
-            description={describe(environment)}
-            control={
-              <div className="flex gap-1">
-                <Button
-                  aria-label={`Rename ${environment.name}`}
-                  size="xs"
-                  variant="outline"
-                  onClick={() => setRenaming({ id: environment.id, name: environment.name })}
-                >
-                  Rename
-                </Button>
-                {environment.kind === "external" ? (
-                  <Button
-                    aria-label={`Remove ${environment.name}`}
-                    size="xs"
-                    variant="destructive-outline"
-                    onClick={() => setRemoving(environment)}
-                  >
-                    Remove
-                  </Button>
-                ) : null}
-              </div>
-            }
-          />
-        );
-      })}
+      {(environments ?? [])
+        // A Space's Sandbox is listed once it has run; until then it is only a choice in the composer.
+        .filter((environment) => environment.kind !== "sandbox" || environment.lastSeenAt !== null)
+        .map((environment) => {
+          const badge = STATUS_BADGES[environment.status];
+          return (
+            <SettingsRow
+              key={environment.id}
+              title={
+                <span className="flex items-center gap-2">
+                  {environment.name}
+                  <Badge size="sm" variant={badge.variant}>
+                    {badge.label}
+                  </Badge>
+                </span>
+              }
+              description={describe(environment)}
+              control={
+                <div className="flex gap-1">
+                  {environment.kind === "sandbox" ? null : (
+                    <Button
+                      aria-label={`Rename ${environment.name}`}
+                      size="xs"
+                      variant="outline"
+                      onClick={() => setRenaming({ id: environment.id, name: environment.name })}
+                    >
+                      Rename
+                    </Button>
+                  )}
+                  {environment.kind === "external" ? (
+                    <Button
+                      aria-label={`Remove ${environment.name}`}
+                      size="xs"
+                      variant="destructive-outline"
+                      onClick={() => setRemoving(environment)}
+                    >
+                      Remove
+                    </Button>
+                  ) : null}
+                </div>
+              }
+            />
+          );
+        })}
       <SettingsRow
         title="Add a machine"
         description="Run `t3 join <this Hub's address>` on it, then approve it here in the browser."
