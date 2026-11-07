@@ -319,6 +319,7 @@ const runJoin = (
         try: () => assertEnvironmentHubUrl(flags.url),
         catch: (cause) => userError(cause instanceof Error ? cause.message : String(cause)),
       });
+      if (Option.isSome(flags.dedicated)) yield* requirePodmanForDedicated();
       const joined = yield* readJoinedHubState(config.joinedHubPath).pipe(Effect.result);
       if (joined._tag === "Success" && Option.isSome(joined.success)) {
         return yield* userError(
@@ -338,7 +339,6 @@ const runJoin = (
       if (hubId === (yield* readLocalEnvironmentId(config.environmentIdPath))) {
         return yield* userError("That address is this server itself; a Hub cannot join itself.");
       }
-      if (Option.isSome(flags.dedicated)) yield* requirePodmanForDedicated();
       const local = yield* localData(config);
       if ((local.users > 0 || local.threads > 0) && !flags.force) {
         return yield* userError(

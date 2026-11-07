@@ -148,8 +148,9 @@ export const fromConfig = Effect.gen(function* () {
     );
     return Option.none();
   }
-  // Unset, only a production Hub looks for Podman: a dev Hub or a joined machine runs none.
-  if (setting === undefined && (config.devUrl !== undefined || config.joinedHub !== undefined)) {
+  // A joined machine runs no Hub Sandboxes (a dedicated one runs its own, through
+  // `dedicatedRuntimeFromConfig`); unset, only a production Hub looks for Podman, not a dev Hub.
+  if (config.joinedHub !== undefined || (setting === undefined && config.devUrl !== undefined)) {
     return Option.none();
   }
   const hubUrl = ProcessSandboxRuntime.sandboxHubLoopbackUrl(config);
