@@ -6,21 +6,17 @@ import * as SqlClient from "effect/sql/SqlClient";
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
-  // Received links: the sessions other servers signed in to this one's `/mcp` with. A linking
-  // server always named its OAuth client `T3 Code · <its name>`, which is how a link from before
-  // the fence is found: neither its token nor any Thread marks it. Those that started work here
-  // are also named by that work's origin. `SessionStore` refuses any token still marked a link.
+  // Received links that started work here, by that work's origin; `SessionStore` revokes other
+  // link-marked tokens. Pre-fence links carry no durable mark (outside agents may share their
+  // `T3 Code · …` name), so they lapse within 30 days, unused: linkers had to relink them.
   yield* sql`
     UPDATE auth_sessions
     SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
     WHERE revoked_at IS NULL
-      AND (
-        (subject = 'mcp-client' AND client_label LIKE 'T3 Code · %')
-        OR session_id IN (
-          SELECT json_extract(payload_json, '$.linkOrigin.sessionId')
-          FROM orchestration_v2_projection_threads
-          WHERE json_type(payload_json, '$.linkOrigin.sessionId') = 'text'
-        )
+      AND session_id IN (
+        SELECT json_extract(payload_json, '$.linkOrigin.sessionId')
+        FROM orchestration_v2_projection_threads
+        WHERE json_type(payload_json, '$.linkOrigin.sessionId') = 'text'
       )
   `;
 

@@ -21,12 +21,12 @@ it.effect("revokes Peer Link credentials, then drops their rows and cards", () =
         ${at}, '2027-10-01T00:00:00.000Z', 1
       )
     `;
-    // Other servers linked to this one. One's agent started a Thread here; another linked before
-    // the fence, so neither its token nor any Thread marks it, only the name its server gave it.
+    // Another server linked to this one, and its agent started a Thread here. Outside agents a
+    // User approved keep their sessions, even one that names itself like a link.
     for (const [sessionId, label] of [
       ["session-link", "T3 Code · Laptop"],
-      ["session-pre-fence-link", "T3 Code · VPS"],
       ["session-outside-agent", "Claude Code"],
+      ["session-outside-t3-named", "T3 Code · Cursor"],
     ] as const) {
       yield* sql`
         INSERT INTO auth_sessions (
@@ -102,7 +102,7 @@ it.effect("revokes Peer Link credentials, then drops their rows and cards", () =
     assert.deepEqual(sessions, [
       { id: "session-link", revoked: 1 },
       { id: "session-outside-agent", revoked: 0 },
-      { id: "session-pre-fence-link", revoked: 1 },
+      { id: "session-outside-t3-named", revoked: 0 },
     ]);
     const retired = yield* sql<{ readonly name: string }>`
       SELECT secret_name AS name FROM retired_server_secrets
