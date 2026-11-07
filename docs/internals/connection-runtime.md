@@ -21,7 +21,26 @@ environment and does not change when a Thread moves. Thread routes are
 `/$environmentId/$threadId` and `/threads/$environmentId/$threadId` links redirect
 there. The Active environment's name and live status (online, reconnecting,
 offline) come from the Hub's Environments list, polled every five seconds while a
-view shows it. Mobile still keeps several saved connections (ticket 13 of spec 2).
+view shows it ([hub environments](../../packages/client-runtime/src/environment/hubEnvironments.ts),
+shared by web and mobile with the move dialog's wording and steps).
+
+## Mobile holds one connection too
+
+Mobile connects only to its Hub. Its connection storage lists at most one saved
+connection: the first saved Hub whose descriptor answers for itself, else the
+first one reached over a bearer route
+([single Hub](../../packages/client-runtime/src/connection/singleHub.ts), the same
+rule the desktop uses). Connections saved before (several Hubs, or servers paired
+with a code) stay saved and unconnected, never deleted; Settings → Environments
+shows a one-time notice about them, and removing the Hub lets the next saved one
+connect on the next start. Registering a second Hub is refused. «Add a Hub» signs
+in in the system browser; scanning or pasting pairing codes is gone, and only a
+development build's dev link (mobile e2e runs) and the showcase capture still
+pair. Thread rows and the Thread screen show the Active environment from the same
+poll, and «Move to another Environment» opens a screen with the web dialog's
+rules. Mobile file, search and write calls of a Thread pass its `threadId`, so
+they act on the Thread's machine. Mobile routes and `ScopedThreadRef` still carry
+the Hub connection's `environmentId`.
 
 The rest of this page describes each connection, which the registry still keys by
 environment. Platform code supplies storage, credentials, network
