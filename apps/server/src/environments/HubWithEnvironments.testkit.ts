@@ -8,6 +8,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   ENVIRONMENT_CONNECTION_PROTOCOL_VERSION,
+  ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
   EnvironmentId,
   EventId,
   type EnvironmentHeartbeatFrame,
@@ -56,6 +57,7 @@ import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import * as HubPreviews from "../preview/HubPreviews.ts";
 import * as PreviewManager from "../preview/Manager.ts";
 import * as PortScanner from "../preview/PortScanner.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -192,7 +194,17 @@ const withOrchestration =
           Layer.provide(layerTextGeneration(textGeneration)),
         ),
       );
-      const merged = Context.merge(services, orchestration);
+      const withRuntime = Context.merge(services, orchestration);
+      // Previews through the Hub, as the server serves them (`/preview/<token>/`).
+      const merged = Context.merge(
+        withRuntime,
+        yield* Layer.build(
+          // A live socket's access is checked again often, so tests see it close quickly.
+          HubPreviews.layerWith({ recheckEvery: "200 millis" }).pipe(
+            Layer.provide(Layer.succeedContext(withRuntime)),
+          ),
+        ),
+      );
       // The effect worker runs as the server runs it, so effects settle without a test draining them.
       yield* EffectWorker.runDaemon.pipe(Effect.provideContext(merged), Effect.forkScoped);
       return merged as unknown as Context.Context<HubServices>;
@@ -321,6 +333,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
     sessions: described.sessions,
     workspaceRoot: described.workspaceRoot,
     orchestration: described.orchestration,
+    executorContractVersion: ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
   }));
   const heartbeat: Effect.Effect<EnvironmentHeartbeatFrame> = Effect.map(report, (described) => ({
     type: "heartbeat",

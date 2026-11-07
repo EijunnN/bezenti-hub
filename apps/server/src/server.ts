@@ -80,6 +80,8 @@ import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as PreviewAgentActivity from "./preview/PreviewAgentActivity.ts";
 import * as DesktopBrowserChannel from "./preview/DesktopBrowserChannel.ts";
 import * as ServerBrowserStream from "./preview/ServerBrowserStream.ts";
+import * as HubPreviews from "./preview/HubPreviews.ts";
+import * as HubPreviewRoute from "./preview/hubPreviewRoute.ts";
 import * as PreviewBrowser from "./preview/PreviewBrowser.ts";
 import * as ProcessRunner from "./processRunner.ts";
 import * as GitManager from "./git/GitManager.ts";
@@ -564,6 +566,8 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   ThreadWorkspace.layer.pipe(
     Layer.provide(Layer.mergeAll(ProjectionStoreV2.layer, ProjectCheckouts.layer)),
   ),
+  // Dev servers on a Thread's machine, at an address on the Hub (`/preview/<token>/`).
+  HubPreviews.layer,
   layerThreadSettlementWorker,
   layerIdleCompactionWorker,
   StorageCleanup.layer.pipe(Layer.provide(ProjectionStoreV2.layer)),
@@ -732,6 +736,7 @@ const layerMakeRoutes = Layer.mergeAll(
     GuestHttp.layer,
     DeviceHubProxy.layer,
     ServerBrowserStream.routeLayer,
+    HubPreviewRoute.routeLayer,
     ServerHttp.layerStaticAndDevRoute,
     Ws.layer,
     EnvironmentConnectRoute.layer,

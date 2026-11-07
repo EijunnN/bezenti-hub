@@ -76,6 +76,11 @@ export function createPreviewEnvironmentAtoms<R, E>(
       label: "environment-data:preview:stop-local-server",
       tag: WS_METHODS.previewStopLocalServer,
     }),
+    /** The Hub's address for a dev server's port on the Thread's Active environment. */
+    proxyUrl: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:proxy-url",
+      tag: WS_METHODS.previewProxyUrl,
+    }),
     reportStatus: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:preview:report-status",
       tag: WS_METHODS.previewReportStatus,

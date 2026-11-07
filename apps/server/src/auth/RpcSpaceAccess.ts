@@ -94,6 +94,8 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.previewClose]: "work",
   [WS_METHODS.previewList]: "work",
   [WS_METHODS.previewReportStatus]: "work",
+  // The address it gives is checked again, by the same rule, on every request it serves.
+  [WS_METHODS.previewProxyUrl]: "work",
   [WS_METHODS.deviceOpen]: "work",
   // Without a Thread these work on a directory, which filesystem scopes guard; with one they run
   // on that Thread's Active environment, inside its workspace (ThreadWorkspace).

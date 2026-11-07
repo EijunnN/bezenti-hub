@@ -12,6 +12,7 @@ import {
   ENVIRONMENT_CLOSE_REASONS,
   ENVIRONMENT_CONNECT_PATH,
   ENVIRONMENT_CONNECTION_PROTOCOL_VERSION,
+  ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
   ENVIRONMENT_HEARTBEAT_INTERVAL_MS,
   type EnvironmentCloseReason,
   environmentCloseReasonOf,
@@ -243,6 +244,7 @@ const makeReports = Effect.gen(function* () {
       sessions: report.sessions,
       workspaceRoot: report.workspaceRoot,
       orchestration: report.orchestration,
+      executorContractVersion: ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
     };
   });
   const heartbeat: Effect.Effect<EnvironmentHeartbeatFrame> = Effect.gen(function* () {

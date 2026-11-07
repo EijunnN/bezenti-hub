@@ -424,3 +424,24 @@ export const PreviewError = Schema.Union([
   PreviewEnvironmentUnavailableError,
 ]);
 export type PreviewError = typeof PreviewError.Type;
+
+/** Where the Hub serves the previews it proxies: `/preview/<token>/`. */
+export const HUB_PREVIEW_ROUTE_PREFIX = "/preview";
+
+/** A dev server's port on the Thread's Active environment, to open through the Hub. */
+export const PreviewProxyUrlInput = Schema.Struct({
+  threadId: ThreadId,
+  port: LocalServerPort,
+});
+export type PreviewProxyUrlInput = typeof PreviewProxyUrlInput.Type;
+
+/**
+ * The Hub's address for a dev server on the Thread's Active environment, for the session's User
+ * only. `path` is on the Hub's own origin; `url` is absolute when the Hub has `T3CODE_PUBLIC_URL`.
+ */
+export const PreviewProxyUrl = Schema.Struct({
+  path: TrimmedNonEmptyString,
+  url: Schema.optionalKey(TrimmedNonEmptyString),
+  expiresAt: Schema.String,
+});
+export type PreviewProxyUrl = typeof PreviewProxyUrl.Type;

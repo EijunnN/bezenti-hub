@@ -102,6 +102,11 @@ export const EnvironmentHelloFrame = Schema.Struct({
   /** Where this machine keeps Project checkouts: `<workspaceRoot>/<Project slug>` by default. */
   workspaceRoot: TrimmedNonEmptyString,
   orchestration: EnvironmentOrchestrationCapabilities,
+  /**
+   * The executor contract the machine runs (`ENVIRONMENT_EXECUTOR_CONTRACT_VERSION`); a machine
+   * from before it was sent runs 7. Operations newer than it are refused on the Hub.
+   */
+  executorContractVersion: Schema.optionalKey(Schema.Int),
 });
 export type EnvironmentHelloFrame = typeof EnvironmentHelloFrame.Type;
 

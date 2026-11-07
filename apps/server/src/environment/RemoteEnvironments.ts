@@ -87,6 +87,14 @@ const MAX_RESENDS = 3;
 const ACTIVE_LOOKUP_RETRIES = 3;
 /** Items of one forwarded stream the Hub holds for a reader that has not taken them. */
 const MAX_STREAM_BACKLOG = 4_096;
+/**
+ * A proxied preview's items are body chunks of up to 64 KiB, so it holds fewer: 32 MiB of a
+ * response, or 64 MiB of a WebSocket's messages, behind a reader that has not taken them.
+ */
+const STREAM_BACKLOG: Partial<Record<RemoteStreamOperation, number>> = {
+  "preview.proxyHttp": 512,
+  "preview.proxySocket": 1_024,
+};
 
 type SessionQueue = Queue.Queue<
   ProviderAdapter.ProviderAdapterV2Event,
@@ -126,6 +134,8 @@ interface Link {
   readonly activeByThread: Map<ThreadId, EnvironmentId | null>;
   /** Open workspace streams (terminal output), by subscription id; each lives on one socket. */
   readonly streams: Map<string, WorkspaceStream>;
+  /** The executor contract the machine said it runs in its last hello. */
+  contractVersion: number;
 }
 
 interface WorkspaceStream {
@@ -742,12 +752,16 @@ const make = Effect.gen(function* () {
     if (Option.isNone(item)) return;
     // Bounded: a reader that falls this far behind loses the stream and opens it again (a
     // terminal reattaches from its snapshot), so a slow client never holds the machine's socket.
-    if ((yield* Queue.size(stream.queue)) >= MAX_STREAM_BACKLOG) {
+    const backlog = STREAM_BACKLOG[stream.operation];
+    if ((yield* Queue.size(stream.queue)) >= (backlog ?? MAX_STREAM_BACKLOG)) {
       link.streams.delete(decoded.value.subscriptionId);
       yield* stream.channel.event(ENVIRONMENT_EXECUTOR_FRAME_METHODS.workspaceStreamCancel, {
         subscriptionId: decoded.value.subscriptionId,
       });
-      return yield* Queue.end(stream.queue);
+      // A proxied response cut short must read as broken, never as a complete shorter one.
+      return yield* backlog === undefined
+        ? Queue.end(stream.queue)
+        : Queue.fail(stream.queue, offline(link));
     }
     yield* Queue.offer(stream.queue, item.value);
   });
@@ -958,7 +972,11 @@ const make = Effect.gen(function* () {
         move,
         runtimePolicy,
         rpc: Option.none(),
-        forward: Option.some({ call: forwardCall(link), stream: forwardStream(link) }),
+        forward: Option.some({
+          contractVersion: () => link.contractVersion,
+          call: forwardCall(link),
+          stream: forwardStream(link),
+        }),
       },
       textGeneration,
       host: {
@@ -1233,10 +1251,13 @@ const make = Effect.gen(function* () {
         pendingAcks: new Map(),
         activeByThread: new Map(),
         streams: new Map(),
+        contractVersion: hello.executorContractVersion ?? 7,
       };
       links.set(environmentId, link);
       link.workspaceRoot = hello.workspaceRoot;
       link.providers = hello.providers;
+      // A machine that comes back updated (or not) is judged by what it says now.
+      link.contractVersion = hello.executorContractVersion ?? 7;
       const previous = link.channel;
       const channel = yield* makeExecutorChannel({
         environmentId,

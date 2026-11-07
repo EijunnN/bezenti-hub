@@ -19,7 +19,11 @@ import {
   EnvironmentUnavailableProvider,
 } from "./environmentConnection.ts";
 
-export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 7;
+/**
+ * 8: previews through the Hub (`preview.proxyHttp`, `preview.proxySocket`,
+ * `preview.proxySocketSend`). A machine reports its own in its hello.
+ */
+export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 8;
 
 /**
  * The Hub machine's Environment id. It is a constant so the `environments` table can seed the
@@ -149,6 +153,9 @@ const ENVIRONMENT_EXECUTOR_OPERATIONS = {
     "preview.list",
     "preview.reportStatus",
     "preview.events",
+    "preview.proxyHttp",
+    "preview.proxySocket",
+    "preview.proxySocketSend",
     "ports.scan",
     "ports.stopServer",
   ],

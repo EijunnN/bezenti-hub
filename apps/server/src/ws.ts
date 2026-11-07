@@ -83,6 +83,7 @@ import {
   ThreadId,
   type TerminalMetadataStreamEvent,
   type PullRequestRef,
+  PreviewEnvironmentUnavailableError,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -170,6 +171,7 @@ import { invalidateSettingsSecrets } from "./sourceControl/sourceControlHostSecr
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
+import * as HubPreviews from "./preview/HubPreviews.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
@@ -1311,6 +1313,7 @@ export const layerWsRpc = (
         ),
       );
       const workspaceCaller = { userId: principal.userId };
+      const hubPreviews = yield* Effect.serviceOption(HubPreviews.HubPreviews);
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
       const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
       const acpRegistryCatalog = yield* AcpRegistrySupport.AcpRegistryCatalog;
@@ -3075,6 +3078,23 @@ export const layerWsRpc = (
         [WS_METHODS.deviceAction]: (input) => deviceService.action(input),
         [WS_METHODS.subscribeDeviceState]: (_input) => DeviceService.stateStream(deviceService),
         [WS_METHODS.previewStopLocalServer]: (input) => portDiscovery.stopServer(input),
+        [WS_METHODS.previewProxyUrl]: (input) =>
+          Option.match(hubPreviews, {
+            onNone: () =>
+              Effect.fail(
+                new PreviewEnvironmentUnavailableError({
+                  threadId: input.threadId,
+                  reason: "outside_thread_workspace",
+                }),
+              ),
+            onSome: (previews) =>
+              previews.address({
+                userId: principal.userId,
+                sessionId: principal.sessionId,
+                threadId: input.threadId,
+                port: input.port,
+              }),
+          }),
         [WS_METHODS.subscribeDiscoveredLocalServers]: (input) =>
           Stream.callback<DiscoveredLocalServerList>((queue) =>
             Effect.gen(function* () {

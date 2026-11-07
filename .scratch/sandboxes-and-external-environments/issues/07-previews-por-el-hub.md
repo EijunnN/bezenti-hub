@@ -4,10 +4,12 @@
 
 **Blocked by:** 01.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Proxy HTTP (y WebSocket si el dev server lo usa) desde el Hub al puerto del Sandbox por el canal del Environment (capa de streams del spec 2).
-- [ ] Cada petición comprueba sesión y pertenencia al Space. Red-first: un Member de otro Space recibe un rechazo.
-- [ ] Respeta `T3CODE_PUBLIC_URL` / `T3CODE_TRUSTED_PROXIES`.
-- [ ] Funciona igual con External environments (dedicados del ticket 09 cuando existan).
-- [ ] Tests en el testkit; prueba real abriendo un dev server del Sandbox.
+- [x] Proxy HTTP (y WebSocket si el dev server lo usa) desde el Hub al puerto del Sandbox por el canal del Environment (capa de streams del spec 2).
+- [x] Cada petición comprueba sesión y pertenencia al Space. Red-first: un Member de otro Space recibe un rechazo.
+- [x] Respeta `T3CODE_PUBLIC_URL` / `T3CODE_TRUSTED_PROXIES`.
+- [x] Funciona igual con External environments (dedicados del ticket 09 cuando existan).
+- [x] Tests en el testkit; prueba real abriendo un dev server del Sandbox.
+
+Notas: la URL es `/preview/<token>/` en el origen del Hub, servida con `Content-Security-Policy: sandbox` (origen opaco); la regla de quién la abre es la de las demás RPC de preview (`work`: el User del Thread). Ver `docs/internals/sandboxes.md#previews-through-the-hub`.

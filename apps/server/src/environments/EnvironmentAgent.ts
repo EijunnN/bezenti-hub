@@ -70,6 +70,7 @@ import {
   type WireCheckout,
 } from "../environment/RemoteExecutorWire.ts";
 import { captureRecoveredChanges } from "../environment/MovedWorkspace.ts";
+import { makePreviewProxyTarget } from "../preview/PreviewProxy.ts";
 import { terminalOutputStream } from "../terminal/OutputProtocol.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as JoinedWorkspaceRoots from "../workspace/JoinedWorkspaceRoots.ts";
@@ -183,6 +184,8 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
     }),
   );
   const workspaceCalls = Effect.map(workspaceRpc, makeWorkspaceRpcCalls);
+  /** Dev servers on this machine, for the previews the Hub serves. */
+  const previewProxy = makePreviewProxyTarget();
 
   const sha256Hex = (bytes: Uint8Array) =>
     digester.digest(Digest.sha256, bytes).pipe(
@@ -1014,6 +1017,27 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
             origin,
           ),
         );
+      // A preview the Hub serves: the Hub checked who asks; this machine reaches its loopback.
+      case "preview.proxyHttp": {
+        const { subscriptionId, ...proxied } = request as RemoteInput<"preview.proxyHttp">;
+        return openWorkspaceStream(
+          "preview.proxyHttp",
+          subscriptionId,
+          previewProxy.http(proxied),
+          origin,
+        );
+      }
+      case "preview.proxySocket": {
+        const { subscriptionId, ...proxied } = request as RemoteInput<"preview.proxySocket">;
+        return openWorkspaceStream(
+          "preview.proxySocket",
+          subscriptionId,
+          previewProxy.socket(proxied),
+          origin,
+        );
+      }
+      case "preview.proxySocketSend":
+        return previewProxy.send(request as RemoteInput<"preview.proxySocketSend">);
     }
   };
 

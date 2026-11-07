@@ -396,7 +396,9 @@ stops on `workspace.streamCancel` or when the socket closes, where the Hub ends 
 the client reopens them. Each connected machine streams its preview events to the Hub for as long
 as its socket lives. A joined machine treats every workspace as known, since the Hub authorized
 and resolved the path. Server-rendered preview frames (`/api/preview-stream`) still come from the
-Hub machine's own browser only.
+Hub machine's own browser only. A dev server's port on the Thread's machine opens through the Hub
+at `/preview/<token>/`, relayed over the same streams and checked on every request; see
+[Previews through the Hub](./sandboxes.md#previews-through-the-hub).
 
 ### Logical workspace paths
 

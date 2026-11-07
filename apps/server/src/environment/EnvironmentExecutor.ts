@@ -141,6 +141,8 @@ export interface EnvironmentMoveWorkspace {
  * types or saves is kept to run later.
  */
 export interface EnvironmentWorkspaceForward {
+  /** The executor contract the machine last said it runs. */
+  readonly contractVersion: () => number;
   readonly call: <O extends RemoteExecutorWire.RemoteOperation>(
     operation: O,
     input: RemoteExecutorWire.RemoteInput<O>,

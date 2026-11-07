@@ -80,6 +80,7 @@ import {
   MovePublishScratchInput,
   MovePublishScratchResult,
 } from "./MovedWorkspace.ts";
+import * as PreviewProxy from "../preview/PreviewProxy.ts";
 
 const RuntimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy;
 const ProviderThread = OrchestrationV2ProviderThread;
@@ -505,12 +506,44 @@ export const REMOTE_OPERATIONS = {
     Schema.Void,
     PreviewError,
   ),
+  /**
+   * A request to a dev server on the machine's loopback, for a preview the Hub serves: its
+   * response streams back (`PreviewProxyHttpItem`s). The Hub checked who asks before sending it.
+   */
+  "preview.proxyHttp": workspace(
+    Schema.Struct({
+      subscriptionId: Schema.String,
+      ...PreviewProxy.PreviewProxyHttpRequest.fields,
+    }),
+    Schema.Void,
+    PreviewProxy.PreviewProxyError,
+  ),
+  /** A WebSocket to a dev server on the machine's loopback; what it receives streams back. */
+  "preview.proxySocket": workspace(
+    Schema.Struct({
+      subscriptionId: Schema.String,
+      ...PreviewProxy.PreviewProxySocketRequest.fields,
+    }),
+    Schema.Void,
+    PreviewProxy.PreviewProxyError,
+  ),
+  /** A message (or the close) the browser sent on a proxied WebSocket, in order. */
+  "preview.proxySocketSend": workspace(
+    PreviewProxy.PreviewProxySocketSend,
+    Schema.Void,
+    PreviewProxy.PreviewProxyError,
+  ),
 } as const;
 
-/** The item each stream-opening operation streams, in its JSON codec. */
+/**
+ * The item each stream-opening operation streams, in its JSON codec. A proxied response's chunks
+ * are up to 64 KiB each (`PREVIEW_PROXY_CHUNK_BYTES`).
+ */
 export const REMOTE_STREAM_ITEMS = {
   "terminal.stream": TerminalAttachStreamEvent,
   "preview.events": PreviewEvent,
+  "preview.proxyHttp": PreviewProxy.PreviewProxyHttpItem,
+  "preview.proxySocket": PreviewProxy.PreviewProxySocketItem,
 } as const;
 export type RemoteStreamOperation = keyof typeof REMOTE_STREAM_ITEMS;
 export type RemoteStreamItem<O extends RemoteStreamOperation> =

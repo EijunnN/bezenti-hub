@@ -34,6 +34,7 @@ import * as EnvironmentGitRoute from "../environments/gitRoute.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as HubEnvironmentsHttp from "../environments/http.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as HubPreviewRoute from "../preview/hubPreviewRoute.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import type * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
 import { layerTestPeer, TEST_PEER_HEADER } from "./clientConnection.testkit.ts";
@@ -269,6 +270,8 @@ export const serveAuthHttpWith = Effect.fn(function* (
         routes,
         EnvironmentConnectRoute.layer.pipe(Layer.provide(Layer.succeedContext(services))),
         EnvironmentGitRoute.layer.pipe(Layer.provide(Layer.succeedContext(services))),
+        // Only with previews among the services (the «Hub con Environments» testkit).
+        HubPreviewRoute.routeLayer.pipe(Layer.provide(Layer.succeedContext(services))),
       ),
       { disableListenLog: true, disableLogger: true },
     ).pipe(
