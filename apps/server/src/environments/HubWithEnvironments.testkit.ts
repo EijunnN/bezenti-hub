@@ -215,6 +215,11 @@ export interface TestEnvironment {
   readonly requests: ReadonlyArray<string>;
   /** Resolves once the Hub sent `method`, counting from request number `from`. */
   readonly awaitRequest: (method: string, from: number) => Effect.Effect<void>;
+  /**
+   * Resolves once the machine answered a `method` request, counting from request number `from`:
+   * the work behind it (its git, its files) is done.
+   */
+  readonly awaitAnswered: (method: string, from: number) => Effect.Effect<void>;
   /** Opens a socket to the Hub; succeeds once the Hub welcomed it. */
   readonly connect: Effect.Effect<void>;
   /** Drops the socket. The machine keeps running: its sessions and unacknowledged events stay. */
@@ -225,6 +230,12 @@ export interface TestEnvironment {
    */
   readonly restart: Effect.Effect<void>;
 }
+
+const decodeResponseFrame = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(
+    Schema.Struct({ type: Schema.Literal("response"), requestId: Schema.String }),
+  ),
+);
 
 /** A joined Environment's half: its executor and agent over the given provider adapters. */
 const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(function* (input: {
@@ -247,6 +258,33 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
   const mcpConfigs: Array<McpProviderSessionConfig> = [];
   const requests: Array<string> = [];
   const requested = yield* PubSub.unbounded<string>();
+  // Which request each id was, and which requests the machine has answered, by number.
+  const requestNumbers = new Map<string, number>();
+  const answered = new Set<number>();
+  const answers = yield* PubSub.unbounded<number>();
+  const isAnswered = (method: string, from: number) =>
+    [...answered].some((number) => number >= from && requests[number] === method);
+  const awaitAnswered = (method: string, from: number) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const subscription = yield* PubSub.subscribe(answers);
+        while (!isAnswered(method, from)) {
+          yield* PubSub.take(subscription);
+        }
+      }),
+    );
+  /** The machine's frame on its way to the Hub: a response marks its request answered. */
+  const noteAnswer = (text: string) =>
+    decodeResponseFrame(text).pipe(
+      Effect.flatMap((frame) => {
+        const number = requestNumbers.get(frame.requestId);
+        if (number === undefined) return Effect.void;
+        answered.add(number);
+        return PubSub.publish(answers, number).pipe(Effect.asVoid);
+      }),
+      // Not a response: nothing to note.
+      Effect.ignore,
+    );
   const awaitRequest = (method: string, from: number) =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -341,18 +379,28 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
       heartbeat,
       onWelcome: () => Deferred.succeed(welcomed, undefined).pipe(Effect.asVoid),
       serve: (write) =>
-        Effect.map(running.agent.attach(write), (served) => ({
-          receive: (frame: unknown) => {
-            const request = frame as { readonly type?: unknown; readonly method?: unknown };
-            if (request.type === "request" && typeof request.method === "string") {
-              requests.push(request.method);
-              return PubSub.publish(requested, request.method).pipe(
-                Effect.andThen(served.receive(frame)),
-              );
-            }
-            return served.receive(frame);
-          },
-        })),
+        Effect.map(
+          running.agent.attach((text) => write(text).pipe(Effect.andThen(noteAnswer(text)))),
+          (served) => ({
+            receive: (frame: unknown) => {
+              const request = frame as {
+                readonly type?: unknown;
+                readonly method?: unknown;
+                readonly requestId?: unknown;
+              };
+              if (request.type === "request" && typeof request.method === "string") {
+                if (typeof request.requestId === "string") {
+                  requestNumbers.set(request.requestId, requests.length);
+                }
+                requests.push(request.method);
+                return PubSub.publish(requested, request.method).pipe(
+                  Effect.andThen(served.receive(frame)),
+                );
+              }
+              return served.receive(frame);
+            },
+          }),
+        ),
     }).pipe(Effect.forkIn(scope));
     yield* Deferred.await(welcomed);
   });
@@ -379,6 +427,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
     workspaceRoot: (yield* report).workspaceRoot,
     requests,
     awaitRequest,
+    awaitAnswered,
     connect,
     disconnect,
     restart,
