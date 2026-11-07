@@ -54,6 +54,7 @@ import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
+import { ProviderSessionReleasedDuringStartError } from "./ProviderSessionReleasedDuringStart.ts";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_IDLE_PIN_MS = 4 * 60 * 60 * 1000;
@@ -79,18 +80,6 @@ export const ProviderSessionReleaseReason = Schema.Literals([
   "server_shutdown",
 ]);
 export type ProviderSessionReleaseReason = typeof ProviderSessionReleaseReason.Type;
-
-/** The refusal when a turn's session is released while it starts (its machine lost it). */
-export class ProviderSessionReleasedDuringStartError extends Schema.TaggedError<ProviderSessionReleasedDuringStartError>()(
-  "ProviderSessionReleasedDuringStartError",
-  {},
-) {
-  override get message(): string {
-    return SESSION_RELEASED_DURING_START;
-  }
-}
-
-const SESSION_RELEASED_DURING_START = "The provider session was released while the turn started.";
 
 export class ProviderSessionOpenError extends Schema.TaggedError<ProviderSessionOpenError>()(
   "ProviderSessionOpenError",
