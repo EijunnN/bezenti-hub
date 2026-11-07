@@ -109,6 +109,24 @@ const handlers = HttpApiBuilder.group(
         }),
       )
       .handle(
+        "start",
+        Effect.fn("environment.environments.start")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          return yield* registry
+            .startSandbox({
+              actorUserId: yield* requireUser(AuthAccessWriteScope),
+              environmentId: args.payload.environmentId,
+            })
+            .pipe(
+              Effect.catchTags({
+                EnvironmentAccessDeniedError: failForbidden,
+                EnvironmentNotFoundError: () => failEnvironmentNotFound("environment_not_found"),
+                EnvironmentStorageError: failStorage,
+              }),
+            );
+        }),
+      )
+      .handle(
         "startJoin",
         Effect.fn("environment.environments.startJoin")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);

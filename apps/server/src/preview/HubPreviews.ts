@@ -28,6 +28,7 @@ import * as Stream from "effect/Stream";
 import * as SessionStore from "../auth/SessionStore.ts";
 import * as UserDirectory from "../auth/UserDirectory.ts";
 import * as ServerConfig from "../config.ts";
+import * as EnvironmentDemand from "../environment/EnvironmentDemand.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
@@ -208,6 +209,8 @@ const makeWith = Effect.fn("HubPreviews.make")(function* (options: HubPreviewsOp
   const environments = yield* EnvironmentRegistry.EnvironmentRegistry;
   const config = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
+  // Starts a stopped Sandbox and keeps it from idling; absent without a Sandbox runtime.
+  const demand = yield* Effect.serviceOption(EnvironmentDemand.EnvironmentDemand);
   const recheckEvery = options.recheckEvery ?? "30 seconds";
   // Sandboxes of the process runtime share the Hub's loopback: none may reach a port of the Hub.
   const sandboxRuntime = yield* Config.String("T3CODE_SANDBOX_RUNTIME").pipe(
@@ -317,11 +320,24 @@ const makeWith = Effect.fn("HubPreviews.make")(function* (options: HubPreviewsOp
       .usableBy({ userId: address.principal, environmentId, threadId: address.threadId })
       .pipe(Effect.orElseSucceed(() => Option.none()));
     if (Option.isNone(usable)) return REFUSED;
+    if (Option.isSome(demand)) {
+      // Opening a preview is the User's own action: a stopped Sandbox starts for it.
+      const started = yield* demand.value
+        .awaitStarted(environmentId, { actorUserId: address.principal, explicit: true })
+        .pipe(
+          Effect.as(true),
+          Effect.catch((error) =>
+            Effect.logWarning("A Sandbox did not start for a preview", {
+              environmentId,
+              detail: error.detail,
+            }).pipe(Effect.as(false)),
+          ),
+        );
+      if (!started) return { _tag: "offline", name: usable.value.name };
+    }
     const executor = yield* Effect.option(executors.get(environmentId));
     const forward = Option.flatMap(executor, (found) => found.workspace.forward);
     if (Option.isNone(forward)) return { _tag: "offline", name: usable.value.name };
-    // Ticket 02 (idle Sandboxes stop): preview traffic is activity, so a Sandbox it reaches
-    // stays up. Call `SandboxActivity.touch(environmentId)` here once that service exists.
     return { _tag: "open", target: forwardedTarget(forward.value), name: usable.value.name };
   });
 
@@ -411,6 +427,8 @@ const makeWith = Effect.fn("HubPreviews.make")(function* (options: HubPreviewsOp
       const checked = yield* checkCached(known);
       if (checked._tag !== "open") return checked;
       touch(known, now);
+      // Each request served is use: the Sandbox's idle time starts again.
+      if (Option.isSome(demand)) yield* demand.value.touch(known.environmentId);
       return {
         _tag: "open",
         address: known,
@@ -423,6 +441,8 @@ const makeWith = Effect.fn("HubPreviews.make")(function* (options: HubPreviewsOp
   const whileAllowed: HubPreviews["Service"]["whileAllowed"] = (address) =>
     Effect.scoped(
       Effect.gen(function* () {
+        // An open preview socket keeps its Sandbox from idling until it closes.
+        if (Option.isSome(demand)) yield* demand.value.hold(address.environmentId);
         const changes = yield* spaceVisibility.subscribeAccessChanges(address.principal);
         const stillAllowed = Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis;

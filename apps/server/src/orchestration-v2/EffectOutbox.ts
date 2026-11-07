@@ -155,6 +155,13 @@ const ENVIRONMENT_BOUND_EFFECT_TYPES = [
   "preview.cleanup",
 ] as const satisfies ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
 
+/** Machine work that only tidies up: it never starts a stopped Sandbox, and runs once one is up. */
+const CLEANUP_EFFECT_TYPES = [
+  "provider-session.detach",
+  "terminal.cleanup",
+  "preview.cleanup",
+] as const satisfies ReadonlyArray<(typeof ENVIRONMENT_BOUND_EFFECT_TYPES)[number]>;
+
 /** Effects on state the Hub keeps. They run on the Hub whatever machine runs the Thread. */
 const HUB_EFFECT_TYPES = [
   "scheduled-tasks.cleanup",
@@ -271,6 +278,13 @@ export interface EffectOutboxV2Shape {
   readonly threadEnvironmentRemoved: (
     threadId: ThreadId,
   ) => Effect.Effect<boolean, EffectOutboxError>;
+  /**
+   * The Environments, other than `availableEnvironmentIds`, that machine work waits for (cleanup
+   * aside): a stopped Sandbox among them starts for it.
+   */
+  readonly environmentsAwaited: (
+    availableEnvironmentIds: ReadonlyArray<EnvironmentId>,
+  ) => Effect.Effect<ReadonlyArray<EnvironmentId>, EffectOutboxError>;
   /** `nextClaimableAt`, leaving out work `claimNext` would leave for an unavailable Environment. */
   readonly nextClaimableAtFor: (
     availableEnvironmentIds: ReadonlyArray<EnvironmentId>,
@@ -464,6 +478,24 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
           ? cause
           : new EffectOutboxError({ operation: "next-claimable", cause }),
       ),
+    );
+
+    // Probed on idle passes too, like `nextClaimableAtFor`.
+    const environmentsAwaited = Effect.fnUntraced(
+      function* (availableEnvironmentIds: ReadonlyArray<EnvironmentId>) {
+        const rows = yield* sql<{ readonly environmentId: EnvironmentId }>`
+          SELECT DISTINCT waiting_thread.active_environment_id AS "environmentId"
+          FROM orchestration_v2_effect_outbox AS candidate
+          JOIN orchestration_v2_projection_threads AS waiting_thread
+            ON waiting_thread.thread_id = candidate.thread_id
+          WHERE candidate.status = 'pending'
+            AND candidate.effect_type IN ${sql.in(ENVIRONMENT_BOUND_EFFECT_TYPES)}
+            AND candidate.effect_type NOT IN ${sql.in(CLEANUP_EFFECT_TYPES)}
+            AND ${threadAwayPredicate(availableEnvironmentIds)}
+        `.pipe(NodeSqliteClient.readOnly, Effect.withTracerEnabled(false));
+        return rows.map((row) => row.environmentId);
+      },
+      Effect.mapError((cause) => new EffectOutboxError({ operation: "awaited", cause })),
     );
 
     const cancellationSignal = (effectId: string) => {
@@ -685,6 +717,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
         ),
       ),
       nextClaimableAtFor,
+      environmentsAwaited,
       succeed: Effect.fn("EffectOutbox.succeed")(
         function* ({ effectId, workerId }) {
           const now = DateTime.formatIso(yield* DateTime.now);

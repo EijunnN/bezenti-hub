@@ -1,4 +1,5 @@
 import type {
+  EnvironmentId,
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
 } from "@t3tools/contracts";
@@ -75,6 +76,7 @@ import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
+import * as EnvironmentDemand from "../environment/EnvironmentDemand.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 
@@ -93,13 +95,8 @@ export function withCreationProvenance(
 ): OrchestrationV2Command {
   switch (command.type) {
     case "thread.create": {
-      // Only the server stamps a link's origin or a Thread's owner, so a client cannot set one.
-      const {
-        linkOrigin: _linkOrigin,
-        delegatedFrom: _delegatedFrom,
-        ownerUserId: _ownerUserId,
-        ...rest
-      } = command;
+      // Only the server stamps a Thread's owner, so a client cannot set one.
+      const { ownerUserId: _ownerUserId, ...rest } = command;
       return { ...rest, ...provenance };
     }
     case "thread.move": {
@@ -144,11 +141,9 @@ function existingThreadIdsForCommand(
         : [command.sourceThreadId, command.targetThreadId];
     case "delegated_task.request":
     case "delegated_task.wake-policy":
+    case "delegated_task.orphan.settle":
     case "delegated_task.completion-delivery.acknowledge":
     case "delegated_task.completion-delivery.dispose":
-    case "delegated_task.remote.request":
-    case "delegated_task.remote.complete":
-    case "delegated_task.remote.stop":
       return [command.parentThreadId];
     case "thread.created.record":
       return command.parentThreadId === command.targetThreadId
@@ -617,6 +612,16 @@ const PAUSABLE_RUN_STATUSES: ReadonlySet<string> = new Set([
   "waiting",
 ]);
 
+/** Commands decided with the Thread's machine: a stopped Sandbox starts for them first. */
+const MACHINE_DECIDED_COMMANDS: ReadonlySet<string> = new Set([
+  "message.dispatch",
+  "checkpoint.rollback",
+  "provider.switch",
+  "queued-run.start",
+  "queue.resume",
+  "queued-message.promote-to-steer",
+]);
+
 const makeWith = Effect.fn("ThreadManagementService.make")(function* (
   spaces: Option.Option<SpaceDirectory.SpaceDirectory["Service"]>,
   environments: Option.Option<EnvironmentRegistry.EnvironmentRegistry["Service"]> = Option.none(),
@@ -631,6 +636,8 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
   // Which machines are connected right now; absent on hosts that run nothing remote.
   const executors = yield* Effect.serviceOption(EnvironmentExecutor.EnvironmentExecutorRegistry);
+  // Sandboxes the Hub starts for work; absent on a Hub without a Sandbox runtime.
+  const demand = yield* Effect.serviceOption(EnvironmentDemand.EnvironmentDemand);
   // A Thread without a Project works in its own scratch folder, which any Environment makes.
   const scratchThreads = Option.map(
     Option.all({
@@ -977,10 +984,54 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
     );
   };
 
+  /**
+   * A command the Orchestrator decides with the Thread's machine (its provider, its workspace)
+   * waits for a stopped Sandbox to start, as does a move onto one; a start that fails refuses it
+   * with why. Other commands, and effects (which wait unclaimed), never start it here.
+   */
+  const startMachine = (
+    command: OrchestrationV2ServerCommand,
+  ): Effect.Effect<OrchestrationV2ServerCommand, Orchestrator.OrchestratorCommandRejectedError> => {
+    if (Option.isNone(demand) || Option.isNone(executors)) return Effect.succeed(command);
+    const target: Effect.Effect<EnvironmentId> | undefined =
+      command.type === "thread.move"
+        ? Effect.succeed(command.targetEnvironmentId)
+        : MACHINE_DECIDED_COMMANDS.has(command.type) && "threadId" in command
+          ? executors.value.activeEnvironment(command.threadId)
+          : undefined;
+    if (target === undefined) return Effect.succeed(command);
+    return target.pipe(
+      Effect.flatMap((environmentId) =>
+        demand.value
+          .awaitStarted(environmentId, {
+            actorUserId: "ownerUserId" in command ? command.ownerUserId : undefined,
+            explicit: true,
+          })
+          .pipe(
+            Effect.mapError(
+              (error) =>
+                new Orchestrator.OrchestratorCommandRejectedError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause: new EnvironmentRegistry.ThreadEnvironmentUnavailableError({
+                    environmentId,
+                    name: "The Sandbox",
+                    reason: "sandbox-failed",
+                    detail: error.detail,
+                  }),
+                }),
+            ),
+          ),
+      ),
+      Effect.as(command),
+    );
+  };
+
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
     claimThreadSpace(command).pipe(
       Effect.flatMap(placeThread),
       Effect.flatMap(checkMoveTarget),
+      Effect.flatMap(startMachine),
       Effect.flatMap(queueWhileAway),
       Effect.flatMap((claimed) =>
         ensureCommandTranscripts(claimed).pipe(
@@ -1663,41 +1714,7 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
     const stoppedChildThreadIds = new Set<ThreadId>();
     for (const task of subagents) {
       if (task.origin !== "app_owned") continue;
-      if (task.childThreadId === null) {
-        // A task in a linked environment ends here; its follower then stops it there.
-        // One with its result keeps it, but its thread there may run follow-up work.
-        if (task.remoteChild === undefined) continue;
-        const commandId = CommandId.make(`${input.commandId}:stop:${task.id}`);
-        yield* dispatch(
-          task.result === null
-            ? {
-                type: "delegated_task.remote.complete",
-                commandId,
-                parentThreadId: input.threadId,
-                taskId: task.id,
-                status: "interrupted",
-                result:
-                  input.reason === undefined
-                    ? "Stopped with its parent."
-                    : `Stopped with its parent: ${input.reason}`,
-              }
-            : {
-                type: "delegated_task.remote.stop",
-                commandId,
-                parentThreadId: input.threadId,
-                taskId: task.id,
-              },
-        ).pipe(
-          Effect.catch((error) =>
-            Effect.logWarning("Unable to stop a delegated task", {
-              parentThreadId: input.threadId,
-              taskId: task.id,
-              error,
-            }).pipe(Effect.andThen(Effect.sync(() => failures.push(error)))),
-          ),
-        );
-        continue;
-      }
+      if (task.childThreadId === null) continue;
       const threadId = task.childThreadId;
       // Follow-up tasks reuse a child thread; walk its subtree only once.
       if (stoppedChildThreadIds.has(threadId)) continue;

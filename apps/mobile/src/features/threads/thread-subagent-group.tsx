@@ -23,8 +23,6 @@ import type { ThreadFeedActivity } from "../../lib/threadActivity";
 import { serverEnvironment } from "../../state/server";
 import { environmentThreadDetails } from "../../state/threads";
 import { subagentCardElapsed } from "./subagent-card-presentation";
-import { useEnvironments } from "../../state/environments";
-import { useServerConfigs } from "../../state/entities";
 import { SubagentRow } from "./SubagentRow";
 import { useVisibleSecondClock } from "./use-visible-second-clock";
 import { subagentThreadTarget } from "./threadAgentsPresentation";
@@ -52,9 +50,7 @@ function SubagentAvatar(props: {
   const provider = providers.find(
     (candidate) => candidate.instanceId === props.item.providerInstanceId,
   );
-  // A remote task's own driver is only a "remote" label.
-  const driver =
-    provider?.driver ?? (props.item.remoteChild === undefined ? props.item.driver : undefined);
+  const driver = provider?.driver ?? props.item.driver;
   const badgeEntries = providers.map((candidate) => {
     const rawConfig = props.config?.settings.providerInstances[candidate.instanceId]?.config;
     const instanceConfig =
@@ -116,7 +112,6 @@ export function ThreadSubagentGroup(props: {
     environmentThreadDetails.threadAtom(scopeThreadRef(props.environmentId, members[0]!.threadId)),
     (thread) => thread?.projection.subagents,
   );
-  const { presentationById } = useEnvironments();
   const agents = members.map((item) => {
     const live = liveAgents?.find((agent) => agent.id === item.subagentId);
     return {
@@ -134,10 +129,6 @@ export function ThreadSubagentGroup(props: {
   const label = `${agents.length} subagents`;
   const summary = summarizeSubagentStatuses(agents.map((agent) => agent.status));
   const expanded = props.expandedRows[props.anchorKey] ?? false;
-  const serverConfigs = useServerConfigs();
-  // A task in a linked environment runs a provider instance of that environment.
-  const configOf = (item: SubagentItem) =>
-    item.remoteChild === undefined ? config : serverConfigs.get(item.remoteChild.environmentId);
   return (
     <WorkLogBlock>
       {grouped ? (
@@ -151,7 +142,7 @@ export function ThreadSubagentGroup(props: {
           <View className="flex-row items-center">
             {agents.slice(0, 3).map((agent, index) => (
               <View key={agent.item.id} style={{ marginLeft: index === 0 ? 0 : -7 }}>
-                <SubagentAvatar item={agent.item} config={configOf(agent.item)} />
+                <SubagentAvatar item={agent.item} config={config} />
               </View>
             ))}
             {agents.length > 3 ? (
@@ -188,21 +179,14 @@ export function ThreadSubagentGroup(props: {
       {!grouped || expanded ? (
         <View className="mb-1 gap-px rounded-xl border border-border bg-card/30 p-1">
           {agents.map((agent) => {
-            // A task in a linked environment opens there, if this app is connected to it.
-            const target = subagentThreadTarget(agent, props.environmentId, (id) =>
-              presentationById.has(id),
-            );
+            const target = subagentThreadTarget(agent, props.environmentId);
             return (
               <Pressable
                 key={agent.item.id}
                 accessible
                 accessibilityRole={target === null ? undefined : "link"}
                 accessibilityHint={
-                  target !== null
-                    ? "Opens this agent's thread"
-                    : agent.remoteChild !== undefined
-                      ? `Runs on ${agent.remoteChild.label}`
-                      : "Provider-managed agent"
+                  target !== null ? "Opens this agent's thread" : "Provider-managed agent"
                 }
                 disabled={target === null}
                 onPress={() => {
@@ -230,7 +214,6 @@ export function ThreadSubagentGroup(props: {
                 <SubagentRow
                   environmentId={props.environmentId}
                   subagent={agent}
-                  canOpenRemote={target !== null}
                   elapsed={<SubagentElapsed agents={[agent]} />}
                 />
               </Pressable>

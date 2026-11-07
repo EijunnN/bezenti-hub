@@ -147,9 +147,7 @@ export interface EnvironmentThreadShell {
   readonly worktreePath: string | null;
   readonly lineage: OrchestrationV2ThreadShell["lineage"];
   readonly forkedFrom: OrchestrationV2ThreadShell["forkedFrom"];
-  readonly linkOrigin: OrchestrationV2ThreadShell["linkOrigin"] | null;
   /** The thread in a linked environment that delegated this one, if one did. */
-  readonly delegatedFrom: OrchestrationV2ThreadShell["delegatedFrom"] | null;
   /** The Hub Environment it runs on; absent means the Hub machine, null that it needs one. */
   readonly activeEnvironmentId?: OrchestrationV2ThreadShell["activeEnvironmentId"];
   /** Its latest move to another Environment, running or finished. */
@@ -300,8 +298,6 @@ export function presentThreadShell(
     branchPullRequest: thread.branchPullRequest ?? null,
     lineage: thread.lineage,
     forkedFrom: thread.forkedFrom,
-    linkOrigin: thread.linkOrigin ?? null,
-    delegatedFrom: thread.delegatedFrom ?? null,
     ...(thread.activeEnvironmentId === undefined
       ? {}
       : { activeEnvironmentId: thread.activeEnvironmentId }),

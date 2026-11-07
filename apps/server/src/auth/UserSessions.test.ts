@@ -25,7 +25,6 @@ it.effect("keeps a browser sign-in for 30 days after its last use, and tokens fo
     const mcpClient = yield* server.environmentAuth.issueMcpClientSession({
       label: "Claude Code",
       access: "read-only",
-      peerLink: false,
       client: { deviceType: "bot", ipAddress: "127.0.0.1" },
     });
     const tokenWorks = (token: string) =>
@@ -105,7 +104,6 @@ it.effect("gives every session without a User of its own to the Owner", () =>
     const mcpClient = yield* server.environmentAuth.issueMcpClientSession({
       label: "Claude Code",
       access: "read-only",
-      peerLink: false,
       client: { deviceType: "bot", ipAddress: "127.0.0.1" },
     });
     expect((yield* server.sessions.verify(mcpClient.token)).userId).toBe(ownerId);

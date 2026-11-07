@@ -1,4 +1,4 @@
-import { ArrowRightLeftIcon, LockIcon } from "lucide-react";
+import { ArrowRightLeftIcon, LoaderCircleIcon, LockIcon, TriangleAlertIcon } from "lucide-react";
 import { ChildThreadApprovals } from "./chat/ChildThreadApprovals";
 import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
@@ -232,7 +232,6 @@ import { threadEnvironment } from "../state/threads";
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
 import { vcsEnvironment } from "../state/vcs";
 import {
-  useEnvironment,
   useEnvironmentProviders,
   useEnvironments,
   usePrimaryEnvironment,
@@ -377,9 +376,14 @@ import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplat
 import {
   NEEDS_ENVIRONMENT_LABEL,
   PAUSED_OFFLINE_LABEL,
+  SANDBOX_FAILED_LABEL,
+  SANDBOX_RETRY_LABEL,
+  SANDBOX_STARTING_LABEL,
+  refreshHubEnvironments,
   threadEnvironmentState,
   useActiveEnvironment,
 } from "../environments/primary/useHubEnvironments";
+import { startHubEnvironment } from "../environments/primary/hubEnvironments";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/models";
 import { openMoveThreadDialog } from "./chat/MoveThreadDialog";
 import { Button } from "./ui/button";
@@ -854,15 +858,6 @@ export default function ChatView(props: ChatViewProps) {
           messages: serverProjection.messages,
           parentSubagents: workflowOpeningParentProjection?.projection.subagents ?? null,
         });
-  // A linked environment's agent may have delegated this thread from there.
-  const delegatedFrom = activeThread?.delegatedFrom ?? null;
-  const delegatedFromEnvironment = useEnvironment(delegatedFrom?.environmentId ?? null);
-  const delegatedFromRef =
-    delegatedFrom === null
-      ? null
-      : scopeThreadRef(delegatedFrom.environmentId, delegatedFrom.threadId);
-  // The title it had at delegation, until this client sees the parent itself.
-  const delegatedFromThread = useQuietThreadShell(delegatedFromRef);
   const sideChatParentRef =
     activeThread?.lineage.sideChat === true && activeThread.lineage.parentThreadId !== null
       ? scopeThreadRef(activeThread.environmentId, activeThread.lineage.parentThreadId)
@@ -895,23 +890,7 @@ export default function ChatView(props: ChatViewProps) {
         },
       };
     }
-    if (delegatedFrom === null || delegatedFromRef === null) return null;
-    const parentRef = delegatedFromRef;
-    return {
-      title: delegatedFromThread?.title ?? delegatedFrom.title,
-      environmentLabel: delegatedFromEnvironment?.label ?? activeThread?.linkOrigin?.label ?? "",
-      // Only an environment this client is connected to can open the parent.
-      ...(delegatedFromEnvironment === null
-        ? {}
-        : {
-            open: (): void => {
-              void navigate({
-                to: "/$threadId",
-                params: buildThreadRouteParams(parentRef),
-              });
-            },
-          }),
-    };
+    return null;
   })();
   // The header's breadcrumb opens a parent in this environment only.
   const headerParentThreadLink =
@@ -1396,6 +1375,23 @@ export default function ChatView(props: ChatViewProps) {
     activePendingUserInput: activePendingUserInput?.requestId ?? null,
     threadError,
   });
+  // «Try again» was pressed and the Hub has not answered yet: one press starts one start.
+  const [sandboxRetryPending, setSandboxRetryPending] = useState(false);
+  // A send to a Sandbox that is not running starts it: follow it until it is up or has failed.
+  const sandboxWaking =
+    isSendBusy &&
+    threadActiveEnvironment?.isSandbox === true &&
+    threadActiveEnvironment.status !== "online";
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- a timer that polls the Hub's Environments list while the send waits on the Sandbox
+  useEffect(() => {
+    if (!sandboxWaking) return;
+    refreshHubEnvironments();
+    const timer = window.setInterval(refreshHubEnvironments, 1000);
+    return () => {
+      window.clearInterval(timer);
+      refreshHubEnvironments();
+    };
+  }, [sandboxWaking]);
   const optimisticCompactionMessage = optimisticUserMessages.at(-1);
   const latestServerUserItem = serverVisibleTurnItems.findLast(
     (row) => row.item.type === "user_message",
@@ -2568,39 +2564,83 @@ export default function ChatView(props: ChatViewProps) {
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
     // Where the Thread runs keeps it from going on: say why, and offer the move.
+    const sandboxId = activeThreadShell?.activeEnvironmentId ?? null;
     const environmentItems: ComposerBannerStackItem[] =
       threadEnvState === null
         ? []
-        : [
-            {
-              id: `thread-environment:${threadEnvState}`,
-              variant: "warning",
-              group: "environment",
-              icon: <ArrowRightLeftIcon />,
-              title:
-                threadEnvState === "needs-environment"
-                  ? NEEDS_ENVIRONMENT_LABEL
-                  : PAUSED_OFFLINE_LABEL,
-              description:
-                threadEnvState === "needs-environment"
-                  ? "The machine this Thread ran on was removed. Its history is kept: move it to another Environment to continue."
-                  : `${threadActiveEnvironment?.name ?? "Its Environment"} is offline. The turn goes on when it comes back; messages you send now are queued until then, or until you move the Thread.`,
-              actions: (
-                <Button
-                  size="xs"
-                  variant="outline"
-                  onClick={() =>
-                    activeThread &&
-                    openMoveThreadDialog(
-                      scopeThreadRef(activeThread.environmentId, activeThread.id),
-                    )
-                  }
-                >
-                  Move to another Environment
-                </Button>
-              ),
-            },
-          ];
+        : threadEnvState === "sandbox-starting"
+          ? [
+              {
+                id: "thread-environment:sandbox-starting",
+                variant: "info",
+                group: "environment",
+                icon: <LoaderCircleIcon className="animate-spin" />,
+                title: SANDBOX_STARTING_LABEL,
+                description: `${threadActiveEnvironment?.name ?? "The Sandbox"} is starting for this Thread's work. What you send runs once it is up.`,
+              },
+            ]
+          : threadEnvState === "sandbox-failed"
+            ? [
+                {
+                  id: "thread-environment:sandbox-failed",
+                  variant: "error",
+                  group: "environment",
+                  icon: <TriangleAlertIcon />,
+                  title: SANDBOX_FAILED_LABEL,
+                  description:
+                    threadActiveEnvironment?.startError ??
+                    `${threadActiveEnvironment?.name ?? "The Sandbox"} did not start.`,
+                  actions:
+                    sandboxId === null ? undefined : (
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        disabled={sandboxRetryPending}
+                        onClick={() => {
+                          setSandboxRetryPending(true);
+                          void startHubEnvironment(sandboxId)
+                            .catch(() => undefined)
+                            .then(() => {
+                              setSandboxRetryPending(false);
+                              refreshHubEnvironments();
+                            });
+                        }}
+                      >
+                        {SANDBOX_RETRY_LABEL}
+                      </Button>
+                    ),
+                },
+              ]
+            : [
+                {
+                  id: `thread-environment:${threadEnvState}`,
+                  variant: "warning",
+                  group: "environment",
+                  icon: <ArrowRightLeftIcon />,
+                  title:
+                    threadEnvState === "needs-environment"
+                      ? NEEDS_ENVIRONMENT_LABEL
+                      : PAUSED_OFFLINE_LABEL,
+                  description:
+                    threadEnvState === "needs-environment"
+                      ? "The machine this Thread ran on was removed. Its history is kept: move it to another Environment to continue."
+                      : `${threadActiveEnvironment?.name ?? "Its Environment"} is offline. The turn goes on when it comes back; messages you send now are queued until then, or until you move the Thread.`,
+                  actions: (
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      onClick={() =>
+                        activeThread &&
+                        openMoveThreadDialog(
+                          scopeThreadRef(activeThread.environmentId, activeThread.id),
+                        )
+                      }
+                    >
+                      Move to another Environment
+                    </Button>
+                  ),
+                },
+              ];
     // Someone else's Thread: say why the composer is closed, whatever state the Thread is in.
     const roleItems: ComposerBannerStackItem[] =
       threadRole.continueBlockedReason === null
@@ -2764,9 +2804,7 @@ export default function ChatView(props: ChatViewProps) {
   }, [embedded, toggleRightPanelStable, toggleRightPanelMaximizedStable]);
 
   usePasteToFocusComposer(embedded ? null : activeThreadId, composerRef);
-  // A delegated task is a remote thread's subagent.
-  const isSubagentThread =
-    activeThread?.lineage.relationshipToParent === "subagent" || delegatedFrom !== null;
+  const isSubagentThread = activeThread?.lineage.relationshipToParent === "subagent";
   // Side chats do not nest or start from subagents, and older servers would fork a listed thread.
   const sideChatsOffered =
     !embedded &&
@@ -3341,7 +3379,6 @@ export default function ChatView(props: ChatViewProps) {
               activeThreadId={activeThread.id}
               isServerThread={isServerThread}
               activeThreadTitle={activeThread.title}
-              activeThreadLinkOrigin={activeThreadShell?.linkOrigin?.label ?? null}
               activeEnvironment={isServerThread ? threadActiveEnvironment : null}
               environmentState={threadEnvState}
               activeThreadMove={isServerThread ? (activeThreadShell?.move ?? null) : null}

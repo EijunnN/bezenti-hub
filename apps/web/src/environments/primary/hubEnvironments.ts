@@ -27,6 +27,13 @@ export function removeHubEnvironment(environmentId: EnvironmentId): Promise<HubE
   );
 }
 
+/** «Try again» on a Sandbox that failed to start: answers at once, with it starting. */
+export function startHubEnvironment(environmentId: EnvironmentId): Promise<HubEnvironmentSummary> {
+  return request((client) =>
+    client.environments.start({ headers: {}, payload: { environmentId } }),
+  );
+}
+
 /** The `t3 join` request a «Register this machine» link names. */
 export function fetchEnvironmentJoinRequest(
   requestId: string,

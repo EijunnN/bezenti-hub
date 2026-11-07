@@ -39,6 +39,7 @@ export const AuditAction = Schema.Literals([
   "environment.remove",
   "thread.move",
   "sandbox.create",
+  "sandbox.start",
   "sandbox.stop",
   "sandbox.delete",
 ]);
@@ -116,7 +117,12 @@ export const AUDIT_DETAIL_KEYS = {
   ],
   /** Which Sandbox runtime made it (process or podman). */
   "sandbox.create": ["runtime"],
-  /** `archived`: its Organization was. */
+  /**
+   * `demand`: work needed it; `retry`: a User's «Try again». `started` or `failed`, with the
+   * trimmed reason.
+   */
+  "sandbox.start": ["via", "outcome", "reason"],
+  /** `archived`: its Organization was; `idle`: nothing ran in it for the idle timeout. */
   "sandbox.stop": ["via"],
   "sandbox.delete": [],
 } as const satisfies Record<AuditAction, ReadonlyArray<string>>;

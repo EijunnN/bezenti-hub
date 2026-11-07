@@ -15,9 +15,12 @@ import {
   UserId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
 import { fetch as undiciFetch, WebSocket as UndiciWebSocket } from "undici";
 
 import { addMember, joinOrganization } from "../auth/UserAuth.testkit.ts";
+import * as Sandboxes from "../sandboxes/Sandboxes.ts";
+import { listEnvironments } from "./environments.testkit.ts";
 import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
@@ -522,6 +525,85 @@ describe("Hub con Environments: previews through the Hub", () => {
         SET active_environment_id = ${HUB_MACHINE_ENVIRONMENT_ID} WHERE thread_id = ${threadId}
       `;
         assert.equal((yield* get(url, { headers: { cookie: hub.owner } })).status, 404);
+      }).pipe(Effect.scoped),
+  );
+});
+
+describe("Hub con Environments: a preview and its Sandbox's lifecycle", () => {
+  it.live(
+    "a stopped Sandbox starts when its preview is opened, and an open preview socket keeps it from idling",
+    () =>
+      Effect.gen(function* () {
+        const clock = yield* TestClock.make();
+        const hub = yield* makeHub({ sandboxAdapters: idleAdapters, sandboxLifecycle: { clock } });
+        const owner = yield* ownerIdOf(hub);
+        const acme = (yield* hub
+          .service(SpaceDirectory.SpaceDirectory)
+          .createOrganization(owner, "Acme")
+          .pipe(Effect.orDie)).id;
+        const projectId = ProjectId.make("project:acme-idle");
+        yield* seedProject(hub.server, {
+          projectId,
+          title: "Acme web",
+          defaultModelSelection: null,
+          spaceId: acme,
+        });
+        const sandboxId = sandboxEnvironmentIdOf(acme);
+        // Chosen, the Sandbox is made; placing never starts it.
+        yield* hub.service(EnvironmentRegistry.EnvironmentRegistry).chooseForThread({
+          userId: owner,
+          requested: sandboxId,
+          projectId,
+          providerInstanceId: instanceId,
+        });
+        const threadId = ThreadId.make("thread:acme-idle");
+        yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:acme-idle"),
+          threadId,
+          projectId,
+          title: "Preview",
+          modelSelection: { instanceId, model: "claude-sonnet-4-6" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeEnvironmentId: sandboxId,
+        });
+        const status = Effect.map(
+          listEnvironments(hub.server, hub.owner),
+          (listed) => listed.find((entry) => entry.id === sandboxId)?.status,
+        );
+        const sandboxes = hub.service(Sandboxes.Sandboxes);
+        assert.equal(yield* status, "stopped");
+
+        // Asking for the address starts it: opening a preview is the User's own action.
+        const dev = yield* startDevServer;
+        const ownerSession = yield* sessionOf(hub, hub.owner);
+        const address = yield* hub.service(HubPreviews.HubPreviews).address({
+          userId: owner,
+          sessionId: ownerSession.sessionId,
+          threadId,
+          port: dev.port,
+        });
+        assert.equal(yield* status, "online");
+        // Idle with nothing open, it stops; opening the page starts it again.
+        yield* clock.adjust("31 minutes");
+        yield* sandboxes.stopIdle;
+        assert.equal(yield* status, "stopped");
+        const url = `${hub.server.url}${address.path}`;
+        const page = yield* get(url, { headers: { cookie: hub.owner } });
+        assert.equal(page.status, 200);
+        assert.include(page.text, "Hello from the dev server");
+        assert.equal(yield* status, "online");
+
+        // An open preview socket (the page's HMR) holds it however long it stays open.
+        yield* openSocket(`${url.replace(/^http/, "ws")}hmr`, hub.owner);
+        yield* clock.adjust("2 hours");
+        yield* sandboxes.stopIdle;
+        assert.equal(yield* status, "online");
       }).pipe(Effect.scoped),
   );
 });

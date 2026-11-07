@@ -46,7 +46,7 @@ import { base64UrlEncode } from "../auth/utils.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import type * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
 import * as Sandboxes from "../sandboxes/Sandboxes.ts";
-import * as ProcessSandboxRuntime from "../sandboxes/ProcessSandboxRuntime.ts";
+import * as SandboxRuntimeFromConfig from "../sandboxes/sandboxRuntimeFromConfig.ts";
 import { sandboxSpaceOf } from "../sandboxes/sandboxSpace.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as EnvironmentConnections from "./EnvironmentConnections.ts";
@@ -82,6 +82,8 @@ export class EnvironmentAccessDeniedError extends Schema.TaggedError<Environment
         return "This account is turned off.";
       case "sandbox":
         return "A Space's Sandbox is run by the Hub: it is not renamed or removed as a machine.";
+      case "not-usable":
+        return "You can't run Threads in this Sandbox's Space.";
       case "missing-installation-permission":
         return REGISTER_OWN_REQUIRED_MESSAGE;
       default:
@@ -178,6 +180,9 @@ interface EnvironmentRow {
   readonly revokedAt: string | null;
   /** The owner was turned off or removed. */
   readonly ownerInactive: number;
+  /** A Sandbox's lifecycle (`sandboxes.status`) and why its last start failed. */
+  readonly sandboxStatus: "stopped" | "starting" | "running" | "failed" | null;
+  readonly sandboxError: string | null;
 }
 
 type PolicyRow = Pick<EnvironmentRow, "kind" | "ownerUserId" | "spaceId">;
@@ -331,10 +336,9 @@ export class EnvironmentRegistry extends Context.Service<
       credential: string | undefined,
     ) => Effect.Effect<boolean, EnvironmentStorageError>;
     /**
-     * Where a new Thread runs: the User's choice (a Sandbox is made and started first), else the
-     * Project's preferred Environment, else the Hub machine. It must be usable by the User for the
-     * Thread's Space, online, with the provider; a preference that is not falls back to the Hub
-     * machine (`previewThreadPlacement`).
+     * Where a new Thread runs: the User's choice, else the Project's preference, else the Hub
+     * machine. Usable by the User for the Thread's Space, online with the provider; a Sandbox is
+     * made if missing and counts while stopped (its work starts it), never started here.
      */
     readonly chooseForThread: (input: {
       readonly userId: UserId | undefined;
@@ -363,6 +367,17 @@ export class EnvironmentRegistry extends Context.Service<
      * off): its Threads then need an environment.
      */
     readonly removed: Stream.Stream<EnvironmentId>;
+    /**
+     * «Try again» on a Sandbox that failed to start: a User who may run Threads in its Space starts
+     * it. Answers at once with it `starting`; how the start ends shows in the list.
+     */
+    readonly startSandbox: (input: {
+      readonly actorUserId: UserId;
+      readonly environmentId: EnvironmentId;
+    }) => Effect.Effect<
+      HubEnvironmentSummary,
+      EnvironmentNotFoundError | EnvironmentAccessDeniedError | EnvironmentStorageError
+    >;
     /** Its Organization was archived: its Sandbox stops, and starts no more while archived. */
     readonly stopSandbox: (input: {
       readonly spaceId: SpaceId;
@@ -409,7 +424,15 @@ const make = Effect.gen(function* () {
       EXISTS (
         SELECT 1 FROM users AS owner WHERE owner.user_id = environments.owner_user_id
           AND (owner.disabled_at IS NOT NULL OR owner.removed_at IS NOT NULL)
-      ) AS "ownerInactive"
+      ) AS "ownerInactive",
+      (
+        SELECT sandbox.status FROM sandboxes AS sandbox
+        WHERE sandbox.environment_id = environments.environment_id
+      ) AS "sandboxStatus",
+      (
+        SELECT sandbox.last_error FROM sandboxes AS sandbox
+        WHERE sandbox.environment_id = environments.environment_id
+      ) AS "sandboxError"
     FROM environments WHERE ${sql.and(conditions)}
     ORDER BY kind = 'hub' DESC, registered_at, environment_id
   `;
@@ -487,6 +510,24 @@ const make = Effect.gen(function* () {
     }
     const environmentId = EnvironmentId.make(row.environmentId);
     const connected = yield* connections.isConnected(environmentId);
+    const connection = environmentConnectionStatus({
+      connected,
+      lastSeenAtMs: row.lastSeenAt === null ? null : Date.parse(row.lastSeenAt),
+      nowMs,
+    });
+    const status: HubEnvironmentSummary["status"] =
+      row.kind !== "sandbox"
+        ? connection
+        : // A Sandbox is online once started; until then the Hub starts it when work needs it.
+          row.sandboxStatus === "starting"
+          ? "starting"
+          : connected
+            ? connection
+            : row.sandboxStatus === "failed"
+              ? "failed"
+              : row.sandboxStatus === "running"
+                ? connection
+                : "stopped";
     return {
       id: environmentId,
       name: name ?? row.name,
@@ -494,15 +535,10 @@ const make = Effect.gen(function* () {
       mode: row.kind === "sandbox" ? "sandbox" : "personal",
       ownerUserId: row.ownerUserId === null ? null : UserId.make(row.ownerUserId),
       spaceId: row.spaceId === null ? null : SpaceId.make(row.spaceId),
-      status:
-        row.kind === "sandbox" && !connected
-          ? // The Hub starts it when work needs it.
-            "stopped"
-          : environmentConnectionStatus({
-              connected,
-              lastSeenAtMs: row.lastSeenAt === null ? null : Date.parse(row.lastSeenAt),
-              nowMs,
-            }),
+      status,
+      ...(row.kind === "sandbox"
+        ? { startError: status === "failed" ? row.sandboxError : null }
+        : {}),
       registeredAt: row.registeredAt,
       lastSeenAt: row.lastSeenAt,
       os: row.lastOs,
@@ -895,8 +931,9 @@ const make = Effect.gen(function* () {
           reason: "sandbox-unavailable",
         });
       }
+      // Made here, started by the Thread's first work: placing never waits for it to boot.
       yield* sandboxes.value
-        .ensureRunning({ spaceId: SpaceId.make(row.spaceId), actorUserId: userId })
+        .ensureCreated({ spaceId: SpaceId.make(row.spaceId), actorUserId: userId })
         .pipe(
           Effect.mapError(
             (error) =>
@@ -921,13 +958,16 @@ const make = Effect.gen(function* () {
         providerInstanceId,
       });
     }
-    if (summary.status !== "online") {
+    // A Sandbox not running starts for the work; its providers are known once it ran.
+    const startsForWork = current.kind === "sandbox" && summary.status !== "online";
+    if (summary.status !== "online" && !startsForWork) {
       return yield* new ThreadEnvironmentUnavailableError({
         environmentId,
         name: current.name,
         reason: "offline",
       });
     }
+    if (startsForWork && summary.providers.length === 0) return environmentId;
     const provider = summary.providers.find((entry) => entry.instanceId === providerInstanceId);
     if (provider === undefined || !provider.enabled || !provider.installed) {
       return yield* new ThreadEnvironmentUnavailableError({
@@ -967,8 +1007,36 @@ const make = Effect.gen(function* () {
     return Option.some({ name: row.name });
   });
 
+  const startSandbox: EnvironmentRegistry["Service"]["startSandbox"] = Effect.fn(
+    "EnvironmentRegistry.startSandbox",
+  )(function* ({ actorUserId, environmentId }) {
+    const row = yield* liveRow(environmentId);
+    if (row === undefined || row.kind !== "sandbox" || row.spaceId === null) {
+      return yield* new EnvironmentNotFoundError({});
+    }
+    const spaceId = SpaceId.make(row.spaceId);
+    const principal = yield* principalOf(actorUserId);
+    const resource = yield* resourceOf(row, spaceId);
+    if (!AccessPolicy.isAllowed(decide(principal, "environment.view", resource))) {
+      return yield* new EnvironmentNotFoundError({});
+    }
+    if (
+      principal.inactive === true ||
+      !AccessPolicy.isAllowed(decide(principal, "environment.use", resource))
+    ) {
+      return yield* new EnvironmentAccessDeniedError({ reason: "not-usable" });
+    }
+    if (Option.isSome(sandboxes)) {
+      // The Hub's own start (joined if one is under way); answers once it is `starting`.
+      yield* sandboxes.value.requestStart({ spaceId, actorUserId, via: "retry" });
+    }
+    const current = yield* liveRow(environmentId);
+    return yield* summaryOf(current ?? row, principal.isOwner);
+  });
+
   return EnvironmentRegistry.of({
     hubId,
+    startSandbox,
     chooseForThread,
     usableBy,
     list,
@@ -1016,7 +1084,7 @@ export const layer = Layer.effect(EnvironmentRegistry, make).pipe(
  */
 /** The registry as the server runs it: with Sandboxes only when a runtime that runs them is on. */
 export const layerFromConfig = Layer.unwrap(
-  Effect.map(ProcessSandboxRuntime.fromConfig, (runtime) =>
+  Effect.map(SandboxRuntimeFromConfig.fromConfig, (runtime) =>
     Option.isNone(runtime) ? layer : layerWithSandboxes(runtime.value),
   ),
 );
@@ -1025,7 +1093,9 @@ export const layerWithSandboxes = <E, R>(
   runtime: Layer.Layer<SandboxRuntime.SandboxRuntime, E, R>,
 ) =>
   Layer.effect(EnvironmentRegistry, make).pipe(
-    Layer.provide(Sandboxes.layer.pipe(Layer.provide(runtime))),
+    // Sandboxes start for work and stop when idle: the orchestration and the workspace RPCs ask
+    // through `EnvironmentDemand`, which they see beside the registry.
+    Layer.provideMerge(Sandboxes.layer.pipe(Layer.provide(runtime))),
     Layer.provide(AuditLog.layer),
     Layer.provideMerge(EnvironmentConnections.layer),
   );

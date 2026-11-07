@@ -39,6 +39,8 @@ export const fetchRemoteHubEnvironments = (input: {
 const HUB_ENVIRONMENTS_REFRESH_MS = 5000;
 /** With only the Hub machine there is nothing to keep live: a slow check notices a first join. */
 const HUB_ENVIRONMENTS_IDLE_REFRESH_MS = 60_000;
+/** A Sandbox that is starting is online (or failed) within seconds: the list follows it closely. */
+const HUB_ENVIRONMENTS_STARTING_REFRESH_MS = 1000;
 
 /** «loading» until the first answer, «error» while the last read failed. */
 export type HubEnvironmentsStatus = "loading" | "ready" | "error";
@@ -83,8 +85,12 @@ export function makeHubEnvironmentsPoller(options: {
   const schedule = () => {
     stop();
     if (!running()) return;
-    const interval =
-      environments.length > 1
+    const interval = environments.some((environment) => environment.status === "starting")
+      ? Math.min(
+          options.intervalMs ?? HUB_ENVIRONMENTS_REFRESH_MS,
+          HUB_ENVIRONMENTS_STARTING_REFRESH_MS,
+        )
+      : environments.length > 1
         ? (options.intervalMs ?? HUB_ENVIRONMENTS_REFRESH_MS)
         : (options.idleIntervalMs ?? HUB_ENVIRONMENTS_IDLE_REFRESH_MS);
     timer = setTimeout(refresh, interval);
@@ -164,31 +170,52 @@ export interface ActiveEnvironmentView {
   readonly isHubMachine: boolean;
   /** Its Environment was removed: it runs nowhere until it moves («needs an environment»). */
   readonly needsEnvironment: boolean;
+  /** A Space's Sandbox, which the Hub starts for work and stops when idle. */
+  readonly isSandbox: boolean;
+  /** Why a `failed` Sandbox's last start failed. */
+  readonly startError: string | null;
 }
 
 /** The words for a Thread whose Environment was removed. */
 export const NEEDS_ENVIRONMENT_LABEL = "Needs an environment";
 /** The words for a Thread whose turn waits for its machine to come back. */
 export const PAUSED_OFFLINE_LABEL = "Paused, environment offline";
+/** The words for a Thread whose Sandbox is booting for its work. */
+export const SANDBOX_STARTING_LABEL = "Starting the Sandbox…";
+/** The words for a Thread whose Sandbox failed to start; the reason follows. */
+export const SANDBOX_FAILED_LABEL = "The Sandbox could not start";
+/** What starts a failed Sandbox again. */
+export const SANDBOX_RETRY_LABEL = "Try again";
 
 export const ENVIRONMENT_STATUS_LABELS: Record<HubEnvironmentStatus, string> = {
   online: "Online",
   reconnecting: "Reconnecting",
   offline: "Offline",
   stopped: "Stopped",
+  starting: "Starting",
+  failed: "Failed to start",
 };
 
+/** What a Thread says because of where it runs, beyond the machine's own status. */
+export type ThreadEnvironmentState =
+  | "needs-environment"
+  | "paused-offline"
+  | "sandbox-starting"
+  | "sandbox-failed";
+
 /**
- * What the Thread's state is because of where it runs: «needs an environment» once its machine
- * was removed, «paused, environment offline» while a turn is under way on a machine that is not
- * online (it resumes when the machine returns, or the Thread moves). Null otherwise.
+ * The Thread's state because of where it runs: its machine removed, its Sandbox starting or failed
+ * to start, or a turn under way on a machine not online (paused until it returns). Null otherwise,
+ * a stopped Sandbox included: it starts when the Thread's work needs it.
  */
 export function threadEnvironmentState(
   environment: ActiveEnvironmentView | null,
   turnUnderWay: boolean,
-): "needs-environment" | "paused-offline" | null {
+): ThreadEnvironmentState | null {
   if (environment === null) return null;
   if (environment.needsEnvironment) return "needs-environment";
+  if (environment.isSandbox && environment.status === "starting") return "sandbox-starting";
+  if (environment.isSandbox && environment.status === "failed") return "sandbox-failed";
   if (turnUnderWay && !environment.isHubMachine && environment.status !== "online") {
     return "paused-offline";
   }
@@ -209,6 +236,8 @@ export function activeEnvironmentOf(
       status: "offline",
       isHubMachine: false,
       needsEnvironment: true,
+      isSandbox: false,
+      startError: null,
     };
   }
   const id = environmentId ?? HUB_MACHINE_ENVIRONMENT_ID;
@@ -219,6 +248,8 @@ export function activeEnvironmentOf(
     status: environment.kind === "hub" ? "online" : environment.status,
     isHubMachine: environment.kind === "hub",
     needsEnvironment: false,
+    isSandbox: environment.kind === "sandbox",
+    startError: environment.startError ?? null,
   };
 }
 

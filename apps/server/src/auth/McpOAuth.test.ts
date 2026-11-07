@@ -27,8 +27,10 @@ import * as Sqlite from "../persistence/Sqlite.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as McpOAuth from "./McpOAuth.ts";
 import * as McpOAuthHttp from "./mcpOAuthHttp.ts";
+import * as PayloadSigner from "./PayloadSigner.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import { layerTestPeer } from "./clientConnection.testkit.ts";
+import { base64UrlEncode } from "./utils.ts";
 import * as AuthHttp from "./http.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 
@@ -44,10 +46,18 @@ const layerEnvironmentAuth = EnvironmentAuth.layer.pipe(
   Layer.provideMerge(ServerEnvironment.layerIdentity),
   Layer.provide(layerConfig),
 );
-const makeLayerRoutes = (capture: (auth: EnvironmentAuth.EnvironmentAuth["Service"]) => void) =>
+const makeLayerRoutes = (
+  capture: (auth: EnvironmentAuth.EnvironmentAuth["Service"]) => void,
+  captureSecrets: (secrets: ServerSecretStore.ServerSecretStore["Service"]) => void = () => {},
+) =>
   Layer.mergeAll(
     Layer.effectDiscard(
       EnvironmentAuth.EnvironmentAuth.pipe(Effect.tap((auth) => Effect.sync(() => capture(auth)))),
+    ),
+    Layer.effectDiscard(
+      ServerSecretStore.ServerSecretStore.pipe(
+        Effect.tap((secrets) => Effect.sync(() => captureSecrets(secrets))),
+      ),
     ),
     HttpApiBuilder.layer(AuthTestApi).pipe(
       Layer.provide(AuthHttp.layer),
@@ -98,22 +108,32 @@ const form = (body: Record<string, string>) => ({
 type Handler = (request: Request) => Effect.Effect<Response>;
 
 const withRoutes = <A, E>(
-  use: (handler: Handler, auth: EnvironmentAuth.EnvironmentAuth["Service"]) => Effect.Effect<A, E>,
+  use: (
+    handler: Handler,
+    auth: EnvironmentAuth.EnvironmentAuth["Service"],
+    secrets: ServerSecretStore.ServerSecretStore["Service"],
+  ) => Effect.Effect<A, E>,
 ) =>
   Effect.gen(function* () {
     const random = yield* SecureRandom.SecureRandom;
     const context = Context.make(SecureRandom.SecureRandom, random);
     let routerAuth: EnvironmentAuth.EnvironmentAuth["Service"] | undefined;
-    const layerRoutes = makeLayerRoutes((auth) => {
-      routerAuth = auth;
-    });
+    let routerSecrets: ServerSecretStore.ServerSecretStore["Service"] | undefined;
+    const layerRoutes = makeLayerRoutes(
+      (auth) => {
+        routerAuth = auth;
+      },
+      (secrets) => {
+        routerSecrets = secrets;
+      },
+    );
     return yield* Effect.acquireUseRelease(
       Effect.sync(() => HttpRouter.toWebHandler(layerRoutes, { disableLogger: true })),
       (web) =>
         Effect.gen(function* () {
           const handler: Handler = (request) => Effect.promise(() => web.handler(request, context));
           yield* handler(at("/.well-known/oauth-authorization-server"));
-          return yield* use(handler, routerAuth!);
+          return yield* use(handler, routerAuth!, routerSecrets!);
         }),
       (web) => Effect.promise(() => web.dispose()),
     );
@@ -249,6 +269,52 @@ it.live("registers loopback and https clients and never redirects for an unverif
       );
       expect(forgedDetails.status).toBe(400);
       expect(yield* json<Record<string, unknown>>(forgedDetails)).not.toHaveProperty("redirectTo");
+    }),
+  ),
+);
+
+it.live("refuses Peer Links: their registration and the client ids they were issued", () =>
+  withRoutes((handler, _auth, secrets) =>
+    Effect.gen(function* () {
+      const registration = yield* handler(
+        at("/oauth/mcp/register", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: encodeJson({
+            client_name: "T3 Code · Laptop",
+            redirect_uris: [REDIRECT],
+            software_id: "t3code-peer-link",
+          }),
+        }),
+      );
+      expect(registration.status).toBe(400);
+      expect(yield* json<unknown>(registration)).toMatchObject({
+        error: "invalid_client_metadata",
+      });
+
+      // A client id signed for a link before the upgrade.
+      const signer = yield* PayloadSigner.fromSecret(
+        yield* secrets.getOrCreateRandom("mcp-oauth-signing-key", 32).pipe(Effect.orDie),
+      ).pipe(Effect.provide(NodeCrypto.layer));
+      const sign = (payload: string) => signer.sign(`mcp-client-id.${payload}`);
+      const body = base64UrlEncode(
+        JSON.stringify({ v: 1, n: "T3 Code · Laptop", r: [REDIRECT], p: 1 }),
+      );
+      const linkClientId = `${body}.${yield* sign(body)}`;
+      const authorize = yield* handler(
+        at(`/oauth/mcp/authorize?${new URLSearchParams(authorizeParams(linkClientId, REDIRECT))}`),
+      );
+      expect(authorize.status).toBe(400);
+      expect(authorize.headers.get("location")).toBeNull();
+      // The same client id without the marker is an ordinary client.
+      const plainBody = base64UrlEncode(
+        JSON.stringify({ v: 1, n: "T3 Code · Laptop", r: [REDIRECT] }),
+      );
+      const plainClientId = `${plainBody}.${yield* sign(plainBody)}`;
+      const plain = yield* handler(
+        at(`/oauth/mcp/authorize?${new URLSearchParams(authorizeParams(plainClientId, REDIRECT))}`),
+      );
+      expect(plain.status).toBe(302);
     }),
   ),
 );

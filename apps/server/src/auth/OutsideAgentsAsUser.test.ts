@@ -395,7 +395,6 @@ it.live(
         label: "t3 thread cli",
         userId: chosen!,
         access: "full-access",
-        peerLink: false,
         client: { deviceType: "bot", ipAddress: "127.0.0.1" },
       });
       assert.equal((yield* mcpScope(server, thread.token))?.userId, grace.userId);
@@ -488,7 +487,6 @@ it.live("an MCP client approved before the Owner existed becomes the Owner's", (
     const early = yield* server.environmentAuth.issueMcpClientSession({
       label: "Claude Code",
       access: "read-only",
-      peerLink: false,
       client: { deviceType: "bot", ipAddress: "127.0.0.1" },
     });
     assert.isUndefined((yield* mcpScope(server, early.token))?.userId);

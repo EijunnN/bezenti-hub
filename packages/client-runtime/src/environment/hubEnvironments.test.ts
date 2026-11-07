@@ -2,6 +2,7 @@ import {
   EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
   type HubEnvironmentList,
+  type HubEnvironmentStatus,
   type HubEnvironmentSummary,
   type OrchestrationV2ThreadMove,
   ProviderInstanceId,
@@ -151,6 +152,8 @@ describe("a Thread's Active environment", () => {
       status: "offline",
       isHubMachine: false,
       needsEnvironment: false,
+      isSandbox: false,
+      startError: null,
     });
     expect(activeEnvironmentLabel(offline!)).toBe("Laptop, offline");
     expect(activeEnvironmentOf([hub, laptop], undefined)?.name).toBe("Hub machine");
@@ -165,6 +168,37 @@ describe("a Thread's Active environment", () => {
     expect(threadEnvironmentState(offline, true)).toBe("paused-offline");
     expect(threadEnvironmentState(offline, false)).toBeNull();
     expect(threadEnvironmentState(activeEnvironmentOf([hub], undefined), true)).toBeNull();
+  });
+});
+
+describe("a Thread on a Space's Sandbox", () => {
+  const sandboxOf = (status: HubEnvironmentStatus, startError: string | null = null) =>
+    activeEnvironmentOf(
+      [
+        hub,
+        environment({
+          id: EnvironmentId.make("sandbox:org-acme"),
+          name: "Acme Sandbox",
+          kind: "sandbox",
+          mode: "sandbox",
+          spaceId: SpaceId.make("org-acme"),
+          status,
+          startError,
+        }),
+      ],
+      EnvironmentId.make("sandbox:org-acme"),
+    );
+
+  it("says it is starting, or why it failed, whether or not a turn waits; stopped says nothing", () => {
+    expect(threadEnvironmentState(sandboxOf("starting"), false)).toBe("sandbox-starting");
+    expect(threadEnvironmentState(sandboxOf("starting"), true)).toBe("sandbox-starting");
+    const failed = sandboxOf("failed", "its server exited before connecting (exit code 137).");
+    expect(threadEnvironmentState(failed, false)).toBe("sandbox-failed");
+    expect(failed?.startError).toContain("exit code 137");
+    expect(activeEnvironmentLabel(failed!)).toBe("Acme Sandbox, failed to start");
+    // Stopped, it starts when the Thread's work needs it; a turn under way on it is paused.
+    expect(threadEnvironmentState(sandboxOf("stopped"), false)).toBeNull();
+    expect(threadEnvironmentState(sandboxOf("stopped"), true)).toBe("paused-offline");
   });
 });
 
