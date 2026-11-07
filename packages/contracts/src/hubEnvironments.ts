@@ -32,10 +32,15 @@ export type HubEnvironmentMode = typeof HubEnvironmentMode.Type;
 
 export const HubEnvironmentName = TrimmedNonEmptyString.check(Schema.isMaxLength(64));
 
-/** A machine's connection, or `stopped`: a Sandbox not running, which the Hub starts for work. */
+/**
+ * A machine's connection, or a Sandbox's lifecycle while it is not connected: `stopped` (the Hub
+ * starts it for work), `starting`, or `failed` (its last start failed; `startError` says why).
+ */
 export const HubEnvironmentStatus = Schema.Literals([
   ...EnvironmentConnectionStatus.literals,
   "stopped",
+  "starting",
+  "failed",
 ]);
 export type HubEnvironmentStatus = typeof HubEnvironmentStatus.Type;
 
@@ -57,6 +62,8 @@ export const HubEnvironmentSummary = Schema.Struct({
   /** A Sandbox's Space; it runs only that Space's Threads. Absent from older Hubs. */
   spaceId: Schema.optionalKey(Schema.NullOr(SpaceId)),
   status: HubEnvironmentStatus,
+  /** Why a `failed` Sandbox's last start failed. Absent from older Hubs. */
+  startError: Schema.optionalKey(Schema.NullOr(Schema.String)),
   registeredAt: IsoDateTime,
   lastSeenAt: Schema.NullOr(IsoDateTime),
   os: Schema.NullOr(TrimmedNonEmptyString),
@@ -68,10 +75,9 @@ export const HubEnvironmentSummary = Schema.Struct({
 export type HubEnvironmentSummary = typeof HubEnvironmentSummary.Type;
 
 /**
- * Where a new Thread nobody placed starts: the Project's preferred Environment when the User may
- * use it (`usable`, the `environment.use` rule), it is online and it has the provider enabled;
- * otherwise the Hub machine. The Hub places Threads by this rule and clients preview it with it,
- * so the composer's default is where the Thread starts.
+ * Where a new Thread nobody placed starts, by the Hub and as clients preview it: the Project's
+ * preferred Environment when the User may use it, it is online (a Sandbox counts while stopped: it
+ * starts for the work) and it has the provider enabled; otherwise the Hub machine.
  */
 export function previewThreadPlacement(input: {
   readonly preferred:
@@ -84,6 +90,7 @@ export function previewThreadPlacement(input: {
   const preferred = input.preferred;
   if (preferred === undefined || !preferred.usable) return HUB_MACHINE_ENVIRONMENT_ID;
   if (preferred.kind === "hub") return preferred.id;
+  if (preferred.kind === "sandbox" && preferred.status !== "online") return preferred.id;
   if (preferred.status !== "online") return HUB_MACHINE_ENVIRONMENT_ID;
   const provider = preferred.providers.find(
     (entry) => entry.instanceId === input.providerInstanceId,
@@ -106,6 +113,10 @@ export type RenameHubEnvironmentRequest = typeof RenameHubEnvironmentRequest.Typ
 
 export const RemoveHubEnvironmentRequest = Schema.Struct({ environmentId: EnvironmentId });
 export type RemoveHubEnvironmentRequest = typeof RemoveHubEnvironmentRequest.Type;
+
+/** «Try again» on a Sandbox that failed to start: the Hub starts it, and answers at once. */
+export const StartHubEnvironmentRequest = Schema.Struct({ environmentId: EnvironmentId });
+export type StartHubEnvironmentRequest = typeof StartHubEnvironmentRequest.Type;
 
 /**
  * `t3 join` asks to join. It made the credential itself and sends only its SHA-256, so the

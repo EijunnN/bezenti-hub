@@ -12,7 +12,7 @@ export function EnvironmentStatusDot(props: {
       state={
         props.status === "online"
           ? "connected"
-          : props.status === "reconnecting"
+          : props.status === "reconnecting" || props.status === "starting"
             ? "reconnecting"
             : "offline"
       }

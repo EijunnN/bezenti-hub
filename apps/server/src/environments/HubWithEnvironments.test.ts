@@ -95,6 +95,7 @@ import {
 } from "../orchestration-v2/testkit/ProviderReplayFixtures.ts";
 import { materializeReplayTranscriptRuntimeInstructions } from "../orchestration-v2/testkit/ReplayRuntimeInstructions.ts";
 import * as ProcessSandboxRuntime from "../sandboxes/ProcessSandboxRuntime.ts";
+import * as Sandboxes from "../sandboxes/Sandboxes.ts";
 import * as OrganizationLifecycle from "../spaces/OrganizationLifecycle.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -3148,6 +3149,13 @@ describe("Hub con Environments: where a Thread elsewhere works", () => {
   );
 });
 
+/** Starts the Space's Sandbox and waits for it, as the Thread's first work does. */
+const startSandbox = (hub: Hub, spaceId: SpaceId) =>
+  hub
+    .service(Sandboxes.Sandboxes)
+    .ensureRunning({ spaceId, actorUserId: undefined })
+    .pipe(Effect.orDie);
+
 /** An Organization of the Owner's, as `/api/spaces` makes one. */
 const createOrganization = Effect.fn(function* (hub: Hub, name: string) {
   const owner = yield* ownerIdOf(hub);
@@ -3201,17 +3209,19 @@ describe("Hub con Environments: the Sandbox of a Space", () => {
         FROM environments JOIN sandboxes USING (environment_id)
         WHERE environment_id = ${sandboxId}
       `;
+      // Placing makes it and leaves it stopped: its first work starts it.
       assert.deepEqual(row, {
         kind: "sandbox",
         spaceId: acme,
         ownerUserId: null,
-        status: "running",
+        status: "stopped",
       });
       const audited = yield* hub.server.sql<{ readonly action: string; readonly actor: string }>`
         SELECT action, actor_user_id AS actor FROM audit_log WHERE action = 'sandbox.create'
       `;
       assert.deepEqual(audited, [{ action: "sandbox.create", actor: owner }]);
 
+      yield* startSandbox(hub, acme);
       const sandbox = yield* hub.sandboxOf(acme);
       const result = yield* replayOn(hub, sandbox, loaded, { spaceId: acme });
       loaded.variant.assertOutput(result, loaded.transcript);
@@ -3306,6 +3316,7 @@ describe("Hub con Environments: the Sandbox of a Space", () => {
           "not-usable",
         );
 
+        yield* startSandbox(hub, acme);
         const sandbox = yield* hub.sandboxOf(acme);
         const remote = (projectId: ProjectId) =>
           HubRepository.withEnvironmentCredential(
@@ -3424,6 +3435,7 @@ describe("Hub con Environments: the Sandbox of a Space", () => {
           projectId,
           providerInstanceId: instanceId,
         });
+        yield* startSandbox(hub, spaceId);
         homes.push((yield* hub.sandboxOf(spaceId)).workspaceRoot);
       }
       assert.equal(new Set(homes).size, 2);
@@ -3462,6 +3474,7 @@ describe("Hub con Environments: the Sandbox of a Space", () => {
           providerInstanceId: ProviderInstanceId.make("codex"),
         })
         .pipe(Effect.result);
+      yield* startSandbox(hub, acme);
       // It connected; whether it has Codex is up to the machine the test runs on.
       if (Result.isFailure(placed)) {
         assert.equal(
@@ -3521,20 +3534,23 @@ describe("Hub con Environments: the Sandbox of a Space", () => {
         defaultModelSelection: null,
         spaceId: acme,
       });
+      // Placing it never waits for its server; the start fails when work needs it.
+      yield* hub.service(EnvironmentRegistry.EnvironmentRegistry).chooseForThread({
+        userId: yield* ownerIdOf(hub),
+        requested: sandboxEnvironmentIdOf(acme),
+        projectId,
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+      });
       const failed = yield* hub
-        .service(EnvironmentRegistry.EnvironmentRegistry)
-        .chooseForThread({
-          userId: yield* ownerIdOf(hub),
-          requested: sandboxEnvironmentIdOf(acme),
-          projectId,
-          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
-        })
+        .service(Sandboxes.Sandboxes)
+        .ensureRunning({ spaceId: acme, actorUserId: undefined })
         .pipe(Effect.flip);
-      assert.equal(
-        failed._tag === "ThreadEnvironmentUnavailableError" && failed.reason,
-        "sandbox-failed",
-      );
       assert.include(failed.message, "exit code 3");
+      const listed = (yield* listEnvironments(hub.server, hub.owner)).find(
+        (environment) => environment.id === sandboxEnvironmentIdOf(acme),
+      );
+      assert.equal(listed?.status, "failed");
+      assert.include(listed?.startError ?? "", "exit code 3");
     }).pipe(Effect.scoped),
   );
 
@@ -3563,6 +3579,7 @@ describe("Hub con Environments: the Sandbox of a Space", () => {
           providerInstanceId: instanceId,
         });
         yield* choose;
+        yield* startSandbox(hub, acme);
         const sandbox = yield* hub.sandboxOf(acme);
         const status = hub.server.sql<{ readonly status: string }>`
         SELECT status FROM sandboxes WHERE space_id = ${acme}
@@ -3578,7 +3595,8 @@ describe("Hub con Environments: the Sandbox of a Space", () => {
         );
         yield* lifecycle.restore(owner, acme);
         assert.equal(yield* choose, sandboxId);
-        assert.deepEqual(yield* status, ["running"]);
+        // Chosen again it is not started until work needs it.
+        assert.deepEqual(yield* status, ["stopped"]);
 
         yield* lifecycle.archive(owner, acme);
         yield* lifecycle.delete(owner, acme);
@@ -3602,7 +3620,7 @@ describe("Hub con Environments: the Sandbox of a Space", () => {
       `;
         assert.deepEqual(
           audited.map((entry) => entry.action),
-          ["sandbox.create", "sandbox.stop", "sandbox.stop", "sandbox.delete"],
+          ["sandbox.create", "sandbox.start", "sandbox.stop", "sandbox.delete"],
         );
       }).pipe(Effect.scoped),
   );
@@ -3628,6 +3646,7 @@ describe("Hub con Environments: the Sandbox of a Space", () => {
         projectId,
         providerInstanceId: instanceId,
       });
+      yield* startSandbox(hub, acme);
       const threadId = ThreadId.make("thread:acme");
       const modelSelection = { instanceId, model: "claude-sonnet-4-6" };
       yield* hub.service(Orchestrator.OrchestratorV2).dispatch({

@@ -16,9 +16,13 @@ import { fetchHubEnvironments } from "./hubEnvironments";
 
 export {
   type ActiveEnvironmentView,
+  type ThreadEnvironmentState,
   ENVIRONMENT_STATUS_LABELS,
   NEEDS_ENVIRONMENT_LABEL,
   PAUSED_OFFLINE_LABEL,
+  SANDBOX_FAILED_LABEL,
+  SANDBOX_RETRY_LABEL,
+  SANDBOX_STARTING_LABEL,
   activeEnvironmentLabel,
   activeEnvironmentOf,
   environmentUnavailableReason,
@@ -44,6 +48,11 @@ export function useActiveEnvironment(
   const read = () => JSON.stringify(activeEnvironmentOf(poller.snapshot(), environmentId));
   const key = useSyncExternalStore(poller.subscribe, read, read);
   return JSON.parse(key) as ActiveEnvironmentView | null;
+}
+
+/** Reads the list now, as after asking the Hub to start a Sandbox. */
+export function refreshHubEnvironments(): void {
+  poller.refresh();
 }
 
 /** The last list, for event handlers (a menu being built); empty until something mounted it. */

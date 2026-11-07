@@ -20,6 +20,7 @@ import {
 import * as RunFinalizationService from "./RunFinalizationService.ts";
 import * as ResourceCleanupService from "./ResourceCleanupService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
+import * as EnvironmentDemand from "../environment/EnvironmentDemand.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
@@ -680,6 +681,20 @@ export const layerWithOptions = (
           Effect.forkScoped,
         );
       }
+      // A stopped Sandbox that machine work waits for starts for it; the work still waits
+      // unclaimed until its executor serves, so starting spends no attempt.
+      const demand = yield* Effect.serviceOption(EnvironmentDemand.EnvironmentDemand);
+      const startAwaitedEnvironments = (availableEnvironmentIds: ReadonlyArray<EnvironmentId>) =>
+        Option.isNone(demand)
+          ? Effect.void
+          : outbox.environmentsAwaited(availableEnvironmentIds).pipe(
+              Effect.flatMap((awaited) =>
+                awaited.length === 0 ? Effect.void : demand.value.request(awaited),
+              ),
+              Effect.catchCause((cause) =>
+                Effect.logWarning("Could not start the Environments work waits for", cause),
+              ),
+            );
       const workerId = options.workerId ?? `orchestration-v2:${process.pid}`;
       const maxAttempts = Math.max(1, options.maxAttempts ?? 5);
       const wasCancelled = (effectId: string) =>
@@ -793,6 +808,9 @@ export const layerWithOptions = (
           if (Exit.isFailure(claimExit)) return yield* Effect.failCause(claimExit.cause);
           const claimed = claimExit.value;
           if (Option.isNone(claimed)) {
+            if (availableEnvironmentIds !== undefined) {
+              yield* startAwaitedEnvironments(availableEnvironmentIds);
+            }
             return false;
           }
           const effect = claimed.value;

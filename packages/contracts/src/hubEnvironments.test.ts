@@ -45,4 +45,28 @@ describe("previewThreadPlacement", () => {
       HUB_MACHINE_ENVIRONMENT_ID,
     );
   });
+
+  it("counts a Sandbox that is not running as available: the Hub starts it for the work", () => {
+    for (const status of ["stopped", "starting", "failed"] as const) {
+      expect(
+        previewThreadPlacement({
+          preferred: preferred({ kind: "sandbox", status, providers: [] }),
+          providerInstanceId: claude,
+        }),
+      ).toBe(laptop);
+    }
+    // Running, it is held to its providers like any machine; nobody may use it, nothing.
+    expect(
+      previewThreadPlacement({
+        preferred: preferred({ kind: "sandbox", providers: [] }),
+        providerInstanceId: claude,
+      }),
+    ).toBe(HUB_MACHINE_ENVIRONMENT_ID);
+    expect(
+      previewThreadPlacement({
+        preferred: preferred({ kind: "sandbox", status: "stopped", usable: false }),
+        providerInstanceId: claude,
+      }),
+    ).toBe(HUB_MACHINE_ENVIRONMENT_ID);
+  });
 });

@@ -7,6 +7,8 @@ const DOT_CLASS: Record<HubEnvironmentStatus, string> = {
   reconnecting: "bg-warning",
   offline: "bg-muted-foreground/50",
   stopped: "bg-muted-foreground/50",
+  starting: "bg-warning animate-pulse",
+  failed: "bg-destructive",
 };
 
 /** An Active environment's live status as a dot; the words go in the accessible name nearby. */

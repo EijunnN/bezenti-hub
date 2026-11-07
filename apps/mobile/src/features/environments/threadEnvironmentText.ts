@@ -3,6 +3,9 @@ import {
   ENVIRONMENT_STATUS_LABELS,
   NEEDS_ENVIRONMENT_LABEL,
   PAUSED_OFFLINE_LABEL,
+  SANDBOX_FAILED_LABEL,
+  SANDBOX_STARTING_LABEL,
+  type ThreadEnvironmentState,
   activeEnvironmentLabel,
   threadEnvironmentState,
 } from "@t3tools/client-runtime/environment/hub-environments";
@@ -14,7 +17,7 @@ export interface ThreadEnvironmentPresentation {
   /** What its accessible name ends with: «runs on Laptop, offline». */
   readonly accessibilityText: string;
   readonly status: HubEnvironmentStatus;
-  readonly state: "needs-environment" | "paused-offline" | null;
+  readonly state: ThreadEnvironmentState | null;
 }
 
 /**
@@ -31,11 +34,19 @@ export function threadEnvironmentPresentation(input: {
   if (environment === null) return null;
   const state = threadEnvironmentState(environment, input.turnUnderWay);
   if (state === null && !input.hasJoinedEnvironments) return null;
+  const stateLabel =
+    state === "paused-offline"
+      ? PAUSED_OFFLINE_LABEL
+      : state === "sandbox-starting"
+        ? SANDBOX_STARTING_LABEL
+        : state === "sandbox-failed"
+          ? SANDBOX_FAILED_LABEL
+          : undefined;
   const text =
     state === "needs-environment"
       ? NEEDS_ENVIRONMENT_LABEL
-      : state === "paused-offline"
-        ? `${PAUSED_OFFLINE_LABEL} · ${environment.name}`
+      : stateLabel !== undefined
+        ? `${stateLabel} · ${environment.name}`
         : environment.status === "online"
           ? environment.name
           : `${environment.name} · ${ENVIRONMENT_STATUS_LABELS[environment.status]}`;
@@ -44,8 +55,8 @@ export function threadEnvironmentPresentation(input: {
     accessibilityText:
       state === "needs-environment"
         ? NEEDS_ENVIRONMENT_LABEL.toLowerCase()
-        : state === "paused-offline"
-          ? `${PAUSED_OFFLINE_LABEL.toLowerCase()}, runs on ${environment.name}`
+        : stateLabel !== undefined
+          ? `${stateLabel.toLowerCase()}, runs on ${environment.name}`
           : `runs on ${activeEnvironmentLabel(environment)}`,
     status: environment.status,
     state,

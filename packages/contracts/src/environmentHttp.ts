@@ -93,6 +93,7 @@ import {
   HubEnvironmentList,
   HubEnvironmentSummary,
   RemoveHubEnvironmentRequest,
+  StartHubEnvironmentRequest,
   RenameHubEnvironmentRequest,
 } from "./hubEnvironments.ts";
 import {
@@ -1056,6 +1057,15 @@ class EnvironmentHubEnvironmentsHttpApi extends HttpApiGroup.make("environments"
       headers: OptionalBearerHeaders,
       payload: RemoveHubEnvironmentRequest,
       success: HubEnvironmentList,
+      error: [...EnvironmentHubEnvironmentErrors, EnvironmentResourceNotFoundError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  // «Try again» on a Sandbox whose start failed: answers at once, as it starts.
+  .add(
+    HttpApiEndpoint.post("start", "/api/environments/start", {
+      headers: OptionalBearerHeaders,
+      payload: StartHubEnvironmentRequest,
+      success: HubEnvironmentSummary,
       error: [...EnvironmentHubEnvironmentErrors, EnvironmentResourceNotFoundError],
     }).middleware(EnvironmentAuthenticatedAuth),
   )

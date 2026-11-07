@@ -9,6 +9,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 
 import * as Config from "effect/Config";
+import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -205,6 +206,8 @@ export const make = Effect.fn("ProcessSandboxRuntime.make")(function* (options: 
     options.rootDir ??
     path.join(path.dirname(config.baseDir), `${path.basename(config.baseDir)}-sandboxes`);
   const runtimeScope = yield* Effect.scope;
+  // Launches run with the runtime's own services, never those of whoever asked for the start.
+  const runtimeContext = yield* Effect.context<never>();
   const running = new Map<string, Running>();
   const exits = yield* PubSub.unbounded<SandboxExit>();
   const lock = yield* Semaphore.make(1);
@@ -328,7 +331,7 @@ export const make = Effect.fn("ProcessSandboxRuntime.make")(function* (options: 
           startToken,
         })
         .pipe(
-          Effect.provideService(Scope.Scope, scope),
+          Effect.provideContext(Context.add(runtimeContext, Scope.Scope, scope)),
           Effect.onError(() => Scope.close(scope, Exit.void)),
         );
       if (launched.pid !== null) {

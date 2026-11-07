@@ -68,6 +68,7 @@ import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as ProcessSandboxRuntime from "../sandboxes/ProcessSandboxRuntime.ts";
 import * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
+import * as Sandboxes from "../sandboxes/Sandboxes.ts";
 import { ENVIRONMENT_CREDENTIAL_SECRET, readJoinedHubState } from "./joinedHubState.ts";
 import type * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 import type { Authenticator, HubServices, Server } from "../auth/UserAuth.testkit.ts";
@@ -398,11 +399,22 @@ const makeSandboxRuntime = (
   /** A real launcher instead, such as `t3 serve` children. */
   realLauncher: ProcessSandboxRuntime.SandboxLauncher | undefined,
   rootDir: string,
+  /**
+   * Runs before each start of a testkit server: it may hold the start (to see it `starting`), or
+   * answer an exit code, as a server that ends before it connects.
+   */
+  beforeLaunch: ((sandboxId: string) => Effect.Effect<Option.Option<number>>) | undefined,
 ) => {
   let hubUrl = "";
   const started = new Map<string, TestEnvironment>();
+  const exits = new Map<string, Deferred.Deferred<number | null>>();
   const testkitLauncher: ProcessSandboxRuntime.SandboxLauncher = (launch) =>
     Effect.gen(function* () {
+      const exitAtOnce =
+        beforeLaunch === undefined ? Option.none<number>() : yield* beforeLaunch(launch.sandboxId);
+      if (Option.isSome(exitAtOnce)) {
+        return { pid: null, exited: Effect.succeed<number | null>(exitAtOnce.value) };
+      }
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const paths = yield* ServerConfig.deriveServerPaths(launch.homePath, undefined, {
@@ -424,7 +436,9 @@ const makeSandboxRuntime = (
         baseDir: launch.homePath,
       });
       started.set(launch.sandboxId, environment);
-      return { pid: null, exited: Effect.never };
+      const exited = yield* Deferred.make<number | null>();
+      exits.set(launch.sandboxId, exited);
+      return { pid: null, exited: Deferred.await(exited) };
     }).pipe(Effect.provide(NodeServices.layer));
   const runtime = ProcessSandboxRuntime.layer({
     launcher: realLauncher ?? testkitLauncher,
@@ -445,6 +459,14 @@ const makeSandboxRuntime = (
     /** The server the runtime last started for the Space's Sandbox. */
     environmentOf: (spaceId: SpaceId) =>
       Effect.fromNullishOr(started.get(SandboxRuntime.sandboxIdOf(spaceId))).pipe(Effect.orDie),
+    /** Its server dies with `exitCode`, as a crashed or killed container: nothing stopped it. */
+    crash: (spaceId: SpaceId, exitCode = 137) =>
+      Effect.suspend(() => {
+        const exited = exits.get(SandboxRuntime.sandboxIdOf(spaceId));
+        return exited === undefined
+          ? Effect.die("the Sandbox's server never started")
+          : Deferred.succeed(exited, exitCode).pipe(Effect.asVoid);
+      }),
   };
 };
 
@@ -461,6 +483,13 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     >;
     /** Runs each Sandbox's server with this launcher instead of in the test's process. */
     readonly sandboxLauncher?: ProcessSandboxRuntime.SandboxLauncher;
+    /**
+     * Before each testkit Sandbox server starts: hold it, or answer an exit code for a server
+     * that ends before connecting.
+     */
+    readonly beforeSandboxLaunch?: (sandboxId: string) => Effect.Effect<Option.Option<number>>;
+    /** The idle stop's timeout and clock (a TestClock the test advances). */
+    readonly sandboxIdle?: Sandboxes.SandboxIdlePolicy["Service"];
     /** False: no Sandbox runtime, as a production Hub without Podman. */
     readonly sandboxes?: boolean;
   } = {},
@@ -474,11 +503,20 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     options.sandboxAdapters ?? ProviderAdapterRegistry.layerFromAdapters([]),
     options.sandboxLauncher,
     sandboxRoot,
+    options.beforeSandboxLaunch,
   );
+  // The idle policy goes in with the runtime, to the Sandboxes that read it.
+  const sandboxRuntime =
+    options.sandboxIdle === undefined
+      ? sandboxes.runtime
+      : Layer.merge(
+          sandboxes.runtime,
+          Layer.succeed(Sandboxes.SandboxIdlePolicy, options.sandboxIdle),
+        );
   const { server, authenticator, owner } = yield* hubWithOwner({
     listen: true,
     extend: withOrchestration(options.textGeneration),
-    ...(options.sandboxes === false ? {} : { sandboxRuntime: sandboxes.runtime }),
+    ...(options.sandboxes === false ? {} : { sandboxRuntime }),
   });
   sandboxes.setHubUrl(server.url);
   /**
@@ -523,6 +561,8 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     service: serviceOf(server),
     /** The running server of the Space's Sandbox, once the Hub started it. */
     sandboxOf: sandboxes.environmentOf,
+    /** The Space's Sandbox server dies by itself (a crash, or a killed container). */
+    crashSandbox: sandboxes.crash,
     /** Where the Sandboxes' homes are. */
     sandboxRoot,
   };

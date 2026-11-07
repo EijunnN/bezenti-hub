@@ -47,6 +47,7 @@ import { GuestShareIndicator } from "./GuestShareControls";
 import { EnvironmentStatusDot } from "../EnvironmentStatusDot";
 import {
   type ActiveEnvironmentView,
+  type ThreadEnvironmentState,
   ENVIRONMENT_STATUS_LABELS,
   NEEDS_ENVIRONMENT_LABEL,
   PAUSED_OFFLINE_LABEL,
@@ -61,7 +62,7 @@ interface ChatHeaderProps {
   /** The Environment the Thread runs on, by name and live status. */
   activeEnvironment?: ActiveEnvironmentView | null | undefined;
   /** «Needs an environment», or «paused, environment offline» while its turn waits. */
-  environmentState?: "needs-environment" | "paused-offline" | null | undefined;
+  environmentState?: ThreadEnvironmentState | null | undefined;
   /** The Thread's latest move to another Environment; shown while it runs. */
   activeThreadMove?: OrchestrationV2ThreadMove | null | undefined;
   isServerThread: boolean;

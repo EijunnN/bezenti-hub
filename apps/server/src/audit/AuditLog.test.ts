@@ -588,6 +588,7 @@ it.effect(
         "environment.remove",
         "thread.move",
         "sandbox.create",
+        "sandbox.start",
         "sandbox.stop",
         "sandbox.delete",
       ];

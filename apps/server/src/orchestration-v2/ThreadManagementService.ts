@@ -1,4 +1,5 @@
 import type {
+  EnvironmentId,
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
 } from "@t3tools/contracts";
@@ -75,6 +76,7 @@ import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
+import * as EnvironmentDemand from "../environment/EnvironmentDemand.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 
@@ -617,6 +619,17 @@ const PAUSABLE_RUN_STATUSES: ReadonlySet<string> = new Set([
   "waiting",
 ]);
 
+/** Commands decided with the Thread's machine: a stopped Sandbox starts for them first. */
+const MACHINE_DECIDED_COMMANDS: ReadonlySet<string> = new Set([
+  "message.dispatch",
+  "checkpoint.rollback",
+  "provider.switch",
+  "queued-run.start",
+  "queue.resume",
+  "queued-message.promote-to-steer",
+  "thread.guest-message.submit",
+]);
+
 const makeWith = Effect.fn("ThreadManagementService.make")(function* (
   spaces: Option.Option<SpaceDirectory.SpaceDirectory["Service"]>,
   environments: Option.Option<EnvironmentRegistry.EnvironmentRegistry["Service"]> = Option.none(),
@@ -631,6 +644,8 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
   const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
   // Which machines are connected right now; absent on hosts that run nothing remote.
   const executors = yield* Effect.serviceOption(EnvironmentExecutor.EnvironmentExecutorRegistry);
+  // Sandboxes the Hub starts for work; absent on a Hub without a Sandbox runtime.
+  const demand = yield* Effect.serviceOption(EnvironmentDemand.EnvironmentDemand);
   // A Thread without a Project works in its own scratch folder, which any Environment makes.
   const scratchThreads = Option.map(
     Option.all({
@@ -977,10 +992,49 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
     );
   };
 
+  /**
+   * A command the Orchestrator decides with the Thread's machine (its provider, its workspace)
+   * waits for a stopped Sandbox to start, as does a move onto one; a start that fails refuses it
+   * with why. Other commands, and effects (which wait unclaimed), never start it here.
+   */
+  const startMachine = (
+    command: OrchestrationV2ServerCommand,
+  ): Effect.Effect<OrchestrationV2ServerCommand, Orchestrator.OrchestratorCommandRejectedError> => {
+    if (Option.isNone(demand) || Option.isNone(executors)) return Effect.succeed(command);
+    const target: Effect.Effect<EnvironmentId> | undefined =
+      command.type === "thread.move"
+        ? Effect.succeed(command.targetEnvironmentId)
+        : MACHINE_DECIDED_COMMANDS.has(command.type) && "threadId" in command
+          ? executors.value.activeEnvironment(command.threadId)
+          : undefined;
+    if (target === undefined) return Effect.succeed(command);
+    return target.pipe(
+      Effect.flatMap((environmentId) =>
+        demand.value.awaitStarted(environmentId).pipe(
+          Effect.mapError(
+            (error) =>
+              new Orchestrator.OrchestratorCommandRejectedError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause: new EnvironmentRegistry.ThreadEnvironmentUnavailableError({
+                  environmentId,
+                  name: "The Sandbox",
+                  reason: "sandbox-failed",
+                  detail: error.detail,
+                }),
+              }),
+          ),
+        ),
+      ),
+      Effect.as(command),
+    );
+  };
+
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
     claimThreadSpace(command).pipe(
       Effect.flatMap(placeThread),
       Effect.flatMap(checkMoveTarget),
+      Effect.flatMap(startMachine),
       Effect.flatMap(queueWhileAway),
       Effect.flatMap((claimed) =>
         ensureCommandTranscripts(claimed).pipe(

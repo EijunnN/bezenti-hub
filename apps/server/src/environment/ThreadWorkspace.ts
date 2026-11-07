@@ -59,6 +59,7 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
 import { makeWorkspaceRpcCalls } from "../workspace/WorkspaceRpcCalls.ts";
+import * as EnvironmentDemand from "./EnvironmentDemand.ts";
 import * as EnvironmentExecutor from "./EnvironmentExecutor.ts";
 import * as ProjectCheckouts from "./ProjectCheckouts.ts";
 import * as RemoteEnvironments from "./RemoteEnvironments.ts";
@@ -110,6 +111,8 @@ export const make = Effect.gen(function* () {
   const checkouts = yield* Effect.serviceOption(ProjectCheckouts.ProjectCheckouts);
   const environments = yield* Effect.serviceOption(EnvironmentRegistry.EnvironmentRegistry);
   const remoteEnvironments = yield* Effect.serviceOption(RemoteEnvironments.RemoteEnvironments);
+  // Sandboxes start for these calls and count them, and open terminals, as activity.
+  const demand = yield* Effect.serviceOption(EnvironmentDemand.EnvironmentDemand);
   const hubMachine = Option.isSome(registry)
     ? yield* Effect.option(registry.value.get(registry.value.hubMachineEnvironmentId))
     : Option.none();
@@ -155,6 +158,19 @@ export const make = Effect.gen(function* () {
     if (Option.isNone(usable)) return REFUSED;
     const name = usable.value.name;
     const offline: Route = { _tag: "offline", name };
+    if (Option.isSome(demand)) {
+      // A stopped Sandbox starts for the call, which waits for it; one that cannot start is offline.
+      const started = yield* demand.value.awaitStarted(environmentId).pipe(
+        Effect.as(true),
+        Effect.catch((error) =>
+          Effect.logWarning("A Sandbox did not start for a workspace call", {
+            environmentId,
+            detail: error.detail,
+          }).pipe(Effect.as(false)),
+        ),
+      );
+      if (!started) return offline;
+    }
     const executor = yield* Effect.option(registry.value.get(environmentId));
     if (Option.isNone(executor) || Option.isNone(executor.value.workspace.forward)) return offline;
     const thread = yield* Effect.option(projections.value.getThread(ThreadId.make(threadId)));
@@ -419,6 +435,7 @@ export const make = Effect.gen(function* () {
           Option.isSome(forward) &&
           forward.value === known.forward
         ) {
+          if (Option.isSome(demand)) yield* demand.value.touch(known.environmentId);
           return yield* runRemote(known.forward).pipe(
             Effect.catchTags({
               EnvironmentExecutorUnavailableError: () =>
@@ -478,6 +495,8 @@ export const make = Effect.gen(function* () {
         const resolved = terminalFolders(where, input);
         if (resolved === undefined) return Stream.fail(refuse(REFUSED));
         yield* remember(input, caller, where);
+        // An open terminal keeps its Sandbox from idling, for as long as the stream lives.
+        if (Option.isSome(demand)) yield* demand.value.hold(where.environmentId);
         return where.forward
           .stream("terminal.stream", {
             mode,

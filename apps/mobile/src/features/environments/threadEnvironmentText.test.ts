@@ -7,13 +7,22 @@ const laptop = (status: "online" | "reconnecting" | "offline") => ({
   status,
   isHubMachine: false,
   needsEnvironment: false,
+  isSandbox: false,
+  startError: null,
 });
 
 describe("threadEnvironmentPresentation", () => {
   it("says nothing while the Hub machine is the only Environment and the Thread runs there", () => {
     expect(
       threadEnvironmentPresentation({
-        environment: { name: "Hub", status: "online", isHubMachine: true, needsEnvironment: false },
+        environment: {
+          name: "Hub",
+          status: "online",
+          isHubMachine: true,
+          needsEnvironment: false,
+          isSandbox: false,
+          startError: null,
+        },
         hasJoinedEnvironments: false,
         turnUnderWay: false,
       }),
@@ -59,6 +68,8 @@ describe("threadEnvironmentPresentation", () => {
           status: "offline",
           isHubMachine: false,
           needsEnvironment: true,
+          isSandbox: false,
+          startError: null,
         },
         hasJoinedEnvironments: false,
         turnUnderWay: false,
@@ -67,6 +78,38 @@ describe("threadEnvironmentPresentation", () => {
       text: "Needs an environment",
       accessibilityText: "needs an environment",
       state: "needs-environment",
+    });
+  });
+
+  it("says a Sandbox is starting, or that it could not start", () => {
+    const sandbox = (status: "starting" | "failed") => ({
+      name: "Acme Sandbox",
+      status,
+      isHubMachine: false,
+      needsEnvironment: false,
+      isSandbox: true,
+      startError: status === "failed" ? "its server exited (exit code 137)." : null,
+    });
+    expect(
+      threadEnvironmentPresentation({
+        environment: sandbox("starting"),
+        hasJoinedEnvironments: true,
+        turnUnderWay: false,
+      }),
+    ).toMatchObject({
+      text: "Starting the Sandbox… · Acme Sandbox",
+      accessibilityText: "starting the sandbox…, runs on Acme Sandbox",
+      state: "sandbox-starting",
+    });
+    expect(
+      threadEnvironmentPresentation({
+        environment: sandbox("failed"),
+        hasJoinedEnvironments: true,
+        turnUnderWay: true,
+      }),
+    ).toMatchObject({
+      text: "The Sandbox could not start · Acme Sandbox",
+      state: "sandbox-failed",
     });
   });
 

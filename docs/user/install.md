@@ -509,7 +509,12 @@ Space, with its own files, Project checkouts and provider sign-ins. Sandboxes
 need Podman on the Hub's machine; until the Hub can run them they are not
 listed, and choosing one says so. The composer's **Environment** picker lists it as **<Space> Sandbox** (for example
 **Acme Sandbox**) beside your machines. Pick it and send: the first time, the
-Hub creates the Sandbox, which takes a few seconds, and later Threads reuse it.
+Hub creates the Sandbox, and later Threads reuse it. A Sandbox stops by itself
+after 30 minutes with no turns, open terminals or previews
+(`T3CODE_SANDBOX_IDLE_SECONDS` on the Hub changes it), and starts again when you
+send a message, open a terminal or browse its files; meanwhile the Thread says
+**Starting the Sandbox…**. If it cannot start, the Thread says why with **Try
+again**.
 Only Admins and Members of the Space can run Threads there (not Guests), and
 only that Space's Threads run in it; another Space's Sandbox never shows in the
 picker. A Sandbox reaches only its own Space's repositories on the Hub. Turns,

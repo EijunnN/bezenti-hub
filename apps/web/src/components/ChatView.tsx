@@ -1,4 +1,4 @@
-import { ArrowRightLeftIcon, LockIcon } from "lucide-react";
+import { ArrowRightLeftIcon, LoaderCircleIcon, LockIcon, TriangleAlertIcon } from "lucide-react";
 import { ChildThreadApprovals } from "./chat/ChildThreadApprovals";
 import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
@@ -377,9 +377,14 @@ import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplat
 import {
   NEEDS_ENVIRONMENT_LABEL,
   PAUSED_OFFLINE_LABEL,
+  SANDBOX_FAILED_LABEL,
+  SANDBOX_RETRY_LABEL,
+  SANDBOX_STARTING_LABEL,
+  refreshHubEnvironments,
   threadEnvironmentState,
   useActiveEnvironment,
 } from "../environments/primary/useHubEnvironments";
+import { startHubEnvironment } from "../environments/primary/hubEnvironments";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/models";
 import { openMoveThreadDialog } from "./chat/MoveThreadDialog";
 import { Button } from "./ui/button";
@@ -2568,39 +2573,79 @@ export default function ChatView(props: ChatViewProps) {
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
     // Where the Thread runs keeps it from going on: say why, and offer the move.
+    const sandboxId = activeThreadShell?.activeEnvironmentId ?? null;
     const environmentItems: ComposerBannerStackItem[] =
       threadEnvState === null
         ? []
-        : [
-            {
-              id: `thread-environment:${threadEnvState}`,
-              variant: "warning",
-              group: "environment",
-              icon: <ArrowRightLeftIcon />,
-              title:
-                threadEnvState === "needs-environment"
-                  ? NEEDS_ENVIRONMENT_LABEL
-                  : PAUSED_OFFLINE_LABEL,
-              description:
-                threadEnvState === "needs-environment"
-                  ? "The machine this Thread ran on was removed. Its history is kept: move it to another Environment to continue."
-                  : `${threadActiveEnvironment?.name ?? "Its Environment"} is offline. The turn goes on when it comes back; messages you send now are queued until then, or until you move the Thread.`,
-              actions: (
-                <Button
-                  size="xs"
-                  variant="outline"
-                  onClick={() =>
-                    activeThread &&
-                    openMoveThreadDialog(
-                      scopeThreadRef(activeThread.environmentId, activeThread.id),
-                    )
-                  }
-                >
-                  Move to another Environment
-                </Button>
-              ),
-            },
-          ];
+        : threadEnvState === "sandbox-starting"
+          ? [
+              {
+                id: "thread-environment:sandbox-starting",
+                variant: "info",
+                group: "environment",
+                icon: <LoaderCircleIcon className="animate-spin" />,
+                title: SANDBOX_STARTING_LABEL,
+                description: `${threadActiveEnvironment?.name ?? "The Sandbox"} is starting for this Thread's work. What you send runs once it is up.`,
+              },
+            ]
+          : threadEnvState === "sandbox-failed"
+            ? [
+                {
+                  id: "thread-environment:sandbox-failed",
+                  variant: "error",
+                  group: "environment",
+                  icon: <TriangleAlertIcon />,
+                  title: SANDBOX_FAILED_LABEL,
+                  description:
+                    threadActiveEnvironment?.startError ??
+                    `${threadActiveEnvironment?.name ?? "The Sandbox"} did not start.`,
+                  actions:
+                    sandboxId === null ? undefined : (
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        onClick={() => {
+                          void startHubEnvironment(sandboxId).then(
+                            () => refreshHubEnvironments(),
+                            () => refreshHubEnvironments(),
+                          );
+                        }}
+                      >
+                        {SANDBOX_RETRY_LABEL}
+                      </Button>
+                    ),
+                },
+              ]
+            : [
+                {
+                  id: `thread-environment:${threadEnvState}`,
+                  variant: "warning",
+                  group: "environment",
+                  icon: <ArrowRightLeftIcon />,
+                  title:
+                    threadEnvState === "needs-environment"
+                      ? NEEDS_ENVIRONMENT_LABEL
+                      : PAUSED_OFFLINE_LABEL,
+                  description:
+                    threadEnvState === "needs-environment"
+                      ? "The machine this Thread ran on was removed. Its history is kept: move it to another Environment to continue."
+                      : `${threadActiveEnvironment?.name ?? "Its Environment"} is offline. The turn goes on when it comes back; messages you send now are queued until then, or until you move the Thread.`,
+                  actions: (
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      onClick={() =>
+                        activeThread &&
+                        openMoveThreadDialog(
+                          scopeThreadRef(activeThread.environmentId, activeThread.id),
+                        )
+                      }
+                    >
+                      Move to another Environment
+                    </Button>
+                  ),
+                },
+              ];
     // Someone else's Thread: say why the composer is closed, whatever state the Thread is in.
     const roleItems: ComposerBannerStackItem[] =
       threadRole.continueBlockedReason === null
