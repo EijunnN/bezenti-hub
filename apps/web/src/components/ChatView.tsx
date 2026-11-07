@@ -1401,6 +1401,21 @@ export default function ChatView(props: ChatViewProps) {
     activePendingUserInput: activePendingUserInput?.requestId ?? null,
     threadError,
   });
+  // A send to a Sandbox that is not running starts it: follow it until it is up or has failed.
+  const sandboxWaking =
+    isSendBusy &&
+    threadActiveEnvironment?.isSandbox === true &&
+    threadActiveEnvironment.status !== "online";
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- a timer that polls the Hub's Environments list while the send waits on the Sandbox
+  useEffect(() => {
+    if (!sandboxWaking) return;
+    refreshHubEnvironments();
+    const timer = window.setInterval(refreshHubEnvironments, 1000);
+    return () => {
+      window.clearInterval(timer);
+      refreshHubEnvironments();
+    };
+  }, [sandboxWaking]);
   const optimisticCompactionMessage = optimisticUserMessages.at(-1);
   const latestServerUserItem = serverVisibleTurnItems.findLast(
     (row) => row.item.type === "user_message",
