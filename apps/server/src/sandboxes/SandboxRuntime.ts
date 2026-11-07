@@ -11,9 +11,9 @@ import type * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import type * as Stream from "effect/Stream";
 
-import type { SandboxLimits } from "./sandboxLimits.ts";
+import type { HomeMeasurement, HostSpace, SandboxLimits } from "./sandboxLimits.ts";
 
-export type { SandboxLimits };
+export type { HomeMeasurement, HostSpace, SandboxLimits };
 
 export type SandboxRuntimeKind = "process" | "podman";
 
@@ -122,6 +122,13 @@ export class SandboxRuntime extends Context.Service<
     readonly limitSupport: Effect.Effect<SandboxLimitSupport>;
     /** What the running Sandbox uses now; null when it is not running or cannot be told. */
     readonly resourceUse: (sandboxId: string) => Effect.Effect<SandboxResourceUse | null>;
+    /**
+     * The size of its home, measured so that nothing the Sandbox does to its files (an unreadable
+     * directory) hides them; a failure is reported, never a smaller size.
+     */
+    readonly measureHome: (sandboxId: string) => Effect.Effect<HomeMeasurement>;
+    /** The filesystem its homes are on: the Hub keeps it from filling. */
+    readonly hostSpace: Effect.Effect<HostSpace | null>;
     /** Each server that ended without `stop` or `delete`. */
     readonly exits: Stream.Stream<SandboxExit>;
   }

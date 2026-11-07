@@ -379,6 +379,21 @@ export class EnvironmentHttpForbiddenError extends Schema.TaggedError<Environmen
   }
 }
 
+/** Sandbox limits outside what a Sandbox needs or the Hub's machine has; `message` says which. */
+export class EnvironmentSandboxLimitsInvalidError extends Schema.TaggedError<EnvironmentSandboxLimitsInvalidError>()(
+  "EnvironmentSandboxLimitsInvalidError",
+  {
+    message: Schema.String,
+  },
+  { httpApiStatus: 400 },
+) {
+  [HttpServerRespondable.symbol]() {
+    return HttpServerResponse.schemaJson(EnvironmentSandboxLimitsInvalidError)(this, {
+      status: 400,
+    });
+  }
+}
+
 export class EnvironmentHttpInternalServerError extends Schema.TaggedError<EnvironmentHttpInternalServerError>()(
   "EnvironmentHttpInternalServerError",
   {
@@ -1095,7 +1110,11 @@ class EnvironmentHubEnvironmentsHttpApi extends HttpApiGroup.make("environments"
       headers: OptionalBearerHeaders,
       payload: HubSandboxLimitsRequest,
       success: HubSandboxList,
-      error: [...EnvironmentHubEnvironmentErrors, EnvironmentResourceNotFoundError],
+      error: [
+        ...EnvironmentHubEnvironmentErrors,
+        EnvironmentResourceNotFoundError,
+        EnvironmentSandboxLimitsInvalidError,
+      ],
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   // `t3 join` on the machine: start a request, then ask until the Owner decides.

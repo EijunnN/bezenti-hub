@@ -28,7 +28,7 @@ import {
   writeJoinedHubState,
 } from "../environments/joinedHubState.ts";
 import { sandboxServerPaths } from "./sandboxHome.ts";
-import { NO_LIMITS, type SandboxLimits } from "./sandboxLimits.ts";
+import { hostSpaceOf, measureWithDu, NO_LIMITS, type SandboxLimits } from "./sandboxLimits.ts";
 import {
   type SandboxExit,
   SandboxHubAddress,
@@ -731,6 +731,20 @@ const make = Effect.fn("PodmanSandboxRuntime.make")(function* (
     inspect,
     limitSupport: Effect.succeed(limitSupport),
     resourceUse,
+    // As root of the Hub user's namespace (`podman unshare`): the container's own uids, so a
+    // directory the Sandbox made unreadable to it is still read.
+    measureHome: Effect.fn("PodmanSandboxRuntime.measureHome")(function* (sandboxId) {
+      return yield* measureWithDu(options.podmanCommand ?? "podman", [
+        ...podmanGlobalArgs(),
+        "unshare",
+        "du",
+        "-s",
+        "-k",
+        "-x",
+        homeOf(sandboxId),
+      ]);
+    }),
+    hostSpace: Effect.sync(() => hostSpaceOf(rootDir)),
     exits: Stream.fromPubSub(exits),
   });
 });

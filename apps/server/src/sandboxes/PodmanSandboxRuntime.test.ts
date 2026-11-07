@@ -627,6 +627,20 @@ describe.skipIf(!rootlessPodmanAvailable)("the Podman Sandbox runtime", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.live("measures a home with what the Sandbox made unreadable to the Hub's user", () =>
+    Effect.gen(function* () {
+      const { runtime, homeOf } = yield* twoSandboxes({ createOnly: true });
+      const hidden = NodePath.join(homeOf("acme"), "hidden");
+      NodeFS.mkdirSync(hidden);
+      NodeFS.writeFileSync(NodePath.join(hidden, "big.bin"), Buffer.alloc(3 * 1024 * 1024, 1));
+      NodeFS.chmodSync(hidden, 0o000);
+      yield* Effect.addFinalizer(() => Effect.sync(() => NodeFS.chmodSync(hidden, 0o700)));
+      const measured = yield* runtime.measureHome("sandbox-acme");
+      assert.equal(measured._tag, "measured", JSON.stringify(measured));
+      assert.isAtLeast(measured._tag === "measured" ? measured.bytes : 0, 3 * 1024 * 1024);
+    }).pipe(Effect.scoped),
+  );
+
   // Needs a systemd user session giving each container its cgroup, with memory and pids delegated.
   it.live.skipIf(!podmanLimitSupportHere.memory || !podmanLimitSupportHere.pids)(
     `the memory and PIDs limits apply (skipped where they are not enforced: ${podmanLimitSupportHere.note ?? "enforced"})`,

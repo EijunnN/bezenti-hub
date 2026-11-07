@@ -541,8 +541,13 @@ process limits apply on the Sandbox's next start, and Podman enforces them only
 when the Hub runs in a systemd user session (with `dbus-user-session`
 installed): otherwise Settings shows **Limits not enforced on this host** and
 why. The disk limit is the Hub's own: a Sandbox whose files go over it stops,
-and its Threads say its disk is full until the Owner raises the limit and starts
-it again.
+its running turns end saying so, and its Threads say its disk is full until the
+Owner raises the limit and starts it again. The Hub checks every minute, so a
+Sandbox can briefly go past its limit: keep the Sandboxes' folder
+(`<Hub home>-sandboxes`) on a disk of its own (or a size-capped mount) so it can
+never fill the disk the Hub keeps its data on. Whatever the limits, no Sandbox
+runs while that disk has less than 5% (at most 10 GiB) free. A Sandbox the Owner
+stops from Settings stays stopped until someone starts it.
 
 Each Sandbox runs in a container of its own, with no access to the Hub's
 files, other Sandboxes, or anything on the machine's loopback. It reaches the

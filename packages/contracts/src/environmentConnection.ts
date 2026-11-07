@@ -193,6 +193,7 @@ export const ENVIRONMENT_CLOSE_REASONS = {
   "heartbeat-timeout": { code: 4412, final: false },
   replaced: { code: 4413, final: true },
   "hub-shutting-down": { code: 4414, final: false },
+  "sandbox-disk-full": { code: 4415, final: true },
 } as const;
 
 export type EnvironmentCloseReason = keyof typeof ENVIRONMENT_CLOSE_REASONS;
@@ -223,6 +224,8 @@ export const ENVIRONMENT_CLOSE_MESSAGES: Record<EnvironmentCloseReason, string> 
   replaced:
     "Another process is using this machine's credential, and the Hub kept the newer connection.",
   "hub-shutting-down": "The Hub is restarting.",
+  "sandbox-disk-full":
+    "The Hub stopped this Sandbox: its disk is over its limit, or the Hub's disk is almost full.",
 };
 
 /**

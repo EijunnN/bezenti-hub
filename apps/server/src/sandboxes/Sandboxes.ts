@@ -25,6 +25,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
@@ -38,9 +39,15 @@ import * as EnvironmentConnections from "../environments/EnvironmentConnections.
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import {
   BUILT_IN_DEFAULT_LIMITS,
+  DISK_MEASURE_FAILURES_ALLOWED,
   diskFullMessage,
+  diskUnmeasurableMessage,
   effectiveLimits,
-  homeUsageBytes,
+  formatBytes,
+  hostCapacity,
+  type HostSpace,
+  hostSpaceShortage,
+  invalidLimitsReason,
   type SandboxLimits,
 } from "./sandboxLimits.ts";
 import { SandboxRuntime, type SandboxRuntimeKind, sandboxIdOf } from "./SandboxRuntime.ts";
@@ -59,6 +66,10 @@ const RETRY_BACKOFF_MS = 10_000;
 /** Seconds between measurements of running Sandboxes' homes against their disk limit. */
 const DISK_CHECK_SETTING = "T3CODE_SANDBOX_DISK_CHECK_SECONDS";
 const DEFAULT_DISK_CHECK_SECONDS = 60;
+/** How often running Sandboxes' CPU and memory are read for Settings. */
+const USAGE_SAMPLE_EVERY = "10 seconds";
+/** `du` runs at once on at most this many homes. */
+const DISK_MEASURE_CONCURRENCY = 2;
 /** The longest a caller waits for a start it asked for; the start itself has its own timeout. */
 const CALLER_WAIT = "3 minutes";
 
@@ -76,13 +87,36 @@ export interface SandboxStatusRow {
   readonly environmentId: EnvironmentId;
   readonly status: "stopped" | "starting" | "running" | "failed";
   readonly lastError: string | null;
+  /** Set while the Owner stopped it by hand: waiting work does not start it again. */
+  readonly heldAt: string | null;
 }
 
 /** Why a start happened, as the audit log records it. */
 export type SandboxStartVia = "demand" | "retry" | "settings" | "restart";
 
 /** Why a Sandbox was stopped, as the audit log records it. */
-export type SandboxStopVia = "archived" | "idle" | "settings" | "restart" | "disk-full";
+export type SandboxStopVia =
+  | "archived"
+  | "idle"
+  | "settings"
+  | "restart"
+  | "disk-full"
+  | "host-disk-low";
+
+/** Why the Hub ended a Sandbox's provider sessions as it stopped it: its turns end interrupted. */
+export interface SandboxSessionsEnded {
+  readonly environmentId: EnvironmentId;
+  readonly reason: "sandbox-disk-full";
+}
+
+export class SandboxLimitsInvalidError extends Schema.TaggedError<SandboxLimitsInvalidError>()(
+  "SandboxLimitsInvalidError",
+  { reason: Schema.String },
+) {
+  override get message(): string {
+    return this.reason;
+  }
+}
 
 /**
  * How long a Sandbox may idle and may take to start, and the clock the idle stop reads (a test's
@@ -95,6 +129,10 @@ export class SandboxLifecyclePolicy extends Context.Service<
     readonly startTimeout?: Duration.Input;
     /** How often running Sandboxes' homes are measured against their disk limit. */
     readonly diskCheckEvery?: Duration.Input;
+    /** How often running Sandboxes' CPU and memory are sampled for Settings. */
+    readonly usageSampleEvery?: Duration.Input;
+    /** The Sandboxes' filesystem as a test fakes it, instead of the runtime's. */
+    readonly hostSpace?: Effect.Effect<HostSpace | null>;
     readonly clock?: Clock.Clock;
   }
 >()("t3/sandboxes/Sandboxes/SandboxLifecyclePolicy") {}
@@ -109,13 +147,20 @@ export interface SandboxDetailRow {
   readonly startedAt: string | null;
   /** The Space's own values; null takes the default. */
   readonly overrides: SandboxLimits;
-  /** What it starts with. */
+  /** What it starts with next. */
   readonly limits: SandboxLimits;
+  /** What its running server was started with; null while it does not run. */
+  readonly appliedLimits: SandboxLimits | null;
+  /** The Owner stopped it by hand: only a User's or the Owner's start runs it again. */
+  readonly heldByOwner: boolean;
+  /** The background sampler's last reading; never measured on the way to Settings. */
   readonly usage: {
     readonly cpuPercent: number | null;
     readonly memoryBytes: number | null;
     readonly diskBytes: number | null;
     readonly diskMeasuredAt: string | null;
+    /** Why its home's last measurement failed. */
+    readonly diskError: string | null;
   };
 }
 
@@ -173,8 +218,11 @@ export class Sandboxes extends Context.Service<
     readonly stop: (input: {
       readonly spaceId: SpaceId;
       readonly actor: AuditLog.AuditActor;
+      /** `settings`: the Owner's, which holds it stopped until a User or the Owner starts it. */
       readonly via?: "archived" | "settings";
     }) => Effect.Effect<void, SandboxStartError>;
+    /** Each time the Hub ended a Sandbox's sessions as it stopped it (its disk). */
+    readonly sessionsEnded: Stream.Stream<SandboxSessionsEnded>;
     /** The Owner restarts it: stopped, then started in the background with its current limits. */
     readonly restart: (input: {
       readonly spaceId: SpaceId;
@@ -192,7 +240,7 @@ export class Sandboxes extends Context.Service<
       readonly spaceId: SpaceId | undefined;
       readonly limits: SandboxLimits;
       readonly actor: AuditLog.AuditActor;
-    }) => Effect.Effect<void, SandboxNotFoundError | SandboxStartError>;
+    }) => Effect.Effect<void, SandboxNotFoundError | SandboxLimitsInvalidError | SandboxStartError>;
     /**
      * Measures each running Sandbox's home and stops, as `failed` with why, each one over its
      * disk limit; run on a schedule.
@@ -230,7 +278,15 @@ const make = Effect.gen(function* () {
   const digester = yield* Digest.Digest;
   const hubId = yield* (yield* ServerEnvironment.ServerEnvironmentIdentity).getEnvironmentId;
   const policy = yield* Effect.serviceOption(SandboxLifecyclePolicy);
-  const policyValue = <K extends "idleTimeout" | "startTimeout" | "diskCheckEvery" | "clock">(
+  const policyValue = <
+    K extends
+      | "idleTimeout"
+      | "startTimeout"
+      | "diskCheckEvery"
+      | "usageSampleEvery"
+      | "hostSpace"
+      | "clock",
+  >(
     key: K,
   ) => Option.flatMap(policy, (value) => Option.fromUndefinedOr(value[key]));
   const clock = Option.getOrUndefined(policyValue("clock")) ?? (yield* Clock.Clock);
@@ -260,6 +316,10 @@ const make = Effect.gen(function* () {
         ),
       ),
   });
+  const usageSampleEvery = Duration.fromInputUnsafe(
+    Option.getOrElse(policyValue("usageSampleEvery"), (): Duration.Input => USAGE_SAMPLE_EVERY),
+  );
+  const readHostSpace = Option.getOrElse(policyValue("hostSpace"), () => runtime.hostSpace);
   const startTimeout = Option.getOrElse(
     policyValue("startTimeout"),
     (): Duration.Input => START_TIMEOUT,
@@ -298,7 +358,7 @@ const make = Effect.gen(function* () {
   const selectRow = (spaceId: SpaceId) =>
     sql<SandboxStatusRow>`
       SELECT space_id AS "spaceId", environment_id AS "environmentId", status,
-        last_error AS "lastError"
+        last_error AS "lastError", held_at AS "heldAt"
       FROM sandboxes WHERE space_id = ${spaceId}
     `.pipe(Effect.map((rows) => rows[0]));
 
@@ -350,19 +410,96 @@ const make = Effect.gen(function* () {
     return overrides === undefined ? defaults : effectiveLimits(defaults, overrides);
   });
 
-  // Each home's size when last measured; whether `du` works here at all.
-  const diskUse = new Map<SpaceId, { readonly bytes: number; readonly at: string }>();
+  /**
+   * What the background samplers last read of each Sandbox; Settings reads only this. Its home's
+   * size (with the failures in a row since the last good measurement), and its CPU and memory.
+   */
+  interface Sample {
+    readonly diskBytes: number | null;
+    readonly diskMeasuredAt: string | null;
+    readonly diskError: string | null;
+    readonly diskFailures: number;
+    readonly cpuPercent: number | null;
+    readonly memoryBytes: number | null;
+  }
+  const EMPTY_SAMPLE: Sample = {
+    diskBytes: null,
+    diskMeasuredAt: null,
+    diskError: null,
+    diskFailures: 0,
+    cpuPercent: null,
+    memoryBytes: null,
+  };
+  const samples = new Map<SpaceId, Sample>();
+  const updateSample = (spaceId: SpaceId, change: Partial<Sample>) =>
+    samples.set(spaceId, { ...(samples.get(spaceId) ?? EMPTY_SAMPLE), ...change });
+  // Whether this host has `du` at all: without it no disk limit is enforced, and Settings says so.
   let diskMeasurable = true;
-  /** Measures the Sandbox's home now; null when it has none or it cannot be measured. */
+  // Few `du` at once, whatever asks: the checks, the samplers and starts.
+  const duPermits = Semaphore.makeUnsafe(DISK_MEASURE_CONCURRENCY);
+  // The limits each running server was started with, and which start it is (a check that read
+  // one start's state never stops the next).
+  const applied = new Map<SpaceId, SandboxLimits>();
+  const startEpochs = new Map<SpaceId, number>();
+
+  /**
+   * Measures the Sandbox's home now and records it. A failure counts toward
+   * `DISK_MEASURE_FAILURES_ALLOWED`; null when it has no home or this host has no `du`.
+   */
   const measureDisk = Effect.fn("Sandboxes.measureDisk")(function* (spaceId: SpaceId) {
-    const inspected = yield* runtime.inspect(sandboxIdOf(spaceId));
+    const sandboxId = sandboxIdOf(spaceId);
+    const inspected = yield* runtime.inspect(sandboxId);
     if (inspected.state._tag === "missing") return null;
-    const bytes = yield* homeUsageBytes(inspected.homePath);
-    diskMeasurable = bytes !== null;
-    if (bytes === null) return null;
-    diskUse.set(spaceId, { bytes, at: yield* nowIso });
-    return bytes;
+    const measured = yield* duPermits.withPermits(1)(runtime.measureHome(sandboxId));
+    const at = yield* nowIso;
+    switch (measured._tag) {
+      case "unavailable":
+        diskMeasurable = false;
+        return null;
+      case "measured":
+        diskMeasurable = true;
+        updateSample(spaceId, {
+          diskBytes: measured.bytes,
+          diskMeasuredAt: at,
+          diskError: null,
+          diskFailures: 0,
+        });
+        return measured;
+      case "failed": {
+        diskMeasurable = true;
+        const failures = (samples.get(spaceId)?.diskFailures ?? 0) + 1;
+        updateSample(spaceId, {
+          diskMeasuredAt: at,
+          diskError: measured.reason,
+          diskFailures: failures,
+        });
+        yield* Effect.logWarning("Could not measure a Sandbox's home", {
+          spaceId,
+          reason: measured.reason,
+          failures,
+        });
+        return measured;
+      }
+    }
   });
+
+  /**
+   * Why a home over (or not measurably under) `limit` must stop, if it must: over it, or failed
+   * `DISK_MEASURE_FAILURES_ALLOWED` times in a row (it fails closed).
+   */
+  const diskVerdict = (
+    spaceId: SpaceId,
+    measured: Effect.Success<ReturnType<typeof measureDisk>>,
+    limit: number | null,
+  ) => {
+    if (limit === null || measured === null) return undefined;
+    if (measured._tag === "measured") {
+      return measured.bytes > limit ? diskFullMessage(measured.bytes, limit) : undefined;
+    }
+    return (samples.get(spaceId)?.diskFailures ?? 0) >= DISK_MEASURE_FAILURES_ALLOWED
+      ? diskUnmeasurableMessage(measured.reason)
+      : undefined;
+  };
 
   /** Threads on the Sandbox with a run in progress; one that cannot be read counts as busy. */
   const unfinishedRuns = (environmentId: EnvironmentId) =>
@@ -486,21 +623,26 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           const made = yield* createLocked(input);
           if (!made.running) yield* setStatus(spaceId, "starting");
+          // Whoever starts it (a User's work, the Owner) ends the Owner's hold.
+          yield* sql`UPDATE sandboxes SET held_at = NULL WHERE space_id = ${spaceId}`;
           return made;
         }),
       ).pipe(Effect.ensuring(Deferred.succeed(begun, undefined)));
       name = created.name;
       // Read at each start: a limit changed while it was stopped applies now.
       const limits = yield* limitsOf(spaceId);
-      if (!created.running && limits.diskBytes !== null) {
+      if (!created.running) {
+        // Nothing starts on a filesystem about to fill, which holds the Hub's database too.
+        const shortage = hostSpaceShortage(yield* readHostSpace);
+        if (shortage !== undefined) return yield* Effect.fail(shortage);
         // A home over its disk limit does not start: it would be stopped again at once.
-        const used = yield* measureDisk(spaceId);
-        if (used !== null && used > limits.diskBytes) {
-          return yield* Effect.fail(diskFullMessage(used, limits.diskBytes));
-        }
+        const refused = diskVerdict(spaceId, yield* measureDisk(spaceId), limits.diskBytes);
+        if (refused !== undefined) return yield* Effect.fail(refused);
       }
       launched = true;
       const started = yield* runtime.start(sandboxId, { limits });
+      applied.set(spaceId, limits);
+      startEpochs.set(spaceId, (startEpochs.get(spaceId) ?? 0) + 1);
       // Ready once welcomed with its executor serving; a server that ends first fails at once.
       const ready = yield* Effect.raceFirst(
         connections.awaitReady(environmentId).pipe(Effect.as("ready" as const)),
@@ -521,6 +663,7 @@ const make = Effect.gen(function* () {
           failedAt.delete(spaceId);
           if (created.running) return;
           yield* setStatus(spaceId, "running");
+          yield* sampleUsage.pipe(Effect.forkIn(serviceScope));
           yield* audit.record({
             actor: actorOf(input.actorUserId),
             action: "sandbox.start",
@@ -536,6 +679,7 @@ const make = Effect.gen(function* () {
       if (launched) {
         // Verified stop: the runtime waits for the server to end (killing it if it must).
         yield* runtime.stop(sandboxId).pipe(Effect.ignore);
+        applied.delete(spaceId);
         yield* connections.close(environmentId, "heartbeat-timeout");
       }
       failedAt.set(spaceId, nowMs());
@@ -570,7 +714,10 @@ const make = Effect.gen(function* () {
   }) =>
     Effect.suspend(() => {
       const current = inFlight.get(input.spaceId);
-      if (current !== undefined) return Effect.succeed(current);
+      // One that already ended (its entry not yet dropped) is not joined: a new start begins.
+      if (current !== undefined && !Deferred.isDoneUnsafe(current.done)) {
+        return Effect.succeed(current);
+      }
       const entry: InFlight = {
         done: Deferred.makeUnsafe<EnvironmentId, SandboxStartError>(),
         begun: Deferred.makeUnsafe<void>(),
@@ -622,24 +769,51 @@ const make = Effect.gen(function* () {
 
   const list: Sandboxes["Service"]["list"] = sql<SandboxStatusRow>`
     SELECT space_id AS "spaceId", environment_id AS "environmentId", status,
-      last_error AS "lastError"
+      last_error AS "lastError", held_at AS "heldAt"
     FROM sandboxes ORDER BY created_at
   `.pipe(Effect.mapError((cause) => new SandboxStartError({ spaceId: "", detail: String(cause) })));
 
+  const sessionsEnded = yield* PubSub.unbounded<SandboxSessionsEnded>();
+
+  /**
+   * Stops it under its lock and records why. `failed` ends it failed with that error in the same
+   * status write (never `stopped` on the way, which waiting work would start again), its turns
+   * interrupted for that reason and its socket closed with it; `hold` keeps waiting work from
+   * starting it (the Owner stopped it).
+   */
   const stopLocked = Effect.fn("Sandboxes.stopLocked")(function* (input: {
     readonly spaceId: SpaceId;
     readonly actor: AuditLog.AuditActor;
     readonly via: SandboxStopVia;
+    readonly failed?: string;
+    readonly hold?: boolean;
   }) {
     const { spaceId } = input;
     const row = yield* selectRow(spaceId);
     if (row === undefined) return;
     const sandboxId = sandboxIdOf(spaceId);
     const wasRunning = (yield* runtime.inspect(sandboxId)).state._tag === "running";
+    if (input.failed !== undefined) {
+      failedAt.set(spaceId, nowMs());
+      yield* setStatus(spaceId, "failed", input.failed);
+      // Its turns end now, interrupted with why, rather than paused for a return it will not make.
+      yield* PubSub.publish(sessionsEnded, {
+        environmentId: row.environmentId,
+        reason: "sandbox-disk-full",
+      } satisfies SandboxSessionsEnded);
+    }
     yield* runtime.stop(sandboxId);
+    applied.delete(spaceId);
+    updateSample(spaceId, { cpuPercent: null, memoryBytes: null });
     // Its server is gone: its socket is not waited on to notice, so nothing takes it as ready.
-    yield* connections.close(row.environmentId, "heartbeat-timeout");
-    yield* setStatus(spaceId, "stopped");
+    yield* connections.close(
+      row.environmentId,
+      input.failed === undefined ? "heartbeat-timeout" : "sandbox-disk-full",
+    );
+    if (input.failed === undefined) yield* setStatus(spaceId, "stopped");
+    if (input.hold === true) {
+      yield* sql`UPDATE sandboxes SET held_at = ${yield* nowIso} WHERE space_id = ${spaceId}`;
+    }
     lastUse.delete(row.environmentId);
     if (!wasRunning) return;
     yield* audit.record({
@@ -647,7 +821,7 @@ const make = Effect.gen(function* () {
       action: "sandbox.stop",
       spaceId,
       target: { kind: "environment", id: row.environmentId },
-      detail: { via: input.via },
+      detail: { via: input.via, ...(input.hold === true ? { hold: true } : {}) },
     });
   });
 
@@ -663,7 +837,9 @@ const make = Effect.gen(function* () {
     via: SandboxStopVia,
   ) =>
     settleStart(input.spaceId).pipe(
-      Effect.andThen(locked(input.spaceId, stopLocked({ ...input, via }))),
+      Effect.andThen(
+        locked(input.spaceId, stopLocked({ ...input, via, hold: via === "settings" })),
+      ),
       Effect.mapError(
         (cause) => new SandboxStartError({ spaceId: input.spaceId, detail: String(cause) }),
       ),
@@ -677,6 +853,7 @@ const make = Effect.gen(function* () {
       Effect.andThen(requestStart({ spaceId, actorUserId, via: "restart" })),
     );
 
+  /** Settings: the samplers' cache and the rows, nothing measured on the way. */
   const overview: Sandboxes["Service"]["overview"] = Effect.fn("Sandboxes.overview")(
     function* (include) {
       const defaults = yield* readDefaults;
@@ -689,22 +866,21 @@ const make = Effect.gen(function* () {
           readonly status: SandboxStatusRow["status"];
           readonly imageVersion: string | null;
           readonly startedAt: string | null;
+          readonly heldAt: string | null;
         }
       >`
         SELECT space_id AS "spaceId", environment_id AS "environmentId", runtime, status,
           image_version AS "imageVersion", started_at AS "startedAt", cpu_limit AS cpus,
-          memory_limit_bytes AS "memoryBytes", pids_limit AS pids, disk_limit_bytes AS "diskBytes"
+          memory_limit_bytes AS "memoryBytes", pids_limit AS pids, disk_limit_bytes AS "diskBytes",
+          held_at AS "heldAt"
         FROM sandboxes ORDER BY created_at
       `;
-      const sandboxes = yield* Effect.forEach(
-        rows.filter((row) => include(row.spaceId)),
-        Effect.fnUntraced(function* (row) {
+      const sandboxes = rows
+        .filter((row) => include(row.spaceId))
+        .map((row): SandboxDetailRow => {
           const overrides = toLimits(row);
           const running = row.status === "running";
-          const use = running ? yield* runtime.resourceUse(sandboxIdOf(row.spaceId)) : null;
-          // A home never measured is measured once; a running one again by each disk check.
-          if (!diskUse.has(row.spaceId)) yield* measureDisk(row.spaceId).pipe(Effect.ignore);
-          const disk = diskUse.get(row.spaceId);
+          const sample = samples.get(row.spaceId) ?? EMPTY_SAMPLE;
           return {
             spaceId: row.spaceId,
             environmentId: row.environmentId,
@@ -713,16 +889,17 @@ const make = Effect.gen(function* () {
             startedAt: running ? row.startedAt : null,
             overrides,
             limits: effectiveLimits(defaults, overrides),
+            appliedLimits: running ? (applied.get(row.spaceId) ?? null) : null,
+            heldByOwner: row.heldAt !== null,
             usage: {
-              cpuPercent: use?.cpuPercent ?? null,
-              memoryBytes: use?.memoryBytes ?? null,
-              diskBytes: disk?.bytes ?? null,
-              diskMeasuredAt: disk?.at ?? null,
+              cpuPercent: running ? sample.cpuPercent : null,
+              memoryBytes: running ? sample.memoryBytes : null,
+              diskBytes: sample.diskBytes,
+              diskMeasuredAt: sample.diskMeasuredAt,
+              diskError: sample.diskError,
             },
-          } satisfies SandboxDetailRow;
-        }),
-        { concurrency: 4 },
-      );
+          };
+        });
       const notes = [
         support.note,
         diskMeasurable
@@ -745,29 +922,33 @@ const make = Effect.gen(function* () {
   );
 
   /**
-   * Stops a running Sandbox whose home is over its disk limit, leaving it `failed` with why: its
-   * Threads show it, and it starts again only once there is room (the Owner raises the limit).
+   * Stops a running Sandbox whose home is over its disk limit (or could not be measured too many
+   * times in a row), leaving it `failed` with why: its Threads show it, and it starts again only
+   * once there is room. What the measurement was taken against is read again under the lock, so a
+   * limit raised or a restart meanwhile is not stopped for a stale reading.
    */
   const checkDiskOf = Effect.fn("Sandboxes.checkDiskOf")(
     function* (spaceId: SpaceId) {
       const current = yield* selectRow(spaceId);
-      if (current?.status !== "running" || inFlight.has(spaceId)) return;
-      const limits = yield* limitsOf(spaceId);
-      const used = yield* measureDisk(spaceId);
-      if (limits.diskBytes === null || used === null || used <= limits.diskBytes) return;
-      const limit = limits.diskBytes;
+      if (current?.status !== "running") return;
+      const limit = (yield* limitsOf(spaceId)).diskBytes;
+      const epoch = startEpochs.get(spaceId);
+      const measured = yield* measureDisk(spaceId);
+      const why = diskVerdict(spaceId, measured, limit);
+      if (why === undefined) return;
       yield* locked(
         spaceId,
         Effect.gen(function* () {
           if ((yield* selectRow(spaceId))?.status !== "running") return;
-          yield* Effect.logWarning("Stopping a Sandbox over its disk limit", {
+          if ((yield* limitsOf(spaceId)).diskBytes !== limit) return;
+          if (startEpochs.get(spaceId) !== epoch) return;
+          yield* Effect.logWarning("Stopping a Sandbox for its disk", { spaceId, why });
+          yield* stopLocked({
             spaceId,
-            usedBytes: used,
-            limitBytes: limit,
+            actor: { source: "system" },
+            via: "disk-full",
+            failed: why,
           });
-          yield* stopLocked({ spaceId, actor: { source: "system" }, via: "disk-full" });
-          failedAt.set(spaceId, nowMs());
-          yield* setStatus(spaceId, "failed", diskFullMessage(used, limit));
         }),
       );
     },
@@ -782,20 +963,82 @@ const make = Effect.gen(function* () {
       ),
   );
 
-  const checkDisk: Sandboxes["Service"]["checkDisk"] = list.pipe(
+  /** Every running Sandbox stops, failed with why, while the Sandboxes' filesystem is too full. */
+  const stopAllForHostSpace = Effect.fn("Sandboxes.stopAllForHostSpace")(function* (
+    rows: ReadonlyArray<SandboxStatusRow>,
+    why: string,
+  ) {
+    yield* Effect.logWarning("Stopping every Sandbox: the Hub's disk is almost full", { why });
+    yield* Effect.forEach(
+      rows.filter((row) => row.status === "running"),
+      (row) =>
+        locked(
+          row.spaceId,
+          Effect.gen(function* () {
+            if ((yield* selectRow(row.spaceId))?.status !== "running") return;
+            yield* stopLocked({
+              spaceId: row.spaceId,
+              actor: { source: "system" },
+              via: "host-disk-low",
+              failed: why,
+            });
+          }),
+        ).pipe(Effect.ignore),
+      { discard: true },
+    );
+  });
+
+  /**
+   * The disk sampler: the host's free space first (every running Sandbox stops below its floor),
+   * then each running home against its limit, and once each home never measured.
+   */
+  const checkDisk: Sandboxes["Service"]["checkDisk"] = Effect.gen(function* () {
+    const rows = yield* list.pipe(Effect.orElseSucceed(() => []));
+    const shortage = hostSpaceShortage(yield* readHostSpace);
+    if (shortage !== undefined) return yield* stopAllForHostSpace(rows, shortage);
+    yield* Effect.forEach(
+      rows,
+      (row) =>
+        row.status === "running"
+          ? checkDiskOf(row.spaceId)
+          : samples.get(row.spaceId)?.diskMeasuredAt == null
+            ? measureDisk(row.spaceId).pipe(Effect.ignore)
+            : Effect.void,
+      { concurrency: DISK_MEASURE_CONCURRENCY, discard: true },
+    );
+  }).pipe(Effect.withSpan("Sandboxes.checkDisk"));
+
+  /** The usage sampler: each running Sandbox's CPU and memory, for Settings. */
+  const sampleUsage = list.pipe(
     Effect.orElseSucceed(() => []),
     Effect.flatMap((rows) =>
       Effect.forEach(
         rows.filter((row) => row.status === "running"),
-        (row) => checkDiskOf(row.spaceId),
-        { concurrency: 4, discard: true },
+        (row) =>
+          runtime.resourceUse(sandboxIdOf(row.spaceId)).pipe(
+            Effect.tap((use) =>
+              Effect.sync(() =>
+                updateSample(row.spaceId, {
+                  cpuPercent: use?.cpuPercent ?? null,
+                  memoryBytes: use?.memoryBytes ?? null,
+                }),
+              ),
+            ),
+            Effect.ignore,
+          ),
+        { concurrency: 2, discard: true },
       ),
     ),
-    Effect.withSpan("Sandboxes.checkDisk"),
+    Effect.withSpan("Sandboxes.sampleUsage"),
   );
 
   const setLimits: Sandboxes["Service"]["setLimits"] = Effect.fn("Sandboxes.setLimits")(
     function* ({ spaceId, limits, actor }) {
+      const invalid = invalidLimitsReason(
+        limits,
+        hostCapacity((yield* readHostSpace)?.totalBytes ?? null),
+      );
+      if (invalid !== undefined) return yield* new SandboxLimitsInvalidError({ reason: invalid });
       const now = yield* nowIso;
       const environmentId = spaceId === undefined ? undefined : sandboxEnvironmentIdOf(spaceId);
       yield* sql.withTransaction(
@@ -861,7 +1104,8 @@ const make = Effect.gen(function* () {
       const environmentId = sandboxEnvironmentIdOf(spaceId);
       yield* runtime.delete(sandboxIdOf(spaceId));
       lastUse.delete(environmentId);
-      diskUse.delete(spaceId);
+      samples.delete(spaceId);
+      applied.delete(spaceId);
       yield* sql.withTransaction(
         Effect.gen(function* () {
           yield* sql`
@@ -973,13 +1217,14 @@ const make = Effect.gen(function* () {
         // A start under way reports its own failure; only a running one is marked here.
         if (row === undefined || row.status !== "running") return;
         const environmentId = sandboxEnvironmentIdOf(row.spaceId);
-        // A container killed under an enforced memory limit ends with SIGKILL's code.
-        const limits = yield* limitsOf(row.spaceId);
+        // A container killed under an enforced memory limit ends with SIGKILL's code: the limit
+        // named is the one that container had.
+        const memoryLimit = applied.get(row.spaceId)?.memoryBytes ?? null;
+        applied.delete(row.spaceId);
+        updateSample(row.spaceId, { cpuPercent: null, memoryBytes: null });
         const exitMessage =
-          exit.exitCode === 137 &&
-          limits.memoryBytes !== null &&
-          (yield* runtime.limitSupport).memory
-            ? `It was killed (exit code 137), most likely for going over its memory limit of ${(limits.memoryBytes / 1024 ** 3).toFixed(1)} GiB.`
+          exit.exitCode === 137 && memoryLimit !== null && (yield* runtime.limitSupport).memory
+            ? `It was killed (exit code 137), most likely for going over its memory limit of ${formatBytes(memoryLimit)}.`
             : `It exited with code ${exit.exitCode ?? "?"}.`;
         lastUse.delete(environmentId);
         // Its socket is gone with it: its Threads are away now, as on any machine that dropped.
@@ -1009,6 +1254,9 @@ const make = Effect.gen(function* () {
   yield* clock
     .sleep(diskCheckEvery)
     .pipe(Effect.andThen(checkDisk), Effect.forever, Effect.forkScoped);
+  yield* clock
+    .sleep(usageSampleEvery)
+    .pipe(Effect.andThen(sampleUsage), Effect.forever, Effect.forkScoped);
 
   // What the runtime does not enforce here is said once in the log, and in Settings.
   const support = yield* runtime.limitSupport;
@@ -1032,6 +1280,7 @@ const make = Effect.gen(function* () {
     overview,
     setLimits,
     checkDisk,
+    sessionsEnded: Stream.fromPubSub(sessionsEnded),
   });
 
   const demand = EnvironmentDemand.EnvironmentDemand.of({
@@ -1051,6 +1300,12 @@ const make = Effect.gen(function* () {
       if (stop !== undefined) yield* Deferred.await(stop);
       if (!inFlight.has(spaceId)) {
         const row = yield* selectRow(spaceId).pipe(Effect.orElseSucceed(() => undefined));
+        // The Owner stopped it: only a User's own action starts it again.
+        if (row?.heldAt != null && !options.explicit) {
+          return yield* startError(
+            "the Owner stopped it. Start it from Settings → Environments → Sandboxes, or send a message.",
+          );
+        }
         if (row?.status === "failed") {
           const lastFailure = failedAt.get(spaceId);
           // Only a User's own action starts a failed Sandbox, and not again right away.
@@ -1074,8 +1329,8 @@ const make = Effect.gen(function* () {
         const spaceId = sandboxSpaceOf(environmentId);
         if (spaceId === undefined || inFlight.has(spaceId) || stopping.has(spaceId)) continue;
         const row = yield* selectRow(spaceId).pipe(Effect.orElseSucceed(() => undefined));
-        // Waiting work never starts a failed Sandbox: a User does.
-        if (row === undefined || row.status === "failed") continue;
+        // Waiting work never starts a failed Sandbox, nor one the Owner stopped: a User does.
+        if (row === undefined || row.status === "failed" || row.heldAt !== null) continue;
         if (yield* connections.isReady(environmentId)) continue;
         yield* startOnce({ spaceId, actorUserId: undefined, via: "demand" });
       }

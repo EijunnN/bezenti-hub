@@ -2,7 +2,8 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 // The Installation's default Sandbox limits, one row the Owner changes in Settings. A Space's own
-// values stay in `sandboxes` (null there: this default). Null here: no limit.
+// values stay in `sandboxes` (null there: this default). Null here: no limit. `sandboxes.held_at`:
+// the Owner stopped it by hand, and waiting work does not start it again.
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
@@ -22,4 +23,5 @@ export default Effect.gen(function* () {
       id, cpu_limit, memory_limit_bytes, pids_limit, disk_limit_bytes, updated_at
     ) VALUES (1, 2, ${4 * 1024 ** 3}, 4096, ${20 * 1024 ** 3}, '1970-01-01T00:00:00.000Z')
   `;
+  yield* sql`ALTER TABLE sandboxes ADD COLUMN held_at TEXT`;
 });

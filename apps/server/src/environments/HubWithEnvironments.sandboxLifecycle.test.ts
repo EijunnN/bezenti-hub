@@ -1,9 +1,13 @@
+// @effect-diagnostics nodeBuiltinImport:off -- fills a Sandbox's home past its disk limit.
 /**
  * «Hub con Environments», spec 3 ticket 02: a Space's Sandbox starts when work needs it (never
  * while a Thread is placed), shows `starting` and then online or `failed` with why and «Try
  * again», stops after the idle timeout on the test clock, and dies mid-turn like an offline
  * Environment of spec 2.
  */
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+
 import { assert, describe, it } from "@effect/vitest";
 import {
   CommandId,
@@ -711,5 +715,67 @@ describe("Hub con Environments: a Sandbox's start belongs to the Hub, not to who
       // The work found it running: it was started again once the stop ended.
       assert.equal((yield* sandboxRow(hub, acme))?.status, "online");
     }).pipe(Effect.scoped),
+  );
+});
+
+describe("Hub con Environments: a Sandbox that fills its disk", () => {
+  it.live(
+    "stops with its turn interrupted for that reason, failed in one write, and waiting work does not start it again",
+    () =>
+      Effect.gen(function* () {
+        const loaded = yield* loadFixture("simple");
+        const hold = yield* holdingEvents(loaded.adapters, 2);
+        const launches = yield* Ref.make(0);
+        const hub = yield* makeHub({
+          sandboxAdapters: hold.layer,
+          sandboxLifecycle: { diskCheckEvery: "1 hour" },
+          beforeSandboxLaunch: () =>
+            Ref.update(launches, (count) => count + 1).pipe(Effect.as(Option.none())),
+        });
+        const owner = yield* ownerIdOf(hub);
+        const acme = yield* createOrganization(hub, "Acme");
+        const { threadId, message } = yield* placeOnSandbox(hub, loaded, acme, owner);
+        yield* dispatchAs(hub, owner, message);
+        yield* Deferred.await(hold.reached);
+
+        // Its agent writes past the limit while the turn runs.
+        NodeFS.writeFileSync(
+          NodePath.join(hub.sandboxRoot, `sandbox-${acme}`, "big.bin"),
+          Buffer.alloc(2 * 1024 * 1024),
+        );
+        yield* hub.server.sql`
+          UPDATE sandboxes SET disk_limit_bytes = ${1024 * 1024} WHERE space_id = ${acme}
+        `;
+        // Every status the row passes through while the check stops it.
+        const statuses: Array<string> = [];
+        const watch = yield* hub.server.sql<{ readonly status: string }>`
+          SELECT status FROM sandboxes WHERE space_id = ${acme}
+        `.pipe(
+          Effect.tap((rows) => Effect.sync(() => statuses.push(rows[0]?.status ?? ""))),
+          Effect.andThen(Effect.yieldNow),
+          Effect.forever,
+          Effect.forkScoped,
+        );
+        yield* hub.service(Sandboxes.Sandboxes).checkDisk;
+        yield* Fiber.interrupt(watch);
+        // Never `stopped` on the way: waiting work would take that as free to start.
+        assert.notInclude(statuses, "stopped");
+        assert.equal((yield* sandboxRow(hub, acme))?.status, "failed");
+
+        assert.equal(yield* awaitRunSettled(hub, threadId, 1), "interrupted");
+        const interrupted = (yield* projectionOf(hub, threadId)).turnItems.find(
+          (item) => item.type === "run_interrupt_result",
+        );
+        assert.include(
+          interrupted?.type === "run_interrupt_result" ? interrupted.message : "",
+          "disk",
+        );
+        // Work waiting for it does not start it: a User does, once there is room.
+        yield* hub
+          .service(EnvironmentDemand.EnvironmentDemand)
+          .request([sandboxEnvironmentIdOf(acme)]);
+        assert.equal((yield* sandboxRow(hub, acme))?.status, "failed");
+        assert.equal(yield* Ref.get(launches), 1);
+      }).pipe(Effect.scoped),
   );
 });

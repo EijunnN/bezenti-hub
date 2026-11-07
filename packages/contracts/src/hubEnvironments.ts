@@ -130,9 +130,8 @@ export type StartHubEnvironmentRequest = typeof StartHubEnvironmentRequest.Type;
  * in a Space's override null is the Installation's default.
  */
 export const SandboxLimits = Schema.Struct({
-  cpus: Schema.NullOr(
-    Schema.Number.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(512)),
-  ),
+  // The Hub refuses values below a Sandbox's floors or above its machine, saying which.
+  cpus: Schema.NullOr(Schema.Number.check(Schema.isFinite(), Schema.isGreaterThan(0))),
   memoryBytes: Schema.NullOr(PositiveInt),
   pids: Schema.NullOr(PositiveInt),
   diskBytes: Schema.NullOr(PositiveInt),
@@ -153,13 +152,15 @@ export const SandboxLimitEnforcement = Schema.Struct({
 });
 export type SandboxLimitEnforcement = typeof SandboxLimitEnforcement.Type;
 
-/** What a Sandbox uses now (CPU and memory while running) and its home's size when last measured. */
+/** What a Sandbox used at the last sample (CPU and memory while running) and its home's size. */
 export const SandboxUsage = Schema.Struct({
   /** Percent of one CPU. */
   cpuPercent: Schema.NullOr(Schema.Number),
   memoryBytes: Schema.NullOr(Schema.Number),
   diskBytes: Schema.NullOr(Schema.Number),
   diskMeasuredAt: Schema.NullOr(IsoDateTime),
+  /** Why its home's last measurement failed; three in a row stop it, as over its limit. */
+  diskError: Schema.NullOr(Schema.String),
 });
 export type SandboxUsage = typeof SandboxUsage.Type;
 
@@ -180,6 +181,13 @@ export const HubSandboxDetail = Schema.Struct({
   limits: SandboxLimits,
   /** The Space's own values; null where it takes the default. */
   overrides: SandboxLimits,
+  /** What its running server was started with; null while it does not run. */
+  appliedLimits: Schema.NullOr(SandboxLimits),
+  /** The Owner stopped it: waiting work does not start it, a User or the Owner does. */
+  heldByOwner: Schema.Boolean,
+  /** Threads with a turn running in it, which stopping it interrupts. */
+  runningThreadCount: NonNegativeInt,
+  /** The background sampler's last reading. */
   usage: SandboxUsage,
   /** Whether the viewer (the Owner) may start, stop, restart it and change its limits. */
   manageable: Schema.Boolean,

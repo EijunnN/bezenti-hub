@@ -64,6 +64,12 @@ function describeLimits(limits: SandboxLimits, enforcement: SandboxLimitEnforcem
   ].join(" · ");
 }
 
+const sameLimits = (a: SandboxLimits, b: SandboxLimits) =>
+  a.cpus === b.cpus &&
+  a.memoryBytes === b.memoryBytes &&
+  a.pids === b.pids &&
+  a.diskBytes === b.diskBytes;
+
 function describeSandbox(sandbox: HubSandboxDetail, enforcement: SandboxLimitEnforcement) {
   const usage = sandbox.usage;
   const use = [
@@ -80,9 +86,28 @@ function describeSandbox(sandbox: HubSandboxDetail, enforcement: SandboxLimitEnf
     <>
       {use.length > 0 ? use.join(" · ") : "Not running"}
       <br />
-      {`Limits: ${describeLimits(sandbox.limits, enforcement)}`}
+      {/* A running one shows what its container has; a change waits for its next start. */}
+      {`Limits: ${describeLimits(sandbox.appliedLimits ?? sandbox.limits, enforcement)}`}
+      {sandbox.appliedLimits !== null && !sameLimits(sandbox.appliedLimits, sandbox.limits) ? (
+        <>
+          <br />
+          {`Applies on next restart: ${describeLimits(sandbox.limits, enforcement)}`}
+        </>
+      ) : null}
       <br />
       {`Image: ${sandbox.imageVersion ?? "not recorded"} · ${sandbox.runtime} runtime`}
+      {sandbox.heldByOwner ? (
+        <>
+          <br />
+          Stopped by the Owner: it starts again only when someone starts it.
+        </>
+      ) : null}
+      {usage.diskError !== null && sandbox.error === null ? (
+        <>
+          <br />
+          {`Its disk could not be measured: ${usage.diskError}`}
+        </>
+      ) : null}
       {sandbox.error !== null ? (
         <>
           <br />
@@ -103,26 +128,28 @@ interface LimitFields {
 
 const toFields = (limits: SandboxLimits): LimitFields => ({
   cpus: limits.cpus === null ? "" : String(limits.cpus),
-  memoryGib: limits.memoryBytes === null ? "" : String(+(limits.memoryBytes / GIB).toFixed(2)),
+  memoryGib: limits.memoryBytes === null ? "" : String(+(limits.memoryBytes / GIB).toFixed(4)),
   pids: limits.pids === null ? "" : String(limits.pids),
-  diskGib: limits.diskBytes === null ? "" : String(+(limits.diskBytes / GIB).toFixed(2)),
+  diskGib: limits.diskBytes === null ? "" : String(+(limits.diskBytes / GIB).toFixed(4)),
 });
 
 /** The limits typed, or why they are not valid. */
 function fromFields(fields: LimitFields): SandboxLimits | string {
-  const number = (text: string, label: string, integer: boolean) => {
+  // The Hub's floors (it also refuses more than its machine has).
+  const number = (text: string, label: string, integer: boolean, floor: number, unit: string) => {
     const trimmed = text.trim();
     if (trimmed === "") return null;
     const value = Number(trimmed);
-    if (!Number.isFinite(value) || value <= 0 || (integer && !Number.isInteger(value))) {
-      return `${label} must be a positive ${integer ? "whole number" : "number"}.`;
+    if (!Number.isFinite(value) || (integer && !Number.isInteger(value))) {
+      return `${label} must be a ${integer ? "whole number" : "number"}.`;
     }
+    if (value < floor) return `${label} must be at least ${floor}${unit}.`;
     return value;
   };
-  const cpus = number(fields.cpus, "CPUs", false);
-  const memory = number(fields.memoryGib, "Memory", false);
-  const pids = number(fields.pids, "Processes", true);
-  const disk = number(fields.diskGib, "Disk", false);
+  const cpus = number(fields.cpus, "CPUs", false, 0.1, "");
+  const memory = number(fields.memoryGib, "Memory", false, 0.25, " GiB (256 MiB)");
+  const pids = number(fields.pids, "Processes and threads", true, 64, "");
+  const disk = number(fields.diskGib, "Disk", false, 1, " GiB");
   for (const value of [cpus, memory, pids, disk]) if (typeof value === "string") return value;
   return {
     cpus: cpus as number | null,
@@ -130,6 +157,12 @@ function fromFields(fields: LimitFields): SandboxLimits | string {
     pids: pids as number | null,
     diskBytes: disk === null ? null : Math.round((disk as number) * GIB),
   };
+}
+
+/** Stopping or restarting one with turns running: asked first, naming how many. */
+interface Confirming {
+  readonly sandbox: HubSandboxDetail;
+  readonly action: "stop" | "restart";
 }
 
 interface Editing {
@@ -150,6 +183,7 @@ export function HubSandboxesSettings() {
   const [list, setList] = useState<HubSandboxList | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Editing>();
+  const [confirming, setConfirming] = useState<Confirming>();
   const [pending, setPending] = useState(false);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- polls the Hub for each Sandbox's live status and use while Settings is open.
@@ -190,6 +224,7 @@ export function HubSandboxesSettings() {
     try {
       await change();
       setEditing(undefined);
+      setConfirming(undefined);
     } catch (cause) {
       setError(errorMessageOf(cause, "That change did not go through."));
     }
@@ -303,7 +338,11 @@ export function HubSandboxesSettings() {
                         disabled={busy}
                         size="xs"
                         variant="outline"
-                        onClick={() => act(sandbox, "restart")}
+                        onClick={() =>
+                          sandbox.runningThreadCount > 0
+                            ? setConfirming({ sandbox, action: "restart" })
+                            : act(sandbox, "restart")
+                        }
                       >
                         Restart
                       </Button>
@@ -312,7 +351,11 @@ export function HubSandboxesSettings() {
                         disabled={busy}
                         size="xs"
                         variant="outline"
-                        onClick={() => act(sandbox, "stop")}
+                        onClick={() =>
+                          sandbox.runningThreadCount > 0
+                            ? setConfirming({ sandbox, action: "stop" })
+                            : act(sandbox, "stop")
+                        }
                       >
                         Stop
                       </Button>
@@ -350,6 +393,40 @@ export function HubSandboxesSettings() {
         );
       })}
       {error ? <SettingsRow title="Something went wrong" description={error} /> : null}
+      {confirming !== undefined ? (
+        <Dialog open onOpenChange={(open) => (open ? undefined : setConfirming(undefined))}>
+          <DialogPopup className="sm:max-w-sm">
+            <DialogHeader>
+              <DialogTitle>
+                {`${confirming.action === "stop" ? "Stop" : "Restart"} ${confirming.sandbox.name}?`}
+              </DialogTitle>
+              <DialogDescription>
+                {`${confirming.sandbox.runningThreadCount} ${
+                  confirming.sandbox.runningThreadCount === 1
+                    ? "Thread has a turn"
+                    : "Threads have turns"
+                } running in it, which ${confirming.action === "stop" ? "stopping" : "restarting"} interrupts.${
+                  confirming.action === "stop"
+                    ? " It stays stopped until you or one of its Users starts it."
+                    : ""
+                }`}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button type="button" variant="ghost" onClick={() => setConfirming(undefined)}>
+                Cancel
+              </Button>
+              <Button
+                disabled={pending}
+                variant="destructive"
+                onClick={() => act(confirming.sandbox, confirming.action)}
+              >
+                {confirming.action === "stop" ? "Stop Sandbox" : "Restart Sandbox"}
+              </Button>
+            </DialogFooter>
+          </DialogPopup>
+        </Dialog>
+      ) : null}
       {editing !== undefined ? (
         <Dialog open onOpenChange={(open) => (open ? undefined : setEditing(undefined))}>
           <DialogPopup className="sm:max-w-sm">

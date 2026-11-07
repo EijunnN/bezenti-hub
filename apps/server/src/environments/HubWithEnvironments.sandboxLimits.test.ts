@@ -19,6 +19,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
+import * as EnvironmentDemand from "../environment/EnvironmentDemand.ts";
 import type * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
 import { sandboxIdOf } from "../sandboxes/SandboxRuntime.ts";
 import * as Sandboxes from "../sandboxes/Sandboxes.ts";
@@ -139,12 +140,18 @@ describe("Hub con Environments: a Sandbox's limits", () => {
         const after = sandboxOf(changed.body as unknown as HubSandboxList, environmentId);
         assert.deepEqual(after.limits, { ...defaults, memoryBytes: 1 * GIB });
         assert.deepEqual(after.overrides, { ...NO_OVERRIDE, memoryBytes: 1 * GIB });
-        // Running Sandboxes keep what they started with: the change applies on the next start.
+        // Running Sandboxes keep what they started with: the change applies on the next start,
+        // and Settings shows both.
         assert.equal(starts.length, 1);
+        assert.deepEqual(after.appliedLimits, defaults);
         const restarted = yield* act(hub, hub.owner, environmentId, "restart");
         assert.equal(restarted.status, 200, JSON.stringify(restarted.body));
         assert.equal((yield* awaitStarted(hub, spaceId)).status, "online");
         assert.deepEqual(starts.at(-1)?.options.limits, { ...defaults, memoryBytes: 1 * GIB });
+        assert.deepEqual(
+          sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId).appliedLimits,
+          { ...defaults, memoryBytes: 1 * GIB },
+        );
 
         // The defaults change for every Sandbox without its own value.
         const defaultsChanged = yield* setLimits(hub, hub.owner, {
@@ -195,13 +202,8 @@ describe("Hub con Environments: a Sandbox's limits", () => {
           NodePath.join(hub.sandboxRoot, sandboxIdOf(spaceId), "big.bin"),
           Buffer.alloc(2 * 1024 * 1024),
         );
-        // A limit below what its home holds counts at once, not at the next hourly check.
-        const limited = yield* setLimits(hub, hub.owner, {
-          environmentId,
-          limits: { ...NO_OVERRIDE, diskBytes: 1024 * 1024 },
-        });
-        assert.equal(limited.status, 200);
-        // The check it starts may still run: this one, under the same lock, settles it either way.
+        // Below the floors only to keep the test small: written to its row, then checked.
+        yield* overrideDisk(hub, spaceId, 1024 * 1024);
         yield* hub.service(Sandboxes.Sandboxes).checkDisk;
         const failed = sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId);
         assert.equal(failed.status, "failed");
@@ -324,6 +326,170 @@ describe("Hub con Environments: Settings → Environments «Sandboxes»", () => 
         );
         assert.equal(sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId).status, "online");
         assert.deepEqual(yield* audited(hub, ["sandbox.limits.change", "sandbox.stop"]), []);
+      }).pipe(Effect.scoped),
+  );
+});
+
+/** Its home holds `bytes` more, in a file the Sandbox wrote. */
+const fillHome = (hub: Hub, spaceId: SpaceId, bytes: number, at = "big.bin") =>
+  Effect.sync(() => {
+    const file = NodePath.join(hub.sandboxRoot, sandboxIdOf(spaceId), at);
+    NodeFS.mkdirSync(NodePath.dirname(file), { recursive: true });
+    NodeFS.writeFileSync(file, Buffer.alloc(bytes));
+  });
+
+/** The Space's own disk limit, written straight to its row: no check starts with it. */
+const overrideDisk = (hub: Hub, spaceId: SpaceId, diskBytes: number | null) =>
+  hub.server.sql`UPDATE sandboxes SET disk_limit_bytes = ${diskBytes} WHERE space_id = ${spaceId}`;
+
+describe("Hub con Environments: a Sandbox cannot get past its disk limit", () => {
+  it.live(
+    "a home it made unreadable to the Hub's measurement counts as over its limit, not as small",
+    () =>
+      Effect.gen(function* () {
+        const hub = yield* makeHub({ sandboxLifecycle: { diskCheckEvery: "1 hour" } });
+        const { spaceId, environmentId } = yield* acmeWithSandbox(hub);
+        yield* fillHome(hub, spaceId, 3 * 1024 * 1024, "hidden/big.bin");
+        const hidden = NodePath.join(hub.sandboxRoot, sandboxIdOf(spaceId), "hidden");
+        NodeFS.chmodSync(hidden, 0o000);
+        yield* Effect.addFinalizer(() => Effect.sync(() => NodeFS.chmodSync(hidden, 0o700)));
+        yield* overrideDisk(hub, spaceId, 1024 * 1024);
+        for (let check = 0; check < 3; check += 1) {
+          yield* hub.service(Sandboxes.Sandboxes).checkDisk;
+        }
+        const sandbox = sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId);
+        assert.equal(sandbox.status, "failed");
+        assert.include(sandbox.error ?? "", "could not be measured");
+      }).pipe(Effect.scoped),
+  );
+
+  it.live("a limit raised while its home is measured keeps it running", () =>
+    Effect.gen(function* () {
+      let armed = false;
+      let raise: Effect.Effect<unknown> = Effect.void;
+      const hub = yield* makeHub({
+        sandboxLifecycle: { diskCheckEvery: "1 hour" },
+        // The Owner raises the limit after the check read it, before it decides.
+        beforeSandboxInspect: () =>
+          Effect.suspend(() => {
+            if (!armed) return Effect.void;
+            armed = false;
+            return raise.pipe(Effect.asVoid);
+          }),
+      });
+      const { spaceId, environmentId } = yield* acmeWithSandbox(hub);
+      yield* fillHome(hub, spaceId, 2 * 1024 * 1024);
+      yield* overrideDisk(hub, spaceId, 1024 * 1024);
+      raise = overrideDisk(hub, spaceId, null).pipe(Effect.orDie);
+      armed = true;
+      yield* hub.service(Sandboxes.Sandboxes).checkDisk;
+      assert.equal(sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId).status, "online");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("limits below a Sandbox's floors or above the Hub's machine are refused with why", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub();
+      const { environmentId } = yield* acmeWithSandbox(hub);
+      for (const [limits, why] of [
+        [{ ...NO_OVERRIDE, memoryBytes: 1024 * 1024 }, "256 MiB"],
+        [{ ...NO_OVERRIDE, pids: 10 }, "64"],
+        [{ ...NO_OVERRIDE, diskBytes: 100 * 1024 * 1024 }, "1.0 GiB"],
+        [{ ...NO_OVERRIDE, cpus: 0.05 }, "0.1"],
+        [{ ...NO_OVERRIDE, cpus: 100_000 }, "CPUs"],
+        [{ ...NO_OVERRIDE, memoryBytes: 1024 ** 5 }, "Memory can be at most"],
+      ] as const) {
+        const refused = yield* setLimits(hub, hub.owner, { environmentId, limits });
+        assert.equal(refused.status, 400, JSON.stringify(limits));
+        assert.include(JSON.stringify(refused.body), why, JSON.stringify(refused.body));
+      }
+      assert.deepEqual(
+        sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId).overrides,
+        NO_OVERRIDE,
+      );
+      // At the floors they are taken as given.
+      const floors = { cpus: 0.1, memoryBytes: 256 * 1024 ** 2, pids: 64, diskBytes: 1024 ** 3 };
+      const taken = yield* setLimits(hub, hub.owner, { environmentId, limits: floors });
+      assert.equal(taken.status, 200, JSON.stringify(taken.body));
+      assert.deepEqual(
+        sandboxOf(taken.body as unknown as HubSandboxList, environmentId).overrides,
+        floors,
+      );
+    }).pipe(Effect.scoped),
+  );
+});
+
+describe("Hub con Environments: what stops a Sandbox stays stopped until someone starts it", () => {
+  it.live(
+    "the Owner's stop holds it: waiting work does not start it, a User's own action does",
+    () =>
+      Effect.gen(function* () {
+        const hub = yield* makeHub();
+        const { spaceId, environmentId } = yield* acmeWithSandbox(hub);
+        const stopped = yield* act(hub, hub.owner, environmentId, "stop");
+        assert.equal(stopped.status, 200);
+        assert.isTrue((stopped.body as unknown as HubSandboxDetail).heldByOwner);
+
+        const demand = hub.service(EnvironmentDemand.EnvironmentDemand);
+        yield* demand.request([environmentId]);
+        assert.equal(
+          sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId).status,
+          "stopped",
+        );
+        const refused = yield* demand
+          .awaitStarted(environmentId, { actorUserId: undefined, explicit: false })
+          .pipe(Effect.flip);
+        assert.include(refused.detail, "the Owner stopped it");
+
+        // A User's own action (a message, «Try again») starts it, and ends the hold.
+        yield* demand
+          .awaitStarted(environmentId, { actorUserId: undefined, explicit: true })
+          .pipe(Effect.orDie);
+        const started = sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId);
+        assert.equal(started.status, "online");
+        assert.isFalse(started.heldByOwner);
+        assert.deepInclude(yield* audited(hub, ["sandbox.stop"]), {
+          action: "sandbox.stop",
+          via: "settings",
+          hold: true,
+        });
+        assert.isDefined(spaceId);
+      }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "a Hub disk almost full stops every running Sandbox and starts none until there is room",
+    () =>
+      Effect.gen(function* () {
+        let space = { freeBytes: 500 * GIB, totalBytes: 1000 * GIB };
+        const hub = yield* makeHub({
+          sandboxLifecycle: {
+            diskCheckEvery: "1 hour",
+            hostSpace: Effect.sync(() => space),
+          },
+        });
+        const { spaceId, environmentId } = yield* acmeWithSandbox(hub);
+        space = { freeBytes: 9 * GIB, totalBytes: 1000 * GIB };
+        yield* hub.service(Sandboxes.Sandboxes).checkDisk;
+        const failed = sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId);
+        assert.equal(failed.status, "failed");
+        assert.include(failed.error ?? "", "almost full");
+        assert.deepInclude(
+          (yield* audited(hub, ["sandbox.stop"])).map((entry) => entry.via),
+          "host-disk-low",
+        );
+        const refused = yield* hub
+          .service(Sandboxes.Sandboxes)
+          .ensureRunning({ spaceId, actorUserId: undefined })
+          .pipe(Effect.flip);
+        assert.include(refused.detail, "almost full");
+
+        space = { freeBytes: 11 * GIB, totalBytes: 1000 * GIB };
+        yield* hub
+          .service(Sandboxes.Sandboxes)
+          .ensureRunning({ spaceId, actorUserId: undefined })
+          .pipe(Effect.orDie);
+        assert.equal(sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId).status, "online");
       }).pipe(Effect.scoped),
   );
 });

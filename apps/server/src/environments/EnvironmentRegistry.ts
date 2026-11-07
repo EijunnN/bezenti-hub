@@ -410,8 +410,13 @@ export class EnvironmentRegistry extends Context.Service<
       readonly limits: SandboxLimits;
     }) => Effect.Effect<
       HubSandboxList,
-      EnvironmentNotFoundError | EnvironmentAccessDeniedError | EnvironmentStorageError
+      | EnvironmentNotFoundError
+      | EnvironmentAccessDeniedError
+      | Sandboxes.SandboxLimitsInvalidError
+      | EnvironmentStorageError
     >;
+    /** Each time the Hub ended a Sandbox's sessions as it stopped it (its disk). */
+    readonly sandboxSessionsEnded: Stream.Stream<Sandboxes.SandboxSessionsEnded>;
     /** Its Organization was archived: its Sandbox stops, and starts no more while archived. */
     readonly stopSandbox: (input: {
       readonly spaceId: SpaceId;
@@ -1141,6 +1146,9 @@ const make = Effect.gen(function* () {
         startedAt: summary.status === "online" ? sandbox.startedAt : null,
         limits: sandbox.limits,
         overrides: sandbox.overrides,
+        appliedLimits: sandbox.appliedLimits,
+        heldByOwner: sandbox.heldByOwner,
+        runningThreadCount: summary.runningThreadCount,
         usage: sandbox.usage,
         manageable: entry.manageable,
       });
@@ -1243,6 +1251,7 @@ const make = Effect.gen(function* () {
     yield* service.setLimits({ spaceId, limits, actor: AuditLog.userActor(actorUserId) }).pipe(
       Effect.catchTags({
         SandboxNotFoundError: () => Effect.fail(new EnvironmentNotFoundError({})),
+        SandboxLimitsInvalidError: (error) => Effect.fail(error),
         SandboxStartError: (cause) => Effect.fail(storageError(cause)),
       }),
     );
@@ -1253,6 +1262,7 @@ const make = Effect.gen(function* () {
     hubId,
     startSandbox,
     sandboxes: sandboxList,
+    sandboxSessionsEnded: Option.isSome(sandboxes) ? sandboxes.value.sessionsEnded : Stream.empty,
     sandboxAction,
     setSandboxLimits,
     chooseForThread,

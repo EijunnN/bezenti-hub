@@ -5,6 +5,7 @@ import {
   EnvironmentHttpApi,
   EnvironmentHttpForbiddenError,
   EnvironmentRateLimitedError,
+  EnvironmentSandboxLimitsInvalidError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -173,6 +174,8 @@ const handlers = HttpApiBuilder.group(
                 EnvironmentAccessDeniedError: failForbidden,
                 EnvironmentNotFoundError: () => failEnvironmentNotFound("environment_not_found"),
                 EnvironmentStorageError: failStorage,
+                SandboxLimitsInvalidError: (error) =>
+                  Effect.fail(new EnvironmentSandboxLimitsInvalidError({ message: error.reason })),
               }),
             );
         }),

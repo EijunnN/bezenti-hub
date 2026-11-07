@@ -125,9 +125,11 @@ export const AUDIT_DETAIL_KEYS = {
   "sandbox.start": ["via", "outcome", "reason"],
   /**
    * `archived`: its Organization was; `idle`: nothing ran in it for the idle timeout; `settings` or
-   * `restart`: the Owner by hand; `disk-full`: its home went over its disk limit.
+   * `restart`: the Owner by hand; `disk-full`: its home went over its disk limit (or could not be
+   * measured); `host-disk-low`: the Hub's disk for Sandboxes is almost full. `hold`: the Owner's
+   * stop, which waiting work does not undo.
    */
-  "sandbox.stop": ["via"],
+  "sandbox.stop": ["via", "hold"],
   "sandbox.delete": [],
   /**
    * `defaults` (the Installation's, no Space) or `space`; each new value, null where there is no

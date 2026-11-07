@@ -487,6 +487,8 @@ const makeSandboxRuntime = (
   otherRuntime: SandboxRuntimeOverRoot | undefined,
   /** Sees each start the Hub asks for, with what it starts with (its limits). */
   onStart: SandboxStartObserver | undefined,
+  /** Runs before each `inspect` of a Sandbox, as before each measurement of its home. */
+  beforeInspect: ((sandboxId: string) => Effect.Effect<void>) | undefined,
 ) => {
   let hubUrl = "";
   const started = new Map<string, TestEnvironment>();
@@ -538,7 +540,7 @@ const makeSandboxRuntime = (
     ),
   );
   const runtime =
-    beforeStop === undefined && onStart === undefined
+    beforeStop === undefined && onStart === undefined && beforeInspect === undefined
       ? processRuntime
       : Layer.effect(
           SandboxRuntime.SandboxRuntime,
@@ -552,6 +554,10 @@ const makeSandboxRuntime = (
               stop: (sandboxId) =>
                 (beforeStop?.(sandboxId) ?? Effect.void).pipe(
                   Effect.andThen(inner.stop(sandboxId)),
+                ),
+              inspect: (sandboxId) =>
+                (beforeInspect?.(sandboxId) ?? Effect.void).pipe(
+                  Effect.andThen(inner.inspect(sandboxId)),
                 ),
             }),
           ),
@@ -597,6 +603,8 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     readonly beforeSandboxStop?: (sandboxId: string) => Effect.Effect<void>;
     /** Sees each start the Hub asks of the runtime, with the limits it passes. */
     readonly onSandboxStart?: SandboxStartObserver;
+    /** Before each `inspect` of a Sandbox by the Hub (each measurement of its home among them). */
+    readonly beforeSandboxInspect?: (sandboxId: string) => Effect.Effect<void>;
     /** The idle timeout, the start timeout and the clock (a TestClock the test advances). */
     readonly sandboxLifecycle?: Sandboxes.SandboxLifecyclePolicy["Service"];
     /** Runs Sandboxes with this runtime instead of the process one. */
@@ -618,6 +626,7 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     options.beforeSandboxStop,
     options.sandboxRuntime,
     options.onSandboxStart,
+    options.beforeSandboxInspect,
   );
   // The lifecycle policy goes in with the runtime, to the Sandboxes that read it.
   const sandboxRuntime =

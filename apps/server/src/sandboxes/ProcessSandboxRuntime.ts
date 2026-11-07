@@ -25,6 +25,7 @@ import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
 import { pointSandboxHomeAt, writeSandboxHome } from "./sandboxHome.ts";
+import { hostSpaceOf, measureWithDu } from "./sandboxLimits.ts";
 import {
   type SandboxExit,
   SandboxHubAddress,
@@ -398,6 +399,11 @@ export const make = Effect.fn("ProcessSandboxRuntime.make")(function* (options: 
     limitSupport: Effect.succeed(PROCESS_LIMIT_SUPPORT),
     // @effect-diagnostics-next-line effectFnOpportunity:off -- a constant answer, nothing to trace.
     resourceUse: () => NO_RESOURCE_USE,
+    // As the Hub's user, which is the Sandbox's: a directory it made unreadable fails the measure.
+    measureHome: Effect.fn("ProcessSandboxRuntime.measureHome")(function* (sandboxId) {
+      return yield* measureWithDu("du", ["-s", "-k", "-x", homeOf(sandboxId)]);
+    }),
+    hostSpace: Effect.sync(() => hostSpaceOf(rootDir)),
     exits: Stream.fromPubSub(exits),
   });
 });
