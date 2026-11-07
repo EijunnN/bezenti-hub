@@ -53,7 +53,7 @@ const POLL_INTERVAL_MS = 2_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 
 const RETURN_PAGE =
-  '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>T3 Code</title><style>body{font-family:system-ui;display:grid;place-items:center;min-height:90vh;margin:0}main{max-width:360px;padding:32px}h1{font-size:24px}p{line-height:1.6;opacity:.7}</style></head><body><main><h1>Return to your terminal</h1><p><code>t3 join</code> is finishing there. You can close this tab.</p></main></body></html>';
+  '<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>T3 Code</title><style>body{font-family:system-ui;display:grid;place-items:center;min-height:90vh;margin:0}main{max-width:360px;padding:32px}h1{font-size:24px}p{line-height:1.6;opacity:.7}</style></head><body><main><h1>Return to your terminal</h1><p><code>t3 join</code> shows there who approved this machine and registers it once that is confirmed. You can close this tab.</p></main></body></html>';
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeStarted = Schema.decodeUnknownOption(EnvironmentJoinStartResult);
