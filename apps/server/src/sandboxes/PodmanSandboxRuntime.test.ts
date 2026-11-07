@@ -24,12 +24,14 @@ import * as PodmanSandboxRuntime from "./PodmanSandboxRuntime.ts";
 import {
   ensureDevImage,
   makeTestRun,
+  podmanLimitSupportHere,
   podmanResult,
   removeTestRunContainers,
   rootlessPodmanAvailable,
 } from "./PodmanSandboxRuntime.testkit.ts";
 import { devCodeMounts, hubHostAllowsPodman } from "./sandboxRuntimeFromConfig.ts";
 import { isSandboxHubPath } from "./SandboxHubSocket.ts";
+import type { SandboxLimits } from "./sandboxLimits.ts";
 import { SandboxHubAddress, SandboxRuntime } from "./SandboxRuntime.ts";
 
 describe("what a Sandbox reaches of its Hub", () => {
@@ -155,7 +157,63 @@ const spec = (name: string) => ({
   name: `${name} Sandbox`,
   hubEnvironmentId: EnvironmentId.make("hub"),
   credential: Redacted.make(`t3env.hub.${name}-secret`),
-  limits: { cpus: null, memoryBytes: null, pids: null, diskBytes: null },
+});
+
+describe("which limits rootless Podman enforces", () => {
+  const limits = { cpus: 1.5, memoryBytes: 256 * 1024 ** 2, pids: 128, diskBytes: 1024 ** 3 };
+  it("none under cgroupfs, as without the systemd user bus, and says so", () => {
+    const support = PodmanSandboxRuntime.podmanLimitSupport({
+      cgroupManager: "cgroupfs",
+      cgroupVersion: "v2",
+      cgroupControllers: ["cpu", "memory", "pids"],
+    });
+    assert.deepInclude(support, { cpus: false, memory: false, pids: false });
+    assert.include(support.note ?? "", "not enforced on this host");
+    // A memory or PIDs flag under cgroupfs makes `podman run` fail: none is passed.
+    assert.deepEqual(PodmanSandboxRuntime.podmanLimitArgs(limits, support), []);
+    assert.equal(
+      PodmanSandboxRuntime.podmanLimitLabels(limits, support)["io.t3code.limits-enforced"],
+      "none",
+    );
+  });
+  it("those whose controllers are delegated under systemd, and names the others", () => {
+    const support = PodmanSandboxRuntime.podmanLimitSupport({
+      cgroupManager: "systemd",
+      cgroupVersion: "v2",
+      cgroupControllers: ["memory", "pids"],
+    });
+    assert.deepInclude(support, { cpus: false, memory: true, pids: true });
+    assert.include(support.note ?? "", "no cpu controller delegated");
+    assert.deepEqual(PodmanSandboxRuntime.podmanLimitArgs(limits, support), [
+      "--memory=268435456b",
+      "--memory-swap=268435456b",
+      "--pids-limit=128",
+    ]);
+  });
+  it("every one with all three delegated, saying nothing", () => {
+    const support = PodmanSandboxRuntime.podmanLimitSupport({
+      cgroupManager: "systemd",
+      cgroupVersion: "v2",
+      cgroupControllers: ["cpuset", "cpu", "io", "memory", "pids"],
+    });
+    assert.deepEqual(support, { cpus: true, memory: true, pids: true, note: null });
+    assert.include(PodmanSandboxRuntime.podmanLimitArgs(limits, support), "--cpus=1.5");
+    assert.deepEqual(
+      PodmanSandboxRuntime.podmanLimitArgs(
+        { cpus: null, memoryBytes: null, pids: null, diskBytes: null },
+        support,
+      ),
+      [],
+    );
+  });
+  it("none on cgroups v1", () => {
+    const support = PodmanSandboxRuntime.podmanLimitSupport({
+      cgroupManager: "systemd",
+      cgroupVersion: "v1",
+      cgroupControllers: ["cpu", "memory", "pids"],
+    });
+    assert.deepInclude(support, { cpus: false, memory: false, pids: false });
+  });
 });
 
 describe.skipIf(!rootlessPodmanAvailable)("the Podman Sandbox runtime", () => {
@@ -173,6 +231,8 @@ describe.skipIf(!rootlessPodmanAvailable)("the Podman Sandbox runtime", () => {
       readonly codeMounts?: ReadonlyArray<string>;
       /** Create the homes but start nothing. */
       readonly createOnly?: boolean;
+      /** What each starts with. */
+      readonly limits?: SandboxLimits;
     } = {},
   ) =>
     Effect.gen(function* () {
@@ -208,7 +268,12 @@ describe.skipIf(!rootlessPodmanAvailable)("the Podman Sandbox runtime", () => {
       for (const name of ["acme", "globex"]) {
         yield* runtime.create(spec(name));
         NodeFS.writeFileSync(NodePath.join(rootDir, `sandbox-${name}`, "whoami"), name);
-        if (options.createOnly !== true) yield* runtime.start(`sandbox-${name}`);
+        if (options.createOnly !== true) {
+          yield* runtime.start(
+            `sandbox-${name}`,
+            options.limits === undefined ? undefined : { limits: options.limits },
+          );
+        }
       }
       return {
         hub,
@@ -533,5 +598,72 @@ describe.skipIf(!rootlessPodmanAvailable)("the Podman Sandbox runtime", () => {
       assert.notEqual(podmanResult(["container", "exists", `${acme}-moved`]).exitCode, 0);
       assert.equal(podmanResult(["container", "exists", acme]).exitCode, 0);
     }).pipe(Effect.scoped),
+  );
+
+  const LIMITS = { cpus: 1, memoryBytes: 128 * 1024 ** 2, pids: 64, diskBytes: null };
+  /** This run's container left under the Sandbox's name by the test before, which it named so. */
+  const removeNameClash = () => podmanResult(["rm", "--force", `${run.namePrefix}sandbox-acme`]);
+
+  it.live("a container records the limits it started with, and gets those the host enforces", () =>
+    Effect.gen(function* () {
+      removeNameClash();
+      const { runtime, acme } = yield* twoSandboxes({ limits: LIMITS });
+      assert.deepEqual(yield* runtime.limitSupport, podmanLimitSupportHere);
+      const inspect = (format: string) =>
+        podmanResult(["container", "inspect", "--format", format, acme]).stdout.trim();
+      const labels = JSON.parse(inspect("{{json .Config.Labels}}")) as Record<string, string>;
+      assert.equal(labels["io.t3code.limit.memory-bytes"], String(LIMITS.memoryBytes));
+      assert.equal(labels["io.t3code.limit.pids"], String(LIMITS.pids));
+      assert.equal(labels["io.t3code.limit.cpus"], "1");
+      // Only what the host enforces reaches the container's own cgroup settings.
+      assert.equal(
+        inspect("{{.HostConfig.Memory}}"),
+        podmanLimitSupportHere.memory ? String(LIMITS.memoryBytes) : "0",
+      );
+      // What it uses is read from its processes, whatever its cgroup.
+      const use = yield* runtime.resourceUse("sandbox-acme");
+      assert.isAbove(use?.memoryBytes ?? 0, 0);
+      assert.isNull(yield* runtime.resourceUse("sandbox-nobody"));
+    }).pipe(Effect.scoped),
+  );
+
+  // Needs a systemd user session giving each container its cgroup, with memory and pids delegated.
+  it.live.skipIf(!podmanLimitSupportHere.memory || !podmanLimitSupportHere.pids)(
+    `the memory and PIDs limits apply (skipped where they are not enforced: ${podmanLimitSupportHere.note ?? "enforced"})`,
+    () =>
+      Effect.gen(function* () {
+        removeNameClash();
+        const { acme } = yield* twoSandboxes({ limits: LIMITS });
+        // Over its memory: the allocating process is killed, the container goes on.
+        const allocated = podmanResult(
+          [
+            "exec",
+            acme,
+            "node",
+            "-e",
+            "const a = []; for (;;) a.push(Buffer.alloc(16 * 1024 * 1024, 1));",
+          ],
+          60_000,
+        );
+        assert.equal(allocated.exitCode, 137, allocated.stderr);
+        // Past its PIDs: no more processes start.
+        const spawned = podmanResult(
+          [
+            "exec",
+            acme,
+            "node",
+            "-e",
+            `const cp = require("node:child_process"); let made = 0;
+             try { for (let i = 0; i < 200; i += 1) { cp.spawn("sleep", ["30"]); made += 1; } } catch {}
+             setTimeout(() => console.log(made), 500);`,
+          ],
+          60_000,
+        );
+        assert.isBelow(Number.parseInt(spawned.stdout.trim(), 10) || 0, 200, spawned.stderr);
+        assert.equal(
+          podmanResult(["exec", acme, "cat", "/sys/fs/cgroup/memory.max"]).stdout.trim(),
+          String(LIMITS.memoryBytes),
+        );
+      }).pipe(Effect.scoped),
   );
 });

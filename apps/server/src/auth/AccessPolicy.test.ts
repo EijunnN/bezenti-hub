@@ -1228,6 +1228,57 @@ const rows: ReadonlyArray<
     acmeSandbox(ORG),
     deny("owner-only"),
   ],
+  ["Owner sees every Sandbox's use and limits", owner, "sandbox.inspect", acmeSandbox(ORG), allow],
+  [
+    "an Admin sees their Sandbox's use and limits",
+    admin,
+    "sandbox.inspect",
+    acmeSandbox(ORG),
+    allow,
+  ],
+  [
+    "a Member does not see the Sandbox's use and limits",
+    member,
+    "sandbox.inspect",
+    acmeSandbox(ORG),
+    deny("role-not-allowed"),
+  ],
+  [
+    "another Organization's Admin does not see its use",
+    outsider,
+    "sandbox.inspect",
+    acmeSandbox(ORG),
+    deny("not-a-member"),
+  ],
+  [
+    "a User sees their Personal space's Sandbox use",
+    personalCreator,
+    "sandbox.inspect",
+    personalSandbox("grace"),
+    allow,
+  ],
+  [
+    "Owner starts, stops and limits any Sandbox",
+    owner,
+    "sandbox.manage",
+    personalSandbox("grace"),
+    allow,
+  ],
+  [
+    "an Admin does not start, stop or limit their Sandbox",
+    admin,
+    "sandbox.manage",
+    acmeSandbox(ORG),
+    deny("owner-only"),
+  ],
+  ["a Sandbox action needs a Sandbox", owner, "sandbox.manage", hubMachine, deny("wrong-resource")],
+  [
+    "a disabled Admin sees no Sandbox use",
+    disabledMember,
+    "sandbox.inspect",
+    acmeSandbox(ORG),
+    deny("user-inactive"),
+  ],
 ];
 
 describe("AccessPolicy.decide", () => {

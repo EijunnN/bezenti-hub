@@ -59,6 +59,16 @@ export type SandboxLauncher = (
 
 const STOP_GRACE_MS = 5_000;
 
+const NO_RESOURCE_USE = Effect.succeed(null);
+
+/** The process runtime is for development and tests: it enforces no limit but the Hub's disk check. */
+const PROCESS_LIMIT_SUPPORT = {
+  cpus: false,
+  memory: false,
+  pids: false,
+  note: "The process Sandbox runtime (development only) runs Sandboxes as plain processes of the Hub's user: CPU, memory and PIDs limits are not enforced on this host.",
+} as const;
+
 /** The Hub's environment a Sandbox may see: never its secrets, tokens or ports. */
 const childEnvironment = (launch: SandboxLaunch) => {
   const env: Record<string, string> = {
@@ -384,6 +394,10 @@ export const make = Effect.fn("ProcessSandboxRuntime.make")(function* (options: 
     stop,
     delete: remove,
     inspect,
+    // Plain processes of the Hub's user: nothing limits them.
+    limitSupport: Effect.succeed(PROCESS_LIMIT_SUPPORT),
+    // @effect-diagnostics-next-line effectFnOpportunity:off -- a constant answer, nothing to trace.
+    resourceUse: () => NO_RESOURCE_USE,
     exits: Stream.fromPubSub(exits),
   });
 });

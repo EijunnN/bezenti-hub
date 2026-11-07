@@ -3,6 +3,10 @@ import type {
   EnvironmentJoinRequestView,
   HubEnvironmentList,
   HubEnvironmentSummary,
+  HubSandboxActionRequest,
+  HubSandboxDetail,
+  HubSandboxList,
+  SandboxLimits,
 } from "@t3tools/contracts";
 
 import { request, type StepUp, toReauth, UserSignInError } from "./userAccounts";
@@ -31,6 +35,34 @@ export function removeHubEnvironment(environmentId: EnvironmentId): Promise<HubE
 export function startHubEnvironment(environmentId: EnvironmentId): Promise<HubEnvironmentSummary> {
   return request((client) =>
     client.environments.start({ headers: {}, payload: { environmentId } }),
+  );
+}
+
+/** Settings → Environments «Sandboxes»: each one the User may inspect, with use and limits. */
+export function fetchHubSandboxes(): Promise<HubSandboxList> {
+  return request((client) => client.environments.sandboxes({ headers: {} }));
+}
+
+/** The Owner starts (answering once it is starting), stops or restarts a Sandbox. */
+export function runHubSandboxAction(
+  environmentId: EnvironmentId,
+  action: HubSandboxActionRequest["action"],
+): Promise<HubSandboxDetail> {
+  return request((client) =>
+    client.environments.sandboxAction({ headers: {}, payload: { environmentId, action } }),
+  );
+}
+
+/** The Owner changes the Installation's defaults (no Environment) or a Sandbox's limits. */
+export function setHubSandboxLimits(
+  environmentId: EnvironmentId | undefined,
+  limits: SandboxLimits,
+): Promise<HubSandboxList> {
+  return request((client) =>
+    client.environments.sandboxLimits({
+      headers: {},
+      payload: environmentId === undefined ? { limits } : { environmentId, limits },
+    }),
   );
 }
 

@@ -124,14 +124,18 @@ export const joinMachine = Effect.fn(function* (
 export const memberWithPasskey = Effect.fn(function* (
   server: Server,
   owner: string,
-  input: { readonly displayName: string; readonly spaceId?: string },
+  input: {
+    readonly displayName: string;
+    readonly spaceId?: string;
+    readonly role?: "admin" | "member";
+  },
 ) {
   const spaceId =
     input.spaceId ??
     ((yield* server.request("/api/spaces/organizations", { body: { name: "Acme" }, cookie: owner }))
       .body.id as string);
   const invitation = yield* server.request(`/api/spaces/${spaceId}/invitations`, {
-    body: { role: "member" },
+    body: { role: input.role ?? "member" },
     cookie: owner,
   });
   const token = invitation.body.token as string;

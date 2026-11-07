@@ -42,6 +42,7 @@ export const AuditAction = Schema.Literals([
   "sandbox.start",
   "sandbox.stop",
   "sandbox.delete",
+  "sandbox.limits.change",
 ]);
 export type AuditAction = typeof AuditAction.Type;
 
@@ -118,13 +119,21 @@ export const AUDIT_DETAIL_KEYS = {
   /** Which Sandbox runtime made it (process or podman). */
   "sandbox.create": ["runtime"],
   /**
-   * `demand`: work needed it; `retry`: a User's «Try again». `started` or `failed`, with the
-   * trimmed reason.
+   * `demand`: work needed it; `retry`: a User's «Try again»; `settings` or `restart`: the Owner
+   * by hand. `started` or `failed`, with the trimmed reason.
    */
   "sandbox.start": ["via", "outcome", "reason"],
-  /** `archived`: its Organization was; `idle`: nothing ran in it for the idle timeout. */
+  /**
+   * `archived`: its Organization was; `idle`: nothing ran in it for the idle timeout; `settings` or
+   * `restart`: the Owner by hand; `disk-full`: its home went over its disk limit.
+   */
   "sandbox.stop": ["via"],
   "sandbox.delete": [],
+  /**
+   * `defaults` (the Installation's, no Space) or `space`; each new value, null where there is no
+   * limit (defaults) or the default applies (a Space).
+   */
+  "sandbox.limits.change": ["scope", "cpus", "memoryBytes", "pids", "diskBytes"],
 } as const satisfies Record<AuditAction, ReadonlyArray<string>>;
 
 export type AuditDetailOf<A extends AuditAction> = {

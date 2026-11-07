@@ -14,11 +14,14 @@ import {
   type EnvironmentHelloFrame,
   HUB_MACHINE_ENVIRONMENT_ID,
   type HubEnvironmentSummary,
+  type HubSandboxDetail,
+  type HubSandboxList,
   previewThreadPlacement,
   type ProjectId,
   type ProviderInstanceId,
   sandboxEnvironmentIdOf,
   sandboxEnvironmentName,
+  type SandboxLimits,
   SpaceId,
   type ThreadId,
   UserId,
@@ -47,6 +50,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import type * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
 import * as Sandboxes from "../sandboxes/Sandboxes.ts";
 import * as SandboxRuntimeFromConfig from "../sandboxes/sandboxRuntimeFromConfig.ts";
+import { BUILT_IN_DEFAULT_LIMITS } from "../sandboxes/sandboxLimits.ts";
 import { sandboxSpaceOf } from "../sandboxes/sandboxSpace.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as EnvironmentConnections from "./EnvironmentConnections.ts";
@@ -376,6 +380,32 @@ export class EnvironmentRegistry extends Context.Service<
       readonly environmentId: EnvironmentId;
     }) => Effect.Effect<
       HubEnvironmentSummary,
+      EnvironmentNotFoundError | EnvironmentAccessDeniedError | EnvironmentStorageError
+    >;
+    /**
+     * Settings → Environments «Sandboxes»: the Sandboxes the User may inspect (`sandbox.inspect`:
+     * the Owner every one, an Admin their Space's) with status, use, limits and image, and the
+     * Installation's defaults.
+     */
+    readonly sandboxes: (
+      viewer: UserId,
+    ) => Effect.Effect<HubSandboxList, EnvironmentAccessDeniedError | EnvironmentStorageError>;
+    /** The Owner starts (in the background), stops or restarts a Sandbox (`sandbox.manage`). */
+    readonly sandboxAction: (input: {
+      readonly actorUserId: UserId;
+      readonly environmentId: EnvironmentId;
+      readonly action: "start" | "stop" | "restart";
+    }) => Effect.Effect<
+      HubSandboxDetail,
+      EnvironmentNotFoundError | EnvironmentAccessDeniedError | EnvironmentStorageError
+    >;
+    /** The Owner changes the Installation's defaults (no Environment) or a Sandbox's limits. */
+    readonly setSandboxLimits: (input: {
+      readonly actorUserId: UserId;
+      readonly environmentId: EnvironmentId | undefined;
+      readonly limits: SandboxLimits;
+    }) => Effect.Effect<
+      HubSandboxList,
       EnvironmentNotFoundError | EnvironmentAccessDeniedError | EnvironmentStorageError
     >;
     /** Its Organization was archived: its Sandbox stops, and starts no more while archived. */
@@ -1034,9 +1064,179 @@ const make = Effect.gen(function* () {
     return yield* summaryOf(current ?? row, principal.isOwner);
   });
 
+  const sandboxFailure = (cause: unknown) => storageError(cause);
+
+  /** Each Sandbox the viewer may inspect, by Space, as the policy decides on it. */
+  const inspectableSandboxes = Effect.fn("EnvironmentRegistry.inspectableSandboxes")(function* (
+    principal: AccessPolicy.Principal,
+    viewer: UserId,
+  ) {
+    const rows = yield* selectRows([sql`kind = 'sandbox'`, sql`revoked_at IS NULL`]);
+    const spaceIds = rows.flatMap((row) =>
+      row.spaceId === null ? [] : [SpaceId.make(row.spaceId)],
+    );
+    const resources = yield* spaces.spacesById(spaceIds);
+    const names = new Map<string, string>(
+      (yield* spaces.view(viewer)).spaces.map((space) => [space.id, space.name]),
+    );
+    const allowed = new Map<
+      SpaceId,
+      { readonly row: EnvironmentRow; readonly name: string; readonly manageable: boolean }
+    >();
+    for (const row of rows) {
+      if (row.spaceId === null) continue;
+      const spaceId = SpaceId.make(row.spaceId);
+      const resource = environmentResource(row, resources.get(spaceId)?.resource);
+      if (!AccessPolicy.isAllowed(decide(principal, "sandbox.inspect", resource))) continue;
+      const spaceName = names.get(spaceId);
+      allowed.set(spaceId, {
+        row,
+        name: spaceName === undefined ? row.name : sandboxEnvironmentName(spaceName),
+        manageable: AccessPolicy.isAllowed(decide(principal, "sandbox.manage", resource)),
+      });
+    }
+    return allowed;
+  }, Effect.mapError(storageError));
+
+  const sandboxList = Effect.fn("EnvironmentRegistry.sandboxList")(function* (viewer: UserId) {
+    const principal = yield* principalOf(viewer);
+    if (principal.inactive === true) {
+      return yield* new EnvironmentAccessDeniedError({ reason: "user-inactive" });
+    }
+    if (Option.isNone(sandboxes)) {
+      return {
+        defaults: BUILT_IN_DEFAULT_LIMITS,
+        enforcement: {
+          cpus: false,
+          memory: false,
+          pids: false,
+          disk: false,
+          note: "This Hub runs no Sandboxes: it has no Sandbox runtime.",
+        },
+        sandboxes: [],
+        manageable: principal.isOwner,
+      } satisfies HubSandboxList;
+    }
+    const allowed = yield* inspectableSandboxes(principal, viewer);
+    const overview = yield* sandboxes.value
+      .overview((spaceId) => allowed.has(spaceId))
+      .pipe(Effect.mapError(sandboxFailure));
+    const details: Array<HubSandboxDetail> = [];
+    for (const sandbox of overview.sandboxes) {
+      const entry = allowed.get(sandbox.spaceId);
+      if (entry === undefined) continue;
+      const summary = yield* summaryOf(entry.row, principal.isOwner, entry.name);
+      details.push({
+        environmentId: sandbox.environmentId,
+        spaceId: sandbox.spaceId,
+        name: summary.name,
+        status: summary.status,
+        error: summary.status === "failed" ? entry.row.sandboxError : null,
+        runtime: sandbox.runtime,
+        imageVersion: sandbox.imageVersion,
+        startedAt: summary.status === "online" ? sandbox.startedAt : null,
+        limits: sandbox.limits,
+        overrides: sandbox.overrides,
+        usage: sandbox.usage,
+        manageable: entry.manageable,
+      });
+    }
+    return {
+      defaults: overview.defaults,
+      enforcement: overview.enforcement,
+      sandboxes: details,
+      manageable: principal.isOwner,
+    } satisfies HubSandboxList;
+  });
+
+  /** A Sandbox the Owner manages; one the actor may not see answers like a missing one. */
+  const authorizeSandbox = Effect.fn("EnvironmentRegistry.authorizeSandbox")(function* (
+    actorUserId: UserId,
+    environmentId: EnvironmentId,
+  ) {
+    const row = yield* liveRow(environmentId);
+    if (row === undefined || row.kind !== "sandbox" || row.spaceId === null) {
+      return yield* new EnvironmentNotFoundError({});
+    }
+    const principal = yield* principalOf(actorUserId);
+    const resource = yield* resourceOf(row);
+    if (principal.inactive === true) {
+      return yield* new EnvironmentAccessDeniedError({ reason: "user-inactive" });
+    }
+    if (!AccessPolicy.isAllowed(decide(principal, "sandbox.inspect", resource))) {
+      return yield* new EnvironmentNotFoundError({});
+    }
+    const decision = decide(principal, "sandbox.manage", resource);
+    if (decision._tag === "Deny") {
+      return yield* new EnvironmentAccessDeniedError({ reason: decision.reason });
+    }
+    if (Option.isNone(sandboxes)) return yield* new EnvironmentNotFoundError({});
+    return { spaceId: SpaceId.make(row.spaceId), sandboxes: sandboxes.value };
+  });
+
+  const sandboxAction: EnvironmentRegistry["Service"]["sandboxAction"] = Effect.fn(
+    "EnvironmentRegistry.sandboxAction",
+  )(function* ({ actorUserId, environmentId, action }) {
+    const { spaceId, sandboxes: service } = yield* authorizeSandbox(actorUserId, environmentId);
+    const actor = AuditLog.userActor(actorUserId);
+    switch (action) {
+      case "start":
+        // Answers once it is `starting`; how the start ends shows in the list.
+        yield* service.requestStart({ spaceId, actorUserId, via: "settings" });
+        break;
+      case "stop":
+        yield* service
+          .stop({ spaceId, actor, via: "settings" })
+          .pipe(Effect.mapError(sandboxFailure));
+        break;
+      case "restart":
+        yield* service.restart({ spaceId, actorUserId }).pipe(Effect.mapError(sandboxFailure));
+        break;
+    }
+    const listed = yield* sandboxList(actorUserId);
+    const detail = listed.sandboxes.find((entry) => entry.environmentId === environmentId);
+    if (detail === undefined) return yield* new EnvironmentNotFoundError({});
+    return detail;
+  });
+
+  const setSandboxLimits: EnvironmentRegistry["Service"]["setSandboxLimits"] = Effect.fn(
+    "EnvironmentRegistry.setSandboxLimits",
+  )(function* ({ actorUserId, environmentId, limits }) {
+    let spaceId: SpaceId | undefined;
+    let service: Sandboxes.Sandboxes["Service"];
+    if (environmentId === undefined) {
+      const principal = yield* principalOf(actorUserId);
+      const decision =
+        principal.inactive === true
+          ? AccessPolicy.deny("user-inactive")
+          : principal.isOwner
+            ? AccessPolicy.allow
+            : AccessPolicy.deny("owner-only");
+      if (decision._tag === "Deny") {
+        return yield* new EnvironmentAccessDeniedError({ reason: decision.reason });
+      }
+      if (Option.isNone(sandboxes)) return yield* new EnvironmentNotFoundError({});
+      service = sandboxes.value;
+    } else {
+      const authorized = yield* authorizeSandbox(actorUserId, environmentId);
+      spaceId = authorized.spaceId;
+      service = authorized.sandboxes;
+    }
+    yield* service.setLimits({ spaceId, limits, actor: AuditLog.userActor(actorUserId) }).pipe(
+      Effect.catchTags({
+        SandboxNotFoundError: () => Effect.fail(new EnvironmentNotFoundError({})),
+        SandboxStartError: (cause) => Effect.fail(storageError(cause)),
+      }),
+    );
+    return yield* sandboxList(actorUserId);
+  });
+
   return EnvironmentRegistry.of({
     hubId,
     startSandbox,
+    sandboxes: sandboxList,
+    sandboxAction,
+    setSandboxLimits,
     chooseForThread,
     usableBy,
     list,

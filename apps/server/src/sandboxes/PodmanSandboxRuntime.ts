@@ -28,9 +28,11 @@ import {
   writeJoinedHubState,
 } from "../environments/joinedHubState.ts";
 import { sandboxServerPaths } from "./sandboxHome.ts";
+import { NO_LIMITS, type SandboxLimits } from "./sandboxLimits.ts";
 import {
   type SandboxExit,
   SandboxHubAddress,
+  type SandboxLimitSupport,
   SandboxRuntime,
   SandboxRuntimeError,
   type SandboxState,
@@ -50,6 +52,8 @@ export const SANDBOX_CONTAINER_HUB_URL = `http://127.0.0.1:${SANDBOX_CONTAINER_H
 const SANDBOX_LABEL = "io.t3code.sandbox";
 /** The label naming the Sandboxes root of the Hub that made it, so no Hub stops another's. */
 const SANDBOX_ROOT_LABEL = "io.t3code.sandbox-root";
+/** The labels recording a container's limits: `io.t3code.limit.<name>`, and `…limits-enforced`. */
+const SANDBOX_LIMIT_LABEL = "io.t3code.limit";
 /** The network: its own, with internet, without the host's loopback (also slirp4netns's default). */
 const SANDBOX_NETWORK = "slirp4netns:allow_host_loopback=false";
 
@@ -154,6 +158,106 @@ export const runPodman = (
     );
     return Effect.sync(() => child.kill("SIGKILL"));
   });
+
+/** What `podman info` says of the cgroups its containers get. */
+export interface PodmanCgroupInfo {
+  readonly cgroupManager: string | undefined;
+  readonly cgroupVersion: string | undefined;
+  readonly cgroupControllers: ReadonlyArray<string>;
+}
+
+const NOT_ENFORCED = "CPU, memory and PIDs limits are not enforced on this host";
+
+/**
+ * Which limits rootless Podman enforces, from its cgroups: only a cgroup v2 host whose systemd
+ * user session gives each container a cgroup of its own, with the controllers delegated to the
+ * Hub's user. Under cgroupfs (no systemd user bus, as in a `wsl -e` session) a rootless container
+ * shares its caller's cgroup, and a memory or PIDs flag makes `podman run` fail or is ignored.
+ */
+export const podmanLimitSupport = (info: PodmanCgroupInfo): SandboxLimitSupport => {
+  const none = (note: string): SandboxLimitSupport => ({
+    cpus: false,
+    memory: false,
+    pids: false,
+    note,
+  });
+  if (info.cgroupVersion !== "v2") {
+    return none(
+      `Podman runs on cgroups ${info.cgroupVersion ?? "of an unknown version"} here, where rootless containers get no limits: ${NOT_ENFORCED}.`,
+    );
+  }
+  if (info.cgroupManager !== "systemd") {
+    return none(
+      `Podman uses the ${info.cgroupManager ?? "unknown"} cgroup manager here because the Hub's systemd user session bus ($XDG_RUNTIME_DIR/bus) is not reachable (as in a \`wsl -e\` session), so rootless containers get no cgroup of their own: ${NOT_ENFORCED}. Run the Hub as a systemd user service, with dbus-user-session installed, to enforce them.`,
+    );
+  }
+  const has = (controller: string) => info.cgroupControllers.includes(controller);
+  const missing = ["cpu", "memory", "pids"].filter((controller) => !has(controller));
+  return {
+    cpus: has("cpu"),
+    memory: has("memory"),
+    pids: has("pids"),
+    note:
+      missing.length === 0
+        ? null
+        : `The Hub user's cgroup has no ${missing.join(", ")} controller delegated, so those limits are not enforced on this host. Delegate them (Delegate=cpu cpuset io memory pids for user@.service) to enforce them.`,
+  };
+};
+
+/**
+ * The `podman run` flags for the limits the host enforces; memory with no swap beyond it. The
+ * others are left out, since under cgroupfs a memory or PIDs flag makes the run fail.
+ */
+export const podmanLimitArgs = (
+  limits: SandboxLimits,
+  support: SandboxLimitSupport,
+): ReadonlyArray<string> => [
+  ...(support.cpus && limits.cpus !== null ? [`--cpus=${limits.cpus}`] : []),
+  ...(support.memory && limits.memoryBytes !== null
+    ? [`--memory=${limits.memoryBytes}b`, `--memory-swap=${limits.memoryBytes}b`]
+    : []),
+  ...(support.pids && limits.pids !== null ? [`--pids-limit=${limits.pids}`] : []),
+];
+
+/** Labels recording the limits a container was started with, and which of them are enforced. */
+export const podmanLimitLabels = (
+  limits: SandboxLimits,
+  support: SandboxLimitSupport,
+): Readonly<Record<string, string>> => {
+  const enforced = [
+    ...(support.cpus ? ["cpus"] : []),
+    ...(support.memory ? ["memory"] : []),
+    ...(support.pids ? ["pids"] : []),
+  ];
+  return {
+    [`${SANDBOX_LIMIT_LABEL}.cpus`]: String(limits.cpus ?? "none"),
+    [`${SANDBOX_LIMIT_LABEL}.memory-bytes`]: String(limits.memoryBytes ?? "none"),
+    [`${SANDBOX_LIMIT_LABEL}.pids`]: String(limits.pids ?? "none"),
+    [`${SANDBOX_LIMIT_LABEL}s-enforced`]: enforced.length === 0 ? "none" : enforced.join(","),
+  };
+};
+
+const readCgroupInfo = (podmanCommand?: string) =>
+  runPodman(["info", "--format", "json"], {
+    ...(podmanCommand === undefined ? {} : { podmanCommand }),
+    timeoutMs: 15_000,
+  }).pipe(
+    Effect.map((result): PodmanCgroupInfo => {
+      try {
+        const host = (JSON.parse(result.stdout) as { host?: Record<string, unknown> }).host ?? {};
+        const controllers = host.cgroupControllers;
+        return {
+          cgroupManager: typeof host.cgroupManager === "string" ? host.cgroupManager : undefined,
+          cgroupVersion: typeof host.cgroupVersion === "string" ? host.cgroupVersion : undefined,
+          cgroupControllers: Array.isArray(controllers)
+            ? controllers.filter((entry): entry is string => typeof entry === "string")
+            : [],
+        };
+      } catch {
+        return { cgroupManager: undefined, cgroupVersion: undefined, cgroupControllers: [] };
+      }
+    }),
+  );
 
 /** Whether `podman` runs here, rootless. */
 export const detectRootlessPodman = (podmanCommand?: string) =>
@@ -363,7 +467,7 @@ const make = Effect.fn("PodmanSandboxRuntime.make")(function* (
     (effect, spec) => Effect.mapError(effect, failure("be created", spec.sandboxId)),
   );
 
-  const runArgs = (sandboxId: string, socketDir: string) => {
+  const runArgs = (sandboxId: string, socketDir: string, limits: SandboxLimits) => {
     const serverCommand = options.serverCommand ?? ["t3"];
     const [command, ...commandArgs] = serverCommand;
     return [
@@ -379,6 +483,11 @@ const make = Effect.fn("PodmanSandboxRuntime.make")(function* (
         "--label",
         `${key}=${value}`,
       ]),
+      ...Object.entries(podmanLimitLabels(limits, limitSupport)).flatMap(([key, value]) => [
+        "--label",
+        `${key}=${value}`,
+      ]),
+      ...podmanLimitArgs(limits, limitSupport),
       "--hostname",
       "sandbox",
       // The Hub's user, mapped to itself, so the home it made is the server's; no root inside.
@@ -464,7 +573,7 @@ const make = Effect.fn("PodmanSandboxRuntime.make")(function* (
   });
 
   const start: SandboxRuntime["Service"]["start"] = Effect.fn("PodmanSandboxRuntime.start")(
-    function* (sandboxId) {
+    function* (sandboxId, startOptions) {
       const current = running.get(sandboxId);
       if (current !== undefined) return { exited: Deferred.await(current.exited) };
       if (!NodeFS.existsSync(joinedOf(sandboxId)) || !NodeFS.existsSync(homeOf(sandboxId))) {
@@ -495,7 +604,7 @@ const make = Effect.fn("PodmanSandboxRuntime.make")(function* (
           socketPath: path.join(socketDir, "hub.sock"),
           hubUrl: () => hubUrl,
         }).pipe(Effect.mapError(failure("start", sandboxId)));
-        const ran = yield* podman(runArgs(sandboxId, socketDir));
+        const ran = yield* podman(runArgs(sandboxId, socketDir, startOptions?.limits ?? NO_LIMITS));
         const id = ran.stdout.trim().split("\n").at(-1)?.trim() ?? "";
         if (ran.exitCode !== 0 || id === "") {
           // A container made but not started still goes.
@@ -576,6 +685,35 @@ const make = Effect.fn("PodmanSandboxRuntime.make")(function* (
       return { state, homePath };
     });
 
+  /**
+   * The container's processes as `podman top` sees them, summed: their resident memory and their
+   * CPU averaged over each one's life. Read from the processes, not the cgroup, which a container
+   * under cgroupfs shares with its caller.
+   */
+  const resourceUse: SandboxRuntime["Service"]["resourceUse"] = (sandboxId) =>
+    Effect.suspend(() => {
+      const current = running.get(sandboxId);
+      if (current === undefined) return Effect.succeed(null);
+      return podman(["top", current.containerId, "rss", "pcpu"], 15_000).pipe(
+        Effect.map((result) => {
+          if (result.exitCode !== 0) return null;
+          let rssKib = 0;
+          let cpu = 0;
+          for (const line of result.stdout.split("\n").slice(1)) {
+            const [rss, pcpu] = line.trim().split(/\s+/u);
+            const rssValue = Number.parseFloat(rss ?? "");
+            const cpuValue = Number.parseFloat(pcpu ?? "");
+            if (Number.isFinite(rssValue)) rssKib += rssValue;
+            if (Number.isFinite(cpuValue)) cpu += cpuValue;
+          }
+          return { cpuPercent: Math.round(cpu * 10) / 10, memoryBytes: rssKib * 1024 };
+        }),
+      );
+    });
+
+  // Asked once: the Hub's log and Settings say what is not enforced (`Sandboxes`).
+  const limitSupport = podmanLimitSupport(yield* readCgroupInfo(options.podmanCommand));
+
   // A Hub that crashed left its containers: none of them is serving it any more.
   for (const id of yield* containersOfThisHub()) yield* removeContainer(id);
 
@@ -591,6 +729,8 @@ const make = Effect.fn("PodmanSandboxRuntime.make")(function* (
     stop,
     delete: remove,
     inspect,
+    limitSupport: Effect.succeed(limitSupport),
+    resourceUse,
     exits: Stream.fromPubSub(exits),
   });
 });

@@ -156,7 +156,11 @@ export type Action =
   | "environment.use"
   | "environment.rename"
   /** Remove a machine: its credential stops working at once. */
-  | "environment.remove";
+  | "environment.remove"
+  /** See a Sandbox's resource use and limits: the Owner, an Admin of its Space. */
+  | "sandbox.inspect"
+  /** Start, stop or restart a Sandbox by hand and change its limits: the Owner. */
+  | "sandbox.manage";
 
 /** Actions that read or manage rather than add something to the Space. */
 const NON_CREATING: ReadonlySet<Action> = new Set([
@@ -180,6 +184,8 @@ const ENVIRONMENT_ACTIONS: ReadonlySet<Action> = new Set([
   "environment.use",
   "environment.rename",
   "environment.remove",
+  "sandbox.inspect",
+  "sandbox.manage",
 ]);
 
 const USER_ACTIONS: ReadonlySet<Action> = new Set(["user.disable", "user.remove"]);
@@ -270,6 +276,15 @@ const decideSandbox = (
   if (action === "environment.view") {
     return principal.isOwner ? allow : decide(principal, "space.view", space);
   }
+  // Its use and limits are its Space's Admins' to see (a Personal space's User's); the Owner's
+  // to change.
+  if (action === "sandbox.inspect") {
+    if (principal.isOwner) return allow;
+    return space.kind === "personal"
+      ? inPersonalSpace(principal, space)
+      : inOrganization(principal, space, ADMIN_ONLY);
+  }
+  if (action === "sandbox.manage") return principal.isOwner ? allow : deny("owner-only");
   if (action !== "environment.use") return principal.isOwner ? deny("sandbox") : deny("owner-only");
   if (environment.workSpaceId !== space.id) return deny("other-space");
   if (space.archived) return deny("space-archived");
@@ -295,6 +310,7 @@ const decideEnvironment = (
   if (environment.environmentKind === "sandbox") {
     return decideSandbox(principal, action, environment);
   }
+  if (action === "sandbox.inspect" || action === "sandbox.manage") return deny("wrong-resource");
   const own = environment.ownerUserId === principal.userId;
   // A personal machine runs only its owner's work: the Owner sees every one, uses only their own.
   if (action === "environment.use") {

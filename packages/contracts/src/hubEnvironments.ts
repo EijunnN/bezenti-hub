@@ -4,6 +4,7 @@ import {
   EnvironmentId,
   IsoDateTime,
   NonNegativeInt,
+  PositiveInt,
   SpaceId,
   TrimmedNonEmptyString,
   UserId,
@@ -123,6 +124,94 @@ export type RemoveHubEnvironmentRequest = typeof RemoveHubEnvironmentRequest.Typ
 /** «Try again» on a Sandbox that failed to start: the Hub starts it, and answers at once. */
 export const StartHubEnvironmentRequest = Schema.Struct({ environmentId: EnvironmentId });
 export type StartHubEnvironmentRequest = typeof StartHubEnvironmentRequest.Type;
+
+/**
+ * A Sandbox's CPU, memory, PIDs and disk limits. In the Installation's defaults null is no limit;
+ * in a Space's override null is the Installation's default.
+ */
+export const SandboxLimits = Schema.Struct({
+  cpus: Schema.NullOr(
+    Schema.Number.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(512)),
+  ),
+  memoryBytes: Schema.NullOr(PositiveInt),
+  pids: Schema.NullOr(PositiveInt),
+  diskBytes: Schema.NullOr(PositiveInt),
+});
+export type SandboxLimits = typeof SandboxLimits.Type;
+
+/**
+ * Which limits this Hub enforces on its Sandboxes. CPU, memory and PIDs need the Sandbox runtime
+ * to give each container a cgroup of its own; disk is the Hub's own periodic check. `note` says,
+ * in words for the Owner, why one is not enforced.
+ */
+export const SandboxLimitEnforcement = Schema.Struct({
+  cpus: Schema.Boolean,
+  memory: Schema.Boolean,
+  pids: Schema.Boolean,
+  disk: Schema.Boolean,
+  note: Schema.NullOr(Schema.String),
+});
+export type SandboxLimitEnforcement = typeof SandboxLimitEnforcement.Type;
+
+/** What a Sandbox uses now (CPU and memory while running) and its home's size when last measured. */
+export const SandboxUsage = Schema.Struct({
+  /** Percent of one CPU. */
+  cpuPercent: Schema.NullOr(Schema.Number),
+  memoryBytes: Schema.NullOr(Schema.Number),
+  diskBytes: Schema.NullOr(Schema.Number),
+  diskMeasuredAt: Schema.NullOr(IsoDateTime),
+});
+export type SandboxUsage = typeof SandboxUsage.Type;
+
+/** One Sandbox as Settings → Environments «Sandboxes» shows it. */
+export const HubSandboxDetail = Schema.Struct({
+  environmentId: EnvironmentId,
+  spaceId: SpaceId,
+  name: HubEnvironmentName,
+  status: HubEnvironmentStatus,
+  /** Why it is `failed`: its start, or its disk being over its limit. */
+  error: Schema.NullOr(Schema.String),
+  runtime: Schema.Literals(["process", "podman"]),
+  /** The image version it last started with, once the Hub records one. */
+  imageVersion: Schema.NullOr(Schema.String),
+  /** Since when it runs; null while it does not. */
+  startedAt: Schema.NullOr(IsoDateTime),
+  /** The limits it starts with: the Space's override over the Installation's defaults. */
+  limits: SandboxLimits,
+  /** The Space's own values; null where it takes the default. */
+  overrides: SandboxLimits,
+  usage: SandboxUsage,
+  /** Whether the viewer (the Owner) may start, stop, restart it and change its limits. */
+  manageable: Schema.Boolean,
+});
+export type HubSandboxDetail = typeof HubSandboxDetail.Type;
+
+export const HubSandboxList = Schema.Struct({
+  /** The Installation's default limits; the Owner changes them. */
+  defaults: SandboxLimits,
+  enforcement: SandboxLimitEnforcement,
+  sandboxes: Schema.Array(HubSandboxDetail),
+  /** Whether the viewer is the Owner, who changes the defaults. */
+  manageable: Schema.Boolean,
+});
+export type HubSandboxList = typeof HubSandboxList.Type;
+
+/** The Owner starts, stops or restarts a Sandbox by hand. Answers at once for a start. */
+export const HubSandboxActionRequest = Schema.Struct({
+  environmentId: EnvironmentId,
+  action: Schema.Literals(["start", "stop", "restart"]),
+});
+export type HubSandboxActionRequest = typeof HubSandboxActionRequest.Type;
+
+/**
+ * The Owner changes the Installation's defaults (no `environmentId`) or one Space's override.
+ * Takes effect on the Sandbox's next start; the disk limit at its next check.
+ */
+export const HubSandboxLimitsRequest = Schema.Struct({
+  environmentId: Schema.optionalKey(EnvironmentId),
+  limits: SandboxLimits,
+});
+export type HubSandboxLimitsRequest = typeof HubSandboxLimitsRequest.Type;
 
 /**
  * `t3 join` asks to join. It made the credential itself and sends only its SHA-256, so the

@@ -36,7 +36,14 @@ import * as EnvironmentDemand from "../environment/EnvironmentDemand.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as EnvironmentConnections from "../environments/EnvironmentConnections.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
-import { SandboxRuntime, sandboxIdOf } from "./SandboxRuntime.ts";
+import {
+  BUILT_IN_DEFAULT_LIMITS,
+  diskFullMessage,
+  effectiveLimits,
+  homeUsageBytes,
+  type SandboxLimits,
+} from "./sandboxLimits.ts";
+import { SandboxRuntime, type SandboxRuntimeKind, sandboxIdOf } from "./SandboxRuntime.ts";
 import { sandboxSpaceOf } from "./sandboxSpace.ts";
 
 /** How long a starting Sandbox has to connect before its start counts as failed. */
@@ -49,6 +56,9 @@ const CRASH_RESTART_LIMIT = 3;
 const CRASH_RESTART_WINDOW_MS = 10 * 60 * 1000;
 /** After a failed start, a User's work tries again only once this much time has passed. */
 const RETRY_BACKOFF_MS = 10_000;
+/** Seconds between measurements of running Sandboxes' homes against their disk limit. */
+const DISK_CHECK_SETTING = "T3CODE_SANDBOX_DISK_CHECK_SECONDS";
+const DEFAULT_DISK_CHECK_SECONDS = 60;
 /** The longest a caller waits for a start it asked for; the start itself has its own timeout. */
 const CALLER_WAIT = "3 minutes";
 
@@ -69,7 +79,10 @@ export interface SandboxStatusRow {
 }
 
 /** Why a start happened, as the audit log records it. */
-export type SandboxStartVia = "demand" | "retry";
+export type SandboxStartVia = "demand" | "retry" | "settings" | "restart";
+
+/** Why a Sandbox was stopped, as the audit log records it. */
+export type SandboxStopVia = "archived" | "idle" | "settings" | "restart" | "disk-full";
 
 /**
  * How long a Sandbox may idle and may take to start, and the clock the idle stop reads (a test's
@@ -80,9 +93,49 @@ export class SandboxLifecyclePolicy extends Context.Service<
   {
     readonly idleTimeout?: Duration.Input;
     readonly startTimeout?: Duration.Input;
+    /** How often running Sandboxes' homes are measured against their disk limit. */
+    readonly diskCheckEvery?: Duration.Input;
     readonly clock?: Clock.Clock;
   }
 >()("t3/sandboxes/Sandboxes/SandboxLifecyclePolicy") {}
+
+/** One Sandbox with its limits and what it uses, for Settings. */
+export interface SandboxDetailRow {
+  readonly spaceId: SpaceId;
+  readonly environmentId: EnvironmentId;
+  readonly runtime: SandboxRuntimeKind;
+  readonly imageVersion: string | null;
+  /** When it last became running (its uptime while it runs). */
+  readonly startedAt: string | null;
+  /** The Space's own values; null takes the default. */
+  readonly overrides: SandboxLimits;
+  /** What it starts with. */
+  readonly limits: SandboxLimits;
+  readonly usage: {
+    readonly cpuPercent: number | null;
+    readonly memoryBytes: number | null;
+    readonly diskBytes: number | null;
+    readonly diskMeasuredAt: string | null;
+  };
+}
+
+export interface SandboxOverview {
+  readonly defaults: SandboxLimits;
+  /** What the runtime enforces here, with the Hub's own disk check. */
+  readonly enforcement: {
+    readonly cpus: boolean;
+    readonly memory: boolean;
+    readonly pids: boolean;
+    readonly disk: boolean;
+    readonly note: string | null;
+  };
+  readonly sandboxes: ReadonlyArray<SandboxDetailRow>;
+}
+
+export class SandboxNotFoundError extends Schema.TaggedError<SandboxNotFoundError>()(
+  "SandboxNotFoundError",
+  { spaceId: Schema.String },
+) {}
 
 export class Sandboxes extends Context.Service<
   Sandboxes,
@@ -113,11 +166,38 @@ export class Sandboxes extends Context.Service<
     }) => Effect.Effect<void>;
     /** The Sandboxes that exist, by Space. */
     readonly list: Effect.Effect<ReadonlyArray<SandboxStatusRow>, SandboxStartError>;
-    /** Stops the Space's Sandbox, keeping its home: its Organization was archived. */
+    /**
+     * Stops the Space's Sandbox, keeping its home: its Organization was archived (the default
+     * `via`), or the Owner stopped it.
+     */
     readonly stop: (input: {
       readonly spaceId: SpaceId;
       readonly actor: AuditLog.AuditActor;
+      readonly via?: "archived" | "settings";
     }) => Effect.Effect<void, SandboxStartError>;
+    /** The Owner restarts it: stopped, then started in the background with its current limits. */
+    readonly restart: (input: {
+      readonly spaceId: SpaceId;
+      readonly actorUserId: UserId;
+    }) => Effect.Effect<void, SandboxStartError>;
+    /** Each Sandbox `include` keeps, with its limits and use; the Installation's defaults. */
+    readonly overview: (
+      include: (spaceId: SpaceId) => boolean,
+    ) => Effect.Effect<SandboxOverview, SandboxStartError>;
+    /**
+     * Changes the Installation's defaults (no `spaceId`) or a Space's override, audited. Applies
+     * on each Sandbox's next start; the disk limit is checked again at once.
+     */
+    readonly setLimits: (input: {
+      readonly spaceId: SpaceId | undefined;
+      readonly limits: SandboxLimits;
+      readonly actor: AuditLog.AuditActor;
+    }) => Effect.Effect<void, SandboxNotFoundError | SandboxStartError>;
+    /**
+     * Measures each running Sandbox's home and stops, as `failed` with why, each one over its
+     * disk limit; run on a schedule.
+     */
+    readonly checkDisk: Effect.Effect<void>;
     /**
      * Stops it, revokes its credential and removes its row and home: its Space is deleted. True
      * when there was one.
@@ -150,8 +230,9 @@ const make = Effect.gen(function* () {
   const digester = yield* Digest.Digest;
   const hubId = yield* (yield* ServerEnvironment.ServerEnvironmentIdentity).getEnvironmentId;
   const policy = yield* Effect.serviceOption(SandboxLifecyclePolicy);
-  const policyValue = <K extends "idleTimeout" | "startTimeout" | "clock">(key: K) =>
-    Option.flatMap(policy, (value) => Option.fromUndefinedOr(value[key]));
+  const policyValue = <K extends "idleTimeout" | "startTimeout" | "diskCheckEvery" | "clock">(
+    key: K,
+  ) => Option.flatMap(policy, (value) => Option.fromUndefinedOr(value[key]));
   const clock = Option.getOrUndefined(policyValue("clock")) ?? (yield* Clock.Clock);
   const configuredSeconds = yield* Config.Int(IDLE_TIMEOUT_SETTING).pipe(
     Config.option,
@@ -164,6 +245,20 @@ const make = Effect.gen(function* () {
         1,
         Option.getOrElse(configuredSeconds, () => DEFAULT_IDLE_TIMEOUT_SECONDS),
       ) * 1000,
+  });
+  const configuredDiskSeconds = yield* Config.Int(DISK_CHECK_SETTING).pipe(
+    Config.option,
+    Effect.orElseSucceed(() => Option.none<number>()),
+  );
+  const diskCheckEvery = Option.match(policyValue("diskCheckEvery"), {
+    onSome: (every) => Duration.fromInputUnsafe(every),
+    onNone: () =>
+      Duration.seconds(
+        Math.max(
+          5,
+          Option.getOrElse(configuredDiskSeconds, () => DEFAULT_DISK_CHECK_SECONDS),
+        ),
+      ),
   });
   const startTimeout = Option.getOrElse(
     policyValue("startTimeout"),
@@ -220,6 +315,53 @@ const make = Effect.gen(function* () {
         updated_at = ${now}
       WHERE space_id = ${spaceId}
     `;
+  });
+
+  interface LimitColumns {
+    readonly cpus: number | null;
+    readonly memoryBytes: number | null;
+    readonly pids: number | null;
+    readonly diskBytes: number | null;
+  }
+  const toLimits = (row: LimitColumns): SandboxLimits => ({
+    cpus: row.cpus,
+    memoryBytes: row.memoryBytes,
+    pids: row.pids,
+    diskBytes: row.diskBytes,
+  });
+  /** The Installation's defaults (migration 104's row; the built-in ones if it is gone). */
+  const readDefaults = sql<LimitColumns>`
+    SELECT cpu_limit AS cpus, memory_limit_bytes AS "memoryBytes", pids_limit AS pids,
+      disk_limit_bytes AS "diskBytes"
+    FROM sandbox_limit_defaults WHERE id = 1
+  `.pipe(
+    Effect.map((rows) => (rows[0] === undefined ? BUILT_IN_DEFAULT_LIMITS : toLimits(rows[0]))),
+  );
+  const readOverrides = (spaceId: SpaceId) =>
+    sql<LimitColumns>`
+      SELECT cpu_limit AS cpus, memory_limit_bytes AS "memoryBytes", pids_limit AS pids,
+        disk_limit_bytes AS "diskBytes"
+      FROM sandboxes WHERE space_id = ${spaceId}
+    `.pipe(Effect.map((rows) => (rows[0] === undefined ? undefined : toLimits(rows[0]))));
+  /** The limits the Space's Sandbox starts with: its override over the defaults. */
+  const limitsOf = Effect.fn("Sandboxes.limitsOf")(function* (spaceId: SpaceId) {
+    const defaults = yield* readDefaults;
+    const overrides = yield* readOverrides(spaceId);
+    return overrides === undefined ? defaults : effectiveLimits(defaults, overrides);
+  });
+
+  // Each home's size when last measured; whether `du` works here at all.
+  const diskUse = new Map<SpaceId, { readonly bytes: number; readonly at: string }>();
+  let diskMeasurable = true;
+  /** Measures the Sandbox's home now; null when it has none or it cannot be measured. */
+  const measureDisk = Effect.fn("Sandboxes.measureDisk")(function* (spaceId: SpaceId) {
+    const inspected = yield* runtime.inspect(sandboxIdOf(spaceId));
+    if (inspected.state._tag === "missing") return null;
+    const bytes = yield* homeUsageBytes(inspected.homePath);
+    diskMeasurable = bytes !== null;
+    if (bytes === null) return null;
+    diskUse.set(spaceId, { bytes, at: yield* nowIso });
+    return bytes;
   });
 
   /** Threads on the Sandbox with a run in progress; one that cannot be read counts as busy. */
@@ -311,7 +453,6 @@ const make = Effect.gen(function* () {
         name,
         hubEnvironmentId: hubId,
         credential: issued.credential,
-        limits: { cpus: null, memoryBytes: null, pids: null, diskBytes: null },
       });
       return { environmentId, name, running: false };
     }
@@ -349,8 +490,17 @@ const make = Effect.gen(function* () {
         }),
       ).pipe(Effect.ensuring(Deferred.succeed(begun, undefined)));
       name = created.name;
+      // Read at each start: a limit changed while it was stopped applies now.
+      const limits = yield* limitsOf(spaceId);
+      if (!created.running && limits.diskBytes !== null) {
+        // A home over its disk limit does not start: it would be stopped again at once.
+        const used = yield* measureDisk(spaceId);
+        if (used !== null && used > limits.diskBytes) {
+          return yield* Effect.fail(diskFullMessage(used, limits.diskBytes));
+        }
+      }
       launched = true;
-      const started = yield* runtime.start(sandboxId);
+      const started = yield* runtime.start(sandboxId, { limits });
       // Ready once welcomed with its executor serving; a server that ends first fails at once.
       const ready = yield* Effect.raceFirst(
         connections.awaitReady(environmentId).pipe(Effect.as("ready" as const)),
@@ -479,7 +629,7 @@ const make = Effect.gen(function* () {
   const stopLocked = Effect.fn("Sandboxes.stopLocked")(function* (input: {
     readonly spaceId: SpaceId;
     readonly actor: AuditLog.AuditActor;
-    readonly via: "archived" | "idle";
+    readonly via: SandboxStopVia;
   }) {
     const { spaceId } = input;
     const row = yield* selectRow(spaceId);
@@ -508,14 +658,202 @@ const make = Effect.gen(function* () {
       return current === undefined ? Effect.void : Deferred.await(current.done).pipe(Effect.ignore);
     });
 
-  const stop: Sandboxes["Service"]["stop"] = (input) =>
+  const stopVia = (
+    input: { readonly spaceId: SpaceId; readonly actor: AuditLog.AuditActor },
+    via: SandboxStopVia,
+  ) =>
     settleStart(input.spaceId).pipe(
-      Effect.andThen(locked(input.spaceId, stopLocked({ ...input, via: "archived" }))),
+      Effect.andThen(locked(input.spaceId, stopLocked({ ...input, via }))),
       Effect.mapError(
         (cause) => new SandboxStartError({ spaceId: input.spaceId, detail: String(cause) }),
       ),
-      Effect.withSpan("Sandboxes.stop"),
+      Effect.withSpan("Sandboxes.stop", { attributes: { via } }),
     );
+
+  const stop: Sandboxes["Service"]["stop"] = (input) => stopVia(input, input.via ?? "archived");
+
+  const restart: Sandboxes["Service"]["restart"] = ({ spaceId, actorUserId }) =>
+    stopVia({ spaceId, actor: AuditLog.userActor(actorUserId) }, "restart").pipe(
+      Effect.andThen(requestStart({ spaceId, actorUserId, via: "restart" })),
+    );
+
+  const overview: Sandboxes["Service"]["overview"] = Effect.fn("Sandboxes.overview")(
+    function* (include) {
+      const defaults = yield* readDefaults;
+      const support = yield* runtime.limitSupport;
+      const rows = yield* sql<
+        LimitColumns & {
+          readonly spaceId: SpaceId;
+          readonly environmentId: EnvironmentId;
+          readonly runtime: SandboxRuntimeKind;
+          readonly status: SandboxStatusRow["status"];
+          readonly imageVersion: string | null;
+          readonly startedAt: string | null;
+        }
+      >`
+        SELECT space_id AS "spaceId", environment_id AS "environmentId", runtime, status,
+          image_version AS "imageVersion", started_at AS "startedAt", cpu_limit AS cpus,
+          memory_limit_bytes AS "memoryBytes", pids_limit AS pids, disk_limit_bytes AS "diskBytes"
+        FROM sandboxes ORDER BY created_at
+      `;
+      const sandboxes = yield* Effect.forEach(
+        rows.filter((row) => include(row.spaceId)),
+        Effect.fnUntraced(function* (row) {
+          const overrides = toLimits(row);
+          const running = row.status === "running";
+          const use = running ? yield* runtime.resourceUse(sandboxIdOf(row.spaceId)) : null;
+          // A home never measured is measured once; a running one again by each disk check.
+          if (!diskUse.has(row.spaceId)) yield* measureDisk(row.spaceId).pipe(Effect.ignore);
+          const disk = diskUse.get(row.spaceId);
+          return {
+            spaceId: row.spaceId,
+            environmentId: row.environmentId,
+            runtime: row.runtime,
+            imageVersion: row.imageVersion,
+            startedAt: running ? row.startedAt : null,
+            overrides,
+            limits: effectiveLimits(defaults, overrides),
+            usage: {
+              cpuPercent: use?.cpuPercent ?? null,
+              memoryBytes: use?.memoryBytes ?? null,
+              diskBytes: disk?.bytes ?? null,
+              diskMeasuredAt: disk?.at ?? null,
+            },
+          } satisfies SandboxDetailRow;
+        }),
+        { concurrency: 4 },
+      );
+      const notes = [
+        support.note,
+        diskMeasurable
+          ? null
+          : "A Sandbox's disk use cannot be measured on this host (no `du`): the disk limit is not enforced.",
+      ].filter((note) => note !== null);
+      return {
+        defaults,
+        enforcement: {
+          cpus: support.cpus,
+          memory: support.memory,
+          pids: support.pids,
+          disk: diskMeasurable,
+          note: notes.length === 0 ? null : notes.join(" "),
+        },
+        sandboxes,
+      } satisfies SandboxOverview;
+    },
+    Effect.mapError((cause) => new SandboxStartError({ spaceId: "", detail: String(cause) })),
+  );
+
+  /**
+   * Stops a running Sandbox whose home is over its disk limit, leaving it `failed` with why: its
+   * Threads show it, and it starts again only once there is room (the Owner raises the limit).
+   */
+  const checkDiskOf = Effect.fn("Sandboxes.checkDiskOf")(
+    function* (spaceId: SpaceId) {
+      const current = yield* selectRow(spaceId);
+      if (current?.status !== "running" || inFlight.has(spaceId)) return;
+      const limits = yield* limitsOf(spaceId);
+      const used = yield* measureDisk(spaceId);
+      if (limits.diskBytes === null || used === null || used <= limits.diskBytes) return;
+      const limit = limits.diskBytes;
+      yield* locked(
+        spaceId,
+        Effect.gen(function* () {
+          if ((yield* selectRow(spaceId))?.status !== "running") return;
+          yield* Effect.logWarning("Stopping a Sandbox over its disk limit", {
+            spaceId,
+            usedBytes: used,
+            limitBytes: limit,
+          });
+          yield* stopLocked({ spaceId, actor: { source: "system" }, via: "disk-full" });
+          failedAt.set(spaceId, nowMs());
+          yield* setStatus(spaceId, "failed", diskFullMessage(used, limit));
+        }),
+      );
+    },
+    (effect, spaceId) =>
+      effect.pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Could not check a Sandbox's disk", {
+            spaceId,
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      ),
+  );
+
+  const checkDisk: Sandboxes["Service"]["checkDisk"] = list.pipe(
+    Effect.orElseSucceed(() => []),
+    Effect.flatMap((rows) =>
+      Effect.forEach(
+        rows.filter((row) => row.status === "running"),
+        (row) => checkDiskOf(row.spaceId),
+        { concurrency: 4, discard: true },
+      ),
+    ),
+    Effect.withSpan("Sandboxes.checkDisk"),
+  );
+
+  const setLimits: Sandboxes["Service"]["setLimits"] = Effect.fn("Sandboxes.setLimits")(
+    function* ({ spaceId, limits, actor }) {
+      const now = yield* nowIso;
+      const environmentId = spaceId === undefined ? undefined : sandboxEnvironmentIdOf(spaceId);
+      yield* sql.withTransaction(
+        Effect.gen(function* () {
+          if (spaceId === undefined) {
+            yield* sql`
+              INSERT INTO sandbox_limit_defaults (
+                id, cpu_limit, memory_limit_bytes, pids_limit, disk_limit_bytes, updated_at
+              ) VALUES (
+                1, ${limits.cpus}, ${limits.memoryBytes}, ${limits.pids}, ${limits.diskBytes},
+                ${now}
+              )
+              ON CONFLICT (id) DO UPDATE SET cpu_limit = excluded.cpu_limit,
+                memory_limit_bytes = excluded.memory_limit_bytes,
+                pids_limit = excluded.pids_limit, disk_limit_bytes = excluded.disk_limit_bytes,
+                updated_at = excluded.updated_at
+            `;
+          } else {
+            if ((yield* selectRow(spaceId)) === undefined) {
+              return yield* new SandboxNotFoundError({ spaceId });
+            }
+            yield* sql`
+              UPDATE sandboxes SET cpu_limit = ${limits.cpus},
+                memory_limit_bytes = ${limits.memoryBytes}, pids_limit = ${limits.pids},
+                disk_limit_bytes = ${limits.diskBytes}, updated_at = ${now}
+              WHERE space_id = ${spaceId}
+            `;
+          }
+          yield* audit.record({
+            actor,
+            action: "sandbox.limits.change",
+            spaceId: spaceId ?? null,
+            target:
+              environmentId === undefined
+                ? { kind: "environment", id: "sandboxes", name: "Default Sandbox limits" }
+                : { kind: "environment", id: environmentId },
+            detail: {
+              scope: spaceId === undefined ? "defaults" : "space",
+              cpus: limits.cpus,
+              memoryBytes: limits.memoryBytes,
+              pids: limits.pids,
+              diskBytes: limits.diskBytes,
+            },
+          });
+        }),
+      );
+      // A lower disk limit counts at once; the others on the next start.
+      yield* (spaceId === undefined ? checkDisk : checkDiskOf(spaceId)).pipe(
+        Effect.forkIn(serviceScope),
+      );
+    },
+    Effect.catchTags({
+      SqlError: (cause) =>
+        Effect.fail(new SandboxStartError({ spaceId: "", detail: String(cause) })),
+      AuditLogWriteError: (cause) =>
+        Effect.fail(new SandboxStartError({ spaceId: "", detail: String(cause) })),
+    }),
+  );
 
   const remove: Sandboxes["Service"]["delete"] = Effect.fn("Sandboxes.delete")(
     function* ({ spaceId, actor }) {
@@ -634,7 +972,14 @@ const make = Effect.gen(function* () {
         // A start under way reports its own failure; only a running one is marked here.
         if (row === undefined || row.status !== "running") return;
         const environmentId = sandboxEnvironmentIdOf(row.spaceId);
-        const exitMessage = `It exited with code ${exit.exitCode ?? "?"}.`;
+        // A container killed under an enforced memory limit ends with SIGKILL's code.
+        const limits = yield* limitsOf(row.spaceId);
+        const exitMessage =
+          exit.exitCode === 137 &&
+          limits.memoryBytes !== null &&
+          (yield* runtime.limitSupport).memory
+            ? `It was killed (exit code 137), most likely for going over its memory limit of ${(limits.memoryBytes / 1024 ** 3).toFixed(1)} GiB.`
+            : `It exited with code ${exit.exitCode ?? "?"}.`;
         lastUse.delete(environmentId);
         // Its socket is gone with it: its Threads are away now, as on any machine that dropped.
         yield* connections.close(environmentId, "heartbeat-timeout");
@@ -660,6 +1005,15 @@ const make = Effect.gen(function* () {
   // Only the wait between checks runs on the idle clock; stopping runs on the Hub's own.
   const checkEvery = Duration.millis(Math.min(60_000, Math.max(1_000, idleTimeoutMs / 4)));
   yield* clock.sleep(checkEvery).pipe(Effect.andThen(stopIdle), Effect.forever, Effect.forkScoped);
+  yield* clock
+    .sleep(diskCheckEvery)
+    .pipe(Effect.andThen(checkDisk), Effect.forever, Effect.forkScoped);
+
+  // What the runtime does not enforce here is said once in the log, and in Settings.
+  const support = yield* runtime.limitSupport;
+  if (support.note !== null) {
+    yield* Effect.logWarning("Sandbox limits not enforced on this host", { note: support.note });
+  }
 
   /** Running and not being stopped: work goes straight to it. */
   const readyNow = (spaceId: SpaceId, environmentId: EnvironmentId) =>
@@ -673,6 +1027,10 @@ const make = Effect.gen(function* () {
     stop,
     delete: remove,
     stopIdle,
+    restart,
+    overview,
+    setLimits,
+    checkDisk,
   });
 
   const demand = EnvironmentDemand.EnvironmentDemand.of({

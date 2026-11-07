@@ -92,6 +92,10 @@ import {
   EnvironmentLeaveResult,
   HubEnvironmentList,
   HubEnvironmentSummary,
+  HubSandboxActionRequest,
+  HubSandboxDetail,
+  HubSandboxLimitsRequest,
+  HubSandboxList,
   RemoveHubEnvironmentRequest,
   StartHubEnvironmentRequest,
   RenameHubEnvironmentRequest,
@@ -1066,6 +1070,31 @@ class EnvironmentHubEnvironmentsHttpApi extends HttpApiGroup.make("environments"
       headers: OptionalBearerHeaders,
       payload: StartHubEnvironmentRequest,
       success: HubEnvironmentSummary,
+      error: [...EnvironmentHubEnvironmentErrors, EnvironmentResourceNotFoundError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  // Settings → Environments «Sandboxes»: the Owner sees every one and manages them; an Admin sees
+  // their Space's.
+  .add(
+    HttpApiEndpoint.get("sandboxes", "/api/environments/sandboxes", {
+      headers: OptionalBearerHeaders,
+      success: HubSandboxList,
+      error: EnvironmentHubEnvironmentErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("sandboxAction", "/api/environments/sandboxes/action", {
+      headers: OptionalBearerHeaders,
+      payload: HubSandboxActionRequest,
+      success: HubSandboxDetail,
+      error: [...EnvironmentHubEnvironmentErrors, EnvironmentResourceNotFoundError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("sandboxLimits", "/api/environments/sandboxes/limits", {
+      headers: OptionalBearerHeaders,
+      payload: HubSandboxLimitsRequest,
+      success: HubSandboxList,
       error: [...EnvironmentHubEnvironmentErrors, EnvironmentResourceNotFoundError],
     }).middleware(EnvironmentAuthenticatedAuth),
   )

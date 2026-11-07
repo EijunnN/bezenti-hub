@@ -92,7 +92,6 @@ it.live("a server an earlier Hub left running is stopped before another starts o
       name: "Acme Sandbox",
       hubEnvironmentId: EnvironmentId.make("hub"),
       credential: Redacted.make("t3env.x.y"),
-      limits: { cpus: null, memoryBytes: null, pids: null, diskBytes: null },
     });
     yield* first.start("sandbox-acme");
     const leftover = yield* readPid;
