@@ -627,7 +627,6 @@ const MACHINE_DECIDED_COMMANDS: ReadonlySet<string> = new Set([
   "queued-run.start",
   "queue.resume",
   "queued-message.promote-to-steer",
-  "thread.guest-message.submit",
 ]);
 
 const makeWith = Effect.fn("ThreadManagementService.make")(function* (
@@ -1010,21 +1009,26 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
     if (target === undefined) return Effect.succeed(command);
     return target.pipe(
       Effect.flatMap((environmentId) =>
-        demand.value.awaitStarted(environmentId).pipe(
-          Effect.mapError(
-            (error) =>
-              new Orchestrator.OrchestratorCommandRejectedError({
-                commandId: command.commandId,
-                commandType: command.type,
-                cause: new EnvironmentRegistry.ThreadEnvironmentUnavailableError({
-                  environmentId,
-                  name: "The Sandbox",
-                  reason: "sandbox-failed",
-                  detail: error.detail,
+        demand.value
+          .awaitStarted(environmentId, {
+            actorUserId: "ownerUserId" in command ? command.ownerUserId : undefined,
+            explicit: true,
+          })
+          .pipe(
+            Effect.mapError(
+              (error) =>
+                new Orchestrator.OrchestratorCommandRejectedError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause: new EnvironmentRegistry.ThreadEnvironmentUnavailableError({
+                    environmentId,
+                    name: "The Sandbox",
+                    reason: "sandbox-failed",
+                    detail: error.detail,
+                  }),
                 }),
-              }),
+            ),
           ),
-        ),
       ),
       Effect.as(command),
     );

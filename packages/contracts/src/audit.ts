@@ -117,8 +117,11 @@ export const AUDIT_DETAIL_KEYS = {
   ],
   /** Which Sandbox runtime made it (process or podman). */
   "sandbox.create": ["runtime"],
-  /** `demand`: work needed it; `retry`: a User's «Try again». */
-  "sandbox.start": ["via"],
+  /**
+   * `demand`: work needed it; `retry`: a User's «Try again». `started` or `failed`, with the
+   * trimmed reason.
+   */
+  "sandbox.start": ["via", "outcome", "reason"],
   /** `archived`: its Organization was; `idle`: nothing ran in it for the idle timeout. */
   "sandbox.stop": ["via"],
   "sandbox.delete": [],

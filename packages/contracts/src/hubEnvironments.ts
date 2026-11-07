@@ -76,8 +76,9 @@ export type HubEnvironmentSummary = typeof HubEnvironmentSummary.Type;
 
 /**
  * Where a new Thread nobody placed starts, by the Hub and as clients preview it: the Project's
- * preferred Environment when the User may use it, it is online (a Sandbox counts while stopped: it
- * starts for the work) and it has the provider enabled; otherwise the Hub machine.
+ * preferred Environment when the User may use it, it is online (a Sandbox counts while stopped or
+ * starting, not once its start failed) and it has the provider (as far as it is known); otherwise
+ * the Hub machine.
  */
 export function previewThreadPlacement(input: {
   readonly preferred:
@@ -90,11 +91,16 @@ export function previewThreadPlacement(input: {
   const preferred = input.preferred;
   if (preferred === undefined || !preferred.usable) return HUB_MACHINE_ENVIRONMENT_ID;
   if (preferred.kind === "hub") return preferred.id;
-  if (preferred.kind === "sandbox" && preferred.status !== "online") return preferred.id;
-  if (preferred.status !== "online") return HUB_MACHINE_ENVIRONMENT_ID;
   const provider = preferred.providers.find(
     (entry) => entry.instanceId === input.providerInstanceId,
   );
+  if (preferred.kind === "sandbox" && preferred.status !== "online") {
+    if (preferred.status === "failed") return HUB_MACHINE_ENVIRONMENT_ID;
+    // Before it ever ran its providers are unknown; after, it must have this one.
+    if (preferred.providers.length === 0) return preferred.id;
+  } else if (preferred.status !== "online") {
+    return HUB_MACHINE_ENVIRONMENT_ID;
+  }
   return provider !== undefined && provider.enabled && provider.installed
     ? preferred.id
     : HUB_MACHINE_ENVIRONMENT_ID;

@@ -404,6 +404,8 @@ const makeSandboxRuntime = (
    * answer an exit code, as a server that ends before it connects.
    */
   beforeLaunch: ((sandboxId: string) => Effect.Effect<Option.Option<number>>) | undefined,
+  /** Runs before each stop of a Sandbox's server: it may hold the stop half-way. */
+  beforeStop: ((sandboxId: string) => Effect.Effect<void>) | undefined,
 ) => {
   let hubUrl = "";
   const started = new Map<string, TestEnvironment>();
@@ -440,7 +442,7 @@ const makeSandboxRuntime = (
       exits.set(launch.sandboxId, exited);
       return { pid: null, exited: Deferred.await(exited) };
     }).pipe(Effect.provide(NodeServices.layer));
-  const runtime = ProcessSandboxRuntime.layer({
+  const processRuntime = ProcessSandboxRuntime.layer({
     launcher: realLauncher ?? testkitLauncher,
     rootDir,
   }).pipe(
@@ -451,6 +453,19 @@ const makeSandboxRuntime = (
       ),
     ),
   );
+  const runtime =
+    beforeStop === undefined
+      ? processRuntime
+      : Layer.effect(
+          SandboxRuntime.SandboxRuntime,
+          Effect.map(SandboxRuntime.SandboxRuntime, (inner) =>
+            SandboxRuntime.SandboxRuntime.of({
+              ...inner,
+              stop: (sandboxId) =>
+                beforeStop(sandboxId).pipe(Effect.andThen(inner.stop(sandboxId))),
+            }),
+          ),
+        ).pipe(Layer.provide(processRuntime));
   return {
     runtime,
     setHubUrl: (url: string) => {
@@ -488,8 +503,10 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
      * that ends before connecting.
      */
     readonly beforeSandboxLaunch?: (sandboxId: string) => Effect.Effect<Option.Option<number>>;
-    /** The idle stop's timeout and clock (a TestClock the test advances). */
-    readonly sandboxIdle?: Sandboxes.SandboxIdlePolicy["Service"];
+    /** Before each stop of a Sandbox's server: hold it half-way. */
+    readonly beforeSandboxStop?: (sandboxId: string) => Effect.Effect<void>;
+    /** The idle timeout, the start timeout and the clock (a TestClock the test advances). */
+    readonly sandboxLifecycle?: Sandboxes.SandboxLifecyclePolicy["Service"];
     /** False: no Sandbox runtime, as a production Hub without Podman. */
     readonly sandboxes?: boolean;
   } = {},
@@ -504,14 +521,15 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     options.sandboxLauncher,
     sandboxRoot,
     options.beforeSandboxLaunch,
+    options.beforeSandboxStop,
   );
-  // The idle policy goes in with the runtime, to the Sandboxes that read it.
+  // The lifecycle policy goes in with the runtime, to the Sandboxes that read it.
   const sandboxRuntime =
-    options.sandboxIdle === undefined
+    options.sandboxLifecycle === undefined
       ? sandboxes.runtime
       : Layer.merge(
           sandboxes.runtime,
-          Layer.succeed(Sandboxes.SandboxIdlePolicy, options.sandboxIdle),
+          Layer.succeed(Sandboxes.SandboxLifecyclePolicy, options.sandboxLifecycle),
         );
   const { server, authenticator, owner } = yield* hubWithOwner({
     listen: true,

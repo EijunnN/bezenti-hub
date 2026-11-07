@@ -408,7 +408,6 @@ const make = Effect.gen(function* () {
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const platform = yield* HostProcess.Platform;
   const removals = yield* PubSub.unbounded<EnvironmentId>();
-  const registryScope = yield* Effect.scope;
 
   const sha256 = (value: string) =>
     digester.digest(Digest.sha256, new TextEncoder().encode(value)).pipe(
@@ -1028,11 +1027,8 @@ const make = Effect.gen(function* () {
       return yield* new EnvironmentAccessDeniedError({ reason: "not-usable" });
     }
     if (Option.isSome(sandboxes)) {
-      // In the background: the list shows it `starting`, then online, or failed again with why.
-      yield* sandboxes.value
-        .ensureRunning({ spaceId, actorUserId, via: "retry" })
-        .pipe(Effect.ignore, Effect.forkIn(registryScope));
-      yield* Effect.yieldNow;
+      // The Hub's own start (joined if one is under way); answers once it is `starting`.
+      yield* sandboxes.value.requestStart({ spaceId, actorUserId, via: "retry" });
     }
     const current = yield* liveRow(environmentId);
     return yield* summaryOf(current ?? row, principal.isOwner);

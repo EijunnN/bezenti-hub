@@ -60,34 +60,50 @@ for the start.
 Environments list shows a Sandbox `starting` from the moment its start begins until it is ready,
 `failed` with `startError` when its last start failed, online once running and connected, and
 `stopped` otherwise. Clients read it from the shared Environments list (polled every second while
-anything is starting): the Thread says «Starting the Sandbox…», or «The Sandbox could not start»
-with the reason and «Try again» (`POST /api/environments/start`, for Users who may run Threads in
-its Space; audited `sandbox.start` via `retry`).
+anything is starting, or while a send waits on a Sandbox): the Thread says «Starting the
+Sandbox…», or «The Sandbox could not start» with the reason and «Try again»
+(`POST /api/environments/start`, for Users who may run Threads in its Space, disabled while the
+request is out).
 
-Placing a Thread never starts it. Work that needs the machine does, through
-[EnvironmentDemand](../../apps/server/src/environment/EnvironmentDemand.ts), which only the Sandboxes
-provide:
+**A start belongs to the Hub.** [Sandboxes](../../apps/server/src/sandboxes/Sandboxes.ts) runs one
+supervised start per Space in its own scope: asking again joins it, and whoever asked only waits
+for it, with a timeout of their own, so a caller that gives up never leaves it half-started. The
+per-Space lock is held only to make it and mark it `starting`, to mark it `running`, and to stop
+it; never across the boot. Every start ends `running` or `failed`; a server that did not become
+ready in time (or at all) is stopped first, and the runtime waits for it to end, so nothing runs
+that the Hub does not track. Each start is audited `sandbox.start` with `via` (`demand`, `retry`),
+`outcome` (`started`, `failed`) and the trimmed `reason`, naming the User whose action caused it.
 
-- Commands the Orchestrator decides with the machine (`message.dispatch`, rollback, provider
-  switch, starting a queued run, a move onto it) wait in `ThreadManagementService` for it to be
-  ready; a failed start refuses them with `ThreadEnvironmentUnavailableError` (`sandbox-failed`).
-- Machine-bound effects wait unclaimed, spending no attempt, as for any machine that is away;
-  when the worker finds nothing to claim it asks the Sandboxes their work waits for to start
-  (`EffectOutbox.environmentsAwaited`, cleanup effects aside). One whose last start failed waits
-  for a User: «Try again», or a command that waits on it.
-- Workspace RPCs (files, search, terminals, previews) start it and wait, then go on as on any
-  machine; one that cannot start answers `environment_offline`.
+Placing a Thread never starts it. Work goes through
+[EnvironmentDemand](../../apps/server/src/environment/EnvironmentDemand.ts), which only the
+Sandboxes provide:
 
-Each start is audited `sandbox.start` (`demand` or `retry`). A running Sandbox stops after
-`T3CODE_SANDBOX_IDLE_SECONDS` (30 minutes by default) with no run in progress on it, nothing
-holding it, and no use since (`sandbox.stop` via `idle`). Use is `EnvironmentDemand.touch` (every
-workspace call, every command that waited on it, its start) and `EnvironmentDemand.hold` for as
-long as something stays open (an attached terminal stream; previews served through the Hub call
-the same). The idle check reads `SandboxIdlePolicy`'s clock, which tests replace with a TestClock.
+- A User's own action starts it and waits (`awaitStarted`, `explicit`): commands the Orchestrator
+  decides with the machine (`message.dispatch`, rollback, provider switch, starting a queued run, a
+  move onto it), and workspace calls that act (opening or typing in a terminal, writing a file,
+  opening a preview). A failed start refuses the command with `ThreadEnvironmentUnavailableError`
+  (`sandbox-failed`). A guest's message does not start it.
+- Reads (listings, search, reading files, preview and terminal lists) on a Sandbox that is not
+  running answer «Sandbox stopped» at once (`ready`), start nothing and count as no use, so a
+  client that polls never keeps a Sandbox up.
+- Machine-bound effects wait unclaimed, spending no attempt; when the worker finds nothing to claim
+  it asks the Sandboxes their work waits for to start (`EffectOutbox.environmentsAwaited`, cleanup
+  effects aside).
+- A `failed` Sandbox starts again only for a User: «Try again», or their own action after a ten
+  second backoff. Waiting work never restarts it.
+
+A running Sandbox stops after `T3CODE_SANDBOX_IDLE_SECONDS` (30 minutes by default) with no run in
+progress on it (a projection that cannot be read counts as busy), nothing holding it, and no use
+since (`sandbox.stop` via `idle`). Use is `EnvironmentDemand.touch` (every action and start) and
+`EnvironmentDemand.hold`, keyed per holder, for as long as something stays open (an attached
+terminal stream; previews served through the Hub call the same). Each Space is checked on its own.
+The stop marks the Sandbox stopping under its lock before checking again, so work that arrives
+meanwhile waits for the stop to end and then starts it again. Only the wait between checks reads
+`SandboxLifecyclePolicy`'s clock (a TestClock in tests); the policy also sets the start timeout.
 
 A server that exits by itself while running is `stopped` with why, and its socket is closed at
 once, so its Threads are away as on any machine that dropped (spec 2: «paused, environment
 offline»). If a run was in progress on it, the Hub starts it again: the hello lists no sessions,
-so the turn ends interrupted and its history stays. One that exits more than three times in ten
-minutes is left `failed` instead. A start under way reports its own failure; an exit never
-overwrites it.
+so the turn ends interrupted and its history stays. Every such exit counts: more than three in ten
+minutes leaves it `failed` until a User starts it. A start under way reports its own failure; an
+exit never overwrites it.

@@ -13,12 +13,14 @@ import {
 } from "@t3tools/contracts";
 import { base64UrlEncode } from "@t3tools/shared/base64Url";
 import { formatEnvironmentCredential } from "@t3tools/shared/environmentJoin";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -42,9 +44,13 @@ const START_TIMEOUT = "2 minutes";
 /** Seconds without turns, terminals or previews before a running Sandbox stops. */
 const IDLE_TIMEOUT_SETTING = "T3CODE_SANDBOX_IDLE_SECONDS";
 const DEFAULT_IDLE_TIMEOUT_SECONDS = 30 * 60;
-/** A Sandbox that exits by itself this often within the window is not started again by itself. */
+/** A Sandbox that exits by itself more often than this within the window is left `failed`. */
 const CRASH_RESTART_LIMIT = 3;
 const CRASH_RESTART_WINDOW_MS = 10 * 60 * 1000;
+/** After a failed start, a User's work tries again only once this much time has passed. */
+const RETRY_BACKOFF_MS = 10_000;
+/** The longest a caller waits for a start it asked for; the start itself has its own timeout. */
+const CALLER_WAIT = "3 minutes";
 
 export class SandboxStartError extends Schema.TaggedError<SandboxStartError>()(
   "SandboxStartError",
@@ -66,14 +72,17 @@ export interface SandboxStatusRow {
 export type SandboxStartVia = "demand" | "retry";
 
 /**
- * How the idle stop measures time: the timeout, and the clock it reads (a test's own clock, so a
- * test advances it without waiting). Absent: `T3CODE_SANDBOX_IDLE_SECONDS`, else 30 minutes, on
- * the Hub's clock.
+ * How long a Sandbox may idle and may take to start, and the clock the idle stop reads (a test's
+ * TestClock). Absent: `T3CODE_SANDBOX_IDLE_SECONDS` (else 30 minutes), 2 minutes, the Hub's clock.
  */
-export class SandboxIdlePolicy extends Context.Service<
-  SandboxIdlePolicy,
-  { readonly timeout?: Duration.Input; readonly clock?: Clock.Clock }
->()("t3/sandboxes/Sandboxes/SandboxIdlePolicy") {}
+export class SandboxLifecyclePolicy extends Context.Service<
+  SandboxLifecyclePolicy,
+  {
+    readonly idleTimeout?: Duration.Input;
+    readonly startTimeout?: Duration.Input;
+    readonly clock?: Clock.Clock;
+  }
+>()("t3/sandboxes/Sandboxes/SandboxLifecyclePolicy") {}
 
 export class Sandboxes extends Context.Service<
   Sandboxes,
@@ -87,12 +96,21 @@ export class Sandboxes extends Context.Service<
       readonly spaceId: SpaceId;
       readonly actorUserId: UserId | undefined;
     }) => Effect.Effect<EnvironmentId, SandboxStartError>;
-    /** Makes it if needed, starts it and waits until it is connected and its executor serves. */
+    /**
+     * Starts it (joining a start under way) and waits until it is connected and its executor
+     * serves. The start is the Hub's: a caller that stops waiting does not stop it.
+     */
     readonly ensureRunning: (input: {
       readonly spaceId: SpaceId;
       readonly actorUserId: UserId | undefined;
       readonly via?: SandboxStartVia;
     }) => Effect.Effect<EnvironmentId, SandboxStartError>;
+    /** Starts it in the background (joining one under way); answers once it is `starting`. */
+    readonly requestStart: (input: {
+      readonly spaceId: SpaceId;
+      readonly actorUserId: UserId | undefined;
+      readonly via: SandboxStartVia;
+    }) => Effect.Effect<void>;
     /** The Sandboxes that exist, by Space. */
     readonly list: Effect.Effect<ReadonlyArray<SandboxStatusRow>, SandboxStartError>;
     /** Stops the Space's Sandbox, keeping its home: its Organization was archived. */
@@ -116,6 +134,12 @@ export class Sandboxes extends Context.Service<
 const errorDetail = (cause: unknown) =>
   typeof cause === "string" ? cause : cause instanceof Error ? cause.message : String(cause);
 
+/** A start under way: settled once it is running or failed; `begun` once it is `starting`. */
+interface InFlight {
+  readonly done: Deferred.Deferred<EnvironmentId, SandboxStartError>;
+  readonly begun: Deferred.Deferred<void>;
+}
+
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const runtime = yield* SandboxRuntime;
@@ -125,28 +149,30 @@ const make = Effect.gen(function* () {
   const random = yield* SecureRandom.SecureRandom;
   const digester = yield* Digest.Digest;
   const hubId = yield* (yield* ServerEnvironment.ServerEnvironmentIdentity).getEnvironmentId;
-  const policy = yield* Effect.serviceOption(SandboxIdlePolicy);
-  const idleClock = Option.flatMap(policy, (value) => Option.fromUndefinedOr(value.clock)).pipe(
-    Option.getOrUndefined,
-  );
-  const clock = idleClock ?? (yield* Clock.Clock);
+  const policy = yield* Effect.serviceOption(SandboxLifecyclePolicy);
+  const policyValue = <K extends "idleTimeout" | "startTimeout" | "clock">(key: K) =>
+    Option.flatMap(policy, (value) => Option.fromUndefinedOr(value[key]));
+  const clock = Option.getOrUndefined(policyValue("clock")) ?? (yield* Clock.Clock);
   const configuredSeconds = yield* Config.Int(IDLE_TIMEOUT_SETTING).pipe(
     Config.option,
     Effect.orElseSucceed(() => Option.none<number>()),
   );
-  const idleTimeoutMs = Option.match(
-    Option.flatMap(policy, (value) => Option.fromUndefinedOr(value.timeout)),
-    {
-      onSome: (timeout) => Duration.toMillis(Duration.fromInputUnsafe(timeout)),
-      onNone: () =>
-        Math.max(
-          1,
-          Option.getOrElse(configuredSeconds, () => DEFAULT_IDLE_TIMEOUT_SECONDS),
-        ) * 1000,
-    },
+  const idleTimeoutMs = Option.match(policyValue("idleTimeout"), {
+    onSome: (timeout) => Duration.toMillis(Duration.fromInputUnsafe(timeout)),
+    onNone: () =>
+      Math.max(
+        1,
+        Option.getOrElse(configuredSeconds, () => DEFAULT_IDLE_TIMEOUT_SECONDS),
+      ) * 1000,
+  });
+  const startTimeout = Option.getOrElse(
+    policyValue("startTimeout"),
+    (): Duration.Input => START_TIMEOUT,
   );
   const serviceScope = yield* Effect.scope;
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+  const nowMs = () => clock.currentTimeMillisUnsafe();
+  // Held only for short transitions (made, marked starting, stopped), never across a boot.
   const locks = new Map<SpaceId, Semaphore.Semaphore>();
   const lockOf = (spaceId: SpaceId) => {
     let lock = locks.get(spaceId);
@@ -156,26 +182,23 @@ const make = Effect.gen(function* () {
     }
     return lock;
   };
+  const locked = <A, E, R>(spaceId: SpaceId, effect: Effect.Effect<A, E, R>) =>
+    lockOf(spaceId).withPermits(1)(effect);
 
-  // What keeps each Sandbox from idling: its last use, and what holds it open now.
-  const activity = new Map<EnvironmentId, { last: number; holds: number }>();
-  const activityOf = (environmentId: EnvironmentId) => {
-    let entry = activity.get(environmentId);
-    if (entry === undefined) {
-      entry = { last: clock.currentTimeMillisUnsafe(), holds: 0 };
-      activity.set(environmentId, entry);
-    }
-    return entry;
-  };
+  // The one start under way per Space, and the idle stop under way.
+  const inFlight = new Map<SpaceId, InFlight>();
+  const stopping = new Map<SpaceId, Deferred.Deferred<void>>();
+  // When each Sandbox's last start failed (the backoff), and when it last exited by itself.
+  const failedAt = new Map<SpaceId, number>();
+  const crashes = new Map<SpaceId, Array<number>>();
+
+  // What keeps each Sandbox from idling: its last use, and each thing that holds it open now.
+  const lastUse = new Map<EnvironmentId, number>();
+  const holds = new Map<EnvironmentId, Set<object>>();
   const touch = (environmentId: EnvironmentId) =>
     Effect.sync(() => {
-      if (sandboxSpaceOf(environmentId) === undefined) return;
-      activityOf(environmentId).last = clock.currentTimeMillisUnsafe();
+      if (sandboxSpaceOf(environmentId) !== undefined) lastUse.set(environmentId, nowMs());
     });
-  // Starts asked for and not yet settled, so a burst of work starts one.
-  const requested = new Set<SpaceId>();
-  // When each Sandbox last exited by itself, for the crash-restart limit.
-  const crashes = new Map<SpaceId, Array<number>>();
 
   const selectRow = (spaceId: SpaceId) =>
     sql<SandboxStatusRow>`
@@ -199,7 +222,7 @@ const make = Effect.gen(function* () {
     `;
   });
 
-  /** Threads on the Sandbox with a run in progress: a turn keeps it from idling. */
+  /** Threads on the Sandbox with a run in progress; one that cannot be read counts as busy. */
   const unfinishedRuns = (environmentId: EnvironmentId) =>
     sql<{ readonly count: number }>`
       SELECT COUNT(*) AS count
@@ -213,8 +236,11 @@ const make = Effect.gen(function* () {
         )
     `.pipe(
       Effect.map((rows) => rows[0]?.count ?? 0),
-      Effect.orElseSucceed(() => 0),
+      Effect.orElseSucceed(() => 1),
     );
+
+  const actorOf = (actorUserId: UserId | undefined): AuditLog.AuditActor =>
+    actorUserId === undefined ? { source: "system" } : AuditLog.userActor(actorUserId);
 
   /** A new credential: the Sandbox keeps it in its home, the Hub only its hash. */
   const issueCredential = Effect.gen(function* () {
@@ -270,10 +296,7 @@ const make = Effect.gen(function* () {
             ) VALUES (${spaceId}, ${environmentId}, ${runtime.kind}, 'stopped', ${now}, ${now})
           `;
           yield* audit.record({
-            actor:
-              input.actorUserId === undefined
-                ? { source: "system" }
-                : AuditLog.userActor(input.actorUserId),
+            actor: actorOf(input.actorUserId),
             action: "sandbox.create",
             spaceId,
             target: { kind: "environment", id: environmentId, name },
@@ -295,70 +318,157 @@ const make = Effect.gen(function* () {
     return { environmentId, name, running: inspected.state._tag === "running" };
   });
 
-  const startLocked = Effect.fn("Sandboxes.start")(function* (input: {
+  /**
+   * One start, owned by the service: marked `starting` under the lock, booted outside it, and
+   * always ended `running` or `failed`. A server that did not become ready is stopped first, so
+   * nothing runs that the Hub does not track.
+   */
+  const runStart = Effect.fn("Sandboxes.runStart")(function* (
+    input: {
+      readonly spaceId: SpaceId;
+      readonly actorUserId: UserId | undefined;
+      readonly via: SandboxStartVia;
+    },
+    begun: Deferred.Deferred<void>,
+  ) {
+    const { spaceId } = input;
+    const sandboxId = sandboxIdOf(spaceId);
+    const environmentId = sandboxEnvironmentIdOf(spaceId);
+    // An idle stop under way ends first; the start then begins from a stopped Sandbox.
+    const stop = stopping.get(spaceId);
+    if (stop !== undefined) yield* Deferred.await(stop);
+    let launched = false;
+    let name: string | undefined;
+    const attempt = Effect.gen(function* () {
+      const created = yield* locked(
+        spaceId,
+        Effect.gen(function* () {
+          const made = yield* createLocked(input);
+          if (!made.running) yield* setStatus(spaceId, "starting");
+          return made;
+        }),
+      ).pipe(Effect.ensuring(Deferred.succeed(begun, undefined)));
+      name = created.name;
+      launched = true;
+      const started = yield* runtime.start(sandboxId);
+      // Ready once welcomed with its executor serving; a server that ends first fails at once.
+      const ready = yield* Effect.raceFirst(
+        connections.awaitReady(environmentId).pipe(Effect.as("ready" as const)),
+        started.exited.pipe(Effect.map((exitCode) => ({ exitCode }))),
+      ).pipe(Effect.timeoutOption(startTimeout));
+      if (Option.isNone(ready)) {
+        return yield* Effect.fail("it did not connect to the Hub in time.");
+      }
+      if (ready.value !== "ready") {
+        return yield* Effect.fail(
+          `its server exited before connecting (exit code ${ready.value.exitCode ?? "unknown"}).`,
+        );
+      }
+      yield* locked(
+        spaceId,
+        Effect.gen(function* () {
+          yield* touch(environmentId);
+          failedAt.delete(spaceId);
+          if (created.running) return;
+          yield* setStatus(spaceId, "running");
+          yield* audit.record({
+            actor: actorOf(input.actorUserId),
+            action: "sandbox.start",
+            spaceId,
+            target: { kind: "environment", id: environmentId, name: created.name },
+            detail: { via: input.via, outcome: "started" },
+          });
+        }),
+      );
+      return environmentId;
+    });
+    const fail = Effect.fn("Sandboxes.failStart")(function* (detail: string) {
+      if (launched) {
+        // Verified stop: the runtime waits for the server to end (killing it if it must).
+        yield* runtime.stop(sandboxId).pipe(Effect.ignore);
+        yield* connections.close(environmentId, "heartbeat-timeout");
+      }
+      failedAt.set(spaceId, nowMs());
+      yield* setStatus(spaceId, "failed", detail).pipe(Effect.ignore);
+      yield* audit
+        .record({
+          actor: actorOf(input.actorUserId),
+          action: "sandbox.start",
+          spaceId,
+          target: {
+            kind: "environment",
+            id: environmentId,
+            ...(name === undefined ? {} : { name }),
+          },
+          detail: { via: input.via, outcome: "failed", reason: detail.slice(0, 200) },
+        })
+        .pipe(Effect.ignore);
+      return yield* new SandboxStartError({ spaceId, detail });
+    });
+    return yield* attempt.pipe(
+      Effect.catchCause((cause) => fail(errorDetail(Cause.squash(cause)))),
+      // The Hub shutting down mid-start still leaves no Sandbox `starting`.
+      Effect.onInterrupt(() => fail("its start was interrupted.").pipe(Effect.ignore)),
+    );
+  });
+
+  /** The start under way for the Space, or a new one: never two at once. */
+  const startOnce = (input: {
     readonly spaceId: SpaceId;
     readonly actorUserId: UserId | undefined;
     readonly via: SandboxStartVia;
-  }) {
-    const { spaceId } = input;
-    const sandboxId = sandboxIdOf(spaceId);
-    const created = yield* createLocked(input);
-    const { environmentId } = created;
-    if (!created.running) yield* setStatus(spaceId, "starting");
-    const started = yield* runtime.start(sandboxId);
-    // Ready once welcomed with its executor serving, so work can run on it at once; a server that
-    // ends first fails the start at once, with its exit code.
-    const ready = yield* Effect.raceFirst(
-      connections.awaitReady(environmentId).pipe(Effect.as("ready" as const)),
-      started.exited.pipe(Effect.map((exitCode) => ({ exitCode }))),
-    ).pipe(Effect.timeoutOption(START_TIMEOUT));
-    if (Option.isNone(ready)) {
-      return yield* Effect.fail("it did not connect to the Hub in time.");
-    }
-    if (ready.value !== "ready") {
-      return yield* Effect.fail(
-        `its server exited before connecting (exit code ${ready.value.exitCode ?? "unknown"}).`,
+  }) =>
+    Effect.suspend(() => {
+      const current = inFlight.get(input.spaceId);
+      if (current !== undefined) return Effect.succeed(current);
+      const entry: InFlight = {
+        done: Deferred.makeUnsafe<EnvironmentId, SandboxStartError>(),
+        begun: Deferred.makeUnsafe<void>(),
+      };
+      inFlight.set(input.spaceId, entry);
+      return runStart(input, entry.begun).pipe(
+        Effect.exit,
+        Effect.flatMap((exit) => Deferred.done(entry.done, exit)),
+        Effect.ensuring(
+          Effect.suspend(() => {
+            if (inFlight.get(input.spaceId) === entry) inFlight.delete(input.spaceId);
+            return Deferred.succeed(entry.begun, undefined);
+          }),
+        ),
+        Effect.forkIn(serviceScope),
+        Effect.as(entry),
       );
-    }
-    yield* touch(environmentId);
-    if (created.running) return environmentId;
-    yield* setStatus(spaceId, "running");
-    yield* audit.record({
-      actor:
-        input.actorUserId === undefined
-          ? { source: "system" }
-          : AuditLog.userActor(input.actorUserId),
-      action: "sandbox.start",
-      spaceId,
-      target: { kind: "environment", id: environmentId, name: created.name },
-      detail: { via: input.via },
     });
-    return environmentId;
-  });
 
-  /** A failure as the Thread shows it: the Sandbox is `failed`, with why. */
-  const failedStart = (spaceId: SpaceId) => (cause: unknown) => {
-    const detail = errorDetail(cause);
-    return setStatus(spaceId, "failed", detail).pipe(
-      Effect.ignore,
-      Effect.andThen(Effect.fail(new SandboxStartError({ spaceId, detail }))),
+  const awaitStart = (entry: InFlight, spaceId: SpaceId) =>
+    Deferred.await(entry.done).pipe(
+      Effect.timeoutOption(CALLER_WAIT),
+      Effect.flatMap(
+        Option.match({
+          onSome: Effect.succeed,
+          onNone: () =>
+            Effect.fail(
+              new SandboxStartError({ spaceId, detail: "it is taking too long to start." }),
+            ),
+        }),
+      ),
     );
-  };
 
   const ensureCreated: Sandboxes["Service"]["ensureCreated"] = (input) =>
-    lockOf(input.spaceId)
-      .withPermits(1)(createLocked(input))
-      .pipe(
-        Effect.map((created) => created.environmentId),
-        Effect.mapError(
-          (cause) => new SandboxStartError({ spaceId: input.spaceId, detail: errorDetail(cause) }),
-        ),
-      );
+    locked(input.spaceId, createLocked(input)).pipe(
+      Effect.map((created) => created.environmentId),
+      Effect.mapError(
+        (cause) => new SandboxStartError({ spaceId: input.spaceId, detail: errorDetail(cause) }),
+      ),
+    );
 
   const ensureRunning: Sandboxes["Service"]["ensureRunning"] = (input) =>
-    lockOf(input.spaceId)
-      .withPermits(1)(startLocked({ ...input, via: input.via ?? "demand" }))
-      .pipe(Effect.catch(failedStart(input.spaceId)));
+    startOnce({ ...input, via: input.via ?? "demand" }).pipe(
+      Effect.flatMap((entry) => awaitStart(entry, input.spaceId)),
+    );
+
+  const requestStart: Sandboxes["Service"]["requestStart"] = (input) =>
+    startOnce(input).pipe(Effect.flatMap((entry) => Deferred.await(entry.begun)));
 
   const list: Sandboxes["Service"]["list"] = sql<SandboxStatusRow>`
     SELECT space_id AS "spaceId", environment_id AS "environmentId", status,
@@ -380,7 +490,7 @@ const make = Effect.gen(function* () {
     // Its server is gone: its socket is not waited on to notice, so nothing takes it as ready.
     yield* connections.close(row.environmentId, "heartbeat-timeout");
     yield* setStatus(spaceId, "stopped");
-    activity.delete(row.environmentId);
+    lastUse.delete(row.environmentId);
     if (!wasRunning) return;
     yield* audit.record({
       actor: input.actor,
@@ -391,22 +501,28 @@ const make = Effect.gen(function* () {
     });
   });
 
+  /** A start under way ends (either way) before the Sandbox is stopped or deleted. */
+  const settleStart = (spaceId: SpaceId) =>
+    Effect.suspend(() => {
+      const current = inFlight.get(spaceId);
+      return current === undefined ? Effect.void : Deferred.await(current.done).pipe(Effect.ignore);
+    });
+
   const stop: Sandboxes["Service"]["stop"] = (input) =>
-    lockOf(input.spaceId)
-      .withPermits(1)(stopLocked({ ...input, via: "archived" }))
-      .pipe(
-        Effect.mapError(
-          (cause) => new SandboxStartError({ spaceId: input.spaceId, detail: String(cause) }),
-        ),
-        Effect.withSpan("Sandboxes.stop"),
-      );
+    settleStart(input.spaceId).pipe(
+      Effect.andThen(locked(input.spaceId, stopLocked({ ...input, via: "archived" }))),
+      Effect.mapError(
+        (cause) => new SandboxStartError({ spaceId: input.spaceId, detail: String(cause) }),
+      ),
+      Effect.withSpan("Sandboxes.stop"),
+    );
 
   const remove: Sandboxes["Service"]["delete"] = Effect.fn("Sandboxes.delete")(
     function* ({ spaceId, actor }) {
       const row = yield* selectRow(spaceId);
       const environmentId = sandboxEnvironmentIdOf(spaceId);
       yield* runtime.delete(sandboxIdOf(spaceId));
-      activity.delete(environmentId);
+      lastUse.delete(environmentId);
       yield* sql.withTransaction(
         Effect.gen(function* () {
           yield* sql`
@@ -426,7 +542,8 @@ const make = Effect.gen(function* () {
       yield* connections.close(environmentId, "environment-removed");
       return row !== undefined;
     },
-    (effect, input) => lockOf(input.spaceId).withPermits(1)(effect),
+    (effect, input) =>
+      settleStart(input.spaceId).pipe(Effect.andThen(locked(input.spaceId, effect))),
     (effect, input) =>
       Effect.mapError(
         effect,
@@ -434,59 +551,67 @@ const make = Effect.gen(function* () {
       ),
   );
 
-  /**
-   * Stops each running Sandbox nothing used for the idle timeout: no run in progress on it, no
-   * open terminal or preview holding it, and no other use since. Checked again under its lock, so
-   * work that just started it keeps it.
-   */
-  const stopIdle: Sandboxes["Service"]["stopIdle"] = Effect.gen(function* () {
-    const rows = yield* list.pipe(Effect.orElseSucceed(() => []));
-    for (const row of rows) {
-      if (row.status !== "running") continue;
-      const idleSince = Effect.gen(function* () {
-        const entry = activityOf(row.environmentId);
-        if (entry.holds > 0 || (yield* unfinishedRuns(row.environmentId)) > 0) {
-          entry.last = clock.currentTimeMillisUnsafe();
-          return false;
-        }
-        return clock.currentTimeMillisUnsafe() - entry.last >= idleTimeoutMs;
-      });
-      if (!(yield* idleSince)) continue;
-      yield* lockOf(row.spaceId)
-        .withPermits(1)(
-          Effect.gen(function* () {
-            const current = yield* selectRow(row.spaceId);
-            if (current?.status !== "running" || !(yield* idleSince)) return;
-            yield* Effect.logInfo("Stopping an idle Sandbox", { spaceId: row.spaceId });
-            yield* stopLocked({ spaceId: row.spaceId, actor: { source: "system" }, via: "idle" });
-          }),
-        )
-        .pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("Could not stop an idle Sandbox", { spaceId: row.spaceId, cause }),
-          ),
-        );
+  /** No run in progress on it, nothing holding it, and no use for the idle timeout. */
+  const isIdle = Effect.fn("Sandboxes.isIdle")(function* (environmentId: EnvironmentId) {
+    if ((holds.get(environmentId)?.size ?? 0) > 0) return false;
+    if ((yield* unfinishedRuns(environmentId)) > 0) {
+      lastUse.set(environmentId, nowMs());
+      return false;
     }
-  }).pipe(Effect.withSpan("Sandboxes.stopIdle"));
-
-  /** Starts it in the background, unless a start is under way or its last one failed. */
-  const requestStart = Effect.fn("Sandboxes.requestStart")(function* (spaceId: SpaceId) {
-    if (requested.has(spaceId)) return;
-    const row = yield* selectRow(spaceId).pipe(Effect.orElseSucceed(() => undefined));
-    if (row === undefined || row.status === "failed") return;
-    if (yield* connections.isReady(row.environmentId)) return;
-    requested.add(spaceId);
-    yield* ensureRunning({ spaceId, actorUserId: undefined, via: "demand" }).pipe(
-      Effect.catch((error) =>
-        Effect.logWarning("A Sandbox did not start for its work", {
-          spaceId,
-          detail: error.detail,
-        }),
-      ),
-      Effect.ensuring(Effect.sync(() => requested.delete(spaceId))),
-      Effect.forkIn(serviceScope),
-    );
+    const last = lastUse.get(environmentId);
+    if (last === undefined) {
+      lastUse.set(environmentId, nowMs());
+      return false;
+    }
+    return nowMs() - last >= idleTimeoutMs;
   });
+
+  /**
+   * Stops one Sandbox if it is idle. Under its lock it is marked stopping before being checked
+   * again, so work that arrives meanwhile waits for the stop and then starts it again.
+   */
+  const stopIfIdle = Effect.fn("Sandboxes.stopIfIdle")(
+    function* (row: SandboxStatusRow) {
+      if (row.status !== "running" || inFlight.has(row.spaceId)) return;
+      if (!(yield* isIdle(row.environmentId))) return;
+      const done = Deferred.makeUnsafe<void>();
+      yield* locked(
+        row.spaceId,
+        Effect.gen(function* () {
+          stopping.set(row.spaceId, done);
+          const current = yield* selectRow(row.spaceId);
+          if (current?.status !== "running" || !(yield* isIdle(row.environmentId))) return;
+          yield* Effect.logInfo("Stopping an idle Sandbox", { spaceId: row.spaceId });
+          yield* stopLocked({ spaceId: row.spaceId, actor: { source: "system" }, via: "idle" });
+        }),
+      ).pipe(
+        Effect.ensuring(
+          Effect.suspend(() => {
+            if (stopping.get(row.spaceId) === done) stopping.delete(row.spaceId);
+            return Deferred.succeed(done, undefined);
+          }),
+        ),
+      );
+    },
+    (effect, row) =>
+      effect.pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Could not stop an idle Sandbox", {
+            spaceId: row.spaceId,
+            cause: Cause.pretty(cause),
+          }),
+        ),
+      ),
+  );
+
+  // Each Space on its own: one Sandbox slow to stop holds back no other.
+  const stopIdle: Sandboxes["Service"]["stopIdle"] = list.pipe(
+    Effect.orElseSucceed(() => []),
+    Effect.flatMap((rows) =>
+      Effect.forEach(rows, stopIfIdle, { concurrency: "unbounded", discard: true }),
+    ),
+    Effect.withSpan("Sandboxes.stopIdle"),
+  );
 
   // What the runtime does not run is not running, whatever the last Hub recorded.
   const recorded = yield* list.pipe(Effect.orElseSucceed(() => []));
@@ -496,9 +621,9 @@ const make = Effect.gen(function* () {
     if (Option.isSome(inspected) && inspected.value.state._tag === "running") continue;
     yield* setStatus(row.spaceId, "stopped").pipe(Effect.ignore);
   }
-  // A server that ended by itself counts as stopped. One that ended under a turn starts again,
-  // so the turn resumes or ends interrupted as on any machine that came back (spec 2); one that
-  // keeps ending is left `failed` for a User to try again.
+  // A running server that ended by itself counts as stopped, and every such exit counts toward
+  // the crash limit; past it the Sandbox is `failed` until a User starts it. One that ended under
+  // a turn starts again, so the turn resumes or ends interrupted (spec 2).
   yield* runtime.exits.pipe(
     Stream.runForEach((exit) =>
       Effect.gen(function* () {
@@ -510,41 +635,40 @@ const make = Effect.gen(function* () {
         if (row === undefined || row.status !== "running") return;
         const environmentId = sandboxEnvironmentIdOf(row.spaceId);
         const exitMessage = `It exited with code ${exit.exitCode ?? "?"}.`;
-        activity.delete(environmentId);
+        lastUse.delete(environmentId);
         // Its socket is gone with it: its Threads are away now, as on any machine that dropped.
         yield* connections.close(environmentId, "heartbeat-timeout");
-        if ((yield* unfinishedRuns(environmentId)) === 0) {
-          yield* setStatus(row.spaceId, "stopped", exitMessage);
-          return;
-        }
-        const now = clock.currentTimeMillisUnsafe();
+        const now = nowMs();
         const recent = (crashes.get(row.spaceId) ?? []).filter(
           (at) => now - at < CRASH_RESTART_WINDOW_MS,
         );
         recent.push(now);
         crashes.set(row.spaceId, recent);
         if (recent.length > CRASH_RESTART_LIMIT) {
+          failedAt.set(row.spaceId, now);
           yield* setStatus(row.spaceId, "failed", `It kept exiting. ${exitMessage}`);
           return;
         }
         yield* setStatus(row.spaceId, "stopped", exitMessage);
-        yield* requestStart(row.spaceId);
+        if ((yield* unfinishedRuns(environmentId)) > 0) {
+          yield* startOnce({ spaceId: row.spaceId, actorUserId: undefined, via: "demand" });
+        }
       }).pipe(Effect.ignore),
     ),
     Effect.forkScoped,
   );
-  // The idle check runs on the idle clock, often enough to stop within a quarter of the timeout.
+  // Only the wait between checks runs on the idle clock; stopping runs on the Hub's own.
   const checkEvery = Duration.millis(Math.min(60_000, Math.max(1_000, idleTimeoutMs / 4)));
-  yield* Effect.sleep(checkEvery).pipe(
-    Effect.andThen(stopIdle),
-    Effect.forever,
-    Effect.provideService(Clock.Clock, clock),
-    Effect.forkScoped,
-  );
+  yield* clock.sleep(checkEvery).pipe(Effect.andThen(stopIdle), Effect.forever, Effect.forkScoped);
+
+  /** Running and not being stopped: work goes straight to it. */
+  const readyNow = (spaceId: SpaceId, environmentId: EnvironmentId) =>
+    stopping.has(spaceId) ? Effect.succeed(false) : connections.isReady(environmentId);
 
   const service = Sandboxes.of({
     ensureCreated,
     ensureRunning,
+    requestStart,
     list,
     stop,
     delete: remove,
@@ -552,38 +676,70 @@ const make = Effect.gen(function* () {
   });
 
   const demand = EnvironmentDemand.EnvironmentDemand.of({
-    awaitStarted: Effect.fn("Sandboxes.awaitStarted")(function* (environmentId) {
+    ready: Effect.fn("Sandboxes.ready")(function* (environmentId) {
+      const spaceId = sandboxSpaceOf(environmentId);
+      if (spaceId === undefined) return true;
+      return yield* readyNow(spaceId, environmentId);
+    }),
+    awaitStarted: Effect.fn("Sandboxes.awaitStarted")(function* (environmentId, options) {
       const spaceId = sandboxSpaceOf(environmentId);
       if (spaceId === undefined) return;
-      if (yield* connections.isReady(environmentId)) return yield* touch(environmentId);
-      yield* ensureRunning({ spaceId, actorUserId: undefined, via: "demand" }).pipe(
-        Effect.mapError(
-          (error) =>
-            new EnvironmentDemand.EnvironmentStartError({ environmentId, detail: error.detail }),
-        ),
-      );
+      const startError = (detail: string) =>
+        new EnvironmentDemand.EnvironmentStartError({ environmentId, detail });
+      if (yield* readyNow(spaceId, environmentId)) return yield* touch(environmentId);
+      // Work that lands while it is being stopped starts it again once the stop ends.
+      const stop = stopping.get(spaceId);
+      if (stop !== undefined) yield* Deferred.await(stop);
+      if (!inFlight.has(spaceId)) {
+        const row = yield* selectRow(spaceId).pipe(Effect.orElseSucceed(() => undefined));
+        if (row?.status === "failed") {
+          const lastFailure = failedAt.get(spaceId);
+          // Only a User's own action starts a failed Sandbox, and not again right away.
+          if (
+            !options.explicit ||
+            (lastFailure !== undefined && nowMs() - lastFailure < RETRY_BACKOFF_MS)
+          ) {
+            return yield* startError(row.lastError ?? "its last start failed.");
+          }
+        }
+      }
+      const entry = yield* startOnce({
+        spaceId,
+        actorUserId: options.actorUserId,
+        via: "demand",
+      });
+      yield* awaitStart(entry, spaceId).pipe(Effect.mapError((error) => startError(error.detail)));
     }),
     request: Effect.fn("Sandboxes.request")(function* (environmentIds) {
       for (const environmentId of environmentIds) {
         const spaceId = sandboxSpaceOf(environmentId);
-        if (spaceId !== undefined) yield* requestStart(spaceId);
+        if (spaceId === undefined || inFlight.has(spaceId) || stopping.has(spaceId)) continue;
+        const row = yield* selectRow(spaceId).pipe(Effect.orElseSucceed(() => undefined));
+        // Waiting work never starts a failed Sandbox: a User does.
+        if (row === undefined || row.status === "failed") continue;
+        if (yield* connections.isReady(environmentId)) continue;
+        yield* startOnce({ spaceId, actorUserId: undefined, via: "demand" });
       }
     }),
     touch,
     hold: Effect.fn("Sandboxes.hold")(function* (environmentId) {
+      if (sandboxSpaceOf(environmentId) === undefined) return;
+      // Each holder has its own key, so a late release never drops another's hold.
+      const key = {};
       yield* Effect.acquireRelease(
         Effect.sync(() => {
-          if (sandboxSpaceOf(environmentId) === undefined) return;
-          const entry = activityOf(environmentId);
-          entry.holds += 1;
-          entry.last = clock.currentTimeMillisUnsafe();
+          let held = holds.get(environmentId);
+          if (held === undefined) {
+            held = new Set();
+            holds.set(environmentId, held);
+          }
+          held.add(key);
+          lastUse.set(environmentId, nowMs());
         }),
         () =>
           Effect.sync(() => {
-            const entry = activity.get(environmentId);
-            if (entry === undefined) return;
-            entry.holds = Math.max(0, entry.holds - 1);
-            entry.last = clock.currentTimeMillisUnsafe();
+            holds.get(environmentId)?.delete(key);
+            lastUse.set(environmentId, nowMs());
           }),
       );
     }),

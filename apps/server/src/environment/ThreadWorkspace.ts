@@ -68,7 +68,15 @@ import { locateInCheckout } from "./WorkspaceLocation.ts";
 /** Who asks: the session's User, whose rules a forwarded call keeps to. */
 export interface WorkspaceCaller {
   readonly userId: UserId | undefined;
+  /**
+   * The User acts (opens a terminal, types, writes a file, opens a preview): a stopped Sandbox
+   * starts for it. Reads and listings never start one, nor count as use.
+   */
+  readonly startsSandbox?: boolean;
 }
+
+/** The same caller, acting: a stopped Sandbox starts for the call. */
+const acting = (caller: WorkspaceCaller): WorkspaceCaller => ({ ...caller, startsSandbox: true });
 
 type Route =
   | { readonly _tag: "local" }
@@ -82,16 +90,23 @@ type Route =
       /** The same workspace on the Thread's machine: the root every forwarded path is under. */
       readonly remoteBase: string;
     }
-  | { readonly _tag: "offline"; readonly name: string | undefined }
+  | {
+      readonly _tag: "offline";
+      readonly name: string | undefined;
+      /** A Sandbox that is not running, which a read does not start. */
+      readonly stopped?: boolean;
+    }
   | { readonly _tag: "refused" };
 
 const LOCAL: Route = { _tag: "local" };
 const REFUSED: Route = { _tag: "refused" };
 
-const offlineMessage = (name: string | undefined) =>
-  name === undefined
-    ? "Environment offline: this Thread has no Environment right now. Move it to one to use its files and terminals."
-    : `Environment offline: ${name} is not connected. Start it to use this Thread's files and terminals.`;
+const offlineMessage = (name: string | undefined, stopped = false) =>
+  stopped
+    ? `Sandbox stopped: ${name ?? "the Sandbox"} starts when you send a message or open a terminal.`
+    : name === undefined
+      ? "Environment offline: this Thread has no Environment right now. Move it to one to use its files and terminals."
+      : `Environment offline: ${name} is not connected. Start it to use this Thread's files and terminals.`;
 const REFUSED_MESSAGE = "That is outside this Thread's workspace.";
 
 /** A path inside a workspace, `/`-separated; undefined when it leaves it or names another root. */
@@ -159,17 +174,25 @@ export const make = Effect.gen(function* () {
     const name = usable.value.name;
     const offline: Route = { _tag: "offline", name };
     if (Option.isSome(demand)) {
-      // A stopped Sandbox starts for the call, which waits for it; one that cannot start is offline.
-      const started = yield* demand.value.awaitStarted(environmentId).pipe(
-        Effect.as(true),
-        Effect.catch((error) =>
-          Effect.logWarning("A Sandbox did not start for a workspace call", {
-            environmentId,
-            detail: error.detail,
-          }).pipe(Effect.as(false)),
-        ),
-      );
-      if (!started) return offline;
+      // A User's action starts a stopped Sandbox and waits; a read answers at once, untouched.
+      if (caller.startsSandbox !== true) {
+        if (!(yield* demand.value.ready(environmentId))) {
+          return { _tag: "offline", name, stopped: true } satisfies Route;
+        }
+      } else {
+        const started = yield* demand.value
+          .awaitStarted(environmentId, { actorUserId: caller.userId, explicit: true })
+          .pipe(
+            Effect.as(true),
+            Effect.catch((error) =>
+              Effect.logWarning("A Sandbox did not start for a workspace call", {
+                environmentId,
+                detail: error.detail,
+              }).pipe(Effect.as(false)),
+            ),
+          );
+        if (!started) return offline;
+      }
     }
     const executor = yield* Effect.option(registry.value.get(environmentId));
     if (Option.isNone(executor) || Option.isNone(executor.value.workspace.forward)) return offline;
@@ -231,7 +254,7 @@ export const make = Effect.gen(function* () {
           cwd: input.cwd,
           relativePath: input.relativePath,
           failure: "environment_offline" as const,
-          message: offlineMessage(route.name),
+          message: offlineMessage(route.name, route.stopped),
         }
       : {
           cwd: input.cwd,
@@ -242,7 +265,10 @@ export const make = Effect.gen(function* () {
 
   const entriesFailure = (route: Route) =>
     route._tag === "offline"
-      ? { failure: "environment_offline" as const, message: offlineMessage(route.name) }
+      ? {
+          failure: "environment_offline" as const,
+          message: offlineMessage(route.name, route.stopped),
+        }
       : { failure: "outside_thread_workspace" as const, message: REFUSED_MESSAGE };
 
   /** A call its Thread names the machine for, with that call's own offline and refused errors. */
@@ -435,7 +461,9 @@ export const make = Effect.gen(function* () {
           Option.isSome(forward) &&
           forward.value === known.forward
         ) {
-          if (Option.isSome(demand)) yield* demand.value.touch(known.environmentId);
+          if (Option.isSome(demand) && caller.startsSandbox === true) {
+            yield* demand.value.touch(known.environmentId);
+          }
           return yield* runRemote(known.forward).pipe(
             Effect.catchTags({
               EnvironmentExecutorUnavailableError: () =>
@@ -602,7 +630,7 @@ export const make = Effect.gen(function* () {
     writeFile: (input: ProjectWriteFileInput, caller: WorkspaceCaller) =>
       routed(
         input,
-        caller,
+        acting(caller),
         (input) => Effect.flatMap(localCalls, (calls) => calls.writeFile(input)),
         (forward, input, where) => {
           // Only workspace-relative paths are writable, as on the Hub machine.
@@ -655,7 +683,7 @@ export const make = Effect.gen(function* () {
     terminalOpen: (input: TerminalOpenInput, caller: WorkspaceCaller) =>
       terminalCall(
         input,
-        caller,
+        acting(caller),
         (terminals) => terminals.open(input),
         (forward, where) => {
           const resolved = terminalFolders(where, input);
@@ -669,7 +697,7 @@ export const make = Effect.gen(function* () {
     terminalWrite: (input: TerminalWriteInput, caller: WorkspaceCaller) =>
       openTerminalCall(
         input,
-        caller,
+        acting(caller),
         (terminals) => terminals.write(input),
         (forward) => forward.call("terminal.write", input),
       ),
@@ -703,7 +731,7 @@ export const make = Effect.gen(function* () {
         (forward) => forward.call("terminal.close", input),
       ),
     terminalAttach: (input: TerminalAttachInput, viewerId: string, caller: WorkspaceCaller) =>
-      terminalStream(input, caller, "attach", viewerId, (terminals) =>
+      terminalStream(input, acting(caller), "attach", viewerId, (terminals) =>
         terminals.attachOutputStream(input, viewerId),
       ),
     terminalObserve: (input: TerminalObserveInput, caller: WorkspaceCaller) =>
@@ -716,7 +744,7 @@ export const make = Effect.gen(function* () {
     previewOpen: (input: PreviewOpenInput, caller: WorkspaceCaller) =>
       previewCall(
         input.threadId,
-        caller,
+        acting(caller),
         (previews) => previews.open(input),
         (forward) => forward.call("preview.open", input),
       ),

@@ -3,7 +3,7 @@
  * one asks here instead of failing as offline, and what keeps one busy says so here. Absent on a
  * Hub without a Sandbox runtime. See docs/internals/sandboxes.md.
  */
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, UserId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -23,11 +23,18 @@ export class EnvironmentDemand extends Context.Service<
   EnvironmentDemand,
   {
     /**
-     * Starts it unless it runs, and waits until its executor serves. Nothing for an Environment
-     * that is not startable. Counts as activity.
+     * Whether work can go to it now: false only for a Sandbox not running (or being stopped).
+     * Reads nothing else and counts as no use, so polling never keeps a Sandbox up.
+     */
+    readonly ready: (environmentId: EnvironmentId) => Effect.Effect<boolean>;
+    /**
+     * Starts it unless it runs (joining a start under way) and waits until its executor serves;
+     * counts as use. A failed Sandbox starts again only for a User's own action (`explicit`), after
+     * a short backoff. The start is the Hub's: a caller that stops waiting does not stop it.
      */
     readonly awaitStarted: (
       environmentId: EnvironmentId,
+      options: { readonly actorUserId?: UserId | undefined; readonly explicit: boolean },
     ) => Effect.Effect<void, EnvironmentStartError>;
     /**
      * Starts the startable ones among them that are stopped, without waiting; one whose last start

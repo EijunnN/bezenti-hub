@@ -1401,6 +1401,8 @@ export default function ChatView(props: ChatViewProps) {
     activePendingUserInput: activePendingUserInput?.requestId ?? null,
     threadError,
   });
+  // «Try again» was pressed and the Hub has not answered yet: one press starts one start.
+  const [sandboxRetryPending, setSandboxRetryPending] = useState(false);
   // A send to a Sandbox that is not running starts it: follow it until it is up or has failed.
   const sandboxWaking =
     isSendBusy &&
@@ -2619,11 +2621,15 @@ export default function ChatView(props: ChatViewProps) {
                       <Button
                         size="xs"
                         variant="outline"
+                        disabled={sandboxRetryPending}
                         onClick={() => {
-                          void startHubEnvironment(sandboxId).then(
-                            () => refreshHubEnvironments(),
-                            () => refreshHubEnvironments(),
-                          );
+                          setSandboxRetryPending(true);
+                          void startHubEnvironment(sandboxId)
+                            .catch(() => undefined)
+                            .then(() => {
+                              setSandboxRetryPending(false);
+                              refreshHubEnvironments();
+                            });
                         }}
                       >
                         {SANDBOX_RETRY_LABEL}
