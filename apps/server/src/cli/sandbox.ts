@@ -10,6 +10,7 @@ import {
   AuthStandardClientScopes,
   EnvironmentHttpApi,
   EnvironmentHttpConflictError,
+  HUB_MACHINE_ENVIRONMENT_ID,
   type SandboxImageStatus,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -59,7 +60,7 @@ const buildOnHub = Effect.fn("cli.sandbox.buildOnHub")(function* (origin: string
   const client = yield* HttpApiClient.make(EnvironmentHttpApi, { baseUrl: origin });
   const headers = { authorization: `Bearer ${token}` };
   const probe = yield* client.sandboxImage
-    .status({ headers })
+    .status({ headers, query: {} })
     .pipe(Effect.timeout("3 seconds"), Effect.result);
   if (probe._tag === "Failure") {
     if (unreachable(probe.failure)) return false;
@@ -70,20 +71,19 @@ const buildOnHub = Effect.fn("cli.sandbox.buildOnHub")(function* (origin: string
     .pipe(
       Effect.catchIf(isConflict, () =>
         Console.log("A build is already under way on the Hub; following it.").pipe(
-          Effect.andThen(client.sandboxImage.status({ headers })),
+          Effect.andThen(client.sandboxImage.status({ headers, query: {} })),
         ),
       ),
     );
-  let printed = 0;
+  // Each poll answers only the lines after the ones already printed.
   while (true) {
-    const fresh = Math.min(status.build.logLines - printed, status.build.log.length);
-    for (const line of status.build.log.slice(status.build.log.length - fresh)) {
-      yield* Console.log(line);
-    }
-    printed = status.build.logLines;
+    for (const line of status.build.log) yield* Console.log(line);
     if (status.build.state !== "building") break;
     yield* Effect.sleep("1 second");
-    status = yield* client.sandboxImage.status({ headers });
+    status = yield* client.sandboxImage.status({
+      headers,
+      query: { after: status.build.logLines },
+    });
   }
   if (status.build.state === "failed") {
     return yield* userError(`The Sandbox image was not built: ${status.build.error ?? "unknown"}`);
@@ -131,7 +131,7 @@ const buildHere = Effect.fn("cli.sandbox.buildHere")(function* (
     yield* audit.record({
       actor: AuditLog.cliActor,
       action: "sandbox.image.update",
-      target: { kind: "environment", id: "hub", name: image },
+      target: { kind: "environment", id: HUB_MACHINE_ENVIRONMENT_ID, name: image },
       detail:
         built._tag === "Success"
           ? { via: "cli", outcome: "built", version: built.success.version }

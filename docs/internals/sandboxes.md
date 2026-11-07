@@ -134,12 +134,14 @@ for the start.
 Every Sandbox runs one image, [the Containerfile](../../apps/server/sandbox-image/Containerfile):
 Debian bookworm-slim, Node of the repository's `engines` (from nodejs.org, checked against its
 SHASUMS), git, git-lfs, ripgrep, `build-essential`, Python and the usual shell tools, the CLIs of the
-providers that ship one, and the T3 server of the Hub's own version as `t3`. Every version is an
-`ARG` at its top:
+providers that ship one, and the T3 server of the Hub's own version as `t3`. Node is an `ARG`
+checked against nodejs.org's SHASUMS; the CLIs are
+[clis/package.json](../../apps/server/sandbox-image/clis/package.json) with its `package-lock.json`,
+so their whole dependency tree, platform binaries included, is locked with integrity hashes:
 
 | Piece                 | Version   | Installed as                            |
 | --------------------- | --------- | --------------------------------------- |
-| Node                  | 26.12.1   | nodejs.org tarball                      |
+| Node                  | 26.12.1   | nodejs.org tarball, SHASUMS256          |
 | Claude Code, `claude` | 2.1.319   | `@anthropic-ai/claude-code` (npm)       |
 | Codex, `codex`        | 0.167.0   | `@openai/codex` (npm)                   |
 | OpenCode, `opencode`  | 1.19.5    | `opencode-ai` (npm)                     |
@@ -148,15 +150,33 @@ providers that ship one, and the T3 server of the Hub's own version as `t3`. Eve
 | T3 server, `t3`       | the Hub's | the Hub's own (below)                   |
 
 Cursor runs inside the server (its SDK). Kiro, Fx, Muse and Antigravity ship no npm CLI; whoever
-needs one installs it in the Sandbox's home. To move a pin, change its `ARG` and this table, and
+needs one installs it in the Sandbox's home.
+
+The image runs `npm ci --ignore-scripts` on the lockfile, then `npm rebuild` for exactly two
+packages: Claude Code and OpenCode ship a placeholder `bin` that their postinstall replaces with the
+binary of their platform package (an optional dependency, already in the lockfile and checked by
+its hash); neither downloads anything. Grok's postinstall only copies its binary into the installing
+user's `~/.grok`, and its `bin` runs the locked binary without it; protobufjs's only prints a
+version warning; Codex and Pi have none. No install script fetches anything at build time.
+
+To bump: Node, its `ARG` and this table. A CLI, its version in `clis/package.json`, then in that
+directory `npm install --package-lock-only --ignore-scripts` (with the repository's Node), check
+whether its install scripts changed (`npm view <pkg>@<version> scripts`), update this table, and
 rebuild.
 
 **Building.** `t3 sandbox image build` on the Hub's machine, or **Build image** in Settings →
 Environments («Sandbox image», the Owner's), builds it with the Hub's rootless Podman, one build at
 a time ([SandboxImage](../../apps/server/src/sandboxes/SandboxImage.ts)). With the Hub running, the
 command asks it as the shell (`POST /api/sandboxes/image/build`) and prints the build's output as
-Settings shows it (`GET /api/sandboxes/image`, its last 400 lines); with no Hub running it builds in
-its own process and records the build itself. The build is the Hub's: a client that stops following
+Settings shows it (`GET /api/sandboxes/image?after=<lines>`: only the lines after the ones a client
+has). Output lines split on `
+` and `
+`, each cut at 2 KiB; the Hub keeps the last 400 lines and
+at most 256 KiB. With no Hub running the command builds in its own process and records the build
+itself. One build at a time: claimed in one step, so two requests never both build (the other gets
+409). The status reads `podman info` once per Hub and the image at most every 5 seconds (again after
+each build), and every Sandbox's version and busy state in one query. Every build is audited on
+the Hub machine (`environment:hub-machine`), a build the Hub stopped during included. The build is the Hub's: a client that stops following
 it does not stop it. It is plain `podman build` (`--file`, `--tag`, `--build-arg`), so Podman 3.4,
 which has no BuildKit, builds it.
 
@@ -165,11 +185,14 @@ The server goes in **from the Hub itself**, so the image always has the Hub's ve
 - A `t3` release (a single executable) copies the tree it runs from: the executable, its client and
   its runtime `node_modules`. The release archive carries `sandbox-image/` for this.
 - A Hub run from a checkout (source or `dist`) runs
-  [stage-sandbox-server.ts](../../scripts/stage-sandbox-server.ts): `vp pack` into the build context
-  (never `apps/server/dist`), and the runtime externals for this Linux, staged as the release stages
+  [stage-sandbox-server.ts](../../scripts/stage-sandbox-server.ts) into the build context, the
+  Hub's own 0700 `mkdtemp` (it refuses a directory that does not exist, and never makes or
+  replaces one at a path): `vp pack` (never into `apps/server/dist`), and the runtime externals for this Linux, staged as the release stages
   them (pnpm, with the repository's patches). It adds the dev Replay agent where the bundle looks
-  for it, so the Sandboxes of a dev Hub (`--dev-url`) offer «Replay (dev)». It runs with the Hub's Node first
-  on PATH and, in WSL, without the Windows directories the login shell adds (their `pnpm` cannot run).
+  for it, so the Sandboxes of a dev Hub (`--dev-url`) offer «Replay (dev)». It runs with a minimal
+  environment (HOME, USER, locale, TMPDIR and XDG dirs, no provider keys, tokens or build settings),
+  the Hub's Node first on PATH and, in WSL, without the Windows directories the login shell adds
+  (their `pnpm` cannot run).
 
 The context is `Containerfile`, `server/` (to `/opt/t3/app`), `modules/` (its `node_modules`, a layer
 of its own, so a new server rebuilds little) and `extras/` (to `/opt/t3`). The build fails without
@@ -189,10 +212,16 @@ Each Sandbox records the version it started with; the Owner's view shows them an
   `POST /api/sandboxes/image/update`): the Hub stops it and starts it again (`sandbox.stop` and
   `sandbox.start` via `update`), under its lock and marked stopping as an idle stop is, so work that
   arrives meanwhile waits and then runs on the new image.
-- Never mid-turn: with a run in progress on it (checked before and again under the lock) the request
-  is refused with why, «A turn is in progress on it (1 Thread). Update it once its turns end.», and
-  so it is while the Sandbox starts or stops. Already on the newest image it answers `up-to-date`;
-  not running, `next-start`.
+- Never mid-turn, checked before and again under its lock with it marked stopping (so work arriving
+  after waits for the restart): refused with why when a turn runs on it, as its connection reports
+  turns (`EnvironmentDemand.turnStarted`, from each `provider.startTurn` until its `turn.terminal`
+  or its session ends) or the projection has a run in progress, «A turn is in progress on it
+  (1 Thread). Update it once its turns end.»; or when a User sent it work in the last 10 seconds
+  whose turn has not reported in (`awaitStarted` for an explicit action claims it), «Work was just
+  sent to it. Update it once that work has ended.»; and while it starts or stops.
+- Never into a start that cannot succeed: with no newest image (the tag names none, or one the Hub
+  did not build) it is refused, «The newest image is missing», and keeps running. Already on the
+  newest image it answers `up-to-date`; not running, `next-start`.
 - Audited as `sandbox.image.update`. A build: `via` (`settings`, `cli`), `outcome` (`built`,
   `failed`), `version` or `reason`, on the Hub machine. A move: `via: restart`, `from`, `version` and
   `outcome`, on the Sandbox.

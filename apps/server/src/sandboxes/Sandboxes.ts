@@ -49,6 +49,8 @@ const CRASH_RESTART_LIMIT = 3;
 const CRASH_RESTART_WINDOW_MS = 10 * 60 * 1000;
 /** After a failed start, a User's work tries again only once this much time has passed. */
 const RETRY_BACKOFF_MS = 10_000;
+/** How long work a User sent keeps an image update off, until its turn reports in. */
+const DISPATCH_GRACE_MS = 10_000;
 /** The longest a caller waits for a start it asked for; the start itself has its own timeout. */
 const CALLER_WAIT = "3 minutes";
 
@@ -79,7 +81,7 @@ export class SandboxImageUpdateRefusedError extends Schema.TaggedError<SandboxIm
   "SandboxImageUpdateRefusedError",
   {
     spaceId: Schema.String,
-    kind: Schema.Literals(["missing", "busy", "transition"]),
+    kind: Schema.Literals(["missing", "busy", "transition", "image-missing"]),
     detail: Schema.String,
   },
 ) {
@@ -242,6 +244,10 @@ const make = Effect.gen(function* () {
   // What keeps each Sandbox from idling: its last use, and each thing that holds it open now.
   const lastUse = new Map<EnvironmentId, number>();
   const holds = new Map<EnvironmentId, Set<object>>();
+  // What an image update must not cut short: turns its connection reports running, and work a
+  // User just sent to it (claimed by `awaitStarted`) whose run may not be recorded yet.
+  const liveTurns = new Map<EnvironmentId, Set<string>>();
+  const claimedAt = new Map<EnvironmentId, number>();
   const touch = (environmentId: EnvironmentId) =>
     Effect.sync(() => {
       if (sandboxSpaceOf(environmentId) !== undefined) lastUse.set(environmentId, nowMs());
@@ -543,6 +549,7 @@ const make = Effect.gen(function* () {
     yield* connections.close(row.environmentId, "heartbeat-timeout");
     yield* setStatus(spaceId, "stopped");
     lastUse.delete(row.environmentId);
+    liveTurns.delete(row.environmentId);
     if (!wasRunning) return;
     yield* audit.record({
       actor: input.actor,
@@ -575,6 +582,7 @@ const make = Effect.gen(function* () {
       const environmentId = sandboxEnvironmentIdOf(spaceId);
       yield* runtime.delete(sandboxIdOf(spaceId));
       lastUse.delete(environmentId);
+      liveTurns.delete(environmentId);
       yield* sql.withTransaction(
         Effect.gen(function* () {
           yield* sql`
@@ -688,6 +696,7 @@ const make = Effect.gen(function* () {
         const environmentId = sandboxEnvironmentIdOf(row.spaceId);
         const exitMessage = `It exited with code ${exit.exitCode ?? "?"}.`;
         lastUse.delete(environmentId);
+        liveTurns.delete(environmentId);
         // Its socket is gone with it: its Threads are away now, as on any machine that dropped.
         yield* connections.close(environmentId, "heartbeat-timeout");
         const now = nowMs();
@@ -717,17 +726,26 @@ const make = Effect.gen(function* () {
   const readyNow = (spaceId: SpaceId, environmentId: EnvironmentId) =>
     stopping.has(spaceId) ? Effect.succeed(false) : connections.isReady(environmentId);
 
+  // One query for every Sandbox, a run in progress on it read with the rest.
   const listImages: Sandboxes["Service"]["listImages"] = Effect.gen(function* () {
-    const rows = yield* sql<Omit<SandboxImageRow, "busy">>`
+    const rows = yield* sql<Omit<SandboxImageRow, "busy"> & { readonly runs: number }>`
       SELECT sandbox.space_id AS "spaceId", sandbox.environment_id AS "environmentId",
-        environment.name AS name, sandbox.status, sandbox.image_version AS "imageVersion"
+        environment.name AS name, sandbox.status, sandbox.image_version AS "imageVersion",
+        EXISTS (
+          SELECT 1 FROM orchestration_v2_projection_threads AS thread
+          JOIN orchestration_v2_projection_runs AS run ON run.thread_id = thread.thread_id
+          WHERE thread.active_environment_id = sandbox.environment_id
+            AND thread.deleted_at IS NULL
+            AND run.status IN ('preparing', 'queued', 'starting', 'running', 'waiting')
+        ) AS runs
       FROM sandboxes AS sandbox
       JOIN environments AS environment ON environment.environment_id = sandbox.environment_id
       ORDER BY sandbox.created_at
     `;
-    return yield* Effect.forEach(rows, (row) =>
-      unfinishedRuns(row.environmentId).pipe(Effect.map((runs) => ({ ...row, busy: runs > 0 }))),
-    );
+    return rows.map(({ runs, ...row }) => ({
+      ...row,
+      busy: runs > 0 || (liveTurns.get(row.environmentId)?.size ?? 0) > 0,
+    }));
   }).pipe(
     Effect.mapError((cause) => new SandboxStartError({ spaceId: "", detail: String(cause) })),
   );
@@ -743,8 +761,21 @@ const make = Effect.gen(function* () {
       const environmentId = sandboxEnvironmentIdOf(spaceId);
       const refuse = (kind: SandboxImageUpdateRefusedError["kind"], detail: string) =>
         new SandboxImageUpdateRefusedError({ spaceId, kind, detail });
-      const busyDetail = (runs: number) =>
-        `A turn is in progress on it (${runs} ${runs === 1 ? "Thread" : "Threads"}). Update it once its turns end.`;
+      /** Why it is busy now, if it is: never stopped mid-turn, nor under work just sent to it. */
+      const busyNow = Effect.gen(function* () {
+        const turns = Math.max(
+          liveTurns.get(environmentId)?.size ?? 0,
+          yield* unfinishedRuns(environmentId),
+        );
+        if (turns > 0) {
+          return `A turn is in progress on it (${turns} ${turns === 1 ? "Thread" : "Threads"}). Update it once its turns end.`;
+        }
+        const claimed = claimedAt.get(environmentId);
+        if (claimed !== undefined && nowMs() - claimed < DISPATCH_GRACE_MS) {
+          return "Work was just sent to it. Update it once that work has ended.";
+        }
+        return undefined;
+      });
       const row = yield* selectRow(spaceId).pipe(Effect.orDie);
       if (row === undefined) return yield* refuse("missing", "This Space has no Sandbox.");
       const newest = yield* runtime.imageVersion.pipe(
@@ -753,12 +784,19 @@ const make = Effect.gen(function* () {
       if (inFlight.has(spaceId) || stopping.has(spaceId)) {
         return yield* refuse("transition", "It is starting or stopping; try again in a moment.");
       }
+      // A healthy Sandbox is never stopped into a start that cannot succeed.
+      if (newest === null && row.status === "running") {
+        return yield* refuse(
+          "image-missing",
+          "The newest image is missing: build it with t3 sandbox image build first.",
+        );
+      }
       // A stopped Sandbox runs the newest image from its next start: nothing to do now.
       if (row.status !== "running") return { outcome: "next-start" as const, imageVersion: newest };
       const from = yield* imageVersionOf(spaceId).pipe(Effect.orDie);
       if (from === newest) return { outcome: "up-to-date" as const, imageVersion: newest };
-      const runs = yield* unfinishedRuns(environmentId);
-      if (runs > 0) return yield* refuse("busy", busyDetail(runs));
+      const busy = yield* busyNow;
+      if (busy !== undefined) return yield* refuse("busy", busy);
       // Stopped under its lock and marked stopping, as an idle stop: work that arrives meanwhile
       // waits for the stop, then starts it again, on the newest image.
       const done = Deferred.makeUnsafe<void>();
@@ -766,8 +804,9 @@ const make = Effect.gen(function* () {
         spaceId,
         Effect.gen(function* () {
           stopping.set(spaceId, done);
-          const runsNow = yield* unfinishedRuns(environmentId);
-          if (runsNow > 0) return yield* refuse("busy", busyDetail(runsNow));
+          // Again under the lock, with it marked stopping: work arriving now waits for the restart.
+          const busyLocked = yield* busyNow;
+          if (busyLocked !== undefined) return yield* refuse("busy", busyLocked);
           yield* stopLocked({ spaceId, actor: input.actor, via: "update" }).pipe(
             Effect.mapError((cause) => new SandboxStartError({ spaceId, detail: String(cause) })),
           );
@@ -828,6 +867,8 @@ const make = Effect.gen(function* () {
     awaitStarted: Effect.fn("Sandboxes.awaitStarted")(function* (environmentId, options) {
       const spaceId = sandboxSpaceOf(environmentId);
       if (spaceId === undefined) return;
+      // Claimed before anything is waited on, so an image update checking now sees it.
+      if (options.explicit) claimedAt.set(environmentId, nowMs());
       const startError = (detail: string) =>
         new EnvironmentDemand.EnvironmentStartError({ environmentId, detail });
       if (yield* readyNow(spaceId, environmentId)) return yield* touch(environmentId);
@@ -866,6 +907,22 @@ const make = Effect.gen(function* () {
       }
     }),
     touch,
+    turnStarted: (environmentId, key) =>
+      Effect.sync(() => {
+        if (sandboxSpaceOf(environmentId) === undefined) return;
+        let turns = liveTurns.get(environmentId);
+        if (turns === undefined) {
+          turns = new Set();
+          liveTurns.set(environmentId, turns);
+        }
+        turns.add(key);
+        // The work it was sent for is under way: its turn now keeps it busy.
+        claimedAt.delete(environmentId);
+      }),
+    turnEnded: (environmentId, key) =>
+      Effect.sync(() => {
+        liveTurns.get(environmentId)?.delete(key);
+      }),
     hold: Effect.fn("Sandboxes.hold")(function* (environmentId) {
       if (sandboxSpaceOf(environmentId) === undefined) return;
       // Each holder has its own key, so a late release never drops another's hold.

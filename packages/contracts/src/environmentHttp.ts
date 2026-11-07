@@ -134,6 +134,7 @@ import {
 import { Project, ProjectMutation, ProjectSnapshot } from "./project.ts";
 import {
   SandboxImageStatus,
+  SandboxImageStatusQuery,
   UpdateSandboxImageRequest,
   UpdateSandboxImageResult,
 } from "./sandboxImage.ts";
@@ -1331,6 +1332,7 @@ class EnvironmentSandboxImageHttpApi extends HttpApiGroup.make("sandboxImage")
   .add(
     HttpApiEndpoint.get("status", "/api/sandboxes/image", {
       headers: OptionalBearerHeaders,
+      query: SandboxImageStatusQuery,
       success: SandboxImageStatus,
       error: EnvironmentSandboxImageErrors,
     }).middleware(EnvironmentAuthenticatedAuth),

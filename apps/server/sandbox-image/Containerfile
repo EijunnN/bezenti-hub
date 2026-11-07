@@ -4,24 +4,19 @@
 # builds it with rootless Podman 3.4 or newer; nothing here needs BuildKit.
 #
 # The context the Hub prepares:
+#   clis/     the providers' CLIs: package.json and its package-lock.json (this directory's clis/).
 #   server/   the T3 server of the Hub's version, without its node_modules: the release tree a
 #             `t3` executable runs from, or a bundle built from a checkout (`dist/bin.mjs`).
 #   modules/  that server's runtime node_modules, for Linux on this machine's architecture.
 #   extras/   files laid out under /opt/t3 (a checkout's dev Replay agent); may be empty.
 #
-# Every version is pinned. To update one, change its ARG here (and the table in
-# docs/internals/sandboxes.md) and rebuild; a Sandbox picks the new image up at its next start.
+# Everything is pinned: Node by version and SHASUMS256, the CLIs with their whole dependency tree
+# by clis/package-lock.json (with integrity hashes). How to bump each: docs/internals/sandboxes.md.
 
 FROM docker.io/library/debian:bookworm-slim
 
 # Node of the repository's `engines` (package.json).
 ARG NODE_VERSION=26.12.1
-# The providers' CLIs, as their drivers name the npm packages (Claude, Codex, OpenCode, Pi, Grok).
-ARG CLAUDE_CODE_VERSION=2.1.319
-ARG CODEX_VERSION=0.167.0
-ARG OPENCODE_VERSION=1.19.5
-ARG PI_VERSION=1.5.0
-ARG GROK_VERSION=1.0.77
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
@@ -48,17 +43,21 @@ RUN set -eu; \
     rm "${file}"; \
     node --version; npm --version
 
-# Their install scripts fetch or link each CLI's platform binary, so they are allowed by name.
-RUN npm install --global --no-fund --no-audit \
-      --allow-scripts=@anthropic-ai/claude-code,@xai-official/grok,opencode-ai,protobufjs \
-      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-      "@openai/codex@${CODEX_VERSION}" \
-      "opencode-ai@${OPENCODE_VERSION}" \
-      "@earendil-works/pi-coding-agent@${PI_VERSION}" \
-      "@xai-official/grok@${GROK_VERSION}" \
- && npm cache clean --force \
- && rm -rf /root/.npm \
- && claude --version && codex --version && opencode --version && pi --version && grok --version
+# The CLIs from the lockfile, every package checked against its integrity hash, with no install
+# script run. Then only the two whose postinstall is needed, rebuilt by name: Claude Code and
+# OpenCode ship a placeholder `bin` that their postinstall replaces with the platform binary of
+# their (locked, already verified) optional dependency; neither downloads anything. Grok's
+# postinstall only copies its binary into the installing user's ~/.grok, and its `bin` launches
+# the locked platform binary without it; protobufjs's only checks its version. Codex and Pi have
+# no install script.
+COPY clis/ /opt/t3/clis/
+RUN set -eu; \
+    cd /opt/t3/clis; \
+    npm ci --omit=dev --ignore-scripts --no-audit --no-fund; \
+    npm rebuild --foreground-scripts @anthropic-ai/claude-code opencode-ai; \
+    for bin in claude codex opencode pi grok; do ln -s "/opt/t3/clis/node_modules/.bin/${bin}" "/usr/local/bin/${bin}"; done; \
+    npm cache clean --force; rm -rf /root/.npm; \
+    claude --version; codex --version; opencode --version; pi --version; grok --version
 
 # The server last, so a new Hub version rebuilds only these layers.
 COPY modules/ /opt/t3/app/node_modules/

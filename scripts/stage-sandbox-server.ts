@@ -34,7 +34,7 @@ const RepoRoot = Effect.service(Path.Path).pipe(
   Effect.flatMap((path) => path.fromFileUrl(new URL("..", import.meta.url))),
 );
 
-const stage = Effect.fn("stageSandboxServer")(function* (outputDir: string) {
+export const stageSandboxServer = Effect.fn("stageSandboxServer")(function* (outputDir: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -48,9 +48,16 @@ const stage = Effect.fn("stageSandboxServer")(function* (outputDir: string) {
   const repoRoot = yield* RepoRoot;
   const serverDir = path.join(repoRoot, "apps/server");
   const out = path.resolve(outputDir);
-  yield* fs.remove(out, { recursive: true, force: true });
-  for (const dir of ["server", "modules", "extras/scripts"]) {
-    yield* fs.makeDirectory(path.join(out, dir), { recursive: true });
+  // Into the private directory the caller made (the Hub's mkdtemp, 0700): never one made here at a
+  // path, which another user of the machine could have made first.
+  const given = yield* fs.stat(out).pipe(Effect.option);
+  if (given._tag === "None" || given.value.type !== "Directory") {
+    return yield* new SandboxServerStageError({
+      detail: `${out} does not exist; make it (privately, as with mkdtemp) first.`,
+    });
+  }
+  for (const dir of ["server", "extras/scripts"]) {
+    yield* fs.makeDirectory(path.join(out, dir), { recursive: true, mode: 0o700 });
   }
 
   // The bundle, as `vp pack` builds it for npm, into the context rather than apps/server/dist.
@@ -74,8 +81,7 @@ const stage = Effect.fn("stageSandboxServer")(function* (outputDir: string) {
   }
 
   yield* Effect.log("[sandbox-image] Installing its runtime modules...");
-  const stageDir = path.join(out, ".stage");
-  yield* fs.makeDirectory(stageDir, { recursive: true });
+  const stageDir = yield* fs.makeTempDirectory({ directory: out, prefix: ".stage-" });
   yield* stageRuntimeExternals({
     repoRoot,
     stageDir,
@@ -83,7 +89,6 @@ const stage = Effect.fn("stageSandboxServer")(function* (outputDir: string) {
     arch,
     version: serverPackageJson.version,
   });
-  yield* fs.remove(path.join(out, "modules"), { recursive: true, force: true });
   if (yield* fs.exists(path.join(stageDir, "node_modules"))) {
     yield* fs.rename(path.join(stageDir, "node_modules"), path.join(out, "modules"));
   } else {
@@ -109,7 +114,7 @@ const command = Command.make(
       Flag.withDescription("Where to put server/, modules/ and extras/ (emptied first)."),
     ),
   },
-  ({ outputDir }) => stage(outputDir).pipe(Effect.scoped),
+  ({ outputDir }) => stageSandboxServer(outputDir).pipe(Effect.scoped),
 ).pipe(Command.withDescription("Stage this checkout's T3 server for the Sandbox image."));
 
 if (import.meta.main) {

@@ -8,7 +8,6 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import * as NodeReadline from "node:readline";
 import * as NodeSea from "node:sea";
 
 import {
@@ -16,6 +15,7 @@ import {
   type SandboxImageBuild,
   type SandboxImageInfo,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -42,6 +42,9 @@ const SANDBOX_IMAGE_LABEL = "io.t3code.sandbox-image";
 /** A first build downloads Debian, Node and the CLIs; later ones reuse those layers. */
 const BUILD_TIMEOUT_MS = 60 * 60 * 1000;
 const LOG_LINES_KEPT = 400;
+/** Each line of the build's output is cut here, and all it keeps at most this many characters. */
+const LINE_MAX_CHARS = 2_048;
+const LOG_MAX_CHARS = 256 * 1024;
 
 export const configuredSandboxImage = Config.String(SANDBOX_IMAGE_SETTING).pipe(
   Config.option,
@@ -99,7 +102,17 @@ const streamCommand = (
       stdio: ["ignore", "pipe", "pipe"],
     });
     for (const stream of [child.stdout, child.stderr]) {
-      NodeReadline.createInterface({ input: stream }).on("line", (line) => onLine(line));
+      // Progress bars redraw with a bare carriage return: each redraw is a line of its own.
+      let pending = "";
+      stream.setEncoding("utf8");
+      stream.on("data", (chunk: string) => {
+        const parts = (pending + chunk).split(/\r\n|\r|\n/u);
+        pending = (parts.pop() ?? "").slice(0, LINE_MAX_CHARS);
+        for (const line of parts) onLine(line.slice(0, LINE_MAX_CHARS));
+      });
+      stream.on("end", () => {
+        if (pending !== "") onLine(pending);
+      });
     }
     child.on("error", (error) => {
       resume(Effect.fail(new SandboxImageBuildError({ detail: error.message })));
@@ -132,19 +145,31 @@ const streamCommand = (
   );
 
 /**
- * The staging's tools resolve `node` from PATH: the Hub's own first. In WSL the PATH the Hub took
- * from the login shell also lists Windows directories, whose `node` cannot run here.
+ * The staging's environment: only what pnpm and vp need, never the Hub's provider keys, tokens or
+ * build settings. Its tools resolve `node` from PATH, the Hub's own first; in WSL the PATH the Hub
+ * took from the login shell also lists Windows directories, whose `node` and `pnpm` cannot run.
  */
-const stagingEnvironment = (): NodeJS.ProcessEnv => {
-  const entries = (process.env.PATH ?? "")
-    .split(NodePath.delimiter)
-    .filter((entry) => entry !== "");
+const STAGING_ENV_KEPT = [
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "LANG",
+  "LC_ALL",
+  "TMPDIR",
+  "XDG_CACHE_HOME",
+  "XDG_DATA_HOME",
+  "XDG_CONFIG_HOME",
+];
+const stagingEnvironment = (env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv => {
+  const entries = (env.PATH ?? "").split(NodePath.delimiter).filter((entry) => entry !== "");
   const usable =
-    process.env.WSL_DISTRO_NAME === undefined
+    env.WSL_DISTRO_NAME === undefined
       ? entries
       : entries.filter((entry) => !entry.startsWith("/mnt/"));
+  const kept: NodeJS.ProcessEnv = {};
+  for (const key of STAGING_ENV_KEPT) if (env[key] !== undefined) kept[key] = env[key];
   return {
-    ...process.env,
+    ...kept,
     PATH: [NodePath.dirname(process.execPath), ...usable].join(NodePath.delimiter),
   };
 };
@@ -166,14 +191,14 @@ const prepareContext = Effect.fn("SandboxImage.prepareContext")(function* (
     });
   if (fromCheckout === undefined && NodeSea.isSea()) {
     const tree = NodePath.dirname(process.execPath);
-    const containerfile = NodePath.join(tree, "sandbox-image", "Containerfile");
-    if (!NodeFS.existsSync(containerfile)) {
+    const definition = NodePath.join(tree, "sandbox-image");
+    if (!NodeFS.existsSync(NodePath.join(definition, "Containerfile"))) {
       return yield* new SandboxImageBuildError({
-        detail: `this installation has no ${containerfile}; install T3 Code again.`,
+        detail: `this installation has no ${definition}/Containerfile; install T3 Code again.`,
       });
     }
     onLine(`Copying the T3 server ${packageJson.version} from ${tree}...`);
-    yield* copy(containerfile, NodePath.join(contextDir, "Containerfile"));
+    yield* copy(definition, contextDir);
     for (const entry of NodeFS.readdirSync(tree)) {
       if (entry === "sandbox-image" || entry === "node_modules" || entry.startsWith(".")) continue;
       yield* copy(NodePath.join(tree, entry), NodePath.join(contextDir, "server", entry));
@@ -200,10 +225,8 @@ const prepareContext = Effect.fn("SandboxImage.prepareContext")(function* (
     onLine,
     { cwd: checkout, env: stagingEnvironment(), timeoutMs: 20 * 60 * 1000 },
   );
-  yield* copy(
-    NodePath.join(checkout, "apps", "server", "sandbox-image", "Containerfile"),
-    NodePath.join(contextDir, "Containerfile"),
-  );
+  // The Containerfile and the CLIs' lockfile.
+  yield* copy(NodePath.join(checkout, "apps", "server", "sandbox-image"), contextDir);
 });
 
 /**
@@ -331,10 +354,12 @@ export class SandboxImageBuilds extends Context.Service<
   SandboxImageBuilds,
   {
     readonly image: string;
-    readonly builder: SandboxImageBuilder["Service"];
-    /** The image the tag names now. */
+    /** Why this Hub cannot build it, asked once (rootless Podman does not come and go). */
+    readonly cannotBuildReason: Effect.Effect<string | null>;
+    /** The image the tag names now, read again at most every few seconds and after each build. */
     readonly current: Effect.Effect<SandboxImageInfo>;
-    readonly lastBuild: Effect.Effect<SandboxImageBuild>;
+    /** The last (or current) build, with the lines of its output after `after` (a line count). */
+    readonly lastBuild: (after?: number) => Effect.Effect<SandboxImageBuild>;
     /** Starts a build and answers at once; refused while one runs. */
     readonly start: (input: {
       readonly actor: AuditLog.AuditActor;
@@ -342,6 +367,9 @@ export class SandboxImageBuilds extends Context.Service<
     }) => Effect.Effect<void, SandboxImageBuildInProgressError>;
   }
 >()("t3/sandboxes/SandboxImage/SandboxImageBuilds") {}
+
+/** How long a read of the image stands for the next ones (clients poll every second or so). */
+const CURRENT_TTL_MS = 5_000;
 
 const make = Effect.gen(function* () {
   const audit = yield* AuditLog.AuditLog;
@@ -352,44 +380,52 @@ const make = Effect.gen(function* () {
   const image = yield* configuredSandboxImage;
   const scope = yield* Effect.scope;
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
-  let state: SandboxImageBuild = {
+  let state: Omit<SandboxImageBuild, "log" | "logLines"> = {
     state: "idle",
     startedAt: null,
     finishedAt: null,
     error: null,
-    log: [],
-    logLines: 0,
   };
+  // The kept tail of its output: `log[0]` is line number `logLines - log.length`.
   let log: Array<string> = [];
+  let logChars = 0;
   let logLines = 0;
   const onLine = (line: string) => {
     logLines += 1;
     log.push(line);
-    if (log.length > LOG_LINES_KEPT) log = log.slice(-LOG_LINES_KEPT);
+    logChars += line.length;
+    while (log.length > LOG_LINES_KEPT || logChars > LOG_MAX_CHARS) {
+      logChars -= log.shift()?.length ?? 0;
+    }
   };
 
-  const current: SandboxImageBuilds["Service"]["current"] = builder.inspect(image).pipe(
-    Effect.map((found) => ({
+  const cannotBuildReason = yield* Effect.cached(builder.cannotBuildReason);
+
+  let currentRead: { readonly at: number; readonly value: SandboxImageInfo } | undefined;
+  const readCurrent = builder.inspect(image).pipe(
+    Effect.map((found): SandboxImageInfo => ({
       image,
       version: found?.version ?? null,
       builtAt: found === null || found.createdAt === null ? null : toIso(found.createdAt),
     })),
   );
+  const current: SandboxImageBuilds["Service"]["current"] = Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    if (currentRead !== undefined && now - currentRead.at < CURRENT_TTL_MS) {
+      return currentRead.value;
+    }
+    const value = yield* readCurrent;
+    currentRead = { at: now, value };
+    return value;
+  });
 
-  // The build is recorded on the Hub machine, which runs it; the image tag is its name.
+  // Every build is recorded on the Hub machine, whoever asked; the image tag is its name.
   const target = { kind: "environment", id: HUB_MACHINE_ENVIRONMENT_ID, name: image } as const;
-  const finish = Effect.fn("SandboxImageBuilds.finish")(function* (
+  const record = (
     input: { readonly actor: AuditLog.AuditActor; readonly via: SandboxImageBuildVia },
     outcome: { readonly built: SandboxImageFound } | { readonly error: string },
-  ) {
-    if ("error" in outcome) onLine(`The build failed: ${outcome.error}`);
-    state = {
-      ...state,
-      state: "built" in outcome ? "succeeded" : "failed",
-      finishedAt: yield* nowIso,
-      error: "error" in outcome ? outcome.error : null,
-    };
-    yield* audit
+  ) =>
+    audit
       .record({
         actor: input.actor,
         action: "sandbox.image.update",
@@ -400,20 +436,34 @@ const make = Effect.gen(function* () {
             : { via: input.via, outcome: "failed", reason: outcome.error.slice(0, 200) },
       })
       .pipe(Effect.ignore({ log: true }));
+  const finish = Effect.fn("SandboxImageBuilds.finish")(function* (
+    input: { readonly actor: AuditLog.AuditActor; readonly via: SandboxImageBuildVia },
+    outcome: { readonly built: SandboxImageFound } | { readonly error: string },
+  ) {
+    if ("error" in outcome) onLine(`The build failed: ${outcome.error}`);
+    currentRead = undefined;
+    state = {
+      ...state,
+      state: "built" in outcome ? "succeeded" : "failed",
+      finishedAt: yield* nowIso,
+      error: "error" in outcome ? outcome.error : null,
+    };
+    yield* record(input, outcome);
   });
 
   const start: SandboxImageBuilds["Service"]["start"] = Effect.fn("SandboxImageBuilds.start")(
     function* (input) {
-      if (state.state === "building") return yield* new SandboxImageBuildInProgressError({});
-      log = [];
-      logLines = 0;
-      state = {
-        ...state,
-        state: "building",
-        startedAt: yield* nowIso,
-        finishedAt: null,
-        error: null,
-      };
+      const startedAt = yield* nowIso;
+      // Checked and claimed in one step, with nothing between: two requests never both build.
+      const claimed = yield* Effect.sync(() => {
+        if (state.state === "building") return false;
+        log = [];
+        logChars = 0;
+        logLines = 0;
+        state = { state: "building", startedAt, finishedAt: null, error: null };
+        return true;
+      });
+      if (!claimed) return yield* new SandboxImageBuildInProgressError({});
       yield* builder.build({ image, onLine }).pipe(
         Effect.matchEffect({
           onSuccess: (built) => finish(input, { built }),
@@ -424,11 +474,8 @@ const make = Effect.gen(function* () {
             Effect.andThen(finish(input, { error: "the build stopped unexpectedly." })),
           ),
         ),
-        Effect.onInterrupt(() =>
-          Effect.sync(() => {
-            state = { ...state, state: "failed", error: "the Hub stopped during the build." };
-          }),
-        ),
+        // The Hub stopping mid-build still leaves it recorded, as failed.
+        Effect.onInterrupt(() => finish(input, { error: "the Hub stopped during the build." })),
         Effect.forkIn(scope),
       );
     },
@@ -436,9 +483,13 @@ const make = Effect.gen(function* () {
 
   return SandboxImageBuilds.of({
     image,
-    builder,
+    cannotBuildReason,
     current,
-    lastBuild: Effect.sync(() => ({ ...state, log: [...log], logLines })),
+    lastBuild: (after = 0) =>
+      Effect.sync(() => {
+        const first = logLines - log.length;
+        return { ...state, log: log.slice(Math.max(0, after - first)), logLines };
+      }),
     start,
   });
 });

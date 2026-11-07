@@ -31,6 +31,7 @@ import * as Stream from "effect/Stream";
 
 import { addMember, joinOrganization } from "../auth/UserAuth.testkit.ts";
 import * as CommandActor from "../auth/CommandActor.ts";
+import * as EnvironmentDemand from "../environment/EnvironmentDemand.ts";
 import { ClaudeOrchestratorReplayHarness } from "../orchestration-v2/Adapters/ClaudeAdapterV2.testkit.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
@@ -427,6 +428,12 @@ describe("Hub con Environments: the Sandboxes' base image", () => {
       assert.equal(done.body.build.state, "succeeded");
       assert.equal(done.body.image.version, "0.1.7-20261107000000");
       assert.deepEqual(done.body.build.log, ["STEP 1/2: FROM debian", "STEP 2/2: COPY server/"]);
+      // A client that has the first line asks only for what came after it.
+      const since = answered<SandboxImageStatus>(
+        yield* hub.server.request("/api/sandboxes/image?after=1", { cookie: hub.owner }),
+      );
+      assert.deepEqual(since.body.build.log, ["STEP 2/2: COPY server/"]);
+      assert.equal(since.body.build.logLines, 2);
 
       // A failed build says why, and is recorded too.
       yield* requestBuild(hub);
@@ -450,6 +457,95 @@ describe("Hub con Environments: the Sandboxes' base image", () => {
           reason: "podman build exited with code 125.",
         },
       ]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "refuses to move a running Sandbox when the newest image is missing, keeping it running",
+    () =>
+      Effect.gen(function* () {
+        let newest: string | null = "0.1.7-20261101000000";
+        const hub = yield* makeHub({ sandboxImageVersion: () => newest });
+        const acme = yield* createOrganization(hub, "Acme");
+        yield* hub
+          .service(Sandboxes.Sandboxes)
+          .ensureRunning({ spaceId: acme, actorUserId: undefined })
+          .pipe(Effect.orDie);
+        // The tag was removed (or never built): a restart would only fail to start.
+        newest = null;
+        const refused = yield* updateImage(hub, acme);
+        assert.equal(refused.status, 409);
+        assert.include(refused.body.message ?? "", "The newest image is missing");
+        const listed = yield* listEnvironments(hub.server, hub.owner);
+        assert.equal(
+          listed.find((entry) => entry.id === sandboxEnvironmentIdOf(acme))?.status,
+          "online",
+        );
+        assert.deepEqual(yield* auditedStarts(hub), ["sandbox.start:demand"]);
+      }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "work sent to a Sandbox just before the update makes it refuse, before any run is recorded",
+    () =>
+      Effect.gen(function* () {
+        let newest = "0.1.7-20261101000000";
+        const hub = yield* makeHub({ sandboxImageVersion: () => newest });
+        const acme = yield* createOrganization(hub, "Acme");
+        yield* hub
+          .service(Sandboxes.Sandboxes)
+          .ensureRunning({ spaceId: acme, actorUserId: undefined })
+          .pipe(Effect.orDie);
+        newest = "0.1.7-20261107000000";
+        // A message's dispatch claims the Sandbox (as `message.dispatch` does) before its run exists.
+        yield* hub
+          .service(EnvironmentDemand.EnvironmentDemand)
+          .awaitStarted(sandboxEnvironmentIdOf(acme), {
+            actorUserId: yield* ownerIdOf(hub),
+            explicit: true,
+          })
+          .pipe(Effect.orDie);
+        const refused = yield* updateImage(hub, acme);
+        assert.equal(refused.status, 409);
+        assert.include(refused.body.message ?? "", "Work was just sent to it");
+        assert.deepEqual(yield* auditedStarts(hub), ["sandbox.start:demand"]);
+      }).pipe(Effect.scoped),
+  );
+
+  it.live("two builds asked at once: one runs, the other is refused", () =>
+    Effect.gen(function* () {
+      const release = yield* Deferred.make<void>();
+      const started = yield* Deferred.make<void>();
+      const builds = yield* Ref.make(0);
+      const hub = yield* makeHub({
+        sandboxImageBuilder: SandboxImage.SandboxImageBuilder.of({
+          cannotBuildReason: Effect.succeed(null),
+          inspect: Effect.fn(function* () {
+            yield* Effect.void;
+            return null;
+          }),
+          build: Effect.fn(function* () {
+            yield* Ref.update(builds, (n) => n + 1);
+            yield* Deferred.succeed(started, undefined);
+            yield* Deferred.await(release);
+            return { id: "abc", version: "0.1.7-20261107000000", createdAt: null };
+          }),
+        }),
+      });
+      const answers = yield* Effect.all([requestBuild(hub), requestBuild(hub)], {
+        concurrency: "unbounded",
+      });
+      assert.sameMembers(
+        answers.map((answer) => answer.status),
+        [200, 409],
+      );
+      yield* Deferred.await(started);
+      yield* Deferred.succeed(release, undefined);
+      yield* imageStatus(hub).pipe(
+        // oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- the build runs in the Hub's own fiber; its status is what clients poll
+        Effect.repeat({ schedule: Schedule.spaced("20 millis"), until: buildEnded }),
+      );
+      assert.equal(yield* Ref.get(builds), 1);
     }).pipe(Effect.scoped),
   );
 

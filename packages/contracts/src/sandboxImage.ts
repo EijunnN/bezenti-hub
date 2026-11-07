@@ -25,9 +25,9 @@ export const SandboxImageBuild = Schema.Struct({
   finishedAt: Schema.NullOr(IsoDateTime),
   /** Why it failed. */
   error: Schema.NullOr(Schema.String),
-  /** The last lines of its output. */
+  /** Its output's lines after the `after` asked for (of the last ones the Hub keeps). */
   log: Schema.Array(Schema.String),
-  /** How many lines it printed in all, so a client that polls reads on from where it was. */
+  /** How many lines it printed in all: the `after` to ask with next. */
   logLines: NonNegativeInt,
 });
 export type SandboxImageBuild = typeof SandboxImageBuild.Type;
@@ -60,6 +60,14 @@ export const SandboxImageStatus = Schema.Struct({
   sandboxes: Schema.Array(SandboxImageSandbox),
 });
 export type SandboxImageStatus = typeof SandboxImageStatus.Type;
+
+/** `after`: the `logLines` a client already has, so only newer lines come back. */
+export const SandboxImageStatusQuery = Schema.Struct({
+  after: Schema.optional(
+    Schema.NumberFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  ),
+});
+export type SandboxImageStatusQuery = typeof SandboxImageStatusQuery.Type;
 
 /** A running Sandbox moves to the newest image, never mid-turn. */
 export const UpdateSandboxImageRequest = Schema.Struct({ environmentId: EnvironmentId });

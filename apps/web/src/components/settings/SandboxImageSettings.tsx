@@ -1,5 +1,5 @@
 import type { EnvironmentId, SandboxImageSandbox, SandboxImageStatus } from "@t3tools/contracts";
-import { useEffect, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import { usePrimarySessionState } from "../../environments/primary";
 import {
@@ -64,23 +64,48 @@ export function SandboxImageSettings() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
+  const [log, setLog] = useState<ReadonlyArray<string>>([]);
+  // The build the shown lines are of, and how many it had printed: the Hub sends only newer ones.
+  const shown = useRef<{ readonly startedAt: string | null; readonly lines: number } | null>(null);
   const building = status?.build.state === "building";
+
+  /** Takes a status in, appending the build's new lines (or starting over for another build). */
+  const receive = (next: SandboxImageStatus, askedAfter: number | undefined) => {
+    setStatus(next);
+    const same = shown.current !== null && shown.current.startedAt === next.build.startedAt;
+    if (same && askedAfter !== undefined) {
+      setLog((lines) => [...lines, ...next.build.log].slice(-LOG_LINES_SHOWN));
+    } else {
+      setLog(next.build.log.slice(-LOG_LINES_SHOWN));
+    }
+    // Lines asked for relative to another build are not these: ask for all of this one next.
+    shown.current =
+      same || askedAfter === undefined
+        ? { startedAt: next.build.startedAt, lines: next.build.logLines }
+        : null;
+  };
+
+  const polled = useEffectEvent((next: SandboxImageStatus, after: number | undefined) =>
+    receive(next, after),
+  );
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- polls the Hub for the build's output and each Sandbox's image while Settings is open.
   useEffect(() => {
     if (!isOwner) return;
     let current = true;
-    const load = () =>
-      void fetchSandboxImageStatus().then(
+    const load = () => {
+      const after = shown.current?.lines;
+      void fetchSandboxImageStatus(after).then(
         (next) => {
           if (!current) return;
-          setStatus(next);
+          polled(next, after);
           setError(null);
         },
         (cause: unknown) => {
           if (current) setError(errorMessageOf(cause, "Could not load the Sandbox image."));
         },
       );
+    };
     load();
     const timer = window.setInterval(load, building ? BUILDING_REFRESH_MS : IDLE_REFRESH_MS);
     return () => {
@@ -96,7 +121,7 @@ export function SandboxImageSettings() {
     setError(null);
     setNotice(null);
     try {
-      setStatus(await buildSandboxImage());
+      receive(await buildSandboxImage(), undefined);
     } catch (cause) {
       setError(errorMessageOf(cause, "The build did not start."));
     }
@@ -116,14 +141,13 @@ export function SandboxImageSettings() {
             ? `${sandbox.name} already runs the newest image.`
             : `${sandbox.name} is not running; it uses the newest image at its next start.`,
       );
-      setStatus(await fetchSandboxImageStatus());
+      receive(await fetchSandboxImageStatus(), undefined);
     } catch (cause) {
       setError(errorMessageOf(cause, `${sandbox.name} was not updated.`));
     }
     setPending(null);
   };
 
-  const log = status?.build.log.slice(-LOG_LINES_SHOWN) ?? [];
   const newest = status?.image.version ?? null;
 
   return (

@@ -45,5 +45,11 @@ export class EnvironmentDemand extends Context.Service<
     readonly touch: (environmentId: EnvironmentId) => Effect.Effect<void>;
     /** Keeps it busy until the scope closes: an open terminal, a preview being served. */
     readonly hold: (environmentId: EnvironmentId) => Effect.Effect<void, never, Scope.Scope>;
+    /**
+     * A turn started on it (`key` names it, per provider session and run) or ended, as its
+     * connection reports them: what an image update must never cut short.
+     */
+    readonly turnStarted: (environmentId: EnvironmentId, key: string) => Effect.Effect<void>;
+    readonly turnEnded: (environmentId: EnvironmentId, key: string) => Effect.Effect<void>;
   }
 >()("t3/environment/EnvironmentDemand") {}

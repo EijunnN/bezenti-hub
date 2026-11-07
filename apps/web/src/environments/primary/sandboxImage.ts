@@ -6,9 +6,14 @@ import type {
 
 import { request } from "./userAccounts";
 
-/** The Sandbox base image, its last build and each Sandbox's version: the Owner's. */
-export function fetchSandboxImageStatus(): Promise<SandboxImageStatus> {
-  return request((client) => client.sandboxImage.status({ headers: {} }));
+/**
+ * The Sandbox base image, its last build and each Sandbox's version: the Owner's. With `after`
+ * (the `logLines` already shown), only the build's newer lines come back.
+ */
+export function fetchSandboxImageStatus(after?: number): Promise<SandboxImageStatus> {
+  return request((client) =>
+    client.sandboxImage.status({ headers: {}, query: after === undefined ? {} : { after } }),
+  );
 }
 
 /** Starts a build on the Hub and answers at once; follow it with {@link fetchSandboxImageStatus}. */

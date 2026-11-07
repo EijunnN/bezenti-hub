@@ -68,9 +68,9 @@ export const layer = HttpApiBuilder.group(
       };
     });
 
-    const status = Effect.gen(function* () {
+    const status = Effect.fn("environment.sandboxImage.statusOf")(function* (after?: number) {
       const [image, build, cannotBuildReason] = yield* Effect.all(
-        [builds.current, builds.lastBuild, builds.builder.cannotBuildReason],
+        [builds.current, builds.lastBuild(after), builds.cannotBuildReason],
         { concurrency: "unbounded" },
       );
       const rows = Option.isNone(sandboxes)
@@ -101,7 +101,7 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.sandboxImage.status")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireOwner(AuthAccessReadScope);
-          return yield* status;
+          return yield* status(args.query.after);
         }),
       )
       .handle(
@@ -115,7 +115,7 @@ export const layer = HttpApiBuilder.group(
                 Effect.fail(new EnvironmentHttpConflictError({ message: error.message })),
             }),
           );
-          return yield* status;
+          return yield* status();
         }),
       )
       .handle(
