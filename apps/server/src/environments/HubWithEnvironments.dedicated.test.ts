@@ -18,7 +18,9 @@ import {
   UserId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 
 import * as AuditLog from "../audit/AuditLog.ts";
@@ -26,6 +28,7 @@ import * as CommandActor from "../auth/CommandActor.ts";
 import { addMember, joinOrganization, passkeyReauth } from "../auth/UserAuth.testkit.ts";
 import * as HubRepository from "../checkpointing/HubRepository.ts";
 import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
+import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -38,12 +41,15 @@ import {
   rootlessPodmanAvailable,
 } from "../sandboxes/PodmanSandboxRuntime.testkit.ts";
 import { devCodeMounts } from "../sandboxes/sandboxRuntimeFromConfig.ts";
+import * as OrganizationLifecycle from "../spaces/OrganizationLifecycle.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import { dedicatedSandboxIdOf } from "./DedicatedHost.ts";
 import * as EnvironmentConnections from "./EnvironmentConnections.ts";
 import * as EnvironmentRegistry from "./EnvironmentRegistry.ts";
 import {
   approveJoin,
   confirmJoin,
+  joinMachine,
   joinStatus,
   listEnvironments,
   memberWithPasskey,
@@ -116,6 +122,28 @@ const createThread = (
     worktreePath: null,
     activeEnvironmentId: input.environmentId,
   });
+
+/** Completes once the Thread's Active environment changed, as its next event says. */
+const threadEnvironmentChanged = Effect.fn(function* (hub: Hub, threadId: string) {
+  const orchestrator = hub.service(Orchestrator.OrchestratorV2);
+  const id = ThreadId.make(threadId);
+  const afterSequence = yield* hub
+    .service(EventSink.EventSinkV2)
+    .latestSequence({ threadId: id })
+    .pipe(Effect.orDie);
+  return yield* orchestrator.streamStoredEventsFrom({ threadId: id, afterSequence }).pipe(
+    Stream.filter(({ event }) => {
+      const payload = (event as { readonly payload?: { readonly activeEnvironmentId?: unknown } })
+        .payload;
+      return event.type === "thread.metadata-updated" && payload?.activeEnvironmentId === null;
+    }),
+    Stream.runHead,
+    Effect.timeout("60 seconds"),
+    Effect.orDie,
+    Effect.forkScoped,
+    Effect.map(Fiber.join),
+  );
+});
 
 const listedIds = (hub: Hub, cookie: string) =>
   listEnvironments(hub.server, cookie).pipe(Effect.map((listed) => listed.map(({ id }) => id)));
@@ -341,7 +369,6 @@ describe("Hub con Environments: a machine dedicated to a Space", () => {
     () =>
       Effect.gen(function* () {
         const hub = yield* makeHub();
-        const registry = hub.service(EnvironmentRegistry.EnvironmentRegistry);
         const owner = yield* ownerIdOf(hub);
         const acme = yield* createOrganization(hub, "Acme");
         const globex = yield* createOrganization(hub, "Globex");
@@ -370,6 +397,22 @@ describe("Hub con Environments: a machine dedicated to a Space", () => {
           environmentId: vps,
           title: "Busy on the VPS",
         });
+        // An archived Thread there too: it blocks nothing, and needs an environment afterwards.
+        yield* createThread(hub, grace, {
+          threadId: "thread:shelved",
+          projectId: acmeProject,
+          spaceId: acme,
+          environmentId: vps,
+          title: "Shelved on the VPS",
+        });
+        const orchestrator = hub.service(Orchestrator.OrchestratorV2);
+        yield* orchestrator
+          .dispatch({
+            type: "thread.archive",
+            commandId: CommandId.make("command:archive-shelved"),
+            threadId: ThreadId.make("thread:shelved"),
+          })
+          .pipe(CommandActor.actAs(owner), Effect.orDie);
 
         const changeMode = (cookie: string, body: Record<string, unknown>) =>
           hub.server.request("/api/environments/mode", {
@@ -395,44 +438,68 @@ describe("Hub con Environments: a machine dedicated to a Space", () => {
         assert.equal(stillAcme?.mode, "dedicated");
         assert.equal(stillAcme?.spaceId, acme);
 
-        // Once the Thread is gone it moves to Globex, and then becomes the Owner's own.
-        yield* hub
-          .service(Orchestrator.OrchestratorV2)
+        // Once the active Thread is gone it moves to Globex: the archived one needs an
+        // environment from then on, and unarchiving it does not put it back on the machine.
+        yield* orchestrator
           .dispatch({
             type: "thread.delete",
             commandId: CommandId.make("command:delete-busy"),
             threadId: ThreadId.make("thread:busy"),
           })
           .pipe(CommandActor.actAs(owner), Effect.orDie);
+        const shelvedReleased = yield* threadEnvironmentChanged(hub, "thread:shelved");
         const toGlobex = yield* changeMode(hub.owner, { mode: "dedicated", spaceId: globex });
         assert.equal(toGlobex.status, 200);
         assert.equal(toGlobex.body.spaceId, globex);
+        assert.isNull(toGlobex.body.ownerUserId);
+        yield* shelvedReleased;
+        yield* orchestrator
+          .dispatch({
+            type: "thread.unarchive",
+            commandId: CommandId.make("command:unarchive-shelved"),
+            threadId: ThreadId.make("thread:shelved"),
+          })
+          .pipe(CommandActor.actAs(owner), Effect.orDie);
+        const unarchived = yield* orchestrator
+          .getThreadProjection(ThreadId.make("thread:shelved"))
+          .pipe(Effect.orDie);
+        assert.isNull(unarchived.thread.activeEnvironmentId);
         assert.notInclude(
           (yield* listEnvironments(hub.server, graceCookie)).map(({ id }) => id),
           vps,
         );
+
+        // The machine learns it from the Hub: its Sandbox's server, welcomed for Globex, exits;
+        // its host asks the Hub, deletes Acme's home and starts one for Globex.
+        const first = yield* dedicated.nextLaunch;
+        const acmeHome = dedicated.launches[0]?.homePath ?? "";
+        yield* first.connect;
+        const globexServer = yield* dedicated.nextLaunch.pipe(
+          Effect.timeout("60 seconds"),
+          Effect.orDie,
+        );
+        assert.equal(dedicated.launches[1]?.joined.spaceId, globex);
+        assert.notEqual(dedicated.launches[1]?.homePath, acmeHome);
+        assert.isFalse(NodeFS.existsSync(acmeHome));
+        assert.equal(dedicated.persisted.at(-1)?.spaceId, globex);
+        yield* assertOnline(hub, vps);
+
         const toPersonal = yield* changeMode(hub.owner, { mode: "personal" });
         assert.equal(toPersonal.status, 200);
         assert.equal(toPersonal.body.mode, "personal");
         assert.equal(toPersonal.body.ownerUserId, owner);
-        // Each change closed its socket, so it reconnects and its welcome names the new mode.
         assert.notEqual(
           (yield* listEnvironments(hub.server, hub.owner)).find((entry) => entry.id === vps)
             ?.status,
           "online",
         );
-        assert.isDefined(dedicated.environment);
-        yield* dedicated.environment.connect;
-        yield* assertOnline(hub, vps);
-        assert.equal(
-          yield* registry.chooseForThread({
-            userId: owner,
-            requested: vps,
-            projectId: acmeProject,
-            providerInstanceId: INSTANCE,
-          }),
-          vps,
-        );
+        // Welcomed as personal, the Sandbox's server refuses; its host deletes Globex's home and
+        // serves as a personal machine from then on.
+        yield* globexServer.connect;
+        const personal = yield* dedicated.turnedPersonal.pipe(Effect.timeout("60 seconds"));
+        assert.equal(personal.mode, "personal");
+        assert.isFalse(NodeFS.existsSync(dedicated.launches[1]?.homePath ?? ""));
+        assert.equal(dedicated.launches.length, 2);
 
         const changes = yield* hub
           .service(AuditLog.AuditLog)
@@ -442,6 +509,63 @@ describe("Hub con Environments: a machine dedicated to a Space", () => {
           { from: "dedicated", to: "dedicated", fromSpaceId: acme, toSpaceId: globex },
           { from: "dedicated", to: "personal", fromSpaceId: globex, toSpaceId: null },
         ]);
+      }).pipe(Effect.scoped),
+  );
+});
+
+describe("Hub con Environments: a dedicated machine is the Installation's", () => {
+  it.live(
+    "owned by nobody, it outlives its Space for the Owner alone, refused at connect, and leaves as itself",
+    () =>
+      Effect.gen(function* () {
+        const hub = yield* makeHub();
+        const registry = hub.service(EnvironmentRegistry.EnvironmentRegistry);
+        const owner = yield* ownerIdOf(hub);
+        const acme = yield* createOrganization(hub, "Acme");
+        const vps = yield* joinMachine(hub.server, hub.authenticator, hub.owner, "Acme VPS", acme);
+        const spare = yield* joinMachine(hub.server, hub.authenticator, hub.owner, "Spare", acme);
+        // Nobody owns it: the Owner who dedicated it is only on record.
+        const [row] = yield* hub.server.sql<{ readonly owner: string | null }>`
+          SELECT owner_user_id AS owner FROM environments WHERE environment_id = ${vps.environmentId}
+        `;
+        assert.isNull(row?.owner);
+        assert.equal((yield* registry.checkCredential(vps.credential))._tag, "valid");
+
+        // Its Organization is deleted: the Owner still sees, renames and removes it; it runs nothing.
+        const lifecycle = hub.service(OrganizationLifecycle.OrganizationLifecycle);
+        yield* lifecycle.archive(owner, acme).pipe(Effect.orDie);
+        yield* lifecycle.delete(owner, acme).pipe(Effect.orDie);
+        const checked = yield* registry.checkCredential(vps.credential);
+        assert.equal(checked._tag === "refused" && checked.reason, "space-missing");
+        assert.include(
+          (yield* listEnvironments(hub.server, hub.owner)).map(({ id }) => id),
+          vps.environmentId,
+        );
+        const renamed = yield* hub.server.request("/api/environments/rename", {
+          cookie: hub.owner,
+          body: { environmentId: vps.environmentId, name: "Old Acme VPS" },
+        });
+        assert.equal(renamed.status, 200);
+        const removed = yield* hub.server.request("/api/environments/remove", {
+          cookie: hub.owner,
+          body: { environmentId: vps.environmentId },
+        });
+        assert.equal(removed.status, 200);
+
+        // `t3 leave` on a dedicated machine is recorded as the machine, not as any User.
+        yield* hub.server.sql`
+          UPDATE environments SET space_id = ${yield* createOrganization(hub, "Globex")}
+          WHERE environment_id = ${spare.environmentId}
+        `;
+        assert.isTrue(yield* registry.leave(spare.credential));
+        const entries = yield* hub
+          .service(AuditLog.AuditLog)
+          .list({ viewer: owner, query: { action: "environment.remove" } })
+          .pipe(Effect.orDie);
+        const left = entries.entries.find((entry) => entry.target.id === spare.environmentId);
+        assert.equal(left?.actor.source, "cli");
+        assert.isNull(left?.actor.userId);
+        assert.equal(left?.detail.via, "leave");
       }).pipe(Effect.scoped),
   );
 });
@@ -489,7 +613,7 @@ describe.skipIf(!rootlessPodmanAvailable)("a dedicated machine in Podman", () =>
         );
         const state = yield* dedicated.hostState;
         assert.equal(state._tag === "sandbox" && state.state, "running");
-        const container = `${run.namePrefix}dedicated`;
+        const container = `${run.namePrefix}${dedicatedSandboxIdOf(acme)}`;
         const mounts = JSON.parse(
           podmanResult(["container", "inspect", "--format", "{{json .Mounts}}", container]).stdout,
         ) as Array<{ Source: string; Destination: string; RW: boolean }>;

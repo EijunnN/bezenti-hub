@@ -17,6 +17,7 @@ import * as Result from "effect/Result";
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
 import * as PodmanSandboxRuntime from "./PodmanSandboxRuntime.ts";
+import { hostExposureRefusal, listeningOutsideLoopback } from "./hostExposure.ts";
 import * as ProcessSandboxRuntime from "./ProcessSandboxRuntime.ts";
 import { SandboxHubAddress } from "./SandboxRuntime.ts";
 
@@ -24,6 +25,8 @@ const SANDBOX_RUNTIME_SETTING = "T3CODE_SANDBOX_RUNTIME";
 /** The image Sandboxes run; by default the one built for this Hub's version. */
 const SANDBOX_IMAGE_SETTING = "T3CODE_SANDBOX_IMAGE";
 const defaultSandboxImage = `localhost/t3code-sandbox:${packageJson.version}`;
+/** Ports of a dedicated machine its Sandbox may reach, comma-separated (for example `22`). */
+const DEDICATED_HOST_PORTS_SETTING = "T3CODE_DEDICATED_HOST_PORTS";
 
 const optionalSetting = (name: string) =>
   Config.String(name).pipe(
@@ -132,6 +135,20 @@ export const dedicatedRuntimeFromConfig = Effect.fn("dedicatedRuntimeFromConfig"
       `Podman is here but the Sandbox image ${image} is not: build it (\`t3 sandbox image build\`) or set ${SANDBOX_IMAGE_SETTING}.`,
     );
   }
+  // The container reaches every address of this machine but its loopback, and rootless Podman
+  // cannot firewall that: nothing may listen there unless the Owner named it.
+  const allowed = new Set(
+    Option.getOrElse(yield* optionalSetting(DEDICATED_HOST_PORTS_SETTING), () => "")
+      .split(",")
+      .map((port) => Number.parseInt(port.trim(), 10))
+      .filter(Number.isFinite),
+  );
+  const exposed = hostExposureRefusal(
+    // This server's own port answers only `/health`.
+    listeningOutsideLoopback().filter((listener) => listener.port !== config.port),
+    allowed,
+  );
+  if (exposed !== undefined) return Result.fail(exposed);
   return Result.succeed(podmanForHub(config, image).pipe(Layer.provide(address)));
 });
 

@@ -136,6 +136,11 @@ export function HubEnvironmentsSettings() {
   );
   const spaceName = (spaceId: string | null | undefined) =>
     spaces?.find((space) => space.id === spaceId)?.name ?? "a Space";
+  // A dedicated machine leaving its Space loses that Space's work files on it.
+  const leavesSpace = (change: {
+    readonly environment: HubEnvironmentSummary;
+    readonly use: "personal" | SpaceId;
+  }) => change.environment.mode === "dedicated" && change.use !== change.environment.spaceId;
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- polls the Hub for each machine's live status while Settings is open.
   useEffect(() => {
@@ -353,6 +358,11 @@ export function HubEnvironmentsSettings() {
                     </option>
                   ))}
                 </select>
+                {leavesSpace(changingMode) ? (
+                  <p className="mt-2 text-sm text-warning-foreground">
+                    {`Work files on ${changingMode.environment.name} for ${spaceName(changingMode.environment.spaceId)} will be deleted: its Sandbox's home goes, so no other Space or owner ever sees them.`}
+                  </p>
+                ) : null}
                 {modeError !== null ? (
                   <p className="mt-2 text-sm text-destructive-foreground" role="alert">
                     {modeError}
@@ -364,7 +374,7 @@ export function HubEnvironmentsSettings() {
                   Cancel
                 </Button>
                 <Button disabled={pending} type="submit">
-                  Save
+                  {leavesSpace(changingMode) ? "Change and delete its files" : "Save"}
                 </Button>
               </DialogFooter>
             </form>

@@ -40,6 +40,7 @@ import * as CliError from "effect/cli/CliError";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import {
+  DEDICATED_CREDENTIAL_SECRET,
   ENVIRONMENT_CREDENTIAL_SECRET,
   readJoinedHubState,
   removeJoinedHubState,
@@ -424,7 +425,14 @@ const runJoin = (
         );
       }
       const secrets = yield* ServerSecretStore.ServerSecretStore;
-      yield* secrets.set(ENVIRONMENT_CREDENTIAL_SECRET, new TextEncoder().encode(credential));
+      // A dedicated machine's credential is only for its Sandbox: the host's own server, as a
+      // personal one, never finds it.
+      yield* secrets.set(
+        decision.dedicatedSpace === undefined
+          ? ENVIRONMENT_CREDENTIAL_SECRET
+          : DEDICATED_CREDENTIAL_SECRET,
+        new TextEncoder().encode(credential),
+      );
       yield* writeJoinedHubState(config.joinedHubPath, {
         hubUrl: hubUrl.origin,
         hubEnvironmentId: decision.hubEnvironmentId,
@@ -449,7 +457,10 @@ const runLeave = (flags: CliAuthLocationFlags) =>
       const secrets = yield* ServerSecretStore.ServerSecretStore;
       const forget = secrets
         .remove(ENVIRONMENT_CREDENTIAL_SECRET)
-        .pipe(Effect.andThen(removeJoinedHubState(config.joinedHubPath)));
+        .pipe(
+          Effect.andThen(secrets.remove(DEDICATED_CREDENTIAL_SECRET)),
+          Effect.andThen(removeJoinedHubState(config.joinedHubPath)),
+        );
       const joined = yield* readJoinedHubState(config.joinedHubPath).pipe(Effect.result);
       if (joined._tag === "Failure") {
         yield* forget;
@@ -461,9 +472,18 @@ const runLeave = (flags: CliAuthLocationFlags) =>
         return yield* Console.log("This machine is not joined to a Hub.");
       }
       const hub = joined.success.value;
-      const credential = yield* secrets
-        .get(ENVIRONMENT_CREDENTIAL_SECRET)
-        .pipe(Effect.map(Option.map((bytes) => new TextDecoder().decode(bytes))));
+      // A personal machine's credential, or a dedicated one's.
+      const credential = yield* Effect.all([
+        secrets.get(ENVIRONMENT_CREDENTIAL_SECRET),
+        secrets.get(DEDICATED_CREDENTIAL_SECRET),
+      ]).pipe(
+        Effect.map(([personal, dedicated]) =>
+          Option.map(
+            Option.orElse(personal, () => dedicated),
+            (bytes) => new TextDecoder().decode(bytes),
+          ),
+        ),
+      );
       const outcome = Option.isNone(credential)
         ? { status: 401 }
         : yield* callHub(new URL("/api/environments/leave", hub.hubUrl), {

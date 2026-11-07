@@ -712,13 +712,11 @@ const layerHubMachineSnapshot = Layer.effect(
 // Joined mode serves `/health` and nothing else: no client, sign-in or user WebSocket. A dedicated
 // machine runs no work itself: its Sandbox's server is the one connected to the Hub.
 const layerJoinedRoutes = (joined: JoinedHubState) =>
-  joined.mode === "dedicated"
-    ? (JoinedHub.layerHealthRoute.pipe(
-        Layer.provide(DedicatedHost.layer(joined)),
-      ) as unknown as ReturnType<typeof layerPersonalJoinedRoutes>)
-    : layerPersonalJoinedRoutes(joined);
-const layerPersonalJoinedRoutes = (joined: JoinedHubState) =>
-  JoinedHub.layerHealthRoute.pipe(Layer.provide(JoinedHub.layer(joined)));
+  JoinedHub.layerHealthRoute.pipe(
+    Layer.provide(
+      joined.mode === "dedicated" ? DedicatedHost.layer(joined) : JoinedHub.layer(joined),
+    ),
+  );
 
 const layerMakeRoutes = Layer.mergeAll(
   Layer.mergeAll(

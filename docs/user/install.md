@@ -556,7 +556,11 @@ back on the machine answer `y` to `Approved by … as a machine dedicated to
 Acme. Register it for Acme? [y/N]`. Then start it with `t3 serve`: it runs the
 organization's work inside a Sandbox container, with the same isolation as the
 Hub's Sandboxes, so the agents see none of the machine's own files or users.
-`t3 status` shows whether that container is running.
+`t3 status` shows whether that container is running. The container can reach
+any service the machine listens to on an address other than `127.0.0.1`, so
+it starts only when there is none: bind such services to `127.0.0.1`, or list
+the ports the organization may reach in `T3CODE_DEDICATED_HOST_PORTS` (for
+example `T3CODE_DEDICATED_HOST_PORTS=22`). `t3 status` names any it found.
 
 The organization's Admins and Members see it in the composer's **Environment**
 picker for that organization's Threads, and can make it a Project's
@@ -567,9 +571,14 @@ it or the Project prefers it.
 In **Settings → Environments** the Owner's **Change use** makes a machine
 personal again, or dedicates it to another organization. It works only once no
 Thread is on the machine: otherwise it names the Threads to move (or delete)
-first. Each change is recorded in the audit log. A personal machine dedicated
-this way stops taking work until you restart its server with `t3 serve`, which
-then runs that work in a Sandbox container.
+first; archived Threads there don't block it, and need another Environment
+when unarchived. The organization's work files on the machine are deleted
+with the change, so no other organization or owner ever sees them. Each change
+is recorded in the audit log. A dedicated machine follows the change by itself;
+a personal machine dedicated this way stops taking work until you restart its
+server with `t3 serve`, which then runs that work in a Sandbox container. If
+the organization is deleted, the Owner can still rename or remove the machine,
+and it runs nothing.
 
 ### Move a Thread to another machine
 

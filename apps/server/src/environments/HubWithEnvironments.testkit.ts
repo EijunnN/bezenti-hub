@@ -13,6 +13,7 @@ import {
   EventId,
   type EnvironmentHeartbeatFrame,
   type EnvironmentHelloFrame,
+  type EnvironmentWelcomeFrame,
   type ModelSelection,
   OrchestrationV2ProviderCapabilities,
   type ProjectId,
@@ -78,7 +79,7 @@ import {
   readJoinedHubState,
 } from "./joinedHubState.ts";
 import * as DedicatedHost from "./DedicatedHost.ts";
-import type * as JoinedHub from "./JoinedHub.ts";
+import * as JoinedHub from "./JoinedHub.ts";
 import type * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 import type { Authenticator, HubServices, Server } from "../auth/UserAuth.testkit.ts";
 import * as EnvironmentAgent from "./EnvironmentAgent.ts";
@@ -272,6 +273,10 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
   readonly textGeneration?: ProviderTextGeneration;
   /** Its T3 home; a fresh temporary one by default. */
   readonly baseDir?: string;
+  /** It runs in a Sandbox, and its hello says so. */
+  readonly sandbox?: { readonly runtime: "podman" | "process" };
+  /** Runs after each welcome, as a server checks the mode the Hub names. */
+  readonly onWelcome?: (welcome: EnvironmentWelcomeFrame) => Effect.Effect<void>;
 }) {
   const scope = yield* Effect.scope;
   const mcpConfigs: Array<McpProviderSessionConfig> = [];
@@ -380,6 +385,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
     workspaceRoot: described.workspaceRoot,
     orchestration: described.orchestration,
     executorContractVersion: ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
+    ...(input.sandbox === undefined ? {} : { sandbox: input.sandbox }),
   }));
   const heartbeat: Effect.Effect<EnvironmentHeartbeatFrame> = Effect.map(report, (described) => ({
     type: "heartbeat",
@@ -397,7 +403,10 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
       expectedHubId: input.hubEnvironmentId,
       hello,
       heartbeat,
-      onWelcome: () => Deferred.succeed(welcomed, undefined).pipe(Effect.asVoid),
+      onWelcome: (welcome) =>
+        Deferred.succeed(welcomed, undefined).pipe(
+          Effect.andThen(input.onWelcome?.(welcome) ?? Effect.void),
+        ),
       serve: (write) =>
         Effect.map(
           running.agent.attach((text) => write(text).pipe(Effect.andThen(noteAnswer(text)))),
@@ -523,6 +532,7 @@ const makeSandboxRuntime = (
         adapters,
         connect: true,
         baseDir: launch.homePath,
+        sandbox: { runtime: "process" },
       });
       started.set(launch.sandboxId, environment);
       const exited = yield* Deferred.make<number | null>();
@@ -688,6 +698,10 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     );
     const started = yield* Deferred.make<TestEnvironment>();
     const launches: Array<SandboxLaunchRecord> = [];
+    const environments: Array<TestEnvironment> = [];
+    const launched = yield* Queue.unbounded<TestEnvironment>();
+    const persisted: Array<JoinedHubState> = [];
+    const turnedPersonal = yield* Deferred.make<JoinedHubState>();
     const launcher: ProcessSandboxRuntime.SandboxLauncher = (launch) =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -701,6 +715,7 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
           .readFileString(path.join(paths.secretsDir, `${ENVIRONMENT_CREDENTIAL_SECRET}.bin`))
           .pipe(Effect.orDie);
         launches.push({ homePath: launch.homePath, joined: home.value, credential });
+        const exited = yield* Deferred.make<number | null>();
         const environment = yield* startEnvironment({
           hubUrl: home.value.hubUrl,
           credential,
@@ -710,9 +725,17 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
           adapters: input.adapters,
           connect: true,
           baseDir: launch.homePath,
+          sandbox: { runtime: "process" },
+          // As the real server does: welcomed for another Space, or as personal, it exits.
+          onWelcome: (welcome) =>
+            JoinedHub.sandboxedServerRefuses(home.value, welcome)
+              ? Deferred.succeed(exited, JoinedHub.SANDBOX_MODE_CHANGED_EXIT).pipe(Effect.asVoid)
+              : Effect.void,
         });
+        environments.push(environment);
+        yield* Queue.offer(launched, environment);
         yield* Deferred.succeed(started, environment);
-        return { pid: null, exited: Effect.never };
+        return { pid: null, exited: Deferred.await(exited) };
       }).pipe(Effect.provide(NodeServices.layer));
     const hubConfig = Context.get(
       server.services as unknown as Context.Context<ServerConfig.ServerConfig>,
@@ -747,6 +770,14 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
       },
       credential: joined.credential,
       state: hostState,
+      askHub: DedicatedHost.askHubAt(server.url, joined.credential),
+      homesOnDisk: FileSystem.FileSystem.pipe(
+        Effect.flatMap((fs) => fs.readDirectory(rootDir)),
+        Effect.provide(NodeServices.layer),
+        Effect.orElseSucceed(() => []),
+      ),
+      persist: (next) => Effect.sync(() => void persisted.push(next)),
+      becomePersonal: (personal) => Deferred.succeed(turnedPersonal, personal).pipe(Effect.asVoid),
     }).pipe(Effect.provide(runtime), Effect.forkScoped);
     // The testkit's own server is known once it started; another runtime's is only seen online.
     const environment = input.runtime === undefined ? yield* Deferred.await(started) : undefined;
@@ -754,8 +785,16 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
       environmentId: EnvironmentId.make(joined.environmentId),
       credential: joined.credential,
       environment,
+      /** Every server its Sandboxes started, the latest last. */
+      environments,
+      /** The next server its Sandboxes start, in order: the first one first. */
+      nextLaunch: Queue.take(launched),
       launches,
       rootDir,
+      /** The joined states it wrote, as the Hub answered. */
+      persisted,
+      /** Completes once the Hub made the machine personal and its server serves as one. */
+      turnedPersonal: Deferred.await(turnedPersonal),
       hostState: Ref.get(hostState),
     };
   });

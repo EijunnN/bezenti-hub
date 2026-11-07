@@ -6,6 +6,7 @@ import {
   type EnvironmentWelcomeFrame,
   ProviderDriverKind,
   ProviderInstanceId,
+  SpaceId,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
@@ -15,7 +16,7 @@ import * as Fiber from "effect/Fiber";
 import { addMember, type Server } from "../auth/UserAuth.testkit.ts";
 import { formatEnvironmentCredential } from "@t3tools/shared/environmentJoin";
 import { hubWithOwner, joinMachine, listEnvironments } from "./environments.testkit.ts";
-import { connectOnce, mustRestartAsDedicated } from "./JoinedHub.ts";
+import { connectOnce, sandboxedServerRefuses } from "./JoinedHub.ts";
 
 const hostResources = {
   sampledAt: 0,
@@ -63,6 +64,8 @@ const connect = Effect.fn(function* (
     readonly expectedHubId?: string;
     /** Runs on the machine just before it sends hello, after the Hub checked its credential. */
     readonly beforeHello?: Effect.Effect<unknown>;
+    /** The hello of a server inside a Sandbox. */
+    readonly sandboxed?: boolean;
   } = {},
 ) {
   const welcomed = yield* Deferred.make<EnvironmentWelcomeFrame>();
@@ -70,7 +73,12 @@ const connect = Effect.fn(function* (
     hubUrl: server.url,
     credential: joined.credential,
     expectedHubId: EnvironmentId.make(options.expectedHubId ?? joined.hubEnvironmentId),
-    hello: (options.beforeHello ?? Effect.void).pipe(Effect.as(hello(options.protocolVersion))),
+    hello: (options.beforeHello ?? Effect.void).pipe(
+      Effect.as({
+        ...hello(options.protocolVersion),
+        ...(options.sandboxed === true ? { sandbox: { runtime: "podman" as const } } : {}),
+      }),
+    ),
     heartbeat: Effect.succeed({ type: "heartbeat", hostResources, disk: null }),
     onWelcome: (welcome) => Deferred.succeed(welcomed, welcome).pipe(Effect.asVoid),
   }).pipe(Effect.forkScoped);
@@ -116,7 +124,7 @@ it.effect("a joined machine says hello and shows online, and removing it closes 
 );
 
 it.effect(
-  "a dedicated machine is welcomed with its mode and Space, which a server running work itself stops on",
+  "a dedicated machine connects only from its Sandbox, welcomed with its mode and Space",
   () =>
     Effect.gen(function* () {
       const { server, authenticator, owner } = yield* hubWithOwner({ listen: true });
@@ -129,16 +137,23 @@ it.effect(
       const personalWelcome = yield* Deferred.await((yield* connect(server, personal)).welcomed);
       assert.equal(personalWelcome.mode, "personal");
       assert.isUndefined(personalWelcome.spaceId);
-      const welcome = yield* Deferred.await((yield* connect(server, dedicated)).welcomed);
+      // Its credential without a Sandbox's hello (its host's own server, an older one) is refused.
+      const unsandboxed = yield* (yield* connect(server, dedicated)).outcome;
+      assert.equal(unsandboxed.reason, "not-sandboxed");
+      assert.isFalse(unsandboxed.welcomed);
+      const welcome = yield* Deferred.await(
+        (yield* connect(server, dedicated, { sandboxed: true })).welcomed,
+      );
       assert.equal(welcome.mode, "dedicated");
       assert.equal(welcome.spaceId, acme);
-      // A server joined as personal (or from before modes) serves no work for a dedicated
-      // machine; the Sandbox's server and a server already dedicated do.
-      assert.isTrue(mustRestartAsDedicated({}, welcome));
-      assert.isTrue(mustRestartAsDedicated({ mode: "personal" }, welcome));
-      assert.isFalse(mustRestartAsDedicated({ sandboxed: true }, welcome));
-      assert.isFalse(mustRestartAsDedicated({ mode: "dedicated" }, welcome));
-      assert.isFalse(mustRestartAsDedicated({}, personalWelcome));
+      // A Sandbox's server serves only its own Space: never as personal, never another Space's.
+      const inside = { sandboxed: true, spaceId: acme };
+      assert.isFalse(sandboxedServerRefuses(inside, welcome));
+      assert.isTrue(sandboxedServerRefuses(inside, personalWelcome));
+      assert.isTrue(
+        sandboxedServerRefuses(inside, { ...welcome, spaceId: SpaceId.make("org-other") }),
+      );
+      assert.isFalse(sandboxedServerRefuses({}, personalWelcome));
     }),
 );
 

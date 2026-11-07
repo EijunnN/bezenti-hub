@@ -8,7 +8,7 @@
 import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
 import * as NodeHttps from "node:https";
-import type * as NodeNet from "node:net";
+import * as NodeNet from "node:net";
 
 import { ENVIRONMENT_CONNECT_PATH } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -83,7 +83,8 @@ const makeProxy = (hubUrl: () => string) => {
         hostname,
         port: Number(url.port || (secure ? 443 : 80)),
         // The Host the Hub's address names, as a reverse proxy in front of it expects.
-        ...(secure ? { servername: hostname } : {}),
+        // SNI names a host only: an IP literal sends none.
+        ...(secure && NodeNet.isIP(hostname) === 0 ? { servername: hostname } : {}),
       },
     };
   };
