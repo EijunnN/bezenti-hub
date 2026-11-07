@@ -3,6 +3,9 @@
  * never on the Hub machine unless `T3CODE_HUB_RUNS_AGENTS` (the testkit's `hubRunsAgents`); with
  * neither it is refused with why; a Thread left on the Hub machine needs an environment and moves.
  */
+// @effect-diagnostics nodeBuiltinImport:off -- checks the Hub's own copy of the Project on disk.
+import * as NodeFSP from "node:fs/promises";
+
 import { assert, describe, it } from "@effect/vitest";
 import {
   CommandId,
@@ -31,6 +34,8 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
 import * as CommandActor from "../auth/CommandActor.ts";
+import * as ProjectCheckouts from "../environment/ProjectCheckouts.ts";
+import * as ThreadWorkspace from "../environment/ThreadWorkspace.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { ClaudeOrchestratorReplayHarness } from "../orchestration-v2/Adapters/ClaudeAdapterV2.testkit.ts";
@@ -202,6 +207,52 @@ const awaitThread = (
   });
 
 describe("Hub con Environments: the Hub stops running agents", () => {
+  it.live("a Hub without agents acts on its own machine for no draft nor Thread-less call", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub({ sandboxes: false, hubRunsAgents: false });
+      const owner = { userId: yield* ownerIdOf(hub) };
+      const acme = yield* createOrganization(hub, "Acme");
+      const { workspaceRoot } = yield* seedProject(hub.server, {
+        projectId: ProjectId.make("project:acme"),
+        title: "Acme",
+        defaultModelSelection: null,
+        spaceId: acme,
+      });
+      const workspace = yield* ThreadWorkspace.make.pipe(
+        Effect.provide(Layer.mergeAll(ProjectionStore.layer, ProjectCheckouts.layer)),
+        Effect.provideContext(hub.server.services as never),
+      ) as Effect.Effect<ThreadWorkspace.ThreadWorkspace["Service"]>;
+      // A draft: the composer of a Thread not sent yet, which runs nowhere so far. (Reads still
+      // answer from the Hub's copy; this testkit Hub has no workspace services to read with.)
+      for (const threadId of [ThreadId.make("thread:draft"), undefined]) {
+        const written = yield* workspace
+          .writeFile(
+            {
+              cwd: workspaceRoot,
+              relativePath: "notes.md",
+              contents: "x\n",
+              ...(threadId === undefined ? {} : { threadId }),
+            },
+            owner,
+          )
+          .pipe(Effect.flip);
+        assert.include(written.message, "The Hub runs no agents", String(threadId));
+      }
+      const opened = yield* workspace
+        .terminalOpen({ threadId: "thread:draft", terminalId: "term-1", cwd: workspaceRoot }, owner)
+        .pipe(Effect.flip);
+      assert.include(opened.message, "The Hub runs no agents");
+      assert.isFalse(
+        yield* Effect.promise(() =>
+          NodeFSP.access(`${workspaceRoot}/notes.md`).then(
+            () => true,
+            () => false,
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped),
+  );
+
   it.live(
     "a Thread nobody placed runs in its Space's Sandbox, and the Hub machine is not offered",
     () =>
@@ -369,6 +420,29 @@ describe("Hub con Environments: the Hub stops running agents", () => {
           FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}
         `;
         assert.equal(placed?.environmentId, HUB_MACHINE_ENVIRONMENT_ID);
+        // And one in the Acme Sandbox, which the restarted Hub has no runtime for.
+        const sandboxThreadId = ThreadId.make("thread:in-the-sandbox");
+        yield* dispatchAs(hub, owner, {
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:in-the-sandbox"),
+          threadId: sandboxThreadId,
+          projectId,
+          spaceId: acme,
+          title: "In the Sandbox",
+          modelSelection: { instanceId: CLAUDE_INSTANCE, model: "claude-sonnet-4-6" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeEnvironmentId: sandboxEnvironmentIdOf(acme),
+        });
+        const activeOf = (id: ThreadId) =>
+          hub.server.sql<{ readonly environmentId: string | null }>`
+            SELECT active_environment_id AS "environmentId"
+            FROM orchestration_v2_projection_threads WHERE thread_id = ${id}
+          `.pipe(Effect.map((rows) => rows[0]?.environmentId));
 
         // The Hub starts again with the setting off: what it does at startup for its Threads runs
         // again, over the same database, seeing a Hub machine that runs no Threads.
@@ -383,7 +457,11 @@ describe("Hub con Environments: the Hub stops running agents", () => {
         const restarted = Context.add(
           services,
           EnvironmentRegistry.EnvironmentRegistry,
-          EnvironmentRegistry.EnvironmentRegistry.of({ ...registry, hubRunsAgents: false }),
+          EnvironmentRegistry.EnvironmentRegistry.of({
+            ...registry,
+            hubRunsAgents: false,
+            sandboxesUnavailable: "Sandboxes are turned off on this Hub.",
+          }),
         );
         // The Hub's own event sink, so its streams see what is written; fresh Thread locks and
         // stores over the same database, as a restarted Hub has.
@@ -400,6 +478,9 @@ describe("Hub con Environments: the Hub stops running agents", () => {
             Layer.provide(Layer.succeedContext(restarted)),
           ),
         );
+        // Released while the Hub starts, before its runs are recovered: nothing waits for it.
+        assert.isNull(yield* activeOf(threadId));
+        assert.isNull(yield* activeOf(sandboxThreadId));
         const released = yield* awaitThread(
           hub,
           threadId,

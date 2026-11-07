@@ -922,6 +922,29 @@ const make = Effect.gen(function* () {
           }
         },
       ),
+      threadTitle: Effect.fn("RemoteEnvironments.textGeneration.threadTitle")(function* (input) {
+        const outcome = yield* invoke(link, "textGeneration.threadTitle", input);
+        switch (outcome._tag) {
+          case "ok":
+            return outcome.value as { readonly title: string };
+          case "unavailable":
+            return yield* offline(link);
+          case "failed":
+            return yield* isOperationError["textGeneration.threadTitle"](outcome.error)
+              ? Effect.fail(
+                  outcome.error as TextGenerationError | EnvironmentExecutorUnavailableError,
+                )
+              : Effect.fail(
+                  new TextGenerationError({
+                    operation: "generateThreadTitle",
+                    detail:
+                      typeof outcome.error === "string"
+                        ? outcome.error.slice(0, 500)
+                        : "The machine could not write the title.",
+                  }),
+                );
+        }
+      }),
     };
     // Resolved on the Hub from what the Environment reported: the Orchestrator asks while deciding.
     const runtimePolicy: RuntimePolicy.RuntimePolicyV2Shape = {

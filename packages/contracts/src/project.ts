@@ -495,6 +495,8 @@ export const ProjectFileFailure = Schema.Literals([
   "operation_failed",
   // The Thread's Active environment is not connected; nothing was read or written.
   "environment_offline",
+  // The Hub machine runs no agents (`T3CODE_HUB_RUNS_AGENTS` off): it writes nothing for a Thread.
+  "hub_runs_no_agents",
 ]);
 export type ProjectFileFailure = typeof ProjectFileFailure.Type;
 

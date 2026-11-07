@@ -92,6 +92,8 @@ export function previewDefaultEnvironment(input: {
   readonly preferredEnvironmentId: EnvironmentId | null;
   readonly providerInstanceId: ProviderInstanceId;
   readonly userId: UserId | null;
+  /** Why the Hub runs no Sandboxes (its list says); a Sandbox then takes nothing, as on the Hub. */
+  readonly sandboxesUnavailable?: string | null;
 }): EnvironmentId | null {
   const preferred = input.environments.find(
     (environment) => environment.id === input.preferredEnvironmentId,
@@ -111,6 +113,7 @@ export function previewDefaultEnvironment(input: {
     providerInstanceId: input.providerInstanceId,
     hubMachine: input.environments.some((environment) => environment.kind === "hub"),
     spaceSandbox,
+    sandboxesRun: input.sandboxesUnavailable == null,
   });
 }
 

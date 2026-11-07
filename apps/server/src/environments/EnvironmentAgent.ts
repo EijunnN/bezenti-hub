@@ -753,6 +753,16 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
               );
             });
       }
+      // The Hub asks this machine to title one of its Threads (the Hub runs no agents itself).
+      case "textGeneration.threadTitle":
+        return local.textGeneration === undefined
+          ? Effect.fail(
+              new TextGenerationError({
+                operation: "generateThreadTitle",
+                detail: "This machine has no text generation.",
+              }),
+            )
+          : local.textGeneration.threadTitle(request as RemoteInput<"textGeneration.threadTitle">);
       case "checkpoint.isGitRepository":
         return checkpoints.isGitRepository(
           (request as RemoteInput<"checkpoint.isGitRepository">).cwd,

@@ -15,8 +15,9 @@ import {
 } from "@t3tools/shared/serverSettings";
 import * as ServerSettings from "../serverSettings.ts";
 import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textGeneration";
-import { TextGenerationError } from "@t3tools/contracts";
+import { HUB_RUNS_NO_AGENTS_MESSAGE, TextGenerationError } from "@t3tools/contracts";
 
+import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
@@ -75,6 +76,8 @@ export const make = Effect.gen(function* () {
   const registry = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
   const sourceControl = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  // A Hub that runs no agents runs no provider CLI either: its callers ask the Thread's machine.
+  const runsAgents = yield* HubRunsAgents.HubRunsAgents;
   const generate = Effect.fn("TextGeneration.generate")(function* <A>(
     operation: TextGenerationOp,
     selection: ModelSelection,
@@ -83,6 +86,9 @@ export const make = Effect.gen(function* () {
       modelSelection: ModelSelection,
     ) => Effect.Effect<A, TextGenerationError>,
   ) {
+    if (!runsAgents) {
+      return yield* new TextGenerationError({ operation, detail: HUB_RUNS_NO_AGENTS_MESSAGE });
+    }
     const snapshots = yield* registry.listInstances.pipe(
       Effect.flatMap((instances) =>
         Effect.forEach(instances, (instance) => instance.snapshot.getSnapshot),

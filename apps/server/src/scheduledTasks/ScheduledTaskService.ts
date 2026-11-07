@@ -49,6 +49,8 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
+import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as Metrics from "../observability/Metrics.ts";
@@ -1426,6 +1428,10 @@ export const layer = Layer.effect(
         (yield* managedFolders.isScratchProject(input.projectId))
           ? { type: "root" }
           : input.workspaceStrategy;
+      // Said now, not at its first run: no Environment but the Hub machine makes worktrees yet.
+      if (workspaceStrategy.type === "worktree" && !(yield* HubRunsAgents.HubRunsAgents)) {
+        return yield* taskError(EnvironmentRegistry.WORKTREE_UNSUPPORTED_MESSAGE, { taskId: id });
+      }
       const scheduleUnchanged =
         existingTask !== null &&
         existingTask.enabled === input.enabled &&

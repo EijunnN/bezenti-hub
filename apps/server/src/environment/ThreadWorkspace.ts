@@ -8,6 +8,7 @@ import {
   type FilesystemBrowseInput,
   type EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
+  HUB_RUNS_NO_AGENTS_MESSAGE,
   type PreviewAdjustInput,
   type PreviewCloseInput,
   PreviewEnvironmentUnavailableError,
@@ -61,6 +62,7 @@ import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
 import { makeWorkspaceRpcCalls } from "../workspace/WorkspaceRpcCalls.ts";
 import * as EnvironmentDemand from "./EnvironmentDemand.ts";
 import * as EnvironmentExecutor from "./EnvironmentExecutor.ts";
+import * as HubRunsAgents from "./HubRunsAgents.ts";
 import * as ProjectCheckouts from "./ProjectCheckouts.ts";
 import * as RemoteEnvironments from "./RemoteEnvironments.ts";
 import { locateInCheckout } from "./WorkspaceLocation.ts";
@@ -96,9 +98,12 @@ type Route =
       /** A Sandbox that is not running, which a read does not start. */
       readonly stopped?: boolean;
     }
-  | { readonly _tag: "refused" };
+  | { readonly _tag: "refused" }
+  /** An action (a terminal, a write) the Hub machine would run, and it runs no agents. */
+  | { readonly _tag: "hub-off" };
 
 const LOCAL: Route = { _tag: "local" };
+const HUB_OFF: Route = { _tag: "hub-off" };
 const REFUSED: Route = { _tag: "refused" };
 
 const offlineMessage = (name: string | undefined, stopped = false) =>
@@ -128,6 +133,7 @@ export const make = Effect.gen(function* () {
   const remoteEnvironments = yield* Effect.serviceOption(RemoteEnvironments.RemoteEnvironments);
   // Sandboxes start for these calls and count them, and open terminals, as activity.
   const demand = yield* Effect.serviceOption(EnvironmentDemand.EnvironmentDemand);
+  const runsAgents = yield* HubRunsAgents.HubRunsAgents;
   const hubMachine = Option.isSome(registry)
     ? yield* Effect.option(registry.value.get(registry.value.hubMachineEnvironmentId))
     : Option.none();
@@ -152,6 +158,9 @@ export const make = Effect.gen(function* () {
     threadId: string | undefined,
     caller: WorkspaceCaller,
   ) {
+    // The Hub machine's services answer reads of the Hub's own copy (listings, search, reading
+    // files, browsing folders), which run no code; with no agents on it, nothing that acts.
+    const local = runsAgents || caller.startsSandbox !== true ? LOCAL : HUB_OFF;
     if (
       threadId === undefined ||
       Option.isNone(registry) ||
@@ -159,12 +168,19 @@ export const make = Effect.gen(function* () {
       Option.isNone(checkouts) ||
       Option.isNone(environments)
     ) {
-      return LOCAL;
+      return local;
     }
     const environmentId = yield* registry.value.activeEnvironment(ThreadId.make(threadId));
     // A draft, or a Thread on the Hub machine: the Hub machine's services answer, as before.
-    if (environmentId === HUB_MACHINE_ENVIRONMENT_ID) return LOCAL;
+    if (environmentId === HUB_MACHINE_ENVIRONMENT_ID) return local;
     if (environmentId === EnvironmentExecutor.NO_ENVIRONMENT_ID) {
+      // A draft (not placed yet) on a Hub that runs no agents: as a call without a Thread.
+      if (
+        !runsAgents &&
+        Option.isNone(yield* Effect.option(projections.value.getThread(ThreadId.make(threadId))))
+      ) {
+        return local;
+      }
       return { _tag: "offline", name: undefined } satisfies Route;
     }
     const usable = yield* environments.value
@@ -249,27 +265,36 @@ export const make = Effect.gen(function* () {
   };
 
   const fileFailure = (route: Route, input: { cwd: string; relativePath: string }) =>
-    route._tag === "offline"
+    route._tag === "hub-off"
       ? {
           cwd: input.cwd,
           relativePath: input.relativePath,
-          failure: "environment_offline" as const,
-          message: offlineMessage(route.name, route.stopped),
+          failure: "hub_runs_no_agents" as const,
+          message: HUB_RUNS_NO_AGENTS_MESSAGE,
         }
-      : {
-          cwd: input.cwd,
-          relativePath: input.relativePath,
-          failure: "workspace_path_outside_root" as const,
-          message: REFUSED_MESSAGE,
-        };
+      : route._tag === "offline"
+        ? {
+            cwd: input.cwd,
+            relativePath: input.relativePath,
+            failure: "environment_offline" as const,
+            message: offlineMessage(route.name, route.stopped),
+          }
+        : {
+            cwd: input.cwd,
+            relativePath: input.relativePath,
+            failure: "workspace_path_outside_root" as const,
+            message: REFUSED_MESSAGE,
+          };
 
   const entriesFailure = (route: Route) =>
-    route._tag === "offline"
-      ? {
-          failure: "environment_offline" as const,
-          message: offlineMessage(route.name, route.stopped),
-        }
-      : { failure: "outside_thread_workspace" as const, message: REFUSED_MESSAGE };
+    route._tag === "hub-off"
+      ? { failure: "environment_offline" as const, message: HUB_RUNS_NO_AGENTS_MESSAGE }
+      : route._tag === "offline"
+        ? {
+            failure: "environment_offline" as const,
+            message: offlineMessage(route.name, route.stopped),
+          }
+        : { failure: "outside_thread_workspace" as const, message: REFUSED_MESSAGE };
 
   /** A call its Thread names the machine for, with that call's own offline and refused errors. */
   const threadCall = Effect.fn("ThreadWorkspace.threadCall")(function* <A, E>(
@@ -330,7 +355,12 @@ export const make = Effect.gen(function* () {
     (route: Route): TerminalError =>
       new TerminalEnvironmentUnavailableError({
         threadId,
-        reason: route._tag === "offline" ? "environment_offline" : "outside_thread_workspace",
+        reason:
+          route._tag === "hub-off"
+            ? "hub_runs_no_agents"
+            : route._tag === "offline"
+              ? "environment_offline"
+              : "outside_thread_workspace",
         ...(route._tag === "offline" && route.name !== undefined
           ? { environmentName: route.name }
           : {}),
@@ -341,7 +371,12 @@ export const make = Effect.gen(function* () {
     (route: Route): PreviewError =>
       new PreviewEnvironmentUnavailableError({
         threadId,
-        reason: route._tag === "offline" ? "environment_offline" : "outside_thread_workspace",
+        reason:
+          route._tag === "hub-off"
+            ? "hub_runs_no_agents"
+            : route._tag === "offline"
+              ? "environment_offline"
+              : "outside_thread_workspace",
         ...(route._tag === "offline" && route.name !== undefined
           ? { environmentName: route.name }
           : {}),

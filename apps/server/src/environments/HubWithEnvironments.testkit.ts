@@ -41,6 +41,7 @@ import * as CheckpointDiffQuery from "../checkpointing/CheckpointDiffQuery.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as ServerConfig from "../config.ts";
+import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
 import { scratchRootOf } from "../environment/ScratchWorkspace.ts";
@@ -328,6 +329,8 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
     ),
     Layer.provideMerge(layerRecordingMcp),
     Layer.provideMerge(VcsProcess.layer),
+    // A joined machine runs agents: that is its job, whatever its Hub does.
+    Layer.provideMerge(Layer.succeed(HubRunsAgents.HubRunsAgents, true)),
     // The agent shares the workspace services' roots (memoized: one instance per machine).
     Layer.provideMerge(JoinedWorkspaceRoots.layer),
     Layer.provideMerge(SqlitePersistence.layerMemory),

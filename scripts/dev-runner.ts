@@ -324,6 +324,8 @@ export const createDevRunnerEnv = Effect.fn("dev-runner.createDevRunnerEnv")(fun
     VITE_DEV_SERVER_URL:
       devUrl?.toString() ??
       `http://${isDesktopMode ? DESKTOP_DEV_LOOPBACK_HOST : "localhost"}:${webPort}`,
+    // Marks the servers it starts as development Hubs (T3CODE_HUB_RUNS_AGENTS is honored only there).
+    T3CODE_DEV_RUNNER: "1",
   };
 
   if (configuredBaseDir !== undefined) {

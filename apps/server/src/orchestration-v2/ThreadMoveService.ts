@@ -38,6 +38,7 @@ import * as Stream from "effect/Stream";
 
 import * as AuditLog from "../audit/AuditLog.ts";
 import * as HubRepository from "../checkpointing/HubRepository.ts";
+import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import type { MoveFetchInput } from "../environment/MovedWorkspace.ts";
 import * as ProjectCheckouts from "../environment/ProjectCheckouts.ts";
@@ -149,6 +150,8 @@ export const layer: Layer.Layer<
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const registry = yield* EnvironmentExecutor.EnvironmentExecutorRegistry;
+    // Without agents on the Hub machine, a summary its offline source cannot write is the target's.
+    const hubRunsAgents = yield* HubRunsAgents.HubRunsAgents;
     const eventSink = yield* EventSink.EventSinkV2;
     const ids = yield* IdAllocator.IdAllocatorV2;
     const threadLocks = yield* ThreadCommandExecutor.ThreadCommandExecutor;
@@ -1002,34 +1005,44 @@ export const layer: Layer.Layer<
         );
         const recent = MoveHandoff.recentMessages(history.messages);
 
-        // The source writes it while it is online; otherwise the Hub machine, for the Owner only.
+        // The source writes it while it is online; otherwise the Hub machine, for the Owner only, or
+        // (the Hub running no agents) the target, which takes the Thread's history anyway.
         const source =
           move.sourceOffline === true || move.sourceEnvironmentId === null
             ? Option.none<EnvironmentExecutor.EnvironmentExecutor>()
             : yield* awaitExecutor(move.sourceEnvironmentId, null);
-        if (Option.isNone(source) && !(yield* hubMayWriteFor(thread))) {
+        if (Option.isNone(source) && hubRunsAgents && !(yield* hubMayWriteFor(thread))) {
           return assembled(
             history,
             recent,
             "the Hub doesn't write summaries with another User's history",
           );
         }
+        const target =
+          Option.isSome(source) || hubRunsAgents
+            ? Option.none<EnvironmentExecutor.EnvironmentExecutor>()
+            : yield* awaitExecutor(move.targetEnvironmentId, null);
+        if (Option.isNone(source) && !hubRunsAgents && Option.isNone(target)) {
+          return assembled(history, recent, `${targetName} is not connected.`);
+        }
         const writer = Option.isSome(source)
           ? { executor: source.value, writtenBy: "source" as const, name: sourceName }
-          : yield* registry
-              .get(registry.hubMachineEnvironmentId)
-              .pipe(
-                Effect.flatMap((executor) =>
-                  nameOf(executor.environmentId).pipe(
-                    Effect.map((name) => ({ executor, writtenBy: "hub" as const, name })),
+          : Option.isSome(target)
+            ? { executor: target.value, writtenBy: "target" as const, name: targetName }
+            : yield* registry
+                .get(registry.hubMachineEnvironmentId)
+                .pipe(
+                  Effect.flatMap((executor) =>
+                    nameOf(executor.environmentId).pipe(
+                      Effect.map((name) => ({ executor, writtenBy: "hub" as const, name })),
+                    ),
                   ),
-                ),
-              );
+                );
         const textGeneration = writer.executor.textGeneration;
         if (textGeneration === undefined) {
           return assembled(history, recent, `${writer.name} has no text generation.`);
         }
-        // The source runs it in the Thread's workspace; the Hub machine in its checkout.
+        // The source runs it in the Thread's workspace; the Hub machine and the target in the checkout.
         const cwd = yield* (
           writer.writtenBy === "source"
             ? workspaceOn(writer.executor, thread)

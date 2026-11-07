@@ -119,6 +119,8 @@ import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
 import * as Observability from "./observability/Observability.ts";
 import * as HeapSnapshot from "./observability/HeapSnapshot.ts";
 import * as EventLoopMonitor from "./observability/EventLoopMonitor.ts";
+import * as HubRunsAgents from "./environment/HubRunsAgents.ts";
+import * as SandboxRuntimeFromConfig from "./sandboxes/sandboxRuntimeFromConfig.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as DirectEndpoints from "./environment/DirectEndpoints.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
@@ -782,6 +784,8 @@ const layerMakeServer = Layer.unwrap(
     const layerLauncher = ServiceLauncherClient.layer;
 
     yield* fixPath({ shellEnvironmentPrepared: config.shellEnvironmentPrepared });
+    // Whether this machine runs agents in process: a Hub only in development, a joined machine always.
+    const hubRunsAgents = yield* SandboxRuntimeFromConfig.hubRunsAgentsFromConfig;
 
     const layerHttpListening = Layer.effectDiscard(
       Effect.gen(function* () {
@@ -965,6 +969,8 @@ const layerMakeServer = Layer.unwrap(
       Layer.provide(VcsProcess.layer),
       Layer.provideMerge(AgentScopeLive.layer),
       Layer.provideMerge(layerPlatformServices),
+      // Read by the Hub machine's executor, text generation, placement and workspace calls.
+      Layer.provideMerge(Layer.succeed(HubRunsAgents.HubRunsAgents, hubRunsAgents)),
     );
   }),
 ).pipe(Layer.provide(ProcessRunner.layer));

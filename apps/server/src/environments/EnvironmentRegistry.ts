@@ -46,6 +46,7 @@ import * as Stream from "effect/Stream";
 import * as AuditLog from "../audit/AuditLog.ts";
 import * as AccessPolicy from "../auth/AccessPolicy.ts";
 import { base64UrlEncode } from "../auth/utils.ts";
+import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import type * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
 import * as Sandboxes from "../sandboxes/Sandboxes.ts";
@@ -95,6 +96,13 @@ export class EnvironmentAccessDeniedError extends Schema.TaggedError<Environment
   }
 }
 
+/**
+ * Why a new Thread cannot start in a new worktree off the Hub machine (until Environments check out
+ * from the Hub repository), said when it is made: the composer, MCP and scheduled tasks alike.
+ */
+export const WORKTREE_UNSUPPORTED_MESSAGE =
+  "New worktrees are made only on the Hub machine for now, and this Thread runs elsewhere (a Sandbox or a joined machine cannot make one yet). Start it in the Project's checkout instead.";
+
 /** Why a new Thread cannot run on the Environment it asked for. */
 export class ThreadEnvironmentUnavailableError extends Schema.TaggedError<ThreadEnvironmentUnavailableError>()(
   "ThreadEnvironmentUnavailableError",
@@ -132,7 +140,7 @@ export class ThreadEnvironmentUnavailableError extends Schema.TaggedError<Thread
       case "provider-missing":
         return `${name} can't run ${this.providerInstanceId ?? "this provider"}. Choose another provider or Environment.`;
       case "worktree-unsupported":
-        return "New worktrees are made only on the Hub machine for now. Start this Thread in the Project's checkout.";
+        return WORKTREE_UNSUPPORTED_MESSAGE;
       case "sandbox-unavailable":
         return this.detail === undefined
           ? "Sandboxes need Podman on the Hub, which this Hub does not have yet. See «Run Threads in your Space's Sandbox» in the install guide."
@@ -414,10 +422,8 @@ export class EnvironmentRegistry extends Context.Service<
   }
 >()("t3/environments/EnvironmentRegistry") {}
 
-/** How a registry treats the Hub machine, and why it has no Sandboxes when it has none. */
+/** Why a registry without a runtime has no Sandboxes. */
 export interface RegistryOptions {
-  /** Whether the Hub machine runs Threads; on unless said otherwise (tests, the join flow). */
-  readonly hubRunsAgents?: boolean;
   /** Why there are no Sandboxes, for a registry without a runtime. */
   readonly sandboxesUnavailable?: string;
 }
@@ -432,7 +438,8 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
   const hubId = yield* (yield* ServerEnvironment.ServerEnvironmentIdentity).getEnvironmentId;
   // Without a Sandbox runtime (the join flow's tests) Sandboxes are listed but never made.
   const sandboxes = yield* Effect.serviceOption(Sandboxes.Sandboxes);
-  const hubRunsAgents = options.hubRunsAgents ?? true;
+  // Whether the Hub machine runs Threads (`T3CODE_HUB_RUNS_AGENTS`), as the server provides it.
+  const hubRunsAgents = yield* HubRunsAgents.HubRunsAgents;
   const sandboxesUnavailable = Option.isSome(sandboxes)
     ? null
     : (options.sandboxesUnavailable ?? SANDBOXES_NEED_PODMAN);
@@ -1031,7 +1038,12 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
         decide(principal, "environment.use", yield* resourceOf(row, workSpaceId)),
       );
     const summary = yield* summaryOf(row);
-    return canStartThreadOn({ ...summary, usable }, input.providerInstanceId)
+    // As the composer previews it: a Sandbox this Hub cannot run takes nothing.
+    return canStartThreadOn(
+      { ...summary, usable },
+      input.providerInstanceId,
+      Option.isSome(sandboxes),
+    )
       ? environmentId
       : undefined;
   });
@@ -1187,7 +1199,7 @@ export const layer = layerWith();
 export const layerFromConfig = Layer.unwrap(
   Effect.gen(function* () {
     const sandboxes = yield* SandboxRuntimeFromConfig.fromConfig;
-    const hubRunsAgents = yield* SandboxRuntimeFromConfig.hubRunsAgentsFromConfig;
+    const hubRunsAgents = yield* HubRunsAgents.HubRunsAgents;
     if (hubRunsAgents) {
       yield* Effect.logWarning(
         "The Hub machine runs Threads in the Hub's own process (development only: T3CODE_HUB_RUNS_AGENTS).",
@@ -1198,13 +1210,10 @@ export const layerFromConfig = Layer.unwrap(
       );
     }
     return Option.isNone(sandboxes.runtime)
-      ? layerWith({
-          hubRunsAgents,
-          ...(sandboxes.unavailable === null
-            ? {}
-            : { sandboxesUnavailable: sandboxes.unavailable }),
-        })
-      : layerWithSandboxes(sandboxes.runtime.value, { hubRunsAgents });
+      ? layerWith(
+          sandboxes.unavailable === null ? {} : { sandboxesUnavailable: sandboxes.unavailable },
+        )
+      : layerWithSandboxes(sandboxes.runtime.value);
   }),
 );
 
@@ -1214,9 +1223,8 @@ export const layerFromConfig = Layer.unwrap(
  */
 export const layerWithSandboxes = <E, R>(
   runtime: Layer.Layer<SandboxRuntime.SandboxRuntime, E, R>,
-  options: Pick<RegistryOptions, "hubRunsAgents"> = {},
 ) =>
-  Layer.effect(EnvironmentRegistry, make(options)).pipe(
+  Layer.effect(EnvironmentRegistry, make({})).pipe(
     // Sandboxes start for work and stop when idle: the orchestration and the workspace RPCs ask
     // through `EnvironmentDemand`, which they see beside the registry.
     Layer.provideMerge(Sandboxes.layer.pipe(Layer.provide(runtime))),

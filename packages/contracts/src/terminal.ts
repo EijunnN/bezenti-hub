@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { HUB_RUNS_NO_AGENTS_MESSAGE } from "./hubRunsNoAgents.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
 export const DEFAULT_TERMINAL_ID = "term-1";
@@ -370,11 +371,16 @@ export class TerminalEnvironmentUnavailableError extends Schema.TaggedError<Term
   "TerminalEnvironmentUnavailableError",
   {
     threadId: Schema.String,
-    reason: Schema.Literals(["environment_offline", "outside_thread_workspace"]),
+    reason: Schema.Literals([
+      "environment_offline",
+      "outside_thread_workspace",
+      "hub_runs_no_agents",
+    ]),
     environmentName: Schema.optional(Schema.String),
   },
 ) {
   override get message() {
+    if (this.reason === "hub_runs_no_agents") return HUB_RUNS_NO_AGENTS_MESSAGE;
     return this.reason === "environment_offline"
       ? `Environment offline: ${this.environmentName ?? "this Thread's Environment"} is not connected.`
       : "This terminal can only open inside the Thread's workspace.";

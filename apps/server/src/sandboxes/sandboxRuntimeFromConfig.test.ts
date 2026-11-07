@@ -28,30 +28,41 @@ const hubRunsAgents = (env: Record<string, string>, options: { readonly dev: boo
   hubRunsAgentsFromConfig.pipe(Effect.provide(withHub(env, options)));
 
 describe("T3CODE_HUB_RUNS_AGENTS", () => {
-  it.effect("is off for a production Hub unless it is turned on", () =>
+  const devRunner = { T3CODE_DEV_RUNNER: "1" };
+  it.effect("is never honored by a production Hub", () =>
     Effect.gen(function* () {
-      assert.isFalse(yield* hubRunsAgents({}, { dev: false }));
-      assert.isFalse(yield* hubRunsAgents({ T3CODE_HUB_RUNS_AGENTS: "0" }, { dev: false }));
-      assert.isFalse(yield* hubRunsAgents({ T3CODE_HUB_RUNS_AGENTS: "maybe" }, { dev: false }));
-      assert.isTrue(yield* hubRunsAgents({ T3CODE_HUB_RUNS_AGENTS: "1" }, { dev: false }));
-      assert.isTrue(yield* hubRunsAgents({ T3CODE_HUB_RUNS_AGENTS: "true" }, { dev: false }));
+      for (const value of [undefined, "0", "maybe", "1", "true"]) {
+        const env = value === undefined ? {} : { T3CODE_HUB_RUNS_AGENTS: value };
+        assert.isFalse(yield* hubRunsAgents(env, { dev: false }), value);
+        // Nor by one that only inherited a dev URL, without the dev runner's own flag.
+        assert.isFalse(yield* hubRunsAgents(env, { dev: true }), value);
+        assert.isFalse(yield* hubRunsAgents({ ...env, ...devRunner }, { dev: false }), value);
+      }
     }),
   );
 
-  it.effect("is on for a dev Hub without Sandboxes, so it runs without Podman", () =>
+  it.effect("is on for a dev runner Hub without Sandboxes, so it runs without Podman", () =>
     Effect.gen(function* () {
-      assert.isTrue(yield* hubRunsAgents({}, { dev: true }));
-      assert.isTrue(yield* hubRunsAgents({ T3CODE_SANDBOX_RUNTIME: "off" }, { dev: true }));
+      assert.isTrue(yield* hubRunsAgents(devRunner, { dev: true }));
+      assert.isTrue(
+        yield* hubRunsAgents({ ...devRunner, T3CODE_SANDBOX_RUNTIME: "off" }, { dev: true }),
+      );
       // A dev Hub that runs Sandboxes places Threads there, as production does.
-      assert.isFalse(yield* hubRunsAgents({ T3CODE_SANDBOX_RUNTIME: "process" }, { dev: true }));
-      assert.isFalse(yield* hubRunsAgents({ T3CODE_SANDBOX_RUNTIME: "podman" }, { dev: true }));
+      assert.isFalse(
+        yield* hubRunsAgents({ ...devRunner, T3CODE_SANDBOX_RUNTIME: "process" }, { dev: true }),
+      );
+      assert.isFalse(
+        yield* hubRunsAgents({ ...devRunner, T3CODE_SANDBOX_RUNTIME: "podman" }, { dev: true }),
+      );
       assert.isTrue(
         yield* hubRunsAgents(
-          { T3CODE_SANDBOX_RUNTIME: "process", T3CODE_HUB_RUNS_AGENTS: "1" },
+          { ...devRunner, T3CODE_SANDBOX_RUNTIME: "process", T3CODE_HUB_RUNS_AGENTS: "1" },
           { dev: true },
         ),
       );
-      assert.isFalse(yield* hubRunsAgents({ T3CODE_HUB_RUNS_AGENTS: "false" }, { dev: true }));
+      assert.isFalse(
+        yield* hubRunsAgents({ ...devRunner, T3CODE_HUB_RUNS_AGENTS: "false" }, { dev: true }),
+      );
     }),
   );
 });

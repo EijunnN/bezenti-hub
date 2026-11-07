@@ -87,9 +87,12 @@ type PlacementCandidate = Pick<HubEnvironmentSummary, "id" | "kind" | "status" |
 export function canStartThreadOn(
   candidate: PlacementCandidate,
   providerInstanceId: string,
+  /** Whether the Hub runs Sandboxes at all: one it cannot run takes no Thread. */
+  sandboxesRun = true,
 ): boolean {
   if (!candidate.usable) return false;
   if (candidate.kind === "hub") return true;
+  if (candidate.kind === "sandbox" && !sandboxesRun) return false;
   if (candidate.kind === "sandbox" && candidate.status !== "online") {
     if (candidate.status === "failed") return false;
     if (candidate.providers.length === 0) return true;
@@ -111,15 +114,21 @@ export function previewThreadPlacement(input: {
   readonly providerInstanceId: string;
   /** Whether the Hub machine runs Threads; the Hub lists it only then. */
   readonly hubMachine: boolean;
-  /** The Space's Sandbox, when the Hub runs Sandboxes and the User may run Threads there. */
+  /** The Space's Sandbox, when the User may run Threads there. */
   readonly spaceSandbox: { readonly id: EnvironmentId } | undefined;
+  /** Whether the Hub runs Sandboxes (`sandboxesUnavailable` null); true when not known. */
+  readonly sandboxesRun?: boolean;
 }): EnvironmentId | null {
   const preferred = input.preferred;
-  if (preferred !== undefined && canStartThreadOn(preferred, input.providerInstanceId)) {
+  const sandboxesRun = input.sandboxesRun ?? true;
+  if (
+    preferred !== undefined &&
+    canStartThreadOn(preferred, input.providerInstanceId, sandboxesRun)
+  ) {
     return preferred.id;
   }
   if (input.hubMachine) return HUB_MACHINE_ENVIRONMENT_ID;
-  return input.spaceSandbox?.id ?? null;
+  return sandboxesRun ? (input.spaceSandbox?.id ?? null) : null;
 }
 
 /** What the Hub and the composer say when a new Thread has nowhere to run, and why. */

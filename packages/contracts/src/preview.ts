@@ -1,6 +1,7 @@
 import { Schema } from "effect";
 import { NonNegativeInt, PositiveInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { BROWSER_PROFILE_MAX_COUNT, BrowserProfile, BrowserProfileId } from "./browserProfile.ts";
+import { HUB_RUNS_NO_AGENTS_MESSAGE } from "./hubRunsNoAgents.ts";
 
 export const PREVIEW_URL_MAX_LENGTH = 2_048;
 export const CONFIGURED_LOCAL_SERVER_URLS_MAX_ITEMS = 32;
@@ -406,11 +407,16 @@ export class PreviewEnvironmentUnavailableError extends Schema.TaggedError<Previ
   "PreviewEnvironmentUnavailableError",
   {
     threadId: Schema.String,
-    reason: Schema.Literals(["environment_offline", "outside_thread_workspace"]),
+    reason: Schema.Literals([
+      "environment_offline",
+      "outside_thread_workspace",
+      "hub_runs_no_agents",
+    ]),
     environmentName: Schema.optional(Schema.String),
   },
 ) {
   override get message() {
+    if (this.reason === "hub_runs_no_agents") return HUB_RUNS_NO_AGENTS_MESSAGE;
     return this.reason === "environment_offline"
       ? `Environment offline: ${this.environmentName ?? "this Thread's Environment"} is not connected.`
       : "This preview is not available to you.";

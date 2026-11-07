@@ -9,6 +9,7 @@ import {
   VcsUnsupportedOperationError,
   EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
+  HUB_RUNS_NO_AGENTS_MESSAGE,
   ProviderInstanceId,
   type EnvironmentExecutorSnapshot,
   type EnvironmentExecutorTransport,
@@ -16,6 +17,7 @@ import {
   type EnvironmentUnavailableProvider,
   type OrchestrationV2AppThread,
   type ProjectId,
+  type ModelSelection,
   type TextGenerationError,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -38,6 +40,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
+import * as HubRunsAgents from "./HubRunsAgents.ts";
 import * as ServerConfig from "../config.ts";
 import type { CheckpointStoreError } from "../checkpointing/Errors.ts";
 import * as HubRepository from "../checkpointing/HubRepository.ts";
@@ -170,6 +173,18 @@ export interface EnvironmentTextGeneration {
     input: TextGeneration.ThreadHandoffGenerationInput & { readonly generationId?: string },
   ) => Effect.Effect<
     TextGeneration.ThreadHandoffGenerationResult,
+    TextGenerationError | EnvironmentExecutorUnavailableError
+  >;
+  /** A Thread's title, in the Thread's workspace on this machine (attachments stay on the Hub). */
+  readonly threadTitle: (input: {
+    readonly cwd: string;
+    readonly message: string;
+    readonly previousTitle?: string;
+    readonly forkSource?: { readonly title: string; readonly history: string };
+    readonly instructions?: string;
+    readonly modelSelection: ModelSelection;
+  }) => Effect.Effect<
+    { readonly title: string },
     TextGenerationError | EnvironmentExecutorUnavailableError
   >;
 }
@@ -638,6 +653,10 @@ const makeInProcessExecutor = (input: InProcessExecutorInput): EnvironmentExecut
                 new EnvironmentExecutorUnavailableError({ environmentId: input.environmentId }),
               )
             : textGeneration.generateThreadHandoff(request),
+        threadTitle: (request) =>
+          textGeneration
+            .generateThreadTitle({ ...request })
+            .pipe(Effect.map((result) => ({ title: result.title }))),
       },
     }),
   }),
@@ -713,6 +732,51 @@ const makeRegistry = Effect.fn("EnvironmentExecutor.makeRegistry")(function* (
   });
 });
 
+/**
+ * The Hub machine with `T3CODE_HUB_RUNS_AGENTS` off: it opens no provider session, writes no text
+ * and prepares no moved workspace (a setup script), whatever asks; its terminals refuse in
+ * `TerminalManager` and its text generation in `TextGeneration`.
+ */
+const refusingAgents = (executor: EnvironmentExecutor): EnvironmentExecutor => {
+  const { textGeneration: _textGeneration, ...rest } = executor;
+  const adapters = executor.provider.adapters;
+  return {
+    ...rest,
+    provider: {
+      ...executor.provider,
+      adapters: {
+        ...adapters,
+        get: (instanceId) =>
+          adapters.get(instanceId).pipe(
+            Effect.map((adapter) => ({
+              ...adapter,
+              openSession: () =>
+                Effect.fail(
+                  new ProviderAdapter.ProviderAdapterProtocolError({
+                    driver: adapter.driver,
+                    detail: HUB_RUNS_NO_AGENTS_MESSAGE,
+                    cause: new HubRunsAgents.HubRunsNoAgentsError({
+                      operation: "provider.openSession",
+                    }),
+                  }),
+                ),
+            })),
+          ),
+      },
+    },
+    workspace: {
+      ...executor.workspace,
+      move: {
+        ...executor.workspace.move,
+        prepare: () =>
+          Effect.fail(
+            new EnvironmentExecutorUnavailableError({ environmentId: executor.environmentId }),
+          ),
+      },
+    },
+  };
+};
+
 /** Logs a failed refresh and carries on, so a bad snapshot never stops startup or the heartbeat. */
 const logRefreshFailure = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
@@ -745,7 +809,7 @@ export const layerHubMachine: Layer.Layer<
       yield* Effect.serviceOption(HubRepository.HubRepositories),
       deps,
     );
-    const hubMachine = makeInProcessExecutor({
+    const inProcess = makeInProcessExecutor({
       environmentId: HUB_MACHINE_ENVIRONMENT_ID,
       adapters: yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2,
       paths,
@@ -772,6 +836,8 @@ export const layerHubMachine: Layer.Layer<
           ),
       }),
     });
+    // A Hub that runs no agents keeps the executor for its checkouts and checkpoints only.
+    const hubMachine = (yield* HubRunsAgents.HubRunsAgents) ? inProcess : refusingAgents(inProcess);
     const registry = yield* makeRegistry(hubMachine);
     const cache = yield* makeCapabilityCache(
       Effect.fn("EnvironmentExecutor.readCapabilities")(function* (environmentId, instanceId) {

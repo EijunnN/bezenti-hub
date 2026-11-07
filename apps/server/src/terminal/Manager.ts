@@ -34,6 +34,7 @@ import {
   ClaudeSettings,
   CodexSettings,
   ProviderInstanceId,
+  TerminalEnvironmentUnavailableError,
 } from "@t3tools/contracts";
 import { makeKeyedCoalescingWorker } from "@t3tools/shared/KeyedCoalescingWorker";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
@@ -63,6 +64,7 @@ import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as ServerConfig from "../config.ts";
+import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
@@ -1511,6 +1513,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const path = yield* Path.Path;
   const context = yield* Effect.context<never>();
   const runFork = Effect.runForkWith(context);
+  // A Hub that runs no agents opens no shell in its own process (setup scripts included).
+  const runsAgents = yield* HubRunsAgents.HubRunsAgents;
 
   const logsDir = options.logsDir;
   const historyLineLimit = options.historyLineLimit ?? DEFAULT_HISTORY_LINE_LIMIT;
@@ -3454,7 +3458,15 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     );
 
   return TerminalManager.of({
-    open,
+    open: runsAgents
+      ? open
+      : (input) =>
+          Effect.fail(
+            new TerminalEnvironmentUnavailableError({
+              threadId: input.threadId,
+              reason: "hub_runs_no_agents",
+            }),
+          ),
     getShell,
     attachStream,
     attachOutputStream,

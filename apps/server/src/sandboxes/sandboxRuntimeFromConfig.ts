@@ -167,16 +167,31 @@ export const fromConfig = Effect.gen(function* () {
 });
 
 /**
- * Whether the Hub machine's in-process executor still runs Threads (development only: it isolates
- * nothing). Unset, only a dev Hub without a Sandbox runtime runs them, so `vp run dev` works
- * without Podman. See docs/internals/sandboxes.md, «The Hub runs no agents».
+ * Whether this server's own machine runs agents. A joined machine always does. A Hub does only in
+ * development: `T3CODE_HUB_RUNS_AGENTS` is honored only under the dev runner (`T3CODE_DEV_RUNNER=1`
+ * with `--dev-url`), and unset there it is on without a Sandbox runtime. See sandboxes.md.
  */
 const HUB_RUNS_AGENTS_SETTING = "T3CODE_HUB_RUNS_AGENTS";
+/** Set by `vp run dev` (scripts/dev-runner.ts) for the servers it starts, and nothing else. */
+const DEV_RUNNER_SETTING = "T3CODE_DEV_RUNNER";
 
 export const hubRunsAgentsFromConfig = Effect.gen(function* () {
+  const config = yield* ServerConfig.ServerConfig;
+  if (config.joinedHub !== undefined) return true;
   const setting = Option.getOrUndefined(yield* optionalSetting(HUB_RUNS_AGENTS_SETTING))
     ?.trim()
     .toLowerCase();
+  const devRunner =
+    config.devUrl !== undefined &&
+    Option.getOrUndefined(yield* optionalSetting(DEV_RUNNER_SETTING)) === "1";
+  if (!devRunner) {
+    if (setting !== undefined && setting !== "" && setting !== "0" && setting !== "false") {
+      yield* Effect.logError(
+        `${HUB_RUNS_AGENTS_SETTING}=${setting} is ignored: only a development Hub started by \`vp run dev\` runs agents in its own process. This Hub runs none.`,
+      );
+    }
+    return false;
+  }
   if (setting === "1" || setting === "true") return true;
   if (setting === "0" || setting === "false") return false;
   if (setting !== undefined && setting !== "") {
@@ -185,8 +200,6 @@ export const hubRunsAgentsFromConfig = Effect.gen(function* () {
     );
     return false;
   }
-  const config = yield* ServerConfig.ServerConfig;
-  if (config.devUrl === undefined || config.joinedHub !== undefined) return false;
   const runtime = Option.getOrUndefined(yield* optionalSetting(SANDBOX_RUNTIME_SETTING));
   return runtime !== "process" && runtime !== "podman";
 });

@@ -79,6 +79,29 @@ describe("previewThreadPlacement", () => {
     ).toBeNull();
   });
 
+  it("never places on a Sandbox the Hub cannot run, preferred or not", () => {
+    for (const status of ["stopped", "online"] as const) {
+      expect(
+        previewThreadPlacement({
+          preferred: preferred({ kind: "sandbox", status }),
+          providerInstanceId: claude,
+          hubMachine: false,
+          spaceSandbox: { id: sandbox },
+          sandboxesRun: false,
+        }),
+      ).toBeNull();
+    }
+    expect(
+      previewThreadPlacement({
+        preferred: preferred(),
+        providerInstanceId: claude,
+        hubMachine: false,
+        spaceSandbox: { id: sandbox },
+        sandboxesRun: false,
+      }),
+    ).toBe(laptop);
+  });
+
   it("counts a Sandbox that is not running as available: the Hub starts it for the work", () => {
     for (const status of ["stopped", "starting"] as const) {
       expect(onHub(preferred({ kind: "sandbox", status, providers: [] }))).toBe(laptop);

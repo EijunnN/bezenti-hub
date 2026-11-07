@@ -4,6 +4,9 @@ import {
   CommandId,
   ChatAttachmentId,
   type ChatAttachment,
+  EnvironmentExecutorUnavailableError,
+  EnvironmentId,
+  HUB_MACHINE_ENVIRONMENT_ID,
   EventId,
   MessageId,
   ProjectId,
@@ -20,6 +23,9 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { ATTACHMENT_ONLY_BOOTSTRAP_PROMPT } from "@t3tools/shared/composerContextReferences";
 
+import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
+import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
+import * as ProjectCheckouts from "../environment/ProjectCheckouts.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -51,6 +57,8 @@ const adapter = {
 function makeHarness(
   options: {
     readonly generateTitle?: TextGeneration.TextGeneration["Service"]["generateThreadTitle"];
+    /** The Hub machine runs no agents: the Thread's own machine (this executor, if any) titles it. */
+    readonly threadMachine?: EnvironmentExecutor.EnvironmentExecutor | null;
   } = {},
 ) {
   const layerDatabase = SqlitePersistence.layerMemory;
@@ -104,6 +112,21 @@ function makeHarness(
         Layer.mock(TextGeneration.TextGeneration)({ generateThreadTitle }),
         layerServerSettings,
         NodeServices.layer,
+        options.threadMachine === undefined
+          ? Layer.empty
+          : Layer.mergeAll(
+              Layer.succeed(HubRunsAgents.HubRunsAgents, false),
+              Layer.mock(EnvironmentExecutor.EnvironmentExecutorRegistry)({
+                hubMachineEnvironmentId: HUB_MACHINE_ENVIRONMENT_ID,
+                onActiveEnvironment: () => (effect) => effect,
+                activeEnvironment: () => Effect.succeed(EnvironmentId.make("environment:laptop")),
+                get: (environmentId) =>
+                  options.threadMachine == null
+                    ? Effect.fail(new EnvironmentExecutorUnavailableError({ environmentId }))
+                    : Effect.succeed(options.threadMachine),
+              }),
+              Layer.mock(ProjectCheckouts.ProjectCheckouts)({}),
+            ),
       ),
     ),
   );
@@ -393,6 +416,54 @@ describe("ThreadTitleRegenerationService", () => {
         assert.equal(projection.thread.title, "Seed title");
         assert.equal(projection.thread.titleRegeneration?.requestId, currentRequest);
       }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect("without agents on the Hub, the Thread's own machine titles it, or nothing does", () =>
+    Effect.gen(function* () {
+      const asked: Array<{ readonly cwd: string; readonly message: string }> = [];
+      const laptop = {
+        environmentId: EnvironmentId.make("environment:laptop"),
+        textGeneration: {
+          threadTitle: (request: { readonly cwd: string; readonly message: string }) =>
+            Effect.sync(() => {
+              asked.push(request);
+              return { title: "Titled on the Laptop" };
+            }),
+        },
+        workspace: { paths: { checkout: () => Effect.succeedSome("/laptop/repo") } },
+      } as unknown as EnvironmentExecutor.EnvironmentExecutor;
+      for (const machine of [laptop, null]) {
+        const harness = makeHarness({ threadMachine: machine });
+        yield* Effect.gen(function* () {
+          const threads = yield* ThreadManagement.ThreadManagementService;
+          const titles = yield* ThreadTitleRegeneration.ThreadTitleRegenerationService;
+          const name = machine === null ? "away" : "laptop";
+          const threadId = yield* createThread({
+            command: `${name}:create`,
+            thread: `${name}:thread`,
+          });
+          yield* dispatchUserMessage({
+            command: `${name}:message`,
+            threadId,
+            text: "Fix the login",
+          });
+          const requestId = yield* armRegeneration({ command: `${name}:title`, threadId });
+          yield* titles.execute({ threadId, requestId, kind: { type: "regenerate" } });
+          // Never the Hub's own provider CLI.
+          assert.equal(harness.generateThreadTitle.mock.calls.length, 0);
+          const projection = yield* threads.getThreadProjection(threadId);
+          // A machine away leaves the title as it was, and the regeneration settles.
+          assert.equal(
+            projection.thread.title,
+            machine === null ? "Seed title" : "Titled on the Laptop",
+          );
+          assert.isNotOk(projection.thread.titleRegeneration);
+        }).pipe(Effect.provide(harness.layer));
+      }
+      assert.lengthOf(asked, 1);
+      assert.equal(asked[0]?.cwd, "/laptop/repo");
+      assert.include(asked[0]?.message, "Fix the login");
     }),
   );
 

@@ -383,6 +383,21 @@ export const REMOTE_OPERATIONS = {
     }),
     error: Schema.Union([TextGenerationError, EnvironmentExecutorUnavailableError]),
   },
+  // A Thread's title, written with the text generation of the machine it runs on.
+  "textGeneration.threadTitle": {
+    input: Schema.Struct({
+      cwd: Schema.String,
+      message: Schema.String,
+      previousTitle: Schema.optionalKey(Schema.String),
+      forkSource: Schema.optionalKey(
+        Schema.Struct({ title: Schema.String, history: Schema.String }),
+      ),
+      instructions: Schema.optionalKey(Schema.String),
+      modelSelection: ModelSelection,
+    }),
+    output: Schema.Struct({ title: Schema.String }),
+    error: Schema.Union([TextGenerationError, EnvironmentExecutorUnavailableError]),
+  },
   "checkpoint.isGitRepository": checkpoint(Schema.Struct({ cwd: Schema.String }), Schema.Boolean),
   "checkpoint.hasRef": checkpoint(
     Schema.Struct({ cwd: Schema.String, checkpointRef: CheckpointRef }),

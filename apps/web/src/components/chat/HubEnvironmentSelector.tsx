@@ -28,6 +28,18 @@ import { ComposerSelectControl } from "./ComposerControl";
 import { useComposerMenuProps } from "./composerEventScope";
 
 /**
+ * The Space a new Thread of the Project is claimed in, as the Hub claims it: the Project's, or for
+ * a Project without one (the scratch Project, one from before Spaces) the Owner's Personal space,
+ * which only the Owner knows (anyone else may run nothing there). Null: unknown.
+ */
+function useNewThreadSpaceId(projectSpaceId: SpaceId | null): SpaceId | null {
+  const ownersSpaceId = useCurrentSpace((state) =>
+    state.view?.isOwner === true ? state.view.personalSpaceId : null,
+  );
+  return projectSpaceId ?? ownersSpaceId;
+}
+
+/**
  * Why a new Thread nobody placed could run nowhere (the Hub has no Sandbox for it and does not
  * run it itself), as the composer says it before sending; null when it can run somewhere, when
  * the User chose a machine, or until the Environments list is read.
@@ -39,9 +51,7 @@ export function useNoPlacementMessage(input: {
   readonly spaceId: SpaceId | null;
 }): string | null {
   const userId = useCurrentSpace((state) => state.view?.userId ?? null);
-  const ownersSpaceId = useCurrentSpace((state) =>
-    state.view?.isOwner === true ? state.view.personalSpaceId : null,
-  );
+  const spaceId = useNewThreadSpaceId(input.spaceId);
   const all = useHubEnvironments();
   const ready = useHubEnvironmentsReady();
   const unavailable = useSandboxesUnavailable();
@@ -49,10 +59,11 @@ export function useNoPlacementMessage(input: {
   if (!ready || input.draftThreadId === null || input.providerInstanceId === null) return null;
   if (chosen !== undefined) return null;
   const placed = previewDefaultEnvironment({
-    environments: placeableEnvironments(all, input.spaceId ?? ownersSpaceId),
+    environments: placeableEnvironments(all, spaceId),
     preferredEnvironmentId: input.preferredEnvironmentId,
     providerInstanceId: input.providerInstanceId,
     userId,
+    sandboxesUnavailable: unavailable,
   });
   return placed === null ? noPlacementReason(unavailable) : null;
 }
@@ -75,10 +86,8 @@ export const HubEnvironmentSelector = memo(function HubEnvironmentSelector({
   spaceId: SpaceId | null;
 }) {
   const userId = useCurrentSpace((state) => state.view?.userId ?? null);
-  const ownersSpaceId = useCurrentSpace((state) =>
-    state.view?.isOwner === true ? state.view.personalSpaceId : null,
-  );
-  const environments = placeableEnvironments(useHubEnvironments(), spaceId ?? ownersSpaceId);
+  const environments = placeableEnvironments(useHubEnvironments(), useNewThreadSpaceId(spaceId));
+  const sandboxesUnavailable = useSandboxesUnavailable();
   const chosen = useHubEnvironmentChoice(draftThreadId);
   const floatingLayerProps = useComposerMenuProps();
   const defaultId = previewDefaultEnvironment({
@@ -86,6 +95,7 @@ export const HubEnvironmentSelector = memo(function HubEnvironmentSelector({
     preferredEnvironmentId,
     providerInstanceId,
     userId,
+    sandboxesUnavailable,
   });
   // One machine to pick from is no choice, unless the Thread would otherwise run nowhere.
   if (environments.length === 0 || (environments.length < 2 && defaultId !== null)) return null;
