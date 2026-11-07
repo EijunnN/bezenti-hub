@@ -1,6 +1,6 @@
 import { resolveFilesystemReadAccess } from "@t3tools/client-runtime/state/filesystem";
 import { environmentSession } from "../../state/session";
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { AppBar } from "../../components/ui/AppBar";
 import { ScreenContent } from "../../components/ui/ScreenContent";
 import { useState } from "react";
@@ -16,6 +16,7 @@ import { preloadWorkspaceFileContents } from "./preload-workspace-file";
 export function ThreadFileNavigatorPane(props: {
   readonly cwd: string;
   readonly environmentId: EnvironmentId;
+  readonly threadId?: ThreadId | null;
   readonly projectName: string;
   readonly selectedPath: string | null;
   readonly onSelectFile: (path: string) => void;
@@ -37,11 +38,13 @@ export function ThreadFileNavigatorPane(props: {
     environmentId: props.environmentId,
     cwd: canReadFiles ? props.cwd : null,
     searchQuery,
+    threadId: props.threadId,
   });
   const handlePreviewFile = (relativePath: string) => {
     preloadWorkspaceFileContents({
       cwd: props.cwd,
       environmentId: props.environmentId,
+      threadId: props.threadId,
       relativePath,
       theme: highlightTheme,
     });

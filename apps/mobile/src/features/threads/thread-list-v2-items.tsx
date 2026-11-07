@@ -1,5 +1,9 @@
+import { useNavigation } from "@react-navigation/native";
 import * as Dialog from "../../components/ui/Dialog";
 import { useThreadRolePermissions } from "../../state/spaces";
+import { useHasJoinedEnvironments } from "../../state/hubEnvironments";
+import { EnvironmentStatusDot } from "../environments/EnvironmentStatusDot";
+import { useThreadEnvironment } from "../environments/useThreadEnvironment";
 import type { ThreadRowProviderInstance } from "./thread-provider-instance";
 import {
   THREAD_LIST_V2_MONO_FONT as MONO_FONT,
@@ -747,7 +751,9 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       : workingLabel) ?? (isUnread ? DONE_STATUS_LABEL : undefined);
   const recede = shouldRecedeThreadRow({ status, selected });
   const isRegeneratingTitle = thread.titleRegeneration != null;
-  const rowAccessibilityLabel = `${thread.title}${props.hasQueuedMessages ? ", messages queued to send" : ""}${isRegeneratingTitle ? ", regenerating title" : ""}`;
+  // Where the Thread runs, live.
+  const runsOn = useThreadEnvironment(thread);
+  const rowAccessibilityLabel = `${thread.title}${runsOn === null ? "" : `, ${runsOn.accessibilityText}`}${props.hasQueuedMessages ? ", messages queued to send" : ""}${isRegeneratingTitle ? ", regenerating title" : ""}`;
   const timeLabel = props.timeLabel;
 
   const visitThread = useAtomCommand(threadEnvironment.visit, { reportFailure: false });
@@ -771,7 +777,14 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const handleRename = useCallback(() => onRenameThread(thread), [onRenameThread, thread]);
   const canOperateScope = useEnvironmentScope(thread.environmentId, AuthOrchestrationOperateScope);
   // Settling, snoozing and archiving are the creator's or an Admin's; others see no swipe actions.
-  const canOrganize = useThreadRolePermissions(thread.environmentId, thread.source).canArchive;
+  const role = useThreadRolePermissions(thread.environmentId, thread.source);
+  const canOrganize = role.canArchive;
+  const hasJoinedEnvironments = useHasJoinedEnvironments();
+  // Moving continues the Thread elsewhere, so only a User who may continue it sees it; a Thread
+  // whose machine was removed can always go to the Hub machine.
+  const canMoveEnvironment =
+    role.canContinue && (hasJoinedEnvironments || thread.activeEnvironmentId === null);
+  const navigation = useNavigation();
   const canOperateThread = canOperateScope && canOrganize;
   const handleRegenerateTitle = useCallback(
     () => onRegenerateThreadTitle(thread),
@@ -913,8 +926,23 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
             } satisfies MenuAction,
           ]
         : []),
+      ...(canMoveEnvironment
+        ? [
+            {
+              id: "move-environment",
+              title: "Move to another Environment",
+              image: "arrow.left.arrow.right",
+            } satisfies MenuAction,
+          ]
+        : []),
     ],
-    [canTurnIntoProject, props.titleRegenerationSupported, thread.runtime, isRegeneratingTitle],
+    [
+      canMoveEnvironment,
+      canTurnIntoProject,
+      props.titleRegenerationSupported,
+      thread.runtime,
+      isRegeneratingTitle,
+    ],
   );
   const snoozableCardMenuActions = useMemo<MenuAction[]>(
     () => [
@@ -993,6 +1021,12 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       if (nativeEvent.event === "rename") handleRename();
       if (nativeEvent.event === "regenerate-title") handleRegenerateTitle();
       if (nativeEvent.event === "turn-into-project") void turnThreadIntoProject(thread);
+      if (nativeEvent.event === "move-environment") {
+        navigation.navigate("ThreadMove", {
+          environmentId: thread.environmentId,
+          threadId: thread.id,
+        });
+      }
       if (nativeEvent.event === "copy-thread") {
         const target = threadChipCopyTarget(
           { environmentId: thread.environmentId, threadId: thread.id },
@@ -1027,6 +1061,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
       }
     },
     [
+      navigation,
       onNewThreadOnBranch,
       thread,
       handleArchive,
@@ -1253,6 +1288,23 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           >
             {thread.runtime.lastError}
           </Text>
+        ) : runsOn !== null ? (
+          <View className="min-w-0 flex-1 flex-row items-center gap-1">
+            <EnvironmentStatusDot status={runsOn.status} />
+            <Text
+              className={cn(
+                "shrink text-xs",
+                selected
+                  ? selectedThreadRowColors.mutedForegroundClassName
+                  : runsOn.state !== null
+                    ? "text-warning-foreground"
+                    : rowAppearance.tertiaryForegroundClassName,
+              )}
+              numberOfLines={1}
+            >
+              {runsOn.text}
+            </Text>
+          </View>
         ) : props.environmentLabel ? (
           <View className="min-w-0 flex-1 flex-row items-center gap-1">
             {props.environmentMachine ? (

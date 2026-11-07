@@ -1,6 +1,7 @@
 import {
   EnvironmentId,
   ProjectListEntriesError,
+  ThreadId,
   type ProjectEntry,
   type ProjectListEntriesResult,
 } from "@t3tools/contracts";
@@ -17,6 +18,7 @@ type Query = {
     readonly cwd: string;
     readonly query?: string;
     readonly directoryPath?: string;
+    readonly threadId?: ThreadId;
   };
 };
 type Result =
@@ -310,6 +312,22 @@ describe("file tree workspace state", () => {
     await screen.succeed(1);
     act(() => mocks.state.reconnect());
     expect(screen.requests).toHaveLength(2);
+  });
+
+  it("lists folders on the thread's Active environment, and on the Hub copy for a draft", () => {
+    const threadId = ThreadId.make("thread-1");
+    using scoped = setup();
+    scoped.render({ threadId });
+    scoped.load();
+    expect(scoped.requests[0]!.query.input).toEqual({
+      cwd: "/first",
+      directoryPath: "src",
+      threadId,
+    });
+    using draft = setup();
+    draft.render({ threadId: null });
+    draft.load();
+    expect(draft.requests[0]!.query.input).toEqual({ cwd: "/first", directoryPath: "src" });
   });
 
   it("publishes immutable loading and loaded snapshots", async () => {

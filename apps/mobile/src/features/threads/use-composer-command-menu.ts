@@ -299,6 +299,7 @@ export function useComposerCommandMenu({
   const pathSearch = useComposerPathSearch({
     environmentId,
     cwd: trigger?.kind === "path" ? projectCwd : null,
+    threadId: hasThread ? currentThreadId : null,
     query: trigger?.kind === "path" ? trigger.query : null,
   });
   // Mounts older settled threads matching the mention, which shells may leave out.

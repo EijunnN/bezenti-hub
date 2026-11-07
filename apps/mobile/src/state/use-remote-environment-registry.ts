@@ -21,11 +21,6 @@ import {
 } from "../connection/onboarding";
 import { signInToHubInBrowser } from "../features/connection/hubSignIn";
 
-const connectionPairingUrlAtom = Atom.make("").pipe(
-  Atom.keepAlive,
-  Atom.withLabel("mobile:connection-pairing-url"),
-);
-
 const pendingConnectionErrorAtom = Atom.make<string | null>(null).pipe(
   Atom.keepAlive,
   Atom.withLabel("mobile:pending-connection-error"),
@@ -41,7 +36,10 @@ export interface PairingOutcome {
   readonly error: string | null;
 }
 
-/** Pairs with the environment behind a pairing link and saves it. */
+/**
+ * Pairs with the Hub behind a pairing link and saves it. Only a development build's dev link and
+ * the showcase capture pair; people sign in to their Hub in the browser.
+ */
 export async function pairEnvironment(
   pairingUrl: string,
   expectedEnvironmentId?: EnvironmentId,
@@ -52,10 +50,7 @@ export async function pairEnvironment(
     { pairingUrl, ...(expectedEnvironmentId === undefined ? {} : { expectedEnvironmentId }) },
     { reportFailure: false },
   );
-  if (AsyncResult.isSuccess(result)) {
-    appAtomRegistry.set(connectionPairingUrlAtom, "");
-    return { ok: true, error: null };
-  }
+  if (AsyncResult.isSuccess(result)) return { ok: true, error: null };
   return pairingFailure(Cause.squash(result.cause), "Failed to pair with the environment.");
 }
 
@@ -137,6 +132,18 @@ const savedConnectionsByIdAtom = Atom.make((get) => {
   ) as Record<EnvironmentId, SavedRemoteConnection>;
 }).pipe(Atom.withLabel("mobile:saved-connections-by-id"));
 
+/**
+ * The Hub this phone connects: its one connection. Older saved connections stay saved but are
+ * not listed, so the catalog holds at most this one.
+ */
+export const hubConnectionAtom = Atom.make(
+  (get) => Object.values(get(savedConnectionsByIdAtom))[0] ?? null,
+).pipe(Atom.withLabel("mobile:hub-connection"));
+
+export function useHubConnection(): SavedRemoteConnection | null {
+  return useAtomValue(hubConnectionAtom);
+}
+
 export function useSavedRemoteConnections() {
   const catalog = useAtomValue(environmentCatalog.catalogValueAtom);
   const savedConnectionsById = useAtomValue(savedConnectionsByIdAtom);
@@ -182,15 +189,7 @@ export function useRemoteConnectionStatus() {
 
 export function useRemoteConnections() {
   const controller = useConnectionController();
-  const connectionPairingUrl = useAtomValue(connectionPairingUrlAtom);
   const { connectedEnvironments, connectionError, connectionState } = useRemoteConnectionStatus();
-
-  const onChangeConnectionPairingUrl = (pairingUrl: string) => {
-    appAtomRegistry.set(connectionPairingUrlAtom, pairingUrl);
-  };
-
-  const onConnectPress = (pairingUrl?: string, expectedEnvironmentId?: EnvironmentId) =>
-    pairEnvironment(pairingUrl ?? connectionPairingUrl, expectedEnvironmentId);
 
   const onReconnectEnvironment = (environmentId: EnvironmentId) =>
     controller.retryEnvironment(environmentId);
@@ -223,13 +222,10 @@ export function useRemoteConnections() {
   };
 
   return {
-    connectionPairingUrl,
     connectionState,
     connectionError,
     connectedEnvironments,
     connectedEnvironmentCount: connectedEnvironments.length,
-    onChangeConnectionPairingUrl,
-    onConnectPress,
     onReconnectEnvironment,
     onSetEnvironmentEnabled,
     onUpdateEnvironment,

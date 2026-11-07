@@ -11,6 +11,7 @@ import type {
   EnvironmentId,
   OrchestrationV2ProjectedTurnItem,
   ProjectId,
+  ThreadId,
   ThreadPullRequestLink,
   VcsListRefsResult,
   VcsRef,
@@ -85,6 +86,8 @@ export interface ComposerPathSearchTarget {
   readonly environmentId: EnvironmentId | null;
   readonly cwd: string | null;
   readonly query: string | null;
+  /** The Thread whose Active environment serves the search; null or absent for a draft. */
+  readonly threadId?: ThreadId | null;
 }
 
 export function useDebouncedValue<A>(value: A, delayMs: number): A {
@@ -394,7 +397,12 @@ export function usePaginatedBranches(target: VcsRefTarget) {
 
 export function useComposerPathSearch(target: ComposerPathSearchTarget) {
   const query = normalizeComposerPathSearchQuery(target.query);
-  const normalizedTarget = { environmentId: target.environmentId, cwd: target.cwd, query };
+  const normalizedTarget = {
+    environmentId: target.environmentId,
+    cwd: target.cwd,
+    threadId: target.threadId ?? null,
+    query,
+  };
   const debouncedTarget = useDebouncedValue(normalizedTarget, COMPOSER_PATH_SEARCH_DEBOUNCE_MS);
   const fileAccessSession = useEnvironmentQuery(
     debouncedTarget.environmentId === null
@@ -419,6 +427,7 @@ export function useComposerPathSearch(target: ComposerPathSearchTarget) {
             cwd: debouncedTarget.cwd,
             query: debouncedTarget.query,
             limit: COMPOSER_PATH_SEARCH_LIMIT,
+            ...(debouncedTarget.threadId === null ? {} : { threadId: debouncedTarget.threadId }),
           },
         }
       : null;

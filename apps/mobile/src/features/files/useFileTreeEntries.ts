@@ -1,6 +1,11 @@
 import { useAtomMount, useAtomSubscribe } from "@effect/atom-react";
 import { executeAtomQuery } from "@t3tools/client-runtime/state/runtime";
-import { ProjectListEntriesError, type EnvironmentId, type ProjectEntry } from "@t3tools/contracts";
+import {
+  ProjectListEntriesError,
+  type EnvironmentId,
+  type ProjectEntry,
+  type ThreadId,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { useLayoutEffect, useRef, useState } from "react";
 import { Atom } from "effect/reactivity";
@@ -103,14 +108,20 @@ export function useFileTreeEntries(input: {
   readonly cwd: string | null;
   readonly environmentId: EnvironmentId | null;
   readonly searchQuery: string;
+  /** The Thread whose Active environment serves the files; null for a draft (the Hub's copy). */
+  readonly threadId?: ThreadId | null;
 }) {
   const { cwd, environmentId } = input;
+  const threadScope = input.threadId ? { threadId: input.threadId } : {};
   const searching = input.searchQuery.trim().length > 0;
   const query = input.searchQuery.trim().slice(0, 256);
   const debouncedQuery = useDebouncedValue(query, 200);
   const root = useEnvironmentQuery(
     cwd !== null && environmentId !== null
-      ? projectEnvironment.listEntries({ environmentId, input: { cwd, directoryPath: "" } })
+      ? projectEnvironment.listEntries({
+          environmentId,
+          input: { cwd, directoryPath: "", ...threadScope },
+        })
       : null,
   );
   const { refresh: refreshRoot } = root;
@@ -118,11 +129,11 @@ export function useFileTreeEntries(input: {
     searching && debouncedQuery.length > 0 && cwd !== null && environmentId !== null
       ? projectEnvironment.searchEntries({
           environmentId,
-          input: { cwd, query: debouncedQuery, limit: 200 },
+          input: { cwd, query: debouncedQuery, limit: 200, ...threadScope },
         })
       : null,
   );
-  const workspaceKey = JSON.stringify([environmentId, cwd]);
+  const workspaceKey = JSON.stringify([environmentId, cwd, input.threadId ?? null]);
   const [cache, setCache] = useState(() => ({
     key: workspaceKey,
     workspaces: new Map([[workspaceKey, createDirectories()]]),
@@ -214,7 +225,10 @@ export function useFileTreeEntries(input: {
       errors.delete(directoryPath);
       return { ...current, errors, loading: new Set(current.loading).add(directoryPath) };
     });
-    const atom = projectEnvironment.listEntries({ environmentId, input: { cwd, directoryPath } });
+    const atom = projectEnvironment.listEntries({
+      environmentId,
+      input: { cwd, directoryPath, ...threadScope },
+    });
     appAtomRegistry.refresh(atom);
     return executeAtomQuery(appAtomRegistry, atom, {
       signal: controller.signal,
@@ -475,12 +489,15 @@ export function useFileTreeEntries(input: {
     const queries =
       cwd !== null && environmentId !== null
         ? [
-            projectEnvironment.listEntries({ environmentId, input: { cwd, directoryPath: "" } }),
+            projectEnvironment.listEntries({
+              environmentId,
+              input: { cwd, directoryPath: "", ...threadScope },
+            }),
             ...(searching && !missingRoot
               ? [
                   projectEnvironment.searchEntries({
                     environmentId,
-                    input: { cwd, query: debouncedQuery, limit: 200 },
+                    input: { cwd, query: debouncedQuery, limit: 200, ...threadScope },
                   }),
                 ]
               : []),

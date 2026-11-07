@@ -1,4 +1,11 @@
 import { useAtomValue } from "@effect/atom-react";
+import {
+  environmentNameOf as nameOf,
+  moveCandidates,
+  moveExplanation,
+  moveProgressView,
+  moveStepLabel as stepLabel,
+} from "@t3tools/client-runtime/environment/hub-environments";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/models";
 import {
   isAtomCommandInterrupted,
@@ -6,10 +13,8 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import {
   type EnvironmentId,
-  HUB_MACHINE_ENVIRONMENT_ID,
   type HubEnvironmentSummary,
   type OrchestrationV2ThreadMove,
-  type OrchestrationV2ThreadMoveStep,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
 import { ArrowRightLeftIcon } from "lucide-react";
@@ -52,42 +57,6 @@ const moveThreadDialogAtom = Atom.make<ScopedThreadRef | null>(null).pipe(
 export function openMoveThreadDialog(threadRef: ScopedThreadRef): void {
   appAtomRegistry.set(moveThreadDialogAtom, threadRef);
 }
-
-/** What each step of a move is doing, as the Thread and the dialog say it. */
-const MOVE_STEP_LABELS: Record<OrchestrationV2ThreadMoveStep, string> = {
-  "waiting-for-turn": "Finishing the turn",
-  "final-checkpoint": "Uploading a final checkpoint",
-  fetching: "Fetching the checkpoint",
-  preparing: "Preparing the workspace",
-  handoff: "Handing over",
-  switched: "Ready",
-};
-
-const MOVE_STEPS: ReadonlyArray<OrchestrationV2ThreadMoveStep> = [
-  "waiting-for-turn",
-  "final-checkpoint",
-  "fetching",
-  "preparing",
-  "handoff",
-  "switched",
-];
-
-const nameOf = (
-  environments: ReadonlyArray<HubEnvironmentSummary>,
-  environmentId: EnvironmentId | null | undefined,
-) =>
-  environmentId === null
-    ? "no Environment"
-    : (environments.find((environment) => environment.id === environmentId)?.name ??
-      (environmentId === undefined || environmentId === HUB_MACHINE_ENVIRONMENT_ID
-        ? "Hub machine"
-        : "another Environment"));
-
-/** What the move is doing now; a turn waiting on the User says so, since the move waits too. */
-const stepLabel = (move: OrchestrationV2ThreadMove) =>
-  move.step === "waiting-for-turn" && move.waitingOn === "user"
-    ? "Waiting for your answer in the running turn"
-    : MOVE_STEP_LABELS[move.step];
 
 /** Cancels the Thread's running move; resolves to an error message, or null when it went. */
 function useCancelMove(threadRef: ScopedThreadRef) {
@@ -183,10 +152,7 @@ function MoveThreadDialog({
   const shownMove = ownMove ?? (currentMove?.status === "running" ? currentMove : null);
   const turnRunning = thread !== null && threadRuntimeIsActive(thread.runtime);
   // A Thread whose Environment was removed (null) runs nowhere: every Environment is a target.
-  const candidates = environments.filter(
-    (environment) =>
-      environment.id !== (sourceId === undefined ? HUB_MACHINE_ENVIRONMENT_ID : sourceId),
-  );
+  const candidates = moveCandidates(environments, sourceId);
   const source = activeEnvironmentOf(environments, sourceId);
   const sourceAway = source !== null && !source.isHubMachine && source.status !== "online";
   const providerInstanceId = thread?.modelSelection.instanceId;
@@ -234,23 +200,13 @@ function MoveThreadDialog({
       <DialogPopup className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Move to another Environment</DialogTitle>
-          {sourceId === null && shownMove === null ? (
-            <DialogDescription>
-              The machine this Thread ran on was removed. The Thread keeps its history and goes on
-              on the machine you choose, from the last checkpoint it uploaded.
-            </DialogDescription>
-          ) : (
-            <DialogDescription>
-              The Thread keeps its history and goes on running on the machine you choose. If{" "}
-              {movedFromName} is online, it first uploads a final checkpoint with any changes made
-              by hand.{" "}
-              {withoutProject
-                ? "The new machine fetches it into the Thread's own folder there, with the folder's branches; repositories nested in the folder stay behind."
-                : "The new machine fetches it into a worktree of the Thread's own, with its branch, and runs the Project's setup script there, which also rebuilds ignored files such as dependencies."}{" "}
-              If {movedFromName} is offline, the Thread continues from the last checkpoint it
-              uploaded, and changes it kept are put on a separate branch when it comes back.
-            </DialogDescription>
-          )}
+          <DialogDescription>
+            {moveExplanation({
+              sourceRemoved: sourceId === null && shownMove === null,
+              sourceName: movedFromName,
+              withoutProject,
+            })}
+          </DialogDescription>
         </DialogHeader>
         <DialogPanel>
           <div className="flex flex-col gap-4">
@@ -387,81 +343,48 @@ function MoveProgress({
   readonly sourceName: string;
   readonly targetName: string;
 }) {
-  const current = MOVE_STEPS.indexOf(
-    move.status === "failed" ? (move.failure?.step ?? move.step) : move.step,
-  );
-  const summary =
-    move.status === "switched"
-      ? `Moved to ${targetName}.`
-      : move.status === "failed"
-        ? `The move stopped at «${MOVE_STEP_LABELS[move.failure?.step ?? move.step]}». The Thread stays on ${sourceName}.`
-        : move.status === "cancelled"
-          ? `The move was cancelled. The Thread stays on ${sourceName}.`
-          : `Moving to ${targetName}: ${stepLabel(move)}`;
-  const continuesFrom =
-    move.continuesFrom === undefined
-      ? null
-      : move.continuesFrom.kind === "final"
-        ? "It continues from a final checkpoint, with the changes made by hand."
-        : move.continuesFrom.kind === "uploaded"
-          ? `${sourceName} was offline: it continues from the checkpoint of turn ${move.continuesFrom.appRunOrdinal ?? "?"}, the last one uploaded.`
-          : `${sourceName} was offline and never uploaded a checkpoint: it continues from the Project as it is on ${targetName}.`;
+  const view = moveProgressView(move, sourceName, targetName);
   return (
     <div className="flex flex-col gap-3">
       <p role="status" aria-live="polite" className="font-medium text-sm">
-        {summary}
+        {view.summary}
       </p>
       <ol aria-label="Move progress" className="flex flex-col gap-1.5 text-sm">
-        {MOVE_STEPS.map((step, index) => {
-          const state =
-            move.status === "switched" || index < current
-              ? "done"
-              : index === current
-                ? move.status === "failed"
-                  ? "failed"
-                  : "current"
-                : "pending";
-          return (
-            <li
-              key={step}
-              data-state={state}
-              aria-current={state === "current" ? "step" : undefined}
-              className={
-                state === "pending"
-                  ? "text-muted-foreground"
-                  : state === "failed"
-                    ? "text-destructive"
-                    : undefined
-              }
-            >
-              {state === "done"
-                ? "✓ "
+        {view.steps.map(({ step, label, state }) => (
+          <li
+            key={step}
+            data-state={state}
+            aria-current={state === "current" ? "step" : undefined}
+            className={
+              state === "pending"
+                ? "text-muted-foreground"
                 : state === "failed"
-                  ? "✕ "
-                  : state === "current"
-                    ? "… "
-                    : "· "}
-              {MOVE_STEP_LABELS[step]}
-              {step === "final-checkpoint" && move.sourceOffline === true
-                ? ` (skipped: ${sourceName} was offline)`
-                : null}
-            </li>
-          );
-        })}
+                  ? "text-destructive"
+                  : undefined
+            }
+          >
+            {state === "done"
+              ? "✓ "
+              : state === "failed"
+                ? "✕ "
+                : state === "current"
+                  ? "… "
+                  : "· "}
+            {label}
+          </li>
+        ))}
       </ol>
-      {continuesFrom === null ? null : (
-        <p className="text-muted-foreground text-sm">{continuesFrom}</p>
+      {view.continuesFrom === null ? null : (
+        <p className="text-muted-foreground text-sm">{view.continuesFrom}</p>
       )}
-      {move.status === "failed" && move.failure !== undefined ? (
+      {view.failure === null ? null : (
         <p role="alert" className="whitespace-pre-wrap text-destructive text-sm">
-          {move.failure.message}
+          {view.failure}
         </p>
-      ) : null}
-      {move.setAsideRefs !== undefined && move.setAsideRefs.length > 0 ? (
-        <p className="text-muted-foreground text-sm">
-          What {targetName} had in the workspace is kept in {move.setAsideRefs.join(", ")}.
-        </p>
-      ) : null}
+      )}
+      {view.setAside === null ? null : (
+        <p className="text-muted-foreground text-sm">{view.setAside}</p>
+      )}
     </div>
   );
 }

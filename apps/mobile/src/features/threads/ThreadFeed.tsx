@@ -2320,6 +2320,7 @@ function renderFeedEntry(
       activities={entry.activities}
       continuesWorkLog={entry.continuesWorkLog}
       environmentId={props.environmentId}
+      threadId={props.threadId}
       workspaceRoot={props.workspaceRoot}
       anchorKey={entry.id}
       copiedRowId={props.copiedRowId}
@@ -2958,6 +2959,7 @@ export const ThreadFeed = memo(function ThreadFeed({
               query: relativePath,
               kind: "file",
               limit: WORKSPACE_BASENAME_LOOKUP_LIMIT,
+              threadId: props.threadId,
             },
           }),
           { signal: request.signal, reportFailure: false, reportDefect: false },

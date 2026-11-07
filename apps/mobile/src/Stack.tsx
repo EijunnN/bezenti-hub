@@ -69,6 +69,7 @@ import {
 } from "./features/threads/ThreadRouteScreen";
 import { McpAppFullscreenScreen } from "./features/threads/McpAppFullscreenScreen";
 import { ConnectionsRouteScreen } from "./features/connection/ConnectionsRouteScreen";
+import { MoveThreadRouteScreen } from "./features/environments/MoveThreadScreen";
 import { ConnectionsNewRouteScreen } from "./features/connection/ConnectionsNewRouteScreen";
 import { AddProjectDestinationRoute } from "./features/projects/AddProjectDestinationRoute";
 import { AddProjectLocalRoute } from "./features/projects/AddProjectLocalRoute";
@@ -279,7 +280,7 @@ const SETTINGS_SCREENS = {
     linking: "settings/environment-new",
     options: {
       ...SETTINGS_PAGE_OPTIONS,
-      title: "Add Environment",
+      title: "Add a Hub",
     },
   }),
   SettingsArchive: createNativeStackScreen({
@@ -841,6 +842,18 @@ const RootStackConfig = createWorkspaceStackNavigator({
             }),
       },
     }),
+    ThreadMove: createNativeStackScreen({
+      screen: MoveThreadRouteScreen,
+      options: {
+        gestureEnabled: true,
+        headerShown: false,
+        ...(Platform.OS === "android"
+          ? { presentation: "card" as const }
+          : {
+              ...THREAD_SETTINGS_SHEET_OPTIONS,
+            }),
+      },
+    }),
     ThreadQueue: createNativeStackScreen({
       screen: ThreadQueueSheet,
       options: {
@@ -946,7 +959,7 @@ const RootStackConfig = createWorkspaceStackNavigator({
       options: {
         // Mount the iOS header immediately to avoid remounting the pairing form.
         ...(Platform.OS === "ios" ? SHEET_GLASS_HEADER_OPTIONS : undefined),
-        title: "Add Environment",
+        title: "Add a Hub",
         ...HORIZONTAL_FORM_SHEET_OPTIONS,
         sheetAllowedDetents: [0.55, 0.7],
         sheetGrabberVisible: true,

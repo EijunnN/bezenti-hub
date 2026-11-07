@@ -1,3 +1,5 @@
+import { ThreadEnvironmentNotice } from "../environments/ThreadEnvironmentNotice";
+import { useThreadEnvironment } from "../environments/useThreadEnvironment";
 import * as Dialog from "../../components/ui/Dialog";
 import { useRememberThreadProject } from "./useRememberThreadProject";
 import { useOpenPullRequest } from "../../native/useOpenPullRequest";
@@ -501,9 +503,11 @@ function ThreadRouteContent(
       : scopeThreadRef(delegatedFrom.environmentId, delegatedFrom.threadId);
   // The title it had at delegation, until this client sees the parent itself.
   const delegatedFromThread = useThreadShell(delegatedFromRef);
+  // Where the Thread runs, live; the Hub connection is the only one, so it is no news.
+  const runsOn = useThreadEnvironment(selectedThread);
   const headerSubtitle = [
     selectedThreadProject?.title ?? null,
-    selectedEnvironmentConnection?.environmentLabel ?? null,
+    runsOn?.text ?? null,
     // A linked environment's delegated task names its parent; other linked work its origin.
     delegatedFrom !== null
       ? `Subagent of ${delegatedFromThread?.title ?? delegatedFrom.title}`
@@ -587,6 +591,7 @@ function ThreadRouteContent(
           <ThreadFileNavigatorPane
             cwd={selectedThreadCwd}
             environmentId={selectedThread.environmentId}
+            threadId={selectedThread.id}
             projectName={selectedThreadProject?.title ?? "Files"}
             selectedPath={null}
             onSelectFile={(path) =>
@@ -963,6 +968,7 @@ function ThreadRouteContent(
       />
 
       <>
+        <ThreadEnvironmentNotice thread={selectedThread} runsOn={runsOn} />
         <ThreadScreenBinding
           header={
             props.inspectorPresentation ? null : (

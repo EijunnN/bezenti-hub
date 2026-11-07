@@ -4,6 +4,8 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SettingsScreen } from "./components/SettingsScreen";
+import { HubMachinesSection } from "../environments/HubMachinesSection";
+import { KeptSavedConnectionsNotice } from "../environments/KeptSavedConnectionsNotice";
 import { LocalEnvironmentList } from "../connection/LocalEnvironmentList";
 import { PullRequestRoutingSettings } from "../connection/PullRequestRoutingSettings";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
@@ -60,14 +62,19 @@ export function SettingsEnvironmentsRouteScreen() {
   return (
     <SettingsScreen
       title="Environments"
-      actions={[
-        {
-          accessibilityLabel: "Add environment",
-          icon: "plus",
-          tintColor: headerIconColor,
-          onPress: () => navigation.navigate("SettingsEnvironmentNew"),
-        },
-      ]}
+      // This app connects to one Hub: adding one is offered only while none is saved.
+      actions={
+        connectedEnvironments.length === 0
+          ? [
+              {
+                accessibilityLabel: "Add a Hub",
+                icon: "plus",
+                tintColor: headerIconColor,
+                onPress: () => navigation.navigate("SettingsEnvironmentNew"),
+              },
+            ]
+          : []
+      }
     >
       <ScrollView
         alwaysBounceVertical
@@ -79,6 +86,7 @@ export function SettingsEnvironmentsRouteScreen() {
           paddingBottom: Math.max(insets.bottom, 18) + 18,
         }}
       >
+        <KeptSavedConnectionsNotice />
         <LocalEnvironmentList
           environments={localEnvironments}
           expandedId={null}
@@ -90,6 +98,7 @@ export function SettingsEnvironmentsRouteScreen() {
           onUpdate={handleUpdateEnvironment}
         />
 
+        <HubMachinesSection />
         <PullRequestRoutingSettings />
       </ScrollView>
     </SettingsScreen>

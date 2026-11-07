@@ -450,6 +450,7 @@ export function ThreadFilesTreeScreen(props: ThreadFilesRouteScreenProps) {
     environmentId,
     cwd: canReadFiles && !hasFileInspector ? cwd : null,
     searchQuery,
+    threadId,
   });
   const handleReturnToThread = () => {
     if (navigation.canGoBack()) {
@@ -490,6 +491,7 @@ export function ThreadFilesTreeScreen(props: ThreadFilesRouteScreenProps) {
       <ThreadFileNavigatorPane
         cwd={cwd}
         environmentId={environmentId}
+        threadId={threadId}
         projectName={projectName}
         selectedPath={null}
         onSelectFile={handleSelectFile}
@@ -502,6 +504,7 @@ export function ThreadFilesTreeScreen(props: ThreadFilesRouteScreenProps) {
     preloadWorkspaceFileContents({
       cwd,
       environmentId,
+      threadId,
       relativePath,
       theme: highlightTheme,
     });
@@ -615,6 +618,7 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
     environmentId,
     cwd: canReadFiles ? directoryPath : null,
     searchQuery,
+    threadId,
   });
   const [modeOverride, setModeOverride] = useState<{
     readonly path: string;
@@ -714,7 +718,7 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
       needsFileContents
       ? projectEnvironment.readFile({
           environmentId,
-          input: { cwd, relativePath },
+          input: { cwd, relativePath, ...(threadId === null ? {} : { threadId }) },
         })
       : null,
   );
@@ -752,6 +756,7 @@ export function ThreadFileScreen(props: ThreadFileRouteScreenProps) {
       <ThreadFileNavigatorPane
         cwd={directoryPath ?? cwd}
         environmentId={environmentId}
+        threadId={threadId}
         projectName={directoryPath ?? projectName}
         selectedPath={directoryPath === null ? relativePath : null}
         onSelectFile={(path) => {

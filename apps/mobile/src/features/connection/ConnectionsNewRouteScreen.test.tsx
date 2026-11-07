@@ -33,10 +33,6 @@ vi.mock("@react-navigation/native", () => ({
   useRoute: () => ({ name: "ConnectionsNew" }),
 }));
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => null }));
-vi.mock("expo-camera", () => ({
-  CameraView: () => null,
-  useCameraPermissions: () => [null, vi.fn()],
-}));
 vi.mock("expo-haptics", () => ({
   notificationAsync: vi.fn(async () => {}),
   NotificationFeedbackType: { Success: "success", Error: "error" },
@@ -48,7 +44,6 @@ vi.mock("../../components/ui/AppText", () => ({
   AppText: ({ children }: { children?: ReactNode }) => <span>{children}</span>,
   AppTextInput: () => null,
 }));
-vi.mock("../../components/ui/FrostedCutout", () => ({ FrostedCutout: () => null }));
 vi.mock("../../components/ui/AppSymbol", () => ({ SymbolView: () => null }));
 vi.mock("../../lib/useUniwindTheme", () => ({ useUniwindTheme: () => ({}) }));
 vi.mock("../settings/appearance/AppearancePreferencesProvider", () => ({

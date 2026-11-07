@@ -12,6 +12,8 @@ import { useRemoteConnections } from "../../state/use-remote-environment-registr
 import { LocalEnvironmentList } from "./LocalEnvironmentList";
 import { PullRequestRoutingSettings } from "./PullRequestRoutingSettings";
 import { LinkedEnvironmentsSection } from "./LinkedEnvironmentsSection";
+import { HubMachinesSection } from "../environments/HubMachinesSection";
+import { KeptSavedConnectionsNotice } from "../environments/KeptSavedConnectionsNotice";
 
 export function ConnectionsRouteScreen() {
   const {
@@ -35,15 +37,20 @@ export function ConnectionsRouteScreen() {
           embedded
           title="Environments"
           onBack={() => navigation.goBack()}
-          actions={[
-            {
-              accessibilityLabel: "Add environment",
-              icon: "plus",
-              onPress: () => navigation.navigate("ConnectionsNew"),
-            },
-          ]}
+          // This app connects to one Hub: adding one is offered only while none is saved.
+          actions={
+            connectedEnvironments.length === 0
+              ? [
+                  {
+                    accessibilityLabel: "Add a Hub",
+                    icon: "plus",
+                    onPress: () => navigation.navigate("ConnectionsNew"),
+                  },
+                ]
+              : []
+          }
         />
-      ) : (
+      ) : connectedEnvironments.length === 0 ? (
         <Toolbar placement="right">
           <Toolbar.Button
             icon="plus"
@@ -51,7 +58,7 @@ export function ConnectionsRouteScreen() {
             separateBackground
           />
         </Toolbar>
-      )}
+      ) : null}
       <ScrollView
         contentInsetAdjustmentBehavior="automatic"
         showsVerticalScrollIndicator={false}
@@ -62,6 +69,7 @@ export function ConnectionsRouteScreen() {
           paddingTop: 16,
         }}
       >
+        <KeptSavedConnectionsNotice />
         <LocalEnvironmentList
           environments={connectedEnvironments}
           expandedId={expandedId}
@@ -80,6 +88,7 @@ export function ConnectionsRouteScreen() {
               environmentLabel={environment.environmentLabel}
             />
           ))}
+        <HubMachinesSection />
         <PullRequestRoutingSettings />
       </ScrollView>
     </View>

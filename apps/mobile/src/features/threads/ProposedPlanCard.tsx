@@ -3,7 +3,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { proposedPlanTitle, stripDisplayedPlanMarkdown } from "@t3tools/shared/proposedPlanText";
 import { useRef, useState, type ReactNode } from "react";
 import { View } from "react-native";
@@ -17,6 +17,8 @@ import { CopyTextButton } from "./CopyTextButton";
 
 export function ProposedPlanCard(props: {
   readonly environmentId: EnvironmentId;
+  /** The Thread whose Active environment the plan is written to. */
+  readonly threadId?: ThreadId | undefined;
   readonly workspaceRoot: string | null | undefined;
   readonly markdown: string;
   readonly renderMarkdown: (text: string) => ReactNode;
@@ -40,7 +42,12 @@ export function ProposedPlanCard(props: {
     setLastPath(relativePath);
     const result = await writeFile({
       environmentId: props.environmentId,
-      input: { cwd: props.workspaceRoot, relativePath, contents },
+      input: {
+        cwd: props.workspaceRoot,
+        relativePath,
+        contents,
+        ...(props.threadId ? { threadId: props.threadId } : {}),
+      },
     }).finally(() => {
       inFlight.current = false;
       setSaving(false);

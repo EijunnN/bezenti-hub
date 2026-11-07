@@ -1,4 +1,4 @@
-import { AuthFilesystemReadScope, EnvironmentId } from "@t3tools/contracts";
+import { AuthFilesystemReadScope, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { RegistryContext } from "@effect/atom-react";
 import type { VcsRefTarget } from "@t3tools/client-runtime/state/vcs";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
@@ -88,6 +88,17 @@ it("keeps the original search deadline when rerenders have equivalent targets", 
   expect(mocks.searchEntries).toHaveBeenCalledExactlyOnceWith({
     environmentId: target.environmentId,
     input: { cwd: target.cwd, query: target.query, limit: 20 },
+  });
+});
+
+it("scopes the search to the thread so it acts on the thread's Active environment", () => {
+  using harness = setup();
+  const threadId = ThreadId.make("thread-1");
+  harness.render({ ...target, threadId });
+  act(() => vi.advanceTimersByTime(100));
+  expect(mocks.searchEntries).toHaveBeenCalledExactlyOnceWith({
+    environmentId: target.environmentId,
+    input: { cwd: target.cwd, query: target.query, limit: 20, threadId },
   });
 });
 
