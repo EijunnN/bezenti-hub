@@ -118,7 +118,6 @@ it.effect(
         label: "Claude Code",
         userId: grace.userId,
         access: "full-access",
-        peerLink: false,
         client: { deviceType: "bot", ipAddress: "127.0.0.1" },
       });
       assert.equal(yield* mcpUser(server, mcp.token), grace.userId);

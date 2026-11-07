@@ -4,10 +4,10 @@
 
 **Blocked by:** 01.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] El Hub sirve la conexión de Environment y el git del Hub también por un socket UNIX que se monta en cada contenedor; ningún otro puerto del Hub es alcanzable desde un contenedor.
-- [ ] Nada del Hub se monta salvo el volumen del Sandbox y el socket; dentro corre un usuario sin privilegios.
-- [ ] Mientras no exista la imagen base (ticket 06), una imagen mínima de desarrollo construida en el test.
-- [ ] Tests de integración con Podman (se saltan si Podman rootless no está): dos Sandboxes de dos Spaces no leen el volumen del otro, no ven sus procesos, no conectan a sus puertos ni a la loopback del Hub; sí salen a internet; parar y arrancar conserva el volumen. Red-first.
-- [ ] Funciona con Podman 3.4 (Ubuntu 22.04, el WSL de desarrollo) y versiones nuevas; documentar requisitos (subuid/subgid, systemd --user, slirp4netns).
+- [x] El Hub sirve la conexión de Environment y el git del Hub también por un socket UNIX que se monta en cada contenedor; ningún otro puerto del Hub es alcanzable desde un contenedor.
+- [x] Nada del Hub se monta salvo el volumen del Sandbox y el socket; dentro corre un usuario sin privilegios.
+- [x] Mientras no exista la imagen base (ticket 06), una imagen mínima de desarrollo construida en el test.
+- [x] Tests de integración con Podman (se saltan si Podman rootless no está): dos Sandboxes de dos Spaces no leen el volumen del otro, no ven sus procesos, no conectan a sus puertos ni a la loopback del Hub; sí salen a internet; parar y arrancar conserva el volumen. Red-first.
+- [x] Funciona con Podman 3.4 (Ubuntu 22.04, el WSL de desarrollo) y versiones nuevas; documentar requisitos (subuid/subgid, systemd --user, slirp4netns).

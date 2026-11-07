@@ -106,8 +106,6 @@ export interface McpClientSession {
   readonly sessionId: AuthSessionId;
   readonly label: string;
   readonly access: AuthMcpClientAccess;
-  /** Another T3 Code environment's link, whose work here stays within it. */
-  readonly peerLink: boolean;
   /** The User who approved the client; it acts as them. None only before an Owner exists. */
   readonly userId?: UserId;
 }
@@ -584,7 +582,6 @@ export class EnvironmentAuth extends Context.Service<
       readonly label: string;
       readonly userId?: UserId;
       readonly access: AuthMcpClientAccess;
-      readonly peerLink: boolean;
       readonly client: AuthRequestMetadata;
     }) => Effect.Effect<
       {
@@ -1754,7 +1751,6 @@ export const make = Effect.gen(function* () {
               access: session.scopes.includes(AuthOrchestrationOperateScope)
                 ? (session.runtimeModeCeiling ?? "approval-required")
                 : "read-only",
-              peerLink: session.peerLink === true,
               ...(session.userId ? { userId: session.userId } : {}),
             } satisfies McpClientSession)
           : Effect.fail(
@@ -1779,7 +1775,6 @@ export const make = Effect.gen(function* () {
           ...owner,
           scopes: mcpClientScopes(input.access),
           ...(input.access === "read-only" ? {} : { runtimeModeCeiling: input.access }),
-          peerLink: input.peerLink,
           client: { ...input.client, label: input.label, deviceType: "bot" },
         }),
       ),

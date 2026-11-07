@@ -8,7 +8,6 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 
-import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -19,18 +18,13 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
-import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
-import {
-  ENVIRONMENT_CREDENTIAL_SECRET,
-  readJoinedHubState,
-  writeJoinedHubState,
-} from "../environments/joinedHubState.ts";
+import { pointSandboxHomeAt, writeSandboxHome } from "./sandboxHome.ts";
 import {
   type SandboxExit,
   SandboxHubAddress,
@@ -39,8 +33,6 @@ import {
   type SandboxState,
 } from "./SandboxRuntime.ts";
 
-/** The setting that turns the process runtime on; off by default, so no build offers it. */
-const SANDBOX_RUNTIME_SETTING = "T3CODE_SANDBOX_RUNTIME";
 /** Names one start of a Sandbox's server, so a Hub that restarts recognizes its leftover. */
 const START_TOKEN_VARIABLE = "T3CODE_SANDBOX_START_TOKEN";
 
@@ -222,12 +214,6 @@ export const make = Effect.fn("ProcessSandboxRuntime.make")(function* (options: 
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.provideService(Path.Path, path),
     );
-  /** Its server's paths, as `t3 serve --base-dir <home>` derives them. */
-  const pathsOf = (sandboxId: string) =>
-    withPlatform(
-      ServerConfig.deriveServerPaths(homeOf(sandboxId), undefined, { baseDirIsExplicit: true }),
-    );
-
   /** Whether `pid` is that start's server over that home: its command line and its token. */
   const isTheServer = Effect.fn("ProcessSandboxRuntime.isTheServer")(function* (
     sandboxId: string,
@@ -273,20 +259,12 @@ export const make = Effect.fn("ProcessSandboxRuntime.make")(function* (options: 
 
   const create: SandboxRuntime["Service"]["create"] = Effect.fn("ProcessSandboxRuntime.create")(
     function* (spec) {
-      const paths = yield* pathsOf(spec.sandboxId);
-      yield* fs.makeDirectory(rootDir, { recursive: true, mode: 0o700 });
-      yield* fs.makeDirectory(paths.secretsDir, { recursive: true, mode: 0o700 });
-      yield* fs.chmod(homeOf(spec.sandboxId), 0o700);
-      const credentialPath = path.join(paths.secretsDir, `${ENVIRONMENT_CREDENTIAL_SECRET}.bin`);
-      yield* fs.writeFileString(credentialPath, Redacted.value(spec.credential), { mode: 0o600 });
-      yield* fs.chmod(credentialPath, 0o600);
       yield* withPlatform(
-        writeJoinedHubState(paths.joinedHubPath, {
+        writeSandboxHome({
+          rootDir,
+          homePath: homeOf(spec.sandboxId),
+          spec,
           hubUrl: yield* address.loopbackUrl,
-          hubEnvironmentId: spec.hubEnvironmentId,
-          environmentId: spec.environmentId,
-          name: spec.name,
-          joinedAt: DateTime.formatIso(yield* DateTime.now),
         }),
       );
     },
@@ -306,21 +284,11 @@ export const make = Effect.fn("ProcessSandboxRuntime.make")(function* (options: 
     function* (sandboxId) {
       const current = running.get(sandboxId);
       if (current !== undefined) return { exited: Deferred.await(current.exited) };
-      const paths = yield* pathsOf(sandboxId);
-      const joined = yield* withPlatform(readJoinedHubState(paths.joinedHubPath)).pipe(
+      // A dev Hub can come back on another port: the Sandbox follows it.
+      yield* withPlatform(pointSandboxHomeAt(homeOf(sandboxId), yield* address.loopbackUrl)).pipe(
         Effect.mapError(failure("start", sandboxId)),
       );
-      if (Option.isNone(joined)) {
-        return yield* failure("start", sandboxId)("its home has no Hub; create it first.");
-      }
       yield* stopLeftover(sandboxId);
-      // A dev Hub can come back on another port: the Sandbox follows it.
-      const hubUrl = yield* address.loopbackUrl;
-      if (joined.value.hubUrl !== hubUrl) {
-        yield* withPlatform(
-          writeJoinedHubState(paths.joinedHubPath, { ...joined.value, hubUrl }),
-        ).pipe(Effect.mapError(failure("start", sandboxId)));
-      }
       const startToken = NodeCrypto.randomUUID();
       const scope = yield* Scope.fork(runtimeScope);
       const launched = yield* options
@@ -424,22 +392,12 @@ export const layer = (options: Parameters<typeof make>[0]) =>
   Layer.effect(SandboxRuntime, make(options));
 
 /**
- * The process runtime when `T3CODE_SANDBOX_RUNTIME=process` and the Hub answers on loopback;
- * None otherwise, and the Hub offers no Sandbox. It runs the Hub's own entry point with its Node.
+ * The process runtime as a Hub runs it (`T3CODE_SANDBOX_RUNTIME=process`): the Hub's own entry
+ * point under its own Node, `--dev-url` for a dev Hub. None without an entry point.
  */
-export const fromConfig = Effect.gen(function* () {
-  const setting = yield* Config.String(SANDBOX_RUNTIME_SETTING).pipe(
-    Config.option,
-    Effect.orElseSucceed(() => Option.none<string>()),
-  );
-  if (Option.isNone(setting) || setting.value !== "process") return Option.none();
-  const config = yield* ServerConfig.ServerConfig;
-  const hubUrl = sandboxHubLoopbackUrl(config);
+export const forHub = (config: { readonly devUrl: URL | undefined }) => {
   const entry = process.argv[1];
-  if (hubUrl === undefined || entry === undefined) {
-    yield* Effect.logWarning("Sandboxes are off: the Hub does not listen on loopback.");
-    return Option.none();
-  }
+  if (entry === undefined) return Option.none();
   return Option.some(
     layer({
       launcher: childProcessLauncher({
@@ -447,13 +405,6 @@ export const fromConfig = Effect.gen(function* () {
         args: [entry],
         devUrl: config.devUrl?.toString(),
       }),
-    }).pipe(
-      Layer.provide(
-        Layer.succeed(
-          SandboxHubAddress,
-          SandboxHubAddress.of({ loopbackUrl: Effect.succeed(hubUrl) }),
-        ),
-      ),
-    ),
+    }),
   );
-});
+};

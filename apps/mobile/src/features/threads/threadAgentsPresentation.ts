@@ -30,27 +30,16 @@ export interface SubagentRowPresentation {
   readonly tone: SubagentRowTone;
   readonly live: boolean;
   readonly canOpenThread: boolean;
-  /** The linked environment the task runs in, when it runs in one. */
-  readonly runsOn: string | null;
 }
 
-/**
- * Where an agent's thread opens: here, or in the linked environment that runs
- * it. Null when there is no thread, or this app is not connected to that
- * environment.
- */
+/** Where an agent's thread opens; null when it has no thread of its own. */
 export function subagentThreadTarget(
-  subagent: Pick<OrchestrationV2Subagent, "childThreadId" | "remoteChild">,
+  subagent: Pick<OrchestrationV2Subagent, "childThreadId">,
   environmentId: EnvironmentId,
-  isKnownEnvironment: (environmentId: EnvironmentId) => boolean,
 ): { readonly environmentId: EnvironmentId; readonly threadId: ThreadId } | null {
-  if (subagent.childThreadId !== null) {
-    return { environmentId, threadId: subagent.childThreadId };
-  }
-  const remote = subagent.remoteChild;
-  return remote !== undefined && isKnownEnvironment(remote.environmentId)
-    ? { environmentId: remote.environmentId, threadId: remote.threadId }
-    : null;
+  return subagent.childThreadId === null
+    ? null
+    : { environmentId, threadId: subagent.childThreadId };
 }
 
 function rowTitle(subagent: Pick<OrchestrationV2Subagent, "title" | "prompt">): string {
@@ -93,9 +82,8 @@ function rowStatusLabel(status: OrchestrationV2Subagent["status"]): string {
 export function resolveSubagentRowPresentation(
   subagent: Pick<
     OrchestrationV2Subagent,
-    "title" | "prompt" | "status" | "progress" | "result" | "childThreadId" | "remoteChild"
+    "title" | "prompt" | "status" | "progress" | "result" | "childThreadId"
   >,
-  canOpenRemote = false,
 ): SubagentRowPresentation {
   const live = isActiveSubagentStatus(subagent.status);
   return {
@@ -104,9 +92,7 @@ export function resolveSubagentRowPresentation(
     statusLabel: rowStatusLabel(subagent.status),
     tone: rowTone(subagent.status),
     live,
-    canOpenThread:
-      subagent.childThreadId !== null || (subagent.remoteChild !== undefined && canOpenRemote),
-    runsOn: subagent.remoteChild?.label ?? null,
+    canOpenThread: subagent.childThreadId !== null,
   };
 }
 

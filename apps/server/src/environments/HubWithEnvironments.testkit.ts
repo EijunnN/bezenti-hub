@@ -390,6 +390,15 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
  * credential and Hub as for a child process, and its server is a testkit Environment started from
  * that home, over `adapters`, instead of a `t3 serve` child.
  */
+/** A Sandbox runtime over the testkit's Sandboxes root, reaching the Hub at its address. */
+export type SandboxRuntimeOverRoot = (
+  rootDir: string,
+) => Layer.Layer<
+  SandboxRuntime.SandboxRuntime,
+  never,
+  SandboxRuntime.SandboxHubAddress | ServerConfig.ServerConfig | FileSystem.FileSystem | Path.Path
+>;
+
 const makeSandboxRuntime = (
   adapters: Layer.Layer<
     ProviderAdapterRegistry.ProviderAdapterRegistryV2,
@@ -406,6 +415,8 @@ const makeSandboxRuntime = (
   beforeLaunch: ((sandboxId: string) => Effect.Effect<Option.Option<number>>) | undefined,
   /** Runs before each stop of a Sandbox's server: it may hold the stop half-way. */
   beforeStop: ((sandboxId: string) => Effect.Effect<void>) | undefined,
+  /** Another runtime instead, such as Podman's, over the same root and Hub address. */
+  otherRuntime: SandboxRuntimeOverRoot | undefined,
 ) => {
   let hubUrl = "";
   const started = new Map<string, TestEnvironment>();
@@ -442,10 +453,13 @@ const makeSandboxRuntime = (
       exits.set(launch.sandboxId, exited);
       return { pid: null, exited: Deferred.await(exited) };
     }).pipe(Effect.provide(NodeServices.layer));
-  const processRuntime = ProcessSandboxRuntime.layer({
-    launcher: realLauncher ?? testkitLauncher,
-    rootDir,
-  }).pipe(
+  const processRuntime = (
+    otherRuntime?.(rootDir) ??
+    ProcessSandboxRuntime.layer({
+      launcher: realLauncher ?? testkitLauncher,
+      rootDir,
+    })
+  ).pipe(
     Layer.provide(
       Layer.succeed(
         SandboxRuntime.SandboxHubAddress,
@@ -507,6 +521,8 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     readonly beforeSandboxStop?: (sandboxId: string) => Effect.Effect<void>;
     /** The idle timeout, the start timeout and the clock (a TestClock the test advances). */
     readonly sandboxLifecycle?: Sandboxes.SandboxLifecyclePolicy["Service"];
+    /** Runs Sandboxes with this runtime instead of the process one. */
+    readonly sandboxRuntime?: SandboxRuntimeOverRoot;
     /** False: no Sandbox runtime, as a production Hub without Podman. */
     readonly sandboxes?: boolean;
   } = {},
@@ -522,6 +538,7 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     sandboxRoot,
     options.beforeSandboxLaunch,
     options.beforeSandboxStop,
+    options.sandboxRuntime,
   );
   // The lifecycle policy goes in with the runtime, to the Sandboxes that read it.
   const sandboxRuntime =
