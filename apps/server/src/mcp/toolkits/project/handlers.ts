@@ -313,7 +313,6 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
     Effect.gen(function* () {
       const projects = yield* access;
       const visibility = yield* visibilityOf(yield* McpInvocationContext.McpInvocationContext);
-      // Identities are resolved: linked environments find this side's project by repository.
       return yield* projects
         .listPage({ cursor: input.cursor ?? 0, limit: input.limit ?? 20, visibility })
         .pipe(Effect.mapError(unavailable));

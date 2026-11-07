@@ -6,9 +6,6 @@ import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collaps
 import { turnItemDetailRevision } from "@t3tools/client-runtime/work-log/item-detail";
 import { useTurnItemDetail } from "../../state/queries";
 import { useThreadShell, useProject } from "../../state/entities";
-import { useEnvironment } from "../../state/environments";
-import { buildThreadRouteParams } from "../../threadRoutes";
-import { useNavigate } from "@tanstack/react-router";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
 import { useAtomValue } from "@effect/atom-react";
 import { scopeThreadRef, scopeProjectRef } from "@t3tools/client-runtime/environment";
@@ -30,7 +27,6 @@ import {
   type OrchestrationV2ModelSwitch,
   type OrchestrationV2Notification,
   type OrchestrationV2TurnItem,
-  type OrchestrationV2RemoteTaskChild,
   type OrchestrationV2Subagent,
   type ProviderInstanceId,
   type ServerProvider,
@@ -204,7 +200,6 @@ export function V2LifecycleRow(props: {
         startedAt={item.startedAt}
         completedAt={item.completedAt}
         threadId={item.childThreadId}
-        remote={item.remoteChild}
         onOpenThread={props.onOpenThread}
       />
     );
@@ -376,19 +371,15 @@ export function EnvironmentSubagentAvatar({
   environmentId,
   providerInstanceId,
   driver,
-  remote,
   ...props
 }: {
   environmentId: EnvironmentId;
   providerInstanceId: ProviderInstanceId;
   driver?: ProviderDriverKind | undefined;
-  /** A task in a linked environment runs a provider instance there; its driver here is only a label. */
-  remote?: OrchestrationV2RemoteTaskChild | undefined;
   status?: OrchestrationV2TurnItem["status"] | undefined;
 }) {
-  const providerEnvironmentId = remote?.environmentId ?? environmentId;
-  const providersAtom = serverEnvironment.providersValueAtom(providerEnvironmentId);
-  const settings = useAtomValue(serverEnvironment.settingsValueAtom(providerEnvironmentId));
+  const providersAtom = serverEnvironment.providersValueAtom(environmentId);
+  const settings = useAtomValue(serverEnvironment.settingsValueAtom(environmentId));
   const entries = (providers: ReadonlyArray<ServerProvider> | null | undefined) => {
     const derived = deriveProviderInstanceEntries(providers ?? []);
     return settings ? brandProviderInstanceEntries(derived, settings) : derived;
@@ -421,7 +412,7 @@ export function EnvironmentSubagentAvatar({
   return (
     <SubagentAvatar
       {...props}
-      driver={providerDriver ?? (remote === undefined ? driver : undefined)}
+      driver={providerDriver ?? driver}
       displayName={displayName}
       iconUrl={iconUrl}
       accentColor={accentColor}
@@ -514,8 +505,6 @@ function SubagentTimelineLink(props: {
   readonly startedAt: DateTime.Utc | null;
   readonly completedAt: DateTime.Utc | null;
   readonly threadId: ThreadId | null;
-  /** The thread in a linked environment that runs this task, when it runs there. */
-  readonly remote?: OrchestrationV2RemoteTaskChild | undefined;
   readonly onOpenThread: (threadId: ThreadId) => void;
   readonly event?: {
     readonly status: OrchestrationV2TurnItem["status"] | null;
@@ -527,21 +516,8 @@ function SubagentTimelineLink(props: {
     environmentThreadDetails.threadAtom(props.parentRef),
     (thread) => thread?.projection.subagents.find((agent) => agent.id === props.subagentId) ?? null,
   );
-  const remote = props.remote ?? agent?.remoteChild;
-  const remoteEnvironment = useEnvironment(remote?.environmentId ?? null);
-  const navigate = useNavigate();
   const threadId = props.threadId;
-  // A task in a linked environment opens there, if this client is connected to it.
-  const open =
-    threadId !== null
-      ? () => props.onOpenThread(threadId)
-      : remote !== undefined && remoteEnvironment !== null
-        ? () =>
-            void navigate({
-              to: "/$threadId",
-              params: buildThreadRouteParams(scopeThreadRef(remote.environmentId, remote.threadId)),
-            })
-        : null;
+  const open = threadId !== null ? () => props.onOpenThread(threadId) : null;
   const liveStatus = agent?.status ?? props.status;
   const status = props.event ? props.event.status : liveStatus;
   const statusLabel = props.event?.label ?? subagentStatusVisual(liveStatus).label;
@@ -563,7 +539,6 @@ function SubagentTimelineLink(props: {
         environmentId={props.parentRef.environmentId}
         providerInstanceId={props.providerInstanceId}
         driver={props.driver}
-        remote={remote}
         status={status ?? undefined}
       />
       <span className="min-w-0 flex-1">
@@ -571,9 +546,6 @@ function SubagentTimelineLink(props: {
           <span className="min-w-0 truncate text-xs font-medium text-foreground">
             {props.title}
           </span>
-          {remote !== undefined ? (
-            <span className="shrink-0 text-xs text-muted-foreground">on {remote.label}</span>
-          ) : null}
         </span>
         <span
           className={cn(

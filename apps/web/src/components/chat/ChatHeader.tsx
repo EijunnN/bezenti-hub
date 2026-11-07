@@ -57,7 +57,6 @@ interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
   activeThreadId: ThreadId;
   activeThreadTitle: string;
-  activeThreadLinkOrigin?: string | null | undefined;
   /** The Environment the Thread runs on, by name and live status. */
   activeEnvironment?: ActiveEnvironmentView | null | undefined;
   /** «Needs an environment», or «paused, environment offline» while its turn waits. */
@@ -90,7 +89,6 @@ export const ChatHeader = memo(function ChatHeader({
   activeThreadEnvironmentId,
   activeThreadId,
   activeThreadTitle,
-  activeThreadLinkOrigin,
   activeEnvironment,
   environmentState,
   activeThreadMove,
@@ -511,16 +509,6 @@ export const ChatHeader = memo(function ChatHeader({
               move={activeThreadMove ?? null}
               threadRef={scopeThreadRef(activeThreadEnvironmentId, activeThreadId)}
             />
-          ) : null}
-          {renamingTitle === null && activeThreadLinkOrigin ? (
-            <Tooltip>
-              <TooltipTrigger render={<Badge variant="info" size="sm" />}>
-                From {activeThreadLinkOrigin}
-              </TooltipTrigger>
-              <TooltipPopup side="top">
-                Started by an agent on {activeThreadLinkOrigin} through a linked environment.
-              </TooltipPopup>
-            </Tooltip>
           ) : null}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
