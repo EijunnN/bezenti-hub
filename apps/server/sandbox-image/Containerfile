@@ -72,3 +72,8 @@ RUN set -eu; \
       chmod 755 /usr/local/bin/t3; \
     fi; \
     t3 --version
+
+# Last, so each build is an image of its own even when every layer above is cached (a `--label`
+# alone does not make one on Podman 3.4). The Hub passes `<Hub version>-<UTC build time>`.
+ARG T3_IMAGE_VERSION=unversioned
+LABEL io.t3code.sandbox-image="1" io.t3code.image-version="${T3_IMAGE_VERSION}"

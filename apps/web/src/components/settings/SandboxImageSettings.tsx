@@ -167,6 +167,10 @@ export function SandboxImageSettings() {
             aria-label="Sandbox image build output"
             className="max-h-64 overflow-auto rounded-md bg-muted/50 p-2 font-mono text-2xs leading-4 whitespace-pre-wrap"
             role="log"
+            // The newest lines are the ones to follow while it builds.
+            ref={(node) => {
+              if (node !== null) node.scrollTop = node.scrollHeight;
+            }}
           >
             {log.join("\n")}
           </pre>

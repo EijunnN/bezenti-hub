@@ -4,11 +4,11 @@
 
 **Blocked by:** 04.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Containerfile en el repo, construible en WSL con Podman 3.4.
-- [ ] Comando y acción en Settings con progreso y error; versión registrada por Sandbox.
-- [ ] Política de actualización (parados al arrancar; en marcha solo a petición y sin turno activo).
-- [ ] Auditoría `sandbox.image.update`.
-- [ ] Las provider logins de cada Sandbox viven en su volumen y sobreviven a cambios de imagen.
-- [ ] Test de integración que construye la imagen y arranca un Sandbox con ella (se salta sin Podman).
+- [x] Containerfile en el repo, construible en WSL con Podman 3.4.
+- [x] Comando y acción en Settings con progreso y error; versión registrada por Sandbox.
+- [x] Política de actualización (parados al arrancar; en marcha solo a petición y sin turno activo).
+- [x] Auditoría `sandbox.image.update`.
+- [x] Las provider logins de cada Sandbox viven en su volumen y sobreviven a cambios de imagen.
+- [x] Test de integración que construye la imagen y arranca un Sandbox con ella (se salta sin Podman).

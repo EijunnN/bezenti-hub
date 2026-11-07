@@ -31,7 +31,6 @@ import {
   inspectSandboxImage,
   podmanGlobalArgs,
   runPodman,
-  SANDBOX_IMAGE_VERSION_LABEL,
   type SandboxImageFound,
 } from "./PodmanSandboxRuntime.ts";
 
@@ -87,11 +86,16 @@ const streamCommand = (
   command: string,
   args: ReadonlyArray<string>,
   onLine: (line: string) => void,
-  options: { readonly cwd?: string; readonly timeoutMs: number },
+  options: {
+    readonly cwd?: string;
+    readonly env?: NodeJS.ProcessEnv;
+    readonly timeoutMs: number;
+  },
 ) =>
   Effect.callback<void, SandboxImageBuildError>((resume) => {
     const child = NodeChildProcess.spawn(command, [...args], {
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+      ...(options.env === undefined ? {} : { env: options.env }),
       stdio: ["ignore", "pipe", "pipe"],
     });
     for (const stream of [child.stdout, child.stderr]) {
@@ -128,6 +132,24 @@ const streamCommand = (
   );
 
 /**
+ * The staging's tools resolve `node` from PATH: the Hub's own first. In WSL the PATH the Hub took
+ * from the login shell also lists Windows directories, whose `node` cannot run here.
+ */
+const stagingEnvironment = (): NodeJS.ProcessEnv => {
+  const entries = (process.env.PATH ?? "")
+    .split(NodePath.delimiter)
+    .filter((entry) => entry !== "");
+  const usable =
+    process.env.WSL_DISTRO_NAME === undefined
+      ? entries
+      : entries.filter((entry) => !entry.startsWith("/mnt/"));
+  return {
+    ...process.env,
+    PATH: [NodePath.dirname(process.execPath), ...usable].join(NodePath.delimiter),
+  };
+};
+
+/**
  * The context: the Containerfile, and the server of this Hub's version. A `t3` release runs from
  * its own tree, which is copied as it is; a Hub run from a checkout (source or its `dist`) stages
  * that checkout's server (scripts/stage-sandbox-server.ts).
@@ -135,13 +157,14 @@ const streamCommand = (
 const prepareContext = Effect.fn("SandboxImage.prepareContext")(function* (
   contextDir: string,
   onLine: (line: string) => void,
+  fromCheckout: string | undefined,
 ) {
   const copy = (from: string, to: string) =>
     Effect.try({
       try: () => NodeFS.cpSync(from, to, { recursive: true, dereference: true }),
       catch: (cause) => new SandboxImageBuildError({ detail: String(cause) }),
     });
-  if (NodeSea.isSea()) {
+  if (fromCheckout === undefined && NodeSea.isSea()) {
     const tree = NodePath.dirname(process.execPath);
     const containerfile = NodePath.join(tree, "sandbox-image", "Containerfile");
     if (!NodeFS.existsSync(containerfile)) {
@@ -163,7 +186,7 @@ const prepareContext = Effect.fn("SandboxImage.prepareContext")(function* (
     return;
   }
   const entry = process.argv[1];
-  const checkout = entry === undefined ? undefined : checkoutOf(entry);
+  const checkout = fromCheckout ?? (entry === undefined ? undefined : checkoutOf(entry));
   if (checkout === undefined) {
     return yield* new SandboxImageBuildError({
       detail:
@@ -175,7 +198,7 @@ const prepareContext = Effect.fn("SandboxImage.prepareContext")(function* (
     process.execPath,
     [NodePath.join(checkout, "scripts", "stage-sandbox-server.ts"), "--output-dir", contextDir],
     onLine,
-    { cwd: checkout, timeoutMs: 20 * 60 * 1000 },
+    { cwd: checkout, env: stagingEnvironment(), timeoutMs: 20 * 60 * 1000 },
   );
   yield* copy(
     NodePath.join(checkout, "apps", "server", "sandbox-image", "Containerfile"),
@@ -191,6 +214,8 @@ export const buildSandboxImage = Effect.fn("SandboxImage.build")(function* (inpu
   readonly image: string;
   readonly onLine: (line: string) => void;
   readonly podmanCommand?: string;
+  /** Builds the server from this checkout, whatever this process runs from (tests). */
+  readonly checkout?: string;
 }) {
   const podmanCommand = input.podmanCommand ?? "podman";
   if (!(yield* detectRootlessPodman(input.podmanCommand))) {
@@ -202,7 +227,7 @@ export const buildSandboxImage = Effect.fn("SandboxImage.build")(function* (inpu
     Effect.sync(() => NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-sandbox-image-"))),
     (dir) => Effect.sync(() => NodeFS.rmSync(dir, { recursive: true, force: true })),
   );
-  yield* prepareContext(contextDir, input.onLine);
+  yield* prepareContext(contextDir, input.onLine, input.checkout);
   input.onLine(`Building ${input.image} (${version})...`);
   yield* streamCommand(
     podmanCommand,
@@ -215,10 +240,9 @@ export const buildSandboxImage = Effect.fn("SandboxImage.build")(function* (inpu
       input.image,
       "--tag",
       `${repository}:${version}`,
-      "--label",
-      `${SANDBOX_IMAGE_VERSION_LABEL}=${version}`,
-      "--label",
-      `${SANDBOX_IMAGE_LABEL}=1`,
+      // The Containerfile labels the image with it, in a layer of its own per build.
+      "--build-arg",
+      `T3_IMAGE_VERSION=${version}`,
       contextDir,
     ],
     input.onLine,

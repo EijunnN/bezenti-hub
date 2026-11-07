@@ -10,6 +10,8 @@ const KEPT_ENV = new Set([
   "T3CODE_TRANSFER_BUDGET_RESULT_PATH",
   // Opt-in: points the HtmlRender tests at a headless browser, which they skip without.
   "T3CODE_TEST_HEADLESS_SHELL",
+  // Opt-in: builds the real Sandbox image (slow), which SandboxImage.build.test.ts skips without.
+  "T3CODE_TEST_SANDBOX_IMAGE_BUILD",
 ]);
 
 if (process.env.T3CODE_TEST_KEEP_PROVIDER_ENV !== "1") {
