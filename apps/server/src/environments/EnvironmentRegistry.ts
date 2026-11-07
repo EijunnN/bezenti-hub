@@ -46,7 +46,7 @@ import { base64UrlEncode } from "../auth/utils.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import type * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
 import * as Sandboxes from "../sandboxes/Sandboxes.ts";
-import * as ProcessSandboxRuntime from "../sandboxes/ProcessSandboxRuntime.ts";
+import * as SandboxRuntimeFromConfig from "../sandboxes/sandboxRuntimeFromConfig.ts";
 import { sandboxSpaceOf } from "../sandboxes/sandboxSpace.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as EnvironmentConnections from "./EnvironmentConnections.ts";
@@ -1016,7 +1016,7 @@ export const layer = Layer.effect(EnvironmentRegistry, make).pipe(
  */
 /** The registry as the server runs it: with Sandboxes only when a runtime that runs them is on. */
 export const layerFromConfig = Layer.unwrap(
-  Effect.map(ProcessSandboxRuntime.fromConfig, (runtime) =>
+  Effect.map(SandboxRuntimeFromConfig.fromConfig, (runtime) =>
     Option.isNone(runtime) ? layer : layerWithSandboxes(runtime.value),
   ),
 );

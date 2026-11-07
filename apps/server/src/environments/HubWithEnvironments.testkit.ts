@@ -389,6 +389,15 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
  * credential and Hub as for a child process, and its server is a testkit Environment started from
  * that home, over `adapters`, instead of a `t3 serve` child.
  */
+/** A Sandbox runtime over the testkit's Sandboxes root, reaching the Hub at its address. */
+export type SandboxRuntimeOverRoot = (
+  rootDir: string,
+) => Layer.Layer<
+  SandboxRuntime.SandboxRuntime,
+  never,
+  SandboxRuntime.SandboxHubAddress | ServerConfig.ServerConfig | FileSystem.FileSystem | Path.Path
+>;
+
 const makeSandboxRuntime = (
   adapters: Layer.Layer<
     ProviderAdapterRegistry.ProviderAdapterRegistryV2,
@@ -398,6 +407,8 @@ const makeSandboxRuntime = (
   /** A real launcher instead, such as `t3 serve` children. */
   realLauncher: ProcessSandboxRuntime.SandboxLauncher | undefined,
   rootDir: string,
+  /** Another runtime instead, such as Podman's, over the same root and Hub address. */
+  otherRuntime: SandboxRuntimeOverRoot | undefined,
 ) => {
   let hubUrl = "";
   const started = new Map<string, TestEnvironment>();
@@ -426,10 +437,13 @@ const makeSandboxRuntime = (
       started.set(launch.sandboxId, environment);
       return { pid: null, exited: Effect.never };
     }).pipe(Effect.provide(NodeServices.layer));
-  const runtime = ProcessSandboxRuntime.layer({
-    launcher: realLauncher ?? testkitLauncher,
-    rootDir,
-  }).pipe(
+  const runtime = (
+    otherRuntime?.(rootDir) ??
+    ProcessSandboxRuntime.layer({
+      launcher: realLauncher ?? testkitLauncher,
+      rootDir,
+    })
+  ).pipe(
     Layer.provide(
       Layer.succeed(
         SandboxRuntime.SandboxHubAddress,
@@ -461,6 +475,8 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     >;
     /** Runs each Sandbox's server with this launcher instead of in the test's process. */
     readonly sandboxLauncher?: ProcessSandboxRuntime.SandboxLauncher;
+    /** Runs Sandboxes with this runtime instead of the process one. */
+    readonly sandboxRuntime?: SandboxRuntimeOverRoot;
     /** False: no Sandbox runtime, as a production Hub without Podman. */
     readonly sandboxes?: boolean;
   } = {},
@@ -474,6 +490,7 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     options.sandboxAdapters ?? ProviderAdapterRegistry.layerFromAdapters([]),
     options.sandboxLauncher,
     sandboxRoot,
+    options.sandboxRuntime,
   );
   const { server, authenticator, owner } = yield* hubWithOwner({
     listen: true,

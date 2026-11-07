@@ -1,10 +1,12 @@
 // @effect-diagnostics nodeBuiltinImport:off -- writes one attachment file for the Hub to serve.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, describe, it } from "@effect/vitest";
+import { afterAll, assert, beforeAll, describe, it } from "@effect/vitest";
 import {
   CheckpointId,
   CheckpointRef,
@@ -94,7 +96,17 @@ import {
   readReplayFixtureTranscript,
 } from "../orchestration-v2/testkit/ProviderReplayFixtures.ts";
 import { materializeReplayTranscriptRuntimeInstructions } from "../orchestration-v2/testkit/ReplayRuntimeInstructions.ts";
+import * as PodmanSandboxRuntime from "../sandboxes/PodmanSandboxRuntime.ts";
+import {
+  ensureDevImage,
+  makeTestRun,
+  podmanResult,
+  removeTestRunContainers,
+  rootlessPodmanAvailable,
+} from "../sandboxes/PodmanSandboxRuntime.testkit.ts";
 import * as ProcessSandboxRuntime from "../sandboxes/ProcessSandboxRuntime.ts";
+import { devCodeMounts } from "../sandboxes/sandboxRuntimeFromConfig.ts";
+import * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
 import * as OrganizationLifecycle from "../spaces/OrganizationLifecycle.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -3475,6 +3487,95 @@ describe("Hub con Environments: the Sandbox of a Space", () => {
       assert.equal(sandbox?.status, "online");
     }).pipe(Effect.scoped),
   );
+
+  describe.skipIf(!rootlessPodmanAvailable)("in Podman", () => {
+    const run = makeTestRun();
+    let image = "";
+    beforeAll(() => {
+      image = ensureDevImage();
+    });
+    afterAll(() => removeTestRunContainers(run));
+
+    it.live(
+      "the Podman runtime runs it in a container that reaches the Hub only by its socket",
+      () =>
+        Effect.gen(function* () {
+          const entry = new URL("../bin.ts", import.meta.url).pathname;
+          const checkout = new URL("../../../../", import.meta.url).pathname.replace(/\/$/u, "");
+          const hub = yield* makeHub({
+            sandboxRuntime: (rootDir) =>
+              PodmanSandboxRuntime.layer({
+                image,
+                serverCommand: ["node", entry],
+                codeMounts: devCodeMounts(checkout),
+                rootDir,
+                namePrefix: run.namePrefix,
+                labels: run.labels,
+              }),
+          });
+          const acme = yield* createOrganization(hub, "Acme");
+          const projectId = ProjectId.make("project:acme");
+          yield* seedProject(hub.server, {
+            projectId,
+            title: "Acme",
+            defaultModelSelection: null,
+            spaceId: acme,
+          });
+          // It connected; whether it has Codex is up to the image.
+          yield* hub
+            .service(EnvironmentRegistry.EnvironmentRegistry)
+            .chooseForThread({
+              userId: yield* ownerIdOf(hub),
+              requested: sandboxEnvironmentIdOf(acme),
+              projectId,
+              providerInstanceId: ProviderInstanceId.make("codex"),
+            })
+            .pipe(Effect.ignore);
+          const sandbox = (yield* listEnvironments(hub.server, hub.owner)).find(
+            (environment) => environment.id === sandboxEnvironmentIdOf(acme),
+          );
+          assert.equal(sandbox?.status, "online");
+          const container = `${run.namePrefix}${SandboxRuntime.sandboxIdOf(acme)}`;
+          const mounts = JSON.parse(
+            podmanResult(["container", "inspect", "--format", "{{json .Mounts}}", container])
+              .stdout,
+          ) as Array<{ Source: string; Destination: string }>;
+          // Its git reaches the Hub's repositories through the same socket, with the credential
+          // the Hub wrote and mounts read-only.
+          const credentialPath = mounts.find((mount) =>
+            mount.Destination.endsWith("/secrets/environment-credential.bin"),
+          )!.Source;
+          const remote = HubRepository.withEnvironmentCredential(
+            HubRepository.hubRepositoryUrl(PodmanSandboxRuntime.SANDBOX_CONTAINER_HUB_URL, {
+              projectId,
+            }),
+            NodeFS.readFileSync(credentialPath, "utf8"),
+          );
+          const listed = yield* Effect.callback<{ code: number; output: string }>((resume) => {
+            NodeChildProcess.execFile(
+              "podman",
+              [
+                ...PodmanSandboxRuntime.podmanGlobalArgs(),
+                "exec",
+                ...Object.entries(remote.env ?? {}).flatMap(([key, value]) => [
+                  "--env",
+                  `${key}=${String(value)}`,
+                ]),
+                container,
+                "git",
+                "ls-remote",
+                remote.url,
+              ],
+              (error, stdout, stderr) =>
+                resume(
+                  Effect.succeed({ code: error === null ? 0 : 1, output: `${stdout}${stderr}` }),
+                ),
+            );
+          });
+          assert.equal(listed.code, 0, listed.output);
+        }).pipe(Effect.scoped),
+    );
+  });
 
   it.live("is not offered by a Hub without a runtime that runs Sandboxes", () =>
     Effect.gen(function* () {
