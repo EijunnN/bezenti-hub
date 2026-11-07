@@ -81,6 +81,7 @@ import {
 import { AuditLogPage, AuditLogQuery } from "./audit.ts";
 import {
   EnvironmentJoinApproveRequest,
+  EnvironmentJoinConfirmRequest,
   EnvironmentJoinDecisionResult,
   EnvironmentJoinRequestRef,
   EnvironmentJoinRequestView,
@@ -1073,6 +1074,20 @@ class EnvironmentHubEnvironmentsHttpApi extends HttpApiGroup.make("environments"
       error: EnvironmentTokenExchangeErrors,
     }),
   )
+  // Told who approved it, `t3 join` accepts them (registering the machine as theirs) or refuses.
+  .add(
+    HttpApiEndpoint.post("confirmJoin", "/api/environments/join/confirm", {
+      payload: EnvironmentJoinConfirmRequest,
+      success: EnvironmentJoinStatus,
+      error: [
+        EnvironmentRequestInvalidError,
+        EnvironmentAuthInvalidError,
+        EnvironmentResourceNotFoundError,
+        EnvironmentHttpForbiddenError,
+        EnvironmentInternalError,
+      ],
+    }),
+  )
   // The «Register this machine» page; deciding takes only the browser's own cookie.
   .add(
     HttpApiEndpoint.post("joinRequest", "/api/environments/join/request", {
@@ -1101,6 +1116,7 @@ class EnvironmentHubEnvironmentsHttpApi extends HttpApiGroup.make("environments"
       error: [
         EnvironmentAuthInvalidError,
         EnvironmentResourceNotFoundError,
+        EnvironmentHttpForbiddenError,
         EnvironmentInternalError,
       ],
     }),

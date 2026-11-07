@@ -16,7 +16,9 @@ import {
   type ChatAttachment,
   CommandId,
   DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
   GitCommandError,
+  HUB_MACHINE_ENVIRONMENT_ID,
   MessageId,
   ProjectId,
   ProviderDriverKind,
@@ -24,7 +26,9 @@ import {
   OrchestrationV2ThreadProjectionJson,
   ScheduledTaskId,
   type ServerProvider,
+  SpaceId,
   ThreadId,
+  UserId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
@@ -41,7 +45,9 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 
+import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -133,6 +139,10 @@ interface HarnessOptions {
   readonly serverSettings?: Parameters<typeof ServerSettings.layerTest>[0];
   readonly providers?: ReadonlyArray<ServerProvider>;
   readonly git?: Partial<GitWorkflow.GitWorkflowService["Service"]>;
+  /** The Hub's Environments and Spaces, where a test places Threads. */
+  readonly placement?: Layer.Layer<
+    EnvironmentRegistry.EnvironmentRegistry | SpaceDirectory.SpaceDirectory
+  >;
 }
 
 function makeHarness(options: HarnessOptions = {}) {
@@ -242,6 +252,7 @@ function makeHarness(options: HarnessOptions = {}) {
         layerThreadManagement,
         layerReceipts,
         IdAllocator.layer,
+        options.placement ?? Layer.empty,
       ),
     ),
   );
@@ -529,6 +540,57 @@ it.effect("retains automation and sender attribution while a message waits in th
     assert.equal(message?.text, "Run the audit");
   }).pipe(Effect.provide(harness.layer));
 });
+
+it.effect("places a launch for the Space its Thread will be claimed in, not the client's", () =>
+  Effect.gen(function* () {
+    const asked: Array<SpaceId | undefined> = [];
+    // The Thread's Project is in Acme; the client named Globex, its current Space.
+    const placement = Layer.mergeAll(
+      Layer.mock(SpaceDirectory.SpaceDirectory)({
+        claimCreation: (claim) =>
+          claim.spaceId === SpaceId.make("org-refused")
+            ? Effect.fail(
+                new SpaceDirectory.SpaceAccessDeniedError({
+                  action: "thread.create",
+                  reason: "not-a-member",
+                }),
+              )
+            : Effect.succeed({
+                spaceId: SpaceId.make("org-acme"),
+                ownerUserId: UserId.make("ada"),
+              }),
+      }),
+      Layer.mock(EnvironmentRegistry.EnvironmentRegistry)({
+        hubId: EnvironmentId.make("hub"),
+        chooseForThread: (input) =>
+          Effect.sync(() => {
+            asked.push(input.spaceId);
+            return HUB_MACHINE_ENVIRONMENT_ID;
+          }),
+      }),
+    );
+    const harness = makeHarness({ placement });
+    yield* Effect.gen(function* () {
+      const launches = yield* ThreadLaunch.ThreadLaunchService;
+      yield* launches.launch({
+        ...launchInput({ command: "command:launch:claimed", thread: "thread:launch:claimed" }),
+        ownerUserId: UserId.make("ada"),
+        spaceId: SpaceId.make("org-globex"),
+      });
+      assert.deepEqual(asked, [SpaceId.make("org-acme")]);
+      // A Space the creator may not create in is refused before anything is placed.
+      const refused = yield* launches
+        .launch({
+          ...launchInput({ command: "command:launch:refused", thread: "thread:launch:refused" }),
+          ownerUserId: UserId.make("ada"),
+          spaceId: SpaceId.make("org-refused"),
+        })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(refused));
+      assert.deepEqual(asked, [SpaceId.make("org-acme")]);
+    }).pipe(Effect.provide(harness.layer));
+  }),
+);
 
 it.effect("provisions independent launches concurrently instead of behind a global semaphore", () =>
   Effect.gen(function* () {

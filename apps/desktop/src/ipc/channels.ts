@@ -70,6 +70,7 @@ export const SET_WSL_ONLY_CHANNEL = "desktop:set-wsl-only";
 export const GET_JOINED_ENVIRONMENT_STATE_CHANNEL = "desktop:get-joined-environment-state";
 export const JOIN_AS_ENVIRONMENT_CHANNEL = "desktop:join-as-environment";
 export const CANCEL_JOIN_AS_ENVIRONMENT_CHANNEL = "desktop:cancel-join-as-environment";
+export const CONFIRM_JOIN_AS_ENVIRONMENT_CHANNEL = "desktop:confirm-join-as-environment";
 export const SET_JOINED_ENVIRONMENT_ENABLED_CHANNEL = "desktop:set-joined-environment-enabled";
 export const SET_JOINED_ENVIRONMENT_KEEP_RUNNING_CHANNEL =
   "desktop:set-joined-environment-keep-running";

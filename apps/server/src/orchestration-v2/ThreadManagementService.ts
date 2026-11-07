@@ -862,6 +862,7 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
         requested: command.activeEnvironmentId,
         projectId: command.projectId,
         providerInstanceId: command.modelSelection.instanceId,
+        spaceId: command.spaceId,
       })
       .pipe(
         Effect.flatMap((activeEnvironmentId) => {
@@ -911,6 +912,7 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
             requested: command.targetEnvironmentId,
             projectId: thread.projectId,
             providerInstanceId: thread.modelSelection.instanceId,
+            threadId: command.threadId,
           })
           .pipe(Effect.mapError(reject)),
       ),

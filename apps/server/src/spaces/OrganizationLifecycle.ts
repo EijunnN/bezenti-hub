@@ -15,6 +15,7 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -23,6 +24,8 @@ import {
   LIVE_WORK_FILTER,
   threadHasLiveWork,
 } from "../orchestration-v2/threadLiveWork.ts";
+import * as AuditLog from "../audit/AuditLog.ts";
+import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -77,6 +80,8 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const threads = yield* ThreadManagementService.ThreadManagementService;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
+  // Absent where no Environments are kept (orchestration-only hosts): there is no Sandbox.
+  const environments = yield* Effect.serviceOption(EnvironmentRegistry.EnvironmentRegistry);
 
   const storageError = (cause: unknown) => new OrganizationStorageError({ cause });
   const refusal = (error: {
@@ -144,7 +149,16 @@ const make = Effect.gen(function* () {
         Effect.logWarning("Could not stop what runs in an archived Organization", { cause }),
       ),
     );
-    // Spec 3 (Sandboxes): stop the Organization's Sandbox here.
+    // Its Sandbox stops too; while archived nothing starts it (`Sandboxes.ensureRunning`).
+    if (Option.isSome(environments)) {
+      yield* environments.value
+        .stopSandbox({ spaceId, actor: AuditLog.userActor(actor) })
+        .pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("Could not stop an archived Organization's Sandbox", { cause }),
+          ),
+        );
+    }
     return yield* viewOf(actor);
   });
 
@@ -167,6 +181,12 @@ const make = Effect.gen(function* () {
     yield* projects
       .deleteSpaceContent({ commandId: CommandId.make(`organization-delete:${spaceId}`), spaceId })
       .pipe(Effect.mapError(refusal));
+    // Its Sandbox, volume and credential go before its row: a retry finds what is left.
+    if (Option.isSome(environments)) {
+      yield* environments.value
+        .deleteSandbox({ spaceId, actor: AuditLog.userActor(actor) })
+        .pipe(Effect.mapError(storageError));
+    }
     yield* spaces.removeArchivedOrganization({ actor, spaceId }).pipe(Effect.mapError(refusal));
     return yield* viewOf(actor);
   });

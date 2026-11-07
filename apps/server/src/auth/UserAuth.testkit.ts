@@ -12,7 +12,9 @@ import { expect } from "@effect/vitest";
 import { isoCBOR } from "@simplewebauthn/server/helpers";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import type * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import type * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -33,6 +35,7 @@ import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as HubEnvironmentsHttp from "../environments/http.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import type * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
 import { layerTestPeer, TEST_PEER_HEADER } from "./clientConnection.testkit.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as OwnerPresence from "./OwnerPresence.ts";
@@ -154,7 +157,17 @@ const layerPullRequests = Layer.mock(PullRequestService.PullRequestService)({
   diff: () => Effect.die("the diff was read"),
 });
 
-const makeLayerServices = (config: { readonly publicUrl?: URL }) =>
+/** A Sandbox runtime for the testkit Hub; without one, Sandboxes are listed but never made. */
+export type TestSandboxRuntime = Layer.Layer<
+  SandboxRuntime.SandboxRuntime,
+  never,
+  ServerConfig.ServerConfig | FileSystem.FileSystem | Path.Path
+>;
+
+const makeLayerServices = (
+  config: { readonly publicUrl?: URL },
+  sandboxRuntime?: TestSandboxRuntime,
+) =>
   // Archive and delete reach Projects and Thread reads; no Thread in these tests runs.
   OrganizationLifecycle.layer.pipe(
     Layer.provideMerge(
@@ -167,7 +180,9 @@ const makeLayerServices = (config: { readonly publicUrl?: URL }) =>
           InstallationUserService.layer,
           SpaceVisibility.layer,
           AuditLog.layer,
-          EnvironmentRegistry.layer,
+          sandboxRuntime === undefined
+            ? EnvironmentRegistry.layer
+            : EnvironmentRegistry.layerWithSandboxes(sandboxRuntime),
           Layer.merge(McpOAuth.layer, McpOAuth.layerMcpClientAuthenticator).pipe(
             Layer.provide(ServerSettings.layerTest()),
             Layer.provide(
@@ -215,10 +230,15 @@ export const serveAuthHttpWith = Effect.fn(function* (
     readonly extend?: (
       services: Context.Context<HubServices>,
     ) => Effect.Effect<Context.Context<HubServices>, never, Scope.Scope>;
+    /** Runs each Space's Sandbox (the «Hub con Environments» testkit's process runtime). */
+    readonly sandboxRuntime?: TestSandboxRuntime;
   } = {},
 ) {
   const base = yield* Layer.build(
-    makeLayerServices(config.publicUrl === undefined ? {} : { publicUrl: config.publicUrl }),
+    makeLayerServices(
+      config.publicUrl === undefined ? {} : { publicUrl: config.publicUrl },
+      config.sandboxRuntime,
+    ),
   );
   const services = config.extend === undefined ? base : yield* config.extend(base);
   const routes = HttpApiBuilder.layer(AuthTestApi).pipe(

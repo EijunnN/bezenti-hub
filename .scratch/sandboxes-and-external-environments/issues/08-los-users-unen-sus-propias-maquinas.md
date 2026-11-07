@@ -4,11 +4,11 @@
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] La página «Register this machine» acepta al User con `registerOwn` (y al Owner); mensaje claro sin el permiso. Red-first.
-- [ ] La máquina queda personal de ese User: solo él la usa, en cualquiera de sus Spaces.
-- [ ] Settings → Environments muestra a cada User sus máquinas personales, con renombrar y quitar; el Owner ve todas.
-- [ ] Revocar `registerOwn` no quita las máquinas ya unidas (documentado); quitar al User sí (spec 2).
-- [ ] Auditoría `environment.register` con el User aprobador.
-- [ ] Tests en el testkit; prueba real con un Member.
+- [x] La página «Register this machine» acepta al User con `registerOwn` (y al Owner); mensaje claro sin el permiso. Red-first.
+- [x] La máquina queda personal de ese User: solo él la usa, en cualquiera de sus Spaces.
+- [x] Settings → Environments muestra a cada User sus máquinas personales, con renombrar y quitar; el Owner ve todas.
+- [x] Revocar `registerOwn` no quita las máquinas ya unidas (documentado); quitar al User sí (spec 2).
+- [x] Auditoría `environment.register` con el User aprobador.
+- [x] Tests en el testkit; prueba real con un Member.

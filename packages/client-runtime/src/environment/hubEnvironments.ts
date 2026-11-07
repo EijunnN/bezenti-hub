@@ -3,7 +3,7 @@
 // name and live status), a Thread's Active environment read from it, and the words and steps of
 // moving a Thread to another machine. Web and mobile share these so they say the same things.
 import {
-  type EnvironmentConnectionStatus,
+  type HubEnvironmentStatus,
   type EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
   type HubEnvironmentList,
@@ -160,7 +160,7 @@ export function canMoveThread(input: {
 /** What a Thread's header and row say about where it runs. */
 export interface ActiveEnvironmentView {
   readonly name: string;
-  readonly status: EnvironmentConnectionStatus;
+  readonly status: HubEnvironmentStatus;
   readonly isHubMachine: boolean;
   /** Its Environment was removed: it runs nowhere until it moves («needs an environment»). */
   readonly needsEnvironment: boolean;
@@ -171,10 +171,11 @@ export const NEEDS_ENVIRONMENT_LABEL = "Needs an environment";
 /** The words for a Thread whose turn waits for its machine to come back. */
 export const PAUSED_OFFLINE_LABEL = "Paused, environment offline";
 
-export const ENVIRONMENT_STATUS_LABELS: Record<EnvironmentConnectionStatus, string> = {
+export const ENVIRONMENT_STATUS_LABELS: Record<HubEnvironmentStatus, string> = {
   online: "Online",
   reconnecting: "Reconnecting",
   offline: "Offline",
+  stopped: "Stopped",
 };
 
 /**
@@ -235,6 +236,8 @@ export function environmentUnavailableReason(
   providerInstanceId: ProviderInstanceId,
 ): string | null {
   if (environment.kind === "hub") return null;
+  // A Space's Sandbox that is not running starts when a Thread is sent to it.
+  if (environment.kind === "sandbox" && environment.status !== "online") return null;
   if (environment.status !== "online") {
     return environment.status === "reconnecting" ? "Reconnecting" : "Offline";
   }
@@ -292,6 +295,20 @@ export function moveCandidates(
 ): ReadonlyArray<HubEnvironmentSummary> {
   const source = sourceId === undefined ? HUB_MACHINE_ENVIRONMENT_ID : sourceId;
   return environments.filter((environment) => environment.id !== source);
+}
+
+/**
+ * The Environments a new Thread of the Space can be sent to: a Sandbox only runs its own Space's
+ * Threads, so another Space's is left out. `spaceId` undefined (not known) leaves out every one.
+ */
+export function placeableEnvironments(
+  environments: ReadonlyArray<HubEnvironmentSummary>,
+  spaceId: string | null | undefined,
+): ReadonlyArray<HubEnvironmentSummary> {
+  return environments.filter(
+    (environment) =>
+      environment.kind !== "sandbox" || (spaceId != null && environment.spaceId === spaceId),
+  );
 }
 
 /** What the move dialog explains before the User chooses. */

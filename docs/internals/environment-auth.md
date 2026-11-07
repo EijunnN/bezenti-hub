@@ -150,14 +150,33 @@ close that gap and are the next step if it matters.
 ([EnvironmentJoin](../../apps/server/src/environments/EnvironmentJoin.ts)). The
 machine makes its credential itself, `t3env.<issuing Hub's id>.<secret>`, and
 starts a join request carrying only its SHA-256 and a PKCE challenge; the
-credential never travels. The Owner approves on «Register this machine», from
-any device. The policy asks `environment.register` (Owner only) first, so a
-Member's proof is never checked; then `UserDirectory.confirmStrongFactor` needs a
+credential never travels. The Owner, or a User with the `environments.registerOwn`
+Installation permission, approves on «Register this machine», from any device,
+and the machine becomes the approver's personal one. The policy asks
+`environment.register` first (`missing-installation-permission` otherwise, whose
+message names the permission and is the one `REGISTER_OWN_REQUIRED_MESSAGE` the
+page also gets as the request's `denialMessage`; the page learns it beforehand
+from `viewerMayApprove`, and only a viewer who may approve sees the machine's
+name, hostname, OS and time), so the proof of a User without the right is never
+checked; then `UserDirectory.confirmStrongFactor` needs a
 fresh passkey assertion or a password _with_ a TOTP code in the same request, so
-a stolen browser session cannot add a machine. Approval writes the row and its
-`environment.register` entry; the machine asks the outcome with its verifier
-until then, and asking again after a lost answer gets the same machine, never a
-second one. A browser on the machine itself is also sent to `t3 join`'s loopback
+a stolen browser session cannot add a machine. Only such a User denies a request,
+and only while it is pending.
+
+Anyone allowed to add machines who gets hold of the link could approve someone
+else's machine as their own, so approving registers nothing: the request becomes
+`awaiting-confirmation` and the machine's status answer names the approver
+(display name, sign-in name, id). `t3 join` asks `Approved by Grace (grace) as
+their personal machine. Register it as theirs? [y/N]` on a terminal; without
+one it registers only with `--owner <sign-in name or id>` naming that approver,
+and refuses otherwise. The desktop app passes `--confirm-on-stdin` and shows the
+question with «Register as theirs» and «Not me». `POST /api/environments/join/confirm`
+(with the verifier) accepts, which writes the row and its `environment.register`
+entry, whose actor is the approver, or refuses, which ends the request. The
+registry asks the policy again in the transaction that writes the row, so a
+permission revoked between the approval and the confirmation adds nothing. The
+machine asks the outcome with its verifier until then, and asking again after a
+lost answer gets the same machine, never a second one. A browser on the machine itself is also sent to `t3 join`'s loopback
 port (as app sign-in does), only as a nudge to ask now. The PKCE store is shared
 with app sign-in ([pkceGrants](../../apps/server/src/auth/pkceGrants.ts)).
 
@@ -171,7 +190,13 @@ another id gets the socket closed by the machine. `leave` refuses plain HTTP
 from off the Hub's machine, as the socket does (`isSecureEnvironmentTransport`).
 A machine belongs to its owner: turning off or removing that User revokes their
 machines in the same transaction and closes their sockets after it commits, and
-the credential check refuses a machine whose owner is off in any case.
+the credential check refuses a machine whose owner is off in any case. Revoking
+`environments.registerOwn` only stops new approvals: the permission gates
+joining, not having, so machines already joined keep working, and their owner
+still sees, renames and removes them in Settings (the Owner sees and manages
+every one, but uses only their own). The Hub machine's load, providers and
+running Threads are the whole Installation's, so only the Owner's list carries
+them; everyone else gets the row without them.
 
 The socket ([connectRoute](../../apps/server/src/environments/connectRoute.ts))
 upgrades before it checks the credential, so every refusal reaches the machine
@@ -256,8 +281,9 @@ permission: without it the space is hidden (`space.view` is denied, so what it
 holds from before a revoke reads as missing too). The Owner grants and revokes
 permissions (`installation_permissions` rows) over HTTP
 (`/api/installation/users`, which also needs the `access:read`/`access:write`
-scope) through `SpaceDirectory.setInstallationPermission`. `environments.registerOwn` is
-only stored. The Owner reads every
+scope) through `SpaceDirectory.setInstallationPermission`. `environments.registerOwn`
+lets a User approve their own machine joining (see
+[Joined environments](#joined-environments)). The Owner reads every
 Personal space and lists them in the selector, but changes nothing in another
 User's (`personal-space-read-only`). Naming a Space one cannot see, a
 `personal:<id>` included, answers exactly like naming a missing one.

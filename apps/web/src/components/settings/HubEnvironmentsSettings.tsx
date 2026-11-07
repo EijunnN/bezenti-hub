@@ -29,20 +29,35 @@ const STATUS_BADGES = {
   online: { label: "Online", variant: "success" },
   reconnecting: { label: "Reconnecting", variant: "warning" },
   offline: { label: "Offline", variant: "outline" },
+  stopped: { label: "Stopped", variant: "outline" },
 } as const;
 
 const gigabytes = (bytes: number) => `${(bytes / 1_000_000_000).toFixed(1)} GB`;
 
-function describe(environment: HubEnvironmentSummary) {
+function describe(
+  environment: HubEnvironmentSummary,
+  viewer: { readonly userId: string | undefined; readonly isOwner: boolean },
+) {
   const parts = [
-    environment.kind === "hub" ? "Runs the Hub" : "Personal",
+    environment.kind === "hub"
+      ? "Runs the Hub"
+      : environment.kind === "sandbox"
+        ? "Sandbox"
+        : viewer.userId === undefined
+          ? "Personal machine"
+          : environment.ownerUserId === viewer.userId
+            ? "Your personal machine"
+            : "Another User's personal machine",
     environment.os,
     environment.lastSeenAt === null
       ? "never connected"
       : environment.kind === "hub"
         ? null
         : `last seen ${new Date(environment.lastSeenAt).toLocaleString()}`,
-    `${environment.runningThreadCount} running Threads`,
+    // The Hub machine's Threads are everyone's: only the Owner gets that count.
+    environment.kind === "hub" && !viewer.isOwner
+      ? null
+      : `${environment.runningThreadCount} running Threads`,
   ];
   const resources = environment.resources;
   const providers = environment.providers
@@ -81,10 +96,19 @@ function describe(environment: HubEnvironmentSummary) {
   );
 }
 
-/** Settings → Environments: the machines joined to this Hub. The Owner's. */
+/**
+ * Settings → Environments: the machines joined to this Hub. The Owner sees and manages every one;
+ * each User sees the Hub machine and their own personal machines, and renames and removes those.
+ */
 export function HubEnvironmentsSettings() {
   const session = usePrimarySessionState();
-  const isOwner = session.data?.authenticated === true && session.data.isOwner === true;
+  const signedIn = session.data?.authenticated === true;
+  const isOwner = signedIn && session.data?.isOwner === true;
+  // Optional in the session: a session from before the Installation had an Owner names no User.
+  const userId = signedIn ? session.data?.userId : undefined;
+  const manages = (environment: HubEnvironmentSummary) =>
+    isOwner ||
+    (userId !== undefined && environment.kind === "external" && environment.ownerUserId === userId);
   const [environments, setEnvironments] = useState<ReadonlyArray<HubEnvironmentSummary> | null>(
     null,
   );
@@ -95,7 +119,7 @@ export function HubEnvironmentsSettings() {
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- polls the Hub for each machine's live status while Settings is open.
   useEffect(() => {
-    if (!isOwner) return;
+    if (!signedIn) return;
     let current = true;
     const load = () =>
       void fetchHubEnvironments().then(
@@ -114,9 +138,9 @@ export function HubEnvironmentsSettings() {
       current = false;
       window.clearInterval(timer);
     };
-  }, [isOwner]);
+  }, [signedIn]);
 
-  if (!isOwner) return null;
+  if (!signedIn) return null;
 
   const run = async (change: () => Promise<void>) => {
     setPending(true);
@@ -134,45 +158,50 @@ export function HubEnvironmentsSettings() {
   return (
     <SettingsSection id="hub-environments" title="Machines on this Hub">
       {environments === null && error === null ? <SettingsRow title="Loading…" /> : null}
-      {(environments ?? []).map((environment) => {
-        const badge = STATUS_BADGES[environment.status];
-        return (
-          <SettingsRow
-            key={environment.id}
-            title={
-              <span className="flex items-center gap-2">
-                {environment.name}
-                <Badge size="sm" variant={badge.variant}>
-                  {badge.label}
-                </Badge>
-              </span>
-            }
-            description={describe(environment)}
-            control={
-              <div className="flex gap-1">
-                <Button
-                  aria-label={`Rename ${environment.name}`}
-                  size="xs"
-                  variant="outline"
-                  onClick={() => setRenaming({ id: environment.id, name: environment.name })}
-                >
-                  Rename
-                </Button>
-                {environment.kind === "external" ? (
-                  <Button
-                    aria-label={`Remove ${environment.name}`}
-                    size="xs"
-                    variant="destructive-outline"
-                    onClick={() => setRemoving(environment)}
-                  >
-                    Remove
-                  </Button>
-                ) : null}
-              </div>
-            }
-          />
-        );
-      })}
+      {(environments ?? [])
+        // A Space's Sandbox is listed once it has run; until then it is only a choice in the composer.
+        .filter((environment) => environment.kind !== "sandbox" || environment.lastSeenAt !== null)
+        .map((environment) => {
+          const badge = STATUS_BADGES[environment.status];
+          return (
+            <SettingsRow
+              key={environment.id}
+              title={
+                <span className="flex items-center gap-2">
+                  {environment.name}
+                  <Badge size="sm" variant={badge.variant}>
+                    {badge.label}
+                  </Badge>
+                </span>
+              }
+              description={describe(environment, { userId, isOwner })}
+              control={
+                manages(environment) && environment.kind !== "sandbox" ? (
+                  <div className="flex gap-1">
+                    <Button
+                      aria-label={`Rename ${environment.name}`}
+                      size="xs"
+                      variant="outline"
+                      onClick={() => setRenaming({ id: environment.id, name: environment.name })}
+                    >
+                      Rename
+                    </Button>
+                    {environment.kind === "external" ? (
+                      <Button
+                        aria-label={`Remove ${environment.name}`}
+                        size="xs"
+                        variant="destructive-outline"
+                        onClick={() => setRemoving(environment)}
+                      >
+                        Remove
+                      </Button>
+                    ) : null}
+                  </div>
+                ) : null
+              }
+            />
+          );
+        })}
       <SettingsRow
         title="Add a machine"
         description="Run `t3 join <this Hub's address>` on it, then approve it here in the browser."

@@ -1,19 +1,30 @@
 import { assert, it } from "@effect/vitest";
-import { HUB_MACHINE_ENVIRONMENT_ID } from "@t3tools/contracts";
+import {
+  type EnvironmentHostResources,
+  type EnvironmentProviderSummary,
+  HUB_MACHINE_ENVIRONMENT_ID,
+  UserId,
+} from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
 import { addMember, passkeyReauth } from "../auth/UserAuth.testkit.ts";
+import * as EnvironmentRegistry from "./EnvironmentRegistry.ts";
 import {
   approveJoin,
+  confirmJoin,
   hubWithOwner,
   joinMachine,
   joinStatus,
   listEnvironments,
   loopbackStateOf,
+  memberWithPasskey,
+  setRegisterOwn,
   startJoin,
 } from "./environments.testkit.ts";
 
-const OWNER_ONLY = "Only the Owner manages this Hub's Environments.";
+const NEEDS_REGISTER_OWN =
+  'Adding your own machines needs the "Register their own Environments" permission. Ask this Hub\'s Owner for it.';
 const STRONG_FACTOR = "Confirm with your passkey, or with your password and a code from your app.";
 
 it.effect("the Owner registers a machine with a passkey and it joins as their personal one", () =>
@@ -57,17 +68,294 @@ it.effect("the Owner registers a machine with a passkey and it joins as their pe
   }),
 );
 
-it.effect("a Member cannot approve a machine, whatever proof they bring", () =>
+it.effect(
+  "a Member without the permission cannot approve a machine, whatever proof they bring",
+  () =>
+    Effect.gen(function* () {
+      const { server } = yield* hubWithOwner();
+      const member = yield* addMember(server);
+      const { requestId } = yield* startJoin(server);
+      // The page knows before anything is posted.
+      const view = yield* server.request("/api/environments/join/request", {
+        cookie: member,
+        body: { requestId },
+      });
+      assert.equal(view.body.viewerMayApprove, false);
+      // Nor does it learn about the machine.
+      for (const field of ["name", "os", "hostname", "requestedAt"]) {
+        assert.notProperty(view.body, field);
+      }
+      assert.equal(view.body.denialMessage, NEEDS_REGISTER_OWN);
+      const refused = yield* approveJoin(server, member, requestId, {
+        reauth: { method: "password", password: "anything", totpCode: "123456" },
+      });
+      assert.equal(refused.status, 403);
+      assert.equal(refused.body.message, NEEDS_REGISTER_OWN);
+      assert.notProperty(refused.body, "redirectTo");
+    }),
+);
+
+it.effect("a User with `environments.registerOwn` approves their own machine, theirs alone", () =>
   Effect.gen(function* () {
-    const { server } = yield* hubWithOwner();
-    const member = yield* addMember(server);
+    const { server, owner } = yield* hubWithOwner();
+    const grace = yield* memberWithPasskey(server, owner, { displayName: "Grace Hopper" });
+    const linus = yield* memberWithPasskey(server, owner, {
+      displayName: "Linus",
+      spaceId: grace.spaceId,
+    });
+    yield* setRegisterOwn(server, owner, grace.userId, true);
+    const external = (cookie: string) =>
+      Effect.map(listEnvironments(server, cookie), (list) =>
+        list
+          .filter((environment) => environment.kind === "external")
+          .map(({ id, ownerUserId }) => ({ id, ownerUserId })),
+      );
+
     const { requestId } = yield* startJoin(server);
-    const refused = yield* approveJoin(server, member, requestId, {
-      reauth: { method: "password", password: "anything", totpCode: "123456" },
+    const view = yield* server.request("/api/environments/join/request", {
+      cookie: grace.cookie,
+      body: { requestId },
+    });
+    assert.equal(view.body.viewerMayApprove, true);
+    assert.equal(view.body.hostname, "ada-laptop");
+    // Still a strong factor in the same request.
+    assert.equal((yield* approveJoin(server, grace.cookie, requestId)).body.message, STRONG_FACTOR);
+    const approved = yield* approveJoin(server, grace.cookie, requestId, {
+      name: "Grace's laptop",
+      reauth: yield* passkeyReauth(server, grace.authenticator),
+    });
+    assert.equal(approved.status, 200);
+    // `t3 join` is told who approved, as whose machine, before anything is registered.
+    const awaiting = yield* joinStatus(server, requestId);
+    assert.deepEqual(awaiting.body, {
+      status: "awaiting-confirmation",
+      name: "Grace's laptop",
+      approvedBy: { userId: grace.userId, displayName: "Grace Hopper", loginName: null },
+    });
+    assert.deepEqual(yield* external(owner), []);
+    assert.equal((yield* confirmJoin(server, requestId, true)).status, 200);
+    const status = yield* joinStatus(server, requestId);
+    assert.equal(status.body.status, "approved");
+    const environmentId = status.body.environmentId as string;
+
+    const mine = [{ id: environmentId, ownerUserId: grace.userId }];
+    assert.deepEqual(yield* external(grace.cookie), mine);
+    // The Owner sees every machine; another Member does not see this one.
+    assert.deepEqual(yield* external(owner), mine);
+    assert.deepEqual(yield* external(linus.cookie), []);
+
+    const audit = yield* server.request("/api/installation/audit?action=environment.register", {
+      cookie: owner,
+    });
+    const [entry] = audit.body.entries as ReadonlyArray<{
+      actor: { userId: string };
+      target: { id: string };
+    }>;
+    assert.equal(entry!.actor.userId, grace.userId);
+    assert.equal(entry!.target.id, environmentId);
+
+    // Their own to rename and remove; nobody else's.
+    const renamed = yield* server.request("/api/environments/rename", {
+      cookie: grace.cookie,
+      body: { environmentId, name: "Work laptop" },
+    });
+    assert.equal(renamed.status, 200);
+    assert.equal(renamed.body.name, "Work laptop");
+    const linusRemoves = yield* server.request("/api/environments/remove", {
+      cookie: linus.cookie,
+      body: { environmentId },
+    });
+    assert.equal(linusRemoves.status, 404);
+    const hubRename = yield* server.request("/api/environments/rename", {
+      cookie: grace.cookie,
+      body: { environmentId: HUB_MACHINE_ENVIRONMENT_ID, name: "Mine" },
+    });
+    assert.equal(hubRename.status, 403);
+    const removed = yield* server.request("/api/environments/remove", {
+      cookie: grace.cookie,
+      body: { environmentId },
+    });
+    assert.equal(removed.status, 200);
+    assert.deepEqual(yield* external(owner), []);
+  }),
+);
+
+it.effect("revoking the permission keeps the User's machines; removing the User does not", () =>
+  Effect.gen(function* () {
+    const { server, owner } = yield* hubWithOwner();
+    const grace = yield* memberWithPasskey(server, owner, { displayName: "Grace Hopper" });
+    yield* setRegisterOwn(server, owner, grace.userId, true);
+    const joined = yield* joinMachine(server, grace.authenticator, grace.cookie);
+
+    yield* setRegisterOwn(server, owner, grace.userId, false);
+    const kept = yield* listEnvironments(server, grace.cookie);
+    assert.include(
+      kept.map((environment) => environment.id),
+      joined.environmentId,
+    );
+    // No new one, though.
+    const { requestId } = yield* startJoin(server);
+    const refused = yield* approveJoin(server, grace.cookie, requestId, {
+      reauth: yield* passkeyReauth(server, grace.authenticator),
     });
     assert.equal(refused.status, 403);
-    assert.equal(refused.body.message, OWNER_ONLY);
-    assert.notProperty(refused.body, "redirectTo");
+    assert.equal(refused.body.message, NEEDS_REGISTER_OWN);
+
+    const removedUser = yield* server.request(`/api/installation/users/${grace.userId}/status`, {
+      cookie: owner,
+      body: { status: "removed" },
+    });
+    assert.equal(removedUser.status, 200);
+    assert.notInclude(
+      (yield* listEnvironments(server, owner)).map((environment) => environment.id),
+      joined.environmentId,
+    );
+  }),
+);
+
+const registeredCount = (server: Effect.Success<ReturnType<typeof hubWithOwner>>["server"]) =>
+  Effect.map(
+    server.sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count FROM environments WHERE kind = 'external'
+    `,
+    (rows) => rows[0]?.count ?? 0,
+  );
+
+it.effect("a permission revoked between the approval and the write registers nothing", () =>
+  Effect.gen(function* () {
+    const { server, owner } = yield* hubWithOwner();
+    const grace = yield* memberWithPasskey(server, owner, { displayName: "Grace Hopper" });
+    yield* setRegisterOwn(server, owner, grace.userId, true);
+    const { requestId } = yield* startJoin(server);
+    const approved = yield* approveJoin(server, grace.cookie, requestId, {
+      reauth: yield* passkeyReauth(server, grace.authenticator),
+    });
+    assert.equal(approved.status, 200);
+    // Granted when she approved, gone by the write: the registry asks again in its transaction.
+    yield* setRegisterOwn(server, owner, grace.userId, false);
+    const confirmed = yield* confirmJoin(server, requestId, true);
+    assert.equal(confirmed.status, 403);
+    assert.equal(confirmed.body.message, NEEDS_REGISTER_OWN);
+    assert.equal(yield* registeredCount(server), 0);
+    assert.equal((yield* joinStatus(server, requestId)).body.status, "denied");
+  }),
+);
+
+it.effect(
+  "an approval by someone the machine did not expect registers nothing until it confirms",
+  () =>
+    Effect.gen(function* () {
+      const { server, owner, authenticator } = yield* hubWithOwner();
+      const mallory = yield* memberWithPasskey(server, owner, { displayName: "Mallory" });
+      yield* setRegisterOwn(server, owner, mallory.userId, true);
+      // Grace's `t3 join`; Mallory got hold of its link and approves first.
+      const { requestId } = yield* startJoin(server);
+      const approved = yield* approveJoin(server, mallory.cookie, requestId, {
+        reauth: yield* passkeyReauth(server, mallory.authenticator),
+      });
+      assert.equal(approved.status, 200);
+      const awaiting = yield* joinStatus(server, requestId);
+      assert.equal(awaiting.body.status, "awaiting-confirmation");
+      assert.equal((awaiting.body.approvedBy as { displayName: string }).displayName, "Mallory");
+      assert.equal(yield* registeredCount(server), 0);
+      // Nobody else decides it any more.
+      const ownerApproves = yield* approveJoin(server, owner, requestId, {
+        reauth: yield* passkeyReauth(server, authenticator),
+      });
+      assert.equal(ownerApproves.status, 404);
+      // Grace's machine refuses: nothing is registered, ever.
+      const refused = yield* confirmJoin(server, requestId, false);
+      assert.equal(refused.status, 200);
+      assert.equal(refused.body.status, "denied");
+      assert.equal((yield* joinStatus(server, requestId)).body.status, "denied");
+      assert.equal((yield* confirmJoin(server, requestId, true)).status, 404);
+      assert.equal(yield* registeredCount(server), 0);
+      // Only the `t3 join` that started it confirms.
+      const other = yield* startJoin(server);
+      yield* approveJoin(server, mallory.cookie, other.requestId, {
+        reauth: yield* passkeyReauth(server, mallory.authenticator),
+      });
+      const stranger = yield* confirmJoin(
+        server,
+        other.requestId,
+        true,
+        "another-code-verifier-that-is-long-enough-for-pkce-0123",
+      );
+      assert.equal(stranger.status, 401);
+      assert.equal(yield* registeredCount(server), 0);
+    }),
+);
+
+it.effect("only someone who may approve denies, and only a request still pending", () =>
+  Effect.gen(function* () {
+    const { server, owner, authenticator } = yield* hubWithOwner();
+    const linus = yield* addMember(server);
+    const deny = (cookie: string, requestId: string) =>
+      server.request("/api/environments/join/deny", { cookie, body: { requestId } });
+    const { requestId } = yield* startJoin(server);
+    const refused = yield* deny(linus, requestId);
+    assert.equal(refused.status, 403);
+    assert.equal(refused.body.message, NEEDS_REGISTER_OWN);
+    assert.equal((yield* joinStatus(server, requestId)).body.status, "pending");
+
+    // Approved and waiting for the machine: no longer anyone's to deny.
+    yield* approveJoin(server, owner, requestId, {
+      reauth: yield* passkeyReauth(server, authenticator),
+    });
+    assert.equal((yield* deny(owner, requestId)).status, 404);
+    assert.equal((yield* joinStatus(server, requestId)).body.status, "awaiting-confirmation");
+    const joined = yield* joinMachine(server, authenticator, owner);
+    assert.equal((yield* deny(owner, joined.requestId)).status, 404);
+  }),
+);
+
+it.effect("the Hub machine's load and providers are the Owner's to see", () =>
+  Effect.gen(function* () {
+    const { server } = yield* hubWithOwner();
+    yield* addMember(server);
+    const [ownerRow] = yield* server.sql<{ readonly id: string }>`
+      SELECT user_id AS id FROM users WHERE is_owner = 1
+    `;
+    const registry = Context.get(server.services, EnvironmentRegistry.EnvironmentRegistry);
+    const provider = {
+      instanceId: "claudeAgent",
+      provider: "claudeAgent",
+      displayName: null,
+      enabled: true,
+      installed: true,
+      version: "1.0.0",
+      capabilities: { runtimeModes: [], conversationRollback: true, textGeneration: false },
+    } as unknown as EnvironmentProviderSummary;
+    const resources = {
+      hostResources: {
+        sampledAt: 0,
+        cpuUtilization: 0.5,
+        cpuCount: 8,
+        availableMemoryBytes: 1,
+        totalMemoryBytes: 2,
+      },
+      disk: null,
+    } as unknown as EnvironmentHostResources;
+    const hubRow = (userId: string) =>
+      registry.list(UserId.make(userId)).pipe(
+        Effect.map((list) => list.find((environment) => environment.kind === "hub")!),
+        Effect.provideService(EnvironmentRegistry.HubMachineSnapshot, {
+          providers: Effect.succeed([provider]),
+          resources: Effect.succeed(resources),
+        }),
+      );
+    const forOwner = yield* hubRow(ownerRow!.id);
+    assert.deepEqual(forOwner.providers, [provider]);
+    assert.deepEqual(forOwner.resources, resources);
+    const forMember = yield* hubRow("member-1");
+    assert.deepEqual(
+      {
+        providers: forMember.providers,
+        resources: forMember.resources,
+        runningThreadCount: forMember.runningThreadCount,
+      },
+      { providers: [], resources: null, runningThreadCount: 0 },
+    );
   }),
 );
 

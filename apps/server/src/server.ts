@@ -479,7 +479,8 @@ const layerAuth = Layer.mergeAll(
   InstallationUserService.layer,
   SpaceVisibility.layer,
   AuditLog.layer,
-  EnvironmentRegistry.layer,
+  // Sandboxes only with a runtime that runs them (`T3CODE_SANDBOX_RUNTIME`, dev only for now).
+  EnvironmentRegistry.layerFromConfig,
 ).pipe(
   Layer.provideMerge(EnvironmentAuth.layer.pipe(Layer.provideMerge(SpaceDirectory.layer))),
   Layer.provideMerge(layerPersistence),

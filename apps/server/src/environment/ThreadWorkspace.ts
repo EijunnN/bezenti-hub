@@ -150,7 +150,7 @@ export const make = Effect.gen(function* () {
       return { _tag: "offline", name: undefined } satisfies Route;
     }
     const usable = yield* environments.value
-      .usableBy({ userId: caller.userId, environmentId })
+      .usableBy({ userId: caller.userId, environmentId, threadId: ThreadId.make(threadId) })
       .pipe(Effect.orElseSucceed(() => Option.none()));
     if (Option.isNone(usable)) return REFUSED;
     const name = usable.value.name;
@@ -436,7 +436,11 @@ export const make = Effect.gen(function* () {
   });
 
   /** Ends when the caller may no longer use the Environment, checked whenever executors change. */
-  const untilUnusable = (environmentId: EnvironmentId, caller: WorkspaceCaller) =>
+  const untilUnusable = (
+    environmentId: EnvironmentId,
+    caller: WorkspaceCaller,
+    threadId: string,
+  ) =>
     Option.isNone(registry) || Option.isNone(environments)
       ? Effect.never
       : Effect.scoped(
@@ -445,7 +449,11 @@ export const make = Effect.gen(function* () {
             while (true) {
               yield* PubSub.take(changes);
               const usable = yield* environments.value
-                .usableBy({ userId: caller.userId, environmentId })
+                .usableBy({
+                  userId: caller.userId,
+                  environmentId,
+                  threadId: ThreadId.make(threadId),
+                })
                 .pipe(Effect.orElseSucceed(() => Option.none()));
               if (Option.isNone(usable)) return;
             }
@@ -482,7 +490,7 @@ export const make = Effect.gen(function* () {
               EnvironmentExecutorUnavailableError: () =>
                 Stream.fail(refuse({ _tag: "offline", name: where.name })),
             }),
-            Stream.interruptWhen(untilUnusable(where.environmentId, caller)),
+            Stream.interruptWhen(untilUnusable(where.environmentId, caller, input.threadId)),
           );
       }),
     );

@@ -10,7 +10,7 @@ const at = "2026-10-01T00:00:00.000Z";
 it.effect("revokes Peer Link credentials, then drops their rows and cards", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
-    yield* runMigrations({ toMigrationInclusive: 99 });
+    yield* runMigrations({ toMigrationInclusive: 101 });
 
     // This server linked to another: the token is in the secret store under `secret_name`.
     yield* sql`

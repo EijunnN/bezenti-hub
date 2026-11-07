@@ -4,6 +4,8 @@ import {
   type HubEnvironmentList,
   type HubEnvironmentSummary,
   type OrchestrationV2ThreadMove,
+  ProviderInstanceId,
+  SpaceId,
 } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -11,9 +13,11 @@ import {
   activeEnvironmentLabel,
   activeEnvironmentOf,
   canMoveThread,
+  environmentUnavailableReason,
   makeHubEnvironmentsPoller,
   moveCandidates,
   moveProgressView,
+  placeableEnvironments,
   threadEnvironmentState,
 } from "./hubEnvironments.ts";
 
@@ -161,6 +165,41 @@ describe("a Thread's Active environment", () => {
     expect(threadEnvironmentState(offline, true)).toBe("paused-offline");
     expect(threadEnvironmentState(offline, false)).toBeNull();
     expect(threadEnvironmentState(activeEnvironmentOf([hub], undefined), true)).toBeNull();
+  });
+});
+
+describe("a Space's Sandbox in the composer", () => {
+  const acme = environment({
+    id: EnvironmentId.make("sandbox:org-acme"),
+    name: "Acme Sandbox",
+    kind: "sandbox",
+    mode: "sandbox",
+    spaceId: SpaceId.make("org-acme"),
+    status: "offline",
+  });
+  const globex = {
+    ...acme,
+    id: EnvironmentId.make("sandbox:org-globex"),
+    spaceId: SpaceId.make("org-globex"),
+  };
+
+  it("is offered only for its Space's Threads", () => {
+    expect(placeableEnvironments([hub, laptop, acme, globex], "org-acme")).toEqual([
+      hub,
+      laptop,
+      acme,
+    ]);
+    expect(placeableEnvironments([hub, acme], undefined)).toEqual([hub]);
+  });
+
+  it("can be chosen while stopped, since sending starts it; once running it needs the provider", () => {
+    expect(environmentUnavailableReason(acme, ProviderInstanceId.make("claudeAgent"))).toBeNull();
+    expect(
+      environmentUnavailableReason(
+        { ...acme, status: "online" },
+        ProviderInstanceId.make("claudeAgent"),
+      ),
+    ).toBe("Provider not available");
   });
 });
 

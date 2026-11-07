@@ -24,6 +24,7 @@ type JoinedEnvironmentBridge = Pick<
   DesktopBridge,
   | "getJoinedEnvironmentState"
   | "joinAsEnvironment"
+  | "confirmJoinAsEnvironment"
   | "cancelJoinAsEnvironment"
   | "setJoinedEnvironmentEnabled"
   | "setJoinedEnvironmentKeepRunning"
@@ -37,8 +38,11 @@ const STATUS_BADGES = {
 } as const;
 
 function describe(state: DesktopJoinedEnvironmentState): string {
+  if (state.joining?.approvedBy) {
+    return `Approved by ${state.joining.approvedBy} as their personal machine. Register this computer as theirs only if that is you.`;
+  }
   if (state.joining !== null) {
-    return `Approve this computer on ${state.joining.hubUrl} in your browser as its Owner. This finishes by itself.`;
+    return `Approve this computer on ${state.joining.hubUrl} in your browser with your account, then confirm here who approved it.`;
   }
   if (state.repair !== null) return state.repair;
   if (state.hub === null) {
@@ -146,7 +150,25 @@ export function JoinedEnvironmentSetting() {
                 Leave
               </Button>
             ) : null}
-            {joining ? (
+            {state.joining?.approvedBy ? (
+              <>
+                <Button
+                  size="xs"
+                  disabled={pending}
+                  onClick={() => void run(() => bridge.confirmJoinAsEnvironment(true))}
+                >
+                  Register as theirs
+                </Button>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={pending}
+                  onClick={() => void run(() => bridge.confirmJoinAsEnvironment(false))}
+                >
+                  Not me
+                </Button>
+              </>
+            ) : joining ? (
               <Button
                 size="xs"
                 variant="outline"

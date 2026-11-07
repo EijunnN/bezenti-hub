@@ -185,6 +185,8 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   getJoinedEnvironmentState: () =>
     ipcRenderer.invoke(IpcChannels.GET_JOINED_ENVIRONMENT_STATE_CHANNEL),
   joinAsEnvironment: (input) => ipcRenderer.invoke(IpcChannels.JOIN_AS_ENVIRONMENT_CHANNEL, input),
+  confirmJoinAsEnvironment: (accept) =>
+    ipcRenderer.invoke(IpcChannels.CONFIRM_JOIN_AS_ENVIRONMENT_CHANNEL, accept),
   cancelJoinAsEnvironment: () => ipcRenderer.invoke(IpcChannels.CANCEL_JOIN_AS_ENVIRONMENT_CHANNEL),
   setJoinedEnvironmentEnabled: (enabled) =>
     ipcRenderer.invoke(IpcChannels.SET_JOINED_ENVIRONMENT_ENABLED_CHANNEL, enabled),

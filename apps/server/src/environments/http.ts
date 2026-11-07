@@ -136,7 +136,8 @@ const handlers = HttpApiBuilder.group(
         "joinRequest",
         Effect.fn("environment.environments.joinRequest")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          return yield* join.view(args.payload.requestId).pipe(
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          return yield* join.view(request, args.payload.requestId).pipe(
             Effect.catchTags({
               EnvironmentJoinRequestNotFoundError: () =>
                 failEnvironmentNotFound("join_request_not_found"),
@@ -183,9 +184,28 @@ const handlers = HttpApiBuilder.group(
             EnvironmentJoinNotSignedInError: () => failEnvironmentAuthInvalid("missing_credential"),
             EnvironmentJoinRequestNotFoundError: () =>
               failEnvironmentNotFound("join_request_not_found"),
+            EnvironmentAccessDeniedError: failForbidden,
+            EnvironmentStorageError: failStorage,
           }),
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, failStorage),
         ),
+      )
+      .handle(
+        "confirmJoin",
+        Effect.fn("environment.environments.confirmJoin")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* appendCredentialResponseHeaders;
+          return yield* join.confirm(args.payload).pipe(
+            Effect.catchTags({
+              EnvironmentJoinInvalidGrantError: () =>
+                failEnvironmentAuthInvalid("invalid_credential"),
+              EnvironmentJoinRequestNotFoundError: () =>
+                failEnvironmentNotFound("join_request_not_found"),
+              EnvironmentAccessDeniedError: failForbidden,
+              EnvironmentStorageError: failStorage,
+            }),
+          );
+        }),
       )
       .handle(
         "leave",

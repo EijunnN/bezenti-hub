@@ -4,6 +4,7 @@ import {
   EnvironmentId,
   IsoDateTime,
   NonNegativeInt,
+  SpaceId,
   TrimmedNonEmptyString,
   UserId,
 } from "./baseSchemas.ts";
@@ -15,24 +16,47 @@ import {
 import { HUB_MACHINE_ENVIRONMENT_ID } from "./environmentExecutor.ts";
 import { AuthReauth } from "./userAccounts.ts";
 
-/** The Hub machine runs in the Hub's own process; every other one joined with `t3 join`. */
-export const HubEnvironmentKind = Schema.Literals(["hub", "external"]);
+/**
+ * The Hub machine runs in the Hub's own process; an external one joined with `t3 join`; a
+ * Sandbox is the Space's own joined server, which the Hub runs for it.
+ */
+export const HubEnvironmentKind = Schema.Literals(["hub", "external", "sandbox"]);
 export type HubEnvironmentKind = typeof HubEnvironmentKind.Type;
 
-/** `personal`: only its owner uses it, in any of their Spaces. `dedicated` comes later. */
-export const HubEnvironmentMode = Schema.Literals(["personal"]);
+/**
+ * `personal`: only its owner uses it, in any of their Spaces. `sandbox`: the Users who work in
+ * its Space use it, for that Space's Threads. `dedicated` comes later.
+ */
+export const HubEnvironmentMode = Schema.Literals(["personal", "sandbox"]);
 export type HubEnvironmentMode = typeof HubEnvironmentMode.Type;
 
 export const HubEnvironmentName = TrimmedNonEmptyString.check(Schema.isMaxLength(64));
+
+/** A machine's connection, or `stopped`: a Sandbox not running, which the Hub starts for work. */
+export const HubEnvironmentStatus = Schema.Literals([
+  ...EnvironmentConnectionStatus.literals,
+  "stopped",
+]);
+export type HubEnvironmentStatus = typeof HubEnvironmentStatus.Type;
+
+/** A Space's Sandbox has one id for its whole life, known before the Sandbox exists. */
+export const sandboxEnvironmentIdOf = (spaceId: SpaceId): EnvironmentId =>
+  EnvironmentId.make(`sandbox:${spaceId}`);
+
+/** «<Space> Sandbox», as every client names it. */
+export const sandboxEnvironmentName = (spaceName: string) =>
+  `${spaceName.slice(0, 64 - " Sandbox".length).trim()} Sandbox`;
 
 export const HubEnvironmentSummary = Schema.Struct({
   id: EnvironmentId,
   name: HubEnvironmentName,
   kind: HubEnvironmentKind,
   mode: HubEnvironmentMode,
-  /** Null for the Hub machine, which belongs to the Installation. */
+  /** Null for the Hub machine, which belongs to the Installation, and for Sandboxes. */
   ownerUserId: Schema.NullOr(UserId),
-  status: EnvironmentConnectionStatus,
+  /** A Sandbox's Space; it runs only that Space's Threads. Absent from older Hubs. */
+  spaceId: Schema.optionalKey(Schema.NullOr(SpaceId)),
+  status: HubEnvironmentStatus,
   registeredAt: IsoDateTime,
   lastSeenAt: Schema.NullOr(IsoDateTime),
   os: Schema.NullOr(TrimmedNonEmptyString),
@@ -106,18 +130,28 @@ export type EnvironmentJoinStartResult = typeof EnvironmentJoinStartResult.Type;
 export const EnvironmentJoinRequestRef = Schema.Struct({ requestId: TrimmedNonEmptyString });
 export type EnvironmentJoinRequestRef = typeof EnvironmentJoinRequestRef.Type;
 
-/** What «Register this machine» shows. The labels come from `t3 join` on the machine. */
+/**
+ * What «Register this machine» shows. The labels come from `t3 join` on the machine, and only a
+ * viewer who may approve gets them.
+ */
 export const EnvironmentJoinRequestView = Schema.Struct({
   requestId: TrimmedNonEmptyString,
-  name: HubEnvironmentName,
-  os: TrimmedNonEmptyString,
-  hostname: TrimmedNonEmptyString,
-  requestedAt: IsoDateTime,
-  status: Schema.Literals(["pending", "approved", "denied"]),
+  name: Schema.optionalKey(HubEnvironmentName),
+  os: Schema.optionalKey(TrimmedNonEmptyString),
+  hostname: Schema.optionalKey(TrimmedNonEmptyString),
+  requestedAt: Schema.optionalKey(IsoDateTime),
+  status: Schema.Literals(["pending", "awaiting-confirmation", "approved", "denied"]),
+  /**
+   * Whether the browser's signed-in User may approve it (the Owner, or `environments.registerOwn`);
+   * absent when that is unknown, as when nobody is signed in. Approving checks again.
+   */
+  viewerMayApprove: Schema.optionalKey(Schema.Boolean),
+  /** Why they may not, when they may not. */
+  denialMessage: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type EnvironmentJoinRequestView = typeof EnvironmentJoinRequestView.Type;
 
-/** The Owner's approval, with a passkey or a password and code in the same request. */
+/** The approval, with a passkey or a password and code in the same request. */
 export const EnvironmentJoinApproveRequest = Schema.Struct({
   requestId: TrimmedNonEmptyString,
   name: HubEnvironmentName,
@@ -137,9 +171,35 @@ export const EnvironmentJoinStatusRequest = Schema.Struct({
 });
 export type EnvironmentJoinStatusRequest = typeof EnvironmentJoinStatusRequest.Type;
 
-/** Asked again until it is not `pending`; the same approval answers every time. */
+/** Who approved a machine joining, so `t3 join` can check it is whom it expected. */
+export const EnvironmentJoinApprover = Schema.Struct({
+  userId: UserId,
+  displayName: TrimmedNonEmptyString,
+  /** Null for a User who signs in with a passkey only; they are named by `userId`. */
+  loginName: Schema.NullOr(Schema.String),
+});
+export type EnvironmentJoinApprover = typeof EnvironmentJoinApprover.Type;
+
+/** `t3 join` accepts the approver it was told about, registering the machine, or refuses them. */
+export const EnvironmentJoinConfirmRequest = Schema.Struct({
+  requestId: TrimmedNonEmptyString,
+  codeVerifier: TrimmedNonEmptyString,
+  accept: Schema.Boolean,
+});
+export type EnvironmentJoinConfirmRequest = typeof EnvironmentJoinConfirmRequest.Type;
+
+/**
+ * Asked again until it is neither `pending` nor `awaiting-confirmation`; the same approval answers
+ * every time. Once approved on the page the machine is told by whom and confirms (or refuses)
+ * before anything is registered.
+ */
 export const EnvironmentJoinStatus = Schema.Union([
   Schema.Struct({ status: Schema.Literals(["pending", "denied", "expired"]) }),
+  Schema.Struct({
+    status: Schema.Literal("awaiting-confirmation"),
+    name: HubEnvironmentName,
+    approvedBy: EnvironmentJoinApprover,
+  }),
   Schema.Struct({
     status: Schema.Literal("approved"),
     environmentId: EnvironmentId,

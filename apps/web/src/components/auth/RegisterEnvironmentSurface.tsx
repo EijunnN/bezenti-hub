@@ -2,7 +2,6 @@ import type { AuthAccount, EnvironmentJoinRequestView } from "@t3tools/contracts
 import { readEnvironmentJoinPageRequest } from "@t3tools/shared/environmentJoin";
 import { useEffect, useState } from "react";
 
-import { usePrimarySessionState } from "~/environments/primary";
 import {
   approveEnvironmentJoin,
   denyEnvironmentJoin,
@@ -20,14 +19,12 @@ import { SignInSurface } from "./SignInSurface";
 type Outcome = "approved" | "cancelled" | null;
 
 /**
- * The page `t3 join` links to, from any device. The Owner checks the machine, may rename it, and
- * confirms with a passkey or password and code. `t3 join` learns the outcome by asking the Hub;
- * a browser on that machine is also sent back to it.
+ * The page `t3 join` links to, from any device. The Owner, or a User allowed to register their own
+ * machines, checks the machine, may rename it, and confirms with a passkey or password and code.
+ * `t3 join` learns the outcome by asking the Hub; a browser on that machine is also sent back to it.
  */
 export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: boolean }) {
   const [requestId] = useState(() => readEnvironmentJoinPageRequest(window.location.href));
-  const session = usePrimarySessionState();
-  const isOwner = session.data?.authenticated === true && session.data.isOwner === true;
   const [request, setRequest] = useState<EnvironmentJoinRequestView | null>(null);
   const [account, setAccount] = useState<AuthAccount | null>(null);
   const [name, setName] = useState("");
@@ -38,13 +35,13 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the join request and the account's sign-in methods from the server.
   useEffect(() => {
-    if (!signedIn || !isOwner || requestId === null) return;
+    if (!signedIn || requestId === null) return;
     let current = true;
     void Promise.all([fetchEnvironmentJoinRequest(requestId), fetchAccount()]).then(
       ([loaded, loadedAccount]) => {
         if (!current) return;
         setRequest(loaded);
-        setName(loaded.name);
+        setName(loaded.name ?? "");
         setAccount(loadedAccount);
         setStepUp(emptyStepUp(loadedAccount));
       },
@@ -55,7 +52,7 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
     return () => {
       current = false;
     };
-  }, [signedIn, isOwner, requestId]);
+  }, [signedIn, requestId]);
 
   const ended = (title: string, description: string) => (
     <StandalonePage>
@@ -80,32 +77,52 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
         onSignedIn={() => window.location.reload()}
         description={
           <>
-            Sign in as the Owner to add a machine to{" "}
+            Sign in to add your machine to{" "}
             <span className="font-medium text-foreground">{window.location.host}</span>.
           </>
         }
       />
     );
   }
-  if (session.data !== undefined && !isOwner) {
-    return ended(
-      "Only the Owner adds machines",
-      "Ask this Hub's Owner to run `t3 join` and approve the machine.",
-    );
-  }
   if (outcome === "approved") {
     return ended(
-      "Machine registered",
-      "Return to its terminal: `t3 join` finishes there. You can close this tab.",
+      "Approved",
+      "Return to the machine's terminal and confirm there: `t3 join` registers it once you do. You can close this tab.",
     );
   }
   if (outcome === "cancelled") {
     return ended("Registration cancelled", "The machine was not added. You can close this tab.");
   }
+  if (request !== null && request.status === "pending" && request.viewerMayApprove === false) {
+    return ended(
+      "You need permission to add machines",
+      `${request.denialMessage ?? "You may not add machines to this Hub."} Then open this link again.`,
+    );
+  }
+  // Signed in, yet the Hub could not tell who this is: never offer the form on a guess.
+  if (request !== null && request.status === "pending" && request.viewerMayApprove !== true) {
+    return (
+      <SignInSurface
+        onSignedIn={() => window.location.reload()}
+        description={
+          <>
+            Sign in again to add your machine to{" "}
+            <span className="font-medium text-foreground">{window.location.host}</span>.
+          </>
+        }
+      />
+    );
+  }
   if (request !== null && request.status !== "pending") {
     return ended(
-      request.status === "approved" ? "Machine registered" : "Registration cancelled",
-      "This registration was already decided. You can close this tab.",
+      request.status === "approved"
+        ? "Machine registered"
+        : request.status === "awaiting-confirmation"
+          ? "Approved"
+          : "Registration cancelled",
+      request.status === "awaiting-confirmation"
+        ? "This registration was approved and waits for the machine to confirm. You can close this tab."
+        : "This registration was already decided. You can close this tab.",
     );
   }
 
@@ -166,7 +183,11 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
             <dt className="text-muted-foreground">Hostname</dt>
             <dd>{request.hostname}</dd>
             <dt className="text-muted-foreground">Requested</dt>
-            <dd>{new Date(request.requestedAt).toLocaleString()}</dd>
+            <dd>
+              {request.requestedAt === undefined
+                ? null
+                : new Date(request.requestedAt).toLocaleString()}
+            </dd>
           </dl>
           <StepUpFields account={account} disabled={pending} value={stepUp} onChange={setStepUp} />
           <div className="flex flex-wrap gap-2">

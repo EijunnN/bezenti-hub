@@ -129,6 +129,22 @@ const gracesLaptop: AccessPolicy.EnvironmentResource = {
   ownerUserId: UserId.make("grace"),
 };
 
+/** Acme's Sandbox, asked to run a Thread of `workSpaceId`. */
+const acmeSandbox = (workSpaceId: SpaceId | undefined): AccessPolicy.EnvironmentResource => ({
+  kind: "environment",
+  environmentKind: "sandbox",
+  ownerUserId: null,
+  space: organization,
+  ...(workSpaceId === undefined ? {} : { workSpaceId }),
+});
+const personalSandbox = (userId: string): AccessPolicy.EnvironmentResource => ({
+  kind: "environment",
+  environmentKind: "sandbox",
+  ownerUserId: null,
+  space: personalOf(userId),
+  workSpaceId: personalOf(userId).id,
+});
+
 const allow = AccessPolicy.allow;
 const deny = AccessPolicy.deny;
 
@@ -1021,13 +1037,47 @@ const rows: ReadonlyArray<
     organization,
     deny("wrong-resource"),
   ],
-  // Environments: only the Owner joins machines, and a personal one is its owner's alone.
+  // Environments: the Owner and Users with `environments.registerOwn` join their own machines, and
+  // a personal one is its owner's alone.
   ["Owner registers a machine", owner, "environment.register", AccessPolicy.installation, allow],
   [
-    "an Admin does not register a machine",
+    "an Admin without the permission does not register a machine",
     admin,
     "environment.register",
     AccessPolicy.installation,
+    deny("missing-installation-permission"),
+  ],
+  [
+    "a User with `environments.registerOwn` registers their own machine",
+    principal("grace", { roles: [[ORG, "member"]], permissions: ["environments.registerOwn"] }),
+    "environment.register",
+    AccessPolicy.installation,
+    allow,
+  ],
+  [
+    "a disabled User with the permission registers nothing",
+    {
+      ...principal("grace", { permissions: ["environments.registerOwn"] }),
+      inactive: true,
+    },
+    "environment.register",
+    AccessPolicy.installation,
+    deny("user-inactive"),
+  ],
+  [
+    "registering is decided on the Installation",
+    principal("grace", { permissions: ["environments.registerOwn"] }),
+    "environment.register",
+    organization,
+    deny("wrong-resource"),
+  ],
+  ["a Member renames their own machine", member, "environment.rename", gracesLaptop, allow],
+  ["a Member removes their own machine", member, "environment.remove", gracesLaptop, allow],
+  [
+    "a Member does not remove another User's machine",
+    member,
+    "environment.remove",
+    ownersLaptop,
     deny("owner-only"),
   ],
   ["a Member uses the Hub machine", member, "environment.view", hubMachine, allow],
@@ -1089,6 +1139,94 @@ const rows: ReadonlyArray<
     "environment.view",
     organization,
     deny("wrong-resource"),
+  ],
+  ["an Admin runs a Thread in the Sandbox", admin, "environment.use", acmeSandbox(ORG), allow],
+  ["a Member runs a Thread in the Sandbox", member, "environment.use", acmeSandbox(ORG), allow],
+  [
+    "a Guest runs nothing in the Sandbox",
+    guest,
+    "environment.use",
+    acmeSandbox(ORG),
+    deny("role-not-allowed"),
+  ],
+  ["a Guest sees the Sandbox", guest, "environment.view", acmeSandbox(ORG), allow],
+  [
+    "another Organization's Admin does not see the Sandbox",
+    outsider,
+    "environment.view",
+    acmeSandbox(ORG),
+    deny("not-a-member"),
+  ],
+  [
+    "another Organization's Admin runs nothing there, even for their own Space",
+    outsider,
+    "environment.use",
+    acmeSandbox(OTHER_ORG),
+    deny("other-space"),
+  ],
+  [
+    "a Sandbox runs no Thread of another Space, even its Members'",
+    personalAdmin,
+    "environment.use",
+    acmeSandbox(personalOf("grace").id),
+    deny("other-space"),
+  ],
+  [
+    "a Sandbox runs a Thread only for a known Space",
+    member,
+    "environment.use",
+    acmeSandbox(undefined),
+    deny("other-space"),
+  ],
+  [
+    "nothing runs in an archived Organization's Sandbox",
+    owner,
+    "environment.use",
+    { ...acmeSandbox(ORG), space: archivedOrganization },
+    deny("space-archived"),
+  ],
+  [
+    "Owner runs a Thread in any Organization's Sandbox",
+    owner,
+    "environment.use",
+    acmeSandbox(ORG),
+    allow,
+  ],
+  [
+    "a User runs their Personal space's Sandbox",
+    personalCreator,
+    "environment.use",
+    personalSandbox("grace"),
+    allow,
+  ],
+  [
+    "Owner sees another User's Personal Sandbox but runs nothing there",
+    owner,
+    "environment.use",
+    personalSandbox("grace"),
+    deny("personal-space-read-only"),
+  ],
+  ["Owner sees every Sandbox", owner, "environment.view", personalSandbox("grace"), allow],
+  [
+    "a Sandbox is not renamed as a machine",
+    owner,
+    "environment.rename",
+    acmeSandbox(ORG),
+    deny("sandbox"),
+  ],
+  [
+    "a Sandbox is not removed as a machine",
+    owner,
+    "environment.remove",
+    acmeSandbox(ORG),
+    deny("sandbox"),
+  ],
+  [
+    "an Admin does not remove the Sandbox",
+    admin,
+    "environment.remove",
+    acmeSandbox(ORG),
+    deny("owner-only"),
   ],
 ];
 

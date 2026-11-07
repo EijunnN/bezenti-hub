@@ -1,6 +1,7 @@
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
@@ -214,6 +215,7 @@ const make = Effect.gen(function* () {
   const cloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
   // Where the server joins machines; without them every Thread runs on the Hub machine.
   const environments = yield* Effect.serviceOption(EnvironmentRegistry.EnvironmentRegistry);
+  const spaces = yield* Effect.serviceOption(SpaceDirectory.SpaceDirectory);
   const terminals = yield* TerminalManager.TerminalManager;
   const git = yield* GitWorkflow.GitWorkflowService;
   const setupScripts = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
@@ -862,12 +864,25 @@ const make = Effect.gen(function* () {
       // Placed now, as the Thread will be, so a worktree is refused where it can't be made: they
       // are still made on the Hub machine; a Thread elsewhere runs in its checkout.
       if (Option.isSome(environments) && input.reuseExistingThread !== true) {
+        // The Space the Thread will be claimed for, as `thread.create` claims it: a Sandbox runs
+        // only that Space's Threads, whatever Space the client asked for.
+        const claimed = Option.isNone(spaces)
+          ? undefined
+          : yield* spaces.value
+              .claimCreation({
+                action: "thread.create",
+                actorUserId: input.ownerUserId,
+                spaceId: input.spaceId,
+                projectId: input.projectId,
+              })
+              .pipe(Effect.mapError(mapError(input, "create-thread")));
         const placed = yield* environments.value
           .chooseForThread({
             userId: input.ownerUserId,
             requested: input.activeEnvironmentId,
             projectId: input.projectId,
             providerInstanceId: input.modelSelection.instanceId,
+            spaceId: claimed?.spaceId ?? input.spaceId,
           })
           .pipe(Effect.mapError(mapError(input, "create-thread")));
         if (placed !== HUB_MACHINE_ENVIRONMENT_ID && input.workspaceStrategy.type !== "root") {

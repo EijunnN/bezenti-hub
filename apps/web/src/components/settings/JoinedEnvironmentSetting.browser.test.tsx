@@ -38,7 +38,17 @@ it("joins a Hub, shows the connection, turns off and leaves", async () => {
     joinAsEnvironment: vi.fn((input: { readonly hubUrl: string }) =>
       answer({
         ...notJoined,
-        joining: { hubUrl: input.hubUrl, approvalUrl: `${HUB}/register-environment?request=r` },
+        joining: {
+          hubUrl: input.hubUrl,
+          approvalUrl: `${HUB}/register-environment?request=r`,
+          approvedBy: null,
+        },
+      }),
+    ),
+    confirmJoinAsEnvironment: vi.fn(() =>
+      answer({
+        ...notJoined,
+        joining: { hubUrl: HUB, approvalUrl: null, approvedBy: null },
       }),
     ),
     cancelJoinAsEnvironment: vi.fn(() => answer(notJoined)),
@@ -77,7 +87,20 @@ it("joins a Hub, shows the connection, turns off and leaves", async () => {
     .toBeVisible();
   await expect.element(screen.getByRole("link", { name: "Open it" })).toBeVisible();
 
-  // The Owner approves in the browser; the app starts the joined server.
+  // Approved in the browser: the app says by whom and registers only once the User accepts.
+  state = {
+    ...notJoined,
+    joining: { hubUrl: HUB, approvalUrl: null, approvedBy: "Grace (grace)" },
+  };
+  await expect
+    .element(screen.getByText(/Approved by Grace \(grace\) as their personal machine/), {
+      timeout: 6_000,
+    })
+    .toBeVisible();
+  await screen.getByRole("button", { name: "Register as theirs" }).click();
+  expect(bridge.confirmJoinAsEnvironment).toHaveBeenCalledWith(true);
+
+  // The app starts the joined server.
   state = running;
   await expect.element(screen.getByText("Connected"), { timeout: 6_000 }).toBeVisible();
   await expect.element(screen.getByText(`Laptop on ${HUB}.`)).toBeVisible();
@@ -102,6 +125,7 @@ it("offers Join again and Leave for an unreadable joined-hub.json, and keeps a f
   const bridge = {
     getJoinedEnvironmentState: vi.fn(() => Promise.resolve({ ...notJoined, repair })),
     joinAsEnvironment: vi.fn(),
+    confirmJoinAsEnvironment: vi.fn(),
     cancelJoinAsEnvironment: vi.fn(),
     setJoinedEnvironmentEnabled: vi.fn(),
     setJoinedEnvironmentKeepRunning: vi.fn(),

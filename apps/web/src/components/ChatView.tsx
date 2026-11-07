@@ -3777,6 +3777,7 @@ export default function ChatView(props: ChatViewProps) {
                                               preferredEnvironmentId={
                                                 activeProject?.preferredEnvironmentId ?? null
                                               }
+                                              spaceId={activeProject?.spaceId ?? null}
                                             />
                                           )}
                                           <ComposerContextPermissions

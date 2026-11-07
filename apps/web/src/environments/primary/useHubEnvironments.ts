@@ -22,6 +22,7 @@ export {
   activeEnvironmentLabel,
   activeEnvironmentOf,
   environmentUnavailableReason,
+  placeableEnvironments,
   threadEnvironmentState,
 } from "@t3tools/client-runtime/environment/hub-environments";
 
