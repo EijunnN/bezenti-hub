@@ -1,6 +1,6 @@
 # Spec: El Hub como store de Threads y movimiento entre Environments
 
-Status: ready-for-agent
+Status: done (pendiente: ticket 14, limpieza interna)
 Map: ../multi-user-hub/map.md (spec 2 de 6)
 Decisiones de origen: «Registrar Environments en el Hub», «Mover un Project entre Environments», «Cierre del mapa» (`../multi-user-hub/issues/13`, `14`, `16`)
 ADRs: 0002 (el Hub es la fuente de verdad), 0006 (el Hub guarda los Threads; los Environments solo ejecutan), 0007 (sin servicios upstream)

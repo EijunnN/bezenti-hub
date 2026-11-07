@@ -4,7 +4,7 @@
 
 **Blocked by:** 08, 10.
 
-**Status:** ready-for-agent
+**Status:** done (el ?ltimo criterio, quitar `environmentId` de `ScopedThreadRef`, pasa al ticket 14)
 
 - [ ] El Active environment y su estado aparecen en las listas y en la pantalla del Thread, actualizados en vivo.
 - [ ] Acción de mover con el mismo diálogo y las mismas reglas que en web: esperar o parar, progreso y error.
