@@ -93,13 +93,8 @@ export function withCreationProvenance(
 ): OrchestrationV2Command {
   switch (command.type) {
     case "thread.create": {
-      // Only the server stamps a link's origin or a Thread's owner, so a client cannot set one.
-      const {
-        linkOrigin: _linkOrigin,
-        delegatedFrom: _delegatedFrom,
-        ownerUserId: _ownerUserId,
-        ...rest
-      } = command;
+      // Only the server stamps a Thread's owner, so a client cannot set one.
+      const { ownerUserId: _ownerUserId, ...rest } = command;
       return { ...rest, ...provenance };
     }
     case "thread.move": {
@@ -146,9 +141,6 @@ function existingThreadIdsForCommand(
     case "delegated_task.wake-policy":
     case "delegated_task.completion-delivery.acknowledge":
     case "delegated_task.completion-delivery.dispose":
-    case "delegated_task.remote.request":
-    case "delegated_task.remote.complete":
-    case "delegated_task.remote.stop":
       return [command.parentThreadId];
     case "thread.created.record":
       return command.parentThreadId === command.targetThreadId
@@ -1661,41 +1653,7 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
     const stoppedChildThreadIds = new Set<ThreadId>();
     for (const task of subagents) {
       if (task.origin !== "app_owned") continue;
-      if (task.childThreadId === null) {
-        // A task in a linked environment ends here; its follower then stops it there.
-        // One with its result keeps it, but its thread there may run follow-up work.
-        if (task.remoteChild === undefined) continue;
-        const commandId = CommandId.make(`${input.commandId}:stop:${task.id}`);
-        yield* dispatch(
-          task.result === null
-            ? {
-                type: "delegated_task.remote.complete",
-                commandId,
-                parentThreadId: input.threadId,
-                taskId: task.id,
-                status: "interrupted",
-                result:
-                  input.reason === undefined
-                    ? "Stopped with its parent."
-                    : `Stopped with its parent: ${input.reason}`,
-              }
-            : {
-                type: "delegated_task.remote.stop",
-                commandId,
-                parentThreadId: input.threadId,
-                taskId: task.id,
-              },
-        ).pipe(
-          Effect.catch((error) =>
-            Effect.logWarning("Unable to stop a delegated task", {
-              parentThreadId: input.threadId,
-              taskId: task.id,
-              error,
-            }).pipe(Effect.andThen(Effect.sync(() => failures.push(error)))),
-          ),
-        );
-        continue;
-      }
+      if (task.childThreadId === null) continue;
       const threadId = task.childThreadId;
       // Follow-up tasks reuse a child thread; walk its subtree only once.
       if (stoppedChildThreadIds.has(threadId)) continue;

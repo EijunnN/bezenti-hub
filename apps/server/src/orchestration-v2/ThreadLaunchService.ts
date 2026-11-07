@@ -12,8 +12,6 @@ import {
   type ModelSelection,
   type OrchestrationV2Actor,
   type OrchestrationV2CreationSource,
-  type OrchestrationV2DelegatedFrom,
-  type OrchestrationV2LinkOrigin,
   type OrchestrationV2ProviderThreadNativeMetadata,
   type OrchestrationV2ThreadProjection,
   type ProviderDriverKind,
@@ -112,10 +110,6 @@ export interface ThreadLaunchInput {
   readonly spaceId?: SpaceId;
   /** The Environment the User chose; the Hub checks it, and picks one when absent. */
   readonly activeEnvironmentId?: EnvironmentId;
-  /** The linked environment this launch is for, if one asked for it. */
-  readonly linkOrigin?: OrchestrationV2LinkOrigin;
-  /** The parent there, when that environment's agent delegated this as a task. */
-  readonly delegatedFrom?: OrchestrationV2DelegatedFrom;
 }
 
 type PreparationInput = Pick<
@@ -1009,15 +1003,11 @@ const make = Effect.gen(function* () {
                 ...(input.importedNativeThread === undefined
                   ? {}
                   : { importedNativeThread: input.importedNativeThread }),
-                ...(input.linkOrigin === undefined ? {} : { linkOrigin: input.linkOrigin }),
                 ...(input.ownerUserId === undefined ? {} : { ownerUserId: input.ownerUserId }),
                 ...(input.spaceId === undefined ? {} : { spaceId: input.spaceId }),
                 ...(input.activeEnvironmentId === undefined
                   ? {}
                   : { activeEnvironmentId: input.activeEnvironmentId }),
-                ...(input.delegatedFrom === undefined
-                  ? {}
-                  : { delegatedFrom: input.delegatedFrom }),
                 createdBy: input.createdBy,
                 creationSource: input.creationSource,
               });

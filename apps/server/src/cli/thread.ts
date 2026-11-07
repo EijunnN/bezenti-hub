@@ -227,7 +227,6 @@ const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E,
         // Only the Hub's shell runs it. New threads still start at the
         // project's default mode, never at this ceiling by default.
         access: "full-access",
-        peerLink: false,
         client: { deviceType: "bot" },
       }),
       (session) =>

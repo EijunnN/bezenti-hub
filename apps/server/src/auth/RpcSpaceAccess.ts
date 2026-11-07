@@ -68,7 +68,6 @@ export const RPC_SPACE_ACCESS = {
   [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: "thread",
   [ORCHESTRATION_V2_WS_METHODS.forceStopThread]: "thread",
   [WS_METHODS.guestShareCreate]: "thread",
-  [WS_METHODS.peerLinksAnswerRequest]: "thread",
   [WS_METHODS.secretsAnswerRequest]: "thread",
   [WS_METHODS.projectsCreateFromThread]: "thread",
   // An app acts inside its Thread's live session, so it is its creator's, like a message.

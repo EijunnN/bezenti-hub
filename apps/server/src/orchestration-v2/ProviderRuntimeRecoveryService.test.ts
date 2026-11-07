@@ -446,17 +446,6 @@ it.effect("recovery closes a secret card's form but leaves a link card open", ()
         label: "GitHub token",
         reason: "Used as GH_TOKEN.",
       },
-      {
-        id: "turn-item:link-request:recovery",
-        threadId,
-        runId,
-        nodeId: null,
-        type: "link_request",
-        status: "waiting",
-        linkStatus: "pending",
-        url: "https://box.example.ts.net",
-        reason: "Run the suite there.",
-      },
     ],
   } as unknown as OrchestrationV2ThreadProjection;
   const layer = ProviderRuntimeRecovery.layer.pipe(
@@ -493,11 +482,6 @@ it.effect("recovery closes a secret card's form but leaves a link card open", ()
     const secret = cards.find((card) => card.type === "secret_request");
     assert.equal(secret?.status, "cancelled");
     assert.equal(secret?.type === "secret_request" ? secret.secretStatus : null, "cancelled");
-    // Nothing in memory waits on a link card; the user can still answer it.
-    assert.equal(
-      cards.some((card) => card.type === "link_request"),
-      false,
-    );
   }).pipe(Effect.provide(layer));
 });
 

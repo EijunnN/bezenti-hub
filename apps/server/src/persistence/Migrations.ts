@@ -102,6 +102,7 @@ import Migration0095 from "./Migrations/095_ProjectCheckouts.ts";
 import Migration0096 from "./Migrations/096_ThreadActiveEnvironment.ts";
 import Migration0097 from "./Migrations/097_CheckpointUploads.ts";
 import Migration0099 from "./Migrations/099_MoveHandoffs.ts";
+import Migration0102 from "./Migrations/102_RemovePeerLinks.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -204,6 +205,8 @@ const migrationEntries = [
   [97, "CheckpointUploads", Migration0097],
   // 98 is ticket 10's.
   [99, "MoveHandoffs", Migration0099],
+  // 100 and 101 are spec 3 tickets 01 and 08.
+  [102, "RemovePeerLinks", Migration0102],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

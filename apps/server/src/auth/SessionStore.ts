@@ -63,8 +63,6 @@ export interface VerifiedSession {
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly proofKeyThumbprint?: string;
   readonly runtimeModeCeiling?: RuntimeMode;
-  /** An MCP client that is another T3 Code environment's peer link. */
-  readonly peerLink?: true;
 }
 
 export interface VerifiedWebSocketTicket extends VerifiedSession {
@@ -388,7 +386,6 @@ export class SessionStore extends Context.Service<
       readonly client?: AuthClientMetadata;
       readonly proofKeyThumbprint?: string;
       readonly runtimeModeCeiling?: RuntimeMode;
-      readonly peerLink?: boolean;
       readonly replaceActiveForSubjectAndMethod?: boolean;
       readonly replaceSessionId?: AuthSessionId;
     }) => Effect.Effect<IssuedSession, SessionCredentialInternalError>;
@@ -468,7 +465,10 @@ const SessionClaims = Schema.Struct({
   method: Schema.Literals(["browser-session-cookie", "bearer-access-token", "dpop-access-token"]),
   jkt: Schema.optionalKey(Schema.String),
   rtc: Schema.optionalKey(RuntimeMode),
-  /** Signed, so a client cannot shed its peer link's limits. */
+  /**
+   * Marked a removed Peer Link's session. Such sessions are refused as revoked: migration 102
+   * revokes the ones it can find, and this catches the rest.
+   */
   plk: Schema.optionalKey(Schema.Literal(1)),
   uid: Schema.optionalKey(UserId),
   iat: Schema.Number,
@@ -715,7 +715,6 @@ const make = Effect.gen(function* () {
         method: input?.method ?? "browser-session-cookie",
         ...(input?.proofKeyThumbprint ? { jkt: input.proofKeyThumbprint } : {}),
         ...(input?.runtimeModeCeiling ? { rtc: input.runtimeModeCeiling } : {}),
-        ...(input?.peerLink === true ? { plk: 1 as const } : {}),
         ...(input?.userId ? { uid: input.userId } : {}),
         iat: issuedAt.epochMilliseconds,
         exp: expiresAt.epochMilliseconds,
@@ -885,6 +884,12 @@ const make = Effect.gen(function* () {
           revokedAt: row.value.revokedAt,
         });
       }
+      if (claims.plk === 1) {
+        return yield* new SessionTokenRevokedError({
+          sessionId: claims.sid,
+          revokedAt: observedAt,
+        });
+      }
       // A sliding session outlives its signed exp, so its row holds the deadline.
       const expiresAt = row.value.sliding ? row.value.expiresAt : claimedExpiry.value;
       if (expiresAt.epochMilliseconds <= observedAt.epochMilliseconds) {
@@ -913,7 +918,6 @@ const make = Effect.gen(function* () {
         scopes: row.value.scopes,
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
         ...(claims.rtc ? { runtimeModeCeiling: claims.rtc } : {}),
-        ...(claims.plk === 1 ? { peerLink: true as const } : {}),
       } satisfies VerifiedSession;
     },
   );
