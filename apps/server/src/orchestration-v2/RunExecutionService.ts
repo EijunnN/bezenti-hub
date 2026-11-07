@@ -19,6 +19,7 @@ import {
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2Run,
   type OrchestrationV2RunAttempt,
+  type OrchestrationV2RuntimeRequest,
   type OrchestrationV2Subagent,
   type OrchestrationV2TurnItem,
   type ProviderSessionId,
@@ -623,6 +624,8 @@ export const layer: Layer.Layer<
         readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
         readonly loadRunInterruptReason?: () => Effect.Effect<string | undefined, never>;
         readonly openRunOwnedSubagents?: OpenRunOwnedSubagentProjection;
+        // Requests to the User still open when T3 ends the run itself: nothing can answer them.
+        readonly openRuntimeRequests?: ReadonlyArray<OrchestrationV2RuntimeRequest>;
         // Root turn snapshot written with the run when T3 ends the run itself.
         readonly abandonedProviderTurn?: OrchestrationV2ProviderTurn;
         readonly terminal: ProviderTerminalEvent;
@@ -705,6 +708,33 @@ export const layer: Layer.Layer<
                 allocateEventId,
               })
             : [];
+        // Clients stop offering Approve or an answer for them: the run that asked is over.
+        const closedRuntimeRequests: Array<OrchestrationV2DomainEvent> = [];
+        if (input.terminal.status !== "completed") {
+          for (const request of input.openRuntimeRequests ?? []) {
+            closedRuntimeRequests.push({
+              id: yield* allocateEventId(),
+              type: "runtime-request.updated",
+              threadId: input.run.threadId,
+              runId: input.run.id,
+              nodeId: request.nodeId,
+              providerInstanceId: input.run.providerInstanceId,
+              occurredAt: completedAt,
+              payload: {
+                ...request,
+                status: "cancelled",
+                resolvedAt: completedAt,
+                responseCapability: {
+                  type: "not_resumable",
+                  reason:
+                    input.terminal.status === "interrupted"
+                      ? "The run was interrupted."
+                      : "The run ended.",
+                },
+              },
+            });
+          }
+        }
         const persistedStatus =
           input.terminal.status === "completed" ? "waiting" : input.terminal.status;
         // Omit delegatedCompletion; the startup snapshot must not overwrite newer acknowledgements, successors, or Stop barriers.
@@ -753,6 +783,7 @@ export const layer: Layer.Layer<
               : [],
           events: [
             ...cascadedSubagentEvents,
+            ...closedRuntimeRequests,
             ...(input.abandonedProviderTurn === undefined
               ? []
               : [
@@ -1060,6 +1091,10 @@ export const layer: Layer.Layer<
           ReadonlySet<OrchestrationV2TurnItem["id"]>
         >(new Set(inheritedBackgroundTurnItemsById.keys()));
         const openRunOwnedSubagents = yield* Ref.make(emptyOpenRunOwnedSubagentProjection());
+        // The run's requests to the User still open on its Thread, by id.
+        const openRuntimeRequests = yield* Ref.make<
+          ReadonlyMap<OrchestrationV2RuntimeRequest["id"], OrchestrationV2RuntimeRequest>
+        >(new Map());
         const finalizeRootRun = Effect.fn("RunExecutionService.finalizeRootRun")(function* (
           terminal: ProviderTerminalEvent,
         ) {
@@ -1111,6 +1146,19 @@ export const layer: Layer.Layer<
           deliverable: boolean,
         ) {
           const routing = yield* Ref.get(eventRouting);
+          if (
+            event.type === "runtime_request.updated" &&
+            deliverable &&
+            (event.threadId === undefined || event.threadId === input.run.threadId)
+          ) {
+            const request = event.runtimeRequest;
+            yield* Ref.update(openRuntimeRequests, (current) => {
+              const next = new Map(current);
+              if (request.status === "pending") next.set(request.id, request);
+              else next.delete(request.id);
+              return next;
+            });
+          }
           if (event.type === "provider_turn.updated") {
             const isRoot =
               event.providerTurn.runAttemptId === input.attempt.id ||
@@ -1597,6 +1645,8 @@ export const layer: Layer.Layer<
                     expectedStatus: "running",
                   },
                   openRunOwnedSubagents: openSubagents,
+                  // The stream that would answer them is gone.
+                  openRuntimeRequests: [...(yield* Ref.get(openRuntimeRequests)).values()],
                   ...(abandonedProviderTurn === null ? {} : { abandonedProviderTurn }),
                   completedAt,
                   terminal:

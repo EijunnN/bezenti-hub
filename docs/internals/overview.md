@@ -343,7 +343,10 @@ Thread's runtime and the Environment's live status). The hello lists the session
 one the machine lost fails on the Hub with `EnvironmentSessionLostError`, which
 [RunExecutionService](../../apps/server/src/orchestration-v2/RunExecutionService.ts) turns into
 an interrupted turn (a `run_interrupt_result` saying why) instead of a failed one, so the queue
-goes on there. While a Thread's machine is away, a User's message that would steer or start
+goes on there. Whichever way the Hub ends a turn itself (a lost session, or HubRunInterrupt
+below), a request it had open to the User (an approval, a question) is cancelled with it
+(`not_resumable`), so clients stop offering Approve or an answer and the Thread can take new work
+or move. While a Thread's machine is away, a User's message that would steer or start
 work goes to the queue (`ThreadManagementService`, `queueWhileAway`). A move with **Stop the
 turn** from a machine that is away ends its sessions on the Hub
 (`RemoteEnvironments.abandonSessions`) and its unfinished runs there too
