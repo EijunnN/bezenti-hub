@@ -13,6 +13,7 @@ import {
   type EnvironmentId,
   MessageId,
   type OrchestrationV2AppThread,
+  type OrchestrationV2RuntimeRequest,
   type OrchestrationV2TurnItem,
   type ProjectId,
   ProviderDriverKind,
@@ -74,21 +75,55 @@ type Adapters = Layer.Layer<
   McpProviderSessions.McpProviderSessions
 >;
 
-const loadFixture = Effect.fn(function* (name: string) {
+/**
+ * A recording made under a read-only sandbox, replayed with the Thread in «approval-required»:
+ * the Hub resolves a remote Thread's policy from its runtime mode alone, so the agent opens with
+ * the full tool set and still asks before writing.
+ */
+const askingFirst = (transcript: ProviderReplayTranscript): ProviderReplayTranscript => ({
+  ...transcript,
+  entries: transcript.entries.map((entry) => {
+    const frame = entry.type === "runtime_exit" ? undefined : entry.frame;
+    if (
+      typeof frame !== "object" ||
+      frame === null ||
+      (frame as { readonly type?: unknown }).type !== "query.open"
+    ) {
+      return entry;
+    }
+    const { options } = frame as { readonly options: Record<string, unknown> };
+    const { allowedTools: _allowedTools, ...rest } = options;
+    return {
+      ...entry,
+      frame: { ...frame, options: { ...rest, tools: { type: "preset", preset: "claude_code" } } },
+    };
+  }),
+});
+
+const loadFixture = Effect.fn(function* (
+  name: string,
+  options: { readonly approvalRequired?: boolean } = {},
+) {
   const fixture = findReplayFixture(name);
   const variant = fixture?.providers.find((provider) => provider.driver === CLAUDE);
   assert.isDefined(fixture);
   assert.isDefined(variant);
-  const raw = yield* readReplayFixtureTranscript(variant.transcriptFile);
+  const recorded = (yield* readReplayFixtureTranscript(
+    variant.transcriptFile,
+  )) as ProviderReplayTranscript;
+  const raw = options.approvalRequired === true ? askingFirst(recorded) : recorded;
   const transcript = yield* ClaudeOrchestratorReplayHarness.decodeTranscript(
-    materializeReplayTranscriptRuntimeInstructions(raw as ProviderReplayTranscript, {
+    materializeReplayTranscriptRuntimeInstructions(raw, {
       driver: CLAUDE,
       model: variant.modelSelection.model,
     }),
   );
   const materialized = yield* materializeFixtureInput({
     scenario: name,
-    fixtureInput: fixture.buildInput(),
+    fixtureInput:
+      options.approvalRequired === true
+        ? { ...fixture.buildInput(), runtimeMode: "approval-required" }
+        : fixture.buildInput(),
     driver: CLAUDE,
     modelSelection: variant.modelSelection,
   }).pipe(Effect.provide(IdAllocator.layer));
@@ -219,6 +254,17 @@ const replayOn = Effect.fn(function* (
   );
 });
 
+/** The fixture without the User's answers: its turn stays waiting on what it asks. */
+const unanswered = (loaded: LoadedFixture): LoadedFixture => ({
+  ...loaded,
+  materialized: {
+    ...loaded.materialized,
+    steps: loaded.materialized.steps.filter(
+      (step) => step.type !== "respond_to_next_runtime_request",
+    ),
+  },
+});
+
 const ownerIdOf = Effect.fn(function* (hub: Hub) {
   const [row] = yield* hub.server.sql<{ readonly userId: string }>`
     SELECT user_id AS "userId" FROM users WHERE is_owner = 1
@@ -278,6 +324,31 @@ const awaitRunSettled = (hub: Hub, threadId: ThreadId, ordinal: number) =>
           : undefined;
       }),
     ),
+  );
+
+/** The Thread's first request to its User that is still open, once there is one. */
+const awaitPendingRequest = (hub: Hub, threadId: ThreadId) =>
+  awaitThreadEvent(
+    hub,
+    threadId,
+    (event) => {
+      const request = event.payload as OrchestrationV2RuntimeRequest;
+      return event.type === "runtime-request.updated" && request.status === "pending"
+        ? request
+        : undefined;
+    },
+    // The Thread may not exist yet.
+    hub
+      .service(Orchestrator.OrchestratorV2)
+      .getThreadProjection(threadId)
+      .pipe(
+        Effect.option,
+        Effect.map((projection) =>
+          Option.isSome(projection)
+            ? projection.value.runtimeRequests.find((request) => request.status === "pending")
+            : undefined,
+        ),
+      ),
   );
 
 const awaitRecovered = (hub: Hub, threadId: ThreadId) =>
@@ -648,6 +719,84 @@ describe("Hub con Environments: disconnections", () => {
         JSON.stringify(ended),
       );
     }).pipe(Effect.scoped),
+  );
+
+  /** A Thread on a Laptop whose turn waits on the User's approval, and a Desktop to move to. */
+  const waitingOnApproval = Effect.fn(function* () {
+    const loaded = unanswered(
+      yield* loadFixture("tool_call_read_only_on_request", { approvalRequired: true }),
+    );
+    // Its transcript is never played to the end: nobody answers.
+    const adapters: Adapters = makeClaudeRestartReplayHarness(loaded.transcript)
+      .harness.makeProviderAdapterRegistryLayer(loaded.transcript)
+      .pipe(Layer.orDie);
+    const hub = yield* makeHub();
+    const owner = yield* ownerIdOf(hub);
+    const laptop = yield* hub.join({ name: "Laptop", adapters });
+    const desktop = yield* hub.join({
+      name: "Desktop",
+      adapters: idleAdapters(loaded.variant.modelSelection.instanceId),
+    });
+    yield* replayOn(hub, laptop, loaded).pipe(Effect.forkScoped);
+    const [threadId] = loaded.materialized.projectionThreadIds;
+    if (threadId === undefined) return yield* Effect.die("no Thread");
+    const request = yield* awaitPendingRequest(hub, threadId);
+    assert.equal((yield* projectionOf(hub, threadId)).runs.at(-1)?.status, "running");
+    return { hub, owner, laptop, desktop, threadId, request };
+  });
+
+  /** The turn ended interrupted, its request closed, and the Thread on the Desktop takes work. */
+  const endedAndMovesOn = Effect.fn(function* (
+    input: Effect.Success<ReturnType<typeof waitingOnApproval>>,
+  ) {
+    const { hub, owner, desktop, threadId, request } = input;
+    assert.equal(yield* awaitRunSettled(hub, threadId, 1), "interrupted");
+    const after = yield* projectionOf(hub, threadId);
+    // Closed: clients no longer offer to approve it.
+    const closed = after.runtimeRequests.find((candidate) => candidate.id === request.id);
+    assert.equal(closed?.status, "cancelled", JSON.stringify(closed));
+    assert.isUndefined(after.runtimeRequests.find((candidate) => candidate.status === "pending"));
+    assert.isTrue(
+      after.turnItems.some((item) => item.type === "run_interrupt_result" && item.runId !== null),
+    );
+    const moved = yield* settledMove(hub, threadId);
+    assert.equal(moved.move?.status, "switched", moved.move?.failure?.message);
+    assert.equal(moved.activeEnvironmentId, desktop.environmentId);
+    const asked = desktop.requests.length;
+    yield* sendMessage(hub, threadId, owner, 5);
+    yield* desktop.awaitRequest("provider.openSession", asked);
+  });
+
+  it.live(
+    "a removed machine's turn waiting on an approval ends; the approval closes and the Thread moves on",
+    () =>
+      Effect.gen(function* () {
+        const waiting = yield* waitingOnApproval();
+        const { hub, owner, laptop, desktop, threadId } = waiting;
+        yield* goesAway(hub, laptop, laptop.disconnect);
+        yield* hub
+          .service(EnvironmentRegistry.EnvironmentRegistry)
+          .remove({ actorUserId: owner, environmentId: laptop.environmentId });
+        yield* dispatchMove(hub, { threadId, target: desktop.environmentId, actor: owner });
+        yield* endedAndMovesOn(waiting);
+      }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "a turn waiting on an approval on an offline machine ends when the Thread moves with Stop",
+    () =>
+      Effect.gen(function* () {
+        const waiting = yield* waitingOnApproval();
+        const { hub, owner, laptop, desktop, threadId } = waiting;
+        yield* goesAway(hub, laptop, laptop.disconnect);
+        yield* dispatchMove(hub, {
+          threadId,
+          target: desktop.environmentId,
+          actor: owner,
+          ifRunning: "stop",
+        });
+        yield* endedAndMovesOn(waiting);
+      }).pipe(Effect.scoped),
   );
 
   it.live(
