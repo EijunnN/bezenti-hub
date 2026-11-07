@@ -10,7 +10,6 @@ import { receiveCodexAuthCallback, CodexAuthCallbackError } from "./CodexAuthCal
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import { providerAuthReturnUrl } from "@t3tools/shared/providerAuthReturnUrl";
 import { promptLinkAppPath } from "@t3tools/shared/promptLinks";
-import { readPairingAppLink } from "@t3tools/shared/remote";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
@@ -21,7 +20,7 @@ import * as DesktopWebLinks from "./DesktopWebLinks.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 
 /**
- * Claims the single-instance lock and routes launch links (pairing, prompt, provider sign-in
+ * Claims the single-instance lock and routes launch links (prompt, provider sign-in
  * returns, web pages) to the running app, including links that arrive before it is configured.
  */
 export class DesktopLaunchLinks extends Context.Service<
@@ -131,8 +130,7 @@ export const make = Effect.gen(function* () {
         return true;
       };
       const openAppLink = (value: string | undefined) => {
-        if (!value || (promptLinkAppPath(value) === null && readPairingAppLink(value) === null))
-          return false;
+        if (!value || promptLinkAppPath(value) === null) return false;
         void runPromise(webLinks.receive(value));
         return true;
       };

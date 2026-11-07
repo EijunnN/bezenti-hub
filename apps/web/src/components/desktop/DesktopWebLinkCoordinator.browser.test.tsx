@@ -13,8 +13,6 @@ const state = vi.hoisted(() => ({
   openLink: vi.fn(async () => undefined),
   navigate: vi.fn(async (): Promise<void> => undefined),
   openScratchProject: vi.fn(async () => null),
-  confirm: vi.fn(async (_message: string) => true),
-  connectPairing: vi.fn(async (_input: { pairingUrl: string }) => ({ _tag: "Success" })),
   localEnvironmentDisabled: false,
 }));
 
@@ -79,24 +77,6 @@ vi.mock("../../state/use-atom-query-runner", () => ({
   useAtomQueryRunner: () => state.preview,
 }));
 vi.mock("../../browser/useOpenLink", () => ({ useOpenLink: () => state.openLink }));
-vi.mock(import("../../confirmDialog"), async (original) => ({
-  ...(await original()),
-  requestConfirmDialog: state.confirm,
-}));
-vi.mock(import("../../connection/onboarding"), async (original) => ({
-  ...(await original()),
-  connectPairing: "connectPairing" as never,
-}));
-vi.mock(import("../../state/use-atom-command"), async (original) => {
-  const actual = await original();
-  return {
-    ...actual,
-    useAtomCommand: ((command: unknown, options: never) =>
-      command === "connectPairing"
-        ? state.connectPairing
-        : actual.useAtomCommand(command as never, options)) as never,
-  };
-});
 
 import { AppAtomRegistryProvider, appAtomRegistry } from "../../rpc/atomRegistry";
 import { allReachableShellsLiveAtom } from "../../state/shell";
@@ -140,12 +120,8 @@ const pullRequestView = {
   },
 };
 
-const pairingUrl = "https://vps.example.com/pair#token=ABC123";
-const pairLink = `t3code://pair?pairingUrl=${encodeURIComponent(pairingUrl)}`;
-
 function setup() {
   vi.clearAllMocks();
-  state.confirm.mockResolvedValue(true);
   state.localEnvironmentDisabled = false;
   state.projects = [];
   state.routeParams = {};
@@ -277,56 +253,12 @@ it("opens a plain commit the workspace lacks like any other delivered link", asy
   expect(useRightPanelStore.getState().byThreadKey).toEqual({});
 });
 
-it("adds the backend from a pairing link after the user confirms its host", async () => {
-  setup();
-  await using _coordinator = await mount(pairLink);
-  await vi.waitFor(() =>
-    expect(state.connectPairing).toHaveBeenCalledExactlyOnceWith({ pairingUrl }),
-  );
-  expect(state.confirm).toHaveBeenCalledExactlyOnceWith(
-    "Add the backend at https://vps.example.com?",
-  );
-  expect(state.navigate).not.toHaveBeenCalled();
-});
-
-it("does not spend the pairing token when the user declines", async () => {
-  setup();
-  const otherPairingUrl = "https://other.example.com/pair#token=XYZ789";
-  state.confirm.mockResolvedValueOnce(false);
-  await using _coordinator = await mount(
-    pairLink,
-    `t3code://pair?pairingUrl=${encodeURIComponent(otherPairingUrl)}`,
-  );
-  await vi.waitFor(() => expect(state.connectPairing).toHaveBeenCalled());
-  expect(state.confirm).toHaveBeenCalledTimes(2);
-  expect(state.connectPairing).toHaveBeenCalledExactlyOnceWith({ pairingUrl: otherPairingUrl });
-});
-
-it("skips a repeat of a pairing link that already paired", async () => {
-  setup();
-  const otherPairingUrl = "https://other.example.com/pair#token=XYZ789";
-  await using _coordinator = await mount(
-    pairLink,
-    pairLink,
-    `t3code://pair?pairingUrl=${encodeURIComponent(otherPairingUrl)}`,
-  );
-  await vi.waitFor(() =>
-    expect(state.connectPairing).toHaveBeenLastCalledWith({ pairingUrl: otherPairingUrl }),
-  );
-  expect(state.confirm).toHaveBeenCalledTimes(2);
-  expect(state.connectPairing.mock.calls).toEqual([
-    [{ pairingUrl }],
-    [{ pairingUrl: otherPairingUrl }],
-  ]);
-});
-
-it("pairs with Local environment disabled, where there is no primary environment to wait for", async () => {
+it("opens an app link with Local environment disabled, where there is no primary environment to wait for", async () => {
   setup();
   state.localEnvironmentDisabled = true;
-  await using _coordinator = await mount(pairLink);
-  await vi.waitFor(() =>
-    expect(state.connectPairing).toHaveBeenCalledExactlyOnceWith({ pairingUrl }),
-  );
+  await using _coordinator = await mount("t3code://new?prompt=hi");
+  await vi.waitFor(() => expect(state.navigate).toHaveBeenCalledOnce());
+  expect(state.openLink).not.toHaveBeenCalled();
 });
 
 it("holds a launch PR link with Local environment disabled until discovery settles", async () => {

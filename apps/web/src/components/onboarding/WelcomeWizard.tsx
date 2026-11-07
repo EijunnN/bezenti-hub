@@ -9,10 +9,7 @@ import type {
   ServerProvider,
 } from "@t3tools/contracts";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
-import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
+import { isAtomCommandInterrupted } from "@t3tools/client-runtime/state/runtime";
 import {
   AgentSessionSource,
   AuthTerminalOperateScope,
@@ -28,7 +25,6 @@ import {
   ArrowRightIcon,
   CheckIcon,
   ChevronRightIcon,
-  LinkIcon,
   MonitorIcon,
   TerminalIcon,
 } from "lucide-react";
@@ -68,7 +64,7 @@ import {
 } from "../../state/session";
 import { terminalEnvironment } from "../../state/terminal";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { connectPairing } from "../../connection/onboarding";
+import { AddEnvironmentDialog } from "../settings/AddEnvironmentDialog";
 import { getProviderSummary } from "../settings/providerStatus";
 import { providerClients } from "../settings/providerDriverMeta";
 import { ChatGptWelcomeCoordinator } from "../settings/ChatGptWelcomeCoordinator";
@@ -78,12 +74,9 @@ import { buildProviderInstanceUpdatePatch } from "../settings/SettingsPanels.log
 import { TerminalViewport } from "../ThreadTerminalDrawer";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { T3Wordmark } from "../T3Wordmark";
-import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
-import { CommandBlock } from "../CommandBlock";
 import { Checkbox } from "../ui/checkbox";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
-import { Input } from "../ui/input";
 import { Tooltip, TooltipTrigger, TooltipPopup } from "../ui/tooltip";
 import { ScrollArea } from "../ui/scroll-area";
 import { Spinner } from "../ui/spinner";
@@ -101,11 +94,9 @@ const ONBOARDING_STAGES = ["Connect", "Agents", "Projects"] as const;
 const SCAN_LIMIT_MESSAGE = "Scan limit reached. Some projects or conversations may be missing.";
 
 export function WelcomeWizard({
-  localAvailable,
   onDone,
   resumeEnvironmentId,
 }: {
-  readonly localAvailable: boolean;
   readonly resumeEnvironmentId?: EnvironmentId | undefined;
   readonly onDone: (projectRef?: ScopedProjectRef) => void | Promise<void>;
 }) {
@@ -219,11 +210,7 @@ export function WelcomeWizard({
         if (event.reason === "close-press" && !isImporting) void finish();
       }}
     >
-      <WizardPopup
-        size="wide"
-        bottomStickOnMobile={false}
-        initialFocus={() => document.getElementById("onboarding-pairing-url") ?? true}
-      >
+      <WizardPopup size="wide" bottomStickOnMobile={false}>
         <WizardHeader
           title="Set up T3 Code"
           identity={
@@ -249,15 +236,11 @@ export function WelcomeWizard({
         <WizardPanel holdHeight={isLoadingProjects}>
           {step === "connection" ? (
             <ConnectionStep
-              expandPairingInitially={!localAvailable}
               selectedIds={selectedIds}
               onSelectionChange={setSelection}
               onContinue={() =>
                 startSetup(resolveOnboardingSetup(environments, selectedIds).environmentIds)
               }
-              onPaired={(environmentId) => {
-                setSelection(new Set([...selectedIds, environmentId]));
-              }}
             />
           ) : step === "agents" ? (
             <AgentsStep environmentIds={setupIds} onContinue={() => setStep("import")} />
@@ -279,21 +262,20 @@ export function WelcomeWizard({
 }
 
 function ConnectionStep({
-  expandPairingInitially,
   selectedIds,
   onSelectionChange,
   onContinue,
-  onPaired,
 }: {
-  readonly expandPairingInitially: boolean;
   readonly selectedIds: ReadonlySet<EnvironmentId>;
   readonly onSelectionChange: (ids: ReadonlySet<EnvironmentId>) => void;
   readonly onContinue: () => void;
-  readonly onPaired: (environmentId: EnvironmentId) => void;
 }) {
   const { environments } = useEnvironments();
-  const [pairingOpen, setPairingOpen] = useState(expandPairingInitially);
-  const [isPairing, setIsPairing] = useState(false);
+  const [addHubOpen, setAddHubOpen] = useState(false);
+  const [addHubError, setAddHubError] = useState<string | null>(null);
+  // A browser always has its page's Hub and this computer's own Hub is always connected on desktop;
+  // only the desktop app with its local environment off can have no Hub yet.
+  const needsHub = environments.length === 0 && window.desktopBridge !== undefined;
   const { ready, skippedIds } = resolveOnboardingSetup(environments, selectedIds);
   const skippedLabels = environments
     .filter((environment) => skippedIds.includes(environment.environmentId))
@@ -361,41 +343,20 @@ function ConnectionStep({
           ))}
         </fieldset>
       ) : null}
-      <div className="mt-4 space-y-2">
-        <div className="rounded-lg border border-border bg-background">
-          <Collapsible open={pairingOpen} onOpenChange={setPairingOpen}>
-            <CollapsibleTrigger
-              disabled={isPairing}
-              render={
-                <Button
-                  variant="ghost"
-                  size="sm-multiline"
-                  className="min-h-14 w-full justify-start"
-                />
-              }
-            >
-              <LinkIcon className="size-4 text-muted-foreground" />
-              <span className="flex-1 text-left">Add a computer</span>
-              <ChevronRightIcon
-                className={cn("size-4 text-muted-foreground", pairingOpen && "rotate-90")}
-              />
-            </CollapsibleTrigger>
-            <CollapsiblePanel>
-              <div className="px-3 pb-3">
-                <PairingForm
-                  isPairing={isPairing}
-                  setIsPairing={setIsPairing}
-                  onPaired={(environmentId) => {
-                    setPairingOpen(false);
-                    onPaired(environmentId);
-                    requestAnimationFrame(() => continueRef.current?.focus());
-                  }}
-                />
-              </div>
-            </CollapsiblePanel>
-          </Collapsible>
+      {needsHub ? (
+        <div className="mt-4 flex items-center justify-between gap-3 rounded-lg border border-border bg-background px-3 py-3">
+          <p className="text-sm text-muted-foreground">
+            This computer is not a Hub. Sign in to yours to continue.
+          </p>
+          <AddEnvironmentDialog
+            open={addHubOpen}
+            routeTarget={null}
+            error={addHubError}
+            onOpenChange={setAddHubOpen}
+            onErrorChange={setAddHubError}
+          />
         </div>
-      </div>
+      ) : null}
       {skippedLabels.length > 0 ? (
         <p className="mt-4 text-xs text-muted-foreground">
           Not connected, so setup skips {skippedLabels.join(", ")}. You can set{" "}
@@ -409,8 +370,8 @@ function ConnectionStep({
         <Button
           className="shrink-0 self-end"
           ref={continueRef}
-          autoFocus={!expandPairingInitially}
-          disabled={!ready || isPairing}
+          autoFocus={!needsHub}
+          disabled={!ready}
           onClick={onContinue}
         >
           Continue
@@ -433,117 +394,6 @@ const CONNECTION_BUTTON_LABELS = {
 
 function connectionButtonLabel(phase: keyof typeof CONNECTION_BUTTON_LABELS): string {
   return CONNECTION_BUTTON_LABELS[phase];
-}
-
-function PairingForm({
-  isPairing,
-  setIsPairing,
-  onPaired,
-}: {
-  readonly isPairing: boolean;
-  readonly setIsPairing: (value: boolean) => void;
-  readonly onPaired: (environmentId: EnvironmentId) => void;
-}) {
-  const connectPairingEnvironment = useAtomCommand(connectPairing, { reportFailure: false });
-  const [pairingUrl, setPairingUrl] = useState("");
-  const [errorMessage, setErrorMessage] = useState("");
-  const mountedRef = useRef(true);
-
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- tracks mount so a pairing request that settles after unmount does not set state
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-
-  const submit = async () => {
-    if (isPairing || pairingUrl.trim().length === 0) return;
-    setIsPairing(true);
-    setErrorMessage("");
-    const result = await connectPairingEnvironment({ pairingUrl: pairingUrl.trim() });
-    if (!mountedRef.current) return;
-    setIsPairing(false);
-    if (result._tag === "Success") {
-      onPaired(result.value);
-      return;
-    }
-    if (isAtomCommandInterrupted(result)) return;
-    const cause = squashAtomCommandFailure(result);
-    setErrorMessage(cause instanceof Error ? cause.message : "Pairing failed.");
-  };
-
-  return (
-    <>
-      <form
-        className="space-y-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void submit();
-        }}
-      >
-        <div>
-          <label className="block text-sm text-muted-foreground" htmlFor="onboarding-pairing-url">
-            Pairing link
-          </label>
-          <Input
-            id="onboarding-pairing-url"
-            autoFocus
-            aria-invalid={errorMessage.length > 0}
-            aria-describedby={errorMessage ? "onboarding-pairing-error" : undefined}
-            className="mt-2"
-            size="lg"
-            autoCapitalize="none"
-            autoComplete="off"
-            autoCorrect="off"
-            spellCheck={false}
-            nativeInput
-            readOnly={isPairing}
-            placeholder="https://your-server:5230/pair#token=…"
-            value={pairingUrl}
-            onChange={(event) => setPairingUrl(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (
-                event.key === "Enter" &&
-                (event.nativeEvent.isComposing || event.keyCode === 229)
-              ) {
-                event.preventDefault();
-              }
-            }}
-          />
-        </div>
-        {errorMessage ? (
-          <Alert id="onboarding-pairing-error" variant="error">
-            <AlertDescription>{errorMessage}</AlertDescription>
-          </Alert>
-        ) : null}
-        <Collapsible>
-          <div className="flex items-center justify-between gap-3">
-            <CollapsibleTrigger
-              type="button"
-              className="group flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-            >
-              <ChevronRightIcon className="size-3.5 group-data-panel-open:rotate-90" />
-              Need a pairing link?
-            </CollapsibleTrigger>
-            <Button type="submit" disabled={isPairing || pairingUrl.trim().length === 0}>
-              {isPairing ? "Pairing..." : "Pair"}
-            </Button>
-          </div>
-          <CollapsiblePanel>
-            <p className="pt-3 text-sm text-muted-foreground">
-              On the computer with your code, start T3 Code or run{" "}
-              <code className="font-mono">npx t3 serve</code>, then run:
-            </p>
-            <CommandBlock command="npx t3 pair" className="mt-2" />
-            <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-              On a tailnet, run <code className="font-mono">npx t3 pair --tailscale</code> instead.
-            </p>
-          </CollapsiblePanel>
-        </Collapsible>
-      </form>
-    </>
-  );
 }
 
 const PRIMARY_AGENT_DRIVERS = ["codex", "claudeAgent"] as const;

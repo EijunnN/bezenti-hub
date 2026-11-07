@@ -31,7 +31,6 @@ const state = vi.hoisted(() => ({
   createProject: vi.fn(),
   importThreads: vi.fn(),
   refreshProviders: vi.fn(),
-  connectPairing: vi.fn(),
   completeOnboarding: vi.fn(),
   onDone: vi.fn(),
   scan: vi.fn(),
@@ -112,15 +111,10 @@ vi.mock(import("../../onboarding/useProjectScans"), async (original) => ({
       };
     }),
 }));
-vi.mock(import("../../connection/onboarding"), async (original) => ({
-  ...(await original()),
-  connectPairing: "connectPairing" as never,
-}));
 vi.mock(import("../../state/use-atom-command"), async (original) => ({
   ...(await original()),
-  useAtomCommand: ((
-    command: "createProject" | "importThreads" | "refreshProviders" | "connectPairing",
-  ) => state[command]) as never,
+  useAtomCommand: ((command: "createProject" | "importThreads" | "refreshProviders") =>
+    state[command]) as never,
 }));
 vi.mock(import("../settings/ChatGptWelcomeCoordinator"), async (original) => ({
   ...(await original()),
@@ -243,7 +237,7 @@ async function mountImport(remote = false) {
   const screen = stack.use(
     await render(
       <RegistryContext.Provider value={appAtomRegistry}>
-        <WelcomeWizard localAvailable={!remote} onDone={state.onDone} />
+        <WelcomeWizard onDone={state.onDone} />
       </RegistryContext.Provider>,
     ),
   );
@@ -279,7 +273,6 @@ function setup() {
     .mockReset()
     .mockResolvedValue(AsyncResult.success({ importedCount: 1, skippedCount: 0 }));
   state.refreshProviders.mockReset().mockResolvedValue(AsyncResult.success(undefined));
-  state.connectPairing.mockReset().mockResolvedValue(AsyncResult.success(remoteId));
   state.completeOnboarding.mockReset().mockResolvedValue(undefined);
   state.onDone.mockReset();
   state.scan.mockReset();
