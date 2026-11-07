@@ -2912,12 +2912,12 @@ describe("Hub con Environments: Threads without a Project", () => {
 
   it.live("a folder from before folders got git gets its repository, and then moves", () =>
     Effect.gen(function* () {
-      const { hub, desktop, threadId, projectId, owner, laptopFolder } = yield* scratchTurnOnLaptop(
-        { desktop: true },
-      );
+      const { hub, laptop, desktop, threadId, projectId, owner, laptopFolder } =
+        yield* scratchTurnOnLaptop({ desktop: true });
       assert.isDefined(desktop);
       // As a Thread from before: its folder has no repository.
       yield* Effect.promise(() => NodeFSP.rm(`${laptopFolder}/.git`, { recursive: true }));
+      const asked = laptop.requests.length;
       yield* dispatchMove(hub, {
         commandId: "command:old-scratch-to-desktop",
         threadId,
@@ -2927,6 +2927,9 @@ describe("Hub con Environments: Threads without a Project", () => {
       const moved = yield* settledMove(hub, threadId);
       assert.equal(moved.move?.status, "switched", moved.move?.failure?.message);
       assert.equal(moved.move?.continuesFrom?.kind, "final");
+      // Once the move ends the Hub asks the Laptop what it kept, which captures its folder: the
+      // test ends after that, never while its git still writes there.
+      yield* laptop.awaitAnswered("move.recover", asked);
       const desktopFolder = `${yield* checkoutOn(hub, desktop, projectId)}/${SCRATCH_FOLDER}`;
       assert.equal(
         yield* readText(`${desktopFolder}/notes.md`),
