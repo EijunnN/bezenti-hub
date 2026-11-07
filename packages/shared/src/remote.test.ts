@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  buildPairingAppLink,
+  isPairingAppLink,
   RemoteBackendUrlMissingError,
   RemotePairingTokenMissingError,
   RemotePairingUrlInvalidError,
@@ -143,10 +143,10 @@ describe("remote", () => {
     );
   });
 
-  it("wraps pairing urls in a t3code://pair app link", () => {
-    const pairingUrl = "https://vps.example.com/pair#token=ABC123";
-    const appLink = buildPairingAppLink(pairingUrl);
-    expect(appLink.startsWith("t3code://pair?")).toBe(true);
-    expect(new URL(appLink).searchParams.get("pairingUrl")).toBe(pairingUrl);
+  it("recognizes old t3code://pair links on any channel scheme", () => {
+    expect(isPairingAppLink("t3code://pair?pairingUrl=https%3A%2F%2Fvps.example.com")).toBe(true);
+    expect(isPairingAppLink("t3code-dev://pair")).toBe(true);
+    expect(isPairingAppLink("t3code://threads/thread-1")).toBe(false);
+    expect(isPairingAppLink("https://hub.example.com/pair#token=x")).toBe(false);
   });
 });

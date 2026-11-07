@@ -10,6 +10,7 @@ import { receiveCodexAuthCallback, CodexAuthCallbackError } from "./CodexAuthCal
 import * as ElectronShell from "../electron/ElectronShell.ts";
 import { providerAuthReturnUrl } from "@t3tools/shared/providerAuthReturnUrl";
 import { promptLinkAppPath } from "@t3tools/shared/promptLinks";
+import { isPairingAppLink } from "@t3tools/shared/remote";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
@@ -130,7 +131,8 @@ export const make = Effect.gen(function* () {
         return true;
       };
       const openAppLink = (value: string | undefined) => {
-        if (!value || promptLinkAppPath(value) === null) return false;
+        // An old pairing link opens the app so it can say pairing was removed.
+        if (!value || (promptLinkAppPath(value) === null && !isPairingAppLink(value))) return false;
         void runPromise(webLinks.receive(value));
         return true;
       };

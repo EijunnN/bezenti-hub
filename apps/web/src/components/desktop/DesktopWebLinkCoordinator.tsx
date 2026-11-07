@@ -3,6 +3,7 @@ import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime"
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { promptLinkAppPath } from "@t3tools/shared/promptLinks";
+import { isPairingAppLink } from "@t3tools/shared/remote";
 import { useRouter } from "@tanstack/react-router";
 import * as Effect from "effect/Effect";
 import { AtomRegistry } from "effect/reactivity";
@@ -158,6 +159,16 @@ export function DesktopWebLinkCoordinator() {
   });
 
   const openLink = useEffectEvent(async (url: string) => {
+    if (isPairingAppLink(url)) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Pairing was removed",
+          description: "This app connects to one Hub. Sign in to yours with «Add a Hub».",
+        }),
+      );
+      return;
+    }
     const appPath = promptLinkAppPath(url, readHubLinkOrigin() ?? undefined);
     if (appPath !== null) {
       await router.navigate({ href: appPath });

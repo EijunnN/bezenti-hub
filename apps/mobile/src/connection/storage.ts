@@ -18,10 +18,28 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import { chooseSavedHub, probeHubDescriptor } from "@t3tools/client-runtime/connection/single-hub";
+import { probeHubDescriptor } from "@t3tools/client-runtime/connection/single-hub";
+import { EnvironmentId } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 
+import * as MobileSecureStorage from "../persistence/mobile-secure-storage";
 import * as CatalogStore from "./catalog-store";
-import { SINGLE_HUB_REFUSAL, keptSavedConnections } from "./singleHub";
+import {
+  type KeptConnection,
+  type StoredHub,
+  decideHub,
+  hubState,
+  registrationRefusal,
+  takeChosenHub,
+} from "./singleHub";
+
+/** The Hub this phone connects, decided once (see `decideHub`). */
+export const HUB_CHOICE_KEY = "t3code.hub-choice.v1";
+const StoredHubJson = Schema.fromJsonString(Schema.Struct({ hub: Schema.NullOr(EnvironmentId) }));
+const decodeStoredHub = Schema.decodeUnknownOption(StoredHubJson);
+const encodeStoredHub = Schema.encodeSync(StoredHubJson);
+/** Probing several saved connections, once, never holds the app's start longer than this. */
+const HUB_PROBE_TIMEOUT_MS = 4000;
 
 function targetPersistenceError(
   operation:
@@ -48,30 +66,57 @@ export const layer = Layer.effectContext(
         catalog.update((document) => ({ ...document, githubRoutingPermissions })),
     });
 
-    const targetStore = Persistence.ConnectionTargetStore.of({
-      // Saved connections past the one Hub this app uses stay saved but are not connected.
-      list: catalog.read.pipe(
-        Effect.flatMap((document) =>
-          Effect.promise(() =>
-            chooseSavedHub({
-              targets: document.targets,
-              profiles: document.profiles,
-              slots: 1,
-              probe: probeHubDescriptor,
-            }),
-          ).pipe(
-            Effect.tap((chosen) =>
-              Effect.sync(() =>
-                keptSavedConnections.record({
-                  saved: document.targets.length,
-                  connected: chosen[0]?.environmentId ?? null,
-                }),
-              ),
-            ),
-          ),
-        ),
-        Effect.mapError((error) => targetPersistenceError("list-targets", error)),
+    const secureStorage = yield* MobileSecureStorage.MobileSecureStorage;
+    const readStoredHub = secureStorage.getItem(HUB_CHOICE_KEY).pipe(
+      Effect.map((raw): StoredHub | undefined =>
+        raw === null ? undefined : Option.getOrUndefined(decodeStoredHub(raw)),
       ),
+      Effect.orElseSucceed((): StoredHub | undefined => undefined),
+    );
+    const storeHub = (hub: EnvironmentId | null) =>
+      secureStorage
+        .setItem(HUB_CHOICE_KEY, encodeStoredHub({ hub }))
+        .pipe(Effect.catch((cause) => Effect.logWarning("Could not save the Hub choice.", cause)));
+    const keptOf = (
+      targets: ReadonlyArray<{
+        readonly _tag: string;
+        readonly environmentId: EnvironmentId;
+        readonly label: string;
+        readonly connectionId?: string;
+      }>,
+      hub: EnvironmentId | null,
+    ): ReadonlyArray<KeptConnection> => {
+      const kept = new Map<EnvironmentId, KeptConnection>();
+      for (const target of targets) {
+        if (target.environmentId === hub || kept.has(target.environmentId)) continue;
+        if (target.connectionId === undefined) continue;
+        kept.set(target.environmentId, {
+          environmentId: target.environmentId,
+          label: target.label,
+          connectionId: target.connectionId,
+        });
+      }
+      return [...kept.values()];
+    };
+
+    const targetStore = Persistence.ConnectionTargetStore.of({
+      // Only the Hub is connected; other saved connections stay saved, unconnected.
+      list: Effect.gen(function* () {
+        const document = yield* catalog.read;
+        const stored = yield* readStoredHub;
+        const decision = yield* Effect.promise(() =>
+          decideHub({
+            targets: document.targets,
+            profiles: document.profiles,
+            stored,
+            probe: probeHubDescriptor,
+            timeoutMs: HUB_PROBE_TIMEOUT_MS,
+          }),
+        );
+        if (decision.persist) yield* storeHub(decision.hub);
+        hubState.set({ hub: decision.hub, kept: keptOf(document.targets, decision.hub) });
+        return document.targets.filter((target) => target.environmentId === decision.hub);
+      }).pipe(Effect.mapError((error) => targetPersistenceError("list-targets", error))),
       listDisabled: catalog.read.pipe(
         Effect.map((document) => document.disabledEnvironmentIds),
         Effect.mapError((error) => targetPersistenceError("list-disabled-targets", error)),
@@ -81,26 +126,28 @@ export const layer = Layer.effectContext(
       register: Effect.fn("mobile.connectionStorage.register")(
         function* (registration, routes) {
           const environmentId = registration.target.environmentId;
-          const document = yield* catalog.read;
-          const alreadySaved = document.targets.some(
-            (target) => target.environmentId === environmentId,
-          );
-          const connected = keptSavedConnections.connected();
-          // A route or credential for the one Hub may change; a second Hub may not join it.
-          if (!alreadySaved && connected !== null && connected !== environmentId) {
+          const current = hubState.get();
+          // «Use as my Hub» names one kept connection; nothing else connects a kept one.
+          const chosen = takeChosenHub(environmentId);
+          const refusal = registrationRefusal({
+            environmentId,
+            hub: current.hub,
+            kept: current.kept.map((entry) => entry.environmentId).filter((id) => id !== chosen),
+          });
+          if (refusal !== null) {
             return yield* new Persistence.ConnectionPersistenceError({
               operation: "register-connection",
-              message: SINGLE_HUB_REFUSAL,
+              message: refusal,
             });
           }
-          yield* catalog.update((current) =>
-            registerConnectionInCatalog(current, registration, routes),
+          yield* catalog.update((document) =>
+            registerConnectionInCatalog(document, registration, routes),
           );
-          // The next listing connects it; until then no other Hub may take its place.
-          if (connected === null) {
-            keptSavedConnections.record({
-              saved: document.targets.length + (alreadySaved ? 0 : 1),
-              connected: environmentId,
+          if (current.hub === null) {
+            yield* storeHub(environmentId);
+            hubState.set({
+              hub: environmentId,
+              kept: current.kept.filter((entry) => entry.environmentId !== environmentId),
             });
           }
         },
@@ -120,7 +167,18 @@ export const layer = Layer.effectContext(
         catalog
           .update((document) => removeConnectionFromCatalog(document, environmentId))
           .pipe(
-            Effect.tap(() => Effect.sync(() => keptSavedConnections.forget(environmentId))),
+            // Removing the Hub leaves none: the next one the User adds becomes the Hub, and
+            // kept connections never connect on their own.
+            Effect.tap(() => {
+              const current = hubState.get();
+              const kept = current.kept.filter((entry) => entry.environmentId !== environmentId);
+              if (current.hub !== environmentId) {
+                return Effect.sync(() => hubState.set({ ...current, kept }));
+              }
+              return storeHub(null).pipe(
+                Effect.tap(() => Effect.sync(() => hubState.set({ hub: null, kept }))),
+              );
+            }),
             Effect.mapError((error) => targetPersistenceError("remove-connection", error)),
           ),
       setEnabled: (environmentId, enabled) =>

@@ -8,6 +8,7 @@ import { View } from "react-native";
 import { AppText as Text } from "../../components/ui/AppText";
 import { Button } from "../../components/ui/Button";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import { canMoveThread } from "@t3tools/client-runtime/environment/hub-environments";
 import { useHubEnvironments } from "../../state/hubEnvironments";
 import { useThreadRolePermissions } from "../../state/spaces";
 import type { ThreadEnvironmentPresentation } from "./threadEnvironmentText";
@@ -45,9 +46,13 @@ export function ThreadEnvironmentNotice(props: {
       className="mx-4 mt-2 flex-row items-center gap-3 rounded-2xl border-continuous bg-grouped-card px-4 py-3"
     >
       <Text className="flex-1 text-sm">{message}</Text>
-      {move !== null ? (
+      {!role.canContinue ? null : move !== null ? (
         <Button label="Details" size="compact" tone="secondary" onPress={openMove} />
-      ) : role.canContinue ? (
+      ) : canMoveThread({
+          canContinue: role.canContinue,
+          environmentCount: environments.length,
+          activeEnvironmentId: props.thread.activeEnvironmentId,
+        }) ? (
         <Button label="Move" size="compact" tone="secondary" onPress={openMove} />
       ) : null}
     </View>

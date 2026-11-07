@@ -1,6 +1,7 @@
 import { type StaticScreenProps, useNavigation } from "@react-navigation/native";
 import {
   ENVIRONMENT_STATUS_LABELS,
+  canMoveThread,
   activeEnvironmentOf,
   environmentNameOf,
   environmentUnavailableReason,
@@ -31,7 +32,12 @@ import { ListChoiceRow } from "../../components/ui/ListChoiceRow";
 import { ListSection } from "../../components/ui/ListSection";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
 import { useEnvironmentServerConfig, useProject, useThreadShell } from "../../state/entities";
-import { useHubEnvironments } from "../../state/hubEnvironments";
+import {
+  refreshHubEnvironments,
+  useHubEnvironments,
+  useHubEnvironmentsStatus,
+} from "../../state/hubEnvironments";
+import { useThreadRolePermissions } from "../../state/spaces";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { SettingsScreen } from "../settings/components/SettingsScreen";
@@ -67,6 +73,8 @@ function MoveThreadForm({ threadRef }: { readonly threadRef: ScopedThreadRef }) 
   const insets = useSafeAreaInsets();
   const thread = useThreadShell(threadRef);
   const environments = useHubEnvironments();
+  const listStatus = useHubEnvironmentsStatus();
+  const role = useThreadRolePermissions(threadRef.environmentId, thread?.source ?? null);
   const project = useProject(
     thread === null
       ? null
@@ -145,6 +153,21 @@ function MoveThreadForm({ threadRef }: { readonly threadRef: ScopedThreadRef }) 
     );
   };
 
+  // The same rule as the row menu; the Hub refuses anyone else anyway.
+  const allowed = canMoveThread({
+    canContinue: role.canContinue,
+    environmentCount: environments.length,
+    activeEnvironmentId: sourceId,
+  });
+  if (thread !== null && !role.canContinue) {
+    return (
+      <SettingsScreen formSheet title="Move to another Environment">
+        <Text accessibilityRole="alert" className="px-5 pt-4 text-sm text-foreground-muted">
+          Only someone who may continue this Thread can move it.
+        </Text>
+      </SettingsScreen>
+    );
+  }
   return (
     <SettingsScreen formSheet title="Move to another Environment">
       <ScrollView
@@ -172,7 +195,23 @@ function MoveThreadForm({ threadRef }: { readonly threadRef: ScopedThreadRef }) 
         ) : shownMove === null ? (
           <>
             <ListSection title="Environment">
-              {candidates.length === 0 ? (
+              {listStatus === "loading" ? (
+                <Text className="px-4 py-3 text-sm text-foreground-muted">
+                  Loading this Hub's machines…
+                </Text>
+              ) : listStatus === "error" && environments.length === 0 ? (
+                <View accessibilityRole="alert" className="flex-row items-center gap-3 px-4 py-3">
+                  <Text className="flex-1 text-sm text-danger-foreground">
+                    Could not load this Hub's machines.
+                  </Text>
+                  <Button
+                    label="Try again"
+                    size="compact"
+                    tone="secondary"
+                    onPress={refreshHubEnvironments}
+                  />
+                </View>
+              ) : candidates.length === 0 || !allowed ? (
                 <Text className="px-4 py-3 text-sm text-foreground-muted">
                   No other Environment you can use is joined to this Hub.
                 </Text>

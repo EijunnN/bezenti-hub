@@ -1,3 +1,4 @@
+import { canMoveThread } from "@t3tools/client-runtime/environment/hub-environments";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { requestCustomSnooze } from "../components/CustomSnoozeDialog";
 import { openGuestShareDialog } from "../components/chat/guestShareDialogState";
@@ -152,8 +153,12 @@ export function useThreadActionMenu(input: {
         snoozePresets,
         canShareWithGuest,
         canTurnIntoProject: canTurnThreadIntoProject(threadRef),
-        // A Thread whose machine was removed can always go to the Hub machine.
-        canMoveEnvironment: readHubEnvironments().length > 1 || thread.activeEnvironmentId === null,
+        canMoveEnvironment: canMoveThread({
+          canContinue: readThreadRolePermissions(threadRef.environmentId, thread.source)
+            .canContinue,
+          environmentCount: readHubEnvironments().length,
+          activeEnvironmentId: thread.activeEnvironmentId,
+        }),
         role: readThreadRolePermissions(threadRef.environmentId, thread.source),
       });
       const clicked = await settlePromise(() => api.contextMenu.show(items, position));

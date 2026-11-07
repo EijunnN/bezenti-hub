@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import {
   activeEnvironmentLabel,
   activeEnvironmentOf,
+  canMoveThread,
   makeHubEnvironmentsPoller,
   moveCandidates,
   moveProgressView,
@@ -45,11 +46,11 @@ const flush = async () => {
 
 describe("makeHubEnvironmentsPoller", () => {
   it("reads while subscribed, notifies only on a change, and forgets on reset", async () => {
-    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     try {
       let answer: HubEnvironmentList = { environments: [hub] };
       const fetch = vi.fn(() => Promise.resolve(answer));
-      const poller = makeHubEnvironmentsPoller({ fetch, intervalMs: 1000 });
+      const poller = makeHubEnvironmentsPoller({ fetch, intervalMs: 1000, idleIntervalMs: 1000 });
       const listener = vi.fn();
       const unsubscribe = poller.subscribe(listener);
       await flush();
@@ -105,6 +106,36 @@ describe("makeHubEnvironmentsPoller", () => {
     await flush();
     expect(poller.snapshot()).toEqual([]);
     unsubscribe();
+  });
+});
+
+describe("pausing the poll", () => {
+  it("reads nothing in the background, slowly with the Hub machine alone, and reports a failed read", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      let fail = false;
+      const fetch = vi.fn(() =>
+        fail ? Promise.reject(new Error("down")) : Promise.resolve({ environments: [hub] }),
+      );
+      const poller = makeHubEnvironmentsPoller({ fetch, intervalMs: 1000, idleIntervalMs: 60_000 });
+      expect(poller.status()).toBe("loading");
+      const unsubscribe = poller.subscribe(() => undefined);
+      await flush();
+      expect(poller.status()).toBe("ready");
+      vi.advanceTimersByTime(5000);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      poller.setActive(false);
+      vi.advanceTimersByTime(120_000);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      fail = true;
+      poller.setActive(true);
+      await flush();
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(poller.status()).toBe("error");
+      unsubscribe();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -197,5 +228,26 @@ describe("moving a Thread", () => {
         "Laptop",
       ).summary,
     ).toBe("Moving to Laptop: Waiting for your answer in the running turn");
+  });
+});
+
+describe("canMoveThread", () => {
+  it("offers the move only to a User who may continue the Thread, and only with somewhere to go", () => {
+    expect(
+      canMoveThread({ canContinue: true, environmentCount: 2, activeEnvironmentId: undefined }),
+    ).toBe(true);
+    expect(
+      canMoveThread({ canContinue: false, environmentCount: 2, activeEnvironmentId: undefined }),
+    ).toBe(false);
+    expect(
+      canMoveThread({ canContinue: true, environmentCount: 1, activeEnvironmentId: undefined }),
+    ).toBe(false);
+    // A Thread whose machine was removed can always go to the Hub machine.
+    expect(
+      canMoveThread({ canContinue: true, environmentCount: 0, activeEnvironmentId: null }),
+    ).toBe(true);
+    expect(
+      canMoveThread({ canContinue: false, environmentCount: 0, activeEnvironmentId: null }),
+    ).toBe(false);
   });
 });

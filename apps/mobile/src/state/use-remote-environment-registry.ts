@@ -20,6 +20,7 @@ import {
   connectPairingUrl as connectPairingUrlCommand,
 } from "../connection/onboarding";
 import { signInToHubInBrowser } from "../features/connection/hubSignIn";
+import { hubState } from "../connection/singleHub";
 
 const pendingConnectionErrorAtom = Atom.make<string | null>(null).pipe(
   Atom.keepAlive,
@@ -136,9 +137,15 @@ const savedConnectionsByIdAtom = Atom.make((get) => {
  * The Hub this phone connects: its one connection. Older saved connections stay saved but are
  * not listed, so the catalog holds at most this one.
  */
-export const hubConnectionAtom = Atom.make(
-  (get) => Object.values(get(savedConnectionsByIdAtom))[0] ?? null,
-).pipe(Atom.withLabel("mobile:hub-connection"));
+const storedHubIdAtom = Atom.make((get) => {
+  get.addFinalizer(hubState.subscribe(() => get.setSelf(hubState.get().hub)));
+  return hubState.get().hub;
+}).pipe(Atom.withLabel("mobile:stored-hub-id"));
+
+export const hubConnectionAtom = Atom.make((get) => {
+  const hub = get(storedHubIdAtom);
+  return hub === null ? null : (get(savedConnectionsByIdAtom)[hub] ?? null);
+}).pipe(Atom.withLabel("mobile:hub-connection"));
 
 export function useHubConnection(): SavedRemoteConnection | null {
   return useAtomValue(hubConnectionAtom);

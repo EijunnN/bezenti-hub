@@ -14,7 +14,7 @@ export function EnvironmentStatusDot(props: {
           ? "connected"
           : props.status === "reconnecting"
             ? "reconnecting"
-            : "available"
+            : "offline"
       }
       pulse={false}
       size={props.size ?? 6}

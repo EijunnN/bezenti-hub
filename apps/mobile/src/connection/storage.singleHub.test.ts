@@ -7,6 +7,7 @@ import {
 } from "@t3tools/client-runtime/connection";
 import { Persistence } from "@t3tools/client-runtime/platform";
 import { EnvironmentId } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { afterEach, vi } from "vite-plus/test";
@@ -23,8 +24,13 @@ vi.mock("expo-secure-store", () => ({
 
 import * as MobileSecureStorage from "../persistence/mobile-secure-storage";
 import { LEGACY_CONNECTIONS_KEY } from "./catalog-store";
-import { SINGLE_HUB_REFUSAL, keptSavedConnections } from "./singleHub";
-import { layer } from "./storage";
+import {
+  KEPT_CONNECTION_REFUSAL,
+  SINGLE_HUB_REFUSAL,
+  chooseKeptAsHub,
+  hubState,
+} from "./singleHub";
+import { HUB_CHOICE_KEY, layer } from "./storage";
 
 const legacy = (id: string) => ({
   environmentId: id,
@@ -37,8 +43,7 @@ const legacy = (id: string) => ({
   authenticationMethod: "bearer",
 });
 
-function memoryStorage(initial: Readonly<Record<string, string>>) {
-  const values = new Map(Object.entries(initial));
+function memoryStorage(values: Map<string, string>) {
   return MobileSecureStorage.MobileSecureStorage.of({
     getItem: (key) => Effect.sync(() => values.get(key) ?? null),
     setItem: (key, value) =>
@@ -72,59 +77,132 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const answersAsHub = (hubs: ReadonlyArray<string>) => {
+  const fetch = vi.fn(async (url: URL) => ({
+    ok: true,
+    json: async () => ({
+      environmentId: hubs.find((id) => url.hostname.startsWith(`${id}.`)) ?? "someone-else",
+    }),
+  }));
+  vi.stubGlobal("fetch", fetch);
+  return fetch;
+};
+
+/** One app start: the storage layer over the phone's secure storage. */
+const start = (values: Map<string, string>) =>
+  Layer.build(
+    layer.pipe(
+      Layer.provide(Layer.succeed(MobileSecureStorage.MobileSecureStorage, memoryStorage(values))),
+    ),
+  );
+
+const listed = (context: Context.Context<Persistence.ConnectionTargetStore>) =>
+  Effect.flatMap(Persistence.ConnectionTargetStore, (store) => store.list).pipe(
+    Effect.provide(context),
+    Effect.map((targets) => targets.map((target) => target.environmentId)),
+  );
+
+const register = (context: Context.Context<Persistence.ConnectionRegistrationStore>, id: string) =>
+  Effect.flatMap(Persistence.ConnectionRegistrationStore, (store) =>
+    store.register(registration(id), [registration(id).target]),
+  ).pipe(Effect.provide(context));
+
+const remove = (context: Context.Context<Persistence.ConnectionRegistrationStore>, id: string) =>
+  Effect.flatMap(Persistence.ConnectionRegistrationStore, (store) =>
+    store.remove(EnvironmentId.make(id)),
+  ).pipe(Effect.provide(context));
+
+const legacyPhone = () =>
+  new Map([
+    [
+      LEGACY_CONNECTIONS_KEY,
+      JSON.stringify({
+        connections: [legacy("paired-server"), legacy("hub"), legacy("old-hub")],
+      }),
+    ],
+  ]);
+
 describe("mobile connects one Hub", () => {
-  it.effect(
-    "connects the saved Hub that answers for itself, keeps the others saved, and refuses a second Hub",
-    () =>
-      Effect.gen(function* () {
-        // The paired server answers as some other machine; the Hub answers for itself.
-        vi.stubGlobal(
-          "fetch",
-          vi.fn(async (url: URL) => ({
-            ok: true,
-            json: async () => ({
-              environmentId: url.hostname.startsWith("hub.") ? "hub" : "someone-else",
-            }),
-          })),
-        );
-        const storage = memoryStorage({
-          [LEGACY_CONNECTIONS_KEY]: JSON.stringify({
-            connections: [legacy("paired-server"), legacy("hub"), legacy("old-hub")],
-          }),
-        });
-        const context = yield* Layer.build(
-          layer.pipe(
-            Layer.provide(Layer.succeed(MobileSecureStorage.MobileSecureStorage, storage)),
-          ),
-        );
-        const targets = Persistence.ConnectionTargetStore;
-        const registrations = Persistence.ConnectionRegistrationStore;
-        const listed = yield* Effect.flatMap(targets, (store) => store.list).pipe(
-          Effect.provide(context),
-        );
-        expect(listed.map((target) => target.environmentId)).toEqual(["hub"]);
-        expect(keptSavedConnections.count()).toBe(2);
-        expect(keptSavedConnections.connected()).toBe("hub");
+  it.effect("decides the Hub once, stores it, and never probes again", () =>
+    Effect.gen(function* () {
+      const values = legacyPhone();
+      const fetch = answersAsHub(["hub"]);
+      expect(yield* listed(yield* start(values))).toEqual(["hub"]);
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(JSON.parse(values.get(HUB_CHOICE_KEY)!)).toEqual({ hub: "hub" });
+      expect(hubState.get().kept.map((entry) => entry.environmentId)).toEqual([
+        "paired-server",
+        "old-hub",
+      ]);
 
-        const refused = yield* Effect.flatMap(registrations, (store) =>
-          store.register(registration("another-hub"), [registration("another-hub").target]),
-        ).pipe(Effect.provide(context), Effect.flip);
-        expect(refused.message).toBe(SINGLE_HUB_REFUSAL);
+      // The next start connects the stored Hub, even if another one answers now.
+      const later = answersAsHub(["old-hub"]);
+      expect(yield* listed(yield* start(values))).toEqual(["hub"]);
+      expect(later).not.toHaveBeenCalled();
+    }).pipe(Effect.scoped),
+  );
 
-        // A new credential for the connected Hub is still saved.
-        yield* Effect.flatMap(registrations, (store) =>
-          store.register(registration("hub"), [registration("hub").target]),
-        ).pipe(Effect.provide(context));
+  it.effect("refuses a second Hub and a kept connection, even re-registered", () =>
+    Effect.gen(function* () {
+      const values = legacyPhone();
+      answersAsHub(["hub"]);
+      const context = yield* start(values);
+      yield* listed(context);
+      expect((yield* Effect.flip(register(context, "another-hub"))).message).toBe(
+        SINGLE_HUB_REFUSAL,
+      );
+      expect((yield* Effect.flip(register(context, "old-hub"))).message).toBe(SINGLE_HUB_REFUSAL);
+      // A new credential for the Hub itself is still saved.
+      yield* register(context, "hub");
+    }).pipe(Effect.scoped),
+  );
 
-        // Removing it frees the slot for another Hub.
-        yield* Effect.flatMap(registrations, (store) =>
-          store.remove(EnvironmentId.make("hub")),
-        ).pipe(Effect.provide(context));
-        expect(keptSavedConnections.connected()).toBeNull();
-        yield* Effect.flatMap(registrations, (store) =>
-          store.register(registration("another-hub"), [registration("another-hub").target]),
-        ).pipe(Effect.provide(context));
-        expect(keptSavedConnections.connected()).toBe("another-hub");
-      }).pipe(Effect.scoped),
+  it.effect("after the Hub is removed, only a new Hub or an explicit choice connects", () =>
+    Effect.gen(function* () {
+      const values = legacyPhone();
+      answersAsHub(["hub"]);
+      const context = yield* start(values);
+      yield* listed(context);
+      yield* remove(context, "hub");
+      expect(hubState.get().hub).toBeNull();
+      expect(JSON.parse(values.get(HUB_CHOICE_KEY)!)).toEqual({ hub: null });
+      // Kept connections never connect on their own, not at the next start either.
+      expect((yield* Effect.flip(register(context, "old-hub"))).message).toBe(
+        KEPT_CONNECTION_REFUSAL,
+      );
+      const probe = answersAsHub(["old-hub"]);
+      expect(yield* listed(yield* start(values))).toEqual([]);
+      expect(probe).not.toHaveBeenCalled();
+
+      // «Use as my Hub» makes the kept one the Hub, stored.
+      chooseKeptAsHub(EnvironmentId.make("old-hub"));
+      yield* register(context, "old-hub");
+      expect(hubState.get().hub).toBe("old-hub");
+      expect(yield* listed(yield* start(values))).toEqual(["old-hub"]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("a new Hub added after removing the old one becomes the stored Hub", () =>
+    Effect.gen(function* () {
+      const values = legacyPhone();
+      answersAsHub(["hub"]);
+      const context = yield* start(values);
+      yield* listed(context);
+      yield* remove(context, "hub");
+      yield* register(context, "new-hub");
+      expect(JSON.parse(values.get(HUB_CHOICE_KEY)!)).toEqual({ hub: "new-hub" });
+      expect(yield* listed(yield* start(values))).toEqual(["new-hub"]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("keeps everything unconnected when no saved connection answers as a Hub", () =>
+    Effect.gen(function* () {
+      const values = legacyPhone();
+      answersAsHub([]);
+      expect(yield* listed(yield* start(values))).toEqual([]);
+      expect(values.has(HUB_CHOICE_KEY)).toBe(false);
+      expect(hubState.get()).toMatchObject({ hub: null });
+      expect(hubState.get().kept).toHaveLength(3);
+    }).pipe(Effect.scoped),
   );
 });

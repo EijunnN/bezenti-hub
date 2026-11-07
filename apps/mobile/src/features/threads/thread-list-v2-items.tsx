@@ -1,7 +1,8 @@
 import { useNavigation } from "@react-navigation/native";
 import * as Dialog from "../../components/ui/Dialog";
 import { useThreadRolePermissions } from "../../state/spaces";
-import { useHasJoinedEnvironments } from "../../state/hubEnvironments";
+import { useHubEnvironmentCount } from "../../state/hubEnvironments";
+import { canMoveThread } from "@t3tools/client-runtime/environment/hub-environments";
 import { EnvironmentStatusDot } from "../environments/EnvironmentStatusDot";
 import { useThreadEnvironment } from "../environments/useThreadEnvironment";
 import type { ThreadRowProviderInstance } from "./thread-provider-instance";
@@ -779,11 +780,11 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   // Settling, snoozing and archiving are the creator's or an Admin's; others see no swipe actions.
   const role = useThreadRolePermissions(thread.environmentId, thread.source);
   const canOrganize = role.canArchive;
-  const hasJoinedEnvironments = useHasJoinedEnvironments();
-  // Moving continues the Thread elsewhere, so only a User who may continue it sees it; a Thread
-  // whose machine was removed can always go to the Hub machine.
-  const canMoveEnvironment =
-    role.canContinue && (hasJoinedEnvironments || thread.activeEnvironmentId === null);
+  const canMoveEnvironment = canMoveThread({
+    canContinue: role.canContinue,
+    environmentCount: useHubEnvironmentCount(),
+    activeEnvironmentId: thread.activeEnvironmentId,
+  });
   const navigation = useNavigation();
   const canOperateThread = canOperateScope && canOrganize;
   const handleRegenerateTitle = useCallback(

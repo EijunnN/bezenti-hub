@@ -70,6 +70,7 @@ import {
 import { McpAppFullscreenScreen } from "./features/threads/McpAppFullscreenScreen";
 import { ConnectionsRouteScreen } from "./features/connection/ConnectionsRouteScreen";
 import { MoveThreadRouteScreen } from "./features/environments/MoveThreadScreen";
+import { PairingRemovedRouteScreen } from "./features/connection/PairingRemovedRouteScreen";
 import { ConnectionsNewRouteScreen } from "./features/connection/ConnectionsNewRouteScreen";
 import { AddProjectDestinationRoute } from "./features/projects/AddProjectDestinationRoute";
 import { AddProjectLocalRoute } from "./features/projects/AddProjectLocalRoute";
@@ -965,6 +966,11 @@ const RootStackConfig = createWorkspaceStackNavigator({
         sheetGrabberVisible: true,
         sheetCornerRadius: Platform.OS === "android" ? 28 : undefined,
       },
+    }),
+    PairingRemoved: createNativeStackScreen({
+      screen: PairingRemovedRouteScreen,
+      linking: "pair",
+      options: { headerShown: false },
     }),
     NotFound: createNativeStackScreen({
       screen: NotFoundScreen,

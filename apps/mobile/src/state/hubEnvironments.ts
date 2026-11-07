@@ -1,11 +1,13 @@
 import {
   type ActiveEnvironmentView,
+  type HubEnvironmentsStatus,
   activeEnvironmentOf,
   fetchRemoteHubEnvironments,
   makeHubEnvironmentsPoller,
 } from "@t3tools/client-runtime/environment/hub-environments";
 import type { EnvironmentId, HubEnvironmentList, HubEnvironmentSummary } from "@t3tools/contracts";
 import { useSyncExternalStore } from "react";
+import { AppState } from "react-native";
 
 import { runtime } from "../lib/runtime";
 import { appAtomRegistry } from "./atom-registry";
@@ -35,30 +37,65 @@ async function fetchHubEnvironments(): Promise<HubEnvironmentList> {
   );
 }
 
-// One list for every view that shows where Threads run, read while any of them is mounted.
+// One poll for every view that shows where Threads run, only while one is mounted and the app is
+// in the foreground; slow while the Hub machine is alone.
 const poller = makeHubEnvironmentsPoller({ fetch: fetchHubEnvironments });
+AppState.addEventListener("change", (state) => poller.setActive(state === "active"));
+
+// Each Thread row asks for its machine: one view per machine and list, computed once.
+let viewsOf: ReadonlyArray<HubEnvironmentSummary> | null = null;
+const views = new Map<string, ActiveEnvironmentView | null>();
+function activeEnvironmentView(
+  environmentId: EnvironmentId | null | undefined,
+): ActiveEnvironmentView | null {
+  const list = poller.snapshot();
+  if (viewsOf !== list) {
+    viewsOf = list;
+    // A view whose name and status did not change stays the same object, so its row stays put.
+    for (const [key, previous] of views) {
+      const next = activeEnvironmentOf(
+        list,
+        key === "undefined" ? undefined : key === "null" ? null : (key as EnvironmentId),
+      );
+      views.set(key, JSON.stringify(next) === JSON.stringify(previous) ? previous : next);
+    }
+  }
+  const key = String(environmentId);
+  if (!views.has(key)) views.set(key, activeEnvironmentOf(list, environmentId));
+  return views.get(key) ?? null;
+}
 
 /** The Hub's Environments the signed-in User may see, the Hub machine first; kept fresh. */
 export function useHubEnvironments(): ReadonlyArray<HubEnvironmentSummary> {
   return useSyncExternalStore(poller.subscribe, poller.snapshot, poller.snapshot);
 }
 
-/** One Thread's Active environment, live; re-renders only when its name or status changes. */
+/** Whether the list was read yet, and whether the last read failed. */
+export function useHubEnvironmentsStatus(): HubEnvironmentsStatus {
+  return useSyncExternalStore(poller.subscribe, poller.status, poller.status);
+}
+
+/** Reads the list again now, as «Try again» asks. */
+export function refreshHubEnvironments(): void {
+  poller.refresh();
+}
+
+/** One Thread's Active environment, live; the same object until its machine's list changes. */
 export function useActiveEnvironment(
   environmentId: EnvironmentId | null | undefined,
 ): ActiveEnvironmentView | null {
-  const read = () => JSON.stringify(activeEnvironmentOf(poller.snapshot(), environmentId));
-  const key = useSyncExternalStore(poller.subscribe, read, read);
-  return JSON.parse(key) as ActiveEnvironmentView | null;
+  const read = () => activeEnvironmentView(environmentId);
+  return useSyncExternalStore(poller.subscribe, read, read);
+}
+
+/** How many Environments the User sees, the Hub machine included. */
+export function useHubEnvironmentCount(): number {
+  const read = () => poller.snapshot().length;
+  return useSyncExternalStore(poller.subscribe, read, read);
 }
 
 /** Whether the User sees more machines than the Hub machine, so a Thread's machine is news. */
 export function useHasJoinedEnvironments(): boolean {
   const read = () => poller.snapshot().length > 1;
   return useSyncExternalStore(poller.subscribe, read, read);
-}
-
-/** The last list, for building a menu; empty until a view mounted it. */
-export function readHubEnvironments(): ReadonlyArray<HubEnvironmentSummary> {
-  return poller.snapshot();
 }

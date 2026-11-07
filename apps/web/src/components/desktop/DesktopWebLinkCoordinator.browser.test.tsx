@@ -1,4 +1,5 @@
 import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
+import { toastManager } from "../ui/toast";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { AsyncResult, type Atom } from "effect/reactivity";
@@ -258,6 +259,19 @@ it("opens an app link with Local environment disabled, where there is no primary
   state.localEnvironmentDisabled = true;
   await using _coordinator = await mount("t3code://new?prompt=hi");
   await vi.waitFor(() => expect(state.navigate).toHaveBeenCalledOnce());
+  expect(state.openLink).not.toHaveBeenCalled();
+});
+
+it("opens nothing for an old pairing link, which only says pairing was removed", async () => {
+  setup();
+  const toastAdd = vi.spyOn(toastManager, "add");
+  await using _coordinator = await mount("t3code://pair?pairingUrl=https%3A%2F%2Fvps.example.com");
+  await vi.waitFor(() =>
+    expect(toastAdd).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Pairing was removed" }),
+    ),
+  );
+  expect(state.navigate).not.toHaveBeenCalled();
   expect(state.openLink).not.toHaveBeenCalled();
 });
 

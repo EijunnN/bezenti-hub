@@ -37,73 +37,124 @@ export const fetchRemoteHubEnvironments = (input: {
  * shows «Reconnecting» at once and «Offline» a minute later, so a short poll keeps rows live.
  */
 const HUB_ENVIRONMENTS_REFRESH_MS = 5000;
+/** With only the Hub machine there is nothing to keep live: a slow check notices a first join. */
+const HUB_ENVIRONMENTS_IDLE_REFRESH_MS = 60_000;
+
+/** «loading» until the first answer, «error» while the last read failed. */
+export type HubEnvironmentsStatus = "loading" | "ready" | "error";
 
 export interface HubEnvironmentsPoller {
   readonly subscribe: (listener: () => void) => () => void;
   readonly snapshot: () => ReadonlyArray<HubEnvironmentSummary>;
+  readonly status: () => HubEnvironmentsStatus;
   /** Reads the list now, as a view that just changed something asks. */
   readonly refresh: () => void;
   /** Forgets the list, as when the session it was read with ends. */
   readonly reset: () => void;
+  /** Pauses reading while the app is in the background; resumes with a read. */
+  readonly setActive: (active: boolean) => void;
 }
 
 /**
  * One list for every view that shows where Threads run, read while any of them is subscribed and
- * every `intervalMs` after. A failed read keeps the last list (signed out, or a server without
- * Environments: nothing new to show). An unchanged answer does not notify, since every Thread row
- * reads the list.
+ * the app is active: every `intervalMs` while machines joined the Hub, every `idleIntervalMs`
+ * while the Hub machine is alone. A failed read keeps the last list and reports «error». An
+ * unchanged answer does not notify, since every Thread row reads the list.
  */
 export function makeHubEnvironmentsPoller(options: {
   readonly fetch: () => Promise<HubEnvironmentList>;
   readonly intervalMs?: number;
+  readonly idleIntervalMs?: number;
 }): HubEnvironmentsPoller {
   let environments: ReadonlyArray<HubEnvironmentSummary> = [];
+  let status: HubEnvironmentsStatus = "loading";
   let generation = 0;
+  let active = true;
   const listeners = new Set<() => void>();
-  let timer: ReturnType<typeof setInterval> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const notify = () => {
     for (const listener of listeners) listener();
   };
+  const running = () => active && listeners.size > 0;
+  const stop = () => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+  };
+  const schedule = () => {
+    stop();
+    if (!running()) return;
+    const interval =
+      environments.length > 1
+        ? (options.intervalMs ?? HUB_ENVIRONMENTS_REFRESH_MS)
+        : (options.idleIntervalMs ?? HUB_ENVIRONMENTS_IDLE_REFRESH_MS);
+    timer = setTimeout(refresh, interval);
+  };
 
-  const refresh = () => {
+  function refresh() {
+    stop();
     const pending = options.fetch();
     // Read after starting: a fetch that resets for a new session keeps its own answer.
     const started = generation;
     void pending.then(
       (list) => {
         if (started !== generation) return;
-        if (JSON.stringify(list.environments) === JSON.stringify(environments)) return;
+        const changed =
+          status !== "ready" || JSON.stringify(list.environments) !== JSON.stringify(environments);
         environments = list.environments;
-        notify();
+        status = "ready";
+        schedule();
+        if (changed) notify();
       },
-      () => undefined,
+      () => {
+        if (started !== generation) return;
+        const changed = status !== "error";
+        status = "error";
+        schedule();
+        if (changed) notify();
+      },
     );
-  };
+  }
 
   return {
     subscribe: (listener) => {
       listeners.add(listener);
-      if (listeners.size === 1) {
-        refresh();
-        timer = setInterval(refresh, options.intervalMs ?? HUB_ENVIRONMENTS_REFRESH_MS);
-      }
+      if (listeners.size === 1 && active) refresh();
       return () => {
         listeners.delete(listener);
-        if (listeners.size === 0 && timer !== undefined) {
-          clearInterval(timer);
-          timer = undefined;
-        }
+        if (listeners.size === 0) stop();
       };
     },
     snapshot: () => environments,
+    status: () => status,
     refresh,
     reset: () => {
       generation += 1;
-      if (environments.length === 0) return;
+      const changed = environments.length > 0 || status !== "loading";
       environments = [];
-      notify();
+      status = "loading";
+      if (changed) notify();
+    },
+    setActive: (next) => {
+      if (next === active) return;
+      active = next;
+      if (!next) stop();
+      else if (listeners.size > 0) refresh();
     },
   };
+}
+
+/**
+ * Whether the User may move a Thread to another Environment: only a User who may continue it
+ * (moving continues it elsewhere), and only with another machine to go to; a Thread whose machine
+ * was removed can always go to the Hub machine.
+ */
+export function canMoveThread(input: {
+  readonly canContinue: boolean;
+  /** How many Environments the User sees, the Hub machine included. */
+  readonly environmentCount: number;
+  readonly activeEnvironmentId: EnvironmentId | null | undefined;
+}): boolean {
+  return input.canContinue && (input.environmentCount > 1 || input.activeEnvironmentId === null);
 }
 
 /** What a Thread's header and row say about where it runs. */

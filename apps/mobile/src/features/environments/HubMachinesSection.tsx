@@ -4,7 +4,12 @@ import { View } from "react-native";
 
 import { AppText as Text } from "../../components/ui/AppText";
 import { ListSection } from "../../components/ui/ListSection";
-import { useHubEnvironments } from "../../state/hubEnvironments";
+import { Button } from "../../components/ui/Button";
+import {
+  refreshHubEnvironments,
+  useHubEnvironments,
+  useHubEnvironmentsStatus,
+} from "../../state/hubEnvironments";
 import { useSpaceSelections } from "../../state/spaces";
 import { useHubConnection } from "../../state/use-remote-environment-registry";
 import { EnvironmentStatusDot } from "./EnvironmentStatusDot";
@@ -39,13 +44,26 @@ export function HubMachinesSection() {
 
 function HubMachinesList() {
   const environments = useHubEnvironments();
+  const status = useHubEnvironmentsStatus();
   return (
-    <ListSection
-      title="Machines on this Hub"
-      footer="Machines join with `t3 join`. Rename or remove them from the web or desktop app."
-    >
+    <ListSection title="Machines on this Hub">
+      {status === "error" ? (
+        <View accessibilityRole="alert" className="flex-row items-center gap-3 px-4 py-3">
+          <Text className="flex-1 text-sm text-danger-foreground">
+            Could not load this Hub's machines.
+          </Text>
+          <Button
+            label="Try again"
+            size="compact"
+            tone="secondary"
+            onPress={refreshHubEnvironments}
+          />
+        </View>
+      ) : null}
       {environments.length === 0 ? (
-        <Text className="px-4 py-3 text-sm text-foreground-muted">Loading machines…</Text>
+        status === "loading" ? (
+          <Text className="px-4 py-3 text-sm text-foreground-muted">Loading machines…</Text>
+        ) : null
       ) : (
         environments.map((environment) => {
           const details = hubMachineDetails(environment);
@@ -67,6 +85,10 @@ function HubMachinesList() {
           );
         })
       )}
+      <Text className="px-4 pb-3 text-xs text-foreground-muted">
+        Machines join with <Text className="font-mono text-xs">t3 join</Text>. Rename or remove them
+        from the web or desktop app.
+      </Text>
     </ListSection>
   );
 }

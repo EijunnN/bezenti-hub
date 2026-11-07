@@ -165,6 +165,7 @@ import { canShareWithGuestAtom } from "./chat/guestShareAvailability";
 import { openGuestShareDialog } from "./chat/guestShareDialogState";
 import { openMoveThreadDialog } from "./chat/MoveThreadDialog";
 import { readHubEnvironments } from "../environments/primary/useHubEnvironments";
+import { canMoveThread } from "@t3tools/client-runtime/environment/hub-environments";
 import {
   buildThreadRouteParams,
   resolveActiveThreadRouteRef,
@@ -2649,8 +2650,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 canShareWithGuestAtom(threadRef.environmentId),
               ),
               canTurnIntoProject: canTurnThreadIntoProject(threadRef),
-              canMoveEnvironment:
-                readHubEnvironments().length > 1 || thread.activeEnvironmentId === null,
+              canMoveEnvironment: canMoveThread({
+                canContinue: readThreadRolePermissions(thread.environmentId, thread.source)
+                  .canContinue,
+                environmentCount: readHubEnvironments().length,
+                activeEnvironmentId: thread.activeEnvironmentId,
+              }),
               role: readThreadRolePermissions(thread.environmentId, thread.source),
               supports: {
                 settlement: configLoaded,

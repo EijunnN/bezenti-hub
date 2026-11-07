@@ -1,10 +1,21 @@
-import { ConnectionOnboarding } from "@t3tools/client-runtime/connection";
+import {
+  BearerConnectionRegistration,
+  BearerConnectionTarget,
+  ConnectionOnboarding,
+  CredentialStore,
+  EnvironmentRegistry,
+  ProfileStore,
+} from "@t3tools/client-runtime/connection";
+import { Persistence } from "@t3tools/client-runtime/platform";
 import {
   createAtomCommandScheduler,
   createRuntimeCommand,
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+
+import { type KeptConnection, chooseKeptAsHub } from "./singleHub";
 
 import { connectionAtomRuntime } from "./runtime";
 
@@ -68,4 +79,56 @@ export const signOutAndRemoveEnvironment = createRuntimeCommand(connectionAtomRu
     ConnectionOnboarding.ConnectionOnboarding.pipe(
       Effect.flatMap((onboarding) => onboarding.signOutAndRemove(environmentId)),
     ),
+});
+
+/** Forgets a kept connection: its saved address, profile and token leave the phone. */
+export const removeKeptConnection = createRuntimeCommand(connectionAtomRuntime, {
+  label: "mobile:connection:remove-kept",
+  scheduler: onboardingScheduler,
+  concurrency: { mode: "serial", key: (environmentId: EnvironmentId) => environmentId },
+  execute: (environmentId: EnvironmentId) =>
+    Persistence.ConnectionRegistrationStore.pipe(
+      Effect.flatMap((store) => store.remove(environmentId)),
+    ),
+});
+
+/** «Use as my Hub»: the User makes a kept connection their Hub, and the app connects it. */
+export const chooseKeptConnectionAsHub = createRuntimeCommand(connectionAtomRuntime, {
+  label: "mobile:connection:use-kept-as-hub",
+  scheduler: onboardingScheduler,
+  concurrency: { mode: "singleFlight", key: () => "use-kept-as-hub" },
+  execute: Effect.fn("mobile.connection.chooseKeptConnectionAsHub")(function* (
+    kept: KeptConnection,
+  ) {
+    const profile = yield* ProfileStore.ConnectionProfileStore.pipe(
+      Effect.flatMap((store) => store.get(kept.connectionId)),
+    );
+    const credential = yield* CredentialStore.ConnectionCredentialStore.pipe(
+      Effect.flatMap((store) => store.get(kept.connectionId)),
+    );
+    if (
+      Option.isNone(profile) ||
+      profile.value._tag !== "BearerConnectionProfile" ||
+      Option.isNone(credential) ||
+      credential.value._tag !== "BearerConnectionCredential"
+    ) {
+      return yield* new Persistence.ConnectionPersistenceError({
+        operation: "register-connection",
+        message: "This saved connection has no sign-in left. Remove it and add the Hub again.",
+      });
+    }
+    chooseKeptAsHub(kept.environmentId);
+    const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+    yield* registry.register(
+      new BearerConnectionRegistration({
+        target: new BearerConnectionTarget({
+          environmentId: kept.environmentId,
+          label: kept.label,
+          connectionId: kept.connectionId,
+        }),
+        profile: profile.value,
+        credential: credential.value,
+      }),
+    );
+  }),
 });
