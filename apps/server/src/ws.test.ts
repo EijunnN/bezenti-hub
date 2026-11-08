@@ -1493,6 +1493,7 @@ describe("Space visibility", () => {
     WS_METHODS.projectsReadFile,
     WS_METHODS.projectsWriteFile,
     WS_METHODS.filesystemBrowse,
+    WS_METHODS.vcsListRefs,
     WS_METHODS.mcpAppsCallTool,
     WS_METHODS.mcpAppsUpdateModelContext,
     WS_METHODS.secretsAnswerRequest,
@@ -2677,6 +2678,32 @@ describe("Space visibility", () => {
             ),
             hidden,
           );
+          // Deleted, a Thread on the Hub machine still runs its calls there.
+          yield* server.sql`
+            UPDATE orchestration_v2_projection_threads SET deleted_at = '2026-11-01T00:00:00.000Z'
+            WHERE thread_id = 'acme-child'
+          `;
+          assert.equal(
+            yield* outcome(
+              asAda[WS_METHODS.projectsReadFile]({
+                cwd: globexRoot,
+                relativePath: "README.md",
+                threadId: "acme-child",
+              } as never),
+            ),
+            hidden,
+          );
+          // A browse ending in `.` lists its parent.
+          assert.equal(yield* browse(`${acmeRoot}/.`), hidden);
+          // Git on another Space's folder.
+          const git = (method: "vcs.listRefs", cwd: string) =>
+            outcome(
+              (asAda as unknown as Record<string, (input: unknown) => Effect.Effect<unknown>>)[
+                method
+              ]!({ cwd }),
+            );
+          assert.equal(yield* git(WS_METHODS.vcsListRefs, globexRoot), hidden);
+          assert.notEqual(yield* git(WS_METHODS.vcsListRefs, acmeRoot), hidden);
           // Her own Project's files and folders get past the guard.
           assert.notEqual(yield* read(acmeRoot, "README.md"), hidden);
           assert.notEqual(

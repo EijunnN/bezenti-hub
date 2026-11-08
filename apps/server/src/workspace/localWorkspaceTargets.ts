@@ -26,6 +26,8 @@ const joinUnder = (base: string, relative: string) =>
 export const localWorkspaceTargets = (
   method: string,
   payload: unknown,
+  /** Other fields naming paths it opens (a string or a list of them); each must be absolute. */
+  pathFields: ReadonlyArray<string> = [],
 ): ReadonlyArray<string> | "refused" => {
   const cwd = field(payload, "cwd");
   const named = ["cwd", "relativePath", "directoryPath", "partialPath"].map((name) =>
@@ -45,7 +47,8 @@ export const localWorkspaceTargets = (
       : isExplicitRelativePath(partial) && cwd !== undefined
         ? joinUnder(cwd, partial)
         : undefined;
-    if (full === undefined) return "refused";
+    // A final `.` lists its parent, filtered: refused rather than resolved twice.
+    if (full === undefined || /(^|[\\/])\.$/u.test(full)) return "refused";
     // The folder it lists: the path itself when it ends in a separator, else its parent.
     const cut = Math.max(full.lastIndexOf("/"), full.lastIndexOf("\\"));
     return [/[\\/]$/u.test(full) || cut < 0 ? full : full.slice(0, cut + 1)];
@@ -56,6 +59,22 @@ export const localWorkspaceTargets = (
     if (value === undefined || value === "") continue;
     if (isAbsoluteWorkspacePath(value)) targets.push(value);
     else if (cwd !== undefined) targets.push(joinUnder(cwd, value));
+  }
+  for (const name of pathFields) {
+    const raw = Predicate.isObject(payload)
+      ? (payload as Record<string, unknown>)[name]
+      : undefined;
+    const values = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw];
+    for (const value of values) {
+      if (
+        typeof value !== "string" ||
+        !isAbsoluteWorkspacePath(value.trim()) ||
+        hasParentSegment(value)
+      ) {
+        return "refused";
+      }
+      targets.push(value.trim());
+    }
   }
   return targets;
 };

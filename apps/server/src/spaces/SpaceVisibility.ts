@@ -149,7 +149,10 @@ export class SpaceVisibility extends Context.Service<
       visibility: Visibility,
       directory: string,
     ) => Effect.Effect<boolean>;
-    /** Whether the Thread runs on the Hub machine (or names none), so its calls use the Hub's disk. */
+    /**
+     * Whether the Thread runs on the Hub machine (or names none), deleted or not, read as
+     * `ActiveEnvironmentResolver` reads it: its workspace calls then run on the Hub's disk.
+     */
     readonly threadOnHubMachine: (threadId: string) => Effect.Effect<boolean>;
   }
 >()("t3/spaces/SpaceVisibility") {}
@@ -415,7 +418,7 @@ const make = Effect.gen(function* () {
   ) {
     const [row] = yield* sql<{ readonly environmentId: string | null }>`
       SELECT active_environment_id AS "environmentId" FROM orchestration_v2_projection_threads
-      WHERE thread_id = ${threadId} AND deleted_at IS NULL
+      WHERE thread_id = ${threadId}
     `.pipe(Effect.orDie);
     return (
       row !== undefined &&

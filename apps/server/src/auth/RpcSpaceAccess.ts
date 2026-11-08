@@ -24,10 +24,10 @@ import { localWorkspaceTargets } from "../workspace/localWorkspaceTargets.ts";
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 
 /**
- * `thread`/`project`: refuse ids the session cannot see. `command`: what it acts on, not what it
- * creates. `named`: Projects at any depth, no hidden Thread. `work`: the session User's own
- * Thread or held draft (`claimWork`). `owned`: every Thread named is the session User's own
- * (no drafts). `filtered`: the handler filters. `unscoped`: why not.
+ * `thread`/`project`: hidden ids refused. `command`: what it acts on. `named`: Projects at any
+ * depth. `work`/`owned`: the User's own Thread (or held draft). `filtered`: the handler filters.
+ * `readDirectory`/`workDirectory`: a Hub folder (`cwd`) the User may read or work in.
+ * `unscoped`: why not. An RPC missing here is refused.
  */
 export type RpcSpaceAccess =
   | "thread"
@@ -40,9 +40,18 @@ export type RpcSpaceAccess =
   // A named Thread is not hidden (reads) or is the User's work (writes); else filesystem scopes.
   | "readIfThread"
   | "workIfThread"
+  | "readDirectory"
+  | "workDirectory"
   | { readonly unscoped: string };
 
-const BY_DIRECTORY = { unscoped: "works on a directory, which filesystem scopes guard" };
+const INSTALLATION = { unscoped: "the Installation's own settings and state, which scopes guard" };
+const PROVIDERS = { unscoped: "the Installation's provider instances, which scopes guard" };
+const SOURCE_CONTROL = { unscoped: "the session User's own source control sign-in and lookups" };
+const TASK_BY_ID = {
+  unscoped: "ScheduledTaskService checks the task's rights (requireTaskRights)",
+};
+const DEVICES = { unscoped: "the Installation's devices and their hosts, which scopes guard" };
+const PREVIEW_PROFILES = { unscoped: "this client's own preview profiles and servers" };
 
 export const RPC_SPACE_ACCESS = {
   // A hidden target answers like a missing one; the Role rules run on every command in the
@@ -107,8 +116,8 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.filesystemBrowse]: "readIfThread",
   [WS_METHODS.projectsWriteFile]: "workIfThread",
   [WS_METHODS.deviceClose]: "work",
-  [WS_METHODS.gitRunStackedAction]: BY_DIRECTORY,
-  [WS_METHODS.gitPreparePullRequestThread]: BY_DIRECTORY,
+  [WS_METHODS.gitRunStackedAction]: "workDirectory",
+  [WS_METHODS.gitPreparePullRequestThread]: "workDirectory",
   [WS_METHODS.projectsMutate]: "command",
   [WS_METHODS.scheduledTasksUpsert]: {
     unscoped: "ScheduledTaskService checks it as its creator: hidden like missing, then the Role",
@@ -161,6 +170,108 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.pullRequestsRequestReviewers]: "project",
   [WS_METHODS.pullRequestsLabelCandidates]: "project",
   [WS_METHODS.pullRequestsSetLabels]: "project",
+  // Git and other work on a folder with no Thread to place it: on the Hub's own disk.
+  [WS_METHODS.subscribeVcsStatus]: "readDirectory",
+  [WS_METHODS.vcsPull]: "workDirectory",
+  [WS_METHODS.vcsRefreshStatus]: "readDirectory",
+  [WS_METHODS.gitResolvePullRequest]: "readDirectory",
+  [WS_METHODS.vcsListRefs]: "readDirectory",
+  [WS_METHODS.vcsCreateWorktree]: "workDirectory",
+  [WS_METHODS.vcsRemoveWorktree]: "workDirectory",
+  [WS_METHODS.vcsCreateRef]: "workDirectory",
+  [WS_METHODS.vcsSwitchRef]: "workDirectory",
+  [WS_METHODS.vcsInit]: "workDirectory",
+  [WS_METHODS.reviewGetBranchCommits]: "readDirectory",
+  [WS_METHODS.reviewGetDiffPreview]: "readDirectory",
+  [WS_METHODS.reviewGetDiffFileContents]: "readDirectory",
+  [WS_METHODS.shellOpenInEditor]: "workDirectory",
+  [WS_METHODS.filesystemGetMetadata]: "readDirectory",
+  [WS_METHODS.sourceControlLookupRepository]: "readDirectory",
+  [WS_METHODS.sourceControlPublishRepository]: "workDirectory",
+  [WS_METHODS.serverRefreshProviders]: "readDirectory",
+  [WS_METHODS.sourceControlCloneRepository]: { unscoped: "creates the Project it clones into" },
+  [WS_METHODS.subscribeProjectClones]: { unscoped: "clones in progress have no Project row yet" },
+  [WS_METHODS.projectsEnsureScratch]: { unscoped: "the session User's own scratch Project" },
+  [WS_METHODS.projectsCreateNew]: { unscoped: "creates a Project, as project.create does" },
+  [WS_METHODS.agentSessionsScan]: {
+    unscoped: "lists provider sessions to import; agentSessionsImport checks the Project",
+  },
+  [WS_METHODS.attachmentsCreateUploadUrl]: { unscoped: "the session User's own uploads" },
+  [WS_METHODS.attachmentsDelete]: { unscoped: "the session User's own uploads" },
+  [WS_METHODS.subscribeTerminalMetadata]: "filtered",
+  [WS_METHODS.scheduledTasksSubscribe]: { unscoped: "ScheduledTaskService lists visible tasks" },
+  [WS_METHODS.scheduledTasksSetEnabled]: TASK_BY_ID,
+  [WS_METHODS.scheduledTasksDelete]: TASK_BY_ID,
+  [WS_METHODS.scheduledTasksRunNow]: TASK_BY_ID,
+  [WS_METHODS.scheduledTasksRotateWebhookToken]: TASK_BY_ID,
+  [WS_METHODS.scheduledTasksListWebhookDeliveries]: TASK_BY_ID,
+  [WS_METHODS.scheduledTasksGetWebhookDelivery]: TASK_BY_ID,
+  [WS_METHODS.pullRequestsRoutingIdentity]: { unscoped: "a host's identity, no Project" },
+  [WS_METHODS.pullRequestsSubscribeRefreshes]: { unscoped: "refresh signals, no Project data" },
+  [WS_METHODS.sourceControlSignInStart]: SOURCE_CONTROL,
+  [WS_METHODS.sourceControlSignInWait]: SOURCE_CONTROL,
+  [WS_METHODS.sourceControlSignInCancel]: SOURCE_CONTROL,
+  [WS_METHODS.sourceControlAppAccess]: SOURCE_CONTROL,
+  [WS_METHODS.sourceControlStarred]: SOURCE_CONTROL,
+  [WS_METHODS.sourceControlStar]: SOURCE_CONTROL,
+  [WS_METHODS.previewClearProfile]: PREVIEW_PROFILES,
+  [WS_METHODS.previewReportProfiles]: PREVIEW_PROFILES,
+  [WS_METHODS.subscribePreviewEvents]: PREVIEW_PROFILES,
+  [WS_METHODS.previewStopLocalServer]: PREVIEW_PROFILES,
+  [WS_METHODS.subscribeDiscoveredLocalServers]: PREVIEW_PROFILES,
+  [WS_METHODS.deviceConfigure]: DEVICES,
+  [WS_METHODS.deviceList]: DEVICES,
+  [WS_METHODS.deviceTestHost]: DEVICES,
+  [WS_METHODS.deviceEasAccount]: DEVICES,
+  [WS_METHODS.deviceSimlockIdentity]: DEVICES,
+  [WS_METHODS.deviceShutdown]: DEVICES,
+  [WS_METHODS.deviceDetail]: DEVICES,
+  [WS_METHODS.deviceAction]: DEVICES,
+  [WS_METHODS.subscribeDeviceState]: DEVICES,
+  [WS_METHODS.serverUpdateProvider]: PROVIDERS,
+  [WS_METHODS.providerConsumeResetCredit]: PROVIDERS,
+  [WS_METHODS.providerAuthStart]: PROVIDERS,
+  [WS_METHODS.providerAuthComplete]: PROVIDERS,
+  [WS_METHODS.chatGptReconnectProfile]: PROVIDERS,
+  [WS_METHODS.chatGptImportProfile]: PROVIDERS,
+  [WS_METHODS.chatGptHandoffSubscribe]: PROVIDERS,
+  [WS_METHODS.providerAuthRespond]: PROVIDERS,
+  [WS_METHODS.providerAuthCancel]: PROVIDERS,
+  [WS_METHODS.providerAuthLogout]: PROVIDERS,
+  [WS_METHODS.providerAuthSubscribe]: PROVIDERS,
+  [WS_METHODS.providerInstallStart]: PROVIDERS,
+  [WS_METHODS.providerInstallCancel]: PROVIDERS,
+  [WS_METHODS.providerInstallSubscribe]: PROVIDERS,
+  [WS_METHODS.providerInstallRemove]: PROVIDERS,
+  [WS_METHODS.serverSearchAcpRegistry]: PROVIDERS,
+  [WS_METHODS.serverPrepareAcpRegistryAgent]: PROVIDERS,
+  [WS_METHODS.serverUninstallAcpRegistryManagedBinary]: PROVIDERS,
+  [WS_METHODS.serverAcceptAcpRegistryUrlAuth]: PROVIDERS,
+  [WS_METHODS.serverLogoutAcpRegistry]: PROVIDERS,
+  [WS_METHODS.serverProbe]: INSTALLATION,
+  [WS_METHODS.serverGetConfig]: INSTALLATION,
+  [WS_METHODS.serverUpsertKeybinding]: INSTALLATION,
+  [WS_METHODS.serverRemoveKeybinding]: INSTALLATION,
+  [WS_METHODS.serverRunStorageCleanup]: INSTALLATION,
+  [WS_METHODS.serverGetStorageCleanupReport]: INSTALLATION,
+  [WS_METHODS.serverGetDatabaseStorage]: INSTALLATION,
+  [WS_METHODS.serverUpdateSettings]: INSTALLATION,
+  [WS_METHODS.serverDiscoverSourceControl]: INSTALLATION,
+  [WS_METHODS.serverGetTraceDiagnostics]: INSTALLATION,
+  [WS_METHODS.serverGetProcessDiagnostics]: INSTALLATION,
+  [WS_METHODS.serverGetHostResources]: INSTALLATION,
+  [WS_METHODS.serverGetProcessResourceHistory]: INSTALLATION,
+  [WS_METHODS.serverGetResourceTelemetryHistory]: INSTALLATION,
+  [WS_METHODS.serverRetryResourceTelemetry]: INSTALLATION,
+  [WS_METHODS.serverCheckOtlpEndpoint]: INSTALLATION,
+  [WS_METHODS.serverPrepareTriage]: INSTALLATION,
+  [WS_METHODS.serverGetUsageSummary]: INSTALLATION,
+  [WS_METHODS.serverRefreshUsageRates]: INSTALLATION,
+  [WS_METHODS.serverSignalProcess]: INSTALLATION,
+  [WS_METHODS.subscribeServerConfig]: INSTALLATION,
+  [WS_METHODS.subscribeServerLifecycle]: INSTALLATION,
+  [WS_METHODS.subscribeAuthAccess]: INSTALLATION,
+  [WS_METHODS.subscribeResourceTelemetry]: INSTALLATION,
 } as const satisfies Partial<Readonly<Record<WsRpcMethod, RpcSpaceAccess>>>;
 
 export const spaceAccessForRpcMethod = (method: string): RpcSpaceAccess | undefined =>
@@ -182,6 +293,11 @@ const DIRECTORY_FIELDS: Partial<Record<string, ReadonlyArray<string>>> = {
   [WS_METHODS.terminalAttach]: ["cwd", "worktreePath"],
 };
 const PROJECT_KEYS = new Set(["projectId", "projectIds"]);
+// Other paths a folder RPC opens, besides its `cwd`.
+const DIRECTORY_TARGET_FIELDS: Partial<Record<string, ReadonlyArray<string>>> = {
+  [WS_METHODS.vcsRemoveWorktree]: ["path"],
+  [WS_METHODS.filesystemGetMetadata]: ["paths"],
+};
 
 /** Every string under one of `keys`, at any depth of the payload. */
 const idsUnder = (value: unknown, keys: ReadonlySet<string>, into: Array<string> = []) => {
@@ -274,6 +390,21 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
     return !visible.has(threadId as ThreadId) && !hidden.has(threadId);
   });
   const access = spaceAccessForRpcMethod(method);
+  // An RPC that does not say how it keeps to what the session may see runs for nobody.
+  if (access === undefined) return yield* notFound();
+  if (access === "readDirectory" || access === "workDirectory") {
+    if (visibility.all) return;
+    const named = localWorkspaceTargets(method, payload, DIRECTORY_TARGET_FIELDS[method] ?? []);
+    if (named === "refused") return yield* notFound();
+    for (const target of named) {
+      const allowed =
+        access === "workDirectory"
+          ? yield* spaceVisibility.mayUseDirectory(visibility, userId, target)
+          : yield* spaceVisibility.mayReadDirectory(visibility, target);
+      if (!allowed) return yield* notFound();
+    }
+    return;
+  }
   const threadId = stringField(payload, "threadId");
   if (access === "readIfThread" || access === "workIfThread") {
     // With no Thread, a draft's (no row yet), or one on the Hub machine, the call runs on the

@@ -32,7 +32,8 @@ import {
 } from "./RpcAuthorization.ts";
 import * as CurrentPrincipal from "./CurrentPrincipal.ts";
 import * as RpcAuthorization from "./RpcAuthorization.ts";
-import { RPC_SPACE_ACCESS, spaceAccessForRpcMethod } from "./RpcSpaceAccess.ts";
+import { guardRpcPayload, RPC_SPACE_ACCESS, spaceAccessForRpcMethod } from "./RpcSpaceAccess.ts";
+import { everything } from "../spaces/SpaceVisibility.ts";
 import type * as SchemaAST from "effect/SchemaAST";
 import { layerSeesEverything } from "../spaces/SpaceVisibility.testkit.ts";
 
@@ -121,6 +122,30 @@ describe("RPC authorization scopes", () => {
       }
     }
   });
+
+  it("says for every RPC how it keeps to what the session may see; one that does not is refused", () => {
+    const tags = [...WsRpcGroup.requests.keys()];
+    expect(tags.filter((tag) => spaceAccessForRpcMethod(tag) === undefined)).toEqual([]);
+    // One working on a Hub folder names it.
+    for (const [tag, access] of Object.entries(RPC_SPACE_ACCESS)) {
+      if (access !== "readDirectory" && access !== "workDirectory") continue;
+      const fields = payloadFields(WsRpcGroup.requests.get(tag as never)!.payloadSchema.ast);
+      expect([tag, fields.has("cwd") || fields.has("paths")]).toEqual([tag, true]);
+    }
+  });
+
+  it.effect("refuses an RPC that does not say, even for the Owner", () =>
+    Effect.gen(function* () {
+      const refused = yield* guardRpcPayload(
+        "server.notListed",
+        {},
+        everything,
+        {} as never,
+        undefined,
+      ).pipe(Effect.flip);
+      expect(refused._tag).toBe("SpaceResourceNotFoundError");
+    }),
+  );
 
   it("rejects unknown RPC method names", () => {
     for (const method of ["server.notRegistered", "toString", "constructor"]) {
