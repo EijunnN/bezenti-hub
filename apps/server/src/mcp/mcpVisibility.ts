@@ -7,7 +7,7 @@ import type { McpInvocationScope } from "./McpInvocationContext.ts";
 
 // The server provides SpaceVisibility to every MCP request. A caller acting as a User without
 // it fails rather than reading unfiltered.
-const service = Effect.serviceOption(SpaceVisibility.SpaceVisibility).pipe(
+export const spaceVisibilityService = Effect.serviceOption(SpaceVisibility.SpaceVisibility).pipe(
   Effect.flatMap(
     Option.match({
       onNone: () => Effect.die("SpaceVisibility is not provided to MCP"),
@@ -21,7 +21,7 @@ export const visibilityOf = Effect.fn("mcp.visibilityOf")(function* (
   scope: Pick<McpInvocationScope, "userId">,
 ) {
   if (scope.userId === undefined) return SpaceVisibility.everything;
-  return yield* (yield* service).of(scope.userId);
+  return yield* (yield* spaceVisibilityService).of(scope.userId);
 });
 
 /** The shells among `shells` the caller may see. */
@@ -30,7 +30,7 @@ export const visibleShells = Effect.fn("mcp.visibleShells")(function* <
 >(scope: Pick<McpInvocationScope, "userId">, shells: ReadonlyArray<A>) {
   const visibility = yield* visibilityOf(scope);
   if (visibility.all) return shells;
-  const visible = yield* (yield* service).visibleThreadIds(
+  const visible = yield* (yield* spaceVisibilityService).visibleThreadIds(
     visibility,
     shells.map((shell) => shell.id),
   );
@@ -44,5 +44,7 @@ export const seesProjectId = Effect.fn("mcp.seesProjectId")(function* (
 ) {
   const visibility = yield* visibilityOf(scope);
   if (visibility.all) return true;
-  return (yield* (yield* service).visibleProjectIds(visibility, [projectId])).has(projectId);
+  return (yield* (yield* spaceVisibilityService).visibleProjectIds(visibility, [projectId])).has(
+    projectId,
+  );
 });

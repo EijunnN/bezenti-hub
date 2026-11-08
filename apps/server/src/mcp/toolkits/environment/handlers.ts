@@ -1,10 +1,11 @@
-import { OrchestratorMcpFailure, type ServerSettings } from "@t3tools/contracts";
+import { OrchestratorMcpFailure, type ServerSettings, WS_METHODS } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Environment from "../../../environment/ServerEnvironment.ts";
 import * as ThreadCommandExecutor from "../../../orchestration-v2/ThreadCommandExecutor.ts";
 import * as Settings from "../../../serverSettings.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import { authorizeAsRpc } from "../../rpcAccess.ts";
 import { readCaller, unavailable } from "../../threadAccess.ts";
 import { EnvironmentToolkit } from "./tools.ts";
 
@@ -61,6 +62,8 @@ export const layer = McpToolAccess.toLayer(EnvironmentToolkit, {
       const update = Effect.gen(function* () {
         // The turn may have ended, or the thread's modes changed, while this waited for the lock.
         yield* check;
+        // The Installation's settings: the same check as changing them from the app.
+        yield* authorizeAsRpc(WS_METHODS.serverUpdateSettings, { patch });
         const { settings } = yield* access;
         return preferences(
           yield* settings.updateSettings(patch).pipe(Effect.mapError(unavailable)),

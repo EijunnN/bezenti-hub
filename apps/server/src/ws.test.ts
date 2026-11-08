@@ -4,6 +4,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
   AuthInstallationScopes,
+  SourceControlProviderKind,
+  SourceControlRepositoryError,
   AuthOrchestrationOperateScope,
   AuthStandardClientScopes,
   type AuthEnvironmentScope,
@@ -96,6 +98,7 @@ import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
+import { CLONE_DESTINATION_REFUSED } from "./project/cloneDestination.ts";
 import * as ProviderAuthService from "./provider/ProviderAuthService.ts";
 import * as ProviderInstanceRegistry from "./provider/ProviderInstanceRegistry.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
@@ -1519,6 +1522,7 @@ describe("Space visibility", () => {
     WS_METHODS.sourceControlCloneRepository,
     WS_METHODS.projectCloneStart,
     WS_METHODS.projectCloneCancel,
+    WS_METHODS.projectCloneRetry,
     WS_METHODS.subscribeProjectClones,
     WS_METHODS.attachmentsCreateUploadUrl,
     WS_METHODS.attachmentsDelete,
@@ -3617,8 +3621,7 @@ describe("Space visibility", () => {
                   createdAt: "2026-11-01T00:00:00.000Z",
                 } as never),
               );
-            const refused =
-              "You can only clone into the Hub's Projects folder or a folder of your team's Projects.";
+            const refused = CLONE_DESTINATION_REFUSED;
             // Outside her team's Projects and the Hub's Projects folder: refused, a direct clone too.
             assert.equal(yield* clone(asGrace, "grace-etc", "/etc/cron.d/app"), refused);
             assert.equal(
@@ -3663,6 +3666,101 @@ describe("Space visibility", () => {
             assert.deepEqual(yield* cancel(asLinus, "grace-clone"), { applied: false });
             assert.deepEqual(yield* cancel(asGrace, "owner-clone"), { applied: false });
             assert.deepEqual(yield* cancel(asGrace, "grace-clone"), { applied: true });
+          }),
+        ),
+    );
+
+    it.effect(
+      "in the Hub's Projects folder a Member clones only into a new folder no Project holds, asked again on retry",
+      () =>
+        withTeam(({ server, grace, globex }) =>
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const projects = yield* fs.makeTempDirectoryScoped({ prefix: "t3-clone-root-" });
+            const elsewhere = yield* fs.makeTempDirectoryScoped({ prefix: "t3-clone-elsewhere-" });
+            yield* fs.makeDirectory(path.join(projects, "existing"));
+            yield* fs.symlink(elsewhere, path.join(projects, "link"));
+            // Another Organization's Project kept in the shared folder.
+            yield* server.sql`
+              INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at, space_id)
+              VALUES ('globex-shared', 'globex-shared', ${path.join(projects, "globex-shared")}, '[]',
+                '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', ${globex})
+            `;
+            const tracker = yield* ProjectCloneTracker.make.pipe(
+              Effect.provideService(SourceControlRepositoryService.SourceControlRepositoryService, {
+                prepareClone: (input: { readonly destinationPath: string }) =>
+                  Effect.succeed({
+                    destinationPath: input.destinationPath,
+                    remoteUrl: "https://example.com/acme/app.git",
+                    cloneUrl: "https://example.com/acme/app.git",
+                    repository: null,
+                  }),
+                cloneRepository: () =>
+                  Effect.fail(
+                    new SourceControlRepositoryError({
+                      operation: "cloneRepository",
+                      provider: SourceControlProviderKind.make("unknown"),
+                      detail: "offline",
+                    }),
+                  ),
+                discardClone: () => Effect.void,
+              } as never),
+            );
+            const asGrace = yield* connect(
+              server,
+              grace.userId,
+              Layer.mergeAll(
+                Layer.succeed(ProjectCloneTracker.ProjectCloneTracker, tracker),
+                Layer.mock(ProjectService.ProjectService)({
+                  create: () => Effect.succeed({} as never),
+                }),
+                Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+                  namedProjectsRoot: projects,
+                }),
+              ),
+              AuthStandardClientScopes,
+            );
+            const clone = (projectId: string, destinationPath: string) =>
+              outcome(
+                asGrace[WS_METHODS.projectCloneStart]({
+                  projectId: ProjectId.make(projectId),
+                  title: projectId,
+                  remoteUrl: "https://example.com/acme/app.git",
+                  destinationPath,
+                  createdAt: "2026-11-01T00:00:00.000Z",
+                } as never),
+              );
+            for (const [id, destination] of [
+              ["existing", path.join(projects, "existing")],
+              ["nested", path.join(projects, "new", "app")],
+              ["held", path.join(projects, "globex-shared")],
+              ["inside-held", path.join(projects, "globex-shared", ".claude")],
+              ["through-link", path.join(projects, "link", "app")],
+              ["the-link", path.join(projects, "link")],
+            ] as const) {
+              assert.deepEqual(
+                [id, yield* clone(id, destination)],
+                [id, CLONE_DESTINATION_REFUSED],
+              );
+            }
+            // A new folder right in it starts; its git run fails here, so it can be retried.
+            const target = path.join(projects, "app");
+            assert.equal(yield* clone("app", target), "reached");
+            yield* tracker.stream.pipe(
+              Stream.filter((clones) =>
+                clones.some((entry) => entry.projectId === "app" && entry.phase === "failed"),
+              ),
+              Stream.runHead,
+            );
+            // Meanwhile a link to elsewhere took the folder's place: the retry is refused.
+            yield* fs.symlink(elsewhere, target);
+            assert.equal(
+              yield* outcome(
+                asGrace[WS_METHODS.projectCloneRetry]({ projectId: ProjectId.make("app") }),
+              ),
+              CLONE_DESTINATION_REFUSED,
+            );
           }),
         ),
     );

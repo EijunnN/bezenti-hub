@@ -4,6 +4,7 @@ import {
   ThreadId,
   OrchestratorMcpFailure,
   ProjectId,
+  WS_METHODS,
 } from "@t3tools/contracts";
 import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
@@ -32,6 +33,7 @@ import * as McpToolAccess from "../../McpToolAccess.ts";
 import { seesProjectId, visibilityOf } from "../../mcpVisibility.ts";
 import { spaceRefusalMessage } from "../../../spaces/SpaceDirectory.ts";
 import * as SpaceVisibility from "../../../spaces/SpaceVisibility.ts";
+import { authorizeAsRpc, requireMcpCloneDestination } from "../../rpcAccess.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
 import { ProjectToolkit } from "./tools.ts";
 
@@ -378,6 +380,14 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         };
       }
       const commandId = yield* newCommandId();
+      // The same check as creating it from the app: scripts need the settings scope.
+      yield* authorizeAsRpc(WS_METHODS.projectsMutate, {
+        type: "project.create",
+        ...input,
+        workspaceRoot,
+        commandId,
+        projectId: ProjectId.make(commandId),
+      });
       return yield* projects
         .create({
           ...input,
@@ -393,9 +403,14 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
     Effect.gen(function* () {
       yield* requireVisibleProject(input.projectId);
       const projects = yield* Project.ProjectService;
-      return yield* projects
-        .update({ ...input, commandId: yield* newCommandId() })
-        .pipe(Effect.mapError(projectFailure));
+      const commandId = yield* newCommandId();
+      // The same check as changing it from the app: scripts need the settings scope.
+      yield* authorizeAsRpc(WS_METHODS.projectsMutate, {
+        type: "project.update",
+        ...input,
+        commandId,
+      });
+      return yield* projects.update({ ...input, commandId }).pipe(Effect.mapError(projectFailure));
     }),
   ),
   t3_project_delete: McpToolAccess.writesEnvironment((input) =>
@@ -413,6 +428,8 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   t3_project_clone: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
       const repositories = yield* Repositories.SourceControlRepositoryService;
+      // The same check as cloning from the app, as the caller's User.
+      yield* requireMcpCloneDestination(input.destinationPath);
       return yield* repositories.cloneRepository(input).pipe(
         Effect.mapError(
           (error) =>

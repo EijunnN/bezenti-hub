@@ -107,6 +107,45 @@ describe("ProjectCloneTracker", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
+  it.effect("asks again where the checkout goes right before git writes it, a retry's too", () => {
+    const gitRuns: Array<string> = [];
+    const harness = makeHarness({
+      clone: (input) =>
+        Effect.sync(() => {
+          gitRuns.push(input.destinationPath);
+          return { cwd: input.destinationPath, remoteUrl: input.remoteUrl ?? "", repository: null };
+        }),
+    });
+    let allowed = false;
+    const hooks: ProjectCloneTracker.ProjectCloneHooks = {
+      ...harness.hooks,
+      verifyDestination: () =>
+        allowed
+          ? Effect.void
+          : Effect.fail(
+              new SourceControlRepositoryError({
+                operation: "cloneRepository",
+                provider: SourceControlProviderKind.make("unknown"),
+                detail: "That folder is not yours.",
+              }),
+            ),
+    };
+    return Effect.gen(function* () {
+      const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+      yield* tracker.start(startInput, hooks);
+      yield* Effect.yieldNow;
+      expect(yield* tracker.get(projectId)).toMatchObject({
+        phase: "failed",
+        error: "That folder is not yours.",
+      });
+      expect(gitRuns).toEqual([]);
+      allowed = true;
+      expect(yield* tracker.retry(projectId)).toBe(true);
+      yield* Effect.yieldNow;
+      expect(gitRuns).toEqual(["/workspace/t3code"]);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
   it.effect("flags a clone stalled when git goes quiet and clears it when git speaks", () => {
     const release = Deferred.makeUnsafe<void>();
     const resumed = Deferred.makeUnsafe<void>();

@@ -34,8 +34,6 @@ import {
   type DiscoveredLocalServerList,
   type ProjectCloneSnapshot,
   PreviewStopLocalServerError,
-  SourceControlProviderKind,
-  SourceControlRepositoryError,
   SpaceActionDeniedError,
   type EditorId,
   type FileManagerRevealKind,
@@ -206,6 +204,7 @@ import * as ProjectEnrichmentService from "./project/ProjectEnrichmentService.ts
 import * as ProjectService from "./project/ProjectService.ts";
 import { threadWorkspaceRoot } from "./project/threadWorkspaceRoot.ts";
 import * as ManagedProjectFolders from "./project/ManagedProjectFolders.ts";
+import * as CloneDestination from "./project/cloneDestination.ts";
 import * as ScratchThreadPromotion from "./project/ScratchThreadPromotion.ts";
 import { mutateProjectWithClone } from "./project/ProjectMutation.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
@@ -1428,31 +1427,33 @@ export const layerWsRpc = (
         return yield* withoutHiddenThreads(attributed, (server) => threadOf(server)!);
       });
 
-      // A clone's checkout goes where its User may work: the Hub's Projects folder or a folder
-      // of their team's Projects. The Owner clones anywhere.
-      const requireCloneDestination = Effect.fn("ws.requireCloneDestination")(function* (
-        destinationPath: string,
-      ) {
-        const allowed = yield* spaceVisibility.mayCreateDirectory(
-          yield* currentVisibility,
-          principal.userId,
-          destinationPath,
-          [managedFolders.namedProjectsRoot],
+      // Where this connection's User may clone (`CloneDestination`), read afresh each time.
+      const requireCloneDestination = (destinationPath: string) =>
+        currentVisibility.pipe(
+          Effect.flatMap((visibility) =>
+            CloneDestination.requireCloneDestination(
+              { visibility, userId: principal.userId },
+              destinationPath,
+              {
+                spaceVisibility: Effect.succeed(spaceVisibility),
+                projectsRoot: Effect.succeed(managedFolders.namedProjectsRoot),
+              },
+            ),
+          ),
         );
-        if (allowed) return;
-        return yield* new SourceControlRepositoryError({
-          operation: "cloneRepository",
-          provider: SourceControlProviderKind.make("unknown"),
-          detail:
-            "You can only clone into the Hub's Projects folder or a folder of your team's Projects.",
-        });
-      });
       // A clone in progress is its starter's (and the Owner's) to cancel or retry and to follow,
       // with those of Projects the User sees.
       const mayActOnClone = Effect.fn("ws.mayActOnClone")(function* (projectId: ProjectId) {
         if ((yield* currentVisibility).all) return true;
         const startedBy = yield* projectCloneTracker.startedBy;
         return startedBy.has(projectId) && startedBy.get(projectId) === principal.userId;
+      });
+      // A retry first clears the old checkout, so its folder is asked about again before that.
+      const retryClone = Effect.fn("ws.retryClone")(function* (projectId: ProjectId) {
+        const clone = yield* projectCloneTracker.get(projectId);
+        if (clone === null) return false;
+        yield* requireCloneDestination(clone.destinationPath);
+        return yield* projectCloneTracker.retry(projectId);
       });
       const visibleClones = Effect.fn("ws.visibleClones")(function* (
         snapshots: ReadonlyArray<ProjectCloneSnapshot>,
@@ -2850,6 +2851,7 @@ export const layerWsRpc = (
                         Effect.andThen(projectEnrichment.request(project.workspaceRoot)),
                         Effect.ignoreCause({ log: true }),
                       ),
+                  verifyDestination: requireCloneDestination,
                 },
                 principal.userId,
               ),
@@ -2888,7 +2890,7 @@ export const layerWsRpc = (
         [WS_METHODS.projectCloneRetry]: (input) =>
           mayActOnClone(input.projectId).pipe(
             Effect.flatMap((allowed) =>
-              allowed ? projectCloneTracker.retry(input.projectId) : Effect.succeed(false),
+              allowed ? retryClone(input.projectId) : Effect.succeed(false),
             ),
             Effect.map((applied) => ({ applied })),
           ),

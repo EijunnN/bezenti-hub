@@ -68,6 +68,10 @@ export interface ProjectCloneHooks {
     readonly projectId: ProjectId;
     readonly workspaceRoot: string;
   }) => Effect.Effect<void>;
+  /** Asked right before git writes the checkout, a retry's too: the folder may have changed. */
+  readonly verifyDestination?: (
+    destinationPath: string,
+  ) => Effect.Effect<void, SourceControlRepositoryError>;
 }
 
 const DONE_RETENTION = "30 seconds";
@@ -223,6 +227,9 @@ export const make = Effect.gen(function* () {
   ) {
     const pulses = yield* Queue.sliding<void>(1);
     yield* watchForStall(projectId, pulses).pipe(Effect.forkScoped);
+    if (tracked.hooks.verifyDestination !== undefined) {
+      yield* tracked.hooks.verifyDestination(tracked.input.destinationPath);
+    }
     return yield* repositories.cloneRepository(
       {
         remoteUrl: tracked.input.cloneUrl,

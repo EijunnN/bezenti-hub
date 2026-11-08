@@ -24,6 +24,13 @@ import * as McpToolAccess from "../mcp/McpToolAccess.ts";
 import { visibleShells } from "../mcp/mcpVisibility.ts";
 import * as ProjectHandlers from "../mcp/toolkits/project/handlers.ts";
 import { ProjectToolkit } from "../mcp/toolkits/project/tools.ts";
+import * as EnvironmentHandlers from "../mcp/toolkits/environment/handlers.ts";
+import { EnvironmentToolkit } from "../mcp/toolkits/environment/tools.ts";
+import { CLONE_DESTINATION_REFUSED } from "../project/cloneDestination.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
+import * as Repositories from "../sourceControl/SourceControlRepositoryService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
@@ -194,7 +201,12 @@ const mcpScope = (server: Server, token: string) =>
 
 /** Runs one of the project tools as the MCP caller `scope`. */
 const callProjectTool = <
-  Name extends "t3_project_list" | "t3_project_create" | "t3_project_update" | "t3_project_delete",
+  Name extends
+    | "t3_project_list"
+    | "t3_project_create"
+    | "t3_project_update"
+    | "t3_project_delete"
+    | "t3_project_clone",
 >(
   server: Server,
   scope: McpInvocationContext.McpInvocationScope,
@@ -206,6 +218,15 @@ const callProjectTool = <
     Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
     // Projects started from a title only are not under test.
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/work" }),
+    // A clone that gets past its checks is answered without git.
+    Layer.mock(Repositories.SourceControlRepositoryService)({
+      cloneRepository: (input) =>
+        Effect.succeed({
+          cwd: input.destinationPath,
+          remoteUrl: "https://example.com/acme/app.git",
+          repository: null,
+        }),
+    }),
   );
   return Effect.gen(function* () {
     const toolkit = yield* ProjectToolkit.pipe(
@@ -494,4 +515,94 @@ it.live("an MCP client approved before the Owner existed becomes the Owner's", (
     const ownerId = (created.body.user as { id: string }).id;
     assert.equal((yield* mcpScope(server, early.token))?.userId, ownerId);
   }),
+);
+
+/** Runs the environment preferences tool as the MCP caller `scope`. */
+const callEnvironmentTool = (
+  server: Server,
+  scope: McpInvocationContext.McpInvocationScope,
+  params: Parameters<Effect.Success<typeof EnvironmentToolkit>["handle"]>[1],
+) => {
+  const dependencies = Layer.mergeAll(
+    Layer.succeedContext(server.services),
+    Layer.succeed(McpInvocationContext.McpInvocationContext, scope),
+    Layer.mock(ServerEnvironment.ServerEnvironment)({
+      getDescriptor: Effect.succeed({ environmentId: scope.environmentId } as never),
+    }),
+    Layer.mock(ThreadCommandExecutor.ThreadCommandExecutor)({}),
+  );
+  return Effect.gen(function* () {
+    const toolkit = yield* EnvironmentToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(EnvironmentHandlers.layer).pipe(
+          Layer.provide(dependencies),
+        ),
+      ),
+    );
+    const results = yield* toolkit
+      .handle("t3_environment_preferences_update", params as never)
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+    return results.at(-1) as { readonly isFailure: boolean; readonly result: unknown };
+  });
+};
+
+it.live(
+  "an MCP client of a Member changes none of the Installation's settings, scripts or folders",
+  () =>
+    Effect.gen(function* () {
+      const { server, owner, grace } = yield* hub;
+      const asGrace = (yield* mcpScope(
+        server,
+        (yield* authorizeClient(server, grace.cookie)).token,
+      ))!;
+      const asOwner = (yield* mcpScope(server, (yield* authorizeClient(server, owner)).token))!;
+      const environment = (scope: McpInvocationContext.McpInvocationScope, params: unknown) =>
+        callEnvironmentTool(server, scope, params as never);
+      const project = (
+        scope: McpInvocationContext.McpInvocationScope,
+        name: "t3_project_update" | "t3_project_clone",
+        params: unknown,
+      ) => callProjectTool(server, scope, name, params as never);
+      const refusal = (outcome: { readonly isFailure: boolean; readonly result: unknown }) =>
+        outcome.isFailure ? JSON.stringify(outcome.result) : "";
+
+      // The Installation's settings are the Owner's, as from the app.
+      const settings = Context.get(server.services, ServerSettings.ServerSettingsService);
+      const before = (yield* settings.getSettings).enableProviderUpdateChecks;
+      assert.include(
+        refusal(yield* environment(asGrace, { enableProviderUpdateChecks: !before })),
+        "Only the Owner of this Hub can do that.",
+      );
+      assert.equal((yield* settings.getSettings).enableProviderUpdateChecks, before);
+      assert.equal(
+        refusal(yield* environment(asOwner, { enableProviderUpdateChecks: before })),
+        "",
+      );
+
+      // A Project's scripts need the settings scope, which only the Owner's sessions hold.
+      const scripts = [
+        { id: "build", name: "Build", command: "make", icon: "play", runOnWorktreeCreate: false },
+      ];
+      assert.include(
+        refusal(yield* project(asGrace, "t3_project_update", { projectId: "acme-app", scripts })),
+        "settings:write",
+      );
+      assert.equal(
+        refusal(yield* project(asOwner, "t3_project_update", { projectId: "acme-app", scripts })),
+        "",
+      );
+
+      // Clones go where the Member may work, as from the app.
+      const clone = (scope: McpInvocationContext.McpInvocationScope, destinationPath: string) =>
+        project(scope, "t3_project_clone", {
+          remoteUrl: "https://example.com/acme/app.git",
+          destinationPath,
+        });
+      for (const outside of ["/etc/cron.d/app", "/work/globex-app/node_modules/app", "/work/a/b"]) {
+        assert.include(refusal(yield* clone(asGrace, outside)), CLONE_DESTINATION_REFUSED, outside);
+      }
+      assert.equal(refusal(yield* clone(asGrace, "/work/new-app")), "");
+      assert.equal(refusal(yield* clone(asGrace, "/work/acme-app/vendor/lib")), "");
+      assert.equal(refusal(yield* clone(asOwner, "/etc/owner-app")), "");
+    }),
 );

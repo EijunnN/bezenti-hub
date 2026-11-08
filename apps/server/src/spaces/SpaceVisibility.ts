@@ -150,8 +150,9 @@ export class SpaceVisibility extends Context.Service<
       directory: string,
     ) => Effect.Effect<boolean>;
     /**
-     * Whether the User may create `directory` (a clone's checkout): inside one of `sharedRoots`
-     * (the Hub's Projects folder), or where `mayUseDirectory` lets them work.
+     * Whether the User may create `directory` (a clone's checkout): where `mayUseDirectory` lets
+     * them work, or as a new folder right in one of `sharedRoots` (the Hub's Projects folder) that
+     * no Project holds. Its parent must resolve where it is named. Ask again just before writing.
      */
     readonly mayCreateDirectory: (
       visibility: Visibility,
@@ -443,10 +444,38 @@ const make = Effect.gen(function* () {
     sharedRoots: ReadonlyArray<string>,
   ) {
     if (userId === undefined || visibility.all) return true;
-    return (
-      (yield* within(sharedRoots, directory)) ||
-      (yield* mayUseDirectory(visibility, userId, directory))
-    );
+    if (
+      !path.isAbsolute(directory) ||
+      directory.startsWith("~") ||
+      directory.split(/[\\/]/u).includes("..")
+    ) {
+      return false;
+    }
+    const target = yield* realOf(directory);
+    // Its parent, links resolved, must be where the path names it: a link swapped in on the way
+    // would put the checkout elsewhere.
+    const parent = path.dirname(path.resolve(directory));
+    const realParent = yield* realOf(parent);
+    if (path.dirname(target) !== realParent) return false;
+    if (yield* mayUseDirectory(visibility, userId, directory)) return true;
+    // In a shared root only a new folder right in it, which no Project holds: not inside
+    // another Space's Project kept there.
+    const exists = Option.isSome(fileSystem)
+      ? yield* fileSystem.value.exists(target).pipe(Effect.orElseSucceed(() => true))
+      : false;
+    if (exists) return false;
+    let inSharedRoot = false;
+    for (const root of sharedRoots) {
+      if ((yield* realOf(root)) === realParent) inSharedRoot = true;
+    }
+    if (!inSharedRoot) return false;
+    const projectRoots = yield* sql<{ readonly root: string }>`
+      SELECT workspace_root AS root FROM projection_projects WHERE deleted_at IS NULL
+    `.pipe(Effect.orDie);
+    return !(yield* within(
+      projectRoots.map((row) => row.root),
+      directory,
+    ));
   });
 
   return SpaceVisibility.of({

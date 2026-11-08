@@ -28,6 +28,10 @@ import {
   RpcScopeAuthorization,
   WS_METHODS,
   WsRpcGroup,
+  AuthStandardClientScopes,
+  isInstallationRpcMethod,
+  type UserId,
+  withoutInstallationScopes,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -36,7 +40,7 @@ import type * as RpcGroup from "effect/rpc/RpcGroup";
 
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as CommandActor from "./CommandActor.ts";
-import { guardRpcPayload } from "./RpcSpaceAccess.ts";
+import { type AccessLost, guardRpcPayload } from "./RpcSpaceAccess.ts";
 
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 
@@ -271,18 +275,63 @@ const requiredScopesForRpcCall = (
   return [requiredScopeForRpcMethod(method)];
 };
 
+/**
+ * The one check of an operation, whichever transport asks: the RPC's scopes, then how it keeps
+ * to what the User may see and do (`RpcSpaceAccess`). The WS middleware runs it on every call,
+ * and an MCP tool doing what an RPC does runs it with that RPC's method (`mcp/rpcAccess.ts`).
+ */
+export const authorizeRpcCall = (
+  method: string,
+  payload: unknown,
+  caller: {
+    readonly scopes: ReadonlySet<AuthEnvironmentScope>;
+    readonly visibility: SpaceVisibility.Visibility;
+    readonly userId: UserId | undefined;
+  },
+  spaceVisibility: SpaceVisibility.SpaceVisibility["Service"],
+): Effect.Effect<void, EnvironmentAuthorizationError | AccessLost> =>
+  Effect.suspend((): Effect.Effect<void, EnvironmentAuthorizationError | AccessLost> => {
+    const guard = guardRpcPayload(
+      method,
+      payload,
+      caller.visibility,
+      spaceVisibility,
+      caller.userId,
+    );
+    // For the Installation's own RPCs, not being its Owner is the reason, not a missing scope.
+    if (isInstallationRpcMethod(method) && !caller.visibility.all) return guard;
+    const requiredScope = requiredScopesForRpcCall(method, payload).find(
+      (scope) => !caller.scopes.has(scope),
+    );
+    if (requiredScope !== undefined) return Effect.fail(rpcAuthorizationError(requiredScope));
+    return guard;
+  });
+
+/**
+ * The scopes a User holds where no session carries any (an MCP caller): what a session of theirs
+ * is read with, so the Owner every standard scope and anyone else none of the Installation's.
+ */
+export const scopesOfUser = (
+  visibility: SpaceVisibility.Visibility,
+): ReadonlySet<AuthEnvironmentScope> =>
+  new Set(
+    visibility.all ? AuthStandardClientScopes : withoutInstallationScopes(AuthStandardClientScopes),
+  );
+
 export const layer = Layer.effect(RpcScopeAuthorization)(
   Effect.gen(function* () {
     const principal = yield* EnvironmentAuthenticatedPrincipal;
     const viewer = yield* SpaceVisibility.CurrentViewer;
     const spaceVisibility = yield* SpaceVisibility.SpaceVisibility;
-    const middleware: RpcScopeAuthorization["Service"] = (effect, { rpc, payload }) => {
-      const requiredScopes = requiredScopesForRpcCall(rpc._tag, payload);
-      const requiredScope = requiredScopes.find((scope) => !principal.scopes.has(scope));
-      if (requiredScope !== undefined) return Effect.fail(rpcAuthorizationError(requiredScope));
-      return viewer.visibility.pipe(
+    const middleware: RpcScopeAuthorization["Service"] = (effect, { rpc, payload }) =>
+      viewer.visibility.pipe(
         Effect.tap((visibility) =>
-          guardRpcPayload(rpc._tag, payload, visibility, spaceVisibility, principal.userId),
+          authorizeRpcCall(
+            rpc._tag,
+            payload,
+            { scopes: principal.scopes, visibility, userId: principal.userId },
+            spaceVisibility,
+          ),
         ),
         // Every command the handler sends acts for this session's User (`CommandActor`), and
         // services that pick Projects themselves read what the session may see.
@@ -293,7 +342,6 @@ export const layer = Layer.effect(RpcScopeAuthorization)(
           ),
         ),
       );
-    };
     return middleware;
   }),
 );
