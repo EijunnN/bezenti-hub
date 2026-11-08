@@ -138,8 +138,12 @@ const buildHere = Effect.fn("cli.sandbox.buildHere")(function* (
           : { via: "cli", outcome: "failed", reason: built.failure.detail.slice(0, 200) },
     });
   }).pipe(
-    Effect.provide(AuditLog.layer.pipe(Layer.provideMerge(SqlitePersistence.layerConfig))),
-    Effect.provide(ServerConfig.layer(config)),
+    Effect.provide(
+      AuditLog.layer.pipe(
+        Layer.provideMerge(SqlitePersistence.layerConfig),
+        Layer.provideMerge(ServerConfig.layer(config)),
+      ),
+    ),
     Effect.catchCause((cause) =>
       Effect.logWarning("Could not record the build in the audit log", { cause }),
     ),

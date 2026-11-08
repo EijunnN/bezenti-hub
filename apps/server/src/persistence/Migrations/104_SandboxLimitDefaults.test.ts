@@ -8,7 +8,7 @@ import { runMigrations } from "../Migrations.ts";
 it.effect("gives the Installation one row of default Sandbox limits, and only one", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
-    yield* runMigrations({ toMigrationInclusive: 103 });
+    yield* runMigrations({ toMigrationInclusive: 102 });
     assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 104 }), [
       [104, "SandboxLimitDefaults"],
     ]);

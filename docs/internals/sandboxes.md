@@ -589,7 +589,7 @@ the machine its server runs no work itself but one Sandbox for the Space it serv
   `t3 join`) stays with its host and only asks the Hub (`/self`) or leaves: presented at connect
   or to the git route it is refused (`not-sandboxed`). Each answer to `/self` issues a new
   credential for the Sandbox, for the Space it serves then, replacing the last one
-  (`dedicated_sandbox_credentials`, migration 103, only its hash); that is the one the container
+  (`dedicated_sandbox_credentials`, migration 107, only its hash); that is the one the container
   holds and the only one that connects as the machine or reaches its Space's repositories. A
   change of mode or Space (and removing the machine) drops it in the same transaction, so a copy an
   agent took from the container reaches nothing afterwards, and the old Space's server is refused
