@@ -167,9 +167,11 @@ While off, the Hub machine runs nothing, whatever asks:
   read the Hub's copy of the Project: listings, search, reading files, browsing folders, which run
   no code. Since nothing places them, the folder they name must be one the User may read: a
   Project of a Space they see, or a Thread's working folder there (`mayReadDirectory`; a write,
-  one they may work in), else they answer like a missing Project (`RpcSpaceAccess`). Links count
-  where they lead (both sides resolved), a file named by an absolute path must be inside such a
-  folder too, and a `~` path is refused. Browsing folders with no Thread keeps to them as
+  one they may work in), else they answer like a missing Project (`RpcSpaceAccess`). The same goes
+  for a Thread on the Hub machine. What is checked is what the call opens
+  ([localWorkspaceTargets](../../apps/server/src/workspace/localWorkspaceTargets.ts)): an absolute
+  folder, no `~` and no `..` anywhere, a browse path absolute or explicitly relative (`./`); links
+  count where they lead (both sides resolved). Browsing folders with no Thread keeps to them as
   well (only the Owner browses anything). Anything that acts (writing a file, opening or typing in a terminal, opening a preview)
   is refused until the Thread is placed. A Thread not projected yet resolves to no Environment
   (`ActiveEnvironmentResolver`), never the Hub machine.
@@ -591,8 +593,9 @@ the machine its server runs no work itself but one Sandbox for the Space it serv
   `t3 join`) stays with its host and only asks the Hub (`/self`) or leaves: presented at connect
   or to the git route it is refused (`not-sandboxed`). Each answer to `/self` issues a new
   credential for the Sandbox, for the Space it serves then
-  (`dedicated_sandbox_credentials`, migration 107, only its hashes); the last one used stays valid
-  until a newer one is first used, so an answer lost on its way to the host breaks nothing; that is the one the container
+  (`dedicated_sandbox_credentials`, migration 107, only its hashes); the one a reissue replaces
+  stays valid until the new one is first used, for at most 10 minutes, so an answer lost on its way
+  to the host breaks nothing; that is the one the container
   holds and the only one that connects as the machine or reaches its Space's repositories. A
   change of mode or Space (and removing the machine) drops it in the same transaction, so a copy an
   agent took from the container reaches nothing afterwards, and the old Space's server is refused

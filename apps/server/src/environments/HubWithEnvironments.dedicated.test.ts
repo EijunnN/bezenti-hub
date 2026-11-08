@@ -549,7 +549,7 @@ describe("Hub con Environments: a machine dedicated to a Space", () => {
 
 describe("Hub con Environments: a dedicated machine is the Installation's", () => {
   it.live(
-    "an answer lost on its way to the host leaves its Sandbox's credential working until a newer one is used",
+    "an answer lost on its way to the host leaves the credential it replaced working, until the new one is used or a while passes",
     () =>
       Effect.gen(function* () {
         const hub = yield* makeHub();
@@ -561,13 +561,23 @@ describe("Hub con Environments: a dedicated machine is the Installation's", () =
           .pipe(Effect.map((self) => Option.getOrThrow(self).sandboxCredential ?? ""));
         const running = yield* issue;
         assert.equal(yield* refusalOf(hub, running), "valid");
-        // Two answers never reach the host: what its Sandbox holds still connects.
-        yield* issue;
-        const latest = yield* issue;
+        // An answer never reaches the host: what its Sandbox holds still connects.
+        const lost = yield* issue;
         assert.equal(yield* refusalOf(hub, running), "valid");
-        // Once the newest is used, the one it replaces ends.
-        assert.equal(yield* refusalOf(hub, latest), "valid");
+        // Only the one a reissue replaces stays: across reissues an old one ends.
+        const latest = yield* issue;
         assert.equal(yield* refusalOf(hub, running), "credential-unknown");
+        assert.equal(yield* refusalOf(hub, lost), "valid");
+        // Once the newest is used, the one it replaced ends.
+        assert.equal(yield* refusalOf(hub, latest), "valid");
+        assert.equal(yield* refusalOf(hub, lost), "credential-unknown");
+        // And unused, it ends on its own after a while.
+        const next = yield* issue;
+        yield* hub.server.sql`
+          UPDATE dedicated_sandbox_credentials SET previous_expires_at = '2000-01-01T00:00:00.000Z'
+        `;
+        assert.equal(yield* refusalOf(hub, latest), "credential-unknown");
+        assert.equal(yield* refusalOf(hub, next), "valid");
       }).pipe(Effect.scoped),
   );
 

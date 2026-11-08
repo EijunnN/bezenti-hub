@@ -19,6 +19,7 @@ export const layerSeesEverything = Layer.merge(
       workableThreadIds: (_visibility, _userId, threadIds) => Effect.succeed(new Set(threadIds)),
       mayUseDirectory: () => Effect.succeed(true),
       mayReadDirectory: () => Effect.succeed(true),
+      threadOnHubMachine: () => Effect.succeed(false),
     }),
   ),
   SpaceVisibility.layerCurrentViewerOwner,

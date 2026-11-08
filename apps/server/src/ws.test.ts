@@ -2654,8 +2654,37 @@ describe("Space visibility", () => {
           assert.equal(yield* browse(`${root}/`), hidden);
           assert.equal(yield* browse(`${globexRoot}/`), hidden);
           assert.equal(yield* browse("~/"), hidden);
+          // A link followed by `..` (the kernel goes through the link, a lexical check does not).
+          assert.equal(yield* read(acmeRoot, `${acmeRoot}/vendor/../globex-app/README.md`), hidden);
+          // A browse that is not explicitly relative (resolved against the server's own folder),
+          // and folders named relative to nothing or to home.
+          assert.equal(
+            yield* outcome(
+              asAda[WS_METHODS.filesystemBrowse]({ partialPath: "src/", cwd: acmeRoot } as never),
+            ),
+            hidden,
+          );
+          assert.equal(yield* read("acme-app", "README.md"), hidden);
+          assert.equal(yield* read("~", "README.md"), hidden);
+          // A Thread on the Hub machine runs there too: her team's Thread, another Space's folder.
+          assert.equal(
+            yield* outcome(
+              asAda[WS_METHODS.projectsReadFile]({
+                cwd: globexRoot,
+                relativePath: "README.md",
+                threadId: "acme-thread",
+              } as never),
+            ),
+            hidden,
+          );
           // Her own Project's files and folders get past the guard.
           assert.notEqual(yield* read(acmeRoot, "README.md"), hidden);
+          assert.notEqual(
+            yield* outcome(
+              asAda[WS_METHODS.filesystemBrowse]({ partialPath: "./", cwd: acmeRoot } as never),
+            ),
+            hidden,
+          );
           assert.notEqual(yield* read(acmeRoot, path.join(acmeRoot, "README.md")), hidden);
           assert.notEqual(yield* browse(`${acmeRoot}/`), hidden);
         }).pipe(Effect.provide(NodeServices.layer)),

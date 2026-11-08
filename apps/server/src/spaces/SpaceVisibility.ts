@@ -5,6 +5,7 @@
  */
 import {
   EnvironmentAuthenticatedPrincipal,
+  HUB_MACHINE_ENVIRONMENT_ID,
   ProjectId,
   type SpaceId,
   ThreadId,
@@ -148,6 +149,8 @@ export class SpaceVisibility extends Context.Service<
       visibility: Visibility,
       directory: string,
     ) => Effect.Effect<boolean>;
+    /** Whether the Thread runs on the Hub machine (or names none), so its calls use the Hub's disk. */
+    readonly threadOnHubMachine: (threadId: string) => Effect.Effect<boolean>;
   }
 >()("t3/spaces/SpaceVisibility") {}
 
@@ -183,6 +186,15 @@ const make = Effect.gen(function* () {
     roots: ReadonlyArray<string>,
     directory: string,
   ) {
+    // Only an absolute path without `..` or `~`: resolved lexically first, it could name
+    // another place than the one opened through a link.
+    if (
+      !path.isAbsolute(directory) ||
+      directory.startsWith("~") ||
+      directory.split(/[\\/]/u).includes("..")
+    ) {
+      return false;
+    }
     const target = yield* realOf(directory);
     for (const root of roots) {
       if (isWithin(path, yield* realOf(root), target)) return true;
@@ -398,6 +410,19 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const threadOnHubMachine = Effect.fn("SpaceVisibility.threadOnHubMachine")(function* (
+    threadId: string,
+  ) {
+    const [row] = yield* sql<{ readonly environmentId: string | null }>`
+      SELECT active_environment_id AS "environmentId" FROM orchestration_v2_projection_threads
+      WHERE thread_id = ${threadId} AND deleted_at IS NULL
+    `.pipe(Effect.orDie);
+    return (
+      row !== undefined &&
+      (row.environmentId ?? HUB_MACHINE_ENVIRONMENT_ID) === HUB_MACHINE_ENVIRONMENT_ID
+    );
+  });
+
   return SpaceVisibility.of({
     of,
     viewer,
@@ -409,6 +434,7 @@ const make = Effect.gen(function* () {
     workableThreadIds,
     mayUseDirectory,
     mayReadDirectory,
+    threadOnHubMachine,
   });
 });
 

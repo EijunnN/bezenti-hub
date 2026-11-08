@@ -549,6 +549,9 @@ export class EnvironmentRegistry extends Context.Service<
   }
 >()("t3/environments/EnvironmentRegistry") {}
 
+/** How long a dedicated Sandbox's replaced credential stays valid while the new one is unused. */
+const SANDBOX_CREDENTIAL_OVERLAP_MINUTES = 10;
+
 /** Why a registry without a runtime has no Sandboxes. */
 export interface RegistryOptions {
   /** Why there are no Sandboxes, for a registry without a runtime. */
@@ -1117,30 +1120,40 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
       Effect.mapError(storageError),
     );
     if (row !== undefined) return { row, holder: "machine" as const, sandboxSpaceId: null };
-    const [issued] = yield* sql<{
-      readonly environmentId: string;
-      readonly spaceId: string;
-      readonly newest: number;
-      readonly superseding: number;
-    }>`
-      SELECT environment_id AS "environmentId", space_id AS "spaceId",
-        credential_hash = ${credentialHash} AS newest,
-        previous_credential_hash IS NOT NULL AS superseding
-      FROM dedicated_sandbox_credentials
-      WHERE credential_hash = ${credentialHash} OR previous_credential_hash = ${credentialHash}
-    `.pipe(Effect.mapError(storageError));
+    const now = yield* nowIso;
+    // Looked up, and the one it replaced ended on its first use, in one transaction.
+    const issued = yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const [found] = yield* sql<{
+            readonly environmentId: string;
+            readonly spaceId: string;
+            readonly newest: number;
+            readonly superseding: number;
+          }>`
+            SELECT environment_id AS "environmentId", space_id AS "spaceId",
+              credential_hash = ${credentialHash} AS newest,
+              previous_credential_hash IS NOT NULL AS superseding
+            FROM dedicated_sandbox_credentials
+            WHERE credential_hash = ${credentialHash}
+              OR (previous_credential_hash = ${credentialHash} AND previous_expires_at > ${now})
+          `;
+          if (found !== undefined && found.newest === 1 && found.superseding === 1) {
+            yield* sql`
+              UPDATE dedicated_sandbox_credentials
+              SET previous_credential_hash = NULL, previous_expires_at = NULL
+              WHERE environment_id = ${found.environmentId} AND credential_hash = ${credentialHash}
+            `;
+          }
+          return found;
+        }),
+      )
+      .pipe(Effect.mapError(storageError));
     if (issued === undefined) return undefined;
     const [machine] = yield* selectRows([sql`environment_id = ${issued.environmentId}`]).pipe(
       Effect.mapError(storageError),
     );
     if (machine === undefined) return undefined;
-    // The newest, used for the first time: the one it replaces ends now.
-    if (issued.newest === 1 && issued.superseding === 1) {
-      yield* sql`
-        UPDATE dedicated_sandbox_credentials SET previous_credential_hash = NULL
-        WHERE environment_id = ${issued.environmentId} AND credential_hash = ${credentialHash}
-      `.pipe(Effect.mapError(storageError));
-    }
     return { row: machine, holder: "sandbox" as const, sandboxSpaceId: issued.spaceId };
   });
 
@@ -1311,15 +1324,20 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
             if (mode !== "dedicated" || spaceId === null) {
               return Option.some({ ...named, mode, spaceId });
             }
+            // The one it replaces (the newest until now) stays valid for a while, so an answer
+            // lost on its way leaves the Sandbox working; any older one ends here.
+            const now = yield* DateTime.now;
             yield* sql`
               INSERT INTO dedicated_sandbox_credentials (
                 environment_id, space_id, credential_hash, issued_at
-              ) VALUES (${row.environmentId}, ${spaceId}, ${sandboxHash}, ${yield* nowIso})
+              ) VALUES (
+                ${row.environmentId}, ${spaceId}, ${sandboxHash}, ${DateTime.formatIso(now)}
+              )
               ON CONFLICT (environment_id) DO UPDATE SET space_id = excluded.space_id,
-                previous_credential_hash = COALESCE(
-                  dedicated_sandbox_credentials.previous_credential_hash,
-                  dedicated_sandbox_credentials.credential_hash
-                ),
+                previous_credential_hash = dedicated_sandbox_credentials.credential_hash,
+                previous_expires_at = ${DateTime.formatIso(
+                  DateTime.add(now, { minutes: SANDBOX_CREDENTIAL_OVERLAP_MINUTES }),
+                )},
                 credential_hash = excluded.credential_hash, issued_at = excluded.issued_at
             `;
             return Option.some({
