@@ -13,7 +13,6 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
-  sandboxEnvironmentIdOf,
   type SpaceId,
   ThreadId,
   UserId,
@@ -42,7 +41,6 @@ import {
   rootlessPodmanAvailable,
 } from "../sandboxes/PodmanSandboxRuntime.testkit.ts";
 import { devCodeMounts } from "../sandboxes/sandboxRuntimeFromConfig.ts";
-import * as Sandboxes from "../sandboxes/Sandboxes.ts";
 import * as OrganizationLifecycle from "../spaces/OrganizationLifecycle.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import { dedicatedSandboxIdOf } from "./DedicatedHost.ts";
@@ -650,7 +648,7 @@ describe("Hub con Environments: a dedicated machine is the Installation's", () =
 
 describe("Hub con Environments: a dedicated machine's Sandbox limits", () => {
   it.live(
-    "are the Space's own, not the Hub's defaults, and may be more than the Hub's machine has",
+    "are the Space's own over the Installation's defaults, set for the machine even with no Hub Sandbox, and may be more than the Hub has",
     () =>
       Effect.gen(function* () {
         const hub = yield* makeHub();
@@ -660,25 +658,38 @@ describe("Hub con Environments: a dedicated machine's Sandbox limits", () => {
         const limitsOf = registry
           .selfOf(vps.credential)
           .pipe(Effect.map((self) => Option.getOrThrow(self).limits));
-        // The defaults are sized for Sandboxes sharing the Hub's machine; this one is the Space's.
-        assert.deepEqual(yield* limitsOf, {
-          cpus: null,
-          memoryBytes: null,
-          pids: null,
-          diskBytes: null,
-        });
-        // The Owner sets the Space's own: more than the Hub has, for a bigger machine.
-        yield* hub
-          .service(Sandboxes.Sandboxes)
-          .ensureCreated({ spaceId: acme, actorUserId: yield* ownerIdOf(hub) })
-          .pipe(Effect.orDie);
-        const big = { cpus: 4096, memoryBytes: 64 * 1024 ** 4, pids: 8192, diskBytes: null };
+        const defaults = {
+          cpus: 2,
+          memoryBytes: 4 * 1024 ** 3,
+          pids: 4096,
+          diskBytes: 20 * 1024 ** 3,
+        };
+        // A Space with only a dedicated machine runs with the defaults, never with no limit.
+        assert.deepEqual(yield* limitsOf, defaults);
+        // The Owner sets the Space's own on the machine: more than the Hub has, for a bigger one.
+        const big = { cpus: 4096, memoryBytes: 64 * 1024 ** 4, pids: null, diskBytes: null };
         const set = yield* hub.server.request("/api/environments/sandboxes/limits", {
           cookie: hub.owner,
-          body: { environmentId: sandboxEnvironmentIdOf(acme), limits: big },
+          body: { environmentId: vps.environmentId, limits: big },
         });
         assert.equal(set.status, 200, JSON.stringify(set.body));
-        assert.deepEqual(yield* limitsOf, big);
+        assert.deepEqual(yield* limitsOf, { ...big, pids: 4096, diskBytes: 20 * 1024 ** 3 });
+        // No Hub Sandbox was made for it.
+        const [made] = yield* hub.server.sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count FROM sandboxes WHERE space_id = ${acme}
+        `;
+        assert.equal(made?.count, 0);
+        // Only the Owner sets them.
+        const admin = yield* memberWithPasskey(hub.server, hub.owner, {
+          displayName: "Ada Lovelace",
+          role: "admin",
+          spaceId: acme,
+        });
+        const refused = yield* hub.server.request("/api/environments/sandboxes/limits", {
+          cookie: admin.cookie,
+          body: { environmentId: vps.environmentId, limits: big },
+        });
+        assert.equal(refused.status, 403);
       }).pipe(Effect.scoped),
   );
 });

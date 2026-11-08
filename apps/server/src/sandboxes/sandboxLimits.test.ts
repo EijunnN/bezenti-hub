@@ -4,13 +4,14 @@ import * as NodeNet from "node:net";
 import { assert, describe, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
+import * as Fiber from "effect/Fiber";
 
 import {
   fitLimitsToHost,
   hostSpaceLevel,
   hostSpaceShortage,
   invalidLimitsReason,
+  killAllMeasurements,
   measureWithDu,
   minHostFreeBytes,
   NO_LIMITS,
@@ -18,6 +19,39 @@ import {
 
 const GIB = 1024 ** 3;
 const node = process.execPath;
+
+/**
+ * A measurement whose process runs it in a child of its own (as `podman unshare du`), that child
+ * holding a connection to the test while it lives: `closed` once that child is gone.
+ */
+const grandchildWatch = Effect.gen(function* () {
+  const accepted = yield* Deferred.make<NodeNet.Socket>();
+  const server = NodeNet.createServer((socket) => {
+    Deferred.doneUnsafe(accepted, Effect.succeed(socket));
+  });
+  yield* Effect.callback<void>((resume) => {
+    server.listen(0, "127.0.0.1", () => resume(Effect.void));
+  });
+  yield* Effect.addFinalizer(() => Effect.sync(() => server.close()));
+  const port = (server.address() as NodeNet.AddressInfo).port;
+  const grandchild = `require("node:net").connect(${port}, "127.0.0.1"); setTimeout(() => {}, 60000)`;
+  const args = [
+    "-e",
+    `require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "ignore" });
+     setTimeout(() => {}, 60000);`,
+  ];
+  const connected = Deferred.await(accepted).pipe(Effect.asVoid);
+  const closed = Deferred.await(accepted).pipe(
+    Effect.flatMap((socket) =>
+      Effect.callback<void>((resume) => {
+        if (socket.destroyed) return resume(Effect.void);
+        socket.on("close", () => resume(Effect.void));
+        socket.resume();
+      }),
+    ),
+  );
+  return { args, connected, closed };
+});
 
 describe("measuring a Sandbox's home", () => {
   it.effect("reads the total of a clean `du`", () =>
@@ -72,14 +106,21 @@ describe("measuring a Sandbox's home", () => {
             `console.log('16\\t/home'); console.error(${JSON.stringify(stderr.join("\n"))}); process.exit(1)`,
           ]);
         const vanished = "du: cannot access '/home/tmp/a.o': No such file or directory";
-        const vanishedDir = "du: cannot read directory '/home/tmp/b': No such file or directory";
         const podmanWarning = 'time="2026-01-01" level=warning msg="no systemd user session"';
-        assert.deepEqual(yield* du([vanished, vanishedDir, podmanWarning]), {
+        assert.deepEqual(yield* du([vanished, podmanWarning]), {
           _tag: "measured",
           bytes: 16 * 1024,
         });
         const denied = "du: cannot read directory '/home/hidden': Permission denied";
         assert.equal((yield* du([vanished, denied]))._tag, "failed");
+        // Only a file gone between listing and reading: a directory or the walk itself ending early
+        // leaves a total short of what is there.
+        for (const early of [
+          "du: cannot read directory '/home/tmp/b': No such file or directory",
+          "du: fts_read failed: /home/tmp: No such file or directory",
+        ]) {
+          assert.equal((yield* du([vanished, early]))._tag, "failed", early);
+        }
         // A name that names the vanishing error is still the error after it.
         const tricky =
           "du: cannot read directory '/home/x: No such file or directory': Permission denied";
@@ -99,38 +140,24 @@ describe("measuring a Sandbox's home", () => {
     "kills what the measurement started too, not only its own process, when it gives up",
     () =>
       Effect.gen(function* () {
-        // The measurement's child keeps a connection to the test open while it lives.
-        const connected = yield* Deferred.make<NodeNet.Socket>();
-        const server = NodeNet.createServer((socket) => {
-          Deferred.doneUnsafe(connected, Effect.succeed(socket));
-        });
-        yield* Effect.callback<void>((resume) => {
-          server.listen(0, "127.0.0.1", () => resume(Effect.void));
-        });
-        yield* Effect.addFinalizer(() => Effect.sync(() => server.close()));
-        const port = (server.address() as NodeNet.AddressInfo).port;
-        const grandchild = `require("node:net").connect(${port}, "127.0.0.1"); setTimeout(() => {}, 60000)`;
-        // As `podman unshare du`: the process started runs the measurement in a child of its own.
-        const slow = yield* measureWithDu(
-          node,
-          [
-            "-e",
-            `require("node:child_process").spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "ignore" });
-             setTimeout(() => {}, 60000);`,
-          ],
-          1_500,
-        );
+        const watch = yield* grandchildWatch;
+        const slow = yield* measureWithDu(node, watch.args, 1_500);
         assert.equal(slow._tag, "failed");
-        const socket = yield* Deferred.await(connected);
         // Its child ended with it: its connection closes.
-        const closed = yield* Effect.callback<void>((resume) => {
-          if (socket.destroyed) return resume(Effect.void);
-          socket.on("close", () => resume(Effect.void));
-          socket.resume();
-        }).pipe(Effect.timeoutOption("5 seconds"));
-        socket.destroy();
-        assert.isTrue(Option.isSome(closed), "the measurement's child outlived it");
+        yield* watch.closed;
       }).pipe(Effect.scoped),
+  );
+
+  it.live("kills every measurement under way when the Hub's process ends", () =>
+    Effect.gen(function* () {
+      const watch = yield* grandchildWatch;
+      const measuring = yield* measureWithDu(node, watch.args, 60_000).pipe(Effect.forkScoped);
+      yield* watch.connected;
+      // What runs as the Hub's process exits (`process.on("exit")`).
+      killAllMeasurements();
+      yield* watch.closed;
+      assert.equal((yield* Fiber.join(measuring))._tag, "failed");
+    }).pipe(Effect.scoped),
   );
 
   it.effect("says when the host has no `du` at all", () =>

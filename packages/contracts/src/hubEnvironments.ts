@@ -418,10 +418,10 @@ export const EnvironmentSelfResult = Schema.Struct({
   mode: HubEnvironmentMode,
   spaceId: Schema.NullOr(SpaceId),
   /**
-   * A dedicated machine's: its Space's own Sandbox limits (not the Installation's defaults, which
-   * are for Sandboxes sharing the Hub's machine), which its host starts the Sandbox with, at most
-   * what the machine has (CPU, memory and PIDs; disk is the Hub's own check, for its own
-   * Sandboxes). Absent from older Hubs and for personal machines.
+   * A dedicated machine's: its Space's effective Sandbox limits (its own over the Installation's
+   * defaults), which its host starts the Sandbox with, at most what the machine has (CPU, memory
+   * and PIDs; disk is the Hub's own check, for its own Sandboxes). Absent from older Hubs and for
+   * personal machines.
    */
   limits: Schema.optionalKey(Schema.NullOr(SandboxLimits)),
   /**

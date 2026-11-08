@@ -359,7 +359,11 @@ const fillHome = (hub: Hub, spaceId: SpaceId, bytes: number, at = "big.bin") =>
 
 /** The Space's own disk limit, written straight to its row: no check starts with it. */
 const overrideDisk = (hub: Hub, spaceId: SpaceId, diskBytes: number | null) =>
-  hub.server.sql`UPDATE sandboxes SET disk_limit_bytes = ${diskBytes} WHERE space_id = ${spaceId}`;
+  hub.server.sql`
+    INSERT INTO space_sandbox_limits (space_id, disk_limit_bytes, updated_at)
+    VALUES (${spaceId}, ${diskBytes}, '2026-11-01T00:00:00.000Z')
+    ON CONFLICT (space_id) DO UPDATE SET disk_limit_bytes = excluded.disk_limit_bytes
+  `;
 
 describe("Hub con Environments: a Sandbox cannot get past its disk limit", () => {
   it.live(
@@ -466,10 +470,29 @@ describe("Hub con Environments: a Sandbox cannot get past its disk limit", () =>
       yield* hub
         .service(Sandboxes.Sandboxes)
         .ensureRunning({ spaceId: third.id, actorUserId: owner })
-        .pipe(Effect.timeout("30 seconds"), Effect.orDie);
+        .pipe(Effect.orDie);
       yield* Deferred.succeed(release, undefined);
       yield* Fiber.join(checking);
     }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "a start that finds its server already running records it running, and no check stops it",
+    () =>
+      Effect.gen(function* () {
+        const hub = yield* makeHub({ sandboxLifecycle: { diskCheckEvery: "1 hour" } });
+        const sandboxes = hub.service(Sandboxes.Sandboxes);
+        const { spaceId, environmentId } = yield* acmeWithSandbox(hub);
+        // Recorded failed while its server still runs, as after a write that went wrong.
+        yield* hub.server.sql`UPDATE sandboxes SET status = 'failed' WHERE space_id = ${spaceId}`;
+        yield* sandboxes.ensureRunning({ spaceId, actorUserId: undefined }).pipe(Effect.orDie);
+        yield* sandboxes.checkDisk;
+        const [row] = yield* hub.server.sql<{ readonly status: string }>`
+          SELECT status FROM sandboxes WHERE space_id = ${spaceId}
+        `;
+        assert.equal(row?.status, "running");
+        assert.equal(sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId).status, "online");
+      }).pipe(Effect.scoped),
   );
 
   it.live("a limit raised while its home is measured keeps it running", () =>
@@ -654,5 +677,51 @@ describe("Hub con Environments: what stops a Sandbox stays stopped until someone
           "online",
         );
       }).pipe(Effect.scoped),
+  );
+});
+
+describe("Hub con Environments: the Hub's disk almost full", () => {
+  it.live("stops the Sandboxes that grew first, without waiting to measure the others", () =>
+    Effect.gen(function* () {
+      let space = { freeBytes: 500 * GIB, totalBytes: 1000 * GIB };
+      const slow = new Set<string>();
+      const release = yield* Deferred.make<void>();
+      const writerStopping = yield* Deferred.make<void>();
+      let writerId = "";
+      const hub = yield* makeHub({
+        sandboxLifecycle: { diskCheckEvery: "1 hour", hostSpace: Effect.sync(() => space) },
+        beforeSandboxMeasure: (sandboxId) =>
+          slow.has(sandboxId) ? Deferred.await(release) : Effect.void,
+        beforeSandboxStop: (sandboxId) =>
+          sandboxId === writerId
+            ? Deferred.succeed(writerStopping, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+      });
+      const sandboxes = hub.service(Sandboxes.Sandboxes);
+      const writer = yield* acmeWithSandbox(hub);
+      writerId = sandboxIdOf(writer.spaceId);
+      const quiet = yield* organizationWithSandbox(hub, "Globex");
+      yield* sandboxes.checkDisk;
+      // The writer's growth is on record from the last two checks.
+      yield* fillHome(hub, writer.spaceId, 32 * 1024 * 1024);
+      yield* sandboxes.checkDisk;
+      // Measuring takes minutes now, while the disk is below its floor.
+      slow.add(sandboxIdOf(writer.spaceId));
+      slow.add(sandboxIdOf(quiet.spaceId));
+      space = { freeBytes: 9 * GIB, totalBytes: 1000 * GIB };
+      const checking = yield* sandboxes.checkDisk.pipe(Effect.forkScoped);
+      // Its stop begins while both measurements still run.
+      yield* Deferred.await(writerStopping);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(checking);
+      assert.equal(
+        sandboxOf(yield* sandboxesAs(hub, hub.owner), writer.environmentId).status,
+        "failed",
+      );
+      assert.equal(
+        sandboxOf(yield* sandboxesAs(hub, hub.owner), quiet.environmentId).status,
+        "online",
+      );
+    }).pipe(Effect.scoped),
   );
 });

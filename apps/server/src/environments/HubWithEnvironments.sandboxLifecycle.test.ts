@@ -745,7 +745,8 @@ describe("Hub con Environments: a Sandbox that fills its disk", () => {
           Buffer.alloc(2 * 1024 * 1024),
         );
         yield* hub.server.sql`
-          UPDATE sandboxes SET disk_limit_bytes = ${1024 * 1024} WHERE space_id = ${acme}
+          INSERT INTO space_sandbox_limits (space_id, disk_limit_bytes, updated_at)
+          VALUES (${acme}, ${1024 * 1024}, '2026-11-01T00:00:00.000Z')
         `;
         // Every status the row passes through while the check stops it.
         const statuses: Array<string> = [];
@@ -798,10 +799,7 @@ describe("Hub con Environments: the Owner stops a Sandbox with a turn running", 
         .stop({ spaceId: acme, actor: AuditLog.userActor(owner), via: "settings" })
         .pipe(Effect.orDie);
       // Held stopped, it would never come back by itself to end the turn.
-      assert.equal(
-        yield* awaitRunSettled(hub, threadId, 1).pipe(Effect.timeout("30 seconds"), Effect.orDie),
-        "interrupted",
-      );
+      assert.equal(yield* awaitRunSettled(hub, threadId, 1), "interrupted");
       const interrupted = (yield* projectionOf(hub, threadId)).turnItems.find(
         (item) => item.type === "run_interrupt_result",
       );
@@ -810,6 +808,47 @@ describe("Hub con Environments: the Owner stops a Sandbox with a turn running", 
         "The Owner stopped",
       );
       assert.equal((yield* sandboxRow(hub, acme))?.status, "stopped");
+    }).pipe(Effect.scoped),
+  );
+});
+
+describe("Hub con Environments: a server that ends during the Owner's stop", () => {
+  it.live("is not started again for its turn once the stop holds it", () =>
+    Effect.gen(function* () {
+      const loaded = yield* loadFixture("simple");
+      const hold = yield* holdingEvents(loaded.adapters, 2);
+      let duringStop: Effect.Effect<void> = Effect.void;
+      const hub = yield* makeHub({
+        sandboxAdapters: hold.layer,
+        beforeSandboxStop: () =>
+          Effect.suspend(() => {
+            const run = duringStop;
+            duringStop = Effect.void;
+            return run;
+          }),
+      });
+      const owner = yield* ownerIdOf(hub);
+      const acme = yield* createOrganization(hub, "Acme");
+      const { message } = yield* placeOnSandbox(hub, loaded, acme, owner);
+      yield* dispatchAs(hub, owner, message);
+      yield* Deferred.await(hold.reached);
+      // Its server ends on its own as the Owner stops it; the Hub sees that first, with a turn on
+      // it, and asks to start it again.
+      duringStop = hub.crashSandbox(acme).pipe(Effect.andThen(awaitStatus(hub, acme, "stopped")));
+      yield* hub
+        .service(Sandboxes.Sandboxes)
+        .stop({ spaceId: acme, actor: AuditLog.userActor(owner), via: "settings" })
+        .pipe(Effect.orDie);
+      const refused = yield* hub
+        .service(EnvironmentDemand.EnvironmentDemand)
+        .awaitStarted(sandboxEnvironmentIdOf(acme), { actorUserId: undefined, explicit: false })
+        .pipe(Effect.flip);
+      assert.include(refused.detail, "the Owner stopped it");
+      const [row] = yield* hub.server.sql<{ readonly status: string; readonly heldAt: string }>`
+        SELECT status, held_at AS "heldAt" FROM sandboxes WHERE space_id = ${acme}
+      `;
+      assert.equal(row?.status, "stopped");
+      assert.isNotNull(row?.heldAt ?? null);
     }).pipe(Effect.scoped),
   );
 });

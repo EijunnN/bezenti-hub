@@ -57,7 +57,14 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import type * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
 import * as Sandboxes from "../sandboxes/Sandboxes.ts";
 import * as SandboxRuntimeFromConfig from "../sandboxes/sandboxRuntimeFromConfig.ts";
-import { BUILT_IN_DEFAULT_LIMITS, NO_LIMITS } from "../sandboxes/sandboxLimits.ts";
+import { BUILT_IN_DEFAULT_LIMITS, hostCapacity } from "../sandboxes/sandboxLimits.ts";
+import {
+  changeLimits,
+  deleteSpaceLimits,
+  readSpaceLimits,
+  SandboxLimitsInvalidError,
+  type SandboxNotFoundError,
+} from "../sandboxes/sandboxLimitStore.ts";
 import { sandboxSpaceOf } from "../sandboxes/sandboxSpace.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as EnvironmentConnections from "./EnvironmentConnections.ts";
@@ -519,7 +526,10 @@ export class EnvironmentRegistry extends Context.Service<
       HubSandboxDetail,
       EnvironmentNotFoundError | EnvironmentAccessDeniedError | EnvironmentStorageError
     >;
-    /** The Owner changes the Installation's defaults (no Environment) or a Sandbox's limits. */
+    /**
+     * The Owner changes the Installation's defaults (no Environment) or a Space's own limits, on its
+     * Sandbox or on a machine dedicated to it.
+     */
     readonly setSandboxLimits: (input: {
       readonly actorUserId: UserId;
       readonly environmentId: EnvironmentId | undefined;
@@ -528,7 +538,7 @@ export class EnvironmentRegistry extends Context.Service<
       HubSandboxList,
       | EnvironmentNotFoundError
       | EnvironmentAccessDeniedError
-      | Sandboxes.SandboxLimitsInvalidError
+      | SandboxLimitsInvalidError
       | EnvironmentStorageError
     >;
     /** Each time the Hub ended a Sandbox's sessions as it stopped it (its disk). */
@@ -1344,9 +1354,9 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
               ...named,
               mode,
               spaceId,
-              // Its Sandbox runs with the Space's own limits: the defaults are sized for Sandboxes
-              // sharing the Hub's machine, and this machine is the Space's.
-              limits: yield* spaceOwnLimitsOf(spaceId),
+              // Its Sandbox runs with the limits a Hub gives its own; the host caps them at what
+              // the machine has.
+              limits: yield* withLimitStore(readSpaceLimits(spaceId)),
               sandboxCredential,
             });
           }),
@@ -1583,17 +1593,14 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
 
   const sandboxFailure = (cause: unknown) => storageError(cause);
 
-  /** The Space's own Sandbox limits (its override, where it has a Sandbox row); else none. */
-  const spaceOwnLimitsOf = Effect.fn("EnvironmentRegistry.spaceOwnLimitsOf")(function* (
-    spaceId: SpaceId,
-  ) {
-    const [override] = yield* sql<SandboxLimits>`
-        SELECT cpu_limit AS cpus, memory_limit_bytes AS "memoryBytes", pids_limit AS pids,
-          disk_limit_bytes AS "diskBytes"
-        FROM sandboxes WHERE space_id = ${spaceId}
-      `;
-    return override ?? NO_LIMITS;
-  }, Effect.mapError(storageError));
+  /** The Sandbox limit store over this Hub's database and audit log. */
+  const withLimitStore = <A, E>(
+    effect: Effect.Effect<A, E, SqlClient.SqlClient | AuditLog.AuditLog>,
+  ): Effect.Effect<A, E> =>
+    effect.pipe(
+      Effect.provideService(SqlClient.SqlClient, sql),
+      Effect.provideService(AuditLog.AuditLog, audit),
+    );
 
   /** Each Sandbox the viewer may inspect, by Space, as the policy decides on it. */
   const inspectableSandboxes = Effect.fn("EnvironmentRegistry.inspectableSandboxes")(function* (
@@ -1748,9 +1755,7 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
   const setSandboxLimits: EnvironmentRegistry["Service"]["setSandboxLimits"] = Effect.fn(
     "EnvironmentRegistry.setSandboxLimits",
   )(function* ({ actorUserId, environmentId, limits }) {
-    let spaceId: SpaceId | undefined;
-    let service: Sandboxes.Sandboxes["Service"];
-    if (environmentId === undefined) {
+    const ownerOnly = Effect.gen(function* () {
       const principal = yield* principalOf(actorUserId);
       const decision =
         principal.inactive === true
@@ -1761,18 +1766,43 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
       if (decision._tag === "Deny") {
         return yield* new EnvironmentAccessDeniedError({ reason: decision.reason });
       }
-      if (Option.isNone(sandboxes)) return yield* new EnvironmentNotFoundError({});
-      service = sandboxes.value;
+    });
+    let spaceId: SpaceId | undefined;
+    const row = environmentId === undefined ? undefined : yield* liveRow(environmentId);
+    if (environmentId === undefined) {
+      yield* ownerOnly;
+    } else if (row?.mode === "dedicated" && row.spaceId !== null) {
+      // A machine dedicated to a Space: the Space's own limits, which its Sandbox starts with,
+      // whether or not the Hub also runs a Sandbox for that Space.
+      yield* ownerOnly;
+      spaceId = SpaceId.make(row.spaceId);
     } else {
-      const authorized = yield* authorizeSandbox(actorUserId, environmentId);
-      spaceId = authorized.spaceId;
-      service = authorized.sandboxes;
+      spaceId = (yield* authorizeSandbox(actorUserId, environmentId)).spaceId;
     }
-    yield* service.setLimits({ spaceId, limits, actor: AuditLog.userActor(actorUserId) }).pipe(
+    const actor = AuditLog.userActor(actorUserId);
+    // Through the Sandboxes where the Hub runs them (a lower disk limit is checked at once); else
+    // straight to the store, as a Hub with only dedicated machines.
+    const target = environmentId === undefined ? {} : { environmentId };
+    const change: Effect.Effect<
+      void,
+      SandboxNotFoundError | SandboxLimitsInvalidError | EnvironmentStorageError
+    > = Option.isSome(sandboxes)
+      ? sandboxes.value
+          .setLimits({ spaceId, limits, actor, ...target })
+          .pipe(
+            Effect.catchTags({ SandboxStartError: (cause) => Effect.fail(storageError(cause)) }),
+          )
+      : withLimitStore(
+          changeLimits({ spaceId, limits, actor, host: hostCapacity(null), ...target }),
+        ).pipe(
+          Effect.catchTags({
+            SqlError: (cause) => Effect.fail(storageError(cause)),
+            AuditLogWriteError: (cause) => Effect.fail(storageError(cause)),
+          }),
+        );
+    yield* change.pipe(
       Effect.catchTags({
         SandboxNotFoundError: () => Effect.fail(new EnvironmentNotFoundError({})),
-        SandboxLimitsInvalidError: (error) => Effect.fail(error),
-        SandboxStartError: (cause) => Effect.fail(storageError(cause)),
       }),
     );
     return yield* sandboxList(actorUserId);
@@ -1824,6 +1854,8 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
           Effect.mapError(storageError),
         );
       }
+      // Its own limits go with the Space, whether a Hub Sandbox or a dedicated machine used them.
+      yield* withLimitStore(deleteSpaceLimits(input.spaceId)).pipe(Effect.mapError(storageError));
       yield* PubSub.publish(removals, environmentId);
     }),
   });

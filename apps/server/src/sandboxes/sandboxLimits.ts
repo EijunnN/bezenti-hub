@@ -144,6 +144,9 @@ const MEASURE_OUTPUT_LIMIT = 64 * 1024;
 
 /** The longest stderr line read whole; a longer one counts as an error other than a vanished file. */
 const MEASURE_LINE_LIMIT = 16 * 1024;
+// The one error a file that vanished while `du` ran gives; any other (a directory gone, `fts_read`
+// failing) ends the walk early or skips a whole tree, leaving a total short of what is there.
+const VANISHED_PREFIX = "du: cannot access '";
 const VANISHED_SUFFIX = ": No such file or directory";
 
 /**
@@ -158,7 +161,7 @@ const duErrorsReader = () => {
   let vanished = false;
   const line = (text: string) => {
     if (!text.startsWith("du:")) return;
-    if (text.endsWith(VANISHED_SUFFIX)) vanished = true;
+    if (text.startsWith(VANISHED_PREFIX) && text.endsWith(VANISHED_SUFFIX)) vanished = true;
     else otherErrors = true;
   };
   return {
@@ -180,6 +183,22 @@ const duErrorsReader = () => {
   };
 };
 
+// Each measurement under way, by what kills its process group: a detached group outlives the
+// Hub's process unless killed as it exits.
+const underWay = new Set<() => void>();
+let exitHookAdded = false;
+
+/** Kills every measurement under way; what runs as the Hub's process exits. */
+export const killAllMeasurements = () => {
+  for (const kill of underWay) kill();
+};
+
+const killOnExit = () => {
+  if (exitHookAdded) return;
+  exitHookAdded = true;
+  process.once("exit", killAllMeasurements);
+};
+
 /**
  * Runs a `du -s -k` (`command` and `args`) and reads its total. Anything but a clean exit with a
  * total (or exit 1 for vanished files only) is a failure, never a smaller size. It runs in a
@@ -197,20 +216,25 @@ export const measureWithDu = (
     let child: NodeChildProcess.ChildProcess | undefined;
     const killGroup = () => {
       const pid = child?.pid;
-      if (pid === undefined) return;
-      try {
-        process.kill(-pid, "SIGKILL");
-      } catch {
-        // Its group is gone already.
+      if (pid !== undefined) {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          // Its group is gone already, or never was one: its own process is killed below.
+        }
       }
+      child?.kill("SIGKILL");
     };
     const settle = (result: HomeMeasurement) => {
       if (settled) return;
       settled = true;
+      underWay.delete(killGroup);
       if (timer !== undefined) clearTimeout(timer);
       if (!closed) killGroup();
       resume(Effect.succeed(result));
     };
+    killOnExit();
+    underWay.add(killGroup);
     const errors = duErrorsReader();
     try {
       child = NodeChildProcess.spawn(command, [...args], {
