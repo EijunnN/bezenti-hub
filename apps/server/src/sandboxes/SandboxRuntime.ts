@@ -80,6 +80,11 @@ export interface SandboxInspection {
   readonly homePath: string;
 }
 
+export interface SandboxStarted {
+  readonly exited: Effect.Effect<number | null>;
+  readonly imageVersion: string | null;
+}
+
 /** A Sandbox's server ended without being stopped: it crashed or was killed. */
 export interface SandboxExit {
   readonly sandboxId: string;
@@ -107,12 +112,15 @@ export class SandboxRuntime extends Context.Service<
     readonly create: (spec: SandboxSpec) => Effect.Effect<void, SandboxRuntimeError>;
     /**
      * Starts its server (nothing when it already runs). `exited` completes with its exit code when
-     * that server ends, so a start that dies at once is not waited on.
+     * that server ends, so a start that dies at once is not waited on. `imageVersion` is the
+     * version of the base image it runs (null without one, as the process runtime).
      */
     readonly start: (
       sandboxId: string,
       options?: SandboxStartOptions,
-    ) => Effect.Effect<{ readonly exited: Effect.Effect<number | null> }, SandboxRuntimeError>;
+    ) => Effect.Effect<SandboxStarted, SandboxRuntimeError>;
+    /** The base image version a start would run now: the newest built. */
+    readonly imageVersion: Effect.Effect<string | null, SandboxRuntimeError>;
     /** Stops its server, keeping its home; nothing when it is not running. */
     readonly stop: (sandboxId: string) => Effect.Effect<void, SandboxRuntimeError>;
     /** Stops it and removes its home with everything in it. */

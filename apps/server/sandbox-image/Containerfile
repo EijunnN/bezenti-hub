@@ -1,0 +1,81 @@
+# The base image of every Sandbox (docs/internals/sandboxes.md, «Base image»): Debian, Node, git,
+# ripgrep, common build tools, the AI CLIs of the providers T3 Code runs, and the T3 server of the
+# Hub's own version. `t3 sandbox image build` (or Settings → Environments) prepares the context and
+# builds it with rootless Podman 3.4 or newer; nothing here needs BuildKit.
+#
+# The context the Hub prepares:
+#   clis/     the providers' CLIs: package.json and its package-lock.json (this directory's clis/),
+#             only those two files.
+#   server/   the T3 server of the Hub's version, without its node_modules: the release tree a
+#             `t3` executable runs from, or a bundle built from a checkout (`dist/bin.mjs`).
+#   modules/  that server's runtime node_modules, for Linux on this machine's architecture.
+#   extras/   files laid out under /opt/t3 (a checkout's dev Replay agent); may be empty.
+#
+# Everything is pinned: Node by version and SHASUMS256, the CLIs with their whole dependency tree
+# by clis/package-lock.json (with integrity hashes). How to bump each: docs/internals/sandboxes.md.
+
+FROM docker.io/library/debian:bookworm-slim
+
+# Node of the repository's `engines` (package.json).
+ARG NODE_VERSION=26.12.1
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    NPM_CONFIG_UPDATE_NOTIFIER=false
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      bash build-essential ca-certificates curl file git git-lfs jq less libatomic1 \
+      openssh-client pkg-config procps python3 ripgrep unzip xz-utils zip \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) node_arch=x64 ;; \
+      arm64) node_arch=arm64 ;; \
+      *) echo "No Node build for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    file="node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"; \
+    cd /tmp; \
+    curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/${file}"; \
+    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" | grep " ${file}\$" | sha256sum -c -; \
+    tar -xJf "${file}" -C /usr/local --strip-components=1 --no-same-owner \
+      --exclude='*/CHANGELOG.md' --exclude='*/README.md' --exclude='*/LICENSE' --exclude='*/doc'; \
+    rm "${file}"; \
+    node --version; npm --version
+
+# The CLIs from the lockfile, every package checked against its integrity hash, with no install
+# script run. Then only the two whose postinstall is needed, rebuilt by name: Claude Code and
+# OpenCode ship a placeholder `bin` that their postinstall replaces with the platform binary of
+# their (locked, already verified) optional dependency; neither downloads anything. Grok's
+# postinstall only copies its binary into the installing user's ~/.grok, and its `bin` launches
+# the locked platform binary without it; protobufjs's only checks its version; @google/genai's
+# (Pi's) is an `echo`. Codex and Pi have no install script. clis/package.json's `allowScripts`
+# allows those two and denies the rest, as npm 12 requires (npm refuses `--allow-scripts` on a
+# project's `rebuild`). Only the two files are copied: nothing else of that directory gets in.
+COPY clis/package.json clis/package-lock.json /opt/t3/clis/
+RUN set -eu; \
+    cd /opt/t3/clis; \
+    npm ci --omit=dev --ignore-scripts --no-audit --no-fund; \
+    npm rebuild --foreground-scripts @anthropic-ai/claude-code opencode-ai; \
+    for bin in claude codex opencode pi grok; do ln -s "/opt/t3/clis/node_modules/.bin/${bin}" "/usr/local/bin/${bin}"; done; \
+    npm cache clean --force; rm -rf /root/.npm; \
+    claude --version; codex --version; opencode --version; pi --version; grok --version
+
+# The server last, so a new Hub version rebuilds only these layers.
+COPY modules/ /opt/t3/app/node_modules/
+COPY server/ /opt/t3/app/
+COPY extras/ /opt/t3/
+RUN set -eu; \
+    if [ -x /opt/t3/app/t3 ]; then \
+      ln -s /opt/t3/app/t3 /usr/local/bin/t3; \
+    else \
+      printf '#!/bin/sh\nexec node /opt/t3/app/dist/bin.mjs "$@"\n' > /usr/local/bin/t3; \
+      chmod 755 /usr/local/bin/t3; \
+    fi; \
+    t3 --version
+
+# Last, so each build is an image of its own even when every layer above is cached (a `--label`
+# alone does not make one on Podman 3.4). The Hub passes `<Hub version>-<UTC build time>`.
+ARG T3_IMAGE_VERSION=unversioned
+LABEL io.t3code.sandbox-image="1" io.t3code.image-version="${T3_IMAGE_VERSION}"

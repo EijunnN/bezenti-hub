@@ -190,6 +190,8 @@ import * as EnvironmentGitRoute from "./environments/gitRoute.ts";
 import * as EnvironmentRegistry from "./environments/EnvironmentRegistry.ts";
 import * as HubEnvironmentsHttp from "./environments/http.ts";
 import * as DedicatedHost from "./environments/DedicatedHost.ts";
+import * as SandboxImage from "./sandboxes/SandboxImage.ts";
+import * as SandboxImageHttp from "./sandboxes/http.ts";
 import * as JoinedHub from "./environments/JoinedHub.ts";
 import type { JoinedHubState } from "./environments/joinedHubState.ts";
 import * as NetService from "@t3tools/shared/Net";
@@ -484,6 +486,8 @@ const layerAuth = Layer.mergeAll(
   InstallationUserService.layer,
   SpaceVisibility.layer,
   AuditLog.layer,
+  // The Sandboxes' base image: built on this Hub, one build at a time.
+  SandboxImage.layer,
   // Sandboxes only with a runtime that runs them (`T3CODE_SANDBOX_RUNTIME`, or rootless Podman).
   EnvironmentRegistry.layerFromConfig,
 ).pipe(
@@ -734,6 +738,7 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provide(InstallationUsersHttp.layer),
       Layer.provide(AuditHttp.layer),
       Layer.provide(HubEnvironmentsHttp.layer),
+      Layer.provide(SandboxImageHttp.layer),
       Layer.provide(ServerHttp.layerServerEnvironmentHttpApi),
       Layer.provide(WebhookRoute.layer),
       Layer.provide(AuthHttp.layerAuthenticatedAuth),

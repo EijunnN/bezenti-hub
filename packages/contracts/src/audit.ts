@@ -44,6 +44,7 @@ export const AuditAction = Schema.Literals([
   "sandbox.stop",
   "sandbox.delete",
   "sandbox.limits.change",
+  "sandbox.image.update",
 ]);
 export type AuditAction = typeof AuditAction.Type;
 
@@ -124,14 +125,14 @@ export const AUDIT_DETAIL_KEYS = {
   "sandbox.create": ["runtime"],
   /**
    * `demand`: work needed it; `retry`: a User's «Try again»; `settings` or `restart`: the Owner
-   * by hand. `started` or `failed`, with the trimmed reason.
+   * by hand; `update`: moved to a new image. `started` or `failed`, with the trimmed reason.
    */
   "sandbox.start": ["via", "outcome", "reason"],
   /**
    * `archived`: its Organization was; `idle`: nothing ran in it for the idle timeout; `settings` or
-   * `restart`: the Owner by hand; `disk-full`: its home went over its disk limit (or could not be
-   * measured); `host-disk-low`: the Hub's disk for Sandboxes is almost full. `hold`: the Owner's
-   * stop, which waiting work does not undo.
+   * `restart`: the Owner by hand; `update`: the Owner moved it to a new image; `disk-full`: its
+   * home went over its disk limit (or could not be measured); `host-disk-low`: the Hub's disk for
+   * Sandboxes is almost full. `hold`: the Owner's stop, which waiting work does not undo.
    */
   "sandbox.stop": ["via", "hold"],
   "sandbox.delete": [],
@@ -140,6 +141,12 @@ export const AUDIT_DETAIL_KEYS = {
    * limit (defaults) or the default applies (a Space).
    */
   "sandbox.limits.change": ["scope", "cpus", "memoryBytes", "pids", "diskBytes"],
+  /**
+   * `build`: the base image was built from `settings` or the `cli` (`outcome` `built` or
+   * `failed`, the new `version` or the trimmed `reason`); `restart`: a running Sandbox moved
+   * `from` one version to `version` at the Owner's request.
+   */
+  "sandbox.image.update": ["via", "outcome", "version", "from", "reason"],
 } as const satisfies Record<AuditAction, ReadonlyArray<string>>;
 
 export type AuditDetailOf<A extends AuditAction> = {

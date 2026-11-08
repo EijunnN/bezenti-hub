@@ -63,6 +63,7 @@ import {
   SpaceCheckUnavailableError,
 } from "../sandboxes/sandboxSpace.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import * as EnvironmentDemand from "./EnvironmentDemand.ts";
 import * as EnvironmentExecutor from "./EnvironmentExecutor.ts";
 import type * as MovedWorkspace from "./MovedWorkspace.ts";
 import {
@@ -123,6 +124,8 @@ interface SessionSink {
   stalled: boolean;
   /** Attachments this session's turns carry, by id; they go with the session. */
   readonly grants: Map<string, AttachmentGrant>;
+  /** Its turns started and not yet ended, by run ordinal, as the Sandboxes are told. */
+  readonly turns: Set<number>;
 }
 
 interface Link {
@@ -269,6 +272,28 @@ const make = Effect.gen(function* () {
   const digester = yield* Digest.Digest;
   // Without git processes (orchestration-only hosts) a missing checkout is not cloned.
   const vcs = yield* Effect.serviceOption(VcsProcess.VcsProcess);
+  // A Sandbox is told which turns run on it, so an image update never cuts one short.
+  const demand = yield* Effect.serviceOption(EnvironmentDemand.EnvironmentDemand);
+  const turnKey = (providerSessionId: string, runOrdinal: number) =>
+    `${providerSessionId}:${runOrdinal}`;
+  const turnStarted = (link: Link, providerSessionId: string, sink: SessionSink, run: number) =>
+    Effect.suspend(() => {
+      sink.turns.add(run);
+      return Option.isNone(demand)
+        ? Effect.void
+        : demand.value.turnStarted(link.environmentId, turnKey(providerSessionId, run));
+    });
+  const turnEnded = (link: Link, providerSessionId: string, sink: SessionSink, run: number) =>
+    Effect.suspend(() => {
+      sink.turns.delete(run);
+      return Option.isNone(demand)
+        ? Effect.void
+        : demand.value.turnEnded(link.environmentId, turnKey(providerSessionId, run));
+    });
+  const sessionTurnsEnded = (link: Link, providerSessionId: string, sink: SessionSink) =>
+    Effect.forEach([...sink.turns], (run) => turnEnded(link, providerSessionId, sink, run), {
+      discard: true,
+    });
   const sql = yield* SqlClient.SqlClient;
   const filePath = yield* Path.Path;
   const links = new Map<EnvironmentId, Link>();
@@ -549,6 +574,7 @@ const make = Effect.gen(function* () {
       resumeThread: (input) => onSession("provider.resumeThread", input),
       startTurn: (input) =>
         requireSandboxSpace(link, driver, sink.threadId).pipe(
+          Effect.andThen(turnStarted(link, providerSessionId, sink, input.runOrdinal)),
           Effect.andThen(grantAttachments(sink, input.message.attachments)),
           Effect.flatMap((attachments) =>
             callProvider<void>(link, driver, "provider.startTurn", {
@@ -557,6 +583,8 @@ const make = Effect.gen(function* () {
               attachments,
             }),
           ),
+          // A turn that never started (refused, timed out, the link dropped) never reports its end.
+          Effect.onError(() => turnEnded(link, providerSessionId, sink, input.runOrdinal)),
         ),
       steerTurn: (input) =>
         grantAttachments(sink, input.message.attachments).pipe(
@@ -653,6 +681,7 @@ const make = Effect.gen(function* () {
         lastSeq: 0,
         stalled: false,
         grants: new Map(),
+        turns: new Set(),
       };
       // Before the call: the Environment may stream events ahead of its answer.
       link.sessions.set(input.providerSessionId, sink);
@@ -660,7 +689,10 @@ const make = Effect.gen(function* () {
         if (link.sessions.get(input.providerSessionId) === sink) {
           link.sessions.delete(input.providerSessionId);
         }
-      }).pipe(Effect.andThen(Queue.end(sink.queue)));
+      }).pipe(
+        Effect.andThen(sessionTurnsEnded(link, input.providerSessionId, sink)),
+        Effect.andThen(Queue.end(sink.queue)),
+      );
       const opened = yield* callProvider<{
         readonly providerSession: ProviderAdapter.ProviderAdapterV2SessionRuntime["providerSession"];
         readonly features: WireSessionFeatures;
@@ -1174,6 +1206,9 @@ const make = Effect.gen(function* () {
       });
     }
     if (seq !== undefined) sink.lastSeq = seq;
+    if (parsed.value.type === "turn.terminal") {
+      yield* turnEnded(link, providerSessionId, sink, parsed.value.runOrdinal);
+    }
     yield* Queue.offer(sink.queue, parsed.value);
     ack(link, providerSessionId, seq);
   });
@@ -1187,6 +1222,7 @@ const make = Effect.gen(function* () {
     const sink = yield* admit(link, decoded.value.providerSessionId, decoded.value.seq);
     if (sink === undefined) return;
     link.sessions.delete(decoded.value.providerSessionId);
+    yield* sessionTurnsEnded(link, decoded.value.providerSessionId, sink);
     ack(link, decoded.value.providerSessionId, decoded.value.seq);
     if (decoded.value.error === undefined) return yield* Queue.end(sink.queue);
     const error = yield* decodeJson(
@@ -1261,6 +1297,8 @@ const make = Effect.gen(function* () {
     sink: SessionSink,
     reason: EnvironmentSessionLostError["reason"],
   ) {
+    // Its turns end with it: none of them reports a `turn.terminal` now.
+    yield* sessionTurnsEnded(link, providerSessionId, sink);
     yield* Queue.fail(
       sink.queue,
       new ProviderAdapter.ProviderAdapterEventStreamError({

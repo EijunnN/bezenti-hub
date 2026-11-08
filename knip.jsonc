@@ -35,6 +35,8 @@
         "sign-macos.ts",
         "prepare-server-compile-cache.cjs",
         "smoke-desktop-app.ts",
+        // A Hub run from a checkout runs it by path for `t3 sandbox image build`.
+        "stage-sandbox-server.ts",
         "verify-windows-desktop-artifact.ts",
       ],
       "ignoreDependencies": ["agent-device", "esbuild"],

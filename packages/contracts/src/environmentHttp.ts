@@ -137,6 +137,12 @@ import {
 } from "./orchestrationV2.ts";
 import { Project, ProjectMutation, ProjectSnapshot } from "./project.ts";
 import {
+  SandboxImageStatus,
+  SandboxImageStatusQuery,
+  UpdateSandboxImageRequest,
+  UpdateSandboxImageResult,
+} from "./sandboxImage.ts";
+import {
   PullRequestDiffInput,
   PullRequestDiffResult,
   PullRequestOperationError,
@@ -208,6 +214,7 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "installation_users_failed",
   "audit_log_failed",
   "environments_failed",
+  "sandbox_image_failed",
   "internal_error",
 ]);
 export type EnvironmentInternalErrorReason = typeof EnvironmentInternalErrorReason.Type;
@@ -1361,6 +1368,43 @@ class EnvironmentWebhooksHttpApi extends HttpApiGroup.make("webhooks")
   .add(HttpApiEndpoint.patch("webhookPatch", WEBHOOK_PATH, webhookEndpoint))
   .add(HttpApiEndpoint.get("webhookGet", WEBHOOK_PATH, webhookEndpoint)) {}
 
+// The Sandbox base image: the Owner (or the Hub's own shell, `t3 sandbox image build`) builds it,
+// follows the build and moves a running Sandbox to it. A build answers at once; it runs on the Hub.
+const EnvironmentSandboxImageErrors = [
+  EnvironmentHttpForbiddenError,
+  EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+
+class EnvironmentSandboxImageHttpApi extends HttpApiGroup.make("sandboxImage")
+  .add(
+    HttpApiEndpoint.get("status", "/api/sandboxes/image", {
+      headers: OptionalBearerHeaders,
+      query: SandboxImageStatusQuery,
+      success: SandboxImageStatus,
+      error: EnvironmentSandboxImageErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("build", "/api/sandboxes/image/build", {
+      headers: OptionalBearerHeaders,
+      success: SandboxImageStatus,
+      error: [...EnvironmentSandboxImageErrors, EnvironmentHttpConflictError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("update", "/api/sandboxes/image/update", {
+      headers: OptionalBearerHeaders,
+      payload: UpdateSandboxImageRequest,
+      success: UpdateSandboxImageResult,
+      error: [
+        ...EnvironmentSandboxImageErrors,
+        EnvironmentHttpConflictError,
+        EnvironmentResourceNotFoundError,
+      ],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  ) {}
+
 export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentMetadataHttpApi)
   .add(EnvironmentAuthHttpApi)
@@ -1374,4 +1418,5 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentInstallationUsersHttpApi)
   .add(EnvironmentAuditHttpApi)
   .add(EnvironmentHubEnvironmentsHttpApi)
+  .add(EnvironmentSandboxImageHttpApi)
   .add(EnvironmentWebhooksHttpApi) {}

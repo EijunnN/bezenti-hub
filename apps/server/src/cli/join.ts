@@ -47,7 +47,7 @@ import {
   writeJoinedHubState,
 } from "../environments/joinedHubState.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
-import { rootlessPodmanHere } from "../sandboxes/sandboxRuntimeFromConfig.ts";
+import { rootlessPodmanHere, sandboxImageHere } from "../sandboxes/sandboxRuntimeFromConfig.ts";
 import { joinModeRefusal } from "./joinMode.ts";
 import { authLocationFlags, type CliAuthLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
@@ -232,6 +232,13 @@ const requirePodmanForDedicated = Effect.fn("cli.join.requirePodmanForDedicated"
   if (!(yield* rootlessPodmanHere())) {
     return yield* userError(
       "A dedicated machine runs its work in a Sandbox container, which needs rootless Podman here (`podman info` must say rootless). Install it and run `t3 join --dedicated` again.",
+    );
+  }
+  // Its container runs the Sandbox image, which the machine builds for itself.
+  const sandboxImage = yield* sandboxImageHere;
+  if (!sandboxImage.built) {
+    return yield* userError(
+      `A dedicated machine runs its work in the Sandbox image, and ${sandboxImage.image} is not on this machine. Build it here with \`t3 sandbox image build\` (or set T3CODE_SANDBOX_IMAGE to one that is), then run \`t3 join --dedicated\` again.`,
     );
   }
 });

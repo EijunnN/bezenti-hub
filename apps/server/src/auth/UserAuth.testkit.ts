@@ -37,6 +37,8 @@ import * as HubEnvironmentsHttp from "../environments/http.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as HubPreviewRoute from "../preview/hubPreviewRoute.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import * as SandboxImageHttp from "../sandboxes/http.ts";
+import * as SandboxImage from "../sandboxes/SandboxImage.ts";
 import type * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
 import { layerTestPeer, TEST_PEER_HEADER } from "./clientConnection.testkit.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
@@ -83,6 +85,7 @@ class AuthTestApi extends HttpApi.make("environment")
   .add(EnvironmentHttpApi.groups.installationUsers)
   .add(EnvironmentHttpApi.groups.audit)
   .add(EnvironmentHttpApi.groups.environments)
+  .add(EnvironmentHttpApi.groups.sandboxImage)
   .add(EnvironmentHttpApi.groups.projects)
   .add(EnvironmentHttpApi.groups.orchestration)
   .add(EnvironmentHttpApi.groups.pullRequests)
@@ -175,6 +178,7 @@ const makeLayerServices = (
   config: { readonly publicUrl?: URL },
   sandboxRuntime?: TestSandboxRuntime,
   { hubRunsAgents = true, ...registryOptions }: TestRegistryOptions = {},
+  sandboxImageBuilder?: SandboxImage.SandboxImageBuilder["Service"],
 ) =>
   // Archive and delete reach Projects and Thread reads; no Thread in these tests runs.
   OrganizationLifecycle.layer.pipe(
@@ -192,6 +196,15 @@ const makeLayerServices = (
           sandboxRuntime === undefined
             ? EnvironmentRegistry.layerWith(registryOptions)
             : EnvironmentRegistry.layerWithSandboxes(sandboxRuntime),
+          // Without a builder of its own, the image builds nothing: there is no Podman to ask.
+          SandboxImage.layer.pipe(
+            Layer.provide(
+              Layer.succeed(
+                SandboxImage.SandboxImageBuilder,
+                sandboxImageBuilder ?? SandboxImage.unavailableBuilder,
+              ),
+            ),
+          ),
           Layer.merge(McpOAuth.layer, McpOAuth.layerMcpClientAuthenticator).pipe(
             Layer.provide(ServerSettings.layerTest()),
             Layer.provide(
@@ -248,6 +261,8 @@ export const serveAuthHttpWith = Effect.fn(function* (
      * Sandboxes; by default it runs them, as the tests written before Sandboxes expect.
      */
     readonly registry?: TestRegistryOptions;
+    /** Builds and reads the Sandbox image instead of Podman. */
+    readonly sandboxImageBuilder?: SandboxImage.SandboxImageBuilder["Service"];
   } = {},
 ) {
   const base = yield* Layer.build(
@@ -255,6 +270,7 @@ export const serveAuthHttpWith = Effect.fn(function* (
       config.publicUrl === undefined ? {} : { publicUrl: config.publicUrl },
       config.sandboxRuntime,
       config.registry,
+      config.sandboxImageBuilder,
     ),
   );
   const services = config.extend === undefined ? base : yield* config.extend(base);
@@ -266,6 +282,7 @@ export const serveAuthHttpWith = Effect.fn(function* (
     Layer.provide(InstallationUsersHttp.layer),
     Layer.provide(AuditHttp.layer),
     Layer.provide(HubEnvironmentsHttp.layer),
+    Layer.provide(SandboxImageHttp.layer),
     Layer.provide(ProjectHttp.layer),
     Layer.provide(OrchestrationHttp.layer),
     Layer.provide(PullRequestHttp.layer),

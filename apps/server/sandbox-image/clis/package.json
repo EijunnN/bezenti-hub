@@ -1,0 +1,19 @@
+{
+  "name": "t3code-sandbox-clis",
+  "private": true,
+  "description": "The provider CLIs of the Sandbox image, locked with their whole tree. See docs/internals/sandboxes.md, «Base image».",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.319",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@openai/codex": "0.167.0",
+    "@xai-official/grok": "1.0.77",
+    "opencode-ai": "1.19.5"
+  },
+  "allowScripts": {
+    "@anthropic-ai/claude-code": true,
+    "opencode-ai": true,
+    "@google/genai": false,
+    "@xai-official/grok": false,
+    "protobufjs": false
+  }
+}

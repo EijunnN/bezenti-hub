@@ -73,6 +73,7 @@ import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as ProcessSandboxRuntime from "../sandboxes/ProcessSandboxRuntime.ts";
+import type * as SandboxImage from "../sandboxes/SandboxImage.ts";
 import * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
 import * as Sandboxes from "../sandboxes/Sandboxes.ts";
 import {
@@ -532,6 +533,8 @@ const makeSandboxRuntime = (
   onStart: SandboxStartObserver | undefined,
   /** Runs before each `inspect` of a Sandbox, as before each measurement of its home. */
   beforeInspect: ((sandboxId: string) => Effect.Effect<void>) | undefined,
+  /** The base image version each start runs, read at each start, as a runtime with images. */
+  imageVersion: (() => string | null) | undefined,
 ) => {
   let hubUrl = "";
   const started = new Map<string, TestEnvironment>();
@@ -584,7 +587,10 @@ const makeSandboxRuntime = (
     ),
   );
   const runtime =
-    beforeStop === undefined && onStart === undefined && beforeInspect === undefined
+    beforeStop === undefined &&
+    onStart === undefined &&
+    beforeInspect === undefined &&
+    imageVersion === undefined
       ? processRuntime
       : Layer.effect(
           SandboxRuntime.SandboxRuntime,
@@ -594,7 +600,13 @@ const makeSandboxRuntime = (
               start: (sandboxId, startOptions) =>
                 (onStart?.(sandboxId, startOptions ?? {}) ?? Effect.void).pipe(
                   Effect.andThen(inner.start(sandboxId, startOptions)),
+                  Effect.map((started) =>
+                    imageVersion === undefined
+                      ? started
+                      : { ...started, imageVersion: imageVersion() },
+                  ),
                 ),
+              ...(imageVersion === undefined ? {} : { imageVersion: Effect.sync(imageVersion) }),
               stop: (sandboxId) =>
                 (beforeStop?.(sandboxId) ?? Effect.void).pipe(
                   Effect.andThen(inner.stop(sandboxId)),
@@ -653,6 +665,10 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     readonly sandboxLifecycle?: Sandboxes.SandboxLifecyclePolicy["Service"];
     /** Runs Sandboxes with this runtime instead of the process one. */
     readonly sandboxRuntime?: SandboxRuntimeOverRoot;
+    /** The base image version the testkit's Sandboxes start with, read at each start. */
+    readonly sandboxImageVersion?: () => string | null;
+    /** Builds and reads the Sandbox image instead of Podman. */
+    readonly sandboxImageBuilder?: SandboxImage.SandboxImageBuilder["Service"];
     /** False: no Sandbox runtime, as a production Hub without Podman. */
     readonly sandboxes?: boolean;
     /**
@@ -678,6 +694,7 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     options.sandboxRuntime,
     options.onSandboxStart,
     options.beforeSandboxInspect,
+    options.sandboxImageVersion,
   );
   // The lifecycle policy goes in with the runtime, to the Sandboxes that read it.
   const sandboxRuntime =
@@ -697,6 +714,9 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
         ? {}
         : { sandboxesUnavailable: options.sandboxesUnavailable }),
     },
+    ...(options.sandboxImageBuilder === undefined
+      ? {}
+      : { sandboxImageBuilder: options.sandboxImageBuilder }),
   });
   sandboxes.setHubUrl(server.url);
   /**

@@ -55,6 +55,7 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Scope from "effect/Scope";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -987,11 +988,16 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
   /**
    * A command the Orchestrator decides with the Thread's machine (its provider, its workspace)
    * waits for a stopped Sandbox to start, as does a move onto one; a start that fails refuses it
-   * with why. Other commands, and effects (which wait unclaimed), never start it here.
+   * with why. Other commands, and effects (which wait unclaimed), never start it here. The command
+   * claims the machine for the rest of its dispatch, so an image update never cuts it short.
    */
   const startMachine = (
     command: OrchestrationV2ServerCommand,
-  ): Effect.Effect<OrchestrationV2ServerCommand, Orchestrator.OrchestratorCommandRejectedError> => {
+  ): Effect.Effect<
+    OrchestrationV2ServerCommand,
+    Orchestrator.OrchestratorCommandRejectedError,
+    Scope.Scope
+  > => {
     if (Option.isNone(demand) || Option.isNone(executors)) return Effect.succeed(command);
     const target: Effect.Effect<EnvironmentId> | undefined =
       command.type === "thread.move"
@@ -1003,10 +1009,15 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
     return target.pipe(
       Effect.flatMap((environmentId) =>
         demand.value
-          .awaitStarted(environmentId, {
-            actorUserId: "ownerUserId" in command ? command.ownerUserId : undefined,
-            explicit: true,
-          })
+          .claim(environmentId)
+          .pipe(
+            Effect.andThen(
+              demand.value.awaitStarted(environmentId, {
+                actorUserId: "ownerUserId" in command ? command.ownerUserId : undefined,
+                explicit: true,
+              }),
+            ),
+          )
           .pipe(
             Effect.mapError(
               (error) =>
@@ -1039,6 +1050,8 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
           Effect.andThen(orchestrator.dispatch(claimed)),
         ),
       ),
+      // The machine's claim (startMachine) ends with the dispatch.
+      Effect.scoped,
     );
 
   const getProjectThreadRecords: ThreadManagementServiceShape["getProjectThreadRecords"] = (

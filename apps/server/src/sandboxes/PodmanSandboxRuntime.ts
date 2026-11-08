@@ -14,9 +14,11 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -102,8 +104,48 @@ forward.listen(Number(port), "127.0.0.1", () => {
 });
 `;
 
+/** On every image the Hub builds: its version, `<Hub version>-<UTC build time>`. */
+export const SANDBOX_IMAGE_VERSION_LABEL = "io.t3code.image-version";
+
+/** What an image is, as the Hub reads it: its id and, for one the Hub built, its version. */
+export interface SandboxImageFound {
+  readonly id: string;
+  readonly version: string | null;
+  readonly createdAt: string | null;
+}
+
+const PodmanImage = Schema.Struct({
+  Id: Schema.String,
+  Created: Schema.optional(Schema.String),
+  Labels: Schema.optional(Schema.NullOr(Schema.Record(Schema.String, Schema.String))),
+});
+const decodePodmanImages = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Array(PodmanImage)),
+);
+
+/** `podman image inspect`: the image `image` names now, or none. */
+export const inspectSandboxImage = (image: string, podmanCommand?: string) =>
+  runPodman(["image", "inspect", image], {
+    ...(podmanCommand === undefined ? {} : { podmanCommand }),
+    timeoutMs: 15_000,
+  }).pipe(
+    Effect.map((result): SandboxImageFound | null => {
+      if (result.exitCode !== 0) return null;
+      const [found] = Option.getOrElse(decodePodmanImages(result.stdout), () => []);
+      if (found === undefined) return null;
+      return {
+        id: found.Id,
+        version: found.Labels?.[SANDBOX_IMAGE_VERSION_LABEL] ?? null,
+        createdAt: found.Created ?? null,
+      };
+    }),
+  );
+
 export interface PodmanSandboxRuntimeOptions {
-  /** The image: node and git, and the T3 server (ticket 06), or a dev image. */
+  /**
+   * The image's tag: the base image (apps/server/sandbox-image), or a dev image. Each start runs
+   * the image the tag names then, so a Sandbox picks up a new build at its next start.
+   */
   readonly image: string;
   /** Starts the T3 server in the image; `serve --base-dir …` is appended. Default `["t3"]`. */
   readonly serverCommand?: ReadonlyArray<string>;
@@ -112,6 +154,14 @@ export interface PodmanSandboxRuntimeOptions {
    * runs the Hub's own source. Never in production, where the image carries the server.
    */
   readonly codeMounts?: ReadonlyArray<string>;
+  /**
+   * A dev Hub's own server, for an image the Hub did not build (a dev image of Node and git):
+   * its command and code mounts. A base image runs its own `t3` and mounts no code.
+   */
+  readonly devServer?: {
+    readonly serverCommand: ReadonlyArray<string>;
+    readonly codeMounts: ReadonlyArray<string>;
+  };
   /** A dev Hub's `--dev-url`, so its Sandboxes have the Replay provider too. */
   readonly devUrl?: string | undefined;
   /** Default: beside the Hub's home, `<Hub home>-sandboxes`, so no Sandbox is inside it. */
@@ -272,6 +322,8 @@ interface Running {
   readonly containerId: string;
   readonly startedAt: string;
   readonly exited: Deferred.Deferred<number | null>;
+  /** The version of the base image it runs; null for a dev image. */
+  readonly imageVersion: string | null;
   /** Set before its scope closes, so the end is not reported as a crash. */
   stopping: boolean;
 }
@@ -418,27 +470,50 @@ const make = Effect.fn("PodmanSandboxRuntime.make")(function* (
    * A dev Hub's code mounts, checked once: none may hold the Hub's home, the Sandboxes or a
    * `.env` file, since a Sandbox reads everything mounted.
    */
-  let codeMountsChecked: string | undefined | null = null;
-  const checkCodeMounts = () => {
-    if (codeMountsChecked !== null) return codeMountsChecked;
-    codeMountsChecked = undefined;
-    for (const dir of options.codeMounts ?? []) {
-      const real = NodeFS.realpathSync(dir);
-      for (const secret of [rootDir, config.baseDir]) {
-        const resolved = NodeFS.existsSync(secret) ? NodeFS.realpathSync(secret) : secret;
-        if (isUnder(real, resolved) || isUnder(dir, secret)) {
-          codeMountsChecked = `the code mount ${dir} holds ${secret}.`;
-          return codeMountsChecked;
+  const codeMountsChecked = new Map<string, string | undefined>();
+  const checkCodeMounts = (mounts: ReadonlyArray<string>) => {
+    const key = mounts.join("\0");
+    if (codeMountsChecked.has(key)) return codeMountsChecked.get(key);
+    const refusal = (() => {
+      for (const dir of mounts) {
+        const real = NodeFS.realpathSync(dir);
+        for (const secret of [rootDir, config.baseDir]) {
+          const resolved = NodeFS.existsSync(secret) ? NodeFS.realpathSync(secret) : secret;
+          if (isUnder(real, resolved) || isUnder(dir, secret)) {
+            return `the code mount ${dir} holds ${secret}.`;
+          }
         }
+        const env = envFilesUnder(real);
+        if (env.length > 0) return `the code mount ${dir} holds ${env[0]}.`;
       }
-      const env = envFilesUnder(real);
-      if (env.length > 0) {
-        codeMountsChecked = `the code mount ${dir} holds ${env[0]}.`;
-        return codeMountsChecked;
-      }
-    }
-    return codeMountsChecked;
+      return undefined;
+    })();
+    codeMountsChecked.set(key, refusal);
+    return refusal;
   };
+
+  /**
+   * What a start runs: the image the tag names now (by id, so a build meanwhile changes nothing
+   * mid-start), and its server. A base image runs its own `t3`; a dev Hub's dev image, its source.
+   */
+  const resolveImage = Effect.fn("PodmanSandboxRuntime.resolveImage")(function* (
+    sandboxId: string,
+  ) {
+    const found = yield* inspectSandboxImage(options.image, options.podmanCommand);
+    if (found === null) {
+      return yield* failure(
+        "start",
+        sandboxId,
+      )(`its image ${options.image} is not built; build it with \`t3 sandbox image build\`.`);
+    }
+    const dev = found.version === null ? options.devServer : undefined;
+    return {
+      imageId: found.id,
+      version: found.version,
+      serverCommand: options.serverCommand ?? dev?.serverCommand ?? ["t3"],
+      codeMounts: options.codeMounts ?? dev?.codeMounts ?? [],
+    };
+  });
 
   const create: SandboxRuntime["Service"]["create"] = Effect.fn("PodmanSandboxRuntime.create")(
     function* (spec) {
@@ -470,9 +545,17 @@ const make = Effect.fn("PodmanSandboxRuntime.make")(function* (
     (effect, spec) => Effect.mapError(effect, failure("be created", spec.sandboxId)),
   );
 
-  const runArgs = (sandboxId: string, socketDir: string, limits: SandboxLimits) => {
-    const serverCommand = options.serverCommand ?? ["t3"];
-    const [command, ...commandArgs] = serverCommand;
+  const runArgs = (
+    sandboxId: string,
+    socketDir: string,
+    image: {
+      readonly imageId: string;
+      readonly serverCommand: ReadonlyArray<string>;
+      readonly codeMounts: ReadonlyArray<string>;
+    },
+    limits: SandboxLimits,
+  ) => {
+    const [command, ...commandArgs] = image.serverCommand;
     return [
       "run",
       "--detach",
@@ -510,14 +593,14 @@ const make = Effect.fn("PodmanSandboxRuntime.make")(function* (
       `${joinedOf(sandboxId)}:${containerPaths.joinedHubPath}:ro`,
       "--volume",
       `${socketDir}:${SANDBOX_CONTAINER_HUB_DIR}:ro`,
-      ...(options.codeMounts ?? []).flatMap((dir) => ["--volume", `${dir}:${dir}:ro`]),
+      ...image.codeMounts.flatMap((dir) => ["--volume", `${dir}:${dir}:ro`]),
       "--env",
       `HOME=${SANDBOX_CONTAINER_HOME}`,
       "--workdir",
       SANDBOX_CONTAINER_HOME,
       "--entrypoint",
       "node",
-      options.image,
+      image.imageId,
       "-e",
       SANDBOX_ENTRY_SCRIPT,
       `${SANDBOX_CONTAINER_HUB_DIR}/hub.sock`,
@@ -578,11 +661,14 @@ const make = Effect.fn("PodmanSandboxRuntime.make")(function* (
   const start: SandboxRuntime["Service"]["start"] = Effect.fn("PodmanSandboxRuntime.start")(
     function* (sandboxId, startOptions) {
       const current = running.get(sandboxId);
-      if (current !== undefined) return { exited: Deferred.await(current.exited) };
+      if (current !== undefined) {
+        return { exited: Deferred.await(current.exited), imageVersion: current.imageVersion };
+      }
       if (!NodeFS.existsSync(joinedOf(sandboxId)) || !NodeFS.existsSync(homeOf(sandboxId))) {
         return yield* failure("start", sandboxId)("it has no home; create it first.");
       }
-      const refused = checkCodeMounts();
+      const image = yield* resolveImage(sandboxId);
+      const refused = checkCodeMounts(image.codeMounts);
       if (refused !== undefined) return yield* failure("start", sandboxId)(refused);
       yield* removeLeftover(sandboxId);
       // With no container left, nothing changes the home while this looks (lstat: no link is
@@ -607,7 +693,9 @@ const make = Effect.fn("PodmanSandboxRuntime.make")(function* (
           socketPath: path.join(socketDir, "hub.sock"),
           hubUrl: () => hubUrl,
         }).pipe(Effect.mapError(failure("start", sandboxId)));
-        const ran = yield* podman(runArgs(sandboxId, socketDir, startOptions?.limits ?? NO_LIMITS));
+        const ran = yield* podman(
+          runArgs(sandboxId, socketDir, image, startOptions?.limits ?? NO_LIMITS),
+        );
         const id = ran.stdout.trim().split("\n").at(-1)?.trim() ?? "";
         if (ran.exitCode !== 0 || id === "") {
           // A container made but not started still goes.
@@ -628,6 +716,7 @@ const make = Effect.fn("PodmanSandboxRuntime.make")(function* (
         containerId,
         startedAt: DateTime.formatIso(yield* DateTime.now),
         exited: yield* Deferred.make<number | null>(),
+        imageVersion: image.version,
         stopping: false,
       };
       running.set(sandboxId, entry);
@@ -649,7 +738,7 @@ const make = Effect.fn("PodmanSandboxRuntime.make")(function* (
         ),
         Effect.forkIn(runtimeScope),
       );
-      return { exited: Deferred.await(entry.exited) };
+      return { exited: Deferred.await(entry.exited), imageVersion: entry.imageVersion };
     },
     (effect) => lock.withPermits(1)(effect),
   );
@@ -729,6 +818,9 @@ const make = Effect.fn("PodmanSandboxRuntime.make")(function* (
     kind: "podman",
     create,
     start,
+    imageVersion: inspectSandboxImage(options.image, options.podmanCommand).pipe(
+      Effect.map((found) => found?.version ?? null),
+    ),
     stop,
     delete: remove,
     inspect,

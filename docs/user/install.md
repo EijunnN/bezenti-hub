@@ -534,7 +534,7 @@ To run Sandboxes, the Hub's machine needs:
 - **Rootless Podman** 3.4 or newer with `slirp4netns`, and subuid/subgid ranges
   for the user the Hub runs as (`/etc/subuid`, `/etc/subgid`).
 - **The Sandbox image**, `localhost/t3code-sandbox:<version>` (or another one
-  named in `T3CODE_SANDBOX_IMAGE`).
+  named in `T3CODE_SANDBOX_IMAGE`), built as below.
 - **A Hub that listens on loopback only.** A Sandbox's container can reach every
   other address of the machine, so start the Hub with `T3CODE_HOST=127.0.0.1`
   and publish it through a reverse proxy (or `t3 up`). A Hub listening on
@@ -564,18 +564,43 @@ internet, and the Hub only through a private socket. A Sandbox clones a
 Project from the Project's own remote, so use a remote it can reach over the
 internet.
 
+#### The Sandbox image
+
+Every Sandbox runs the same image: Debian with Node, git, ripgrep and common
+build tools, the CLIs of Claude Code, Codex, OpenCode, Pi and Grok, and the T3
+server of the Hub's own version. Build it on the Hub's machine with:
+
+```bash
+t3 sandbox image build
+```
+
+or, as the Owner, with **Build image** in **Settings → Environments → Sandbox
+image**, which shows the build's output as it runs and why it failed if it
+did. The first build downloads a few gigabytes and takes several minutes;
+later ones reuse most of it. A Hub that started before the image existed runs
+Sandboxes once you restart it.
+
+The same section shows the version each Sandbox runs. After a new build, a
+stopped Sandbox uses it from its next start. A running one keeps its image
+until you choose **Update** beside it; the Hub refuses while a turn is running
+there and says so, so updating never interrupts work. Provider sign-ins live
+in the Sandbox's own files, not in the image, so they survive every update.
+Each build and update is recorded in the audit log.
+
 ### Dedicate a machine to an organization
 
 A server of your own, such as a VPS, can serve a whole organization instead of
 one person: every Admin and Member of that organization can run its Threads
 there, and nobody else sees it. On that machine, with rootless Podman and the
-Sandbox image installed (as for Sandboxes, above), run:
+Sandbox image built there (`t3 sandbox image build` on that machine, as for
+Sandboxes, above), run:
 
 ```bash
 t3 join --dedicated Acme https://hub.example.com
 ```
 
-`t3 join` checks Podman first. Open the link as the Owner: under **Used by**,
+`t3 join` checks Podman and the image first, and says how to build the image
+if it is missing. Open the link as the Owner: under **Used by**,
 **Everyone in Acme (dedicated)** is already chosen (only the Owner is offered
 organizations; anyone else registers machines only as their own). Confirm, and
 back on the machine answer `y` to `Approved by … as a machine dedicated to

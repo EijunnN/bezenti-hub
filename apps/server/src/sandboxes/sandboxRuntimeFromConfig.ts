@@ -15,17 +15,14 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 
-import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
 import * as PodmanSandboxRuntime from "./PodmanSandboxRuntime.ts";
 import { hostExposureRefusal, listeningOutsideLoopback } from "./hostExposure.ts";
 import * as ProcessSandboxRuntime from "./ProcessSandboxRuntime.ts";
+import { checkoutOf, configuredSandboxImage } from "./SandboxImage.ts";
 import { SandboxHubAddress } from "./SandboxRuntime.ts";
 
 const SANDBOX_RUNTIME_SETTING = "T3CODE_SANDBOX_RUNTIME";
-/** The image Sandboxes run; by default the one built for this Hub's version. */
-const SANDBOX_IMAGE_SETTING = "T3CODE_SANDBOX_IMAGE";
-const defaultSandboxImage = `localhost/t3code-sandbox:${packageJson.version}`;
 /** Ports of a dedicated machine its Sandbox may reach, comma-separated (for example `22`). */
 const DEDICATED_HOST_PORTS_SETTING = "T3CODE_DEDICATED_HOST_PORTS";
 
@@ -34,16 +31,6 @@ const optionalSetting = (name: string) =>
     Config.option,
     Effect.orElseSucceed(() => Option.none<string>()),
   );
-
-/** The checkout a Hub run from source lives in: the nearest directory with the pnpm workspace. */
-const checkoutOf = (entry: string) => {
-  let dir = NodePath.dirname(NodePath.resolve(entry));
-  while (dir !== NodePath.dirname(dir)) {
-    if (NodeFS.existsSync(NodePath.join(dir, "pnpm-workspace.yaml"))) return dir;
-    dir = NodePath.dirname(dir);
-  }
-  return undefined;
-};
 
 /**
  * What a dev Hub mounts of its checkout, read-only, for its Sandboxes to run the server from
@@ -79,9 +66,9 @@ const detectPodman = (image: string) =>
   });
 
 /**
- * The Podman runtime as a Hub runs it. A Hub run from source (`src/bin.ts`, a dev Hub) mounts
- * {@link devCodeMounts} and runs it with the image's Node, so a dev image needs only node and git;
- * otherwise the image's `t3` runs.
+ * The Podman runtime as a Hub runs it. The base image runs its own `t3`. A Hub run from source
+ * (`src/bin.ts`, a dev Hub) given a dev image (one it did not build: node and git only) mounts
+ * {@link devCodeMounts} and runs its source with the image's Node.
  */
 const podmanForHub = (config: { readonly devUrl: URL | undefined }, image: string) => {
   const entry = process.argv[1];
@@ -90,7 +77,12 @@ const podmanForHub = (config: { readonly devUrl: URL | undefined }, image: strin
     image,
     ...(checkout === undefined || entry === undefined
       ? {}
-      : { serverCommand: ["node", NodePath.resolve(entry)], codeMounts: devCodeMounts(checkout) }),
+      : {
+          devServer: {
+            serverCommand: ["node", NodePath.resolve(entry)],
+            codeMounts: devCodeMounts(checkout),
+          },
+        }),
     devUrl: config.devUrl?.toString(),
   });
 };
@@ -101,8 +93,17 @@ const podmanForHub = (config: { readonly devUrl: URL | undefined }, image: strin
  * process one only when `T3CODE_SANDBOX_RUNTIME=process` asks for it (development and tests).
  * Fails with why there is none, as `t3 status` shows it.
  */
+/** Why a dedicated machine runs nothing, and whether it waits (its image missing) and asks again. */
+export interface DedicatedRuntimeRefusal {
+  readonly message: string;
+  readonly waits: boolean;
+}
+const refused = (message: string, waits = false) =>
+  Result.fail<DedicatedRuntimeRefusal>({ message, waits });
+
 export const dedicatedRuntimeFromConfig = Effect.fn("dedicatedRuntimeFromConfig")(function* (
   hubUrl: string,
+  options: { readonly recheck?: boolean } = {},
 ) {
   const setting = Option.getOrUndefined(yield* optionalSetting(SANDBOX_RUNTIME_SETTING));
   const config = yield* ServerConfig.ServerConfig;
@@ -113,27 +114,30 @@ export const dedicatedRuntimeFromConfig = Effect.fn("dedicatedRuntimeFromConfig"
   if (setting === "process") {
     const processRuntime = ProcessSandboxRuntime.forHub(config);
     return Option.isNone(processRuntime)
-      ? Result.fail("this server has no entry point to run its Sandbox's server with.")
+      ? refused("this server has no entry point to run its Sandbox's server with.")
       : Result.succeed(processRuntime.value.pipe(Layer.provide(address)));
   }
   if (setting !== undefined && setting !== "podman") {
-    return Result.fail(
+    return refused(
       `a dedicated machine runs its work in a Sandbox container, and ${SANDBOX_RUNTIME_SETTING}=${setting} runs none.`,
     );
   }
-  const image = Option.getOrElse(
-    yield* optionalSetting(SANDBOX_IMAGE_SETTING),
-    () => defaultSandboxImage,
-  );
+  const image = yield* configuredSandboxImage;
+  // Asked again, Podman answers anew: what it said when this server started is not kept.
+  if (options.recheck === true) podmanDetection = undefined;
   const detected = yield* detectPodman(image);
   if (!detected.rootless) {
-    return Result.fail(
+    // On a recheck (rootless Podman was here, only the image missing) it is a slow or failed
+    // `podman info`, not Podman gone: the wait goes on.
+    return refused(
       "a dedicated machine runs its work in a Sandbox container, and rootless Podman is not available here.",
+      options.recheck === true,
     );
   }
   if (!detected.image) {
-    return Result.fail(
-      `Podman is here but the Sandbox image ${image} is not: build it (\`t3 sandbox image build\`) or set ${SANDBOX_IMAGE_SETTING}.`,
+    return refused(
+      `Podman is here but the Sandbox image ${image} is not: build it (\`t3 sandbox image build\`) or set T3CODE_SANDBOX_IMAGE.`,
+      true,
     );
   }
   // The container reaches every address of this machine but its loopback, and rootless Podman
@@ -149,7 +153,7 @@ export const dedicatedRuntimeFromConfig = Effect.fn("dedicatedRuntimeFromConfig"
     listeningOutsideLoopback().filter((listener) => listener.port !== config.port),
     allowed,
   );
-  if (exposed !== undefined) return Result.fail(exposed);
+  if (exposed !== undefined) return refused(exposed);
   return Result.succeed(podmanForHub(config, image).pipe(Layer.provide(address)));
 });
 
@@ -210,10 +214,7 @@ export const fromConfig = Effect.gen(function* () {
       ? none("The process Sandbox runtime needs the Hub's own entry point.")
       : { runtime, unavailable: null, turnedOff: false };
   }
-  const image = Option.getOrElse(
-    yield* optionalSetting(SANDBOX_IMAGE_SETTING),
-    () => defaultSandboxImage,
-  );
+  const image = yield* configuredSandboxImage;
   if (hubUrl === undefined || !hubHostAllowsPodman(config.host)) {
     // Said whenever Podman could have run them, so a Hub left on 0.0.0.0 learns why it has none.
     if (setting === "podman" || (yield* detectPodman(image)).rootless) {
@@ -230,8 +231,12 @@ export const fromConfig = Effect.gen(function* () {
     return none(SANDBOXES_NEED_PODMAN);
   }
   if (setting === undefined && !detected.image) {
-    yield* Effect.logInfo(`Sandboxes are off: Podman is here but the image ${image} is not built.`);
-    return none(`Sandboxes need the Sandbox image ${image}, which is not built on this Hub yet.`);
+    yield* Effect.logInfo(
+      `Sandboxes are off: Podman is here but the image ${image} is not built. Build it with \`t3 sandbox image build\` and restart the Hub.`,
+    );
+    return none(
+      `Sandboxes need the Sandbox image ${image}, which is not built on this Hub yet: build it (Build image, or t3 sandbox image build) and restart the Hub.`,
+    );
   }
   return {
     runtime: Option.some(podmanForHub(config, image).pipe(Layer.provide(addressOf(hubUrl)))),
@@ -276,4 +281,16 @@ export const hubRunsAgentsFromConfig = Effect.gen(function* () {
   }
   const runtime = Option.getOrUndefined(yield* optionalSetting(SANDBOX_RUNTIME_SETTING));
   return runtime !== "process" && runtime !== "podman";
+});
+
+/**
+ * The Sandbox image this machine would run (`T3CODE_SANDBOX_IMAGE`, else this version's), and
+ * whether it is built here, as `t3 join --dedicated` checks before asking.
+ */
+export const sandboxImageHere = Effect.gen(function* () {
+  const image = yield* configuredSandboxImage;
+  const exists = yield* PodmanSandboxRuntime.runPodman(["image", "exists", image], {
+    timeoutMs: 15_000,
+  });
+  return { image, built: exists.exitCode === 0 };
 });

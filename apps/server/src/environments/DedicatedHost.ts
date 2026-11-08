@@ -19,7 +19,10 @@ import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } fr
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
-import { dedicatedRuntimeFromConfig } from "../sandboxes/sandboxRuntimeFromConfig.ts";
+import {
+  dedicatedRuntimeFromConfig,
+  type DedicatedRuntimeRefusal,
+} from "../sandboxes/sandboxRuntimeFromConfig.ts";
 import {
   type SandboxLimits,
   SandboxRuntime,
@@ -261,6 +264,38 @@ export const superviseDedicatedSandbox = Effect.fn("DedicatedHost.supervise")(fu
   }
 });
 
+/** How often a dedicated machine waiting for its Sandbox image asks Podman again. */
+export const DEDICATED_IMAGE_RECHECK_MS = 15_000;
+
+/**
+ * The runtime once it can run. A missing image is waited for, Podman asked again every
+ * {@link DEDICATED_IMAGE_RECHECK_MS} (so `t3 sandbox image build` is picked up without a restart);
+ * any other reason is final, as its message.
+ */
+export const awaitDedicatedRuntime = Effect.fn("DedicatedHost.awaitDedicatedRuntime")(function* <
+  A,
+  R,
+>(input: {
+  readonly check: (
+    recheck: boolean,
+  ) => Effect.Effect<Result.Result<A, DedicatedRuntimeRefusal>, never, R>;
+  readonly onWaiting: (message: string) => Effect.Effect<void>;
+}) {
+  let recheck = false;
+  while (true) {
+    const checked = yield* input.check(recheck);
+    if (Result.isSuccess(checked)) return Result.succeed(checked.success);
+    if (!checked.failure.waits) return Result.fail(checked.failure.message);
+    if (!recheck) {
+      yield* input.onWaiting(
+        `${checked.failure.message} Its Sandbox starts by itself once it is built.`,
+      );
+    }
+    recheck = true;
+    yield* Effect.sleep(DEDICATED_IMAGE_RECHECK_MS);
+  }
+});
+
 /**
  * Joined mode on a dedicated machine: `/health` reports the Sandbox, not a connection of this
  * server's own. Without a runtime that isolates (no rootless Podman, no image, ports of the host
@@ -298,14 +333,7 @@ export const layer = (joined: JoinedHubState) =>
         yield* fail("this machine has no dedicated credential. Run `t3 join --dedicated` again.");
         return connector;
       }
-      const runtime = yield* dedicatedRuntimeFromConfig(joined.hubUrl);
-      if (Result.isFailure(runtime)) {
-        yield* Effect.logWarning(`This dedicated machine runs nothing: ${runtime.failure}`);
-        yield* fail(runtime.failure);
-        return connector;
-      }
       const scope = yield* Effect.scope;
-      const context = yield* Layer.build(runtime.success);
       // The runtime's own root, as it derives it.
       const rootDir = path.join(
         path.dirname(config.baseDir),
@@ -313,31 +341,57 @@ export const layer = (joined: JoinedHubState) =>
       );
       // `layerPersonal` is built only once the Hub made the machine personal.
       const layerPersonal = (personal: JoinedHubState) => JoinedHub.layer(personal);
-      yield* superviseDedicatedSandbox({
-        joined,
-        state,
-        askHub: askHubAt(joined.hubUrl, credential.value),
-        homesOnDisk: dedicatedHomesIn(rootDir).pipe(
-          Effect.provideService(FileSystem.FileSystem, fs),
-          Effect.provideService(Path.Path, path),
-        ),
-        persist: (next) =>
-          writeJoinedHubState(config.joinedHubPath, next).pipe(
+      // Waited for in its own fiber: `/health` answers meanwhile, saying why it runs nothing yet.
+      const supervise = Effect.gen(function* () {
+        const runtime = yield* awaitDedicatedRuntime({
+          check: (recheck) => dedicatedRuntimeFromConfig(joined.hubUrl, { recheck }),
+          onWaiting: (message) =>
+            Effect.logWarning(`This dedicated machine runs nothing yet: ${message}`).pipe(
+              Effect.andThen(nowIso),
+              Effect.flatMap((since) =>
+                Ref.set(state, { _tag: "sandbox", state: "restarting", since, message }),
+              ),
+            ),
+        });
+        if (Result.isFailure(runtime)) {
+          yield* Effect.logWarning(`This dedicated machine runs nothing: ${runtime.failure}`);
+          return yield* fail(runtime.failure);
+        }
+        const context = yield* Layer.buildWithScope(runtime.success, scope);
+        yield* superviseDedicatedSandbox({
+          joined,
+          state,
+          askHub: askHubAt(joined.hubUrl, credential.value),
+          homesOnDisk: dedicatedHomesIn(rootDir).pipe(
             Effect.provideService(FileSystem.FileSystem, fs),
-            Effect.ignore,
+            Effect.provideService(Path.Path, path),
           ),
-        becomePersonal: Effect.fn("DedicatedHost.becomePersonal")(
-          function* (personal: JoinedHubState) {
-            yield* secrets
-              .set(ENVIRONMENT_CREDENTIAL_SECRET, new TextEncoder().encode(credential.value))
-              .pipe(Effect.andThen(secrets.remove(DEDICATED_CREDENTIAL_SECRET)), Effect.ignore);
-            yield* Effect.logInfo("The Hub made this machine personal; it serves as one now.");
-            const served = yield* Layer.buildWithScope(layerPersonal(personal), scope);
-            yield* Ref.set(reported, Context.get(served, JoinedHub.HubConnector).state);
-          },
-          Effect.catchCause((cause) => Effect.logError("Could not turn personal", cause)),
+          persist: (next) =>
+            writeJoinedHubState(config.joinedHubPath, next).pipe(
+              Effect.provideService(FileSystem.FileSystem, fs),
+              Effect.ignore,
+            ),
+          becomePersonal: Effect.fn("DedicatedHost.becomePersonal")(
+            function* (personal: JoinedHubState) {
+              yield* secrets
+                .set(ENVIRONMENT_CREDENTIAL_SECRET, new TextEncoder().encode(credential.value))
+                .pipe(Effect.andThen(secrets.remove(DEDICATED_CREDENTIAL_SECRET)), Effect.ignore);
+              yield* Effect.logInfo("The Hub made this machine personal; it serves as one now.");
+              const served = yield* Layer.buildWithScope(layerPersonal(personal), scope);
+              yield* Ref.set(reported, Context.get(served, JoinedHub.HubConnector).state);
+            },
+            Effect.catchCause((cause) => Effect.logError("Could not turn personal", cause)),
+          ),
+        }).pipe(Effect.provide(context));
+      });
+      yield* supervise.pipe(
+        Effect.catchCause((cause) =>
+          Effect.logError("The dedicated machine's Sandbox could not run", cause).pipe(
+            Effect.andThen(fail("its Sandbox runtime could not start; see the server log.")),
+          ),
         ),
-      }).pipe(Effect.provide(context), Effect.forkScoped);
+        Effect.forkScoped,
+      );
       return connector;
     }),
   );

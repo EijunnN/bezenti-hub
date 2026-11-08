@@ -294,7 +294,8 @@ export const make = Effect.fn("ProcessSandboxRuntime.make")(function* (options: 
   const start: SandboxRuntime["Service"]["start"] = Effect.fn("ProcessSandboxRuntime.start")(
     function* (sandboxId) {
       const current = running.get(sandboxId);
-      if (current !== undefined) return { exited: Deferred.await(current.exited) };
+      if (current !== undefined)
+        return { exited: Deferred.await(current.exited), imageVersion: null };
       // A dev Hub can come back on another port: the Sandbox follows it.
       yield* withPlatform(pointSandboxHomeAt(homeOf(sandboxId), yield* address.loopbackUrl)).pipe(
         Effect.mapError(failure("start", sandboxId)),
@@ -349,7 +350,7 @@ export const make = Effect.fn("ProcessSandboxRuntime.make")(function* (options: 
         ),
         Effect.forkIn(runtimeScope),
       );
-      return { exited: Deferred.await(entry.exited) };
+      return { exited: Deferred.await(entry.exited), imageVersion: null };
     },
     (effect) => lock.withPermits(1)(effect),
   );
@@ -392,6 +393,8 @@ export const make = Effect.fn("ProcessSandboxRuntime.make")(function* (options: 
     kind: "process",
     create,
     start,
+    // It runs the Hub's own server, from no image.
+    imageVersion: Effect.succeed(null),
     stop,
     delete: remove,
     inspect,

@@ -41,7 +41,8 @@ them (`sandbox-unavailable`).
 [Which one runs](../../apps/server/src/sandboxes/sandboxRuntimeFromConfig.ts):
 `T3CODE_SANDBOX_RUNTIME=podman`, `process` or `off`. Unset, a production Hub (no `--dev-url`, not
 joined) runs Podman when `podman info` says rootless and the image (`T3CODE_SANDBOX_IMAGE`, default
-`localhost/t3code-sandbox:<Hub version>`, built by ticket 06) exists; otherwise none. Both checks
+`localhost/t3code-sandbox:<Hub version>`, the [base image](#base-image)) exists; otherwise none (a
+Hub started before the first build runs Sandboxes once it restarts). Both checks
 run once per Hub, together, with a 5-second timeout each. Every runtime needs the Hub to answer on
 loopback; Podman Sandboxes need it to listen on loopback **only** (`T3CODE_HOST=127.0.0.1`, or `::1`),
 since a container reaches every address of the host but its loopback: a Hub on `0.0.0.0` or a LAN
@@ -70,11 +71,16 @@ server in its own rootless container, `t3-<sandboxId>` (labels `io.t3code.sandbo
 - **User.** `--userns=keep-id`: inside it is the Hub's own uid, not root, so the home the Hub made
   is the server's without `chown`; `--cap-drop=all`, `no-new-privileges`, `--init` (reaps agents'
   orphans). It is still the Hub's user on the host, as in any rootless container.
-- **Nothing else of the Hub** is mounted, besides the directory of its Hub socket (read-only) and,
-  for a dev Hub run from source only, `apps/server`, `packages` and `node_modules` of its checkout
-  read-only at their own paths ([devCodeMounts](../../apps/server/src/sandboxes/sandboxRuntimeFromConfig.ts)),
-  so a dev image (Debian, git and Node) runs `node <checkout>/apps/server/src/bin.ts`. A start is
-  refused when a code mount holds the Hub's home, the Sandboxes root or a `.env*` file.
+- **Nothing else of the Hub** is mounted, besides the directory of its Hub socket (read-only). The
+  [base image](#base-image) runs its own `t3`. Only a dev Hub run from source, given a dev image
+  (one the Hub did not build: Debian, git and Node, no version label), mounts `apps/server`,
+  `packages` and `node_modules` of its checkout read-only at their own paths
+  ([devCodeMounts](../../apps/server/src/sandboxes/sandboxRuntimeFromConfig.ts)) and runs
+  `node <checkout>/apps/server/src/bin.ts`. A start is refused when a code mount holds the Hub's
+  home, the Sandboxes root or a `.env*` file.
+- **Image.** Each start runs the image its tag names then, by id (a build meanwhile changes nothing
+  mid-start), and reports that image's version, which `sandboxes.image_version` keeps. A tag that
+  names no image fails the start, saying to build it.
 - **Network.** `slirp4netns:allow_host_loopback=false`: its own namespace with internet, no host
   loopback (`10.0.2.2` leads nowhere), and no other container's ports (none publishes any). Other
   host addresses are reachable as from the LAN, hence the loopback-only rule above.
@@ -273,6 +279,145 @@ Someone who may not inspect a Sandbox gets 404 for it; a start of an archived Or
 Sandbox is refused until it is restored. Audit: `sandbox.start`/`sandbox.stop` with via
 `settings` (with `hold`), `restart`, `disk-full` or `host-disk-low`, and `sandbox.limits.change` with scope (`defaults` or `space`) and
 the new values.
+
+## Base image
+
+Every Sandbox runs one image, [the Containerfile](../../apps/server/sandbox-image/Containerfile):
+Debian bookworm-slim, Node of the repository's `engines` (from nodejs.org, checked against its
+SHASUMS), git, git-lfs, ripgrep, `build-essential`, Python and the usual shell tools, the CLIs of the
+providers that ship one, and the T3 server of the Hub's own version as `t3`. Node is an `ARG`
+checked against nodejs.org's SHASUMS; the CLIs are
+[clis/package.json](../../apps/server/sandbox-image/clis/package.json) with its `package-lock.json`,
+so their whole dependency tree, platform binaries included, is locked with integrity hashes:
+
+| Piece                 | Version   | Installed as                            |
+| --------------------- | --------- | --------------------------------------- |
+| Node                  | 26.12.1   | nodejs.org tarball, SHASUMS256          |
+| Claude Code, `claude` | 2.1.319   | `@anthropic-ai/claude-code` (npm)       |
+| Codex, `codex`        | 0.167.0   | `@openai/codex` (npm)                   |
+| OpenCode, `opencode`  | 1.19.5    | `opencode-ai` (npm)                     |
+| Pi, `pi`              | 1.5.0     | `@earendil-works/pi-coding-agent` (npm) |
+| Grok, `grok`          | 1.0.77    | `@xai-official/grok` (npm)              |
+| T3 server, `t3`       | the Hub's | the Hub's own (below)                   |
+
+Cursor runs inside the server (its SDK). Kiro, Fx, Muse and Antigravity ship no npm CLI; whoever
+needs one installs it in the Sandbox's home.
+
+The image runs `npm ci --ignore-scripts` on the lockfile, then `npm rebuild` for exactly two
+packages: Claude Code and OpenCode ship a placeholder `bin` that their postinstall replaces with the
+binary of their platform package (an optional dependency, already in the lockfile and checked by
+its hash); neither downloads anything. Grok's postinstall only copies its binary into the installing
+user's `~/.grok`, and its `bin` runs the locked binary without it; protobufjs's only prints a
+version warning; @google/genai's (a dependency of Pi; 2.21.0) has only a `preinstall` that echoes «no-op»
+and a `prepare` npm never runs for a registry package; Codex and Pi have none. So none of the five
+packages the lockfile marks `hasInstallScript` fetches anything at build time.
+`clis/package.json` says the same as npm's `allowScripts` policy (Claude Code and OpenCode
+allowed, the other three denied), which npm 12 requires for the rebuild to run their scripts; npm
+refuses `--allow-scripts` on a project's `rebuild` (`EALLOWSCRIPTS`). Only `Containerfile`,
+`clis/package.json` and `clis/package-lock.json` go into the build context (and the release
+archive), so nothing else left in that directory (a stray `clis/node_modules`, an `.npmrc`) ends up in
+a layer.
+
+To bump: Node, its `ARG` and this table. A CLI, its version in `clis/package.json`, then in that
+directory `npm install --package-lock-only --ignore-scripts` (with the repository's Node), check
+whether its install scripts changed (`npm view <pkg>@<version> scripts`, for every package the
+new lockfile marks `hasInstallScript`), update `allowScripts`, the paragraph above and this table,
+and rebuild.
+
+**Building.** `t3 sandbox image build` on the Hub's machine, or **Build image** in Settings →
+Environments («Sandbox image», the Owner's), builds it with the Hub's rootless Podman, one build at
+a time ([SandboxImage](../../apps/server/src/sandboxes/SandboxImage.ts)). With the Hub running, the
+command asks it as the shell (`POST /api/sandboxes/image/build`) and prints the build's output as
+Settings shows it (`GET /api/sandboxes/image?after=<lines>`: only the lines after the ones a client
+has). Output lines split on carriage returns and newlines, each cut at 2 KiB; the Hub keeps the last 400 lines and
+at most 256 KiB. With no Hub running the command builds in its own process and records the build
+itself. One build at a time: claimed in one step, so two requests never both build (the other gets
+409). The status reads `podman info` until it says rootless Podman is here (then never again); a
+«cannot build» answer stands 5 seconds (polls share one check), so a timeout or a Podman set up later
+is not kept. It reads the image at most every 5 seconds (again after
+each build), and every Sandbox's version and busy state in one query. Every build is audited on
+the Hub machine (`environment:hub-machine`), a build the Hub stopped during included. The build is the Hub's: a client that stops following
+it does not stop it. It is plain `podman build` (`--file`, `--tag`, `--build-arg`), so Podman 3.4,
+which has no BuildKit, builds it.
+
+The server goes in **from the Hub itself**, so the image always has the Hub's version:
+
+- A `t3` release (a single executable) copies the tree it runs from: the executable, its client and
+  its runtime `node_modules`. The release archive carries `sandbox-image/` for this.
+- A Hub run from a checkout (source or `dist`) runs
+  [stage-sandbox-server.ts](../../scripts/stage-sandbox-server.ts) into the build context, the
+  Hub's own 0700 `mkdtemp` (it refuses a directory that does not exist, and never makes or
+  replaces one at a path): `vp pack` (never into `apps/server/dist`), and the runtime externals for this Linux, staged as the release stages
+  them (pnpm, with the repository's patches). It adds the dev Replay agent where the bundle looks
+  for it, so the Sandboxes of a dev Hub (`--dev-url`) offer «Replay (dev)». It runs with a minimal
+  environment (HOME, USER, locale, TMPDIR and XDG dirs; the proxy and CA settings `HTTP_PROXY`,
+  `HTTPS_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`; and the
+  package managers' own `npm_config_*` and `PNPM_*`; no provider keys, tokens or build settings),
+  the Hub's Node first on PATH and, in WSL, without the Windows directories the login shell adds
+  (their `pnpm` cannot run).
+
+Before the build, everything under the context is made readable by all (directories and
+executables searchable), whatever umask made it: the image keeps these modes and the Sandbox runs as
+a plain user. The context directory itself stays 0700. The context is `Containerfile`, `server/` (to `/opt/t3/app`), `modules/` (its `node_modules`, a layer
+of its own, so a new server rebuilds little) and `extras/` (to `/opt/t3`). The build fails without
+rootless Podman, or when this `t3` is neither a release nor a checkout.
+
+**Versions.** A build is `<Hub version>-<UTC time>` (`0.1.7-20261107143509`), which the Containerfile
+puts in the label `io.t3code.image-version` (a layer of its own, so every build is a new image).
+It is tagged as the configured image (`T3CODE_SANDBOX_IMAGE`, default
+`localhost/t3code-sandbox:<Hub version>`) and as `<repository>:<version>`. After a build, older builds
+of that repository lose their version tag; one that a running container uses stays until the next.
+Each Sandbox records the version it started with; the Owner's view shows them and the newest.
+
+**Updating.**
+
+- A stopped Sandbox runs the newest build from its next start; nothing else is needed.
+- A running one moves only when the Owner asks (**Update** beside it in «Sandbox image»,
+  `POST /api/sandboxes/image/update`): the Hub stops it and starts it again (`sandbox.stop` and
+  `sandbox.start` via `update`), under its lock and marked stopping as an idle stop is, so work that
+  arrives meanwhile waits and then runs on the new image.
+- Never mid-turn, checked before and again under its lock with it marked stopping (so work arriving
+  after waits for the restart): refused with why when a turn runs on it, as its connection reports
+  turns (`EnvironmentDemand.turnStarted`, from each `provider.startTurn` until its `turn.terminal`
+  or its session ends) or the projection has a run in progress, «A turn is in progress on it
+  (1 Thread). Update it once its turns end.»; or when a User sent it work in the last 10 seconds
+  whose turn has not reported in, «Work was just sent to it. Update it once that work has ended.»;
+  and while it starts or stops. Only dispatched work claims it (`EnvironmentDemand.claim`, scoped
+  to the dispatch of each machine-decided command): each dispatch holds its own claim while it runs,
+  which then stands until a turn reports in or 10 seconds pass (lapsed ones are dropped whenever
+  claims are read). A turn never takes a claim still held, whatever work started it; previews,
+  files and terminals never claim it. A
+  `provider.startTurn` that fails, and a session that is lost, end their turns too. The Owner's view
+  shows a claimed Sandbox as busy.
+- Never into a start that cannot succeed: with no newest image (the tag names none, or one the Hub
+  did not build) it is refused, «The newest image is missing», and keeps running. Already on the
+  newest image it answers `up-to-date`; not running, `next-start`.
+- Audited as `sandbox.image.update`. A build: `via` (`settings`, `cli`), `outcome` (`built`,
+  `failed`), `version` or `reason`, on the Hub machine. A move: `via: restart`, `from`, `version` and
+  `outcome`, on the Sandbox.
+- Only the Owner (signed in, enabled) or the Hub's shell sees or does any of this; anyone else, an
+  Admin of the Sandbox's Organization included, gets 403 «Only the Owner manages the Sandbox image.».
+
+**Dedicated machines** run their Sandbox from the same image, built on that machine: `t3 join
+--dedicated` refuses until `T3CODE_SANDBOX_IMAGE` (default `localhost/t3code-sandbox:<version>`)
+exists there and says to run `t3 sandbox image build`. On a joined machine that command always
+builds in its own process (its server answers only `/health`, and the audit log is the Hub's), with
+the same tags and versions; the machine's Sandbox runs it from its next start. A machine whose
+`t3 serve` found no image waits for one, reporting `restarting` with why (Podman asked again every
+15 seconds, `awaitDedicatedRuntime`; a failed `podman info` then is waited out too), and starts
+its Sandbox once it is built, without a restart.
+
+**Provider logins** live in the Sandbox's home (`~/.claude`, `~/.codex`, …), its volume, not in the
+image: they outlive every new image.
+
+**Tests.** The testkit runs Sandboxes from no image; a runtime that reports versions
+(`sandboxImageVersion`) and a fake builder (`sandboxImageBuilder`) test the policy
+([HubWithEnvironments.sandboxImage.test.ts](../../apps/server/src/environments/HubWithEnvironments.sandboxImage.test.ts)).
+[SandboxImage.build.test.ts](../../apps/server/src/sandboxes/SandboxImage.build.test.ts) builds the
+real image from the checkout (`localhost/t3code-sandbox-test:latest`, kept for its layers), starts a
+Sandbox from it whose own `t3 serve` connects through the socket, and moves it to another build
+keeping its logins. It is slow, so it runs only with rootless Podman and
+`T3CODE_TEST_SANDBOX_IMAGE_BUILD=1`.
 
 ## Lifecycle: started for work, stopped when idle
 

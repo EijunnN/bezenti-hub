@@ -28,13 +28,15 @@ export class EnvironmentDemand extends Context.Service<
      */
     readonly ready: (environmentId: EnvironmentId) => Effect.Effect<boolean>;
     /**
-     * Starts it unless it runs (joining a start under way) and waits until its executor serves;
-     * counts as use. A failed Sandbox starts again only for a User's own action (`explicit`), after
-     * a short backoff. The start is the Hub's: a caller that stops waiting does not stop it.
+     * Starts it unless it runs and waits until its executor serves. A failed Sandbox starts again
+     * only for a User's own action (`explicit`), after a backoff.
      */
     readonly awaitStarted: (
       environmentId: EnvironmentId,
-      options: { readonly actorUserId?: UserId | undefined; readonly explicit: boolean },
+      options: {
+        readonly actorUserId?: UserId | undefined;
+        readonly explicit: boolean;
+      },
     ) => Effect.Effect<void, EnvironmentStartError>;
     /**
      * Starts the startable ones among them that are stopped, without waiting; one whose last start
@@ -43,7 +45,18 @@ export class EnvironmentDemand extends Context.Service<
     readonly request: (environmentIds: ReadonlyArray<EnvironmentId>) => Effect.Effect<void>;
     /** Work used it now: its idle time starts again. */
     readonly touch: (environmentId: EnvironmentId) => Effect.Effect<void>;
+    /**
+     * Work is being sent to it: an image update is refused while the scope is open (until the
+     * dispatch has recorded its run), and for a few seconds after unless a turn reports in.
+     */
+    readonly claim: (environmentId: EnvironmentId) => Effect.Effect<void, never, Scope.Scope>;
     /** Keeps it busy until the scope closes: an open terminal, a preview being served. */
     readonly hold: (environmentId: EnvironmentId) => Effect.Effect<void, never, Scope.Scope>;
+    /**
+     * A turn started on it (`key` names it, per provider session and run) or ended, as its
+     * connection reports them: what an image update must never cut short.
+     */
+    readonly turnStarted: (environmentId: EnvironmentId, key: string) => Effect.Effect<void>;
+    readonly turnEnded: (environmentId: EnvironmentId, key: string) => Effect.Effect<void>;
   }
 >()("t3/environment/EnvironmentDemand") {}
