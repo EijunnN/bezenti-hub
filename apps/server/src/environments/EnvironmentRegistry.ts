@@ -57,7 +57,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import type * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
 import * as Sandboxes from "../sandboxes/Sandboxes.ts";
 import * as SandboxRuntimeFromConfig from "../sandboxes/sandboxRuntimeFromConfig.ts";
-import { BUILT_IN_DEFAULT_LIMITS, effectiveLimits, NO_LIMITS } from "../sandboxes/sandboxLimits.ts";
+import { BUILT_IN_DEFAULT_LIMITS, NO_LIMITS } from "../sandboxes/sandboxLimits.ts";
 import { sandboxSpaceOf } from "../sandboxes/sandboxSpace.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as EnvironmentConnections from "./EnvironmentConnections.ts";
@@ -1344,8 +1344,9 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
               ...named,
               mode,
               spaceId,
-              // Its Sandbox runs with the limits a Hub gives its own.
-              limits: yield* spaceLimitsOf(spaceId),
+              // Its Sandbox runs with the Space's own limits: the defaults are sized for Sandboxes
+              // sharing the Hub's machine, and this machine is the Space's.
+              limits: yield* spaceOwnLimitsOf(spaceId),
               sandboxCredential,
             });
           }),
@@ -1582,27 +1583,16 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
 
   const sandboxFailure = (cause: unknown) => storageError(cause);
 
-  /** The Space's effective Sandbox limits: its override (if it has a Sandbox) over the defaults. */
-  const spaceLimitsOf = Effect.fn("EnvironmentRegistry.spaceLimitsOf")(function* (
+  /** The Space's own Sandbox limits (its override, where it has a Sandbox row); else none. */
+  const spaceOwnLimitsOf = Effect.fn("EnvironmentRegistry.spaceOwnLimitsOf")(function* (
     spaceId: SpaceId,
   ) {
-    interface Columns {
-      readonly cpus: number | null;
-      readonly memoryBytes: number | null;
-      readonly pids: number | null;
-      readonly diskBytes: number | null;
-    }
-    const [defaults] = yield* sql<Columns>`
-        SELECT cpu_limit AS cpus, memory_limit_bytes AS "memoryBytes", pids_limit AS pids,
-          disk_limit_bytes AS "diskBytes"
-        FROM sandbox_limit_defaults WHERE id = 1
-      `;
-    const [override] = yield* sql<Columns>`
+    const [override] = yield* sql<SandboxLimits>`
         SELECT cpu_limit AS cpus, memory_limit_bytes AS "memoryBytes", pids_limit AS pids,
           disk_limit_bytes AS "diskBytes"
         FROM sandboxes WHERE space_id = ${spaceId}
       `;
-    return effectiveLimits(defaults ?? BUILT_IN_DEFAULT_LIMITS, override ?? NO_LIMITS);
+    return override ?? NO_LIMITS;
   }, Effect.mapError(storageError));
 
   /** Each Sandbox the viewer may inspect, by Space, as the policy decides on it. */

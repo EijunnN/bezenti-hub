@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off -- compares with the machine's own size.
+import * as NodeOS from "node:os";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { EnvironmentId } from "@t3tools/contracts";
@@ -278,6 +281,26 @@ it.effect(
       yield* Queue.offer(runtime.ends, 1);
       yield* TestClock.adjust("2 seconds");
       assert.deepEqual(runtime.startOptions.at(-1), { limits: lower });
+    }),
+);
+
+it.effect(
+  "limits above what the machine has start at its own size, not refused by its runtime",
+  () =>
+    Effect.gen(function* () {
+      const runtime = yield* makeRuntime();
+      const limits = { cpus: 100_000, memoryBytes: 1024 ** 5, pids: 4096, diskBytes: null };
+      yield* supervise(runtime, yield* Ref.make(uses("org-acme", limits)));
+      assert.deepEqual(runtime.startOptions, [
+        {
+          limits: {
+            cpus: NodeOS.availableParallelism(),
+            memoryBytes: NodeOS.totalmem(),
+            pids: 4096,
+            diskBytes: null,
+          },
+        },
+      ]);
     }),
 );
 

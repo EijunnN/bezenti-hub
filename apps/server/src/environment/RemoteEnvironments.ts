@@ -183,12 +183,13 @@ export class RemoteEnvironments extends Context.Service<
      */
     readonly environmentRemoved: (environmentId: EnvironmentId) => Effect.Effect<void>;
     /**
-     * The Hub stopped a Sandbox for its disk: its sessions end now, their turns interrupted with
-     * that reason, rather than paused for a return it will not make by itself.
+     * The Hub stopped a Sandbox for its disk, or the Owner stopped it: its sessions end now, their
+     * turns interrupted with that reason, rather than paused for a return it will not make by
+     * itself.
      */
     readonly sandboxSessionsEnded: (
       environmentId: EnvironmentId,
-      reason: "sandbox-disk-full",
+      reason: "sandbox-disk-full" | "sandbox-stopped",
     ) => Effect.Effect<void>;
     /**
      * The Thread leaves a machine that is away while its turn is paused there: the Thread's

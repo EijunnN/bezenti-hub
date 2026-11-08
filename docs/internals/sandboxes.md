@@ -233,26 +233,44 @@ ticket 09's dedicated machines can pass the same options to their own container.
   (`SandboxRuntime.measureHome`): Podman with `podman unshare du -skx`, as root of the Hub user's
   namespace, so a directory the Sandbox made unreadable is still read (checked on Podman 3.4);
   the process runtime with plain `du`. A measurement is either a total from a clean exit or a
-  failure (any non-zero exit, a timeout, too much output; stderr is discarded), never a smaller
-  size. Each failure is counted per Sandbox; three in a row count as over the limit (fail closed:
-  «Its disk use could not be measured 3 times in a row …»), so a Sandbox cannot make itself
-  unmeasurable. At most two `du` run at once. Checks run every
-  `T3CODE_SANDBOX_DISK_CHECK_SECONDS` (default 60) for running Sandboxes, at once when a limit
-  changes, and before each start; a check reads the limit, status and start again under the
-  Sandbox's lock before it stops anything, so a limit raised or a restart meanwhile is never
-  stopped on a stale reading. One over its limit is stopped (audit `sandbox.stop`, via
-  `disk-full`) and set `failed` with why in one status write (never `stopped` on the way, which
-  waiting work would start again); its provider sessions end first
-  (`Sandboxes.sessionsEnded` → `RemoteEnvironments.sandboxSessionsEnded`), so its turns end
-  interrupted with «… ran out of disk space …» (`EnvironmentSessionLostError`, reason
-  `sandbox-disk-full`), and its socket closes with the close reason `sandbox-disk-full` (4415,
-  final). It starts again only on a User's own action once its home fits (the Owner raises the
-  limit, or its files go). Without `du` the disk limit is not enforced and Settings says so.
+  failure (any other exit, a timeout, too much output), never a smaller size, with one exception:
+  exit 1 where every one of `du`'s own errors is `No such file or directory` (files a build
+  deleted while `du` ran; read with `LC_ALL=C`, line by line, never kept) is the total of what is
+  there. GNU `du` quotes a name with a newline and puts the error after the name, so no name passes
+  for that error. `du` runs in a process group of its own, killed whole on a timeout or interrupt,
+  so the `du` that `podman unshare` runs in its child does not outlive it. Each failure is counted
+  per Sandbox; three in a row count as over the limit (fail closed: «Its disk use could not be
+  measured 3 times in a row …»), so a Sandbox cannot make itself unmeasurable. Such a Sandbox
+  starts again on a User's own action or the Owner's Start, to repair its home: a failed
+  measurement never refuses a start (only one over the limit does), and the count starts from
+  none, so it runs for about three checks before it is stopped again unless its home can be
+  measured by then; the message says so. At most two `du` run at once for the checks, and two
+  more for starts, so a slow home measured by a check never holds back another Space's start.
+  Checks run every `T3CODE_SANDBOX_DISK_CHECK_SECONDS` (default 60) for running Sandboxes, at once
+  when a limit changes, and before each start; a check reads the limit, status and start again
+  under the Sandbox's lock before it stops anything, so a limit raised or a restart meanwhile is
+  never stopped on a stale reading. One over its limit is stopped (audit `sandbox.stop`, via
+  `disk-full`). Every stop ends the server first, marked stopping (waiting work neither starts it
+  nor takes it as ready meanwhile): a stop that fails leaves it `running`, for the next check to
+  stop again, never recorded `failed` or `stopped` while its server runs (and each check stops any
+  server still running for a Sandbox recorded `stopped` or `failed`). Then it is set `failed` with
+  why in one status write (never `stopped` on the way, which waiting work would start again); its
+  provider sessions end (`Sandboxes.sessionsEnded` → `RemoteEnvironments.sandboxSessionsEnded`),
+  so its turns end interrupted with «… ran out of disk space …» (`EnvironmentSessionLostError`,
+  reason `sandbox-disk-full`), and its socket closes with the close reason `sandbox-disk-full`
+  (4418, final). It starts again only on a User's own action once its home fits (the Owner raises
+  the limit, or its files go). Without `du` the disk limit is not enforced and Settings says so.
 - **The Hub's own disk.** A bind-mounted home is on the Hub's filesystem, so between two checks a
-  Sandbox can fill it, with the Hub's database on it. No Sandbox starts while the Sandboxes root's
-  filesystem has less free than 5% of its size (at most 10 GiB) (`hostSpaceShortage`), and each
-  check stops every running Sandbox below that floor (via `host-disk-low`, failed with «The Hub's
-  disk for Sandboxes is almost full …»). This is a limitation, not a quota: for a real one put the
+  Sandbox can fill it, with the Hub's database on it. The floor is 5% of the Sandboxes root's
+  filesystem (at most 10 GiB) (`minHostFreeBytes`). Below it each check measures every running
+  home and stops the ones writing to it: each whose home grew more than 16 MiB since it was last
+  measured, or that cannot be measured now (via `host-disk-low`, failed with «The Hub's disk for
+  Sandboxes is almost full …»); one that is not writing keeps running, since stopping it frees
+  nothing (the cause may be no Sandbox at all, such as the Hub's logs). Below half the floor every
+  running Sandbox stops. The stops run at once, each under its own lock. No Sandbox starts until
+  half as much again as the floor is free (`minHostFreeBytesToStart`, 15 GiB on a large disk), so
+  a little room freed (a log rotated) does not start them all, to be stopped again at the next
+  write. This is a limitation, not a quota: for a real one put the
   Sandboxes root (`<Hub home>-sandboxes`) on a filesystem of its own, sized for them, apart from
   the Hub's home: a separate disk or partition, an XFS filesystem with a project quota per home
   (`xfs_quota -x -c 'project -s …'`), or a size-capped mount (a loop-mounted image). Moving homes
@@ -264,16 +282,24 @@ ticket 09's dedicated machines can pass the same options to their own container.
   one measured once). Uptime is from `sandboxes.started_at`. The process runtime reports no CPU or
   memory. Settings shows the limits a running Sandbox was started with and, when they changed
   since, «Applies on next restart: …»; an exit 137 under an enforced memory limit names that
-  container's limit.
+  container's limit. What it was started with is kept in memory only, which is enough: a Hub
+  that starts finds no Sandbox running (Podman removes its leftover containers by label, the
+  process runtime stops its leftover servers), so none outlives the Hub that knew its limits.
 - **Validation.** CPUs at least 0.1, memory at least 256 MiB, processes and threads at least 64,
   disk at least 1 GiB, and none above what the Hub's machine has (its CPUs, its memory, the size
   of the Sandboxes' disk); anything else is refused with which (400
-  `EnvironmentSandboxLimitsInvalidError`).
-- **The Owner's stop holds.** A stop from Settings sets `sandboxes.held_at`: waiting work
-  (`EnvironmentDemand.request`, work that is not a User's own action) does not start it again;
-  a User's message, «Try again» or the Owner's Start does, and ends the hold. Audit
-  `sandbox.stop` with `hold: true`. Settings asks before stopping or restarting a Sandbox with
-  turns running, saying how many.
+  `EnvironmentSandboxLimitsInvalidError`). A Space with a dedicated machine may be given more
+  CPUs and memory than the Hub has, for a bigger machine. Every start (on the Hub or a dedicated
+  machine) uses at most the CPUs and memory its machine has (`fitLimitsToHost`), since Podman
+  refuses more CPUs than the machine's.
+- **The Owner's stop holds.** A stop from Settings sets `sandboxes.held_at` in the same write as
+  `stopped`, before its socket closes, while the Sandbox is marked stopping: waiting work
+  (`EnvironmentDemand.request`, work that is not a User's own action) does not start it again,
+  neither during the stop nor after; a User's message, «Try again» or the Owner's Start does, and
+  ends the hold. Its turns end interrupted, «The Owner stopped … Send a message to start it
+  again and continue.» (`EnvironmentSessionLostError`, reason `sandbox-stopped`), since a held
+  Sandbox does not come back by itself to resume them. Audit `sandbox.stop` with `hold: true`.
+  Settings asks before stopping or restarting a Sandbox with turns running, saying how many.
 
 **Settings → Environments «Sandboxes»** (`GET /api/environments/sandboxes`,
 `POST …/sandboxes/action` with `start`, `stop` or `restart`, `POST …/sandboxes/limits` with or
@@ -657,10 +683,12 @@ joined server, but connects nothing of its own:
   other reason it starts again after 1, 2, 4… seconds (at most 30); more than three ends in ten
   minutes leave it `failed` until `t3 serve` restarts. `t3 status` shows the Sandbox's state. There
   is no idle stop: the machine is the Space's anyway.
-- **Limits.** The Hub sends the Space's effective Sandbox limits (its override over the
-  Installation's defaults, as for a Hub's Sandbox) in the `/api/environments/self` answer
-  (`limits`), which the host asks for at start and after each end of its Sandbox's server; it
-  starts the Sandbox with them as `SandboxStartOptions`, so its Podman runtime passes what that
+- **Limits.** The Hub sends the Space's own Sandbox limits (its override, set in Settings →
+  Sandboxes on the Space's Sandbox; not the Installation's defaults, which are sized for
+  Sandboxes sharing the Hub's machine, while this machine is the Space's) in the
+  `/api/environments/self` answer (`limits`), which the host asks for at start and after each end
+  of its Sandbox's server; it starts the Sandbox with them as `SandboxStartOptions`, capped at
+  the CPUs and memory the machine has (`fitLimitsToHost`), so its Podman runtime passes what that
   machine enforces (`podmanLimitArgs`) and labels the rest, and a change applies on the next
   start. The disk limit is not enforced there: that is the Hub's own check, for its own
   Sandboxes.

@@ -525,8 +525,10 @@ const makeSandboxRuntime = (
    * answer an exit code, as a server that ends before it connects.
    */
   beforeLaunch: ((sandboxId: string) => Effect.Effect<Option.Option<number>>) | undefined,
-  /** Runs before each stop of a Sandbox's server: it may hold the stop half-way. */
-  beforeStop: ((sandboxId: string) => Effect.Effect<void>) | undefined,
+  /** Runs before each stop of a Sandbox's server: it may hold the stop half-way, or fail it. */
+  beforeStop:
+    | ((sandboxId: string) => Effect.Effect<void, SandboxRuntime.SandboxRuntimeError>)
+    | undefined,
   /** Another runtime instead, such as Podman's, over the same root and Hub address. */
   otherRuntime: SandboxRuntimeOverRoot | undefined,
   /** Sees each start the Hub asks for, with what it starts with (its limits). */
@@ -535,6 +537,8 @@ const makeSandboxRuntime = (
   beforeInspect: ((sandboxId: string) => Effect.Effect<void>) | undefined,
   /** The base image version each start runs, read at each start, as a runtime with images. */
   imageVersion: (() => string | null) | undefined,
+  /** Runs before each measurement of a Sandbox's home: it may hold it, as a slow `du`. */
+  beforeMeasure: ((sandboxId: string) => Effect.Effect<void>) | undefined,
 ) => {
   let hubUrl = "";
   const started = new Map<string, TestEnvironment>();
@@ -590,7 +594,8 @@ const makeSandboxRuntime = (
     beforeStop === undefined &&
     onStart === undefined &&
     beforeInspect === undefined &&
-    imageVersion === undefined
+    imageVersion === undefined &&
+    beforeMeasure === undefined
       ? processRuntime
       : Layer.effect(
           SandboxRuntime.SandboxRuntime,
@@ -614,6 +619,10 @@ const makeSandboxRuntime = (
               inspect: (sandboxId) =>
                 (beforeInspect?.(sandboxId) ?? Effect.void).pipe(
                   Effect.andThen(inner.inspect(sandboxId)),
+                ),
+              measureHome: (sandboxId) =>
+                (beforeMeasure?.(sandboxId) ?? Effect.void).pipe(
+                  Effect.andThen(inner.measureHome(sandboxId)),
                 ),
             }),
           ),
@@ -655,12 +664,16 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
      * that ends before connecting.
      */
     readonly beforeSandboxLaunch?: (sandboxId: string) => Effect.Effect<Option.Option<number>>;
-    /** Before each stop of a Sandbox's server: hold it half-way. */
-    readonly beforeSandboxStop?: (sandboxId: string) => Effect.Effect<void>;
+    /** Before each stop of a Sandbox's server: hold it half-way, or fail it as a runtime would. */
+    readonly beforeSandboxStop?: (
+      sandboxId: string,
+    ) => Effect.Effect<void, SandboxRuntime.SandboxRuntimeError>;
     /** Sees each start the Hub asks of the runtime, with the limits it passes. */
     readonly onSandboxStart?: SandboxStartObserver;
     /** Before each `inspect` of a Sandbox by the Hub (each measurement of its home among them). */
     readonly beforeSandboxInspect?: (sandboxId: string) => Effect.Effect<void>;
+    /** Before each measurement of a Sandbox's home: hold it, as a slow `du`. */
+    readonly beforeSandboxMeasure?: (sandboxId: string) => Effect.Effect<void>;
     /** The idle timeout, the start timeout and the clock (a TestClock the test advances). */
     readonly sandboxLifecycle?: Sandboxes.SandboxLifecyclePolicy["Service"];
     /** Runs Sandboxes with this runtime instead of the process one. */
@@ -695,6 +708,7 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     options.onSandboxStart,
     options.beforeSandboxInspect,
     options.sandboxImageVersion,
+    options.beforeSandboxMeasure,
   );
   // The lifecycle policy goes in with the runtime, to the Sandboxes that read it.
   const sandboxRuntime =

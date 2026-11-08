@@ -17,13 +17,17 @@ import {
   SpaceId,
   UserId,
 } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 
 import * as EnvironmentDemand from "../environment/EnvironmentDemand.ts";
 import type * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
-import { sandboxIdOf } from "../sandboxes/SandboxRuntime.ts";
+import { sandboxIdOf, SandboxRuntimeError } from "../sandboxes/SandboxRuntime.ts";
 import * as Sandboxes from "../sandboxes/Sandboxes.ts";
 import * as OrganizationLifecycle from "../spaces/OrganizationLifecycle.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as EnvironmentConnections from "./EnvironmentConnections.ts";
 import { memberWithPasskey } from "./environments.testkit.ts";
 import { type Hub, makeHub } from "./HubWithEnvironments.testkit.ts";
 
@@ -53,6 +57,21 @@ const acmeWithSandbox = Effect.fn(function* (hub: Hub) {
     .ensureRunning({ spaceId, actorUserId: yield* ownerIdOf(hub) })
     .pipe(Effect.orDie);
   return { admin, member, spaceId, environmentId: sandboxEnvironmentIdOf(spaceId) };
+});
+
+/** Another Organization, made by the Owner, with its Sandbox running. */
+const organizationWithSandbox = Effect.fn(function* (hub: Hub, name: string) {
+  const owner = yield* ownerIdOf(hub);
+  const created = yield* hub
+    .service(SpaceDirectory.SpaceDirectory)
+    .createOrganization(owner, name)
+    .pipe(Effect.orDie);
+  const spaceId = created.id;
+  yield* hub
+    .service(Sandboxes.Sandboxes)
+    .ensureRunning({ spaceId, actorUserId: owner })
+    .pipe(Effect.orDie);
+  return { spaceId, environmentId: sandboxEnvironmentIdOf(spaceId) };
 });
 
 const sandboxesAs = Effect.fn(function* (hub: Hub, cookie: string) {
@@ -360,7 +379,97 @@ describe("Hub con Environments: a Sandbox cannot get past its disk limit", () =>
         const sandbox = sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId);
         assert.equal(sandbox.status, "failed");
         assert.include(sandbox.error ?? "", "could not be measured");
+        assert.include(sandbox.error ?? "", "Start it again to repair its home");
+
+        // Started again, it runs while its files are repaired; if they are not, it stops again.
+        assert.equal((yield* act(hub, hub.owner, environmentId, "start")).status, 200);
+        assert.equal((yield* awaitStarted(hub, spaceId)).status, "online");
+        for (let check = 0; check < 3; check += 1) {
+          yield* hub.service(Sandboxes.Sandboxes).checkDisk;
+        }
+        assert.equal(sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId).status, "failed");
+        assert.equal((yield* act(hub, hub.owner, environmentId, "start")).status, 200);
+        assert.equal((yield* awaitStarted(hub, spaceId)).status, "online");
+        // Repaired (readable, and under its limit), it keeps running.
+        NodeFS.chmodSync(hidden, 0o700);
+        NodeFS.rmSync(NodePath.join(hidden, "big.bin"));
+        for (let check = 0; check < 3; check += 1) {
+          yield* hub.service(Sandboxes.Sandboxes).checkDisk;
+        }
+        assert.equal(sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId).status, "online");
       }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "a stop that fails leaves it running for the next check, never failed while it runs",
+    () =>
+      Effect.gen(function* () {
+        let failNextStop = false;
+        const hub = yield* makeHub({
+          sandboxLifecycle: { diskCheckEvery: "1 hour" },
+          beforeSandboxStop: (sandboxId) =>
+            Effect.suspend(() => {
+              if (!failNextStop) return Effect.void;
+              failNextStop = false;
+              return Effect.fail(
+                new SandboxRuntimeError({ operation: "stop", sandboxId, detail: "it timed out" }),
+              );
+            }),
+        });
+        const { spaceId, environmentId } = yield* acmeWithSandbox(hub);
+        yield* fillHome(hub, spaceId, 2 * 1024 * 1024);
+        yield* overrideDisk(hub, spaceId, 1024 * 1024);
+        failNextStop = true;
+        yield* hub.service(Sandboxes.Sandboxes).checkDisk;
+        // Its server still runs: it is not recorded failed, and the next check stops it.
+        assert.equal(sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId).status, "online");
+        const [row] = yield* hub.server.sql<{ readonly status: string }>`
+        SELECT status FROM sandboxes WHERE space_id = ${spaceId}
+      `;
+        assert.equal(row?.status, "running");
+        yield* hub.service(Sandboxes.Sandboxes).checkDisk;
+        const stopped = sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId);
+        assert.equal(stopped.status, "failed");
+        assert.include(stopped.error ?? "", "disk is full");
+      }).pipe(Effect.scoped),
+  );
+
+  it.live("slow measurements of other Sandboxes' homes do not hold back a start", () =>
+    Effect.gen(function* () {
+      const slow = new Set<string>();
+      const bothSlow = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let slowNow = 0;
+      const hub = yield* makeHub({
+        sandboxLifecycle: { diskCheckEvery: "1 hour" },
+        beforeSandboxMeasure: (sandboxId) =>
+          Effect.suspend(() => {
+            if (!slow.has(sandboxId)) return Effect.void;
+            slowNow += 1;
+            return (slowNow === 2 ? Deferred.succeed(bothSlow, undefined) : Effect.void).pipe(
+              Effect.andThen(Deferred.await(release)),
+            );
+          }),
+      });
+      const acme = yield* organizationWithSandbox(hub, "Acme");
+      const globex = yield* organizationWithSandbox(hub, "Globex");
+      slow.add(sandboxIdOf(acme.spaceId));
+      slow.add(sandboxIdOf(globex.spaceId));
+      const checking = yield* hub.service(Sandboxes.Sandboxes).checkDisk.pipe(Effect.forkScoped);
+      yield* Deferred.await(bothSlow);
+      // Both checks measure for minutes; another Space's Sandbox starts meanwhile.
+      const owner = yield* ownerIdOf(hub);
+      const third = yield* hub
+        .service(SpaceDirectory.SpaceDirectory)
+        .createOrganization(owner, "Umbrella")
+        .pipe(Effect.orDie);
+      yield* hub
+        .service(Sandboxes.Sandboxes)
+        .ensureRunning({ spaceId: third.id, actorUserId: owner })
+        .pipe(Effect.timeout("30 seconds"), Effect.orDie);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(checking);
+    }).pipe(Effect.scoped),
   );
 
   it.live("a limit raised while its home is measured keeps it running", () =>
@@ -457,8 +566,42 @@ describe("Hub con Environments: what stops a Sandbox stays stopped until someone
       }).pipe(Effect.scoped),
   );
 
+  it.live("work that waits while the Owner stops it does not start it again", () =>
+    Effect.gen(function* () {
+      let duringStop: Effect.Effect<void> = Effect.void;
+      const hub = yield* makeHub({
+        beforeSandboxStop: () =>
+          Effect.suspend(() => {
+            const run = duringStop;
+            duringStop = Effect.void;
+            return run;
+          }),
+      });
+      const { environmentId } = yield* acmeWithSandbox(hub);
+      // As its server ends, its socket goes, and work waiting for it asks for it.
+      duringStop = hub
+        .service(EnvironmentConnections.EnvironmentConnections)
+        .close(environmentId, "heartbeat-timeout")
+        .pipe(
+          Effect.andThen(hub.service(EnvironmentDemand.EnvironmentDemand).request([environmentId])),
+          Effect.ignore,
+        );
+      const stopped = yield* act(hub, hub.owner, environmentId, "stop");
+      assert.equal(stopped.status, 200, JSON.stringify(stopped.body));
+      // Nothing started it meanwhile: waiting work asking again neither joins a start nor runs one.
+      const refused = yield* hub
+        .service(EnvironmentDemand.EnvironmentDemand)
+        .awaitStarted(environmentId, { actorUserId: undefined, explicit: false })
+        .pipe(Effect.flip);
+      assert.include(refused.detail, "the Owner stopped it");
+      const after = sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId);
+      assert.equal(after.status, "stopped");
+      assert.isTrue(after.heldByOwner);
+    }).pipe(Effect.scoped),
+  );
+
   it.live(
-    "a Hub disk almost full stops every running Sandbox and starts none until there is room",
+    "a Hub disk almost full stops the Sandboxes writing to it, every one when critical, and starts none until there is room again",
     () =>
       Effect.gen(function* () {
         let space = { freeBytes: 500 * GIB, totalBytes: 1000 * GIB };
@@ -468,28 +611,48 @@ describe("Hub con Environments: what stops a Sandbox stays stopped until someone
             hostSpace: Effect.sync(() => space),
           },
         });
-        const { spaceId, environmentId } = yield* acmeWithSandbox(hub);
+        const sandboxes = hub.service(Sandboxes.Sandboxes);
+        const writer = yield* acmeWithSandbox(hub);
+        const quiet = yield* organizationWithSandbox(hub, "Globex");
+        yield* sandboxes.checkDisk;
+        // One Sandbox writes; then the disk is below its floor (10 GiB here).
+        yield* fillHome(hub, writer.spaceId, 32 * 1024 * 1024);
         space = { freeBytes: 9 * GIB, totalBytes: 1000 * GIB };
-        yield* hub.service(Sandboxes.Sandboxes).checkDisk;
-        const failed = sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId);
+        yield* sandboxes.checkDisk;
+        const failed = sandboxOf(yield* sandboxesAs(hub, hub.owner), writer.environmentId);
         assert.equal(failed.status, "failed");
         assert.include(failed.error ?? "", "almost full");
+        assert.equal(
+          sandboxOf(yield* sandboxesAs(hub, hub.owner), quiet.environmentId).status,
+          "online",
+        );
         assert.deepInclude(
           (yield* audited(hub, ["sandbox.stop"])).map((entry) => entry.via),
           "host-disk-low",
         );
-        const refused = yield* hub
-          .service(Sandboxes.Sandboxes)
-          .ensureRunning({ spaceId, actorUserId: undefined })
-          .pipe(Effect.flip);
-        assert.include(refused.detail, "almost full");
-
+        // A little room back is not enough to start again: half as much again as the floor is.
         space = { freeBytes: 11 * GIB, totalBytes: 1000 * GIB };
-        yield* hub
-          .service(Sandboxes.Sandboxes)
-          .ensureRunning({ spaceId, actorUserId: undefined })
+        const refused = yield* sandboxes
+          .ensureRunning({ spaceId: writer.spaceId, actorUserId: undefined })
+          .pipe(Effect.flip);
+        assert.include(refused.detail, "at least 15 GiB");
+
+        // Below half the floor, every running one stops.
+        space = { freeBytes: 4 * GIB, totalBytes: 1000 * GIB };
+        yield* sandboxes.checkDisk;
+        assert.equal(
+          sandboxOf(yield* sandboxesAs(hub, hub.owner), quiet.environmentId).status,
+          "failed",
+        );
+
+        space = { freeBytes: 16 * GIB, totalBytes: 1000 * GIB };
+        yield* sandboxes
+          .ensureRunning({ spaceId: writer.spaceId, actorUserId: undefined })
           .pipe(Effect.orDie);
-        assert.equal(sandboxOf(yield* sandboxesAs(hub, hub.owner), environmentId).status, "online");
+        assert.equal(
+          sandboxOf(yield* sandboxesAs(hub, hub.owner), writer.environmentId).status,
+          "online",
+        );
       }).pipe(Effect.scoped),
   );
 });

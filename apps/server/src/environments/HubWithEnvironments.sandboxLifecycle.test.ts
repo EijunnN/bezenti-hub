@@ -37,6 +37,7 @@ import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
+import * as AuditLog from "../audit/AuditLog.ts";
 import * as CommandActor from "../auth/CommandActor.ts";
 import * as EnvironmentDemand from "../environment/EnvironmentDemand.ts";
 import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
@@ -777,5 +778,38 @@ describe("Hub con Environments: a Sandbox that fills its disk", () => {
         assert.equal((yield* sandboxRow(hub, acme))?.status, "failed");
         assert.equal(yield* Ref.get(launches), 1);
       }).pipe(Effect.scoped),
+  );
+});
+
+describe("Hub con Environments: the Owner stops a Sandbox with a turn running", () => {
+  it.live("its turn ends interrupted, saying the Owner stopped it, instead of waiting paused", () =>
+    Effect.gen(function* () {
+      const loaded = yield* loadFixture("simple");
+      const hold = yield* holdingEvents(loaded.adapters, 2);
+      const hub = yield* makeHub({ sandboxAdapters: hold.layer });
+      const owner = yield* ownerIdOf(hub);
+      const acme = yield* createOrganization(hub, "Acme");
+      const { threadId, message } = yield* placeOnSandbox(hub, loaded, acme, owner);
+      yield* dispatchAs(hub, owner, message);
+      yield* Deferred.await(hold.reached);
+
+      yield* hub
+        .service(Sandboxes.Sandboxes)
+        .stop({ spaceId: acme, actor: AuditLog.userActor(owner), via: "settings" })
+        .pipe(Effect.orDie);
+      // Held stopped, it would never come back by itself to end the turn.
+      assert.equal(
+        yield* awaitRunSettled(hub, threadId, 1).pipe(Effect.timeout("30 seconds"), Effect.orDie),
+        "interrupted",
+      );
+      const interrupted = (yield* projectionOf(hub, threadId)).turnItems.find(
+        (item) => item.type === "run_interrupt_result",
+      );
+      assert.include(
+        interrupted?.type === "run_interrupt_result" ? interrupted.message : "",
+        "The Owner stopped",
+      );
+      assert.equal((yield* sandboxRow(hub, acme))?.status, "stopped");
+    }).pipe(Effect.scoped),
   );
 });

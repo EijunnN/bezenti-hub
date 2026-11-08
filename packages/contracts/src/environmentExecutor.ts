@@ -56,6 +56,7 @@ export class EnvironmentSessionLostError extends Schema.TaggedError<EnvironmentS
       "environment-removed",
       "moved-while-offline",
       "sandbox-disk-full",
+      "sandbox-stopped",
     ]),
   },
 ) {
@@ -67,6 +68,8 @@ export class EnvironmentSessionLostError extends Schema.TaggedError<EnvironmentS
         return `This turn was paused on ${this.environmentName}, which was offline, and was stopped to move the Thread.`;
       case "sandbox-disk-full":
         return `${this.environmentName} ran out of disk space (over its limit, or the Hub's disk is almost full), so this turn was stopped. See Settings → Environments → Sandboxes.`;
+      case "sandbox-stopped":
+        return `The Owner stopped ${this.environmentName}, so this turn was stopped. Send a message to start it again and continue.`;
       case "process-ended":
         return `The agent on ${this.environmentName} stopped while ${this.environmentName} was offline. Send a message to continue here, or move the Thread to another Environment.`;
     }

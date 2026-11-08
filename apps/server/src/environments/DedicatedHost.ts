@@ -28,7 +28,7 @@ import {
   SandboxRuntime,
   type SandboxRuntimeError,
 } from "../sandboxes/SandboxRuntime.ts";
-import { NO_LIMITS } from "../sandboxes/sandboxLimits.ts";
+import { fitLimitsToHost, hostCapacity, NO_LIMITS } from "../sandboxes/sandboxLimits.ts";
 import * as JoinedHub from "./JoinedHub.ts";
 import {
   DEDICATED_CREDENTIAL_SECRET,
@@ -236,8 +236,11 @@ export const superviseDedicatedSandbox = Effect.fn("DedicatedHost.supervise")(fu
       return yield* set({ state: "failed", message: failedWith(made.failure) });
     }
     yield* set({ state: "starting", message: null });
-    // The same start options a Hub gives its own Sandboxes: the runtime passes what it enforces.
-    const started = yield* runtime.start(sandboxId, { limits }).pipe(Effect.result);
+    // The same start options a Hub gives its own Sandboxes, at most what this machine has (Podman
+    // refuses more CPUs than it has): the runtime passes what it enforces.
+    const started = yield* runtime
+      .start(sandboxId, { limits: fitLimitsToHost(limits, hostCapacity(null)) })
+      .pipe(Effect.result);
     let message: string;
     if (Result.isFailure(started)) {
       message = failedWith(started.failure);
