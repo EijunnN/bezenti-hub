@@ -31,6 +31,8 @@ import {
   AuthSessionId,
   type AgentSessionScanResult,
   type DiscoveredLocalServer,
+  DeviceNotFoundError,
+  type DeviceServiceState,
   type DiscoveredLocalServerList,
   type ProjectCloneSnapshot,
   PreviewStopLocalServerError,
@@ -205,6 +207,7 @@ import * as ProjectService from "./project/ProjectService.ts";
 import { threadWorkspaceRoot } from "./project/threadWorkspaceRoot.ts";
 import * as ManagedProjectFolders from "./project/ManagedProjectFolders.ts";
 import * as CloneDestination from "./project/cloneDestination.ts";
+import * as DeviceAccess from "./device/deviceAccess.ts";
 import * as ScratchThreadPromotion from "./project/ScratchThreadPromotion.ts";
 import { mutateProjectWithClone } from "./project/ProjectMutation.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
@@ -1426,6 +1429,15 @@ export const layerWsRpc = (
         const attributed = servers.filter((server) => threadOf(server) !== null);
         return yield* withoutHiddenThreads(attributed, (server) => threadOf(server)!);
       });
+
+      // The Hub's devices as this connection's User sees them (`DeviceAccess`).
+      const deviceViewer = Effect.map(currentVisibility, (visibility) => ({
+        visibility,
+        userId: principal.userId,
+        spaceVisibility,
+      }));
+      const deviceStateForViewer = (state: DeviceServiceState) =>
+        Effect.flatMap(deviceViewer, (viewer) => DeviceAccess.deviceStateFor(viewer, state));
 
       // Where this connection's User may clone (`CloneDestination`), read afresh each time.
       const requireCloneDestination = (destinationPath: string) =>
@@ -3213,7 +3225,7 @@ export const layerWsRpc = (
         [WS_METHODS.deviceEasAccount]: (input) => deviceService.easAccount(input),
         [WS_METHODS.deviceSimlockIdentity]: (input) => deviceService.simlockIdentity(input),
         [WS_METHODS.deviceList]: (input) =>
-          input.inspectOnly && !input.updateTool
+          (input.inspectOnly && !input.updateTool
             ? deviceService.inspect
             : authorizeEffect(
                 requiredScopeForDeviceList(input),
@@ -3222,16 +3234,37 @@ export const layerWsRpc = (
                   : input.retryHostId
                     ? deviceService.retryHost(input.retryHostId)
                     : deviceService.list,
-              ),
+              )
+          ).pipe(Effect.flatMap(deviceStateForViewer)),
         [WS_METHODS.deviceOpen]: (input) =>
           threadWorkspaceRoot(input.threadId).pipe(
             Effect.flatMap((workspaceRoot) => deviceService.open(input, { workspaceRoot })),
           ),
         [WS_METHODS.deviceClose]: (input) => deviceService.close(input),
         [WS_METHODS.deviceShutdown]: (input) => deviceService.shutdown(input),
-        [WS_METHODS.deviceDetail]: (input) => deviceService.detail(input),
+        // Another Space's device (one open only in its Threads) answers like a missing one.
+        [WS_METHODS.deviceDetail]: Effect.fnUntraced(function* (input) {
+          const allowed = yield* DeviceAccess.mayUseDevice(
+            yield* deviceViewer,
+            yield* deviceService.state,
+            {
+              hostId: input.hostId,
+              deviceId: input.deviceId,
+              threadId: undefined,
+              control: false,
+            },
+          );
+          if (!allowed) {
+            return yield* new DeviceNotFoundError({
+              hostId: input.hostId ?? "local",
+              deviceId: input.deviceId,
+            });
+          }
+          return yield* deviceService.detail(input);
+        }),
         [WS_METHODS.deviceAction]: (input) => deviceService.action(input),
-        [WS_METHODS.subscribeDeviceState]: (_input) => DeviceService.stateStream(deviceService),
+        [WS_METHODS.subscribeDeviceState]: (_input) =>
+          DeviceService.stateStream(deviceService).pipe(Stream.mapEffect(deviceStateForViewer)),
         // Only a server listed for the User (see `ownLocalServers`) is theirs to stop.
         [WS_METHODS.previewStopLocalServer]: Effect.fnUntraced(function* (input) {
           if (!(yield* currentVisibility).all) {

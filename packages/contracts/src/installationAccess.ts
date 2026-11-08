@@ -70,6 +70,10 @@ export const INSTALLATION_RPC_METHODS = [
   WS_METHODS.serverUninstallAcpRegistryManagedBinary,
   WS_METHODS.serverAcceptAcpRegistryUrlAuth,
   WS_METHODS.serverLogoutAcpRegistry,
+  // An ACP agent's model provider, secrets included, on the Installation's provider instance;
+  // the Project only says where the agent runs.
+  WS_METHODS.serverSetAcpRegistryProvider,
+  WS_METHODS.serverDisableAcpRegistryProvider,
   WS_METHODS.deviceConfigure,
   WS_METHODS.deviceTestHost,
   WS_METHODS.deviceEasAccount,

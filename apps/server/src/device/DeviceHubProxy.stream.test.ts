@@ -16,6 +16,7 @@ import {
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as DeviceService from "./DeviceService.ts";
 import * as DeviceHubProxy from "./DeviceHubProxy.ts";
+import { layerSeesEverything } from "../spaces/SpaceVisibility.testkit.ts";
 
 it.effect("preserves binary input and admission frames through the real socket proxy", () =>
   Effect.gen(function* () {
@@ -54,6 +55,7 @@ it.effect("preserves binary input and admission frames through the real socket p
         ),
         Layer.provide(
           Layer.succeed(DeviceService.DeviceService, {
+            state: Effect.succeed({ sessions: [] } as never),
             currentReadiness: () =>
               Effect.succeed({
                 hostId: LOCAL_DEVICE_HOST_ID,
@@ -61,6 +63,7 @@ it.effect("preserves binary input and admission frames through the real socket p
               }),
           } as DeviceService.DeviceService["Service"]),
         ),
+        Layer.provideMerge(layerSeesEverything),
       ),
     );
     const origin = HttpServer.formatAddress(

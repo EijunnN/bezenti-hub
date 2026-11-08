@@ -1518,6 +1518,7 @@ describe("Space visibility", () => {
     WS_METHODS.deviceConfigure,
     WS_METHODS.deviceAction,
     WS_METHODS.deviceList,
+    WS_METHODS.deviceDetail,
     WS_METHODS.agentSessionsScan,
     WS_METHODS.sourceControlCloneRepository,
     WS_METHODS.projectCloneStart,
@@ -3763,6 +3764,37 @@ describe("Space visibility", () => {
             );
           }),
         ),
+    );
+
+    it.effect("a Member sees device sessions and details only of Threads she sees", () =>
+      withTeam(({ server, grace }) =>
+        Effect.gen(function* () {
+          const state = {
+            sessions: [
+              { threadId: "grace-thread", hostId: "local", deviceId: "phone", platform: "ios" },
+              { threadId: "globex-thread", hostId: "local", deviceId: "tablet", platform: "ios" },
+            ],
+            bootingDevices: [{ threadId: "globex-thread", id: "watch" }],
+          };
+          const devices = Layer.mock(DeviceService.DeviceService)({
+            state: Effect.succeed(state as never),
+            list: Effect.succeed(state as never),
+            detail: (input: { readonly deviceId: string }) =>
+              Effect.succeed({ deviceId: input.deviceId } as never),
+          });
+          const asGrace = yield* connect(server, grace.userId, devices);
+          const listed = (yield* asGrace[WS_METHODS.deviceList]({})) as unknown as typeof state;
+          assert.deepEqual(
+            listed.sessions.map((session) => session.threadId),
+            ["grace-thread"],
+          );
+          assert.deepEqual(listed.bootingDevices, []);
+          const detail = (deviceId: string) =>
+            outcome(asGrace[WS_METHODS.deviceDetail]({ hostId: "local", deviceId } as never));
+          assert.equal(yield* detail("tablet"), "DeviceNotFoundError");
+          assert.equal(yield* detail("phone"), "reached");
+        }),
+      ),
     );
 
     it.effect("agent sessions to import list only what the User may read", () =>

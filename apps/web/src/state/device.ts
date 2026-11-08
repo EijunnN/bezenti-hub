@@ -66,15 +66,17 @@ const deviceHubAccessAtom = Atom.family((environmentId: EnvironmentId) =>
     .pipe(Atom.setIdleTTL(60_000), Atom.withLabel(`device-hub-access:${environmentId}`)),
 );
 
+/** `threadId` names the Thread the device is open in: the Hub lets a Member reach only those. */
 export function useDeviceHubAccess(
   environmentId: EnvironmentId | null,
-  hostId = "local",
+  hostId: string,
+  threadId: string,
 ): DeviceHubAccess | null {
   const result = useAtomValue(
     environmentId === null ? EMPTY_ACCESS_ATOM : deviceHubAccessAtom(environmentId),
   );
   return AsyncResult.isSuccess(result)
-    ? { ...result.value, query: { ...result.value.query, hostId } }
+    ? { ...result.value, query: { ...result.value.query, hostId, threadId } }
     : null;
 }
 
@@ -89,13 +91,14 @@ export function refreshDeviceHubAccess(environmentId: EnvironmentId): void {
 /** Mints a fresh hub ticket for a one-off request that failed with 401. Resolves null on failure. */
 export function renewDeviceHubAccess(
   environmentId: EnvironmentId,
-  hostId = "local",
+  hostId: string,
+  threadId: string,
 ): Promise<DeviceHubAccess | null> {
   const atom = deviceHubAccessAtom(environmentId);
   appAtomRegistry.refresh(atom);
   return Effect.runPromise(
     AtomRegistry.getResult(appAtomRegistry, atom, { suspendOnWaiting: true }).pipe(
-      Effect.map((access) => ({ ...access, query: { ...access.query, hostId } })),
+      Effect.map((access) => ({ ...access, query: { ...access.query, hostId, threadId } })),
       Effect.timeout("10 seconds"),
       Effect.orElseSucceed(() => null),
     ),

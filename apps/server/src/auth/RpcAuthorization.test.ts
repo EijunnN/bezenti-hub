@@ -171,6 +171,14 @@ describe("RPC authorization scopes", () => {
           ]);
           yield* guardRpcPayload(method, {}, everything, {} as never, UserId.make("owner"));
         }
+        // An ACP agent's model provider is set on the Installation's provider instance, with
+        // its secrets; the Project only says where the agent runs.
+        for (const method of [
+          WS_METHODS.serverSetAcpRegistryProvider,
+          WS_METHODS.serverDisableAcpRegistryProvider,
+        ]) {
+          expect([method, spaceAccessForRpcMethod(method)]).toEqual([method, "installation"]);
+        }
         // Only RPCs really of one session or one connection stay unscoped.
         const unscoped = Object.entries(RPC_SPACE_ACCESS).flatMap(([method, access]) =>
           typeof access === "object" ? [method] : [],

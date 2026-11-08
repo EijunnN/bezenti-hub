@@ -82,6 +82,8 @@ export interface DeviceStreamHandle {
 
 export function DeviceStreamView(props: {
   readonly environmentId: EnvironmentId;
+  /** The Thread the device is open in. */
+  readonly threadId: string;
   readonly platform: DevicePlatform;
   readonly deviceId: string;
   readonly deviceName?: string;
@@ -109,7 +111,7 @@ export function DeviceStreamView(props: {
   const onInputCancel = (cancel: (() => void) | null) => {
     cancelPhoneInputRef.current = cancel;
   };
-  const access = useDeviceHubAccess(props.environmentId, props.hostId);
+  const access = useDeviceHubAccess(props.environmentId, props.hostId, props.threadId);
   const ownViewId = useId();
   const viewId = props.viewId ?? ownViewId;
   const session = useAtomValue(
@@ -274,7 +276,9 @@ export function DeviceStreamView(props: {
                   screenWidth={screen?.width}
                   screenHeight={screen?.height}
                   deviceKey={deviceScreenKey(props.environmentId, props.hostId, props.deviceId)}
-                  renewAccess={() => renewDeviceHubAccess(props.environmentId, props.hostId)}
+                  renewAccess={() =>
+                    renewDeviceHubAccess(props.environmentId, props.hostId, props.threadId)
+                  }
                 />
               ) : showPhone && isDuo && screen?.supportsHingeAngle ? (
                 <DeviceDuoControls

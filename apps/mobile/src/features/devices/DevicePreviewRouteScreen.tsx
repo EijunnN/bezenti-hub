@@ -403,7 +403,12 @@ function OpenDevicePreview({
   const { session } = preview;
   const { themeVariables } = useAppearancePreferences();
   const [viewer] = useState(uuidv4);
-  const { access, error, refresh } = useDeviceHubAccess(environmentId, session.hostId, viewer);
+  const { access, error, refresh } = useDeviceHubAccess(
+    environmentId,
+    session.hostId,
+    viewer,
+    session.threadId,
+  );
   const onUnauthorized = async () => refresh();
   return access ? (
     <DeviceStreamWebView

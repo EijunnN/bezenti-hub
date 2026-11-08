@@ -17,8 +17,13 @@ import * as Socket from "effect/socket/Socket";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 
 import { authenticateMediaRequest } from "../auth/http.ts";
+import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
+import * as DeviceAccess from "./deviceAccess.ts";
 import * as DeviceService from "./DeviceService.ts";
 import { repeatStillFrame } from "./mjpegStillFrame.ts";
+
+// The device a serve-sim helper path names.
+const HELPER_DEVICE = /\/helper\/([^/]+)\//;
 
 const ALLOWED_PATHS: ReadonlyArray<RegExp> = [
   /^\/api\/devices$/,
@@ -200,18 +205,39 @@ const handler = Effect.gen(function* () {
   const controlsDevice =
     (upgrade && hubPath !== "/api/devices/ws") ||
     (!readOnly && /\/api\/(stream-(mode|settings)|fold)$/.test(hubPath));
-  yield* authenticateMediaRequest(
+  const session = yield* authenticateMediaRequest(
     controlsDevice ? AuthOrchestrationOperateScope : AuthOrchestrationReadScope,
   );
   const devices = yield* DeviceService.DeviceService;
+  // A User who does not see everything reaches only a device open in one of their Threads,
+  // named by `threadId`, and drives it only in a Thread they work (`DeviceAccess`).
+  const spaceVisibility = yield* SpaceVisibility.SpaceVisibility;
+  const visibility = yield* spaceVisibility.of(session.userId);
+  if (!visibility.all) {
+    const threadId = url.value.searchParams.get("threadId");
+    const allowed =
+      threadId !== null &&
+      (yield* DeviceAccess.mayUseDevice(
+        { visibility, userId: session.userId, spaceVisibility },
+        yield* devices.state,
+        {
+          hostId: url.value.searchParams.get("hostId") ?? "local",
+          deviceId: HELPER_DEVICE.exec(hubPath)?.[1],
+          threadId,
+          control: controlsDevice,
+        },
+      ));
+    if (!allowed) return HttpServerResponse.text("Not Found", { status: 404 });
+  }
   const ready = yield* devices.currentReadiness(url.value.searchParams.get("hostId") ?? undefined);
   if (!ready) {
     return HttpServerResponse.text("Device hub is not running", { status: 503 });
   }
-  // Consume the auth ticket here; never forward it to the hub.
+  // Consume the auth ticket and our own parameters here; never forward them to the hub.
   const upstreamSearch = new URLSearchParams(url.value.search);
   upstreamSearch.delete("wsTicket");
   upstreamSearch.delete("hostId");
+  upstreamSearch.delete("threadId");
   const search = upstreamSearch.size > 0 ? `?${upstreamSearch.toString()}` : "";
   // Hosts with several upstreams (one per cloud session) route and authenticate requests themselves.
   const routed = ready.upstream ? yield* ready.upstream(hubPath, upstreamSearch) : undefined;

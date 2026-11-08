@@ -29,12 +29,18 @@ const deviceHubAccessAtom = Atom.family((environmentId: EnvironmentId) =>
   ),
 );
 
-export function useDeviceHubAccess(environmentId: EnvironmentId, hostId: string, viewer: string) {
+/** `threadId` names the Thread the device is open in: the Hub lets a Member reach only those. */
+export function useDeviceHubAccess(
+  environmentId: EnvironmentId,
+  hostId: string,
+  viewer: string,
+  threadId: string,
+) {
   const prepared = usePreparedConnection(environmentId);
   const query = useEnvironmentQuery(deviceHubAccessAtom(environmentId)(viewer));
   const access =
     query.data && query.error === null && Option.isSome(prepared)
-      ? { ...query.data, query: { ...query.data.query, hostId } }
+      ? { ...query.data, query: { ...query.data.query, hostId, threadId } }
       : null;
   return { access, error: query.error, refresh: query.refresh };
 }

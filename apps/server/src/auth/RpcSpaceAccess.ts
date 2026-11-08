@@ -55,8 +55,6 @@ const TASK_BY_ID = {
 const SERVER_CONFIG = {
   unscoped: "what every client runs on: providers, models, keybindings and redacted settings",
 };
-// Reading them: acting on one is deviceOpen's (`work`) or, like retrying a host, the Owner's.
-const DEVICES = { unscoped: "the Hub's devices, which a Thread's device picker lists" };
 const SOURCE_CONTROL_ACCOUNT = {
   unscoped: "the Hub's source-control tools and account, which cloning and publishing read",
 };
@@ -145,8 +143,6 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.serverImportAcpRegistrySession]: "project",
   [WS_METHODS.serverDeleteAcpRegistrySession]: "project",
   [WS_METHODS.serverListAcpRegistryProviders]: "project",
-  [WS_METHODS.serverSetAcpRegistryProvider]: "project",
-  [WS_METHODS.serverDisableAcpRegistryProvider]: "project",
   // Without a Project these name, the handler narrows them to the visible ones.
   [WS_METHODS.pullRequestsList]: "project",
   [WS_METHODS.pullRequestsListStats]: "project",
@@ -238,10 +234,11 @@ export const RPC_SPACE_ACCESS = {
   // Of the Hub's listening servers, only the Owner sees (and stops) everyone's.
   [WS_METHODS.subscribeDiscoveredLocalServers]: "filtered",
   [WS_METHODS.previewStopLocalServer]: "filtered",
-  // Retrying a host or updating device tools is the Owner's (`ownerOnlyCall`).
-  [WS_METHODS.deviceList]: DEVICES,
-  [WS_METHODS.deviceDetail]: DEVICES,
-  [WS_METHODS.subscribeDeviceState]: DEVICES,
+  // Sessions of Threads the User sees only (`DeviceAccess`); retrying a host or updating device
+  // tools is the Owner's (`ownerOnlyCall`).
+  [WS_METHODS.deviceList]: "filtered",
+  [WS_METHODS.deviceDetail]: "filtered",
+  [WS_METHODS.subscribeDeviceState]: "filtered",
   [WS_METHODS.serverProbe]: { unscoped: "answers whether this connection is alive" },
   [WS_METHODS.serverGetConfig]: SERVER_CONFIG,
   [WS_METHODS.subscribeServerConfig]: SERVER_CONFIG,

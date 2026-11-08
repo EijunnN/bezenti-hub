@@ -397,6 +397,7 @@ function DeviceMiniPlayer({
         >
           <DeviceStreamView
             environmentId={threadRef.environmentId}
+            threadId={threadRef.threadId}
             platform={source.platform}
             deviceId={source.deviceId}
             hostId={source.hostId}

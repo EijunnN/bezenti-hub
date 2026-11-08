@@ -14,6 +14,8 @@ const DOWNLOAD_URL_LIFETIME_MS = 60_000;
 
 export function DeviceWorkspace(props: {
   environmentId: EnvironmentId;
+  /** The Thread the device is open in. */
+  threadId: string;
   device: DeviceSummary;
   hostLabel: string;
   hostKind: DeviceHostSummary["kind"] | undefined;
@@ -29,7 +31,7 @@ export function DeviceWorkspace(props: {
   const [screenshotError, setScreenshotError] = useState<string | null>(null);
   // A capture always finishes, even if the panel hides or closes meanwhile; the user asked for it.
   const capturing = useRef(false);
-  const access = useDeviceHubAccess(props.environmentId, props.device.hostId);
+  const access = useDeviceHubAccess(props.environmentId, props.device.hostId, props.threadId);
   // Settings and tools run commands on the device's own machine, which EAS and Simlock do not expose.
   const runsHostCommands = props.hostKind === "local" || props.hostKind === "ssh";
   const controls = useDeviceControls({
@@ -81,6 +83,7 @@ export function DeviceWorkspace(props: {
         <div className="min-h-0 flex-1">
           <DeviceStreamView
             environmentId={props.environmentId}
+            threadId={props.threadId}
             platform={props.device.platform}
             deviceName={props.device.name}
             deviceDescription={`${props.hostLabel} · ${props.device.version}`}

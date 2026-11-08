@@ -81,6 +81,7 @@ function view() {
   return (
     <DeviceStreamView
       hostId="local"
+      threadId="thread-1"
       environmentId={EnvironmentId.make("test")}
       deviceId="test"
       platform="ios"

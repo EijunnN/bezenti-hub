@@ -13,6 +13,8 @@ import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import type * as DeviceHost from "./DeviceHost.ts";
 import * as DeviceService from "./DeviceService.ts";
 import * as DeviceHubProxy from "./DeviceHubProxy.ts";
+import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
+import { layerSeesEverything } from "../spaces/SpaceVisibility.testkit.ts";
 
 const disposers: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -24,6 +26,12 @@ const fixture = (
   fail = false,
   authError?: EnvironmentAuth.ServerAuthCredentialError | EnvironmentAuth.ServerAuthInternalError,
   upstream?: DeviceHost.DeviceHostReady["upstream"],
+  // A User who sees only these Threads, and the device sessions open on the Hub.
+  member?: {
+    readonly visible: ReadonlySet<string>;
+    readonly worked: ReadonlySet<string>;
+    readonly sessions: ReadonlyArray<{ threadId: string; hostId: string; deviceId: string }>;
+  },
 ) => {
   let finalized = 0;
   const requests: string[] = [];
@@ -59,6 +67,7 @@ const fixture = (
       ),
       Layer.provideMerge(
         Layer.succeed(DeviceService.DeviceService, {
+          state: Effect.succeed({ sessions: member?.sessions ?? [] } as never),
           currentReadiness: () =>
             Effect.succeed({
               hostId: LOCAL_DEVICE_HOST_ID,
@@ -68,6 +77,17 @@ const fixture = (
         } as DeviceService.DeviceService["Service"]),
       ),
       Layer.provideMerge(Layer.succeed(HttpClient.HttpClient, client)),
+      Layer.provideMerge(
+        member === undefined
+          ? layerSeesEverything
+          : Layer.succeed(SpaceVisibility.SpaceVisibility, {
+              of: () => Effect.succeed({ all: false, spaceIds: [] }),
+              visibleThreadIds: (_visibility: unknown, ids: ReadonlyArray<string>) =>
+                Effect.succeed(new Set(ids.filter((id) => member.visible.has(id)))),
+              workableThreadIds: (_v: unknown, _u: unknown, ids: ReadonlyArray<string>) =>
+                Effect.succeed(new Set(ids.filter((id) => member.worked.has(id)))),
+            } as unknown as SpaceVisibility.SpaceVisibility["Service"]),
+      ),
     ),
     { disableLogger: true },
   );
@@ -264,4 +284,40 @@ it("rejects unsupported Duo routes", async () => {
   );
   expect(response.status).toBe(404);
   expect(requests).toEqual([]);
+});
+
+it("lets a Member reach only a device open in a Thread of theirs, and drive it only in one they work", async () => {
+  const member = {
+    visible: new Set(["mine", "teams"]),
+    worked: new Set(["mine"]),
+    sessions: [
+      { threadId: "mine", hostId: "local", deviceId: "phone" },
+      { threadId: "teams", hostId: "local", deviceId: "tablet" },
+      { threadId: "hidden", hostId: "local", deviceId: "other" },
+    ],
+  };
+  const { handler, requests } = fixture(
+    [AuthOrchestrationReadScope, AuthOrchestrationOperateScope],
+    false,
+    undefined,
+    undefined,
+    member,
+  );
+  const status = async (path: string, init?: RequestInit) =>
+    (await handler(new Request(`http://t3.test/api/device-hub${path}`, init))).status;
+  const stream = (device: string, threadId?: string) =>
+    `/vendor/serve-sim/helper/${device}/stream.mjpeg${threadId === undefined ? "" : `?threadId=${threadId}`}`;
+  // No Thread named, another Space's Thread, or a device not open in the named Thread.
+  expect(await status(stream("phone"))).toBe(404);
+  expect(await status(stream("other", "hidden"))).toBe(404);
+  expect(await status(stream("other", "mine"))).toBe(404);
+  expect(requests).toEqual([]);
+  // Watching a teammate's device, and driving only one's own.
+  expect(await status(stream("tablet", "teams"))).toBe(200);
+  const tune = (threadId: string) =>
+    status(`/vendor/serve-emu/api/stream-settings?threadId=${threadId}`, { method: "POST" });
+  expect(await tune("teams")).toBe(404);
+  expect(await tune("mine")).toBe(200);
+  // The Thread named never reaches the hub.
+  expect(requests.every((url) => !url.includes("threadId"))).toBe(true);
 });
