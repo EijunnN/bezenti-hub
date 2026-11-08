@@ -1,5 +1,6 @@
 import { SettingsGroup } from "./SettingsGroup";
 import { AuthSettingsWriteScope } from "@t3tools/contracts";
+import { usePrimaryActsForInstallation } from "../../environments/primary";
 import { usePrimaryEnvironmentId, usePrimaryEnvironment } from "../../state/environments";
 import { useEnvironmentScope, useEnvironmentsWithScope } from "../../state/session";
 import { useServerConfigs } from "../../state/entities";
@@ -333,6 +334,8 @@ export function SettingsRow({
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const primaryEnvironment = usePrimaryEnvironment();
   const primaryCanWrite = useEnvironmentScope(primaryEnvironmentId, AuthSettingsWriteScope);
+  // A Member of a Hub never holds its settings scope: say why rather than name a scope.
+  const actsForInstallation = usePrimaryActsForInstallation();
   const writableIds = useEnvironmentsWithScope(
     context?.connectedEnvironments ?? [],
     AuthSettingsWriteScope,
@@ -424,18 +427,20 @@ export function SettingsRow({
         ? inertControl(`Managed by ${managedBy}.`)
         : unavailable && control
           ? inertControl(
-              !canWriteSettings
-                ? `This connection lacks permission to change settings on ${
-                    context
-                      ? context.connectedEnvironments
-                          .filter((target) => !writableIds.has(target.environmentId))
-                          .map((target) => target.label)
-                          .join(", ") || "the selected environment"
-                      : (primaryEnvironment?.label ?? "the primary environment")
-                  }.`
-                : context
-                  ? "Reconnect the selected environment to change this setting."
-                  : PRIMARY_SETTINGS_UNAVAILABLE_MESSAGE,
+              !canWriteSettings && !actsForInstallation
+                ? "Only the Owner of this Hub changes this setting."
+                : !canWriteSettings
+                  ? `This connection lacks permission to change settings on ${
+                      context
+                        ? context.connectedEnvironments
+                            .filter((target) => !writableIds.has(target.environmentId))
+                            .map((target) => target.label)
+                            .join(", ") || "the selected environment"
+                        : (primaryEnvironment?.label ?? "the primary environment")
+                    }.`
+                  : context
+                    ? "Reconnect the selected environment to change this setting."
+                    : PRIMARY_SETTINGS_UNAVAILABLE_MESSAGE,
             )
           : environmentWide && control
             ? inertControl("Environment-wide setting. Select an environment to change it.")

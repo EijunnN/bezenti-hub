@@ -451,18 +451,24 @@ providers. Two layers now do:
 - RPCs on the Installation as a whole are `installation` in `RpcSpaceAccess`
   (`INSTALLATION_RPC_METHODS` in contracts): settings and keybindings (one file for the
   whole Hub), storage cleanup, process, trace, telemetry and usage diagnostics, signalling a
-  process, triage, every provider, provider sign-in and ACP registry install, device hosts,
+  process, triage, every provider, provider sign-in, ACP registry install and an ACP agent's
+  model provider (secrets included; the Project only says where the agent runs), device hosts,
   device actions and shutdown, and the Hub's source-control sign-in and starring. The
   middleware refuses them with `SpaceActionDeniedError` ("Only the Owner of this Hub can do
   that.") unless the session sees everything (the Owner, or no Owner yet), whatever its
-  scopes; an Admin is refused like a Member. `device.list` is shared, but its host retry and
-  tool update are the Owner's too. What stays `unscoped` is one session's or connection's own
+  scopes, and says that rather than naming a missing scope; an Admin is refused like a Member.
+  Device state (`device.list`, its stream) carries only sessions of Threads the User sees and
+  `device.detail` answers another Space's device like a missing one (`DeviceAccess`); host
+  retry and tool update are the Owner's. The `/api/device-hub` proxy needs the `threadId` a
+  device is open in from anyone but the Owner: visible to watch it, worked to drive it. What stays `unscoped` is one session's or connection's own
   (probe, server config, lifecycle, client activity, preview profiles, uploads) or reads the
   Hub's shared state its Members need (host load, devices, source-control tools); handlers
   filter the rest: discovered local servers (only those of Threads the User works; stopping
   one needs it listed so), agent sessions to import (folders the User may read, Projects they
-  see), clones (into the Hub's Projects folder or a folder of the User's team's Projects,
-  `SpaceVisibility.mayCreateDirectory`; listed, cancelled and retried by their starter, or
+  see), clones (into a folder of the User's team's Projects, or a new folder right in the
+  Hub's Projects folder that no Project holds, its parent resolving where it is named:
+  `SpaceVisibility.mayCreateDirectory` through `requireCloneDestination`, asked again right
+  before git writes and before a retry clears the old checkout; listed, cancelled and retried by their starter, or
   seen with their Project; their URLs carry no credentials), pending attachments (deleted
   only by the User who asked for the upload, remembered in memory) and the access stream.
 - A session of any User but the Owner is read without the Installation's own scopes
@@ -472,12 +478,19 @@ providers. Two layers now do:
   session without them, and a Member's pairing link and MCP approval ask none of them. So the
   scopes a client is told about are what it can use, and clients that hide controls by scope
   hide these for a Member. The RPC check is what refuses; this keeps the clients honest.
+- One check per operation, whatever the transport: `authorizeRpcCall` (the RPC's scopes, then
+  `RpcSpaceAccess`) runs in the WS middleware, and an MCP tool doing what an RPC does runs it
+  with that RPC's method as its caller's User (`mcp/rpcAccess.ts`, with `scopesOfUser`):
+  `t3_environment_preferences_update` as `server.updateSettings`, `t3_project_create`/`update`
+  as `projects.mutate` (scripts need `settings:write`), `t3_project_clone` as cloning from the
+  app.
 
 Clients hide what a Member cannot do rather than fail: command permissions refuse
 `INSTALLATION_RPC_METHODS` for a session that is not the Owner's
 (`sessionActsForInstallation`), the web Settings drop Providers, Devices, Maintenance,
 Diagnostics, Source control and Secrets for a Member (opening one says only the Owner changes
-them) and mark Threads, Browser, Worktrees, Keybindings, Projects and Labs as the Hub's, and
+them) and mark Threads, Browser, Worktrees, Keybindings, Projects and Labs as the Hub's, whose
+rows a Member cannot change are inert and say only the Owner changes them, and
 mobile Settings drop Providers, Source control and Maintenance. Settings stored once for the
 whole Hub (model favorites, project actions and the like) are therefore the Owner's until
 they are kept per User.
