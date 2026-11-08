@@ -262,9 +262,31 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
   spaceVisibility: SpaceVisibility.SpaceVisibility["Service"],
   userId: UserId | undefined,
 ) {
+  /** No Thread named, or one with no row: a draft, or nothing at all. */
+  const isDraftOrNone = Effect.fn(function* (threadId: string | undefined) {
+    if (threadId === undefined) return true;
+    const ids = [threadId as ThreadId];
+    const [visible, hidden] = yield* Effect.all([
+      spaceVisibility.visibleThreadIds(visibility, ids),
+      spaceVisibility.hiddenThreadIds(visibility, ids),
+    ]);
+    return !visible.has(threadId as ThreadId) && !hidden.has(threadId);
+  });
   const access = spaceAccessForRpcMethod(method);
-  const namesThread = stringField(payload, "threadId") !== undefined;
-  if ((access === "readIfThread" || access === "workIfThread") && !namesThread) return;
+  const threadId = stringField(payload, "threadId");
+  if (access === "readIfThread" || access === "workIfThread") {
+    // With no Thread, or a draft's (no row yet), the call runs on the Hub's own copy of the
+    // folder it names: one the User may read, or work in for a write.
+    const cwd = method === WS_METHODS.filesystemBrowse ? undefined : stringField(payload, "cwd");
+    if (cwd !== undefined && !visibility.all && (yield* isDraftOrNone(threadId))) {
+      const allowed =
+        access === "workIfThread"
+          ? yield* spaceVisibility.mayUseDirectory(visibility, userId, cwd)
+          : yield* spaceVisibility.mayReadDirectory(visibility, cwd);
+      if (!allowed) return yield* notFound();
+    }
+    if (threadId === undefined) return;
+  }
   // Before the Owner's early return: the Owner's drafts are held too, so no one else works them.
   if (access === "work" || access === "workIfThread") {
     const threadId = stringField(payload, "threadId");

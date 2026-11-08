@@ -87,7 +87,7 @@ const makeHandler = Effect.fnUntraced(function* (
         return yield* closeWith("protocol-error");
       }
       // A dedicated machine runs its Space's work only in its Sandbox container, whose server
-      // alone says so: its host's own server (or an older one) is refused.
+      // alone holds the credential that connects (`checkCredential`) and says so in its hello.
       if (check.mode === "dedicated" && hello.value.sandbox === undefined) {
         return yield* closeWith("not-sandboxed");
       }
@@ -99,6 +99,10 @@ const makeHandler = Effect.fnUntraced(function* (
       // close, and one from now on closes it.
       const current = yield* registry.checkCredential(credential);
       if (current._tag === "refused") return yield* closeWith(current.reason);
+      // Dedicated since the first check: the gate applies to what it is welcomed as.
+      if (current.mode === "dedicated" && hello.value.sandbox === undefined) {
+        return yield* closeWith("not-sandboxed");
+      }
       yield* registry.recordHello(environmentId, hello.value);
       yield* writer.write(
         encodeWelcome({

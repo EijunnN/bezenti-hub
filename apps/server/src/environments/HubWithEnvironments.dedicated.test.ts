@@ -148,6 +148,31 @@ const threadEnvironmentChanged = Effect.fn(function* (hub: Hub, threadId: string
 const listedIds = (hub: Hub, cookie: string) =>
   listEnvironments(hub.server, cookie).pipe(Effect.map((listed) => listed.map(({ id }) => id)));
 
+/** What the Hub's git route answers `credential` for the Project's repository. */
+const gitStatus = (hub: Hub, projectId: ProjectId, credential: string) =>
+  HttpClient.HttpClient.pipe(
+    Effect.flatMap((client) =>
+      client.execute(
+        HttpClientRequest.get(
+          `${HubRepository.hubRepositoryUrl(hub.server.url, { projectId })}/info/refs?service=git-upload-pack`,
+        ).pipe(HttpClientRequest.bearerToken(credential)),
+      ),
+    ),
+    Effect.map((response) => response.status),
+    Effect.provide(FetchHttpClient.layer),
+    Effect.orDie,
+  );
+
+/** Why the Hub refuses `credential` at connect, or "valid". */
+const refusalOf = (hub: Hub, credential: string) =>
+  hub
+    .service(EnvironmentRegistry.EnvironmentRegistry)
+    .checkCredential(credential)
+    .pipe(
+      Effect.orDie,
+      Effect.map((check) => (check._tag === "refused" ? check.reason : "valid")),
+    );
+
 /** The Hub sees the machine online: its Sandbox's server was welcomed before this is asked. */
 const assertOnline = (hub: Hub, environmentId: string) =>
   listEnvironments(hub.server, hub.owner).pipe(
@@ -275,14 +300,16 @@ describe("Hub con Environments: a machine dedicated to a Space", () => {
         });
         const vps = dedicated.environmentId;
         yield* assertOnline(hub, vps);
-        // The machine's server ran no work itself: one Sandbox, over the machine's own credential
-        // and Hub, whose server is the Environment the Hub sees.
+        // The machine's server ran no work itself: one Sandbox, with a credential the Hub issued
+        // it for Acme (never the machine's own, which stays with its host), whose server is the
+        // Environment the Hub sees.
         assert.equal(dedicated.launches.length, 1);
         const [launch] = dedicated.launches;
-        assert.equal(launch?.joined.environmentId, vps);
-        assert.isTrue(launch?.joined.sandboxed);
-        assert.equal(launch?.joined.hubUrl, hub.server.url);
-        assert.equal(launch?.credential, dedicated.credential);
+        assert.isDefined(launch);
+        assert.equal(launch.joined.environmentId, vps);
+        assert.isTrue(launch.joined.sandboxed);
+        assert.equal(launch.joined.hubUrl, hub.server.url);
+        assert.notEqual(launch.credential, dedicated.credential);
         assert.equal((yield* dedicated.hostState)._tag, "sandbox");
 
         // Acme's Member and Guest see it; Globex's Member does not.
@@ -345,22 +372,13 @@ describe("Hub con Environments: a machine dedicated to a Space", () => {
           ),
         );
 
-        // Its credential reaches its Space's repositories and no other's.
-        const advertised = (projectId: ProjectId) =>
-          HttpClient.HttpClient.pipe(
-            Effect.flatMap((client) =>
-              client.execute(
-                HttpClientRequest.get(
-                  `${HubRepository.hubRepositoryUrl(hub.server.url, { projectId })}/info/refs?service=git-upload-pack`,
-                ).pipe(HttpClientRequest.bearerToken(dedicated.credential)),
-              ),
-            ),
-            Effect.map((response) => response.status),
-            Effect.provide(FetchHttpClient.layer),
-            Effect.orDie,
-          );
+        // Its Sandbox's credential reaches its Space's repositories and no other's; the
+        // machine's own reaches none.
+        const advertised = (projectId: ProjectId, credential = launch.credential) =>
+          gitStatus(hub, projectId, credential);
         assert.equal(yield* advertised(acmeProject), 200);
         assert.equal(yield* advertised(globexProject), 403);
+        assert.equal(yield* advertised(acmeProject, dedicated.credential), 401);
       }).pipe(Effect.scoped),
   );
 
@@ -469,8 +487,14 @@ describe("Hub con Environments: a machine dedicated to a Space", () => {
           vps,
         );
 
-        // The machine learns it from the Hub: its Sandbox's server, welcomed for Globex, exits;
-        // its host asks the Hub, deletes Acme's home and starts one for Globex.
+        // What Acme's Sandbox holds reaches nothing from the change on: neither its socket nor
+        // the git route, whoever copied it out of the container.
+        const acmeCredential = dedicated.launches[0]?.credential ?? "";
+        assert.equal(yield* refusalOf(hub, acmeCredential), "credential-unknown");
+        assert.equal(yield* gitStatus(hub, acmeProject, acmeCredential), 401);
+        // The machine learns it from the Hub: Acme's server is refused, never welcomed for Globex
+        // (so no Globex work reaches Acme's container), and exits; its host asks the Hub,
+        // deletes Acme's home and starts one for Globex with a credential for Globex.
         const first = yield* dedicated.nextLaunch;
         const acmeHome = dedicated.launches[0]?.homePath ?? "";
         yield* first.connect;
@@ -478,7 +502,14 @@ describe("Hub con Environments: a machine dedicated to a Space", () => {
           Effect.timeout("60 seconds"),
           Effect.orDie,
         );
+        assert.deepEqual(
+          dedicated.launches[0]?.welcomes.map((welcome) => welcome.spaceId),
+          [acme],
+        );
         assert.equal(dedicated.launches[1]?.joined.spaceId, globex);
+        const globexCredential = dedicated.launches[1]?.credential ?? "";
+        assert.notInclude([acmeCredential, dedicated.credential], globexCredential);
+        assert.equal(yield* refusalOf(hub, globexCredential), "valid");
         assert.notEqual(dedicated.launches[1]?.homePath, acmeHome);
         assert.isFalse(NodeFS.existsSync(acmeHome));
         assert.equal(dedicated.persisted.at(-1)?.spaceId, globex);
@@ -500,6 +531,9 @@ describe("Hub con Environments: a machine dedicated to a Space", () => {
         assert.equal(personal.mode, "personal");
         assert.isFalse(NodeFS.existsSync(dedicated.launches[1]?.homePath ?? ""));
         assert.equal(dedicated.launches.length, 2);
+        // Globex's Sandbox credential ended with it; the machine's own now connects as personal.
+        assert.equal(yield* refusalOf(hub, globexCredential), "credential-unknown");
+        assert.equal(yield* refusalOf(hub, dedicated.credential), "valid");
 
         const changes = yield* hub
           .service(AuditLog.AuditLog)
@@ -529,14 +563,23 @@ describe("Hub con Environments: a dedicated machine is the Installation's", () =
           SELECT owner_user_id AS owner FROM environments WHERE environment_id = ${vps.environmentId}
         `;
         assert.isNull(row?.owner);
-        assert.equal((yield* registry.checkCredential(vps.credential))._tag, "valid");
+        // Its own credential only asks the Hub (`/self`): only its Sandbox's connects.
+        assert.equal(yield* refusalOf(hub, vps.credential), "not-sandboxed");
+        const self = yield* registry.selfOf(vps.credential).pipe(Effect.map(Option.getOrThrow));
+        assert.equal(self.spaceId, acme);
+        assert.isString(self.sandboxCredential);
+        assert.equal(yield* refusalOf(hub, self.sandboxCredential ?? ""), "valid");
 
         // Its Organization is deleted: the Owner still sees, renames and removes it; it runs nothing.
         const lifecycle = hub.service(OrganizationLifecycle.OrganizationLifecycle);
         yield* lifecycle.archive(owner, acme).pipe(Effect.orDie);
         yield* lifecycle.delete(owner, acme).pipe(Effect.orDie);
-        const checked = yield* registry.checkCredential(vps.credential);
-        assert.equal(checked._tag === "refused" && checked.reason, "space-missing");
+        assert.equal(yield* refusalOf(hub, vps.credential), "space-missing");
+        assert.equal(yield* refusalOf(hub, self.sandboxCredential ?? ""), "space-missing");
+        // Asked, the Hub says it serves no Space now, so its host waits instead of giving up.
+        const orphaned = yield* registry.selfOf(vps.credential).pipe(Effect.map(Option.getOrThrow));
+        assert.deepInclude(orphaned, { mode: "dedicated", spaceId: null });
+        assert.isUndefined(orphaned.sandboxCredential);
         assert.include(
           (yield* listEnvironments(hub.server, hub.owner)).map(({ id }) => id),
           vps.environmentId,
@@ -579,7 +622,7 @@ describe.skipIf(!rootlessPodmanAvailable)("a dedicated machine in Podman", () =>
   afterAll(() => removeTestRunContainers(run));
 
   it.live(
-    "runs its work in a Sandbox container that holds the machine's credential and reaches the Hub only by its socket",
+    "runs its work in a Sandbox container that holds its own credential, not the machine's, and reaches the Hub only by its socket",
     () =>
       Effect.gen(function* () {
         const entry = new URL("../bin.ts", import.meta.url).pathname;
@@ -624,7 +667,9 @@ describe.skipIf(!rootlessPodmanAvailable)("a dedicated machine in Podman", () =>
         );
         assert.isDefined(credential);
         assert.isFalse(credential.RW);
-        assert.equal(NodeFS.readFileSync(credential.Source, "utf8"), dedicated.credential);
+        const mounted = NodeFS.readFileSync(credential.Source, "utf8");
+        assert.notEqual(mounted, dedicated.credential);
+        assert.equal(yield* refusalOf(hub, mounted), "valid");
         const others = mounts.filter(
           (mount) =>
             !mount.Source.startsWith(dedicated.rootDir) && !mount.Source.startsWith(checkout),

@@ -94,7 +94,9 @@ it.effect("revokes Peer Link credentials, then drops their rows and cards", () =
       `;
     }
 
-    assert.deepEqual(yield* runMigrations(), [[102, "RemovePeerLinks"]]);
+    assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 102 }), [
+      [102, "RemovePeerLinks"],
+    ]);
 
     const sessions = yield* sql<{ readonly id: string; readonly revoked: number }>`
       SELECT session_id AS id, revoked_at IS NOT NULL AS revoked FROM auth_sessions ORDER BY session_id

@@ -454,32 +454,51 @@ describe("Hub con Environments: the Hub stops running agents", () => {
           | Orchestrator.OrchestratorV2
           | SqlClient.SqlClient
         >;
-        const restarted = Context.add(
-          services,
-          EnvironmentRegistry.EnvironmentRegistry,
-          EnvironmentRegistry.EnvironmentRegistry.of({
-            ...registry,
-            hubRunsAgents: false,
-            sandboxesUnavailable: "Sandboxes are turned off on this Hub.",
-          }),
-        );
-        // The Hub's own event sink, so its streams see what is written; fresh Thread locks and
-        // stores over the same database, as a restarted Hub has.
-        yield* Layer.build(
-          EnvironmentReturnService.layer.pipe(
-            Layer.provide(
-              Layer.mergeAll(
-                IdAllocator.layer,
-                ThreadCommandExecutor.layer,
-                ProjectionStore.layer,
-                TurnItemPositionStore.layer,
+        const restartWith = (sandboxes: {
+          readonly sandboxesUnavailable: string;
+          readonly sandboxesTurnedOff: boolean;
+        }) =>
+          Layer.build(
+            EnvironmentReturnService.layer.pipe(
+              Layer.provide(
+                Layer.mergeAll(
+                  IdAllocator.layer,
+                  ThreadCommandExecutor.layer,
+                  ProjectionStore.layer,
+                  TurnItemPositionStore.layer,
+                ),
+              ),
+              // The Hub's own event sink, so its streams see what is written; fresh Thread locks
+              // and stores over the same database, as a restarted Hub has.
+              Layer.provide(
+                Layer.succeedContext(
+                  Context.add(
+                    services,
+                    EnvironmentRegistry.EnvironmentRegistry,
+                    EnvironmentRegistry.EnvironmentRegistry.of({
+                      ...registry,
+                      hubRunsAgents: false,
+                      ...sandboxes,
+                    }),
+                  ),
+                ),
               ),
             ),
-            Layer.provide(Layer.succeedContext(restarted)),
-          ),
-        );
+          );
+        // Its Sandboxes away for now (the image of the new version not built yet): the Thread in
+        // one waits for them, while the Hub machine's needs an environment.
+        yield* restartWith({
+          sandboxesUnavailable: "Sandboxes need the Sandbox image, which is not built yet.",
+          sandboxesTurnedOff: false,
+        });
         // Released while the Hub starts, before its runs are recovered: nothing waits for it.
         assert.isNull(yield* activeOf(threadId));
+        assert.equal(yield* activeOf(sandboxThreadId), sandboxEnvironmentIdOf(acme));
+        // Turned off by the Owner, they are gone: its Threads need an environment too.
+        yield* restartWith({
+          sandboxesUnavailable: "Sandboxes are turned off on this Hub.",
+          sandboxesTurnedOff: true,
+        });
         assert.isNull(yield* activeOf(sandboxThreadId));
         const released = yield* awaitThread(
           hub,

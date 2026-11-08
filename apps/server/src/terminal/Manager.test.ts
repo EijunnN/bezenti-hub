@@ -33,6 +33,7 @@ import * as SynchronizedRef from "effect/SynchronizedRef";
 import * as TestClock from "effect/testing/TestClock";
 import { expect, vi } from "vite-plus/test";
 
+import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -411,6 +412,8 @@ it.layer(
     NodeServices.layer,
     NodeCrypto.layer,
     ProcessRunner.layer.pipe(Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+    // Shells run on this machine, as on a joined machine or a development Hub.
+    HubRunsAgents.layerRunsAgents,
   ),
   { excludeTestServices: true },
 )("TerminalManager", (it) => {

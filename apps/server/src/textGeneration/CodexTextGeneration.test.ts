@@ -24,6 +24,7 @@ import { expect } from "vite-plus/test";
 
 import { CodexSettings, ProviderInstanceId } from "@t3tools/contracts";
 
+import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
 import * as ServerConfig from "../config.ts";
 import { makeProcessProbe, processProbeSource } from "../testUtils/processProbe.ts";
 import * as TextGeneration from "./TextGeneration.ts";
@@ -38,7 +39,11 @@ const DEFAULT_TEST_MODEL_SELECTION = createModelSelection(
 
 const layerCodexTextGenerationTest = ServerConfig.ServerConfig.layerTest(process.cwd(), {
   prefix: "t3code-codex-text-generation-test-",
-}).pipe(Layer.provideMerge(NodeServices.layer));
+}).pipe(
+  Layer.provideMerge(NodeServices.layer),
+  // It runs the provider CLI here, as a joined machine does.
+  Layer.provideMerge(HubRunsAgents.layerRunsAgents),
+);
 
 interface FakeCodexInput {
   output: string;
@@ -501,6 +506,7 @@ it.effect.each([false, true])("text generation preflight: exhausted=%s", (exhaus
     const service = yield* TextGeneration.make.pipe(
       Effect.provide(
         Layer.mergeAll(
+          HubRunsAgents.layerRunsAgents,
           Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
             listInstances: Effect.succeed(instances),
             getInstance: (id) =>

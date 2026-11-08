@@ -26,6 +26,7 @@ import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterReg
 import * as RuntimePolicy from "../orchestration-v2/RuntimePolicy.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import * as EnvironmentExecutor from "./EnvironmentExecutor.ts";
+import * as HubRunsAgents from "./HubRunsAgents.ts";
 import * as ProjectCheckouts from "./ProjectCheckouts.ts";
 import type { WorkspaceLocation } from "./WorkspaceLocation.ts";
 
@@ -136,6 +137,8 @@ const makeLayer = (
         layerInstances,
         layerProjects,
         Layer.succeed(EnvironmentExecutor.ActiveEnvironmentResolver, resolver),
+        // These run work on the Hub machine, as a development Hub does.
+        HubRunsAgents.layerRunsAgents,
       ),
     ),
   );

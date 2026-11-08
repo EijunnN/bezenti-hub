@@ -6,6 +6,7 @@ import * as Option from "effect/Option";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
 import * as ServerConfig from "../config.ts";
+import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
 import { fromConfig, hubRunsAgentsFromConfig } from "./sandboxRuntimeFromConfig.ts";
 
 /** A Hub's config (dev with `--dev-url`, or production) and its environment variables. */
@@ -67,6 +68,14 @@ describe("T3CODE_HUB_RUNS_AGENTS", () => {
   );
 });
 
+describe("HubRunsAgents", () => {
+  it.effect("is off wherever the server did not provide it: nothing runs agents by default", () =>
+    Effect.gen(function* () {
+      assert.isFalse(yield* HubRunsAgents.HubRunsAgents);
+    }),
+  );
+});
+
 describe("Sandbox runtime from config", () => {
   it.effect("says why a Hub runs no Sandboxes", () =>
     Effect.gen(function* () {
@@ -75,9 +84,13 @@ describe("Sandbox runtime from config", () => {
       );
       assert.isTrue(Option.isNone(off.runtime));
       assert.include(off.unavailable ?? "", "turned off");
+      // Only that is the Owner's choice: their Threads need an environment. Any other reason
+      // may pass, and they wait.
+      assert.isTrue(off.turnedOff);
       const dev = yield* fromConfig.pipe(Effect.provide(withHub({}, { dev: true })));
       assert.isTrue(Option.isNone(dev.runtime));
       assert.include(dev.unavailable ?? "", "T3CODE_SANDBOX_RUNTIME=process");
+      assert.isFalse(dev.turnedOff);
     }),
   );
 });

@@ -9,6 +9,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   ENVIRONMENT_CONNECTION_PROTOCOL_VERSION,
   ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
+  type EnvironmentCloseReason,
   EnvironmentId,
   EventId,
   type EnvironmentHeartbeatFrame,
@@ -278,6 +279,8 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
   readonly sandbox?: { readonly runtime: "podman" | "process" };
   /** Runs after each welcome, as a server checks the mode the Hub names. */
   readonly onWelcome?: (welcome: EnvironmentWelcomeFrame) => Effect.Effect<void>;
+  /** Runs when the Hub refuses a connection before any welcome, with why. */
+  readonly onRefused?: (reason: EnvironmentCloseReason | undefined) => Effect.Effect<void>;
 }) {
   const scope = yield* Effect.scope;
   const mcpConfigs: Array<McpProviderSessionConfig> = [];
@@ -433,7 +436,19 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
             },
           }),
         ),
-    }).pipe(Effect.forkIn(scope));
+    }).pipe(
+      // Refused before a welcome: `connect` returns, and the server learns why (it may end, and
+      // this connection with it).
+      Effect.tap((outcome) =>
+        outcome.welcomed
+          ? Effect.void
+          : Deferred.succeed(welcomed, undefined).pipe(
+              Effect.andThen(input.onRefused?.(outcome.reason) ?? Effect.void),
+            ),
+      ),
+      Effect.ensuring(Deferred.succeed(welcomed, undefined)),
+      Effect.forkIn(scope),
+    );
     yield* Deferred.await(welcomed);
   });
   const disconnect = Effect.suspend(() => {
@@ -476,6 +491,8 @@ export interface SandboxLaunchRecord {
   readonly homePath: string;
   readonly joined: JoinedHubState;
   readonly credential: string;
+  /** Every welcome its server got, in order. */
+  readonly welcomes: Array<EnvironmentWelcomeFrame>;
 }
 
 /** A Sandbox runtime over the testkit's Sandboxes root, reaching the Hub at its address. */
@@ -756,8 +773,12 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
         const credential = yield* fs
           .readFileString(path.join(paths.secretsDir, `${ENVIRONMENT_CREDENTIAL_SECRET}.bin`))
           .pipe(Effect.orDie);
-        launches.push({ homePath: launch.homePath, joined: home.value, credential });
+        const welcomes: Array<EnvironmentWelcomeFrame> = [];
+        launches.push({ homePath: launch.homePath, joined: home.value, credential, welcomes });
         const exited = yield* Deferred.make<number | null>();
+        const exitChanged = Deferred.succeed(exited, JoinedHub.SANDBOX_MODE_CHANGED_EXIT).pipe(
+          Effect.asVoid,
+        );
         const environment = yield* startEnvironment({
           hubUrl: home.value.hubUrl,
           credential,
@@ -768,10 +789,17 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
           connect: true,
           baseDir: launch.homePath,
           sandbox: { runtime: "process" },
-          // As the real server does: welcomed for another Space, or as personal, it exits.
+          // As the real server does: welcomed for another Space, or as personal, or its
+          // credential refused, it exits.
           onWelcome: (welcome) =>
-            JoinedHub.sandboxedServerRefuses(home.value, welcome)
-              ? Deferred.succeed(exited, JoinedHub.SANDBOX_MODE_CHANGED_EXIT).pipe(Effect.asVoid)
+            Effect.sync(() => void welcomes.push(welcome)).pipe(
+              Effect.andThen(
+                JoinedHub.sandboxedServerRefuses(home.value, welcome) ? exitChanged : Effect.void,
+              ),
+            ),
+          onRefused: (reason) =>
+            reason !== undefined && JoinedHub.SANDBOX_CREDENTIAL_ENDED.has(reason)
+              ? exitChanged
               : Effect.void,
         });
         environments.push(environment);
@@ -810,14 +838,9 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
         mode: "dedicated",
         spaceId: input.spaceId,
       },
-      credential: joined.credential,
       state: hostState,
       askHub: DedicatedHost.askHubAt(server.url, joined.credential),
-      homesOnDisk: FileSystem.FileSystem.pipe(
-        Effect.flatMap((fs) => fs.readDirectory(rootDir)),
-        Effect.provide(NodeServices.layer),
-        Effect.orElseSucceed(() => []),
-      ),
+      homesOnDisk: DedicatedHost.dedicatedHomesIn(rootDir).pipe(Effect.provide(NodeServices.layer)),
       persist: (next) => Effect.sync(() => void persisted.push(next)),
       becomePersonal: (personal) => Deferred.succeed(turnedPersonal, personal).pipe(Effect.asVoid),
     }).pipe(Effect.provide(runtime), Effect.forkScoped);

@@ -2564,6 +2564,50 @@ describe("Space visibility", () => {
     ),
   );
 
+  it.effect(
+    "a file call with no Thread, or a draft's, keeps to folders of Spaces the User sees",
+    () =>
+      withTeam(({ server, ada }) =>
+        Effect.gen(function* () {
+          const asAda = yield* connectWriter(server, ada.userId);
+          // The refusal's tag, or "reached" once the call got past the guard to the file services
+          // (which these tests do not run).
+          const outcome = <A, E, R>(call: Effect.Effect<A, E, R>) =>
+            call.pipe(
+              Effect.flip,
+              Effect.map((error) => (error as { readonly _tag: string })._tag),
+              Effect.catchCause(() => Effect.succeed("reached")),
+            );
+          const read = (cwd: string, threadId?: string) =>
+            outcome(
+              asAda[WS_METHODS.projectsReadFile]({
+                cwd,
+                relativePath: "README.md",
+                ...(threadId === undefined ? {} : { threadId }),
+              } as never),
+            );
+          // Another Organization's Project answers like a missing one, with no Thread or a draft's,
+          // which run on the Hub's own copy of the folder.
+          assert.equal(yield* read("/work/globex-app"), "SpaceResourceNotFoundError");
+          assert.equal(
+            yield* read("/work/globex-app/src", "ada-draft"),
+            "SpaceResourceNotFoundError",
+          );
+          const written = yield* outcome(
+            asAda[WS_METHODS.projectsWriteFile]({
+              cwd: "/work/globex-app",
+              relativePath: "notes.md",
+              contents: "x",
+            } as never),
+          );
+          assert.equal(written, "SpaceResourceNotFoundError");
+          // Her own team's Project gets past the guard.
+          assert.notEqual(yield* read("/work/acme-app"), "SpaceResourceNotFoundError");
+          assert.notEqual(yield* read("/work/acme-app", "ada-draft"), "SpaceResourceNotFoundError");
+        }),
+      ),
+  );
+
   it.effect("answering a secret request is the Thread creator's, refused before storing", () =>
     withTeam(({ server, gus }) =>
       Effect.gen(function* () {

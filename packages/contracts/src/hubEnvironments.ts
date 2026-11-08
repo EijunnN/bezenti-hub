@@ -423,6 +423,12 @@ export const EnvironmentSelfResult = Schema.Struct({
    * Absent from older Hubs and for personal machines.
    */
   limits: Schema.optionalKey(Schema.NullOr(SandboxLimits)),
+  /**
+   * A dedicated machine's, while it serves a Space: a new credential for its Sandbox, the only
+   * one that connects as the machine, replacing the last one issued. It ends with the machine's
+   * mode or Space; the machine's own credential stays with its host.
+   */
+  sandboxCredential: Schema.optionalKey(Schema.String),
 });
 export type EnvironmentSelfResult = typeof EnvironmentSelfResult.Type;
 

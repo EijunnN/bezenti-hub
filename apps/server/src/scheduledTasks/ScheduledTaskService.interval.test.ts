@@ -13,6 +13,7 @@ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementSe
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
+import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import { ServerActivation } from "../serverActivation.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
@@ -252,7 +253,7 @@ it.effect.each([
         );
         expect(renamed.task.enabled).toBe(true);
         expect(renamed.task.nextRunAt).toBe(expected);
-      }).pipe(Effect.provide(layer));
+      }).pipe(Effect.provide(Layer.merge(layer, HubRunsAgents.layerRunsAgents)));
     }).pipe(
       Effect.provideService(ServerActivation, Effect.never),
       Effect.provide(SqlitePersistence.layerMemory),
@@ -308,7 +309,7 @@ it.effect("reports the stored task when the row was replaced during the run", ()
       const ran = yield* service.runNow({ id: created.task.id });
       expect(ran.task.runCount).toBe(0);
       expect(ran.task.lastRunStatus).toBe("never");
-    }).pipe(Effect.provide(layer));
+    }).pipe(Effect.provide(Layer.merge(layer, HubRunsAgents.layerRunsAgents)));
   }).pipe(
     Effect.provideService(ServerActivation, Effect.never),
     Effect.provide(SqlitePersistence.layerMemory),

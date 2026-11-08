@@ -9,12 +9,15 @@ import {
   SpaceId,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
+import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
 
 import { addMember, type Server } from "../auth/UserAuth.testkit.ts";
 import { formatEnvironmentCredential } from "@t3tools/shared/environmentJoin";
+import * as EnvironmentRegistry from "./EnvironmentRegistry.ts";
 import { hubWithOwner, joinMachine, listEnvironments } from "./environments.testkit.ts";
 import { connectOnce, sandboxedServerRefuses } from "./JoinedHub.ts";
 
@@ -141,8 +144,22 @@ it.effect(
       const unsandboxed = yield* (yield* connect(server, dedicated)).outcome;
       assert.equal(unsandboxed.reason, "not-sandboxed");
       assert.isFalse(unsandboxed.welcomed);
+      // Its Sandbox connects with the credential the Hub issued it, not the machine's own.
+      const machineSandboxed = yield* (yield* connect(server, dedicated, { sandboxed: true }))
+        .outcome;
+      assert.equal(machineSandboxed.reason, "not-sandboxed");
+      const self = yield* Context.get(
+        server.services as unknown as Context.Context<EnvironmentRegistry.EnvironmentRegistry>,
+        EnvironmentRegistry.EnvironmentRegistry,
+      )
+        .selfOf(dedicated.credential)
+        .pipe(Effect.orDie, Effect.map(Option.getOrThrow));
       const welcome = yield* Deferred.await(
-        (yield* connect(server, dedicated, { sandboxed: true })).welcomed,
+        (yield* connect(
+          server,
+          { ...dedicated, credential: self.sandboxCredential ?? "" },
+          { sandboxed: true },
+        )).welcomed,
       );
       assert.equal(welcome.mode, "dedicated");
       assert.equal(welcome.spaceId, acme);

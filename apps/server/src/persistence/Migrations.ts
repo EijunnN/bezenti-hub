@@ -104,6 +104,7 @@ import Migration0097 from "./Migrations/097_CheckpointUploads.ts";
 import Migration0099 from "./Migrations/099_MoveHandoffs.ts";
 import Migration0100 from "./Migrations/100_Sandboxes.ts";
 import Migration0102 from "./Migrations/102_RemovePeerLinks.ts";
+import Migration0103 from "./Migrations/103_DedicatedSandboxCredentials.ts";
 import Migration0104 from "./Migrations/104_SandboxLimitDefaults.ts";
 import Migration0106 from "./Migrations/106_DedicatedMachines.ts";
 
@@ -211,7 +212,7 @@ const migrationEntries = [
   [100, "Sandboxes", Migration0100],
   // 101 is unused.
   [102, "RemovePeerLinks", Migration0102],
-  // 103 is ticket 03's.
+  [103, "DedicatedSandboxCredentials", Migration0103],
   [104, "SandboxLimitDefaults", Migration0104],
   [106, "DedicatedMachines", Migration0106],
 ] as const;

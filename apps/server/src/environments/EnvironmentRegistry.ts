@@ -33,6 +33,7 @@ import {
 } from "@t3tools/contracts";
 import {
   environmentCredentialIssuer,
+  formatEnvironmentCredential,
   REGISTER_OWN_REQUIRED_MESSAGE,
 } from "@t3tools/shared/environmentJoin";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -341,6 +342,11 @@ export class EnvironmentRegistry extends Context.Service<
     /** Why this Hub runs no Sandboxes; null while it runs them. */
     readonly sandboxesUnavailable: string | null;
     /**
+     * The Owner turned Sandboxes off (`T3CODE_SANDBOX_RUNTIME=off`): their Threads need an
+     * environment as the Hub starts. Any other reason (no image yet, Podman away) may pass.
+     */
+    readonly sandboxesTurnedOff: boolean;
+    /**
      * What the User may see, the Hub machine first (only while it runs Threads). A Space the User
      * works in whose Sandbox was never made lists it too, stopped, so it can be chosen and made.
      */
@@ -477,7 +483,11 @@ export class EnvironmentRegistry extends Context.Service<
      * from now on, as on a removed machine.
      */
     readonly released: Stream.Stream<ReleasedThreads>;
-    /** How the Hub uses the machine a credential names now; None when it is refused. */
+    /**
+     * How the Hub uses the machine its own credential names now; None when it is refused. A
+     * dedicated machine also gets a new credential for its Sandbox (`sandboxCredential`), and one
+     * whose Space is gone answers `spaceId: null` until the Owner dedicates it elsewhere.
+     */
     readonly selfOf: (
       credential: string | undefined,
     ) => Effect.Effect<Option.Option<EnvironmentSelfResult>, EnvironmentStorageError>;
@@ -543,6 +553,8 @@ export class EnvironmentRegistry extends Context.Service<
 export interface RegistryOptions {
   /** Why there are no Sandboxes, for a registry without a runtime. */
   readonly sandboxesUnavailable?: string;
+  /** The Owner turned them off, rather than a runtime that may come back. */
+  readonly sandboxesTurnedOff?: boolean;
 }
 
 const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryOptions) {
@@ -560,6 +572,7 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
   const sandboxesUnavailable = Option.isSome(sandboxes)
     ? null
     : (options.sandboxesUnavailable ?? SANDBOXES_NEED_PODMAN);
+  const sandboxesTurnedOff = Option.isNone(sandboxes) && options.sandboxesTurnedOff === true;
   const storageError = (cause: unknown) => new EnvironmentStorageError({ cause });
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const platform = yield* HostProcess.Platform;
@@ -850,6 +863,9 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
         UPDATE environments SET revoked_at = ${yield* nowIso}
         WHERE environment_id = ${input.row.environmentId} AND revoked_at IS NULL
       `;
+    yield* sql`
+      DELETE FROM dedicated_sandbox_credentials WHERE environment_id = ${input.row.environmentId}
+    `;
     yield* audit
       .record({
         actor: input.actor,
@@ -1027,6 +1043,10 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
               owner_user_id = ${mode === "personal" ? actorUserId : null}
             WHERE environment_id = ${environmentId} AND revoked_at IS NULL
           `;
+          // What its Sandbox held ends here: its host asks for another for the new Space.
+          yield* sql`
+            DELETE FROM dedicated_sandbox_credentials WHERE environment_id = ${environmentId}
+          `;
           yield* audit
             .record({
               actor: AuditLog.userActor(actorUserId),
@@ -1085,6 +1105,10 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
     Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }),
   );
 
+  /**
+   * The machine a credential names, and whose it is: the machine's own (`machine`), or one the
+   * Hub issued a dedicated machine's Sandbox for `sandboxSpaceId`.
+   */
   const findByCredential = Effect.fn("EnvironmentRegistry.findByCredential")(function* (
     credential: string,
   ) {
@@ -1092,12 +1116,24 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
     const [row] = yield* selectRows([sql`credential_hash = ${credentialHash}`]).pipe(
       Effect.mapError(storageError),
     );
-    return row;
+    if (row !== undefined) return { row, holder: "machine" as const, sandboxSpaceId: null };
+    const [issued] = yield* sql<{ readonly environmentId: string; readonly spaceId: string }>`
+      SELECT environment_id AS "environmentId", space_id AS "spaceId"
+      FROM dedicated_sandbox_credentials WHERE credential_hash = ${credentialHash}
+    `.pipe(Effect.mapError(storageError));
+    if (issued === undefined) return undefined;
+    const [machine] = yield* selectRows([sql`environment_id = ${issued.environmentId}`]).pipe(
+      Effect.mapError(storageError),
+    );
+    return machine === undefined
+      ? undefined
+      : { row: machine, holder: "sandbox" as const, sandboxSpaceId: issued.spaceId };
   });
 
-  const checkCredential: EnvironmentRegistry["Service"]["checkCredential"] = Effect.fn(
-    "EnvironmentRegistry.checkCredential",
-  )(function* (credential) {
+  /** The machine a credential of this Hub names, or why it is refused before anything else. */
+  const credentialRow = Effect.fn("EnvironmentRegistry.credentialRow")(function* (
+    credential: string | undefined,
+  ) {
     if (credential === undefined || credential.length === 0) {
       return { _tag: "refused", reason: "credential-missing" } as const;
     }
@@ -1106,23 +1142,30 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
     if (issuer !== hubId) {
       return { _tag: "refused", reason: "credential-other-hub" } as const;
     }
-    const row = yield* findByCredential(credential);
+    const found = yield* findByCredential(credential);
+    if (found === undefined) return { _tag: "refused", reason: "credential-unknown" } as const;
+    return { _tag: "found", ...found } as const;
+  });
+
+  /** Why the machine works for nobody now: removed, its owner off, its Space gone. */
+  const rowRefusal = Effect.fn("EnvironmentRegistry.rowRefusal")(function* (row: EnvironmentRow) {
     // A personal machine has its owner; a Sandbox and a dedicated machine, their Space.
-    if (
-      row === undefined ||
-      (isSpaceBound(row) ? row.spaceId === null : row.ownerUserId === null)
-    ) {
-      return { _tag: "refused", reason: "credential-unknown" } as const;
+    if (isSpaceBound(row) ? row.spaceId === null : row.ownerUserId === null) {
+      return "credential-unknown" as const;
     }
-    if (row.revokedAt !== null) return { _tag: "refused", reason: "credential-revoked" } as const;
-    if (row.ownerInactive === 1) return { _tag: "refused", reason: "owner-inactive" } as const;
+    if (row.revokedAt !== null) return "credential-revoked" as const;
+    if (row.ownerInactive === 1) return "owner-inactive" as const;
     // A dedicated machine whose Space was deleted works for nobody until the Owner acts.
     if (row.mode === "dedicated" && row.spaceId !== null) {
       const space = yield* spaces
         .spaceById(SpaceId.make(row.spaceId))
         .pipe(Effect.mapError(storageError));
-      if (Option.isNone(space)) return { _tag: "refused", reason: "space-missing" } as const;
+      if (Option.isNone(space)) return "space-missing" as const;
     }
+    return undefined;
+  });
+
+  const validCheck = (row: EnvironmentRow) => {
     // A dedicated machine works for its Space, never as the Owner who dedicated it.
     const spaceId = isSpaceBound(row) && row.spaceId !== null ? SpaceId.make(row.spaceId) : null;
     return {
@@ -1134,6 +1177,39 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
       spaceId,
       mode: row.kind === "sandbox" ? "sandbox" : row.mode,
     } as const;
+  };
+
+  /**
+   * What connects and reaches git: a machine's own credential, but for a dedicated machine only
+   * the one issued to its Sandbox for the Space it serves now; its own stays with its host.
+   */
+  const checkCredential: EnvironmentRegistry["Service"]["checkCredential"] = Effect.fn(
+    "EnvironmentRegistry.checkCredential",
+  )(function* (credential) {
+    const named = yield* credentialRow(credential);
+    if (named._tag === "refused") return named;
+    const refusal = yield* rowRefusal(named.row);
+    if (refusal !== undefined) return { _tag: "refused", reason: refusal } as const;
+    if (named.row.mode === "dedicated" && named.holder === "machine") {
+      return { _tag: "refused", reason: "not-sandboxed" } as const;
+    }
+    if (
+      named.holder === "sandbox" &&
+      (named.row.mode !== "dedicated" || named.sandboxSpaceId !== named.row.spaceId)
+    ) {
+      return { _tag: "refused", reason: "credential-unknown" } as const;
+    }
+    return validCheck(named.row);
+  });
+
+  /** The machine its own credential names, as `/self` and `leave` take it: never its Sandbox's. */
+  const machineOf = Effect.fn("EnvironmentRegistry.machineOf")(function* (
+    credential: string | undefined,
+  ) {
+    const named = yield* credentialRow(credential);
+    return named._tag === "found" && named.holder === "machine"
+      ? Option.some(named.row)
+      : Option.none<EnvironmentRow>();
   });
 
   const recordHello: EnvironmentRegistry["Service"]["recordHello"] = Effect.fn(
@@ -1165,9 +1241,13 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
 
   const leave: EnvironmentRegistry["Service"]["leave"] = Effect.fn("EnvironmentRegistry.leave")(
     function* (credential) {
-      const check = yield* checkCredential(credential);
+      const machine = yield* machineOf(credential);
+      if (Option.isNone(machine)) return false;
       // A Sandbox is the Hub's own: it does not remove itself.
-      if (check._tag === "refused" || check.mode === "sandbox") return false;
+      if ((yield* rowRefusal(machine.value)) !== undefined || machine.value.kind === "sandbox") {
+        return false;
+      }
+      const check = { environmentId: EnvironmentId.make(machine.value.environmentId) };
       const left = yield* sql
         .withTransaction(
           Effect.gen(function* () {
@@ -1189,6 +1269,52 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
         yield* PubSub.publish(removals, check.environmentId);
       }
       return left;
+    },
+  );
+
+  const selfOf: EnvironmentRegistry["Service"]["selfOf"] = Effect.fn("EnvironmentRegistry.selfOf")(
+    function* (credential) {
+      const sandboxCredential = formatEnvironmentCredential(
+        hubId,
+        base64UrlEncode(yield* random.randomBytes(32).pipe(Effect.orDie)),
+      );
+      const sandboxHash = yield* sha256(sandboxCredential);
+      // Read and issued in one transaction: a change of mode or Space drops what it issued.
+      return yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            const machine = yield* machineOf(credential);
+            if (Option.isNone(machine)) return Option.none<EnvironmentSelfResult>();
+            const row = machine.value;
+            const refusal = yield* rowRefusal(row);
+            const named = { environmentId: EnvironmentId.make(row.environmentId), name: row.name };
+            // Its Space was deleted: it serves none until the Owner dedicates it elsewhere.
+            if (refusal === "space-missing") {
+              return Option.some({ ...named, mode: "dedicated" as const, spaceId: null });
+            }
+            if (refusal !== undefined) return Option.none<EnvironmentSelfResult>();
+            const { mode, spaceId } = validCheck(row);
+            if (mode !== "dedicated" || spaceId === null) {
+              return Option.some({ ...named, mode, spaceId });
+            }
+            yield* sql`
+              INSERT INTO dedicated_sandbox_credentials (
+                environment_id, space_id, credential_hash, issued_at
+              ) VALUES (${row.environmentId}, ${spaceId}, ${sandboxHash}, ${yield* nowIso})
+              ON CONFLICT (environment_id) DO UPDATE SET space_id = excluded.space_id,
+                credential_hash = excluded.credential_hash, issued_at = excluded.issued_at
+            `;
+            return Option.some({
+              ...named,
+              mode,
+              spaceId,
+              // Its Sandbox runs with the limits a Hub gives its own.
+              limits: yield* spaceLimitsOf(spaceId),
+              sandboxCredential,
+            });
+          }),
+        )
+        .pipe(Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }));
     },
   );
 
@@ -1630,6 +1756,7 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
     hubId,
     hubRunsAgents,
     sandboxesUnavailable,
+    sandboxesTurnedOff,
     startSandbox,
     sandboxes: sandboxList,
     sandboxSessionsEnded: Option.isSome(sandboxes) ? sandboxes.value.sessionsEnded : Stream.empty,
@@ -1652,20 +1779,7 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
     leave,
     removed: Stream.fromPubSub(removals),
     released: Stream.fromPubSub(releases),
-    selfOf: Effect.fn("EnvironmentRegistry.selfOf")(function* (credential) {
-      const check = yield* checkCredential(credential);
-      if (check._tag === "refused") return Option.none();
-      return Option.some({
-        environmentId: check.environmentId,
-        name: check.name,
-        mode: check.mode,
-        spaceId: check.spaceId,
-        // A dedicated machine runs its Space's Sandbox with the limits a Hub would.
-        ...(check.mode === "dedicated" && check.spaceId !== null
-          ? { limits: yield* spaceLimitsOf(check.spaceId) }
-          : {}),
-      });
-    }),
+    selfOf,
     stopSandbox: Effect.fn("EnvironmentRegistry.stopSandbox")(function* (input) {
       if (Option.isNone(sandboxes)) return;
       yield* sandboxes.value.stop(input).pipe(Effect.mapError(storageError));
@@ -1696,7 +1810,7 @@ export const layerWith = (options: RegistryOptions = {}) =>
     Layer.provideMerge(EnvironmentConnections.layer),
   );
 
-/** The registry without Sandboxes, its Hub machine running Threads: tests and the join flow. */
+/** The registry without Sandboxes (tests, the join flow); the Hub machine runs Threads as provided. */
 export const layer = layerWith();
 
 /**
@@ -1718,9 +1832,12 @@ export const layerFromConfig = Layer.unwrap(
       );
     }
     return Option.isNone(sandboxes.runtime)
-      ? layerWith(
-          sandboxes.unavailable === null ? {} : { sandboxesUnavailable: sandboxes.unavailable },
-        )
+      ? layerWith({
+          ...(sandboxes.unavailable === null
+            ? {}
+            : { sandboxesUnavailable: sandboxes.unavailable }),
+          sandboxesTurnedOff: sandboxes.turnedOff,
+        })
       : layerWithSandboxes(sandboxes.runtime.value);
   }),
 );

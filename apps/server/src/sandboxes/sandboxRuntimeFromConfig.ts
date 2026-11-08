@@ -168,9 +168,12 @@ const LOOPBACK_ONLY =
 export const fromConfig = Effect.gen(function* () {
   const setting = Option.getOrUndefined(yield* optionalSetting(SANDBOX_RUNTIME_SETTING));
   const config = yield* ServerConfig.ServerConfig;
-  const none = (unavailable: string) => ({ runtime: Option.none(), unavailable }) as const;
+  // `turnedOff`: the Owner chose none, so Threads in Sandboxes need an environment; any other
+  // reason (no image yet after an upgrade, Podman away for now) may pass, and they wait.
+  const none = (unavailable: string, turnedOff = false) =>
+    ({ runtime: Option.none(), unavailable, turnedOff }) as const;
   if (setting === "off") {
-    return none(`Sandboxes are turned off on this Hub (${SANDBOX_RUNTIME_SETTING}=off).`);
+    return none(`Sandboxes are turned off on this Hub (${SANDBOX_RUNTIME_SETTING}=off).`, true);
   }
   if (setting !== undefined && setting !== "process" && setting !== "podman") {
     yield* Effect.logWarning(
@@ -205,7 +208,7 @@ export const fromConfig = Effect.gen(function* () {
     );
     return Option.isNone(runtime)
       ? none("The process Sandbox runtime needs the Hub's own entry point.")
-      : { runtime, unavailable: null };
+      : { runtime, unavailable: null, turnedOff: false };
   }
   const image = Option.getOrElse(
     yield* optionalSetting(SANDBOX_IMAGE_SETTING),
@@ -233,6 +236,7 @@ export const fromConfig = Effect.gen(function* () {
   return {
     runtime: Option.some(podmanForHub(config, image).pipe(Layer.provide(addressOf(hubUrl)))),
     unavailable: null,
+    turnedOff: false,
   };
 });
 

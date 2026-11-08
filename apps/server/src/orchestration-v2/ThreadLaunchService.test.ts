@@ -46,6 +46,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
+import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -190,6 +191,8 @@ function makeHarness(options: HarnessOptions = {}) {
     options.generateTitle ?? (() => Effect.succeed({ title: "Generated title" })),
   );
   const layerExternalServices = Layer.mergeAll(
+    // These place work on the Hub machine, as a development Hub does.
+    HubRunsAgents.layerRunsAgents,
     WorktreeSetupTracker.layer,
     Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({ get: () => Effect.succeed(null) }),
     Layer.mock(TerminalManager.TerminalManager)({ close: closeTerminal }),
@@ -564,6 +567,7 @@ it.effect("places a launch for the Space its Thread will be claimed in, not the 
         hubId: EnvironmentId.make("hub"),
         hubRunsAgents: true,
         sandboxesUnavailable: null,
+        sandboxesTurnedOff: false,
         chooseForThread: (input) =>
           Effect.sync(() => {
             asked.push(input.spaceId);

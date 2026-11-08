@@ -1,7 +1,8 @@
 /**
  * A dedicated machine's joined server runs no work itself: it keeps one Sandbox running for the
  * Space the Hub names, with the runtime and rules a Hub runs a Space's Sandbox with, whose server
- * holds the machine's credential and is the one connected. See docs/internals/sandboxes.md.
+ * is the one connected, with a credential the Hub issues it for that Space (never the machine's,
+ * which stays with this host). See docs/internals/sandboxes.md.
  */
 import { EnvironmentSelfResult, SpaceId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -54,9 +55,12 @@ export type HubAnswer =
   | {
       readonly _tag: "uses";
       readonly mode: EnvironmentSelfResult["mode"];
+      /** Dedicated with none: its Space is gone, and it waits for the Owner. */
       readonly spaceId: string | null;
       /** The Space's Sandbox limits, as the Hub has them now; none from an older Hub. */
       readonly limits: SandboxLimits;
+      /** A new credential for its Sandbox, for that Space only; the last one ends. */
+      readonly sandboxCredential: string | undefined;
     }
   | { readonly _tag: "removed" }
   | { readonly _tag: "unreachable" };
@@ -82,6 +86,7 @@ export const askHubAt = (hubUrl: string, credential: string): Effect.Effect<HubA
               mode: self.mode,
               spaceId: self.spaceId,
               limits: self.limits ?? NO_LIMITS,
+              sandboxCredential: self.sandboxCredential,
             }))
           : Effect.succeed({ _tag: "unreachable" }),
     ),
@@ -90,14 +95,30 @@ export const askHubAt = (hubUrl: string, credential: string): Effect.Effect<HubA
     Effect.orElseSucceed((): HubAnswer => ({ _tag: "unreachable" })),
   );
 
+/** The Sandbox homes on disk under `rootDir`: directories only (never its logs). */
+export const dedicatedHomesIn = Effect.fn("DedicatedHost.dedicatedHomesIn")(
+  function* (rootDir: string) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const homes: Array<string> = [];
+    for (const entry of yield* fs.readDirectory(rootDir)) {
+      if (!entry.startsWith(DEDICATED_PREFIX)) continue;
+      const info = yield* fs.stat(path.join(rootDir, entry)).pipe(Effect.option);
+      if (Option.isSome(info) && info.value.type === "Directory") homes.push(entry);
+    }
+    return homes;
+  },
+  Effect.orElseSucceed((): ReadonlyArray<string> => []),
+);
+
 /**
  * Keeps a Sandbox running for the Space the Hub names, asked at start and after each end of its
- * server: another Space gets a new home and the old one goes (as does any other left on disk);
- * personal, the home goes and `becomePersonal` takes over. Too many ends leave it failed.
+ * server, each start with the Sandbox credential of the last answer: another Space gets a new
+ * home and the old one goes (as does any other left on disk); no Space (deleted) leaves it
+ * waiting; personal, the home goes and `becomePersonal` takes over. Too many ends leave it failed.
  */
 export const superviseDedicatedSandbox = Effect.fn("DedicatedHost.supervise")(function* <R>(input: {
   readonly joined: JoinedHubState;
-  readonly credential: string;
   readonly state: Ref.Ref<JoinedHub.JoinedConnectionState>;
   readonly askHub: Effect.Effect<HubAnswer>;
   /** The Sandbox ids with a home on disk. */
@@ -112,6 +133,8 @@ export const superviseDedicatedSandbox = Effect.fn("DedicatedHost.supervise")(fu
   let current = input.joined;
   // Asked of the Hub with each answer, so a change applies on the Sandbox's next start.
   let limits: SandboxLimits = NO_LIMITS;
+  // The Sandbox's own credential, for `current.spaceId`: none until the Hub gives one.
+  let sandboxCredential: string | undefined;
   const set = (next: {
     readonly state: "starting" | "running" | "restarting" | "failed";
     readonly message: string | null;
@@ -130,6 +153,7 @@ export const superviseDedicatedSandbox = Effect.fn("DedicatedHost.supervise")(fu
   /** Follows the Hub's answer: "stop" once this Sandbox has nothing more to run. */
   const follow = Effect.fn("DedicatedHost.follow")(function* (answer: HubAnswer) {
     if (answer._tag === "unreachable") return "go" as const;
+    // Its credential is refused: it was removed (a deleted Space answers, with no Space).
     if (answer._tag === "removed") {
       yield* set({
         state: "failed",
@@ -138,7 +162,7 @@ export const superviseDedicatedSandbox = Effect.fn("DedicatedHost.supervise")(fu
       return "stop" as const;
     }
     limits = answer.limits;
-    if (answer.mode !== "dedicated" || answer.spaceId === null) {
+    if (answer.mode !== "dedicated") {
       if (current.spaceId !== undefined) yield* remove(dedicatedSandboxIdOf(current.spaceId));
       const { spaceId: _spaceId, ...rest } = current;
       const personal: JoinedHubState = { ...rest, mode: "personal" };
@@ -146,53 +170,67 @@ export const superviseDedicatedSandbox = Effect.fn("DedicatedHost.supervise")(fu
       yield* input.becomePersonal(personal);
       return "stop" as const;
     }
-    if (answer.spaceId !== current.spaceId) {
+    if (answer.spaceId !== (current.spaceId ?? null)) {
       if (current.spaceId !== undefined) yield* remove(dedicatedSandboxIdOf(current.spaceId));
-      current = { ...current, mode: "dedicated", spaceId: answer.spaceId };
+      const { spaceId: _spaceId, ...rest } = current;
+      current =
+        answer.spaceId === null
+          ? { ...rest, mode: "dedicated" }
+          : { ...rest, mode: "dedicated", spaceId: answer.spaceId };
       yield* input.persist(current);
     }
+    sandboxCredential = answer.sandboxCredential;
     return "go" as const;
   });
 
   if ((yield* follow(yield* input.askHub)) === "stop") return;
-  while (current.spaceId === undefined) {
-    yield* set({
-      state: "restarting",
-      message: "waiting for the Hub to say which Space it serves.",
-    });
-    yield* Effect.sleep(HUB_RETRY_MS);
-    if ((yield* follow(yield* input.askHub)) === "stop") return;
-  }
   // Homes of other Spaces (an earlier dedication, a change cut short) are never reused.
   for (const sandboxId of yield* input.homesOnDisk) {
     if (
       sandboxId.startsWith(DEDICATED_PREFIX) &&
-      sandboxId !== dedicatedSandboxIdOf(current.spaceId)
+      (current.spaceId === undefined || sandboxId !== dedicatedSandboxIdOf(current.spaceId))
     ) {
       yield* remove(sandboxId);
     }
   }
 
+  /** The Space to run and its Sandbox's credential, once the Hub gave both. */
+  const runnable = () =>
+    current.spaceId === undefined || sandboxCredential === undefined
+      ? undefined
+      : { spaceId: current.spaceId, credential: sandboxCredential };
+
   const ends: Array<number> = [];
-  let created: string | undefined;
   while (true) {
-    const spaceId: string = current.spaceId ?? "";
+    // Nothing runs until the Hub names a Space and gives its Sandbox a credential for it.
+    let next = runnable();
+    while (next === undefined) {
+      yield* set({
+        state: "restarting",
+        message:
+          current.spaceId === undefined
+            ? "waiting for the Hub to say which Space it serves."
+            : "waiting for the Hub to give its Sandbox a credential.",
+      });
+      yield* Effect.sleep(HUB_RETRY_MS);
+      if ((yield* follow(yield* input.askHub)) === "stop") return;
+      next = runnable();
+    }
+    const { spaceId, credential } = next;
     const sandboxId = dedicatedSandboxIdOf(spaceId);
-    if (created !== sandboxId) {
-      const made = yield* runtime
-        .create({
-          sandboxId,
-          spaceId: SpaceId.make(spaceId),
-          environmentId: current.environmentId,
-          name: current.name,
-          hubEnvironmentId: current.hubEnvironmentId,
-          credential: Redacted.make(input.credential),
-        })
-        .pipe(Effect.result);
-      if (Result.isFailure(made)) {
-        return yield* set({ state: "failed", message: failedWith(made.failure) });
-      }
-      created = sandboxId;
+    // Made (or its credential and Hub replaced) before every start: each answer issues another.
+    const made = yield* runtime
+      .create({
+        sandboxId,
+        spaceId: SpaceId.make(spaceId),
+        environmentId: current.environmentId,
+        name: current.name,
+        hubEnvironmentId: current.hubEnvironmentId,
+        credential: Redacted.make(credential),
+      })
+      .pipe(Effect.result);
+    if (Result.isFailure(made)) {
+      return yield* set({ state: "failed", message: failedWith(made.failure) });
     }
     yield* set({ state: "starting", message: null });
     // The same start options a Hub gives its own Sandboxes: the runtime passes what it enforces.
@@ -268,6 +306,7 @@ export const layer = (joined: JoinedHubState) =>
       }
       const scope = yield* Effect.scope;
       const context = yield* Layer.build(runtime.success);
+      // The runtime's own root, as it derives it.
       const rootDir = path.join(
         path.dirname(config.baseDir),
         `${path.basename(config.baseDir)}-sandboxes`,
@@ -276,10 +315,12 @@ export const layer = (joined: JoinedHubState) =>
       const layerPersonal = (personal: JoinedHubState) => JoinedHub.layer(personal);
       yield* superviseDedicatedSandbox({
         joined,
-        credential: credential.value,
         state,
         askHub: askHubAt(joined.hubUrl, credential.value),
-        homesOnDisk: fs.readDirectory(rootDir).pipe(Effect.orElseSucceed(() => [])),
+        homesOnDisk: dedicatedHomesIn(rootDir).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, path),
+        ),
         persist: (next) =>
           writeJoinedHubState(config.joinedHubPath, next).pipe(
             Effect.provideService(FileSystem.FileSystem, fs),

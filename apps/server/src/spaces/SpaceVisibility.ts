@@ -139,6 +139,14 @@ export class SpaceVisibility extends Context.Service<
       userId: UserId | undefined,
       directory: string,
     ) => Effect.Effect<boolean>;
+    /**
+     * Whether the User may read `directory` with no Thread to place the call: inside a Project of
+     * a Space they see, or the working folder of a Thread there.
+     */
+    readonly mayReadDirectory: (
+      visibility: Visibility,
+      directory: string,
+    ) => Effect.Effect<boolean>;
   }
 >()("t3/spaces/SpaceVisibility") {}
 
@@ -335,6 +343,24 @@ const make = Effect.gen(function* () {
     return roots.some((row) => row.root !== null && isWithin(path, path.resolve(row.root), target));
   });
 
+  const mayReadDirectory = Effect.fn("SpaceVisibility.mayReadDirectory")(function* (
+    visibility: Visibility,
+    directory: string,
+  ) {
+    if (visibility.all) return true;
+    const roots = yield* sql<{ readonly root: string | null }>`
+      SELECT json_extract(t.payload_json, '$.worktreePath') AS root
+      FROM orchestration_v2_projection_threads t
+      WHERE t.deleted_at IS NULL AND ${threadInSpaces(sql, "t", visibility.spaceIds)}
+      UNION
+      SELECT workspace_root AS root FROM projection_projects
+      WHERE deleted_at IS NULL
+        AND space_id IN (SELECT value FROM json_each(${encodeIds(visibility.spaceIds)}))
+    `.pipe(Effect.orDie);
+    const target = path.resolve(directory);
+    return roots.some((row) => row.root !== null && isWithin(path, path.resolve(row.root), target));
+  });
+
   return SpaceVisibility.of({
     of,
     viewer,
@@ -345,6 +371,7 @@ const make = Effect.gen(function* () {
     claimWork,
     workableThreadIds,
     mayUseDirectory,
+    mayReadDirectory,
   });
 });
 

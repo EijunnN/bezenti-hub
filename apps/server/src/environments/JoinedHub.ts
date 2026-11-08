@@ -306,6 +306,13 @@ export const sandboxedServerRefuses = (
 /** The exit code a Sandbox's server ends with when its mode or Space is no longer the Hub's. */
 export const SANDBOX_MODE_CHANGED_EXIT = 78;
 
+/** Refusals of a Sandbox's credential, after which its server exits for its host to ask. */
+export const SANDBOX_CREDENTIAL_ENDED: ReadonlySet<EnvironmentCloseReason> = new Set([
+  "credential-unknown",
+  "credential-revoked",
+  "space-missing",
+]);
+
 /** What a server joined as personal says once the Hub dedicated its machine to a Space. */
 const DEDICATED_RESTART_MESSAGE =
   "The Hub's Owner dedicated this machine to a Space: it runs that Space's work in a Sandbox container. Restart its server (`t3 serve`); it needs rootless Podman and the Sandbox image.";
@@ -383,6 +390,10 @@ const layerConnector = (joined: JoinedHubState, credential: Option.Option<string
           }
           if (outcome.reason !== undefined && ENVIRONMENT_CLOSE_REASONS[outcome.reason].final) {
             yield* Effect.logWarning("The Hub refused this machine", { reason: outcome.reason });
+            // A Sandbox's credential ends with its Space: its host learns why by asking the Hub.
+            if (joined.sandboxed === true && SANDBOX_CREDENTIAL_ENDED.has(outcome.reason)) {
+              return yield* Effect.sync(() => process.exit(SANDBOX_MODE_CHANGED_EXIT));
+            }
             return yield* Ref.set(state, {
               _tag: "stopped",
               reason: outcome.reason,

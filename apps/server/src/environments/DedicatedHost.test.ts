@@ -1,8 +1,10 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { EnvironmentId } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Redacted from "effect/Redacted";
@@ -17,6 +19,7 @@ import {
   type SandboxStartOptions,
 } from "../sandboxes/SandboxRuntime.ts";
 import {
+  dedicatedHomesIn,
   dedicatedSandboxIdOf,
   type HubAnswer,
   superviseDedicatedSandbox,
@@ -36,12 +39,24 @@ const joined: JoinedHubState = {
 
 const NO_LIMITS: SandboxLimits = { cpus: null, memoryBytes: null, pids: null, diskBytes: null };
 
+let issued = 0;
+/** The Hub's answer: dedicated to `spaceId` with a new Sandbox credential, or personal. */
 const uses = (spaceId: string | null, limits: SandboxLimits = NO_LIMITS): HubAnswer => ({
   _tag: "uses",
   mode: spaceId === null ? "personal" : "dedicated",
   spaceId,
   limits,
+  sandboxCredential: spaceId === null ? undefined : `t3env.sandbox-${(issued += 1)}`,
 });
+
+/** Dedicated to a Space the Hub no longer has. */
+const orphaned: HubAnswer = {
+  _tag: "uses",
+  mode: "dedicated",
+  spaceId: null,
+  limits: NO_LIMITS,
+  sandboxCredential: undefined,
+};
 
 /**
  * A runtime recording what it was asked. Each start's server ends with the exit code the test
@@ -91,7 +106,6 @@ const supervise = Effect.fn(function* (
   const personal = yield* Deferred.make<JoinedHubState>();
   const fiber = yield* superviseDedicatedSandbox({
     joined,
-    credential: "t3env.secret",
     state,
     askHub: Ref.get(answers),
     homesOnDisk: Effect.succeed(homes),
@@ -103,22 +117,34 @@ const supervise = Effect.fn(function* (
 });
 
 it.effect(
-  "its Sandbox gets the machine's credential, restarts with a backoff, and stays failed after too many ends",
+  "its Sandbox gets the credential the Hub issued it, restarts with a backoff, and stays failed after too many ends",
   () =>
     Effect.gen(function* () {
       const runtime = yield* makeRuntime();
       for (let end = 0; end < 4; end += 1) yield* Queue.offer(runtime.ends, 1);
-      const { state, fiber } = yield* supervise(runtime, yield* Ref.make(uses("org-acme")));
+      const answers = yield* Ref.make(uses("org-acme"));
+      const first = yield* Ref.get(answers);
+      const { state, fiber } = yield* supervise(runtime, answers);
       assert.equal(runtime.created.length, 1);
       assert.equal(runtime.created[0]?.sandboxId, dedicatedSandboxIdOf("org-acme"));
       assert.equal(runtime.created[0]?.spaceId, "org-acme");
-      assert.equal(Redacted.value(runtime.created[0]!.credential), "t3env.secret");
+      assert.equal(
+        Redacted.value(runtime.created[0]!.credential),
+        first._tag === "uses" ? first.sandboxCredential : undefined,
+      );
       assert.equal(runtime.started.length, 1);
+      // Each answer issues another: a start after it has it.
+      const second = uses("org-acme");
+      yield* Ref.set(answers, second);
       // 1, 2 and 4 seconds apart; the fourth end in ten minutes leaves it failed.
       yield* TestClock.adjust("1 second");
       assert.equal(runtime.started.length, 2);
       yield* TestClock.adjust("2 seconds");
       assert.equal(runtime.started.length, 3);
+      assert.equal(
+        Redacted.value(runtime.created.at(-1)!.credential),
+        second._tag === "uses" ? second.sandboxCredential : undefined,
+      );
       yield* TestClock.adjust("4 seconds");
       assert.equal(runtime.started.length, 4);
       yield* Fiber.join(fiber);
@@ -181,6 +207,42 @@ it.effect("made personal on the Hub, it deletes the Space's home and serves as p
     // Its stale home is never started again.
     assert.equal(runtime.started.length, 1);
   }),
+);
+
+it.effect(
+  "its Space deleted, it deletes the home and waits, then runs for the Space the Owner names",
+  () =>
+    Effect.gen(function* () {
+      const runtime = yield* makeRuntime();
+      const answers = yield* Ref.make(uses("org-acme"));
+      const { state, persisted } = yield* supervise(runtime, answers);
+      yield* Ref.set(answers, orphaned);
+      yield* Queue.offer(runtime.ends, 78);
+      yield* TestClock.adjust("1 millis");
+      assert.deepEqual(runtime.deleted, [dedicatedSandboxIdOf("org-acme")]);
+      assert.isUndefined(persisted.at(-1)?.spaceId);
+      const waiting = yield* Ref.get(state);
+      assert.equal(waiting._tag === "sandbox" && waiting.state, "restarting");
+      yield* TestClock.adjust("30 seconds");
+      assert.equal(runtime.started.length, 1);
+      // The Owner dedicates it to Globex: the next ask finds it.
+      yield* Ref.set(answers, uses("org-globex"));
+      yield* TestClock.adjust("10 seconds");
+      assert.equal(runtime.started.at(-1), dedicatedSandboxIdOf("org-globex"));
+      assert.equal(persisted.at(-1)?.spaceId, "org-globex");
+    }),
+);
+
+it.effect("its homes on disk are the Sandbox directories, never their logs", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-dedicated-homes-" });
+    yield* fs.makeDirectory(`${root}/${dedicatedSandboxIdOf("org-acme")}`);
+    yield* fs.makeDirectory(`${root}/.state`);
+    yield* fs.writeFileString(`${root}/${dedicatedSandboxIdOf("org-acme")}.log`, "log\n");
+    assert.deepEqual(yield* dedicatedHomesIn(root), [dedicatedSandboxIdOf("org-acme")]);
+    assert.deepEqual(yield* dedicatedHomesIn(`${root}/missing`), []);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
 it.effect("a machine the Hub no longer accepts runs nothing", () =>

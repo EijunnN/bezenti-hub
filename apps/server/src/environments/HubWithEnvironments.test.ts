@@ -2224,6 +2224,8 @@ const EPOCH = DateTime.makeUnsafe("2026-01-01T00:00:00.000Z");
 const recordingTextGeneration = (
   asked: Array<ThreadHandoffGenerationInput>,
   answer: { readonly summary: string } | { readonly failure: string },
+  /** Whether each folder it was asked to run in was there, when asked. */
+  cwdFound: Array<boolean> = [],
 ): ProviderTextGeneration => {
   const unused = () => Effect.die("only the handoff summary is written in these tests");
   return {
@@ -2235,6 +2237,7 @@ const recordingTextGeneration = (
     generateThreadHandoff: (input) =>
       Effect.suspend(() => {
         asked.push(input);
+        cwdFound.push(NodeFS.existsSync(input.cwd));
         return "summary" in answer
           ? Effect.succeed({ summary: answer.summary })
           : Effect.fail(
@@ -2424,13 +2427,16 @@ describe("Hub con Environments: the agent's memory after a move", () => {
     Effect.gen(function* () {
       const hubAsked: Array<ThreadHandoffGenerationInput> = [];
       const desktopAsked: Array<ThreadHandoffGenerationInput> = [];
+      const desktopCwdFound: Array<boolean> = [];
       const { hub, laptop, desktop, threadId, owner } = yield* turnOnLaptop({
         desktop: true,
         hubRunsAgents: false,
         hubTextGeneration: recordingTextGeneration(hubAsked, { summary: "Never on the Hub." }),
-        desktopTextGeneration: recordingTextGeneration(desktopAsked, {
-          summary: "Written on the Desktop from the history.",
-        }),
+        desktopTextGeneration: recordingTextGeneration(
+          desktopAsked,
+          { summary: "Written on the Desktop from the history." },
+          desktopCwdFound,
+        ),
       });
       assert.isDefined(desktop);
       yield* laptop.disconnect;
@@ -2444,6 +2450,11 @@ describe("Hub con Environments: the agent's memory after a move", () => {
       assert.equal(moved.move?.status, "switched", moved.move?.failure?.message);
       assert.lengthOf(hubAsked, 0);
       assert.lengthOf(desktopAsked, 1);
+      // In a folder of the Desktop's own that is there (its checkout is not fetched yet), never
+      // a path of the Hub's.
+      const asked = desktopAsked[0]?.cwd ?? "";
+      assert.isTrue(asked.startsWith(desktop.workspaceRoot), asked);
+      assert.deepEqual(desktopCwdFound, [true], asked);
       const { item } = yield* handoffItemOf(hub, threadId);
       assert.equal(item.writtenBy, "target");
       assert.equal(item.summary, "Written on the Desktop from the history.");

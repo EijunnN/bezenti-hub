@@ -114,11 +114,13 @@ export const layer: Layer.Layer<
         environmentId === undefined &&
         Option.isSome(environments) &&
         !environments.value.hubRunsAgents;
-      // So is a Sandbox this Hub has no runtime for (T3CODE_SANDBOX_RUNTIME off, Podman gone).
+      // So is a Sandbox once the Owner turned Sandboxes off (T3CODE_SANDBOX_RUNTIME=off). A
+      // runtime away for now (its image not built after an upgrade, Podman failing) is not:
+      // those Threads wait, offline, for it to come back.
       const sandboxesGone =
         environmentId === undefined &&
         Option.isSome(environments) &&
-        environments.value.sandboxesUnavailable !== null;
+        environments.value.sandboxesTurnedOff;
       const rows = yield* sql<{
         readonly threadId: string;
         readonly environmentId: string;

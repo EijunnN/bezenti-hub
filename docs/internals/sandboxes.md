@@ -147,8 +147,10 @@ the dev runner started (`T3CODE_DEV_RUNNER=1`, set by `vp run dev`, with `--dev-
 a value that turns it on is ignored with an error in the log. Under the dev runner it is on by
 default only with no Sandbox runtime (`T3CODE_SANDBOX_RUNTIME` unset or `off`), so contributors
 without Podman keep working as before Sandboxes; with `process` or `podman` it is off. While on, the
-Hub machine is listed and is the fallback instead of the Sandbox. Tests keep it on by default (the
-testkit's `hubRunsAgents`), and the tests of this rule turn it off.
+Hub machine is listed and is the fallback instead of the Sandbox. Anything the server does not
+provide it to (a CLI command, another entry point) reads it off: it fails closed. Tests that run
+work in the Hub's process provide it on (the testkit's `hubRunsAgents`, on by default), and the
+tests of this rule turn it off.
 
 While off, the Hub machine runs nothing, whatever asks:
 
@@ -157,7 +159,10 @@ While off, the Hub machine runs nothing, whatever asks:
   included) and `TextGeneration` runs no provider CLI (`hub_runs_no_agents`).
 - Workspace calls (`ThreadWorkspace`) for a draft (a Thread not placed yet) or with no Thread still
   read the Hub's copy of the Project: listings, search, reading files, browsing folders, which run
-  no code. Anything that acts (writing a file, opening or typing in a terminal, opening a preview)
+  no code. Since nothing places them, the folder they name must be one the User may read: a
+  Project of a Space they see, or a Thread's working folder there (`mayReadDirectory`; a write,
+  one they may work in), else they answer like a missing Project (`RpcSpaceAccess`). Browsing
+  folders keeps to filesystem scopes alone. Anything that acts (writing a file, opening or typing in a terminal, opening a preview)
   is refused until the Thread is placed. A Thread not projected yet resolves to no Environment
   (`ActiveEnvironmentResolver`), never the Hub machine.
 - Titles are written on the Thread's Active environment (`textGeneration.threadTitle`, in its
@@ -174,9 +179,13 @@ While off, the Hub machine runs nothing, whatever asks:
   turned off), also in the list as `sandboxesUnavailable`, so the composer says it before sending
   and still offers the User's own machines. The Hub logs it at startup.
 - As the Hub starts, before it recovers its runs, every Thread whose Active environment is the Hub
-  machine, or a Sandbox this Hub has no runtime for, needs an environment, as for a removed machine
-  (`EnvironmentReturnService`, built before `serverRuntimeStartup` recovers anything): its history
-  stays, unfinished turns end, and it moves to the Sandbox or a machine of its User's.
+  machine needs an environment, as for a removed machine (`EnvironmentReturnService`, built before
+  `serverRuntimeStartup` recovers anything): its history stays, unfinished turns end, and it moves
+  to the Sandbox or a machine of its User's. So does every Thread in a Sandbox once the Owner turned
+  Sandboxes off (`T3CODE_SANDBOX_RUNTIME=off`, `sandboxesTurnedOff`), and only then: a runtime that
+  is away for now (the image of a new version not built yet, `podman info` failing, the Hub bound
+  elsewhere) releases nothing, which could not be undone; those Threads wait, offline, and can be
+  moved meanwhile.
 
 ## Limits
 
@@ -431,11 +440,19 @@ the machine its server runs no work itself but one Sandbox for the Space it serv
   Thread no longer in its Space, and **fails closed**: a Space it cannot read refuses the turn with
   `SpaceCheckUnavailableError` (retryable), never skips the check (`boundSpaceOf`). Its `t3 leave`
   is audited as the machine (`source: "cli"`, no User).
-- **Only its Sandbox connects.** The Hub accepts a dedicated machine's socket only when the hello
-  carries `sandbox: { runtime }`, which only a server whose host wrote `sandboxed: true` into its
-  state sends; anything else is closed with the final `not-sandboxed`. The host also keeps the
-  credential under another secret (`dedicated-environment-credential`), so its own server run as a
-  personal one (an older one, or `joined-hub.json` edited) finds none to present.
+- **Only its Sandbox connects, with a credential of its own.** The machine's own credential (from
+  `t3 join`) stays with its host and only asks the Hub (`/self`) or leaves: presented at connect
+  or to the git route it is refused (`not-sandboxed`). Each answer to `/self` issues a new
+  credential for the Sandbox, for the Space it serves then, replacing the last one
+  (`dedicated_sandbox_credentials`, migration 103, only its hash); that is the one the container
+  holds and the only one that connects as the machine or reaches its Space's repositories. A
+  change of mode or Space (and removing the machine) drops it in the same transaction, so a copy an
+  agent took from the container reaches nothing afterwards, and the old Space's server is refused
+  before it could be welcomed for the new one. The socket also needs the hello to carry
+  `sandbox: { runtime }` (checked again on the second credential check, after the socket is
+  tracked). The host keeps its own credential under another secret
+  (`dedicated-environment-credential`), so its own server run as a personal one (an older one, or
+  `joined-hub.json` edited) finds none to present.
 - **Changing mode or Space** (`POST /api/environments/mode`, **Change use** in Settings) is the
   Owner's, for joined machines only, to `personal` (the Owner's own) or `dedicated` (owned by
   nobody) to an Organization neither archived nor frozen. Active Threads on it refuse it with 409
@@ -444,7 +461,9 @@ the machine its server runs no work itself but one Sandbox for the Space it serv
   its own. The dialog says the Space's work files on the machine will be deleted. It is audited as
   `environment.mode.change`, and after the commit the socket closes (`environment-mode-changed`).
 - **The machine asks.** `POST /api/environments/self`, with its own credential, answers its mode
-  and Space as the Hub has them now; a dedicated host follows that, never what it remembers.
+  and Space as the Hub has them now, and a dedicated one its Sandbox's new credential; a dedicated
+  host follows that, never what it remembers. Its Space deleted, it answers `dedicated` with no
+  Space (and no credential) until the Owner dedicates it elsewhere or makes it personal.
 
 **On the machine.** `t3 join` writes `mode: "dedicated"` and `spaceId` into `joined-hub.json`,
 after checking rootless Podman (only `T3CODE_SANDBOX_RUNTIME=process` skips that, for
@@ -457,19 +476,23 @@ joined server, but connects nothing of its own:
   (`dedicatedRuntimeFromConfig`): Podman by default (rootless, with the Sandbox image), or the
   process runtime when asked for. The container rules are the ones above: keep-id, no
   capabilities, no new privileges, its own slirp4netns network without the host's loopback, only
-  its home mounted read-write, the credential and `joined-hub.json` written outside the home and
+  its home mounted read-write, its Sandbox credential and `joined-hub.json` written outside the home and
   mounted read-only, and the Hub reached only through the UNIX socket proxy
   (`/api/environment/connect`, `/api/git/…`, `/mcp`, 404 otherwise), which forwards to the Hub's
   own address (`https://`, with SNI for a host name; plain `http://` only for a Hub on that
   machine).
 - **A home is never reused.** At start, and whenever its Sandbox's server ends, the host asks the
-  Hub. Another Space: it deletes the old Space's home (and container) and makes a new one.
+  Hub, and starts the Sandbox again with the credential that answer issued (the runtime's `create`
+  replaces it in place). Another Space: it deletes the old Space's home (and container) and makes a
+  new one. No Space (its Space deleted): it deletes the home and waits, asking every 10 seconds.
   Personal: it deletes the home, moves the credential back to the personal secret, writes its
   state as the Hub answered and serves as a personal machine from then on, without a restart.
-  Every other `dedicated-*` home on disk is deleted at start, so a change cut short leaves nothing.
+  Every other `dedicated-*` home on disk (directories only, never the runtime's logs beside them)
+  is deleted at start, so a change cut short leaves nothing.
 - **The Sandbox's server serves only its Space.** Its state names the Space; welcomed as
   someone's personal machine or for another Space (`sandboxedServerRefuses`), it refuses and exits
-  with code 78, which is how its host learns to ask. A personal server whose credential the Hub
+  with code 78, which is how its host learns to ask; so does a Sandbox's server whose credential
+  the Hub refuses (`credential-unknown`, `credential-revoked`, `space-missing`). A personal server whose credential the Hub
   refuses as `not-sandboxed` (dedicated on the Hub since) moves the credential to the dedicated
   secret, writes `mode: "dedicated"` and stops; restarted, it runs as above.
 - **Its network.** A container reaches every address of its host but the loopback, and rootless

@@ -113,7 +113,7 @@ function makeHarness(
         layerServerSettings,
         NodeServices.layer,
         options.threadMachine === undefined
-          ? Layer.empty
+          ? HubRunsAgents.layerRunsAgents
           : Layer.mergeAll(
               Layer.succeed(HubRunsAgents.HubRunsAgents, false),
               Layer.mock(EnvironmentExecutor.EnvironmentExecutorRegistry)({
