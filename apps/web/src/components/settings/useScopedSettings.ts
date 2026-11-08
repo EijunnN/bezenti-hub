@@ -1,4 +1,4 @@
-import { AuthSettingsWriteScope } from "@t3tools/contracts";
+import { AuthInstallationScopes, AuthSettingsWriteScope } from "@t3tools/contracts";
 import { useEnvironmentsWithScope } from "../../state/session";
 import {
   requiredScopesForServerSettingsPatch,
@@ -70,7 +70,9 @@ function useRunScopedPlan() {
             Cause.fail(
               new EnvironmentAuthorizationError({
                 requiredScope: missing,
-                message: "This connection lacks permission to change these settings.",
+                message: (AuthInstallationScopes as ReadonlyArray<string>).includes(missing)
+                  ? "Only the Owner of this Hub changes these settings."
+                  : "This connection lacks permission to change these settings.",
               }),
             ),
           );

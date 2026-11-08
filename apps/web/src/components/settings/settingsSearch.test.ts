@@ -15,7 +15,9 @@ import {
   movedSettingsPath,
   searchSettings,
   SETTINGS_NAV_GROUPS,
+  SETTINGS_OWNER_ONLY_PATHS,
   SETTINGS_SEARCH_ITEMS,
+  settingsNavGroupsFor,
   sourceControlHostSearchItems,
   sourceControlHostSettingsSearchId,
   type SettingsSearchItem,
@@ -109,6 +111,31 @@ describe("searchSettings", () => {
     expect(searchSettings("hold to quit")).toEqual([]);
     expect(searchSettings("wsl")).toEqual([]);
     expect(searchSettings("update track")).toEqual([]);
+  });
+
+  it("leaves the Owner's pages out of a Member's nav and search", () => {
+    const availability = {
+      hasEnvironment: true,
+      hasProviderSettingsEnvironment: true,
+      hasMacProviderSettingsEnvironment: true,
+      canManageLocalBackend: true,
+      isWslSettingsRowVisible: true,
+      hasThreadAutoSettlement: true,
+    };
+    const pages = (items: ReadonlyArray<SettingsSearchItem>) =>
+      new Set(items.map((item) => item.to));
+    const forOwner = pages(filterAvailableSettingsSearchItems(availability));
+    const forMember = pages(
+      filterAvailableSettingsSearchItems({ ...availability, actsForInstallation: false }),
+    );
+    for (const path of SETTINGS_OWNER_ONLY_PATHS) expect(forMember.has(path)).toBe(false);
+    expect(forOwner.has("/settings/providers")).toBe(true);
+    expect(forMember.has("/settings/appearance")).toBe(true);
+    const memberNav = settingsNavGroupsFor(false).flatMap((group) => group.paths);
+    expect(memberNav).not.toContain("/settings/providers");
+    expect(memberNav).not.toContain("/settings/maintenance");
+    expect(memberNav).toContain("/settings/threads");
+    expect(settingsNavGroupsFor(true)).toBe(SETTINGS_NAV_GROUPS);
   });
 
   it("hides settings whose controls are unavailable", () => {

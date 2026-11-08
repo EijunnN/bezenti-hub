@@ -317,8 +317,8 @@ place this is answered, and every read of Projects or Threads asks it:
 - RPCs that name one Thread or Project are checked by the RPC authorization
   middleware from [RpcSpaceAccess](../../apps/server/src/auth/RpcSpaceAccess.ts).
   It lists every `orchestration.*` RPC and every RPC whose payload names a
-  `threadId`, `projectId` or `projectIds`, as `thread`, `project`, `filtered` or
-  `unscoped` with the reason; `RpcAuthorization.test.ts` fails when one is
+  `threadId`, `projectId` or `projectIds` (in fact every RPC), as `thread`, `project`,
+  `filtered`, `installation` or `unscoped` with the reason; `RpcAuthorization.test.ts` fails when one is
   missing. A hidden Thread and a missing one both fail with
   `SpaceResourceNotFoundError`, so a refusal is not an existence oracle. HTTP
   Thread routes answer `thread_not_found` the same way.
@@ -441,6 +441,46 @@ listed (marked `archived`) only to the Owner.
 Per-Thread controls come from `threadRolePermissions` in the client runtime, which
 mirrors the policy from the directory's Roles and `isOwner`; the server stays the
 judge.
+
+#### The Installation as a whole is the Owner's
+
+Scopes say what a credential may do, not whose Installation it is: every browser session
+got the standard scopes, so they kept no Member out of the Hub's settings, processes or
+providers. Two layers now do:
+
+- RPCs on the Installation as a whole are `installation` in `RpcSpaceAccess`
+  (`INSTALLATION_RPC_METHODS` in contracts): settings and keybindings (one file for the
+  whole Hub), storage cleanup, process, trace, telemetry and usage diagnostics, signalling a
+  process, triage, every provider, provider sign-in and ACP registry install, device hosts,
+  device actions and shutdown, and the Hub's source-control sign-in and starring. The
+  middleware refuses them with `SpaceActionDeniedError` ("Only the Owner of this Hub can do
+  that.") unless the session sees everything (the Owner, or no Owner yet), whatever its
+  scopes; an Admin is refused like a Member. `device.list` is shared, but its host retry and
+  tool update are the Owner's too. What stays `unscoped` is one session's or connection's own
+  (probe, server config, lifecycle, client activity, preview profiles, uploads) or reads the
+  Hub's shared state its Members need (host load, devices, source-control tools); handlers
+  filter the rest: discovered local servers (only those of Threads the User works; stopping
+  one needs it listed so), agent sessions to import (folders the User may read, Projects they
+  see), clones (into the Hub's Projects folder or a folder of the User's team's Projects,
+  `SpaceVisibility.mayCreateDirectory`; listed, cancelled and retried by their starter, or
+  seen with their Project; their URLs carry no credentials), pending attachments (deleted
+  only by the User who asked for the upload, remembered in memory) and the access stream.
+- A session of any User but the Owner is read without the Installation's own scopes
+  (`AuthInstallationScopes`: `settings:write`, `providers:manage`, `environment:maintain`,
+  `diagnostics:read`), however and whenever it was issued (`heldByUser` in EnvironmentAuth,
+  for cookies, bearer and DPoP tokens and WebSocket tickets); sign-in issues a Member's
+  session without them, and a Member's pairing link and MCP approval ask none of them. So the
+  scopes a client is told about are what it can use, and clients that hide controls by scope
+  hide these for a Member. The RPC check is what refuses; this keeps the clients honest.
+
+Clients hide what a Member cannot do rather than fail: command permissions refuse
+`INSTALLATION_RPC_METHODS` for a session that is not the Owner's
+(`sessionActsForInstallation`), the web Settings drop Providers, Devices, Maintenance,
+Diagnostics, Source control and Secrets for a Member (opening one says only the Owner changes
+them) and mark Threads, Browser, Worktrees, Keybindings, Projects and Labs as the Hub's, and
+mobile Settings drop Providers, Source control and Maintenance. Settings stored once for the
+whole Hub (model favorites, project actions and the like) are therefore the Owner's until
+they are kept per User.
 
 ### Invitations
 
