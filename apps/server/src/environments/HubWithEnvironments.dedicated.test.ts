@@ -549,6 +549,29 @@ describe("Hub con Environments: a machine dedicated to a Space", () => {
 
 describe("Hub con Environments: a dedicated machine is the Installation's", () => {
   it.live(
+    "an answer lost on its way to the host leaves its Sandbox's credential working until a newer one is used",
+    () =>
+      Effect.gen(function* () {
+        const hub = yield* makeHub();
+        const registry = hub.service(EnvironmentRegistry.EnvironmentRegistry);
+        const acme = yield* createOrganization(hub, "Acme");
+        const vps = yield* joinMachine(hub.server, hub.authenticator, hub.owner, "Acme VPS", acme);
+        const issue = registry
+          .selfOf(vps.credential)
+          .pipe(Effect.map((self) => Option.getOrThrow(self).sandboxCredential ?? ""));
+        const running = yield* issue;
+        assert.equal(yield* refusalOf(hub, running), "valid");
+        // Two answers never reach the host: what its Sandbox holds still connects.
+        yield* issue;
+        const latest = yield* issue;
+        assert.equal(yield* refusalOf(hub, running), "valid");
+        // Once the newest is used, the one it replaces ends.
+        assert.equal(yield* refusalOf(hub, latest), "valid");
+        assert.equal(yield* refusalOf(hub, running), "credential-unknown");
+      }).pipe(Effect.scoped),
+  );
+
+  it.live(
     "owned by nobody, it outlives its Space for the Owner alone, refused at connect, and leaves as itself",
     () =>
       Effect.gen(function* () {

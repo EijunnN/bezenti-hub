@@ -12,6 +12,7 @@ import {
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Option from "effect/Option";
@@ -156,6 +157,38 @@ const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const spaces = yield* SpaceDirectory.SpaceDirectory;
   const path = yield* Path.Path;
+  const fileSystem = yield* Effect.serviceOption(FileSystem.FileSystem);
+
+  /**
+   * Where a path leads once its links resolve: its deepest existing ancestor's real path, with
+   * the rest as named. Lexical where the server has no filesystem.
+   */
+  const realOf = Effect.fn("SpaceVisibility.realOf")(function* (candidate: string) {
+    const resolved = path.resolve(candidate);
+    if (Option.isNone(fileSystem)) return resolved;
+    let existing = resolved;
+    const rest: Array<string> = [];
+    while (true) {
+      const real = yield* fileSystem.value.realPath(existing).pipe(Effect.option);
+      if (Option.isSome(real)) return path.join(real.value, ...rest);
+      const parent = path.dirname(existing);
+      if (parent === existing) return resolved;
+      rest.unshift(path.basename(existing));
+      existing = parent;
+    }
+  });
+
+  /** Whether `directory` leads inside one of `roots`, links resolved on both sides. */
+  const within = Effect.fn("SpaceVisibility.within")(function* (
+    roots: ReadonlyArray<string>,
+    directory: string,
+  ) {
+    const target = yield* realOf(directory);
+    for (const root of roots) {
+      if (isWithin(path, yield* realOf(root), target)) return true;
+    }
+    return false;
+  });
 
   // A failed read must not widen what anyone sees, so it fails the request instead.
   const of = Effect.fn("SpaceVisibility.of")(function* (userId: UserId | undefined) {
@@ -339,8 +372,10 @@ const make = Effect.gen(function* () {
       WHERE deleted_at IS NULL
         AND space_id IN (SELECT value FROM json_each(${encodeIds(writable)}))
     `.pipe(Effect.orDie);
-    const target = path.resolve(directory);
-    return roots.some((row) => row.root !== null && isWithin(path, path.resolve(row.root), target));
+    return yield* within(
+      roots.flatMap((row) => (row.root === null ? [] : [row.root])),
+      directory,
+    );
   });
 
   const mayReadDirectory = Effect.fn("SpaceVisibility.mayReadDirectory")(function* (
@@ -357,8 +392,10 @@ const make = Effect.gen(function* () {
       WHERE deleted_at IS NULL
         AND space_id IN (SELECT value FROM json_each(${encodeIds(visibility.spaceIds)}))
     `.pipe(Effect.orDie);
-    const target = path.resolve(directory);
-    return roots.some((row) => row.root !== null && isWithin(path, path.resolve(row.root), target));
+    return yield* within(
+      roots.flatMap((row) => (row.root === null ? [] : [row.root])),
+      directory,
+    );
   });
 
   return SpaceVisibility.of({

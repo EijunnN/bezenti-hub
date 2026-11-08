@@ -13,6 +13,7 @@ import {
   WS_METHODS,
   type WsRpcGroup,
 } from "@t3tools/contracts";
+import { isWindowsAbsolutePath } from "@t3tools/shared/path";
 import * as Effect from "effect/Effect";
 import * as Predicate from "effect/Predicate";
 import * as Stream from "effect/Stream";
@@ -251,6 +252,39 @@ const commandTargets = (method: string, payload: unknown) => {
   return { threads, projects: projectId === undefined ? [] : [projectId], created: [...created] };
 };
 
+const isAbsolutePath = (value: string) =>
+  value.startsWith("/") || value.startsWith("\\") || isWindowsAbsolutePath(value);
+
+/**
+ * What a workspace call with no Thread reaches on the Hub: its folder, a file it names by an
+ * absolute path, the folder a browse lists. "refused": a home-relative path (`~`), or a browse
+ * with nothing to resolve it against.
+ */
+const pathsNamed = (method: string, payload: unknown): ReadonlyArray<string> | "refused" => {
+  const cwd = stringField(payload, "cwd");
+  if (method === WS_METHODS.filesystemBrowse) {
+    const partial = stringField(payload, "partialPath") ?? "";
+    if (partial.startsWith("~")) return "refused";
+    const full = isAbsolutePath(partial)
+      ? partial
+      : cwd === undefined
+        ? undefined
+        : `${cwd}/${partial}`;
+    if (full === undefined) return "refused";
+    // The folder it lists: the path itself when it ends in a separator, else its parent.
+    const cut = Math.max(full.lastIndexOf("/"), full.lastIndexOf("\\"));
+    return [/[\\/]$/u.test(full) || cut < 0 ? full : full.slice(0, cut + 1)];
+  }
+  const named: Array<string> = cwd === undefined ? [] : [cwd];
+  for (const field of ["relativePath", "directoryPath"]) {
+    const value = stringField(payload, field)?.trim();
+    if (value === undefined) continue;
+    if (value.startsWith("~")) return "refused";
+    if (isAbsolutePath(value)) named.push(value);
+  }
+  return named;
+};
+
 /**
  * Refuses the call when the payload names a Project or Thread the viewer may not see. A
  * missing one is refused the same way, so neither answer is an existence oracle.
@@ -275,15 +309,18 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
   const access = spaceAccessForRpcMethod(method);
   const threadId = stringField(payload, "threadId");
   if (access === "readIfThread" || access === "workIfThread") {
-    // With no Thread, or a draft's (no row yet), the call runs on the Hub's own copy of the
-    // folder it names: one the User may read, or work in for a write.
-    const cwd = method === WS_METHODS.filesystemBrowse ? undefined : stringField(payload, "cwd");
-    if (cwd !== undefined && !visibility.all && (yield* isDraftOrNone(threadId))) {
-      const allowed =
-        access === "workIfThread"
-          ? yield* spaceVisibility.mayUseDirectory(visibility, userId, cwd)
-          : yield* spaceVisibility.mayReadDirectory(visibility, cwd);
-      if (!allowed) return yield* notFound();
+    // With no Thread, or a draft's (no row yet), the call runs on the Hub's own copy of what it
+    // names: folders (and files) the User may read, or work in for a write.
+    if (!visibility.all && (yield* isDraftOrNone(threadId))) {
+      const named = pathsNamed(method, payload);
+      if (named === "refused") return yield* notFound();
+      for (const target of named) {
+        const allowed =
+          access === "workIfThread"
+            ? yield* spaceVisibility.mayUseDirectory(visibility, userId, target)
+            : yield* spaceVisibility.mayReadDirectory(visibility, target);
+        if (!allowed) return yield* notFound();
+      }
     }
     if (threadId === undefined) return;
   }

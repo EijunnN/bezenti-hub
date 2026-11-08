@@ -42,6 +42,8 @@ import {
 import * as Deferred from "effect/Deferred";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Exit from "effect/Exit";
 import * as Cause from "effect/Cause";
 import * as Fiber from "effect/Fiber";
@@ -1490,6 +1492,7 @@ describe("Space visibility", () => {
     WS_METHODS.terminalOpen,
     WS_METHODS.projectsReadFile,
     WS_METHODS.projectsWriteFile,
+    WS_METHODS.filesystemBrowse,
     WS_METHODS.mcpAppsCallTool,
     WS_METHODS.mcpAppsUpdateModelContext,
     WS_METHODS.secretsAnswerRequest,
@@ -2605,6 +2608,57 @@ describe("Space visibility", () => {
           assert.notEqual(yield* read("/work/acme-app"), "SpaceResourceNotFoundError");
           assert.notEqual(yield* read("/work/acme-app", "ada-draft"), "SpaceResourceNotFoundError");
         }),
+      ),
+  );
+
+  it.effect(
+    "with no Thread, a file named by its own path, a link out of the Project, or a browse keep to the User's Spaces",
+    () =>
+      withTeam(({ server, ada }) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          // The two Projects on disk, Acme's with a link committed into Globex's checkout.
+          const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-space-folders-" });
+          const acmeRoot = path.join(root, "acme-app");
+          const globexRoot = path.join(root, "globex-app");
+          yield* fs.makeDirectory(acmeRoot);
+          yield* fs.makeDirectory(globexRoot);
+          yield* fs.writeFileString(path.join(globexRoot, "README.md"), "globex\n");
+          yield* fs.symlink(globexRoot, path.join(acmeRoot, "vendor"));
+          yield* server.sql`
+            UPDATE projection_projects SET workspace_root = ${acmeRoot} WHERE project_id = 'acme-app'
+          `;
+          yield* server.sql`
+            UPDATE projection_projects SET workspace_root = ${globexRoot}
+            WHERE project_id = 'globex-app'
+          `;
+          const asAda = yield* connectWriter(server, ada.userId);
+          const outcome = <A, E, R>(call: Effect.Effect<A, E, R>) =>
+            call.pipe(
+              Effect.flip,
+              Effect.map((error) => (error as { readonly _tag: string })._tag),
+              Effect.catchCause(() => Effect.succeed("reached")),
+            );
+          const read = (cwd: string, relativePath: string) =>
+            outcome(asAda[WS_METHODS.projectsReadFile]({ cwd, relativePath } as never));
+          const browse = (partialPath: string) =>
+            outcome(asAda[WS_METHODS.filesystemBrowse]({ partialPath } as never));
+          const hidden = "SpaceResourceNotFoundError";
+          // A file outside her Spaces, named by its own path or by home.
+          assert.equal(yield* read(acmeRoot, path.join(globexRoot, "README.md")), hidden);
+          assert.equal(yield* read(acmeRoot, "~/.ssh/id_ed25519"), hidden);
+          // A link in her Project to another Space's checkout.
+          assert.equal(yield* read(path.join(acmeRoot, "vendor"), "README.md"), hidden);
+          // Browsing the Hub's disk outside her Projects.
+          assert.equal(yield* browse(`${root}/`), hidden);
+          assert.equal(yield* browse(`${globexRoot}/`), hidden);
+          assert.equal(yield* browse("~/"), hidden);
+          // Her own Project's files and folders get past the guard.
+          assert.notEqual(yield* read(acmeRoot, "README.md"), hidden);
+          assert.notEqual(yield* read(acmeRoot, path.join(acmeRoot, "README.md")), hidden);
+          assert.notEqual(yield* browse(`${acmeRoot}/`), hidden);
+        }).pipe(Effect.provide(NodeServices.layer)),
       ),
   );
 

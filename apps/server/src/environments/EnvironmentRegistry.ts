@@ -1117,17 +1117,31 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
       Effect.mapError(storageError),
     );
     if (row !== undefined) return { row, holder: "machine" as const, sandboxSpaceId: null };
-    const [issued] = yield* sql<{ readonly environmentId: string; readonly spaceId: string }>`
-      SELECT environment_id AS "environmentId", space_id AS "spaceId"
-      FROM dedicated_sandbox_credentials WHERE credential_hash = ${credentialHash}
+    const [issued] = yield* sql<{
+      readonly environmentId: string;
+      readonly spaceId: string;
+      readonly newest: number;
+      readonly superseding: number;
+    }>`
+      SELECT environment_id AS "environmentId", space_id AS "spaceId",
+        credential_hash = ${credentialHash} AS newest,
+        previous_credential_hash IS NOT NULL AS superseding
+      FROM dedicated_sandbox_credentials
+      WHERE credential_hash = ${credentialHash} OR previous_credential_hash = ${credentialHash}
     `.pipe(Effect.mapError(storageError));
     if (issued === undefined) return undefined;
     const [machine] = yield* selectRows([sql`environment_id = ${issued.environmentId}`]).pipe(
       Effect.mapError(storageError),
     );
-    return machine === undefined
-      ? undefined
-      : { row: machine, holder: "sandbox" as const, sandboxSpaceId: issued.spaceId };
+    if (machine === undefined) return undefined;
+    // The newest, used for the first time: the one it replaces ends now.
+    if (issued.newest === 1 && issued.superseding === 1) {
+      yield* sql`
+        UPDATE dedicated_sandbox_credentials SET previous_credential_hash = NULL
+        WHERE environment_id = ${issued.environmentId} AND credential_hash = ${credentialHash}
+      `.pipe(Effect.mapError(storageError));
+    }
+    return { row: machine, holder: "sandbox" as const, sandboxSpaceId: issued.spaceId };
   });
 
   /** The machine a credential of this Hub names, or why it is refused before anything else. */
@@ -1302,6 +1316,10 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
                 environment_id, space_id, credential_hash, issued_at
               ) VALUES (${row.environmentId}, ${spaceId}, ${sandboxHash}, ${yield* nowIso})
               ON CONFLICT (environment_id) DO UPDATE SET space_id = excluded.space_id,
+                previous_credential_hash = COALESCE(
+                  dedicated_sandbox_credentials.previous_credential_hash,
+                  dedicated_sandbox_credentials.credential_hash
+                ),
                 credential_hash = excluded.credential_hash, issued_at = excluded.issued_at
             `;
             return Option.some({
