@@ -1,6 +1,7 @@
 import { AuthEnvironmentMaintainScope } from "@t3tools/contracts";
 
 import { isElectron } from "~/env";
+import { usePrimaryActsForInstallation } from "~/environments/primary";
 import { isLocalEnvironmentDisabled } from "~/localEnvironment";
 import { desktopWslStateAtom } from "~/state/desktopWslState";
 import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
@@ -48,7 +49,10 @@ export function useAvailableSettingsSearchItems(scopeSearch: SettingsScopeSearch
   const wslSettingsRowVisible =
     isWslSettingsRowVisible({ state: desktopWsl.data, error: desktopWsl.error }) === true;
 
+  const actsForInstallation = usePrimaryActsForInstallation();
+
   return filterAvailableSettingsSearchItems({
+    actsForInstallation,
     localEnvironmentDisabled,
     hasEnvironment,
     hasProviderSettingsEnvironment,

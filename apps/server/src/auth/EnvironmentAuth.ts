@@ -3,6 +3,7 @@ import {
   AuthAccessWriteScope,
   AuthOrchestrationOperateScope,
   AuthStandardClientScopes,
+  withoutInstallationScopes,
   type AuthAccessTokenResult,
   type AuthBrowserSessionResult,
   type AuthAccessSnapshot,
@@ -978,7 +979,32 @@ export const make = Effect.gen(function* () {
         ...(session.proofKeyThumbprint ? { proofKeyThumbprint: session.proofKeyThumbprint } : {}),
         ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
       })),
+      Effect.flatMap(heldByUser),
     );
+
+  /**
+   * The Installation's own scopes (its settings, providers, processes, logs and usage) are the
+   * Owner's: any other User's session is read without them, however it was issued (sign-in, a
+   * pairing link, the shell) and whenever. The RPCs check the Owner again (`installation` in
+   * RpcSpaceAccess); this keeps the scopes a client is told about to what it can use.
+   */
+  const heldByUser = <
+    S extends { readonly userId?: UserId; readonly scopes: ReadonlyArray<AuthEnvironmentScope> },
+  >(
+    session: S,
+  ): Effect.Effect<S> => {
+    const userId = session.userId;
+    if (userId === undefined) return Effect.succeed(session);
+    return knownOwnerId.pipe(
+      // On a failed read nobody is the Owner, so the narrower answer wins.
+      Effect.orElseSucceed(() => undefined),
+      Effect.map((ownerId) =>
+        ownerId === userId
+          ? session
+          : { ...session, scopes: withoutInstallationScopes(session.scopes) },
+      ),
+    );
+  };
 
   const resolveRequestCredential = (request: HttpServerRequest.HttpServerRequest) => {
     const selectedCredential = selectRequestCredential(
@@ -1721,7 +1747,7 @@ export const make = Effect.gen(function* () {
               Effect.provideService(Digest.Digest, digest),
             );
           }
-          return {
+          return yield* heldByUser({
             sessionId: session.sessionId,
             subject: session.subject,
             ...(session.userId ? { userId: session.userId } : {}),
@@ -1731,7 +1757,7 @@ export const make = Effect.gen(function* () {
               ? { proofKeyThumbprint: session.proofKeyThumbprint }
               : {}),
             ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
-          };
+          });
         }
       }
 
@@ -1826,7 +1852,8 @@ export const make = Effect.gen(function* () {
     const link = yield* inspectLink(credential);
     if (Option.isSome(link) && link.value.spendable) yield* approverOf(link.value.userId);
     const grant = yield* resolveBootstrapGrant(credential, {
-      requiredScopes: mcpClientScopes(access),
+      // No MCP tool needs the Installation's own scopes, which a Member's code lacks.
+      requiredScopes: withoutInstallationScopes(mcpClientScopes(access)),
     }).pipe(
       Effect.catchTags({
         ServerAuthInvalidCredentialError: () =>
@@ -1898,7 +1925,10 @@ export const make = Effect.gen(function* () {
         method: "browser-session-cookie",
         subject: USER_SIGN_IN_SUBJECT,
         userId: user.id,
-        scopes: AuthStandardClientScopes,
+        // Only the Owner's session holds the Installation's own scopes (see `heldByUser`).
+        scopes: user.isOwner
+          ? AuthStandardClientScopes
+          : withoutInstallationScopes(AuthStandardClientScopes),
         ...(previousSession?.method === "browser-session-cookie"
           ? { replaceSessionId: previousSession.sessionId }
           : {}),

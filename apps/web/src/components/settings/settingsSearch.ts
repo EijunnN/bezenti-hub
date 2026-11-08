@@ -75,6 +75,8 @@ export interface SettingsSearchAvailability {
   readonly canManageLocalBackend: boolean;
   readonly isWslSettingsRowVisible: boolean;
   readonly hasThreadAutoSettlement: boolean;
+  /** False for a Member of a Hub: its Owner-only pages (`SETTINGS_OWNER_ONLY_PATHS`) are hidden. */
+  readonly actsForInstallation?: boolean;
 }
 
 export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
@@ -145,6 +147,29 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
     paths: ["/settings/maintenance", "/settings/labs", "/settings/about", "/settings/archived"],
   },
 ];
+
+/**
+ * Pages on the Installation as a whole (its providers, devices, maintenance and diagnostics,
+ * source-control sign-in and secrets): only the Owner of a Hub changes them, so a Member's
+ * Settings leave them out.
+ */
+export const SETTINGS_OWNER_ONLY_PATHS: ReadonlySet<SettingsPath> = new Set<SettingsPath>([
+  "/settings/providers",
+  "/settings/devices",
+  "/settings/maintenance",
+  "/settings/diagnostics",
+  "/settings/source-control",
+  "/settings/secrets",
+]);
+
+/** The Settings nav for this session: without the Owner-only pages for a Member. */
+export function settingsNavGroupsFor(actsForInstallation: boolean): typeof SETTINGS_NAV_GROUPS {
+  if (actsForInstallation) return SETTINGS_NAV_GROUPS;
+  return SETTINGS_NAV_GROUPS.map((group) => ({
+    ...group,
+    paths: group.paths.filter((path) => !SETTINGS_OWNER_ONLY_PATHS.has(path)),
+  })).filter((group) => group.paths.length > 0);
+}
 
 export function keybindingSearchAnchorId<Command extends KeybindingCommand>(command: Command) {
   return `keybinding-${command}` as const;
@@ -1269,7 +1294,8 @@ export function filterAvailableSettingsSearchItems(
       (!item.localBackendManagementOnly || availability.canManageLocalBackend) &&
       (!item.localEnvironmentOnly || !availability.localEnvironmentDisabled) &&
       (!item.wslAvailableOnly || availability.isWslSettingsRowVisible) &&
-      (!item.requiresThreadAutoSettlement || availability.hasThreadAutoSettlement),
+      (!item.requiresThreadAutoSettlement || availability.hasThreadAutoSettlement) &&
+      (availability.actsForInstallation !== false || !SETTINGS_OWNER_ONLY_PATHS.has(item.to)),
   );
 }
 

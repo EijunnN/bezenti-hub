@@ -6,6 +6,10 @@ import {
   type EnvironmentId,
   type AuthSessionState,
   type AuthEnvironmentScope,
+  INSTALLATION_OWNER_ONLY_MESSAGE,
+  isInstallationRpcMethod,
+  sessionActsForInstallation,
+  SpaceActionDeniedError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -19,17 +23,20 @@ function makeCommandPermissions<R, E>(
 ) {
   const sessions = createEnvironmentSessionAtoms(runtime);
   const requiredScopes = (input?: unknown) => clientRpcRequiredScopes(method, input);
+  // The Installation as a whole is its Owner's, whatever the session's scopes (the server checks too).
+  const ownerOnly = isInstallationRpcMethod(method);
   const atomsByEnvironment = Atom.family((environmentId: EnvironmentId | null) =>
     Atom.family((scopeKey: string) =>
       Atom.make((get) => {
         if (environmentId === null) return false;
         const scopes = scopeKey.split(",").filter(Boolean) as AuthEnvironmentScope[];
-        if (scopes.length === 0) return true;
+        if (scopes.length === 0 && !ownerOnly) return true;
         const result = get(sessions.sessionStateAtom(environmentId));
         const session = AsyncResult.getOrElse(result, () => null);
         return (
           result._tag !== "Failure" &&
           session !== null &&
+          (!ownerOnly || sessionActsForInstallation(session)) &&
           scopes.every((scope) => sessionGrantsScope(session, scope))
         );
       }),
@@ -44,7 +51,7 @@ function makeCommandPermissions<R, E>(
   ) =>
     Effect.suspend(() => {
       const scopes = requiredScopes(input);
-      if (scopes.length === 0) return Effect.void;
+      if (scopes.length === 0 && !ownerOnly) return Effect.void;
       const atom = sessions.sessionStateAtom(environmentId);
       return Effect.scoped(
         Effect.gen(function* () {
@@ -63,6 +70,8 @@ function makeCommandPermissions<R, E>(
               ...authScopeRequiredResponse(missing),
               message: `This connection requires ${missing}.`,
             });
+          if (ownerOnly && Option.isSome(session) && !sessionActsForInstallation(session.value))
+            return yield* new SpaceActionDeniedError({ message: INSTALLATION_OWNER_ONLY_MESSAGE });
         }),
       );
     });

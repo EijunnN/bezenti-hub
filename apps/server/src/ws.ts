@@ -29,7 +29,14 @@ import {
   type AuthEnvironmentScope,
   type ScheduledTaskListResult,
   AuthSessionId,
+  type AgentSessionScanResult,
+  type DiscoveredLocalServer,
   type DiscoveredLocalServerList,
+  type ProjectCloneSnapshot,
+  PreviewStopLocalServerError,
+  SourceControlProviderKind,
+  SourceControlRepositoryError,
+  SpaceActionDeniedError,
   type EditorId,
   type FileManagerRevealKind,
   type GitActionProgressEvent,
@@ -179,7 +186,13 @@ import {
   createDeterministicAttachmentId,
 } from "./attachmentStore.ts";
 import { parseBase64DataUrl } from "./imageMime.ts";
-import { deletePendingAttachment, issueAttachmentUploadUrl } from "./assets/AttachmentUpload.ts";
+import {
+  deletePendingAttachment,
+  forgetPendingUploader,
+  issueAttachmentUploadUrl,
+  pendingUploaderOf,
+  rememberPendingUploader,
+} from "./assets/AttachmentUpload.ts";
 import * as EnvironmentExecutor from "./environment/EnvironmentExecutor.ts";
 import { readWorkflowScript } from "./orchestration-v2/workflowScriptQuery.ts";
 import { withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
@@ -1401,6 +1414,86 @@ export const layerWsRpc = (
           items.map(threadIdOf),
         );
         return items.filter((item) => workable.has(threadIdOf(item)));
+      });
+
+      // The Hub's listening servers: the Owner sees all; anyone else only those of Threads they
+      // may work (a server no Thread started is the Hub's own, so not theirs to see or stop).
+      const ownLocalServers = Effect.fn("ws.ownLocalServers")(function* (
+        servers: ReadonlyArray<DiscoveredLocalServer>,
+      ) {
+        if ((yield* currentVisibility).all) return servers;
+        const threadOf = (server: DiscoveredLocalServer) =>
+          server.terminal?.threadId ?? server.agent?.threadId ?? null;
+        const attributed = servers.filter((server) => threadOf(server) !== null);
+        return yield* withoutHiddenThreads(attributed, (server) => threadOf(server)!);
+      });
+
+      // A clone's checkout goes where its User may work: the Hub's Projects folder or a folder
+      // of their team's Projects. The Owner clones anywhere.
+      const requireCloneDestination = Effect.fn("ws.requireCloneDestination")(function* (
+        destinationPath: string,
+      ) {
+        const allowed = yield* spaceVisibility.mayCreateDirectory(
+          yield* currentVisibility,
+          principal.userId,
+          destinationPath,
+          [managedFolders.namedProjectsRoot],
+        );
+        if (allowed) return;
+        return yield* new SourceControlRepositoryError({
+          operation: "cloneRepository",
+          provider: SourceControlProviderKind.make("unknown"),
+          detail:
+            "You can only clone into the Hub's Projects folder or a folder of your team's Projects.",
+        });
+      });
+      // A clone in progress is its starter's (and the Owner's) to cancel or retry and to follow,
+      // with those of Projects the User sees.
+      const mayActOnClone = Effect.fn("ws.mayActOnClone")(function* (projectId: ProjectId) {
+        if ((yield* currentVisibility).all) return true;
+        const startedBy = yield* projectCloneTracker.startedBy;
+        return startedBy.has(projectId) && startedBy.get(projectId) === principal.userId;
+      });
+      const visibleClones = Effect.fn("ws.visibleClones")(function* (
+        snapshots: ReadonlyArray<ProjectCloneSnapshot>,
+      ) {
+        const visibility = yield* currentVisibility;
+        if (visibility.all || snapshots.length === 0) return snapshots;
+        const startedBy = yield* projectCloneTracker.startedBy;
+        const visible = yield* spaceVisibility.visibleProjectIds(
+          visibility,
+          snapshots.map((snapshot) => snapshot.projectId),
+        );
+        return snapshots.filter(
+          (snapshot) =>
+            visible.has(snapshot.projectId) ||
+            (principal.userId !== undefined &&
+              startedBy.get(snapshot.projectId) === principal.userId),
+        );
+      });
+
+      // Provider sessions found on the Hub's disk: only those in a folder the User may read, and
+      // none naming a Project they do not see.
+      const readableAgentSessions = Effect.fn("ws.readableAgentSessions")(function* (
+        result: AgentSessionScanResult,
+      ) {
+        const visibility = yield* currentVisibility;
+        if (visibility.all) return result;
+        const visibleProjects = yield* spaceVisibility.visibleProjectIds(
+          visibility,
+          result.candidates.flatMap((candidate) =>
+            candidate.projectId === undefined ? [] : [candidate.projectId],
+          ),
+        );
+        const readable = yield* Effect.forEach(result.candidates, (candidate) =>
+          candidate.projectId !== undefined && !visibleProjects.has(candidate.projectId)
+            ? Effect.succeed(false)
+            : spaceVisibility.mayReadDirectory(visibility, candidate.path),
+        );
+        return {
+          ...result,
+          candidates: result.candidates.filter((_, index) => readable[index]),
+        };
       });
 
       const authorizeEffect = <A, E, R>(
@@ -2706,7 +2799,9 @@ export const layerWsRpc = (
         [WS_METHODS.sourceControlLookupRepository]: (input) =>
           sourceControlRepositories.lookupRepository(input),
         [WS_METHODS.sourceControlCloneRepository]: (input) =>
-          sourceControlRepositories.cloneRepository(input),
+          requireCloneDestination(input.destinationPath).pipe(
+            Effect.andThen(sourceControlRepositories.cloneRepository(input)),
+          ),
         [WS_METHODS.sourceControlSignInStart]: (input) => sourceControlSignIn.start(input),
         [WS_METHODS.sourceControlSignInWait]: (input) => sourceControlSignIn.wait(input),
         [WS_METHODS.sourceControlSignInCancel]: (input) => sourceControlSignIn.cancel(input),
@@ -2714,42 +2809,52 @@ export const layerWsRpc = (
         [WS_METHODS.sourceControlStarred]: (input) => sourceControlSignIn.starred(input),
         [WS_METHODS.sourceControlStar]: (input) => sourceControlSignIn.star(input),
         [WS_METHODS.projectCloneStart]: (input) =>
-          projectCloneTracker.start(input, {
-            createProject: (project) =>
-              projectService
-                .create({
-                  commandId: CommandId.make(`project-clone-create:${project.projectId}`),
-                  projectId: project.projectId,
-                  title: project.title,
-                  workspaceRoot: project.workspaceRoot,
-                  createWorkspaceRootIfMissing: true,
-                })
-                .pipe(
-                  Effect.asVoid,
-                  Effect.mapError(
-                    (cause) =>
-                      new OrchestrationDispatchCommandError({
-                        message: "Failed to create clone project.",
-                        cause,
-                      }),
-                  ),
-                ),
-            onCloned: (project) =>
-              repositoryIdentityResolver.resolve(project.workspaceRoot, { refresh: true }).pipe(
-                Effect.andThen(
-                  projectService.update({
-                    commandId: CommandId.make(`project-clone-done:${project.projectId}`),
-                    projectId: project.projectId,
-                  }),
-                ),
-                Effect.andThen(refreshGitStatus(project.workspaceRoot)),
-                // The folder was empty when the project was created, so the cached
-                // enrichment says "no repository" and clients cannot group it yet.
-                Effect.andThen(projectEnrichment.invalidate([project.workspaceRoot])),
-                Effect.andThen(projectEnrichment.request(project.workspaceRoot)),
-                Effect.ignoreCause({ log: true }),
+          requireCloneDestination(input.destinationPath).pipe(
+            Effect.andThen(
+              projectCloneTracker.start(
+                input,
+                {
+                  createProject: (project) =>
+                    projectService
+                      .create({
+                        commandId: CommandId.make(`project-clone-create:${project.projectId}`),
+                        projectId: project.projectId,
+                        title: project.title,
+                        workspaceRoot: project.workspaceRoot,
+                        createWorkspaceRootIfMissing: true,
+                      })
+                      .pipe(
+                        Effect.asVoid,
+                        Effect.mapError(
+                          (cause) =>
+                            new OrchestrationDispatchCommandError({
+                              message: "Failed to create clone project.",
+                              cause,
+                            }),
+                        ),
+                      ),
+                  onCloned: (project) =>
+                    repositoryIdentityResolver
+                      .resolve(project.workspaceRoot, { refresh: true })
+                      .pipe(
+                        Effect.andThen(
+                          projectService.update({
+                            commandId: CommandId.make(`project-clone-done:${project.projectId}`),
+                            projectId: project.projectId,
+                          }),
+                        ),
+                        Effect.andThen(refreshGitStatus(project.workspaceRoot)),
+                        // The folder was empty when the project was created, so the cached
+                        // enrichment says "no repository" and clients cannot group it yet.
+                        Effect.andThen(projectEnrichment.invalidate([project.workspaceRoot])),
+                        Effect.andThen(projectEnrichment.request(project.workspaceRoot)),
+                        Effect.ignoreCause({ log: true }),
+                      ),
+                },
+                principal.userId,
               ),
-          }),
+            ),
+          ),
         [WS_METHODS.projectsEnsureScratch]: () =>
           managedFolders.ensureScratchProject.pipe(
             Effect.mapError(
@@ -2772,11 +2877,23 @@ export const layerWsRpc = (
                 (cause) => new OrchestrationDispatchCommandError({ message: cause.message, cause }),
               ),
             ),
+        // Someone else's clone is answered like one that is not running.
         [WS_METHODS.projectCloneCancel]: (input) =>
-          projectCloneTracker.cancel(input.projectId).pipe(Effect.map((applied) => ({ applied }))),
+          mayActOnClone(input.projectId).pipe(
+            Effect.flatMap((allowed) =>
+              allowed ? projectCloneTracker.cancel(input.projectId) : Effect.succeed(false),
+            ),
+            Effect.map((applied) => ({ applied })),
+          ),
         [WS_METHODS.projectCloneRetry]: (input) =>
-          projectCloneTracker.retry(input.projectId).pipe(Effect.map((applied) => ({ applied }))),
-        [WS_METHODS.subscribeProjectClones]: () => projectCloneTracker.stream,
+          mayActOnClone(input.projectId).pipe(
+            Effect.flatMap((allowed) =>
+              allowed ? projectCloneTracker.retry(input.projectId) : Effect.succeed(false),
+            ),
+            Effect.map((applied) => ({ applied })),
+          ),
+        [WS_METHODS.subscribeProjectClones]: () =>
+          projectCloneTracker.stream.pipe(Stream.mapEffect(visibleClones)),
         [WS_METHODS.sourceControlPublishRepository]: (input) =>
           sourceControlRepositories.publishRepository(input).pipe(
             Effect.tap(() => repositoryIdentityResolver.resolve(input.cwd, { refresh: true })),
@@ -2843,9 +2960,27 @@ export const layerWsRpc = (
           };
         }),
         [WS_METHODS.filesystemBrowse]: (input) => threadWorkspace.browse(input, workspaceCaller),
-        [WS_METHODS.attachmentsCreateUploadUrl]: (input) => issueAttachmentUploadUrl(input),
-        [WS_METHODS.attachmentsDelete]: (input) => deletePendingAttachment(input.attachmentId),
-        [WS_METHODS.agentSessionsScan]: () => agentSessionScanner.scan,
+        [WS_METHODS.attachmentsCreateUploadUrl]: (input) =>
+          issueAttachmentUploadUrl(input).pipe(
+            Effect.tap((issued) =>
+              Effect.sync(() => rememberPendingUploader(issued.attachmentId, principal.userId)),
+            ),
+          ),
+        // Only the User who asked for a pending upload deletes it; one this server did not issue
+        // since it started is left to the sweep.
+        [WS_METHODS.attachmentsDelete]: Effect.fnUntraced(function* (input) {
+          const uploader = pendingUploaderOf(input.attachmentId);
+          if (uploader === undefined) return;
+          if (uploader.userId !== principal.userId) {
+            return yield* new SpaceActionDeniedError({
+              message: "Only the person who uploaded this attachment can remove it.",
+            });
+          }
+          yield* deletePendingAttachment(input.attachmentId);
+          forgetPendingUploader(input.attachmentId);
+        }),
+        [WS_METHODS.agentSessionsScan]: () =>
+          agentSessionScanner.scan.pipe(Effect.flatMap(readableAgentSessions)),
         [WS_METHODS.agentSessionsImport]: (input) =>
           agentSessionImporter.importRecentAgentThreads(input),
         [WS_METHODS.assetsCreateUrl]:
@@ -3095,7 +3230,16 @@ export const layerWsRpc = (
         [WS_METHODS.deviceDetail]: (input) => deviceService.detail(input),
         [WS_METHODS.deviceAction]: (input) => deviceService.action(input),
         [WS_METHODS.subscribeDeviceState]: (_input) => DeviceService.stateStream(deviceService),
-        [WS_METHODS.previewStopLocalServer]: (input) => portDiscovery.stopServer(input),
+        // Only a server listed for the User (see `ownLocalServers`) is theirs to stop.
+        [WS_METHODS.previewStopLocalServer]: Effect.fnUntraced(function* (input) {
+          if (!(yield* currentVisibility).all) {
+            const own = yield* ownLocalServers(yield* portDiscovery.scan());
+            if (!own.some((server) => server.pid === input.pid && server.port === input.port)) {
+              return yield* new PreviewStopLocalServerError({ reason: "not-found" });
+            }
+          }
+          return yield* portDiscovery.stopServer(input);
+        }),
         [WS_METHODS.previewProxyUrl]: (input) =>
           Option.match(hubPreviews, {
             onNone: () =>
@@ -3121,7 +3265,7 @@ export const layerWsRpc = (
               const initial = yield* portDiscovery.scan(configuredUrls);
               const initialScannedAt = DateTime.formatIso(yield* DateTime.now);
               yield* Queue.offer(queue, {
-                servers: initial,
+                servers: yield* ownLocalServers(initial),
                 scannedAt: initialScannedAt,
                 configuredUrlProbing: true,
               });
@@ -3131,7 +3275,7 @@ export const layerWsRpc = (
                   Effect.gen(function* () {
                     const scannedAt = DateTime.formatIso(yield* DateTime.now);
                     yield* Queue.offer(queue, {
-                      servers,
+                      servers: yield* ownLocalServers(servers),
                       scannedAt,
                       configuredUrlProbing: true,
                     });

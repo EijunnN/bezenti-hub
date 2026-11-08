@@ -1320,7 +1320,8 @@ const WsAttachmentsCreateUploadUrlRpc = Rpc.make(WS_METHODS.attachmentsCreateUpl
 
 const WsAttachmentsDeleteRpc = Rpc.make(WS_METHODS.attachmentsDelete, {
   payload: AttachmentDeleteInput,
-  error: EnvironmentAuthorizationError,
+  // Someone else's pending upload is refused.
+  error: Schema.Union([EnvironmentAuthorizationError, SpaceActionDeniedError]),
 });
 
 const WsMcpAppsCallToolRpc = Rpc.make(WS_METHODS.mcpAppsCallTool, {

@@ -8,6 +8,7 @@ import { useSettingsRestore } from "../components/settings/SettingsPanels";
 import { AppRouteModal, AppRouteModalClose } from "../components/AppRouteModal";
 import { SettingsBreadcrumb } from "../components/settings/SettingsBreadcrumb";
 import { SettingsSidebarNav } from "../components/settings/SettingsSidebarNav";
+import { InstallationSettingsBoundary } from "../components/settings/InstallationSettingsBoundary";
 import {
   SettingsScopeProvider,
   useSettingsScope,
@@ -133,9 +134,11 @@ function SettingsContentLayout() {
             </div>
           </header>
           <div key={`${contentScopeKey}:${restoreSignal}`} className="min-h-0 flex flex-1 flex-col">
-            <SettingsScopeBoundary pathname={location.pathname}>
-              <Outlet />
-            </SettingsScopeBoundary>
+            <InstallationSettingsBoundary pathname={location.pathname}>
+              <SettingsScopeBoundary pathname={location.pathname}>
+                <Outlet />
+              </SettingsScopeBoundary>
+            </InstallationSettingsBoundary>
           </div>
         </div>
       </div>

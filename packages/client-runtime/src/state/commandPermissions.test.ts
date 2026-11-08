@@ -158,6 +158,40 @@ describe("command permissions", () => {
     ),
   );
 
+  it.effect("offers the Installation's own commands only to its Owner's session", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const signal = createCommandPermissions(runtime, WS_METHODS.serverSignalProcess);
+        const cleanup = createCommandPermissions(runtime, WS_METHODS.serverRunStorageCleanup);
+        const session = (isOwner: boolean | undefined): AuthSessionState => ({
+          ...grant(true),
+          scopes: [AuthOrchestrationOperateScope, AuthSettingsWriteScope],
+          permissions: [AuthOrchestrationOperateScope, AuthSettingsWriteScope],
+          ...(isOwner === undefined ? {} : { userId: UserId.make("someone"), isOwner }),
+        });
+        // A Member, even holding every scope the call needs.
+        registry.set(sessions(env), AsyncResult.success(session(false)));
+        for (const permissions of [signal, cleanup]) {
+          expect(registry.get(permissions.permissionAtom(env))).toBe(false);
+          const denied = yield* permissions.authorize(registry, env).pipe(Effect.flip);
+          expect([denied._tag, denied.message]).toEqual([
+            "SpaceActionDeniedError",
+            "Only the Owner of this Hub can do that.",
+          ]);
+        }
+        // The Owner, and a session from before any Owner (or with no accounts at all).
+        for (const isOwner of [true, undefined]) {
+          registry.set(sessions(env), AsyncResult.success(session(isOwner)));
+          for (const permissions of [signal, cleanup]) {
+            expect(registry.get(permissions.permissionAtom(env))).toBe(true);
+            yield* permissions.authorize(registry, env);
+          }
+        }
+      }),
+    ),
+  );
+
   it.effect("requires the destination settings grant to check OTLP endpoints", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -280,9 +314,9 @@ it.effect(
         const registry = yield* setup;
         registry.set(sessions(env), AsyncResult.success(grant(true)));
         const git = createCommandPermissions(runtime, WS_METHODS.vcsInit);
-        expect((yield* git.authorize(registry, env).pipe(Effect.flip)).requiredPermission).toBe(
-          AuthSourceControlWriteScope,
-        );
+        expect(yield* git.authorize(registry, env).pipe(Effect.flip)).toMatchObject({
+          requiredPermission: AuthSourceControlWriteScope,
+        });
         registry.set(
           sessions(env),
           AsyncResult.success({
@@ -300,9 +334,9 @@ it.effect(
           threadId: ThreadId.make("thread"),
         };
         expect(registry.get(prepare.permissionAtom(env, input))).toBe(false);
-        expect(
-          (yield* prepare.authorize(registry, env, input).pipe(Effect.flip)).requiredScope,
-        ).toBe(AuthOrchestrationOperateScope);
+        expect(yield* prepare.authorize(registry, env, input).pipe(Effect.flip)).toMatchObject({
+          requiredScope: AuthOrchestrationOperateScope,
+        });
         yield* prepare.authorize(registry, env, { ...input, threadId: undefined });
         registry.set(
           sessions(env),

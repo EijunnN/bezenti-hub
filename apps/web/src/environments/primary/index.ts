@@ -17,7 +17,7 @@ export {
   __resetServerAuthBootstrapForTests,
 } from "./auth";
 
-export { usePrimarySessionState } from "./sessionState";
+export { usePrimaryActsForInstallation, usePrimarySessionState } from "./sessionState";
 
 export {
   DesktopEnvironmentBootstrapIncompleteError,

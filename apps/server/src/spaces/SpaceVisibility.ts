@@ -150,6 +150,16 @@ export class SpaceVisibility extends Context.Service<
       directory: string,
     ) => Effect.Effect<boolean>;
     /**
+     * Whether the User may create `directory` (a clone's checkout): inside one of `sharedRoots`
+     * (the Hub's Projects folder), or where `mayUseDirectory` lets them work.
+     */
+    readonly mayCreateDirectory: (
+      visibility: Visibility,
+      userId: UserId | undefined,
+      directory: string,
+      sharedRoots: ReadonlyArray<string>,
+    ) => Effect.Effect<boolean>;
+    /**
      * Whether the Thread runs on the Hub machine (or names none), deleted or not, read as
      * `ActiveEnvironmentResolver` reads it: its workspace calls then run on the Hub's disk.
      */
@@ -426,6 +436,19 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const mayCreateDirectory = Effect.fn("SpaceVisibility.mayCreateDirectory")(function* (
+    visibility: Visibility,
+    userId: UserId | undefined,
+    directory: string,
+    sharedRoots: ReadonlyArray<string>,
+  ) {
+    if (userId === undefined || visibility.all) return true;
+    return (
+      (yield* within(sharedRoots, directory)) ||
+      (yield* mayUseDirectory(visibility, userId, directory))
+    );
+  });
+
   return SpaceVisibility.of({
     of,
     viewer,
@@ -437,6 +460,7 @@ const make = Effect.gen(function* () {
     workableThreadIds,
     mayUseDirectory,
     mayReadDirectory,
+    mayCreateDirectory,
     threadOnHubMachine,
   });
 });

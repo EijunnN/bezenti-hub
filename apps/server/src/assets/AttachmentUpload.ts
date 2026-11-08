@@ -5,6 +5,7 @@ import {
   ATTACHMENT_UPLOAD_URL_TTL_MS,
   type AttachmentCreateUploadUrlInput,
   AttachmentUploadSigningKeyError,
+  type UserId,
 } from "@t3tools/contracts";
 import { isSvgAttachment } from "@t3tools/shared/image";
 import * as Clock from "effect/Clock";
@@ -287,3 +288,23 @@ export const deletePendingAttachment = Effect.fn("AttachmentUpload.deletePending
   yield* fileSystem.remove(attachmentPath, { force: true }).pipe(Effect.orElseSucceed(() => {}));
   yield* fileSystem.remove(`${attachmentPath}.txt`, { force: true }).pipe(Effect.ignore);
 });
+
+// Who asked for each pending upload, so that only they delete it. Held in memory: after a
+// restart nobody deletes an upload from before it (the sweep removes those), rather than anybody.
+const PENDING_UPLOADERS_LIMIT = 10_000;
+const pendingUploaders = new Map<string, { readonly userId: UserId | undefined }>();
+
+export const rememberPendingUploader = (attachmentId: string, userId: UserId | undefined) => {
+  if (pendingUploaders.size >= PENDING_UPLOADERS_LIMIT) {
+    const oldest = pendingUploaders.keys().next();
+    if (oldest.done !== true) pendingUploaders.delete(oldest.value);
+  }
+  pendingUploaders.set(attachmentId, { userId });
+};
+
+/** Who asked for the pending upload, if this server issued it since it started. */
+export const pendingUploaderOf = (attachmentId: string) => pendingUploaders.get(attachmentId);
+
+export const forgetPendingUploader = (attachmentId: string) => {
+  pendingUploaders.delete(attachmentId);
+};

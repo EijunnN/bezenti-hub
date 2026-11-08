@@ -4,6 +4,7 @@ import {
   AuthMcpClientAccess,
   EnvironmentHttpApi,
   mcpClientScopes,
+  withoutInstallationScopes,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
@@ -133,7 +134,9 @@ export const layer = HttpApiBuilder.group(
               : {
                   csrfToken: session.csrfToken,
                   oneClickAccess: AuthMcpClientAccess.literals.filter((access) =>
-                    mcpClientScopes(access).every((scope) => session.scopes.includes(scope)),
+                    withoutInstallationScopes(mcpClientScopes(access)).every((scope) =>
+                      session.scopes.includes(scope),
+                    ),
                   ),
                 }),
           };

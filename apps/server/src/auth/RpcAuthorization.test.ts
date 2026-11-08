@@ -1,5 +1,8 @@
 import {
   AuthSessionId,
+  INSTALLATION_OWNER_ONLY_MESSAGE,
+  INSTALLATION_RPC_METHODS,
+  UserId,
   type AuthEnvironmentScope,
   AuthEnvironmentMaintainScope,
   AuthDiagnosticsReadScope,
@@ -145,6 +148,47 @@ describe("RPC authorization scopes", () => {
       ).pipe(Effect.flip);
       expect(refused._tag).toBe("SpaceResourceNotFoundError");
     }),
+  );
+
+  it.effect(
+    "keeps every RPC on the Installation as a whole to its Owner, whatever the scopes",
+    () =>
+      Effect.gen(function* () {
+        const member = { all: false, spaceIds: [] } as const;
+        for (const method of INSTALLATION_RPC_METHODS) {
+          expect([method, spaceAccessForRpcMethod(method)]).toEqual([method, "installation"]);
+          const refused = yield* guardRpcPayload(
+            method,
+            {},
+            member,
+            {} as never,
+            UserId.make("member"),
+          ).pipe(Effect.flip);
+          expect([method, refused._tag, refused.message]).toEqual([
+            method,
+            "SpaceActionDeniedError",
+            INSTALLATION_OWNER_ONLY_MESSAGE,
+          ]);
+          yield* guardRpcPayload(method, {}, everything, {} as never, UserId.make("owner"));
+        }
+        // Only RPCs really of one session or one connection stay unscoped.
+        const unscoped = Object.entries(RPC_SPACE_ACCESS).flatMap(([method, access]) =>
+          typeof access === "object" ? [method] : [],
+        );
+        for (const method of [
+          WS_METHODS.serverUpdateSettings,
+          WS_METHODS.serverGetProcessDiagnostics,
+          WS_METHODS.serverSignalProcess,
+          WS_METHODS.serverPrepareTriage,
+          WS_METHODS.providerAuthStart,
+          WS_METHODS.deviceConfigure,
+          WS_METHODS.deviceAction,
+          WS_METHODS.agentSessionsScan,
+          WS_METHODS.subscribeAuthAccess,
+        ]) {
+          expect(unscoped).not.toContain(method);
+        }
+      }),
   );
 
   it("rejects unknown RPC method names", () => {

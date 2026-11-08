@@ -1,9 +1,13 @@
 /**
  * How each RPC that reaches Projects or Threads keeps to what the session may see. Every
  * `orchestration.*` RPC and every RPC whose payload names a Thread or Project must be listed
- * (RpcAuthorization.test.ts checks). A refusal looks exactly like a missing one.
+ * (RpcAuthorization.test.ts checks). A refusal looks exactly like a missing one. RPCs on the
+ * Installation as a whole are its Owner's: scopes alone do not keep a Member or an Admin out.
  */
 import {
+  INSTALLATION_OWNER_ONLY_MESSAGE,
+  INSTALLATION_RPC_METHODS,
+  type InstallationRpcMethod,
   ORCHESTRATION_V2_WS_METHODS,
   type ProjectId,
   SpaceActionDeniedError,
@@ -27,7 +31,7 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
  * `thread`/`project`: hidden ids refused. `command`: what it acts on. `named`: Projects at any
  * depth. `work`/`owned`: the User's own Thread (or held draft). `filtered`: the handler filters.
  * `readDirectory`/`workDirectory`: a Hub folder (`cwd`) the User may read or work in.
- * `unscoped`: why not. An RPC missing here is refused.
+ * `installation`: the Owner's alone. `unscoped`: why not (one session's own). Missing: refused.
  */
 export type RpcSpaceAccess =
   | "thread"
@@ -42,16 +46,24 @@ export type RpcSpaceAccess =
   | "workIfThread"
   | "readDirectory"
   | "workDirectory"
+  | "installation"
   | { readonly unscoped: string };
 
-const INSTALLATION = { unscoped: "the Installation's own settings and state, which scopes guard" };
-const PROVIDERS = { unscoped: "the Installation's provider instances, which scopes guard" };
-const SOURCE_CONTROL = { unscoped: "the session User's own source control sign-in and lookups" };
 const TASK_BY_ID = {
   unscoped: "ScheduledTaskService checks the task's rights (requireTaskRights)",
 };
-const DEVICES = { unscoped: "the Installation's devices and their hosts, which scopes guard" };
-const PREVIEW_PROFILES = { unscoped: "this client's own preview profiles and servers" };
+const SERVER_CONFIG = {
+  unscoped: "what every client runs on: providers, models, keybindings and redacted settings",
+};
+// Reading them: acting on one is deviceOpen's (`work`) or, like retrying a host, the Owner's.
+const DEVICES = { unscoped: "the Hub's devices, which a Thread's device picker lists" };
+const SOURCE_CONTROL_ACCOUNT = {
+  unscoped: "the Hub's source-control tools and account, which cloning and publishing read",
+};
+const PREVIEW_PROFILES = { unscoped: "this client's own preview browser profiles" };
+const INSTALLATION_ACCESS = Object.fromEntries(
+  INSTALLATION_RPC_METHODS.map((method) => [method, "installation"]),
+) as Readonly<Record<InstallationRpcMethod, "installation">>;
 
 export const RPC_SPACE_ACCESS = {
   // A hidden target answers like a missing one; the Role rules run on every command in the
@@ -122,9 +134,12 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.scheduledTasksUpsert]: {
     unscoped: "ScheduledTaskService checks it as its creator: hidden like missing, then the Role",
   },
-  [WS_METHODS.projectCloneStart]: { unscoped: "creates the Project it clones into" },
-  [WS_METHODS.projectCloneCancel]: { unscoped: "a clone in progress has no Project row yet" },
-  [WS_METHODS.projectCloneRetry]: { unscoped: "a clone in progress has no Project row yet" },
+  // Creates the Project it clones into, in a folder the handler keeps to where the User may
+  // work (`cloneDestinationAllowed`).
+  [WS_METHODS.projectCloneStart]: "filtered",
+  // A clone is its starter's (and the Owner's) to cancel or retry; others are answered no-op.
+  [WS_METHODS.projectCloneCancel]: "filtered",
+  [WS_METHODS.projectCloneRetry]: "filtered",
   [WS_METHODS.agentSessionsImport]: "project",
   [WS_METHODS.serverListAcpRegistrySessions]: "project",
   [WS_METHODS.serverImportAcpRegistrySession]: "project",
@@ -190,15 +205,19 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.sourceControlLookupRepository]: "readDirectory",
   [WS_METHODS.sourceControlPublishRepository]: "workDirectory",
   [WS_METHODS.serverRefreshProviders]: "readDirectory",
-  [WS_METHODS.sourceControlCloneRepository]: { unscoped: "creates the Project it clones into" },
-  [WS_METHODS.subscribeProjectClones]: { unscoped: "clones in progress have no Project row yet" },
+  // Into a folder the handler keeps to where the User may work, as projectCloneStart.
+  [WS_METHODS.sourceControlCloneRepository]: "filtered",
+  // The User's own clones and those of Projects they see; the URLs carry no credentials.
+  [WS_METHODS.subscribeProjectClones]: "filtered",
   [WS_METHODS.projectsEnsureScratch]: { unscoped: "the session User's own scratch Project" },
-  [WS_METHODS.projectsCreateNew]: { unscoped: "creates a Project, as project.create does" },
-  [WS_METHODS.agentSessionsScan]: {
-    unscoped: "lists provider sessions to import; agentSessionsImport checks the Project",
+  [WS_METHODS.projectsCreateNew]: {
+    unscoped: "creates a Project in the Hub's Projects folder, as project.create does",
   },
+  // Only candidates whose folder the User may read and whose Project they see.
+  [WS_METHODS.agentSessionsScan]: "filtered",
   [WS_METHODS.attachmentsCreateUploadUrl]: { unscoped: "the session User's own uploads" },
-  [WS_METHODS.attachmentsDelete]: { unscoped: "the session User's own uploads" },
+  // Only the User who uploaded the pending attachment deletes it.
+  [WS_METHODS.attachmentsDelete]: "filtered",
   [WS_METHODS.subscribeTerminalMetadata]: "filtered",
   [WS_METHODS.scheduledTasksSubscribe]: { unscoped: "ScheduledTaskService lists visible tasks" },
   [WS_METHODS.scheduledTasksSetEnabled]: TASK_BY_ID,
@@ -209,70 +228,32 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.scheduledTasksGetWebhookDelivery]: TASK_BY_ID,
   [WS_METHODS.pullRequestsRoutingIdentity]: { unscoped: "a host's identity, no Project" },
   [WS_METHODS.pullRequestsSubscribeRefreshes]: { unscoped: "refresh signals, no Project data" },
-  [WS_METHODS.sourceControlSignInStart]: SOURCE_CONTROL,
-  [WS_METHODS.sourceControlSignInWait]: SOURCE_CONTROL,
-  [WS_METHODS.sourceControlSignInCancel]: SOURCE_CONTROL,
-  [WS_METHODS.sourceControlAppAccess]: SOURCE_CONTROL,
-  [WS_METHODS.sourceControlStarred]: SOURCE_CONTROL,
-  [WS_METHODS.sourceControlStar]: SOURCE_CONTROL,
+  [WS_METHODS.sourceControlAppAccess]: SOURCE_CONTROL_ACCOUNT,
+  [WS_METHODS.sourceControlStarred]: SOURCE_CONTROL_ACCOUNT,
+  [WS_METHODS.serverDiscoverSourceControl]: SOURCE_CONTROL_ACCOUNT,
   [WS_METHODS.previewClearProfile]: PREVIEW_PROFILES,
   [WS_METHODS.previewReportProfiles]: PREVIEW_PROFILES,
-  [WS_METHODS.subscribePreviewEvents]: PREVIEW_PROFILES,
-  [WS_METHODS.previewStopLocalServer]: PREVIEW_PROFILES,
-  [WS_METHODS.subscribeDiscoveredLocalServers]: PREVIEW_PROFILES,
-  [WS_METHODS.deviceConfigure]: DEVICES,
+  // The handler drops events of Threads the User may not work.
+  [WS_METHODS.subscribePreviewEvents]: "filtered",
+  // Of the Hub's listening servers, only the Owner sees (and stops) everyone's.
+  [WS_METHODS.subscribeDiscoveredLocalServers]: "filtered",
+  [WS_METHODS.previewStopLocalServer]: "filtered",
+  // Retrying a host or updating device tools is the Owner's (`ownerOnlyCall`).
   [WS_METHODS.deviceList]: DEVICES,
-  [WS_METHODS.deviceTestHost]: DEVICES,
-  [WS_METHODS.deviceEasAccount]: DEVICES,
-  [WS_METHODS.deviceSimlockIdentity]: DEVICES,
-  [WS_METHODS.deviceShutdown]: DEVICES,
   [WS_METHODS.deviceDetail]: DEVICES,
-  [WS_METHODS.deviceAction]: DEVICES,
   [WS_METHODS.subscribeDeviceState]: DEVICES,
-  [WS_METHODS.serverUpdateProvider]: PROVIDERS,
-  [WS_METHODS.providerConsumeResetCredit]: PROVIDERS,
-  [WS_METHODS.providerAuthStart]: PROVIDERS,
-  [WS_METHODS.providerAuthComplete]: PROVIDERS,
-  [WS_METHODS.chatGptReconnectProfile]: PROVIDERS,
-  [WS_METHODS.chatGptImportProfile]: PROVIDERS,
-  [WS_METHODS.chatGptHandoffSubscribe]: PROVIDERS,
-  [WS_METHODS.providerAuthRespond]: PROVIDERS,
-  [WS_METHODS.providerAuthCancel]: PROVIDERS,
-  [WS_METHODS.providerAuthLogout]: PROVIDERS,
-  [WS_METHODS.providerAuthSubscribe]: PROVIDERS,
-  [WS_METHODS.providerInstallStart]: PROVIDERS,
-  [WS_METHODS.providerInstallCancel]: PROVIDERS,
-  [WS_METHODS.providerInstallSubscribe]: PROVIDERS,
-  [WS_METHODS.providerInstallRemove]: PROVIDERS,
-  [WS_METHODS.serverSearchAcpRegistry]: PROVIDERS,
-  [WS_METHODS.serverPrepareAcpRegistryAgent]: PROVIDERS,
-  [WS_METHODS.serverUninstallAcpRegistryManagedBinary]: PROVIDERS,
-  [WS_METHODS.serverAcceptAcpRegistryUrlAuth]: PROVIDERS,
-  [WS_METHODS.serverLogoutAcpRegistry]: PROVIDERS,
-  [WS_METHODS.serverProbe]: INSTALLATION,
-  [WS_METHODS.serverGetConfig]: INSTALLATION,
-  [WS_METHODS.serverUpsertKeybinding]: INSTALLATION,
-  [WS_METHODS.serverRemoveKeybinding]: INSTALLATION,
-  [WS_METHODS.serverRunStorageCleanup]: INSTALLATION,
-  [WS_METHODS.serverGetStorageCleanupReport]: INSTALLATION,
-  [WS_METHODS.serverGetDatabaseStorage]: INSTALLATION,
-  [WS_METHODS.serverUpdateSettings]: INSTALLATION,
-  [WS_METHODS.serverDiscoverSourceControl]: INSTALLATION,
-  [WS_METHODS.serverGetTraceDiagnostics]: INSTALLATION,
-  [WS_METHODS.serverGetProcessDiagnostics]: INSTALLATION,
-  [WS_METHODS.serverGetHostResources]: INSTALLATION,
-  [WS_METHODS.serverGetProcessResourceHistory]: INSTALLATION,
-  [WS_METHODS.serverGetResourceTelemetryHistory]: INSTALLATION,
-  [WS_METHODS.serverRetryResourceTelemetry]: INSTALLATION,
-  [WS_METHODS.serverCheckOtlpEndpoint]: INSTALLATION,
-  [WS_METHODS.serverPrepareTriage]: INSTALLATION,
-  [WS_METHODS.serverGetUsageSummary]: INSTALLATION,
-  [WS_METHODS.serverRefreshUsageRates]: INSTALLATION,
-  [WS_METHODS.serverSignalProcess]: INSTALLATION,
-  [WS_METHODS.subscribeServerConfig]: INSTALLATION,
-  [WS_METHODS.subscribeServerLifecycle]: INSTALLATION,
-  [WS_METHODS.subscribeAuthAccess]: INSTALLATION,
-  [WS_METHODS.subscribeResourceTelemetry]: INSTALLATION,
+  [WS_METHODS.serverProbe]: { unscoped: "answers whether this connection is alive" },
+  [WS_METHODS.serverGetConfig]: SERVER_CONFIG,
+  [WS_METHODS.subscribeServerConfig]: SERVER_CONFIG,
+  [WS_METHODS.subscribeServerLifecycle]: {
+    unscoped: "this connection's welcome and the server's own restarts",
+  },
+  [WS_METHODS.serverGetHostResources]: {
+    unscoped: "the Hub's CPU and memory load, which placing a Thread reads; no paths or ids",
+  },
+  // Each User sees their own sessions and links; the Owner sees everyone's.
+  [WS_METHODS.subscribeAuthAccess]: "filtered",
+  ...INSTALLATION_ACCESS,
 } as const satisfies Partial<Readonly<Record<WsRpcMethod, RpcSpaceAccess>>>;
 
 export const spaceAccessForRpcMethod = (method: string): RpcSpaceAccess | undefined =>
@@ -286,6 +267,14 @@ const notYours = () =>
   new SpaceActionDeniedError({
     message: "Only the person who started this Thread can use its terminals, previews and files.",
   });
+const ownerOnly = () => new SpaceActionDeniedError({ message: INSTALLATION_OWNER_ONLY_MESSAGE });
+
+/** A call of an otherwise shared RPC that changes the Hub itself: retrying a device host or
+ * updating device tools, unlike listing devices. */
+const ownerOnlyCall = (method: string, payload: unknown) =>
+  method === WS_METHODS.deviceList &&
+  (stringField(payload, "retryHostId") !== undefined ||
+    stringField(payload, "updateTool") !== undefined);
 
 const THREAD_KEYS = new Set(["threadId", "threadIds", "conversationThreadId"]);
 // A terminal runs in a folder the client names; it must be one the User may work in.
@@ -394,6 +383,12 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
   const access = spaceAccessForRpcMethod(method);
   // An RPC that does not say how it keeps to what the session may see runs for nobody.
   if (access === undefined) return yield* notFound();
+  // The Owner sees everything (as does a session from before any Owner); no one else, not even
+  // an Admin with every scope, acts on the Installation as a whole.
+  if (access === "installation" || ownerOnlyCall(method, payload)) {
+    if (!visibility.all) return yield* ownerOnly();
+    return;
+  }
   if (access === "readDirectory" || access === "workDirectory") {
     if (visibility.all) return;
     const named = localWorkspaceTargets(method, payload, DIRECTORY_TARGET_FIELDS[method] ?? []);

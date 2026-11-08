@@ -22,7 +22,11 @@ import { deriveProjectGroupLabel } from "@t3tools/client-runtime/state/project-g
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useAdaptiveWorkspaceLayout } from "../layout/adaptive-workspace-context";
-import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
+import { useSpaceSelections } from "../../state/spaces";
+import {
+  useHubConnection,
+  useSavedRemoteConnections,
+} from "../../state/use-remote-environment-registry";
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsSection, SettingsSidebarContext } from "./components/SettingsSection";
 import { SettingsScreen } from "./components/SettingsScreen";
@@ -170,6 +174,12 @@ function SettingsList(props: { readonly connections: readonly SettingsListRow[] 
 
 function useSettingsIndexSections(): SettingsListSection[] {
   const { selectedTargets, projectGroups, selectedProjectKey } = useSettingsEnvironmentFilter();
+  const hub = useHubConnection();
+  const selections = useSpaceSelections();
+  // As on web, a Member of a Hub does not see the pages only its Owner changes.
+  const actsForInstallation =
+    hub === null || selections.get(hub.environmentId)?.view?.isOwner !== false;
+  const ownerPage = (row: SettingsListRow): SettingsListRow[] => (actsForInstallation ? [row] : []);
   const noServerTargets = selectedTargets.length === 0;
   const selectedProject = projectGroups.find((group) => group.key === selectedProjectKey);
   const scopedProjectMembers =
@@ -210,7 +220,7 @@ function useSettingsIndexSections(): SettingsListSection[] {
     {
       title: "Agents",
       rows: [
-        serverPage("SettingsProviderAccounts", "person.crop.circle", "Providers"),
+        ...ownerPage(serverPage("SettingsProviderAccounts", "person.crop.circle", "Providers")),
         serverPage("SettingsThreads", "text.bubble", "Threads"),
         page("SettingsScheduledTasks", "clock", "Scheduled tasks"),
       ],
@@ -224,13 +234,17 @@ function useSettingsIndexSections(): SettingsListSection[] {
           "Projects",
           selectedProjectKey !== null ? { value: projectLabel } : undefined,
         ),
-        serverPage("SettingsEnvironmentSourceControl", "arrow.triangle.branch", "Source control"),
+        ...ownerPage(
+          serverPage("SettingsEnvironmentSourceControl", "arrow.triangle.branch", "Source control"),
+        ),
         serverPage("SettingsWorktrees", "square.on.square", "Worktrees"),
       ],
     },
     {
       rows: [
-        serverPage("SettingsEnvironmentMaintenance", "arrow.clockwise", "Maintenance"),
+        ...ownerPage(
+          serverPage("SettingsEnvironmentMaintenance", "arrow.clockwise", "Maintenance"),
+        ),
         page("SettingsLabs", "sparkles", "Labs"),
         page("SettingsAbout", "info.circle", "About"),
         page("SettingsArchive", "archivebox", "Archive"),

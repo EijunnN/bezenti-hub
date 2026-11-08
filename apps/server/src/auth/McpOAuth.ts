@@ -14,6 +14,7 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   mcpClientScopes,
+  withoutInstallationScopes,
   type RuntimeMode,
   type UserId,
 } from "@t3tools/contracts";
@@ -554,7 +555,10 @@ const make = Effect.gen(function* () {
       if (
         session === undefined ||
         !timingSafeEqualBase64Url(decision.csrfToken, session.csrfToken) ||
-        !mcpClientScopes(decision.access).every((scope) => session.scopes.includes(scope))
+        // The Installation's own scopes are not asked of a Member: no MCP tool needs them.
+        !withoutInstallationScopes(mcpClientScopes(decision.access)).every((scope) =>
+          session.scopes.includes(scope),
+        )
       ) {
         return yield* new McpOAuthPageError({
           description: "Your session cannot approve this request. Enter a pairing code instead.",

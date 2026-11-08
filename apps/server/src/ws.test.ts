@@ -3,7 +3,11 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
+  AuthInstallationScopes,
   AuthOrchestrationOperateScope,
+  AuthStandardClientScopes,
+  type AuthEnvironmentScope,
+  INSTALLATION_OWNER_ONLY_MESSAGE,
   AuthOrchestrationReadScope,
   AuthTerminalOperateScope,
   AuthFilesystemReadScope,
@@ -51,6 +55,7 @@ import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
 import * as Result from "effect/Result";
 import * as Queue from "effect/Queue";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { Headers } from "effect/http";
@@ -1501,6 +1506,24 @@ describe("Space visibility", () => {
     WS_METHODS.mcpAppsUpdateModelContext,
     WS_METHODS.secretsAnswerRequest,
     ORCHESTRATION_V2_WS_METHODS.forceStopThread,
+    WS_METHODS.serverGetProcessDiagnostics,
+    WS_METHODS.serverSignalProcess,
+    WS_METHODS.serverGetTraceDiagnostics,
+    WS_METHODS.serverUpdateSettings,
+    WS_METHODS.serverUpsertKeybinding,
+    WS_METHODS.providerAuthStart,
+    WS_METHODS.deviceConfigure,
+    WS_METHODS.deviceAction,
+    WS_METHODS.deviceList,
+    WS_METHODS.agentSessionsScan,
+    WS_METHODS.sourceControlCloneRepository,
+    WS_METHODS.projectCloneStart,
+    WS_METHODS.projectCloneCancel,
+    WS_METHODS.subscribeProjectClones,
+    WS_METHODS.attachmentsCreateUploadUrl,
+    WS_METHODS.attachmentsDelete,
+    WS_METHODS.subscribeDiscoveredLocalServers,
+    WS_METHODS.previewStopLocalServer,
   ] as const;
   const group = WsRpcGroup.omit(
     ...[...WsRpcGroup.requests.keys()].filter(
@@ -1624,6 +1647,14 @@ describe("Space visibility", () => {
     server: Effect.Success<typeof serveAuthHttp>,
     userId: UserId | undefined,
     overrides: Layer.Layer<never> = Layer.empty,
+    scopes: ReadonlyArray<AuthEnvironmentScope> = [
+      AuthOrchestrationReadScope,
+      AuthOrchestrationOperateScope,
+      AuthTerminalReadScope,
+      AuthTerminalOperateScope,
+      AuthFilesystemReadScope,
+      AuthFilesystemWriteScope,
+    ],
   ) {
     const browser = yield* ServerBrowser.ServerBrowser;
     return yield* RpcTest.makeClient(group).pipe(
@@ -1639,14 +1670,7 @@ describe("Space visibility", () => {
               subject: "user-sign-in",
               ...(userId === undefined ? {} : { userId }),
               method: "browser-session-cookie",
-              scopes: [
-                AuthOrchestrationReadScope,
-                AuthOrchestrationOperateScope,
-                AuthTerminalReadScope,
-                AuthTerminalOperateScope,
-                AuthFilesystemReadScope,
-                AuthFilesystemWriteScope,
-              ],
+              scopes,
             }),
           ),
           Layer.provide(
@@ -3408,4 +3432,348 @@ describe("Space visibility", () => {
         }),
       ),
   );
+
+  describe("the Installation as a whole is its Owner's", () => {
+    const ownerUserId = (server: Effect.Success<typeof serveAuthHttp>) =>
+      server.sql<{ userId: string }>`SELECT user_id AS "userId" FROM users WHERE is_owner = 1`.pipe(
+        Effect.map((rows) => UserId.make(rows[0]!.userId)),
+      );
+    type Client = Effect.Success<ReturnType<typeof connect>>;
+    // The refusal's message (or tag), or "reached" once the call got past the guard to the
+    // services, which these tests leave unused.
+    const outcome = <A, E, R>(call: Effect.Effect<A, E, R>) =>
+      call.pipe(
+        Effect.flip,
+        Effect.map((error) => {
+          const failure = error as {
+            readonly _tag: string;
+            readonly message?: string;
+            readonly detail?: unknown;
+          };
+          if (typeof failure.detail === "string") return failure.detail;
+          return failure._tag === "SpaceActionDeniedError"
+            ? (failure.message ?? failure._tag)
+            : failure._tag;
+        }),
+        Effect.catchCause(() => Effect.succeed("reached")),
+      );
+
+    it.effect(
+      "a Member or an Admin, even with every scope, reaches no process, setting, provider or device of the Hub",
+      () =>
+        withTeam(({ server, grace, ada }) =>
+          Effect.gen(function* () {
+            const handled: Array<string> = [];
+            const record = (name: string) =>
+              Effect.sync(() => {
+                handled.push(name);
+                return {} as never;
+              });
+            const services = Layer.mergeAll(
+              Layer.mock(ProcessDiagnostics.ProcessDiagnostics)({
+                read: record("processes"),
+                signal: () => record("signal"),
+              }),
+              Layer.mock(DeviceService.DeviceService)({
+                configure: () => record("deviceConfigure"),
+                action: () => record("deviceAction"),
+                retryHost: () => record("retryHost"),
+              }),
+              Layer.mock(ProviderAuthService.ProviderAuthService)({
+                start: () => record("providerAuth"),
+              }),
+            );
+            const calls = (client: Client) => ({
+              processes: client[WS_METHODS.serverGetProcessDiagnostics]({}),
+              signal: client[WS_METHODS.serverSignalProcess]({
+                pid: 4242,
+                startTimeMs: 0,
+                signal: "SIGKILL",
+              } as never),
+              traces: client[WS_METHODS.serverGetTraceDiagnostics]({}),
+              settings: client[WS_METHODS.serverUpdateSettings]({
+                patch: { defaultRuntimeMode: "full-access" },
+              } as never),
+              keybinding: client[WS_METHODS.serverUpsertKeybinding]({
+                key: "mod+shift+k",
+                command: "terminal.toggle",
+              } as never),
+              providerAuth: client[WS_METHODS.providerAuthStart]({
+                instanceId: ProviderInstanceId.make("codex"),
+              }),
+              deviceConfigure: client[WS_METHODS.deviceConfigure]({ enabled: true }),
+              deviceAction: client[WS_METHODS.deviceAction]({
+                deviceId: "phone",
+                type: "setAppearance",
+                value: "dark",
+              } as never),
+              retryHost: client[WS_METHODS.deviceList]({ retryHostId: "lab" } as never),
+            });
+            for (const userId of [grace.userId, ada.userId]) {
+              const client = yield* connect(server, userId, services, AuthStandardClientScopes);
+              for (const [name, call] of Object.entries(calls(client)) as Array<
+                [string, Effect.Effect<unknown, object>]
+              >) {
+                assert.deepEqual(
+                  [name, yield* outcome(call)],
+                  [name, INSTALLATION_OWNER_ONLY_MESSAGE],
+                );
+              }
+            }
+            assert.deepEqual(handled, []);
+            // The Owner reaches every one of them.
+            const asOwner = yield* connect(
+              server,
+              yield* ownerUserId(server),
+              services,
+              AuthStandardClientScopes,
+            );
+            for (const [name, call] of Object.entries(calls(asOwner)) as Array<
+              [string, Effect.Effect<unknown, object>]
+            >) {
+              assert.notDeepEqual(
+                [name, yield* outcome(call)],
+                [name, INSTALLATION_OWNER_ONLY_MESSAGE],
+              );
+            }
+            assert.includeMembers(handled, [
+              "processes",
+              "signal",
+              "deviceConfigure",
+              "deviceAction",
+              "retryHost",
+              "providerAuth",
+            ]);
+          }),
+        ),
+    );
+
+    it.effect("a Member's session holds none of the Installation's scopes; the Owner's all", () =>
+      withTeam(({ server, owner, grace }) =>
+        Effect.gen(function* () {
+          const permissions = (cookie: string) =>
+            server
+              .request("/api/auth/session", { cookie })
+              .pipe(Effect.map((response) => response.body.permissions as ReadonlyArray<string>));
+          const graceHolds = yield* permissions(grace.cookie);
+          assert.include(graceHolds, AuthOrchestrationOperateScope);
+          for (const scope of AuthInstallationScopes) assert.notInclude(graceHolds, scope);
+          const ownerHolds = yield* permissions(owner);
+          for (const scope of AuthInstallationScopes) assert.include(ownerHolds, scope);
+          // A Member's pairing link hands on what the Member holds, no more.
+          const link = yield* server.request("/api/auth/pairing-token", {
+            cookie: grace.cookie,
+            body: {},
+          });
+          assert.equal(link.status, 200);
+          const linked = yield* server.sql<{ scopes: string }>`
+            SELECT scopes FROM auth_pairing_links WHERE user_id = ${grace.userId}
+          `;
+          assert.lengthOf(linked, 1);
+          for (const scope of AuthInstallationScopes) {
+            assert.notInclude(linked[0]!.scopes, scope);
+          }
+        }),
+      ),
+    );
+
+    it.effect(
+      "a Member clones only into folders where they may work, and sees and cancels only their clones",
+      () =>
+        withTeam(({ server, grace, linus }) =>
+          Effect.gen(function* () {
+            const path = yield* Path.Path;
+            const tracker = yield* ProjectCloneTracker.make.pipe(
+              Effect.provideService(SourceControlRepositoryService.SourceControlRepositoryService, {
+                prepareClone: (input: { readonly destinationPath: string }) =>
+                  Effect.succeed({
+                    destinationPath: input.destinationPath,
+                    remoteUrl: "https://example.com/acme/app.git",
+                    cloneUrl: "https://example.com/acme/app.git",
+                    repository: null,
+                  }),
+                cloneRepository: () => Effect.never,
+                discardClone: () => Effect.void,
+              } as never),
+            );
+            const services = Layer.mergeAll(
+              Layer.succeed(ProjectCloneTracker.ProjectCloneTracker, tracker),
+              Layer.mock(ProjectService.ProjectService)({
+                create: () => Effect.succeed({} as never),
+              }),
+            );
+            const as = (userId: UserId) =>
+              connect(server, userId, services, AuthStandardClientScopes);
+            const asOwner = yield* as(yield* ownerUserId(server));
+            const asGrace = yield* as(grace.userId);
+            const asLinus = yield* as(linus.userId);
+            const clone = (client: Client, projectId: string, destinationPath: string) =>
+              outcome(
+                client[WS_METHODS.projectCloneStart]({
+                  projectId: ProjectId.make(projectId),
+                  title: projectId,
+                  remoteUrl: "https://example.com/acme/app.git",
+                  destinationPath,
+                  createdAt: "2026-11-01T00:00:00.000Z",
+                } as never),
+              );
+            const refused =
+              "You can only clone into the Hub's Projects folder or a folder of your team's Projects.";
+            // Outside her team's Projects and the Hub's Projects folder: refused, a direct clone too.
+            assert.equal(yield* clone(asGrace, "grace-etc", "/etc/cron.d/app"), refused);
+            assert.equal(
+              yield* clone(asGrace, "grace-globex", "/work/globex-app/vendor/app"),
+              refused,
+            );
+            assert.equal(yield* clone(asGrace, "grace-tilde", "~/app"), refused);
+            assert.equal(
+              yield* outcome(
+                asGrace[WS_METHODS.sourceControlCloneRepository]({
+                  remoteUrl: "https://example.com/acme/app.git",
+                  destinationPath: "/home/someone/app",
+                } as never),
+              ),
+              refused,
+            );
+            // In the Hub's Projects folder or a folder of her team's Project, it starts.
+            assert.equal(
+              yield* clone(asGrace, "grace-clone", path.join(process.cwd(), "grace-clone-target")),
+              "reached",
+            );
+            assert.equal(
+              yield* clone(asGrace, "grace-vendor", "/work/acme-app/vendor/lib"),
+              "reached",
+            );
+            assert.equal(yield* clone(asOwner, "owner-clone", "/srv/owner-clone"), "reached");
+            const seen = (client: Client) =>
+              client[WS_METHODS.subscribeProjectClones]({}).pipe(
+                Stream.runHead,
+                Effect.map((head) =>
+                  Option.getOrElse(head, () => [])
+                    .map((snapshot) => snapshot.projectId)
+                    .toSorted(),
+                ),
+              );
+            assert.deepEqual(yield* seen(asGrace), ["grace-clone", "grace-vendor"]);
+            assert.deepEqual(yield* seen(asLinus), []);
+            assert.deepEqual(yield* seen(asOwner), ["grace-clone", "grace-vendor", "owner-clone"]);
+            // Nor does anyone but her (or the Owner) cancel hers.
+            const cancel = (client: Client, projectId: string) =>
+              client[WS_METHODS.projectCloneCancel]({ projectId: ProjectId.make(projectId) });
+            assert.deepEqual(yield* cancel(asLinus, "grace-clone"), { applied: false });
+            assert.deepEqual(yield* cancel(asGrace, "owner-clone"), { applied: false });
+            assert.deepEqual(yield* cancel(asGrace, "grace-clone"), { applied: true });
+          }),
+        ),
+    );
+
+    it.effect("agent sessions to import list only what the User may read", () =>
+      withTeam(({ server, grace }) =>
+        Effect.gen(function* () {
+          const candidate = (path: string, projectId?: string) => ({
+            path,
+            title: path,
+            ...(projectId === undefined ? {} : { projectId: ProjectId.make(projectId) }),
+            sources: [],
+            threadCount: 1,
+            lastActiveAt: null,
+            alreadyImported: projectId !== undefined,
+          });
+          const scanner = Layer.mock(AgentSessionScanner.AgentSessionScanner)({
+            scan: Effect.succeed({
+              candidates: [
+                candidate("/work/acme-app", "acme-app"),
+                candidate("/work/acme-app/packages/web"),
+                candidate("/work/globex-app", "globex-app"),
+                // A Project id she cannot see, though its folder sits inside one she can.
+                candidate("/work/acme-app/globex-copy", "globex-app"),
+                candidate("/home/owner/secret-project"),
+              ],
+              scannedAt: "2026-11-01T00:00:00.000Z",
+            } as never),
+          });
+          const paths = (client: Client) =>
+            client[WS_METHODS.agentSessionsScan]({}).pipe(
+              Effect.map((result) => result.candidates.map((entry) => entry.path)),
+            );
+          assert.deepEqual(yield* paths(yield* connect(server, grace.userId, scanner)), [
+            "/work/acme-app",
+            "/work/acme-app/packages/web",
+          ]);
+          assert.lengthOf(
+            yield* paths(yield* connect(server, yield* ownerUserId(server), scanner)),
+            5,
+          );
+        }),
+      ),
+    );
+
+    it.effect("a pending attachment is deleted only by the User who uploaded it", () =>
+      withTeam(({ server, grace, linus }) =>
+        Effect.gen(function* () {
+          const signer = Layer.mock(AssetSigner.AssetSigner)({
+            sign: () => Effect.succeed("signature"),
+          });
+          const asGrace = yield* connect(server, grace.userId, signer);
+          const asLinus = yield* connect(server, linus.userId, signer);
+          const upload = yield* asGrace[WS_METHODS.attachmentsCreateUploadUrl]({
+            name: "notes.png",
+            mimeType: "image/png",
+            sizeBytes: 3,
+          } as never);
+          const removal = (client: Client) =>
+            outcome(client[WS_METHODS.attachmentsDelete]({ attachmentId: upload.attachmentId }));
+          assert.equal(
+            yield* removal(asLinus),
+            "Only the person who uploaded this attachment can remove it.",
+          );
+          assert.equal(yield* removal(asGrace), "reached");
+        }),
+      ),
+    );
+
+    it.effect("of the Hub's listening servers a Member sees and stops only her own Threads'", () =>
+      withTeam(({ server, grace }) =>
+        Effect.gen(function* () {
+          const stopped: Array<number> = [];
+          const listed = [
+            { pid: 101, terminal: { threadId: "grace-thread", terminalId: "t" } },
+            { pid: 102, terminal: { threadId: "acme-thread", terminalId: "t" } },
+            { pid: 103, terminal: null },
+          ].map(({ pid, terminal }) => ({
+            host: "127.0.0.1",
+            port: 3000 + pid,
+            url: `http://127.0.0.1:${3000 + pid}/`,
+            processName: "node",
+            pid,
+            terminal,
+          }));
+          const discovery = Layer.mock(PortScanner.PortDiscovery)({
+            trackAgent: () => () => undefined,
+            retain: Effect.void,
+            scan: () => Effect.succeed(listed as never),
+            subscribe: () => Effect.void,
+            stopServer: (input: { readonly pid: number }) =>
+              Effect.sync(() => {
+                stopped.push(input.pid);
+              }),
+          });
+          const asGrace = yield* connect(server, grace.userId, discovery);
+          const first = yield* asGrace[WS_METHODS.subscribeDiscoveredLocalServers]({}).pipe(
+            Stream.runHead,
+          );
+          assert.deepEqual(
+            Option.getOrThrow(first).servers.map((entry) => entry.pid),
+            [101],
+          );
+          const stop = (pid: number) =>
+            outcome(asGrace[WS_METHODS.previewStopLocalServer]({ pid, port: 3000 + pid }));
+          assert.equal(yield* stop(102), "PreviewStopLocalServerError");
+          assert.equal(yield* stop(103), "PreviewStopLocalServerError");
+          assert.equal(yield* stop(101), "reached");
+          assert.deepEqual(stopped, [101]);
+        }),
+      ),
+    );
+  });
 });

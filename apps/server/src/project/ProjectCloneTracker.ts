@@ -7,6 +7,7 @@ import type {
   ProjectId,
   SourceControlCloneProtocol,
   SourceControlRepositoryInfo,
+  UserId,
 } from "@t3tools/contracts";
 import {
   OrchestrationDispatchCommandError,
@@ -38,6 +39,8 @@ export class ProjectCloneTracker extends Context.Service<
     readonly start: (
       input: ProjectCloneStartInput,
       hooks: ProjectCloneHooks,
+      /** The User who starts it, who alone (with the Owner) sees, cancels and retries it. */
+      startedBy?: UserId,
     ) => Effect.Effect<
       ProjectCloneStartResult,
       SourceControlRepositoryError | OrchestrationDispatchCommandError
@@ -48,6 +51,8 @@ export class ProjectCloneTracker extends Context.Service<
     /** Stops tracking, interrupts any running clone and removes unfinished checkouts. */
     readonly discard: (projectId: ProjectId) => Effect.Effect<void>;
     readonly get: (projectId: ProjectId) => Effect.Effect<ProjectCloneSnapshot | null>;
+    /** Who started each tracked clone; none for one the server started itself. */
+    readonly startedBy: Effect.Effect<ReadonlyMap<ProjectId, UserId | undefined>>;
     readonly stream: Stream.Stream<ReadonlyArray<ProjectCloneSnapshot>>;
   }
 >()("t3/project/ProjectCloneTracker") {}
@@ -79,6 +84,7 @@ const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
 interface TrackedClone {
   readonly snapshot: ProjectCloneSnapshot;
+  readonly startedBy: UserId | undefined;
   readonly fiber: Fiber.Fiber<unknown, unknown> | null;
   readonly hooks: ProjectCloneHooks;
   readonly input: {
@@ -267,7 +273,7 @@ export const make = Effect.gen(function* () {
   });
 
   const start: ProjectCloneTracker["Service"]["start"] = Effect.fn("ProjectCloneTracker.start")(
-    function* (input, hooks) {
+    function* (input, hooks, startedBy) {
       const prepared = yield* repositories.prepareClone(input);
       const startedAt = yield* nowIso;
       const snapshot: ProjectCloneSnapshot = {
@@ -295,6 +301,7 @@ export const make = Effect.gen(function* () {
         const next = new Map(current);
         next.set(input.projectId, {
           snapshot,
+          startedBy,
           fiber: null,
           hooks,
           input: {
@@ -426,8 +433,8 @@ export const make = Effect.gen(function* () {
 
   // Forwarders retain the underlying operation spans.
   return ProjectCloneTracker.of({
-    start: Effect.fnUntraced(function* (input, hooks) {
-      return yield* locked(start(input, hooks));
+    start: Effect.fnUntraced(function* (input, hooks, startedBy) {
+      return yield* locked(start(input, hooks, startedBy));
     }),
     cancel: Effect.fnUntraced(function* (projectId) {
       return yield* locked(cancel(projectId));
@@ -439,6 +446,12 @@ export const make = Effect.gen(function* () {
       return yield* locked(discard(projectId));
     }),
     get,
+    startedBy: Ref.get(clones).pipe(
+      Effect.map(
+        (current) =>
+          new Map(Array.from(current, ([projectId, tracked]) => [projectId, tracked.startedBy])),
+      ),
+    ),
     stream,
   });
 });

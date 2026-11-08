@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { sessionActsForInstallation } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import { AsyncResult, Atom } from "effect/reactivity";
@@ -34,4 +35,14 @@ export function usePrimarySessionState() {
     isPending: result.waiting,
     refresh: refreshPrimarySessionState,
   };
+}
+
+/**
+ * Whether this app's session may act on the Installation as a whole (its settings, providers,
+ * processes and devices): the Owner's, or one with no accounts at all. Until the session is
+ * read it answers yes; the server refuses a Member regardless.
+ */
+export function usePrimaryActsForInstallation(): boolean {
+  const { data } = usePrimarySessionState();
+  return data === null || !data.authenticated || sessionActsForInstallation(data);
 }
