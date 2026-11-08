@@ -768,7 +768,9 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(VcsProvisioningService.VcsProvisioningService)({}),
   Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({}),
   Layer.mock(WorkspaceEntries.WorkspaceEntries)({}),
-  Layer.mock(WorkspaceFileSystem.WorkspaceFileSystem)({}),
+  Layer.mock(WorkspaceFileSystem.WorkspaceFileSystem)({
+    getMetadata: (input) => Effect.succeed({ entries: input.paths.map(() => ({ kind: "file" })) }),
+  }),
   Layer.mock(WorktreeSetupTracker.WorktreeSetupTracker)({}),
 );
 
@@ -1494,6 +1496,7 @@ describe("Space visibility", () => {
     WS_METHODS.projectsWriteFile,
     WS_METHODS.filesystemBrowse,
     WS_METHODS.vcsListRefs,
+    WS_METHODS.filesystemGetMetadata,
     WS_METHODS.mcpAppsCallTool,
     WS_METHODS.mcpAppsUpdateModelContext,
     WS_METHODS.secretsAnswerRequest,
@@ -2704,6 +2707,15 @@ describe("Space visibility", () => {
             );
           assert.equal(yield* git(WS_METHODS.vcsListRefs, globexRoot), hidden);
           assert.notEqual(yield* git(WS_METHODS.vcsListRefs, acmeRoot), hidden);
+          // File chips: only the paths she may not read answer nothing.
+          const metadata = yield* asAda[WS_METHODS.filesystemGetMetadata]({
+            paths: [path.join(acmeRoot, "README.md"), path.join(globexRoot, "README.md"), "~/x"],
+          } as never);
+          assert.deepEqual((metadata as { readonly entries: ReadonlyArray<unknown> }).entries, [
+            { kind: "file" },
+            null,
+            null,
+          ]);
           // Her own Project's files and folders get past the guard.
           assert.notEqual(yield* read(acmeRoot, "README.md"), hidden);
           assert.notEqual(

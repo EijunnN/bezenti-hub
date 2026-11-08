@@ -64,7 +64,7 @@ export const localWorkspaceTargets = (
     const raw = Predicate.isObject(payload)
       ? (payload as Record<string, unknown>)[name]
       : undefined;
-    const values = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw];
+    const values = Array.isArray(raw) ? raw : raw === undefined || raw === null ? [] : [raw];
     for (const value of values) {
       if (
         typeof value !== "string" ||

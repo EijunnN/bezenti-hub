@@ -213,6 +213,7 @@ import * as CurrentPrincipal from "./auth/CurrentPrincipal.ts";
 import * as SpaceDirectory from "./spaces/SpaceDirectory.ts";
 import * as EnvironmentRegistry from "./environments/EnvironmentRegistry.ts";
 import * as SpaceVisibility from "./spaces/SpaceVisibility.ts";
+import { localWorkspaceTargets } from "./workspace/localWorkspaceTargets.ts";
 import { RpcInstrumentation, rpcInstrumentationLayer } from "./observability/RpcInstrumentation.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
@@ -2810,7 +2811,37 @@ export const layerWsRpc = (
             ),
           ),
         [WS_METHODS.shellOpenInEditor]: (input) => externalLauncher.launchEditor(input),
-        [WS_METHODS.filesystemGetMetadata]: (input) => workspaceFileSystem.getMetadata(input),
+        // A User other than the Owner gets null for each path they may not read.
+        [WS_METHODS.filesystemGetMetadata]: Effect.fnUntraced(function* (input) {
+          const visibility = yield* SpaceVisibility.RequestVisibility;
+          if (visibility.all) return yield* workspaceFileSystem.getMetadata(input);
+          const readable = yield* Effect.forEach(input.paths, (path) => {
+            const targets = localWorkspaceTargets(
+              WS_METHODS.filesystemGetMetadata,
+              { paths: [path] },
+              ["paths"],
+            );
+            return targets === "refused"
+              ? Effect.succeed(false)
+              : Effect.map(
+                  Effect.forEach(targets, (target) =>
+                    spaceVisibility.mayReadDirectory(visibility, target),
+                  ),
+                  (allowed) => allowed.every(Boolean),
+                );
+          });
+          const kept = input.paths.filter((_, index) => readable[index]);
+          const answered =
+            kept.length === 0
+              ? []
+              : (yield* workspaceFileSystem.getMetadata({ ...input, paths: kept })).entries;
+          let next = 0;
+          return {
+            entries: input.paths.map((_, index) =>
+              readable[index] ? (answered[next++] ?? null) : null,
+            ),
+          };
+        }),
         [WS_METHODS.filesystemBrowse]: (input) => threadWorkspace.browse(input, workspaceCaller),
         [WS_METHODS.attachmentsCreateUploadUrl]: (input) => issueAttachmentUploadUrl(input),
         [WS_METHODS.attachmentsDelete]: (input) => deletePendingAttachment(input.attachmentId),

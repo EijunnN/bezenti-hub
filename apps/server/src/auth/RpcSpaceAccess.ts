@@ -185,7 +185,8 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.reviewGetDiffPreview]: "readDirectory",
   [WS_METHODS.reviewGetDiffFileContents]: "readDirectory",
   [WS_METHODS.shellOpenInEditor]: "workDirectory",
-  [WS_METHODS.filesystemGetMetadata]: "readDirectory",
+  // Each path the User may not read answers null (file chips of agent messages keep the rest).
+  [WS_METHODS.filesystemGetMetadata]: "filtered",
   [WS_METHODS.sourceControlLookupRepository]: "readDirectory",
   [WS_METHODS.sourceControlPublishRepository]: "workDirectory",
   [WS_METHODS.serverRefreshProviders]: "readDirectory",
@@ -295,8 +296,9 @@ const DIRECTORY_FIELDS: Partial<Record<string, ReadonlyArray<string>>> = {
 const PROJECT_KEYS = new Set(["projectId", "projectIds"]);
 // Other paths a folder RPC opens, besides its `cwd`.
 const DIRECTORY_TARGET_FIELDS: Partial<Record<string, ReadonlyArray<string>>> = {
+  // Its RPC sends a null `path` (the managed folder); checked should a client ever name one.
+  [WS_METHODS.vcsCreateWorktree]: ["path"],
   [WS_METHODS.vcsRemoveWorktree]: ["path"],
-  [WS_METHODS.filesystemGetMetadata]: ["paths"],
 };
 
 /** Every string under one of `keys`, at any depth of the payload. */
@@ -395,6 +397,7 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
   if (access === "readDirectory" || access === "workDirectory") {
     if (visibility.all) return;
     const named = localWorkspaceTargets(method, payload, DIRECTORY_TARGET_FIELDS[method] ?? []);
+
     if (named === "refused") return yield* notFound();
     for (const target of named) {
       const allowed =
