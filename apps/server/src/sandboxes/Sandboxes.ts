@@ -404,14 +404,19 @@ const make = Effect.gen(function* () {
   // User just sent to it whose run may not be recorded yet: each dispatch its own claim (when it
   // was made), which the next turn reporting in consumes, or which lapses after the grace.
   const liveTurns = new Map<EnvironmentId, Set<string>>();
-  const claims = new Map<EnvironmentId, Array<number>>();
-  /** The claims of work just sent to it that still stand, the lapsed ones dropped. */
+  // Each dispatch's claim, by its own key: held (null) while the dispatch runs, then when it was
+  // released, standing for the grace unless a turn reports in first.
+  const claims = new Map<EnvironmentId, Map<object, number | null>>();
+  /** How many claims stand on it now; lapsed ones are dropped. */
   const claimsOf = (environmentId: EnvironmentId) => {
+    const of = claims.get(environmentId);
+    if (of === undefined) return 0;
     const now = nowMs();
-    const standing = (claims.get(environmentId) ?? []).filter((at) => now - at < DISPATCH_GRACE_MS);
-    if (standing.length === 0) claims.delete(environmentId);
-    else claims.set(environmentId, standing);
-    return standing.length;
+    for (const [key, releasedAt] of of) {
+      if (releasedAt !== null && now - releasedAt >= DISPATCH_GRACE_MS) of.delete(key);
+    }
+    if (of.size === 0) claims.delete(environmentId);
+    return of.size;
   };
   const touch = (environmentId: EnvironmentId) =>
     Effect.sync(() => {
@@ -1487,11 +1492,6 @@ const make = Effect.gen(function* () {
     awaitStarted: Effect.fn("Sandboxes.awaitStarted")(function* (environmentId, options) {
       const spaceId = sandboxSpaceOf(environmentId);
       if (spaceId === undefined) return;
-      // Claimed before anything is waited on, so an image update checking now sees it. Only work
-      // sent to it claims it: a preview or a terminal reaching it does not.
-      if (options.dispatch === true) {
-        claims.set(environmentId, [...(claims.get(environmentId) ?? []), nowMs()]);
-      }
       const startError = (detail: string) =>
         new EnvironmentDemand.EnvironmentStartError({ environmentId, detail });
       if (yield* readyNow(spaceId, environmentId)) return yield* touch(environmentId);
@@ -1545,17 +1545,34 @@ const make = Effect.gen(function* () {
           liveTurns.set(environmentId, turns);
         }
         turns.add(key);
-        // One dispatch's work is under way (its turn now keeps it busy): its claim, the oldest,
-        // goes; another User's dispatch still waiting for its turn keeps its own.
-        const standing = claims.get(environmentId);
-        standing?.shift();
-        if (standing?.length === 0) claims.delete(environmentId);
+        // A turn keeps it busy now: released claims (their runs are recorded) go, while a dispatch
+        // still under way keeps its own, whichever work this turn is.
+        const of = claims.get(environmentId);
+        for (const [claim, releasedAt] of of ?? []) if (releasedAt !== null) of?.delete(claim);
+        if (of?.size === 0) claims.delete(environmentId);
       });
     }),
     turnEnded: Effect.fn("Sandboxes.turnEnded")(function* (environmentId, key) {
       yield* Effect.sync(() => {
         liveTurns.get(environmentId)?.delete(key);
       });
+    }),
+    claim: Effect.fn("Sandboxes.claim")(function* (environmentId) {
+      if (sandboxSpaceOf(environmentId) === undefined) return;
+      const key = {};
+      yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          claimsOf(environmentId);
+          const of = claims.get(environmentId) ?? new Map<object, number | null>();
+          of.set(key, null);
+          claims.set(environmentId, of);
+        }),
+        () =>
+          Effect.sync(() => {
+            const of = claims.get(environmentId);
+            if (of?.has(key) === true) of.set(key, nowMs());
+          }),
+      );
     }),
     hold: Effect.fn("Sandboxes.hold")(function* (environmentId) {
       if (sandboxSpaceOf(environmentId) === undefined) return;

@@ -22,11 +22,13 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import { makeProviderReplayGate } from "@t3tools/provider-testing/replayGate";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import { addMember, joinOrganization } from "../auth/UserAuth.testkit.ts";
@@ -531,15 +533,9 @@ describe("Hub con Environments: the Sandboxes' base image", () => {
           .ensureRunning({ spaceId: acme, actorUserId: undefined })
           .pipe(Effect.orDie);
         newest = "0.1.7-20261107000000";
-        // A message's dispatch claims the Sandbox (as `message.dispatch` does) before its run exists.
-        yield* hub
-          .service(EnvironmentDemand.EnvironmentDemand)
-          .awaitStarted(sandboxEnvironmentIdOf(acme), {
-            actorUserId: yield* ownerIdOf(hub),
-            explicit: true,
-            dispatch: true,
-          })
-          .pipe(Effect.orDie);
+        // A message's dispatch claims the Sandbox (as `message.dispatch` does) before its run
+        // exists, until the dispatch ends: here, the rest of the test.
+        yield* hub.service(EnvironmentDemand.EnvironmentDemand).claim(sandboxEnvironmentIdOf(acme));
         // The Owner's view says so before the Owner asks.
         assert.isTrue(sandboxImageRow((yield* imageStatus(hub)).body, acme)?.busy);
         const refused = yield* updateImage(hub, acme);
@@ -549,7 +545,7 @@ describe("Hub con Environments: the Sandboxes' base image", () => {
       }).pipe(Effect.scoped),
   );
 
-  it.live("each User's dispatch is its own claim: another's turn starting leaves it", () =>
+  it.live("a dispatch keeps its own claim: a turn other work started never takes it", () =>
     Effect.gen(function* () {
       let newest = "0.1.7-20261101000000";
       const hub = yield* makeHub({ sandboxImageVersion: () => newest });
@@ -561,19 +557,17 @@ describe("Hub con Environments: the Sandboxes' base image", () => {
       newest = "0.1.7-20261107000000";
       const demand = hub.service(EnvironmentDemand.EnvironmentDemand);
       const environmentId = sandboxEnvironmentIdOf(acme);
-      const owner = yield* ownerIdOf(hub);
-      // Two messages sent to it; the first one's turn reports in and ends at once.
-      for (let sent = 0; sent < 2; sent += 1) {
-        yield* demand
-          .awaitStarted(environmentId, { actorUserId: owner, explicit: true, dispatch: true })
-          .pipe(Effect.orDie);
-      }
-      yield* demand.turnStarted(environmentId, "session-a:1");
-      yield* demand.turnEnded(environmentId, "session-a:1");
+      // A User's dispatch under way; meanwhile a turn an effect started reports in and ends.
+      const dispatching = yield* Scope.make();
+      yield* demand.claim(environmentId).pipe(Scope.provide(dispatching));
+      yield* demand.turnStarted(environmentId, "effect-session:1");
+      yield* demand.turnEnded(environmentId, "effect-session:1");
       const refused = yield* updateImage(hub, acme);
       assert.equal(refused.status, 409);
       assert.include(refused.body.message ?? "", "Work was just sent to it");
-      // Its turn reports in too: nothing is claimed any more.
+      // Its dispatch ended (its run is recorded): the claim still stands until its turn reports in.
+      yield* Scope.close(dispatching, Exit.void);
+      assert.equal((yield* updateImage(hub, acme)).status, 409);
       yield* demand.turnStarted(environmentId, "session-b:1");
       yield* demand.turnEnded(environmentId, "session-b:1");
       const updated = yield* updateImage(hub, acme);
@@ -631,9 +625,10 @@ describe("Hub con Environments: the Sandboxes' base image", () => {
     }).pipe(Effect.scoped),
   );
 
-  it.live("a Hub that could not build the image can once rootless Podman answers", () =>
+  // Asked again once its answer is a few seconds old: SandboxImage.test.ts.
+  it.live("a Hub that cannot build the image says why", () =>
     Effect.gen(function* () {
-      let reason: string | null = "Rootless Podman is not available on the Hub.";
+      const reason = "Rootless Podman is not available on the Hub.";
       const hub = yield* makeHub({
         sandboxImageBuilder: SandboxImage.SandboxImageBuilder.of({
           // `podman info` timed out, or Podman was set up after the Hub started.
@@ -651,10 +646,6 @@ describe("Hub con Environments: the Sandboxes' base image", () => {
       const before = yield* imageStatus(hub);
       assert.isFalse(before.body.canBuild);
       assert.equal(before.body.cannotBuildReason, "Rootless Podman is not available on the Hub.");
-      reason = null;
-      const after = yield* imageStatus(hub);
-      assert.isTrue(after.body.canBuild);
-      assert.equal(after.body.cannotBuildReason, null);
     }).pipe(Effect.scoped),
   );
 

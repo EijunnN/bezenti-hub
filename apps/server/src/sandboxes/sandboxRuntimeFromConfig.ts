@@ -93,13 +93,13 @@ const podmanForHub = (config: { readonly devUrl: URL | undefined }, image: strin
  * process one only when `T3CODE_SANDBOX_RUNTIME=process` asks for it (development and tests).
  * Fails with why there is none, as `t3 status` shows it.
  */
-/** Why a dedicated machine runs nothing, and whether only its image is missing (waited for). */
+/** Why a dedicated machine runs nothing, and whether it waits (its image missing) and asks again. */
 export interface DedicatedRuntimeRefusal {
   readonly message: string;
-  readonly awaitsImage: boolean;
+  readonly waits: boolean;
 }
-const refused = (message: string, awaitsImage = false) =>
-  Result.fail<DedicatedRuntimeRefusal>({ message, awaitsImage });
+const refused = (message: string, waits = false) =>
+  Result.fail<DedicatedRuntimeRefusal>({ message, waits });
 
 export const dedicatedRuntimeFromConfig = Effect.fn("dedicatedRuntimeFromConfig")(function* (
   hubUrl: string,
@@ -127,8 +127,11 @@ export const dedicatedRuntimeFromConfig = Effect.fn("dedicatedRuntimeFromConfig"
   if (options.recheck === true) podmanDetection = undefined;
   const detected = yield* detectPodman(image);
   if (!detected.rootless) {
+    // On a recheck (rootless Podman was here, only the image missing) it is a slow or failed
+    // `podman info`, not Podman gone: the wait goes on.
     return refused(
       "a dedicated machine runs its work in a Sandbox container, and rootless Podman is not available here.",
+      options.recheck === true,
     );
   }
   if (!detected.image) {

@@ -199,6 +199,29 @@ const SANDBOX_IMAGE_FILES = ["Containerfile", "clis/package.json", "clis/package
  * its own tree, which is copied as it is; a Hub run from a checkout (source or its `dist`) stages
  * that checkout's server (scripts/stage-sandbox-server.ts).
  */
+/**
+ * Everything under the context readable by all (directories and executables searchable too), as
+ * the image keeps these modes and its Sandbox runs as a plain user; whatever the umask the files
+ * were made under. The context directory itself stays 0700: the Hub's alone on this machine.
+ */
+export const makeContextReadable = (contextDir: string) => {
+  const walk = (dir: string) => {
+    for (const entry of NodeFS.readdirSync(dir, { withFileTypes: true })) {
+      const path = NodePath.join(dir, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      const mode = NodeFS.statSync(path).mode & 0o7777;
+      if (entry.isDirectory()) {
+        if ((mode & 0o555) !== 0o555) NodeFS.chmodSync(path, mode | 0o555);
+        walk(path);
+      } else {
+        const wanted = mode | 0o444 | ((mode & 0o100) === 0 ? 0 : 0o111);
+        if (wanted !== mode) NodeFS.chmodSync(path, wanted);
+      }
+    }
+  };
+  walk(contextDir);
+};
+
 const prepareContext = Effect.fn("SandboxImage.prepareContext")(function* (
   contextDir: string,
   onLine: (line: string) => void,
@@ -282,6 +305,10 @@ export const buildSandboxImage = Effect.fn("SandboxImage.build")(function* (inpu
     (dir) => Effect.sync(() => NodeFS.rmSync(dir, { recursive: true, force: true })),
   );
   yield* prepareContext(contextDir, input.onLine, input.checkout);
+  yield* Effect.try({
+    try: () => makeContextReadable(contextDir),
+    catch: (cause) => new SandboxImageBuildError({ detail: String(cause) }),
+  });
   input.onLine(`Building ${input.image} (${version})...`);
   yield* streamCommand(
     podmanCommand,
@@ -402,6 +429,33 @@ export class SandboxImageBuilds extends Context.Service<
   }
 >()("t3/sandboxes/SandboxImage/SandboxImageBuilds") {}
 
+/** How long a «cannot build» answer stands before `podman info` is asked again. */
+const CANNOT_BUILD_TTL_MS = 5_000;
+
+/**
+ * Why it cannot be done, asked once per `ttlMs` (concurrent askers share one check) until the
+ * answer is none, which then stands for good: a slow `podman info` or a Podman set up after the
+ * Hub started is not kept, nor asked on every poll.
+ */
+export const cachedUntilAvailable = Effect.fn("SandboxImage.cachedUntilAvailable")(function* (
+  check: Effect.Effect<string | null>,
+  ttlMs: number,
+) {
+  yield* Effect.void;
+  let available = false;
+  let current: { readonly at: number; readonly read: Effect.Effect<string | null> } | undefined;
+  return Effect.gen(function* () {
+    if (available) return null;
+    const now = yield* Clock.currentTimeMillis;
+    if (current === undefined || now - current.at >= ttlMs) {
+      current = { at: now, read: yield* Effect.cached(check) };
+    }
+    const reason = yield* current.read;
+    if (reason === null) available = true;
+    return reason;
+  });
+});
+
 /** How long a read of the image stands for the next ones (clients poll every second or so). */
 const CURRENT_TTL_MS = 5_000;
 
@@ -433,17 +487,9 @@ const make = Effect.gen(function* () {
     }
   };
 
-  let canBuild = false;
-  const cannotBuildReason = Effect.suspend(() =>
-    canBuild
-      ? Effect.succeed(null)
-      : builder.cannotBuildReason.pipe(
-          Effect.tap((reason) =>
-            Effect.sync(() => {
-              if (reason === null) canBuild = true;
-            }),
-          ),
-        ),
+  const cannotBuildReason = yield* cachedUntilAvailable(
+    builder.cannotBuildReason,
+    CANNOT_BUILD_TTL_MS,
   );
 
   let currentRead: { readonly at: number; readonly value: SandboxImageInfo } | undefined;

@@ -230,7 +230,7 @@ it.effect("a machine waiting for its image starts once it is built, without a re
           rechecks.push(recheck);
           return built
             ? Result.succeed("the runtime")
-            : Result.fail({ message: "the image is not built.", awaitsImage: true });
+            : Result.fail({ message: "the image is not built.", waits: true });
         }),
       onWaiting: (message) => Effect.sync(() => void waiting.push(message)),
     }).pipe(Effect.forkChild);
@@ -255,9 +255,7 @@ it.effect("any other reason it cannot run is final", () =>
     const result = yield* awaitDedicatedRuntime({
       check: () =>
         Ref.update(checks, (n) => n + 1).pipe(
-          Effect.as(
-            Result.fail({ message: "rootless Podman is not available.", awaitsImage: false }),
-          ),
+          Effect.as(Result.fail({ message: "rootless Podman is not available.", waits: false })),
         ),
       onWaiting: () => Effect.void,
     });

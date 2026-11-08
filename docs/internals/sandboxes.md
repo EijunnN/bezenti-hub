@@ -323,8 +323,9 @@ Settings shows it (`GET /api/sandboxes/image?after=<lines>`: only the lines afte
 has). Output lines split on carriage returns and newlines, each cut at 2 KiB; the Hub keeps the last 400 lines and
 at most 256 KiB. With no Hub running the command builds in its own process and records the build
 itself. One build at a time: claimed in one step, so two requests never both build (the other gets
-409). The status reads `podman info` until it says rootless Podman is here (then never again; a
-timeout or a Podman set up later is not kept), and the image at most every 5 seconds (again after
+409). The status reads `podman info` until it says rootless Podman is here (then never again); a
+«cannot build» answer stands 5 seconds (polls share one check), so a timeout or a Podman set up later
+is not kept. It reads the image at most every 5 seconds (again after
 each build), and every Sandbox's version and busy state in one query. Every build is audited on
 the Hub machine (`environment:hub-machine`), a build the Hub stopped during included. The build is the Hub's: a client that stops following
 it does not stop it. It is plain `podman build` (`--file`, `--tag`, `--build-arg`), so Podman 3.4,
@@ -346,7 +347,9 @@ The server goes in **from the Hub itself**, so the image always has the Hub's ve
   the Hub's Node first on PATH and, in WSL, without the Windows directories the login shell adds
   (their `pnpm` cannot run).
 
-The context is `Containerfile`, `server/` (to `/opt/t3/app`), `modules/` (its `node_modules`, a layer
+Before the build, everything under the context is made readable by all (directories and
+executables searchable), whatever umask made it: the image keeps these modes and the Sandbox runs as
+a plain user. The context directory itself stays 0700. The context is `Containerfile`, `server/` (to `/opt/t3/app`), `modules/` (its `node_modules`, a layer
 of its own, so a new server rebuilds little) and `extras/` (to `/opt/t3`). The build fails without
 rootless Podman, or when this `t3` is neither a release nor a checkout.
 
@@ -370,9 +373,11 @@ Each Sandbox records the version it started with; the Owner's view shows them an
   or its session ends) or the projection has a run in progress, «A turn is in progress on it
   (1 Thread). Update it once its turns end.»; or when a User sent it work in the last 10 seconds
   whose turn has not reported in, «Work was just sent to it. Update it once that work has ended.»;
-  and while it starts or stops. Only dispatched work claims it (`awaitStarted` with `dispatch`,
-  which the Orchestrator's machine-decided commands pass), each dispatch a claim of its own that
-  the next turn reporting in consumes: previews, files and terminals never claim it. A
+  and while it starts or stops. Only dispatched work claims it (`EnvironmentDemand.claim`, scoped
+  to the dispatch of each machine-decided command): each dispatch holds its own claim while it runs,
+  which then stands until a turn reports in or 10 seconds pass (lapsed ones are dropped whenever
+  claims are read). A turn never takes a claim still held, whatever work started it; previews,
+  files and terminals never claim it. A
   `provider.startTurn` that fails, and a session that is lost, end their turns too. The Owner's view
   shows a claimed Sandbox as busy.
 - Never into a start that cannot succeed: with no newest image (the tag names none, or one the Hub
@@ -389,8 +394,9 @@ Each Sandbox records the version it started with; the Owner's view shows them an
 exists there and says to run `t3 sandbox image build`. On a joined machine that command always
 builds in its own process (its server answers only `/health`, and the audit log is the Hub's), with
 the same tags and versions; the machine's Sandbox runs it from its next start. A machine whose
-`t3 serve` found no image waits for one (Podman asked again every 15 seconds,
-`awaitDedicatedRuntime`) and starts its Sandbox once it is built, without a restart.
+`t3 serve` found no image waits for one, reporting `restarting` with why (Podman asked again every
+15 seconds, `awaitDedicatedRuntime`; a failed `podman info` then is waited out too), and starts
+its Sandbox once it is built, without a restart.
 
 **Provider logins** live in the Sandbox's home (`~/.claude`, `~/.codex`, …), its volume, not in the
 image: they outlive every new image.

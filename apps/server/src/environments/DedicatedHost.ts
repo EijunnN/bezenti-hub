@@ -247,7 +247,7 @@ export const awaitDedicatedRuntime = Effect.fn("DedicatedHost.awaitDedicatedRunt
   while (true) {
     const checked = yield* input.check(recheck);
     if (Result.isSuccess(checked)) return Result.succeed(checked.success);
-    if (!checked.failure.awaitsImage) return Result.fail(checked.failure.message);
+    if (!checked.failure.waits) return Result.fail(checked.failure.message);
     if (!recheck) {
       yield* input.onWaiting(
         `${checked.failure.message} Its Sandbox starts by itself once it is built.`,
@@ -308,7 +308,10 @@ export const layer = (joined: JoinedHubState) =>
           check: (recheck) => dedicatedRuntimeFromConfig(joined.hubUrl, { recheck }),
           onWaiting: (message) =>
             Effect.logWarning(`This dedicated machine runs nothing yet: ${message}`).pipe(
-              Effect.andThen(fail(message)),
+              Effect.andThen(nowIso),
+              Effect.flatMap((since) =>
+                Ref.set(state, { _tag: "sandbox", state: "restarting", since, message }),
+              ),
             ),
         });
         if (Result.isFailure(runtime)) {
