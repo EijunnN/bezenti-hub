@@ -236,13 +236,17 @@ dedicated machines get the same effective limits (see [Dedicated machines](#dedi
   (`SandboxRuntime.measureHome`): Podman with `podman unshare du -skx`, as root of the Hub user's
   namespace, so a directory the Sandbox made unreadable is still read (checked on Podman 3.4);
   the process runtime with plain `du`. A measurement is either a total from a clean exit or a
-  failure (any other exit, a timeout, too much output), never a smaller size, with one exception:
-  exit 1 where every one of `du`'s own errors is `du: cannot access '…': No such file or
-  directory` (a file a build deleted while `du` ran; read with `LC_ALL=C`, line by line, never
-  kept) is the total of what is there. Any other error, a directory gone (`cannot read
-  directory`) or the walk failing (`fts_read failed`), leaves a total short of what is there and
-  is a failure. GNU `du` quotes a name with a newline and puts the error after the name, so no
-  name passes for that error. `du` runs in a process group of its own, killed whole (and its own
+  failure (any other exit, a timeout, too much output), never a smaller size. Exit 1 where every
+  one of `du`'s own errors is `du: cannot access '…': No such file or directory` (a file deleted
+  while `du` ran; read with `LC_ALL=C`, line by line, never kept) is still a failure, but with its
+  total as a lower bound (`atLeastBytes`): a Sandbox can make real files vanish that way too
+  (renaming a big directory in a loop, as `fts` defers the `stat`), so the total may be far short.
+  Such a measurement is taken again at once (a build's churn usually passes; the larger lower
+  bound of the two is kept); a lower bound already over the limit stops the Sandbox as full,
+  otherwise it counts as a failed measurement, and below the Hub's disk floor as a Sandbox
+  growing. Any other error, a directory gone (`cannot read directory`) or the walk failing
+  (`fts_read failed`), is a plain failure. GNU `du` quotes a name with a newline and puts the
+  error after the name, so no name passes for that error. `du` runs in a process group of its own, killed whole (and its own
   process, should the group kill fail) on a timeout, an interrupt, or the Hub's process exiting,
   so the `du` that `podman unshare` runs in its child does not outlive it. Each failure is counted
   per Sandbox; three in a row count as over the limit (fail closed: «Its disk use could not be
@@ -303,7 +307,14 @@ dedicated machines get the same effective limits (see [Dedicated machines](#dedi
   Sandbox or on the dedicated machine itself (`POST …/sandboxes/limits` with its `environmentId`),
   which works without a Hub Sandbox for that Space, and without a Sandbox runtime on the Hub. Every
   start (on the Hub or a dedicated machine) uses at most the CPUs and memory its machine has
-  (`fitLimitsToHost`), since Podman refuses more CPUs than the machine's.
+  (`fitLimitsToHost`), since Podman refuses more CPUs than the machine's. A change is partial:
+  only the values given change and an explicit null clears one; the answer adds `changed`, the
+  defaults or that Space's own values with the limits its Sandboxes start with.
+- **Defaults on dedicated machines.** The Installation's defaults apply to a dedicated machine's
+  Sandbox too, where the Space has no value of its own (intended: a machine is never unlimited by
+  accident, and `fitLimitsToHost` caps them at its size); give the Space its own values for a
+  bigger machine. Settings lists only Hub Sandboxes, so a Space with only a dedicated machine has
+  no row there yet (follow-up in ticket 13); its limits are set through the API meanwhile.
 - **The Owner's stop holds.** A stop from Settings sets `sandboxes.held_at` in the same write as
   `stopped`, before its socket closes, while the Sandbox is marked stopping: waiting work
   (`EnvironmentDemand.request`, work that is not a User's own action) does not start it again,

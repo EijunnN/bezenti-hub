@@ -97,7 +97,7 @@ describe("measuring a Sandbox's home", () => {
   );
 
   it.effect(
-    "takes files that vanished while it ran as measured, but not one error of any other kind",
+    "takes files that vanished while it ran only as a lower bound, and any other error as a failure",
     () =>
       Effect.gen(function* () {
         const du = (stderr: ReadonlyArray<string>) =>
@@ -107,12 +107,14 @@ describe("measuring a Sandbox's home", () => {
           ]);
         const vanished = "du: cannot access '/home/tmp/a.o': No such file or directory";
         const podmanWarning = 'time="2026-01-01" level=warning msg="no systemd user session"';
-        assert.deepEqual(yield* du([vanished, podmanWarning]), {
-          _tag: "measured",
-          bytes: 16 * 1024,
-        });
+        // A Sandbox can make real files vanish (renaming a big directory in a loop): what du
+        // counted is at least there, never all of it.
+        const partial = yield* du([vanished, podmanWarning]);
+        assert.equal(partial._tag, "failed");
+        assert.equal(partial._tag === "failed" ? partial.atLeastBytes : undefined, 16 * 1024);
         const denied = "du: cannot read directory '/home/hidden': Permission denied";
-        assert.equal((yield* du([vanished, denied]))._tag, "failed");
+        const deniedToo = yield* du([vanished, denied]);
+        assert.equal(deniedToo._tag === "failed" ? deniedToo.atLeastBytes : 0, undefined);
         // Only a file gone between listing and reading: a directory or the walk itself ending early
         // leaves a total short of what is there.
         for (const early of [
@@ -130,7 +132,7 @@ describe("measuring a Sandbox's home", () => {
           "-e",
           `for (let i = 0; i < 20000; i++) console.error(${JSON.stringify(vanished)}); console.log("16\t/home"); process.exitCode = 1`,
         ]);
-        assert.equal(many._tag, "measured");
+        assert.equal(many._tag === "failed" ? many.atLeastBytes : undefined, 16 * 1024);
         // Exit 1 with no file named is no measurement.
         assert.equal((yield* du([podmanWarning]))._tag, "failed");
       }),

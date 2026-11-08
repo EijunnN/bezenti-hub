@@ -8,6 +8,7 @@ import {
   type EnvironmentId,
   sandboxEnvironmentIdOf,
   sandboxEnvironmentName,
+  type SandboxLimitsChange,
   type SpaceId,
   type UserId,
 } from "@t3tools/contracts";
@@ -270,11 +271,15 @@ export class Sandboxes extends Context.Service<
      */
     readonly setLimits: (input: {
       readonly spaceId: SpaceId | undefined;
-      readonly limits: SandboxLimits;
+      /** Only the values given change; null clears one. */
+      readonly limits: SandboxLimitsChange;
       readonly actor: AuditLog.AuditActor;
       /** The Environment they were set on, for the audit: the Space's Sandbox by default. */
       readonly environmentId?: EnvironmentId;
-    }) => Effect.Effect<void, SandboxNotFoundError | SandboxLimitsInvalidError | SandboxStartError>;
+    }) => Effect.Effect<
+      { readonly own: SandboxLimits; readonly effective: SandboxLimits },
+      SandboxNotFoundError | SandboxLimitsInvalidError | SandboxStartError
+    >;
     /**
      * Measures each running Sandbox's home and stops, as `failed` with why, each one over its
      * disk limit; run on a schedule.
@@ -337,6 +342,8 @@ const isStartWithdrawn = Schema.is(StartWithdrawn);
 interface InFlight {
   readonly done: Deferred.Deferred<EnvironmentId, SandboxStartError>;
   readonly begun: Deferred.Deferred<void>;
+  /** Its request: no longer `waiting` once a User's or the Owner's start joined it. */
+  readonly request: { -readonly [K in keyof StartInput]: StartInput[K] };
 }
 
 const make = Effect.gen(function* () {
@@ -545,7 +552,17 @@ const make = Effect.gen(function* () {
     const sandboxId = sandboxIdOf(spaceId);
     const inspected = yield* runtime.inspect(sandboxId);
     if (inspected.state._tag === "missing") return null;
-    const measured = yield* permits.withPermits(1)(runtime.measureHome(sandboxId));
+    const measureOnce = permits.withPermits(1)(runtime.measureHome(sandboxId));
+    const first = yield* measureOnce;
+    // Files that vanished as it ran (a build's): once more at once, as a build's churn passes.
+    let measured = first;
+    if (first._tag === "failed" && first.atLeastBytes !== undefined) {
+      const second = yield* measureOnce;
+      measured =
+        second._tag === "failed" && second.atLeastBytes !== undefined
+          ? { ...second, atLeastBytes: Math.max(first.atLeastBytes, second.atLeastBytes) }
+          : second;
+    }
     const at = yield* nowIso;
     switch (measured._tag) {
       case "unavailable":
@@ -593,6 +610,10 @@ const make = Effect.gen(function* () {
     if (limit === null || measured === null) return undefined;
     if (measured._tag === "measured") {
       return measured.bytes > limit ? diskFullMessage(measured.bytes, limit) : undefined;
+    }
+    // Only a lower bound (files vanished as it ran): over the limit already is over it.
+    if (measured.atLeastBytes !== undefined && measured.atLeastBytes > limit) {
+      return diskFullMessage(measured.atLeastBytes, limit);
     }
     return failClosed && (samples.get(spaceId)?.diskFailures ?? 0) >= DISK_MEASURE_FAILURES_ALLOWED
       ? diskUnmeasurableMessage(measured.reason, repairWindowSeconds)
@@ -717,8 +738,9 @@ const make = Effect.gen(function* () {
         Effect.gen(function* () {
           // Waiting work asked before a stop that ended while it waited for the lock: what that
           // stop left (held by the Owner, failed) stands.
+          const current = yield* selectRow(spaceId);
+          // Read after the row: a User's or the Owner's start that joined it meanwhile keeps it.
           if (input.waiting === true) {
-            const current = yield* selectRow(spaceId);
             if (current?.heldAt != null) return yield* new StartWithdrawn({ detail: HELD_DETAIL });
             if (current?.status === "failed") {
               return yield* new StartWithdrawn({
@@ -839,14 +861,17 @@ const make = Effect.gen(function* () {
       const current = inFlight.get(input.spaceId);
       // One that already ended (its entry not yet dropped) is not joined: a new start begins.
       if (current !== undefined && !Deferred.isDoneUnsafe(current.done)) {
+        // Joined by a start that is not waiting work, it is no longer withdrawn for a hold.
+        if (input.waiting !== true) current.request.waiting = false;
         return Effect.succeed(current);
       }
       const entry: InFlight = {
         done: Deferred.makeUnsafe<EnvironmentId, SandboxStartError>(),
         begun: Deferred.makeUnsafe<void>(),
+        request: { ...input },
       };
       inFlight.set(input.spaceId, entry);
-      return runStart(input, entry.begun).pipe(
+      return runStart(entry.request, entry.begun).pipe(
         Effect.exit,
         Effect.flatMap((exit) => Deferred.done(entry.done, exit)),
         Effect.ensuring(
@@ -1287,7 +1312,7 @@ const make = Effect.gen(function* () {
 
   const setLimits: Sandboxes["Service"]["setLimits"] = Effect.fn("Sandboxes.setLimits")(
     function* ({ spaceId, limits, actor, environmentId }) {
-      yield* changeLimits({
+      const changed = yield* changeLimits({
         spaceId,
         limits,
         actor,
@@ -1300,6 +1325,7 @@ const make = Effect.gen(function* () {
       yield* (spaceId === undefined ? checkDisk : checkDiskOf(spaceId)).pipe(
         Effect.forkIn(serviceScope),
       );
+      return changed;
     },
     Effect.catchTags({
       SqlError: (cause) =>

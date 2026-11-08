@@ -520,6 +520,17 @@ const awaitStatus = (hub: Hub, spaceId: SpaceId, status: string) =>
     Effect.orDie,
   );
 
+/** Once the Hub handled the Sandbox's server ending by itself (its row says how it exited). */
+const awaitExitHandled = (hub: Hub, spaceId: SpaceId) =>
+  hub.server.sql<{ readonly lastError: string | null }>`
+      SELECT last_error AS "lastError" FROM sandboxes WHERE space_id = ${spaceId}
+    `.pipe(
+    Effect.filterOrFail((rows) => (rows[0]?.lastError ?? "").includes("exited with code")),
+    // oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- the Hub records a crash in its own fiber, with no event to await
+    Effect.retry({ schedule: Schedule.spaced("50 millis"), times: 400 }),
+    Effect.orDie,
+  );
+
 describe("Hub con Environments: a Sandbox's start belongs to the Hub, not to whoever asked", () => {
   it.live("a caller that gives up mid-start leaves it starting to the end, never stuck", () =>
     Effect.gen(function* () {
@@ -850,5 +861,53 @@ describe("Hub con Environments: a server that ends during the Owner's stop", () 
       assert.equal(row?.status, "stopped");
       assert.isNotNull(row?.heldAt ?? null);
     }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "the Owner's Start during that stop starts it, joining the start waiting work asked for",
+    () =>
+      Effect.gen(function* () {
+        const loaded = yield* loadFixture("simple");
+        const hold = yield* holdingEvents(loaded.adapters, 2);
+        let duringStop: Effect.Effect<void> = Effect.void;
+        const hub = yield* makeHub({
+          sandboxAdapters: hold.layer,
+          beforeSandboxStop: () =>
+            Effect.suspend(() => {
+              const run = duringStop;
+              duringStop = Effect.void;
+              return run;
+            }),
+        });
+        const owner = yield* ownerIdOf(hub);
+        const acme = yield* createOrganization(hub, "Acme");
+        const { message } = yield* placeOnSandbox(hub, loaded, acme, owner);
+        yield* dispatchAs(hub, owner, message);
+        yield* Deferred.await(hold.reached);
+        const sandboxes = hub.service(Sandboxes.Sandboxes);
+        const scope = yield* Effect.scope;
+        // Its server ends on its own as the Owner stops it, the Hub asks to start it again for its
+        // turn, and the Owner presses Start, all before the stop ends.
+        duringStop = hub.crashSandbox(acme).pipe(
+          Effect.andThen(awaitExitHandled(hub, acme)),
+          Effect.andThen(
+            sandboxes
+              .requestStart({ spaceId: acme, actorUserId: owner, via: "settings" })
+              .pipe(Effect.forkIn(scope)),
+          ),
+          // It joins the start under way before the stop goes on.
+          Effect.andThen(Effect.yieldNow),
+          Effect.asVoid,
+        );
+        yield* sandboxes
+          .stop({ spaceId: acme, actor: AuditLog.userActor(owner), via: "settings" })
+          .pipe(Effect.orDie);
+        // The Owner's own Start runs it, and ends the hold.
+        yield* awaitStatus(hub, acme, "online");
+        const [row] = yield* hub.server.sql<{ readonly heldAt: string | null }>`
+        SELECT held_at AS "heldAt" FROM sandboxes WHERE space_id = ${acme}
+      `;
+        assert.isNull(row?.heldAt ?? null);
+      }).pipe(Effect.scoped),
   );
 });

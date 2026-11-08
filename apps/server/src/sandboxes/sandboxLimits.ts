@@ -136,7 +136,12 @@ export const fitLimitsToHost = (
 /** A home's size, or why it could not be told. `unavailable`: this host has no `du`. */
 export type HomeMeasurement =
   | { readonly _tag: "measured"; readonly bytes: number }
-  | { readonly _tag: "failed"; readonly reason: string }
+  | {
+      readonly _tag: "failed";
+      readonly reason: string;
+      /** What it counted when files vanished as it ran: the home holds at least this much. */
+      readonly atLeastBytes?: number;
+    }
   | { readonly _tag: "unavailable" };
 
 const MEASURE_TIMEOUT_MS = 120_000;
@@ -201,8 +206,8 @@ const killOnExit = () => {
 
 /**
  * Runs a `du -s -k` (`command` and `args`) and reads its total. Anything but a clean exit with a
- * total (or exit 1 for vanished files only) is a failure, never a smaller size. It runs in a
- * process group of its own, killed whole when it gives up (`podman unshare` runs `du` in a child).
+ * total is a failure (exit 1 for vanished files only: with its total as a lower bound), never a
+ * smaller size. Its own process group is killed whole when it gives up (`podman unshare`).
  */
 export const measureWithDu = (
   command: string,
@@ -272,8 +277,10 @@ export const measureWithDu = (
     child.on("close", (code) => {
       // Its output is closed: nothing of its group holds it any more.
       closed = true;
-      // Exit 1 with only vanished files is a total of what is there.
-      if (code !== 0 && !(code === 1 && errors.onlyVanished())) {
+      // Exit 1 with only vanished files counted what was there, but a Sandbox can make real files
+      // vanish too (renaming a big directory in a loop): that total is only a lower bound.
+      const vanishedOnly = code === 1 && errors.onlyVanished();
+      if (code !== 0 && !vanishedOnly) {
         return settle({
           _tag: "failed",
           reason: `some of its files could not be read (du exited with code ${code ?? "?"})`,
@@ -282,6 +289,13 @@ export const measureWithDu = (
       const kibibytes = Number.parseInt(stdout.trim().split(/\s/u)[0] ?? "", 10);
       if (!Number.isFinite(kibibytes))
         return settle({ _tag: "failed", reason: "du gave no total" });
+      if (vanishedOnly) {
+        return settle({
+          _tag: "failed",
+          reason: "files vanished while it ran, so its total is only a lower bound",
+          atLeastBytes: kibibytes * 1024,
+        });
+      }
       settle({ _tag: "measured", bytes: kibibytes * 1024 });
     });
     return Effect.sync(() => settle({ _tag: "failed", reason: "it was interrupted" }));

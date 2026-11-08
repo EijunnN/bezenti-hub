@@ -9,3 +9,5 @@
 - [ ] Fuente compartida de Environments en client-runtime con los estados y modos nuevos; web, desktop y móvil la usan.
 - [ ] Móvil: nombres y estados en listas y Thread; lista de solo lectura para el Owner con modo, Space y estado.
 - [ ] Typecheck y tests de mobile y client-runtime en verde; prueba real en web de las mismas pantallas.
+
+**Follow-up from 05 (limits):** Settings → Environments «Sandboxes» lists only Hub Sandboxes, so a Space whose only Sandbox is a dedicated machine has no row for its limits. Show one (the Space's own values and the effective limits, from `POST …/sandboxes/limits` `changed` or the list) and let the Owner edit them there; the API already takes the dedicated machine's `environmentId`.

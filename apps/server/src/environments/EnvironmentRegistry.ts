@@ -27,6 +27,7 @@ import {
   sandboxEnvironmentIdOf,
   sandboxEnvironmentName,
   type SandboxLimits,
+  type SandboxLimitsChange,
   SpaceId,
   ThreadId,
   UserId,
@@ -533,7 +534,7 @@ export class EnvironmentRegistry extends Context.Service<
     readonly setSandboxLimits: (input: {
       readonly actorUserId: UserId;
       readonly environmentId: EnvironmentId | undefined;
-      readonly limits: SandboxLimits;
+      readonly limits: SandboxLimitsChange;
     }) => Effect.Effect<
       HubSandboxList,
       | EnvironmentNotFoundError
@@ -1784,7 +1785,7 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
     // straight to the store, as a Hub with only dedicated machines.
     const target = environmentId === undefined ? {} : { environmentId };
     const change: Effect.Effect<
-      void,
+      { readonly own: SandboxLimits; readonly effective: SandboxLimits },
       SandboxNotFoundError | SandboxLimitsInvalidError | EnvironmentStorageError
     > = Option.isSome(sandboxes)
       ? sandboxes.value
@@ -1800,12 +1801,15 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
             AuditLogWriteError: (cause) => Effect.fail(storageError(cause)),
           }),
         );
-    yield* change.pipe(
+    const changed = yield* change.pipe(
       Effect.catchTags({
         SandboxNotFoundError: () => Effect.fail(new EnvironmentNotFoundError({})),
       }),
     );
-    return yield* sandboxList(actorUserId);
+    return {
+      ...(yield* sandboxList(actorUserId)),
+      changed: { spaceId: spaceId ?? null, ...changed },
+    };
   });
 
   return EnvironmentRegistry.of({

@@ -3,7 +3,7 @@
  * Space's own (`space_sandbox_limits`, migration 108), read the same way for a Hub's Sandbox and a
  * dedicated machine's, and changed by the Owner, audited. See docs/internals/sandboxes.md#limits.
  */
-import { type EnvironmentId, type SpaceId } from "@t3tools/contracts";
+import { type EnvironmentId, type SandboxLimitsChange, type SpaceId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -83,7 +83,8 @@ const hasDedicatedMachine = Effect.fn("sandboxLimitStore.hasDedicatedMachine")(f
  */
 export const changeLimits = Effect.fn("sandboxLimitStore.changeLimits")(function* (input: {
   readonly spaceId: SpaceId | undefined;
-  readonly limits: SandboxLimits;
+  /** Only the values given change; null clears one. */
+  readonly limits: SandboxLimitsChange;
   readonly actor: AuditLog.AuditActor;
   readonly host: HostCapacity;
   /** The Environment the Owner set them on (its Sandbox or dedicated machine), for the audit. */
@@ -91,7 +92,10 @@ export const changeLimits = Effect.fn("sandboxLimitStore.changeLimits")(function
 }) {
   const sql = yield* SqlClient.SqlClient;
   const audit = yield* AuditLog.AuditLog;
-  const { spaceId, limits } = input;
+  const { spaceId } = input;
+  const current =
+    spaceId === undefined ? yield* readDefaultLimits : yield* readSpaceOverrides(spaceId);
+  const limits: SandboxLimits = { ...current, ...input.limits };
   const dedicated = spaceId !== undefined && (yield* hasDedicatedMachine(spaceId));
   const invalid = invalidLimitsReason(
     limits,
@@ -151,6 +155,10 @@ export const changeLimits = Effect.fn("sandboxLimitStore.changeLimits")(function
       });
     }),
   );
+  return {
+    own: limits,
+    effective: spaceId === undefined ? limits : yield* readSpaceLimits(spaceId),
+  };
 });
 
 /** The Space is deleted: its own limits go with it. */

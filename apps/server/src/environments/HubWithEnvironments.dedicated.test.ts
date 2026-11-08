@@ -674,6 +674,25 @@ describe("Hub con Environments: a dedicated machine's Sandbox limits", () => {
         });
         assert.equal(set.status, 200, JSON.stringify(set.body));
         assert.deepEqual(yield* limitsOf, { ...big, pids: 4096, diskBytes: 20 * 1024 ** 3 });
+        // Only the values given change; an explicit null clears one back to the default.
+        const partly = yield* hub.server.request("/api/environments/sandboxes/limits", {
+          cookie: hub.owner,
+          body: { environmentId: vps.environmentId, limits: { pids: 128, cpus: null } },
+        });
+        assert.equal(partly.status, 200, JSON.stringify(partly.body));
+        const after = {
+          cpus: 2,
+          memoryBytes: 64 * 1024 ** 4,
+          pids: 128,
+          diskBytes: 20 * 1024 ** 3,
+        };
+        assert.deepEqual(yield* limitsOf, after);
+        // The answer says what that Space has now, its own and what its Sandboxes start with.
+        assert.deepEqual(partly.body.changed, {
+          spaceId: acme,
+          own: { cpus: null, memoryBytes: 64 * 1024 ** 4, pids: 128, diskBytes: null },
+          effective: after,
+        });
         // No Hub Sandbox was made for it.
         const [made] = yield* hub.server.sql<{ readonly count: number }>`
           SELECT COUNT(*) AS count FROM sandboxes WHERE space_id = ${acme}

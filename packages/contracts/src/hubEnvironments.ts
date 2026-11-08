@@ -197,14 +197,26 @@ export type StartHubEnvironmentRequest = typeof StartHubEnvironmentRequest.Type;
  * A Sandbox's CPU, memory, PIDs and disk limits. In the Installation's defaults null is no limit;
  * in a Space's override null is the Installation's default.
  */
+// The Hub refuses values below a Sandbox's floors or above its machine, saying which.
+const CpuLimit = Schema.NullOr(Schema.Number.check(Schema.isFinite(), Schema.isGreaterThan(0)));
+const CountLimit = Schema.NullOr(PositiveInt);
+
 export const SandboxLimits = Schema.Struct({
-  // The Hub refuses values below a Sandbox's floors or above its machine, saying which.
-  cpus: Schema.NullOr(Schema.Number.check(Schema.isFinite(), Schema.isGreaterThan(0))),
-  memoryBytes: Schema.NullOr(PositiveInt),
-  pids: Schema.NullOr(PositiveInt),
-  diskBytes: Schema.NullOr(PositiveInt),
+  cpus: CpuLimit,
+  memoryBytes: CountLimit,
+  pids: CountLimit,
+  diskBytes: CountLimit,
 });
 export type SandboxLimits = typeof SandboxLimits.Type;
+
+/** A change to limits: only the values given change; null clears one (the default, or none). */
+export const SandboxLimitsChange = Schema.Struct({
+  cpus: Schema.optionalKey(CpuLimit),
+  memoryBytes: Schema.optionalKey(CountLimit),
+  pids: Schema.optionalKey(CountLimit),
+  diskBytes: Schema.optionalKey(CountLimit),
+});
+export type SandboxLimitsChange = typeof SandboxLimitsChange.Type;
 
 /**
  * Which limits this Hub enforces on its Sandboxes. CPU, memory and PIDs need the Sandbox runtime
@@ -269,6 +281,17 @@ export const HubSandboxList = Schema.Struct({
   sandboxes: Schema.Array(HubSandboxDetail),
   /** Whether the viewer is the Owner, who changes the defaults. */
   manageable: Schema.Boolean,
+  /**
+   * After a change of limits: what was changed, the defaults (`spaceId` null) or a Space's own
+   * values, with the limits that Space's Sandboxes (on the Hub or a dedicated machine) start with.
+   */
+  changed: Schema.optionalKey(
+    Schema.Struct({
+      spaceId: Schema.NullOr(SpaceId),
+      own: SandboxLimits,
+      effective: SandboxLimits,
+    }),
+  ),
 });
 export type HubSandboxList = typeof HubSandboxList.Type;
 
@@ -285,7 +308,7 @@ export type HubSandboxActionRequest = typeof HubSandboxActionRequest.Type;
  */
 export const HubSandboxLimitsRequest = Schema.Struct({
   environmentId: Schema.optionalKey(EnvironmentId),
-  limits: SandboxLimits,
+  limits: SandboxLimitsChange,
 });
 export type HubSandboxLimitsRequest = typeof HubSandboxLimitsRequest.Type;
 
