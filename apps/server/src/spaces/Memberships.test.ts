@@ -321,7 +321,7 @@ it.effect(
           commandId: "create-graces-app",
           projectId: "graces-app",
           title: "Grace's app",
-          workspaceRoot: "/work/graces-app",
+          workspaceRoot: server.newProjectFolder("graces-app"),
           spaceId: acmeId,
         },
       });

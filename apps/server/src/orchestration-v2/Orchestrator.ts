@@ -24,6 +24,7 @@ import {
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type ChatAttachment,
   CommandId,
+  type UserId,
   type GuestMessageId,
   isCompactionCommandMessage,
   isOrchestrationV2WorkActive,
@@ -196,6 +197,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import { threadAccessOf } from "./commandAccess.ts";
+import * as DirectoryRoots from "../spaces/directoryRoots.ts";
 
 const isMessageQuestionAnswer = Schema.is(
   Schema.Union([TrimmedNonEmptyString, Schema.NonEmptyArray(TrimmedNonEmptyString)]),
@@ -13321,6 +13323,46 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     };
   });
 
+  // A Thread's worktree on the Hub machine is a root the directory checks trust
+  // (`SpaceVisibility.mayUseDirectory`), so a User other than the Owner records one only inside
+  // the Thread's Project or as a worktree of its repository. Another machine's path is not
+  // checked here and counts as no folder of the Hub.
+  const requireThreadWorktree = Effect.fn("orchestrationV2.requireThreadWorktree")(function* (
+    directory: SpaceDirectory.SpaceDirectory["Service"],
+    actor: UserId,
+    command: OrchestrationV2ServerCommand,
+  ) {
+    if (command.type !== "thread.create" && command.type !== "thread.metadata.update") return;
+    const worktreePath = command.worktreePath;
+    if (worktreePath === undefined || worktreePath === null) return;
+    let projectId = command.type === "thread.create" ? command.projectId : undefined;
+    if (command.type === "thread.create") {
+      const environmentId = command.activeEnvironmentId ?? HUB_MACHINE_ENVIRONMENT_ID;
+      if (environmentId !== HUB_MACHINE_ENVIRONMENT_ID) return;
+    } else {
+      const thread = yield* projectionStore.getThread(command.threadId);
+      if (thread.worktreePath === worktreePath) return;
+      const environmentId = thread.activeEnvironmentId ?? HUB_MACHINE_ENVIRONMENT_ID;
+      if (environmentId !== HUB_MACHINE_ENVIRONMENT_ID) return;
+      projectId = thread.projectId;
+    }
+    if ((yield* directory.viewableSpaces(actor)) === "all") return;
+    const project = projectId === undefined ? Option.none() : yield* projects.get(projectId);
+    const allowed =
+      Option.isSome(project) &&
+      (yield* DirectoryRoots.isProjectWorktree(
+        { path, fileSystem: Option.some(fileSystem) },
+        project.value.workspaceRoot,
+        worktreePath,
+      ));
+    if (!allowed) {
+      return yield* new SpaceDirectory.SpaceAccessDeniedError({
+        action: "thread.continue",
+        reason: "worktree-not-allowed",
+      });
+    }
+  });
+
   /** `sideChatIds` are the live side chats a `thread.delete` cascades to, read under their locks. */
   const dispatchWithReceiptEffect = Effect.fn("orchestrationV2.dispatch.withReceipt")(function* (
     command: OrchestrationV2ServerCommand,
@@ -13358,6 +13400,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ),
           );
       }
+    }
+
+    if (actor !== undefined && Option.isSome(spaces)) {
+      yield* requireThreadWorktree(spaces.value, actor, command).pipe(Effect.mapError(rejected));
     }
 
     // Nothing starts in an archived or frozen Space or a Project being moved, whoever asks:

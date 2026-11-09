@@ -276,6 +276,7 @@ const make = Effect.gen(function* () {
           projectId: ProjectId.make(id),
           title: "No project",
           workspaceRoot,
+          workspaceRootFromHub: true,
         })
         .pipe(
           // bootstrap reads before locking; racing creates return the winner in a conflict.
@@ -465,6 +466,7 @@ const make = Effect.gen(function* () {
         projectId: ProjectId.make(id),
         title: input.name,
         workspaceRoot,
+        workspaceRootFromHub: true,
         ...(input.actorUserId === undefined ? {} : { actorUserId: input.actorUserId }),
       })
       .pipe(

@@ -15,6 +15,8 @@ import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -45,6 +47,8 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as DirectoryRoots from "../spaces/directoryRoots.ts";
+import * as ServerConfig from "../config.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
@@ -58,6 +62,11 @@ export interface ProjectCreateInput extends ProjectCreatePayload {
   readonly actorUserId?: UserId;
   /** The client's current Space. */
   readonly spaceId?: SpaceId;
+  /**
+   * The Hub chose and made `workspaceRoot` itself (a named Project's folder, a Scratch Thread's):
+   * never set from what a client sends.
+   */
+  readonly workspaceRootFromHub?: boolean;
 }
 
 export interface ProjectUpdateInput extends ProjectUpdatePayload {
@@ -134,6 +143,7 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
       "move-thread",
       "dispatch-project-command",
       "check-environment",
+      "check-folder",
     ]),
     projectId: Schema.optional(ProjectId),
     workspaceRoot: Schema.optional(Schema.String),
@@ -227,6 +237,9 @@ export const make = Effect.gen(function* () {
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const config = yield* Effect.serviceOption(ServerConfig.ServerConfig);
+  const path = yield* Path.Path;
+  const directories = { path, fileSystem: yield* Effect.serviceOption(FileSystem.FileSystem) };
   const projectLocks = yield* KeyedLock.make<ProjectId>();
   const workspaceLocks = yield* KeyedLock.make<string>();
 
@@ -438,14 +451,50 @@ export const make = Effect.gen(function* () {
     return Option.isNone(row) ? Option.none() : Option.some(yield* hydrate(row.value));
   });
 
+  /** Whether the User acts for the whole Installation: the Owner, or anyone before one exists. */
+  const actsForInstallation = (userId: UserId | undefined) =>
+    userId === undefined
+      ? Effect.succeed(true)
+      : spaces.viewableSpaces(userId).pipe(
+          Effect.map((viewable) => viewable === "all"),
+          Effect.mapError(
+            (cause) => new ProjectOperationError({ operation: "check-folder", cause }),
+          ),
+        );
+
+  // A Project's root is what the directory checks trust (`SpaceVisibility.mayReadDirectory`):
+  // the Owner roots one anywhere; anyone else only in a new folder right in the Hub's Projects
+  // folder that no Project holds (as a clone's), or in one the Hub made.
+  const requireProjectRoot = Effect.fn("ProjectService.requireProjectRoot")(function* (
+    actorUserId: UserId | undefined,
+    workspaceRoot: string,
+  ) {
+    if (yield* actsForInstallation(actorUserId)) return;
+    const allowed =
+      Option.isSome(config) &&
+      (yield* DirectoryRoots.isNewFolderIn(directories, sql, workspaceRoot, [
+        DirectoryRoots.projectsRootOf(path, config.value.baseDir),
+      ]));
+    if (!allowed) {
+      return yield* new SpaceDirectory.SpaceAccessDeniedError({
+        action: "project.create",
+        reason: "folder-not-allowed",
+      });
+    }
+  });
+
   const create: ProjectService["Service"]["create"] = Effect.fn("ProjectService.create")(
     function* (input) {
+      const actorUserId = input.actorUserId ?? Option.getOrUndefined(yield* spaces.actingUser);
       // Before touching the workspace, which may create its folder.
       const stamp = yield* spaces.claimCreation({
         action: "project.create",
-        actorUserId: input.actorUserId ?? Option.getOrUndefined(yield* spaces.actingUser),
+        actorUserId,
         spaceId: input.spaceId,
       });
+      if (input.workspaceRootFromHub !== true) {
+        yield* requireProjectRoot(actorUserId, input.workspaceRoot);
+      }
       const workspaceRoot = yield* normalizeWorkspaceRoot({
         projectId: input.projectId,
         workspaceRoot: input.workspaceRoot,
@@ -529,6 +578,15 @@ export const make = Effect.gen(function* () {
               projectId: input.projectId,
               workspaceRoot: input.workspaceRoot,
             });
+      if (
+        workspaceRoot !== previousRoot &&
+        !(yield* actsForInstallation(Option.getOrUndefined(yield* spaces.actingUser)))
+      ) {
+        return yield* new SpaceDirectory.SpaceAccessDeniedError({
+          action: "project.manage",
+          reason: "folder-owner-only",
+        });
+      }
       yield* commit({
         type: "project.meta.update",
         commandId: input.commandId,

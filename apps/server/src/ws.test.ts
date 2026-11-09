@@ -99,6 +99,12 @@ import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
 import { CLONE_DESTINATION_REFUSED } from "./project/cloneDestination.ts";
+import {
+  PROJECT_FOLDER_CHANGE_REFUSED,
+  PROJECT_FOLDER_REFUSED,
+  projectsRootOf,
+  THREAD_WORKTREE_REFUSED,
+} from "./spaces/directoryRoots.ts";
 import * as ProviderAuthService from "./provider/ProviderAuthService.ts";
 import * as ProviderInstanceRegistry from "./provider/ProviderInstanceRegistry.ts";
 import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
@@ -2393,6 +2399,220 @@ describe("Space visibility", () => {
     ),
   );
 
+  describe("folder roots come from the Hub's own records", () => {
+    const ownerOf = (server: Effect.Success<typeof serveAuthHttp>) =>
+      server.sql<{ userId: string }>`SELECT user_id AS "userId" FROM users WHERE is_owner = 1`.pipe(
+        Effect.map((rows) => UserId.make(rows[0]!.userId)),
+      );
+    const messageOf = (body: unknown) => JSON.stringify(body);
+
+    it.effect(
+      "only the Owner roots a Project outside a new folder in the Hub's Projects folder",
+      () =>
+        withTeam(({ server, owner, acme, grace, ada, gus }) =>
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const config = Context.get(server.services, ServerConfigModule.ServerConfig);
+            const projects = projectsRootOf(path, config.baseDir);
+            yield* fs.makeDirectory(path.join(projects, "existing"), { recursive: true });
+            let created = 0;
+            const create = (cookie: string, workspaceRoot: string) =>
+              server.request("/api/projects/mutate", {
+                cookie,
+                body: {
+                  type: "project.create",
+                  commandId: `roots-create-${(created += 1)}`,
+                  projectId: `roots-project-${created}`,
+                  title: "app",
+                  workspaceRoot,
+                  createWorkspaceRootIfMissing: true,
+                  spaceId: acme,
+                },
+              });
+            // Not the Hub's disk root, its data, an existing folder or one nested deeper.
+            for (const who of [grace, ada]) {
+              for (const root of [
+                "/",
+                config.baseDir,
+                path.join(projects, "existing"),
+                path.join(projects, "new-app", "inner"),
+                "/work/acme-app/inside",
+              ]) {
+                const response = yield* create(who.cookie, root);
+                assert.notEqual(response.status, 200, `${who.userId} at ${root}`);
+                assert.include(messageOf(response.body), PROJECT_FOLDER_REFUSED);
+              }
+            }
+            assert.notEqual((yield* create(gus.cookie, "/")).status, 200);
+            // A new folder right in the Hub's Projects folder is what Members create.
+            const members = yield* create(grace.cookie, path.join(projects, "grace-new"));
+            assert.equal(members.status, 200, messageOf(members.body));
+            const admins = yield* create(ada.cookie, path.join(projects, "ada-new"));
+            assert.equal(admins.status, 200, messageOf(admins.body));
+            // Nor does a Member move her own Project elsewhere afterwards.
+            const moved = yield* server.request("/api/projects/mutate", {
+              cookie: grace.cookie,
+              body: {
+                type: "project.update",
+                commandId: "roots-move-grace",
+                projectId: `roots-project-${created - 1}`,
+                workspaceRoot: "/",
+              },
+            });
+            assert.notEqual(moved.status, 200);
+            assert.include(messageOf(moved.body), PROJECT_FOLDER_CHANGE_REFUSED);
+            // The Owner uses any folder.
+            assert.equal((yield* create(owner, "/srv/owner-app")).status, 200);
+            assert.isDefined(yield* ownerOf(server));
+          }),
+        ),
+    );
+
+    it.effect(
+      "a Thread's folder on the Hub machine is inside its Project or a worktree of its repository",
+      () =>
+        withTeam(({ server, owner, acme, grace, ada, gus }) =>
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-roots-project-" });
+            const elsewhere = yield* fs.makeTempDirectoryScoped({ prefix: "t3-roots-other-" });
+            // A worktree of the Project's repository, as `git worktree add` records it, and one
+            // of another repository.
+            const linkWorktree = Effect.fn(function* (repository: string, name: string) {
+              const worktree = path.join(elsewhere, name);
+              const entry = path.join(repository, ".git", "worktrees", name);
+              yield* fs.makeDirectory(worktree, { recursive: true });
+              yield* fs.makeDirectory(entry, { recursive: true });
+              yield* fs.writeFileString(path.join(worktree, ".git"), `gitdir: ${entry}\n`);
+              yield* fs.writeFileString(path.join(entry, "gitdir"), `${worktree}/.git\n`);
+              return worktree;
+            });
+            const ownWorktree = yield* linkWorktree(root, "feature");
+            const foreignWorktree = yield* linkWorktree(elsewhere, "foreign");
+            assert.equal(
+              (yield* server.request("/api/projects/mutate", {
+                cookie: owner,
+                body: {
+                  type: "project.create",
+                  commandId: "roots-real",
+                  projectId: "acme-real",
+                  title: "acme-real",
+                  workspaceRoot: root,
+                  spaceId: acme,
+                },
+              })).status,
+              200,
+            );
+            const ownerId = yield* ownerOf(server);
+            yield* server.eventSink.write({
+              events: [grace.userId, ada.userId, gus.userId, ownerId].map((userId) =>
+                threadCreated({
+                  id: `roots-${userId}`,
+                  projectId: "acme-real",
+                  spaceId: acme,
+                  ownerUserId: userId,
+                  worktreePath: root,
+                }),
+              ),
+            });
+            const services = yield* Layer.build(layerOrchestration(server));
+            const orchestrator = Context.get(services, Orchestrator.OrchestratorV2);
+            let sentCommands = 0;
+            const setFolder = (actor: UserId, worktreePath: string) =>
+              orchestrator
+                .dispatch({
+                  type: "thread.metadata.update",
+                  commandId: CommandId.make(`roots-folder-${(sentCommands += 1)}`),
+                  threadId: ThreadId.make(`roots-${actor}`),
+                  worktreePath,
+                } as never)
+                .pipe(
+                  CommandActor.actAs(actor),
+                  Effect.result,
+                  Effect.map((result) =>
+                    Result.isSuccess(result)
+                      ? "set"
+                      : (SpaceDirectory.spaceRefusalMessage(result.failure) ?? "failed"),
+                  ),
+                );
+            for (const actor of [grace.userId, ada.userId]) {
+              for (const folder of ["/", path.dirname(root), foreignWorktree]) {
+                assert.deepEqual(
+                  [actor, folder, yield* setFolder(actor, folder)],
+                  [actor, folder, THREAD_WORKTREE_REFUSED],
+                );
+              }
+              assert.equal(yield* setFolder(actor, path.join(root, "packages", "app")), "set");
+              assert.equal(yield* setFolder(actor, ownWorktree), "set");
+            }
+            // What reaches the directory checks: Grace reads her Project, not the Hub's disk.
+            const spaceVisibility = Context.get(server.services, SpaceVisibility.SpaceVisibility);
+            const graceSees = yield* spaceVisibility.of(grace.userId);
+            assert.isFalse(yield* spaceVisibility.mayReadDirectory(graceSees, "/etc"));
+            assert.isFalse(yield* spaceVisibility.mayUseDirectory(graceSees, grace.userId, "/etc"));
+            assert.isTrue(yield* spaceVisibility.mayReadDirectory(graceSees, ownWorktree));
+            assert.notEqual(yield* setFolder(gus.userId, "/"), "set");
+            // The Owner uses any folder.
+            assert.equal(yield* setFolder(ownerId, "/srv/anywhere"), "set");
+            // A new Thread on the Hub machine names its folder by the same rule.
+            const createIn = (actor: UserId, worktreePath: string) =>
+              orchestrator
+                .dispatch({
+                  type: "thread.create",
+                  commandId: CommandId.make(`roots-create-${(sentCommands += 1)}`),
+                  threadId: ThreadId.make(`roots-new-${sentCommands}`),
+                  projectId: ProjectId.make("acme-real"),
+                  title: "new",
+                  modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+                  runtimeMode: "full-access",
+                  interactionMode: "default",
+                  branch: null,
+                  worktreePath,
+                  createdAt: "2026-11-01T00:00:00.000Z",
+                } as never)
+                .pipe(
+                  CommandActor.actAs(actor),
+                  Effect.result,
+                  Effect.map((result) =>
+                    Result.isSuccess(result)
+                      ? "created"
+                      : (SpaceDirectory.spaceRefusalMessage(result.failure) ?? "failed"),
+                  ),
+                );
+            assert.equal(yield* createIn(grace.userId, "/"), THREAD_WORKTREE_REFUSED);
+          }),
+        ),
+    );
+
+    it.effect("another machine's folder counts as no folder of the Hub", () =>
+      withTeam(({ server, acme, grace }) =>
+        Effect.gen(function* () {
+          yield* server.eventSink.write({
+            events: [
+              threadCreated({
+                id: "grace-laptop",
+                projectId: "acme-app",
+                spaceId: acme,
+                ownerUserId: grace.userId,
+                worktreePath: "/",
+              }),
+            ],
+          });
+          yield* server.sql`
+            UPDATE orchestration_v2_projection_threads SET active_environment_id = 'laptop'
+            WHERE thread_id = 'grace-laptop'
+          `;
+          const spaceVisibility = Context.get(server.services, SpaceVisibility.SpaceVisibility);
+          const graceSees = yield* spaceVisibility.of(grace.userId);
+          assert.isFalse(yield* spaceVisibility.mayReadDirectory(graceSees, "/etc"));
+          assert.isFalse(yield* spaceVisibility.mayUseDirectory(graceSees, grace.userId, "/etc"));
+        }),
+      ),
+    );
+  });
+
   it.effect("terminals work only on one's own Thread or a draft one holds", () =>
     withTeam(({ server, grace, ada }) =>
       Effect.gen(function* () {
@@ -2800,6 +3020,12 @@ describe("Space visibility", () => {
             installationPermissions: [],
           });
 
+          const path = yield* Path.Path;
+          const projectsRoot = projectsRootOf(
+            path,
+            Context.get(server.services, ServerConfigModule.ServerConfig).baseDir,
+          );
+          // A Member's Projects go in new folders of the Hub's Projects folder.
           const createNotes = (id: string) =>
             server.request("/api/projects/mutate", {
               cookie: grace.cookie,
@@ -2808,7 +3034,7 @@ describe("Space visibility", () => {
                 commandId: `create-${id}`,
                 projectId: id,
                 title: id,
-                workspaceRoot: `/work/${id}`,
+                workspaceRoot: path.join(projectsRoot, id),
               },
             });
           const spaceIds = (cookie: string) =>

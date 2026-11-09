@@ -374,6 +374,9 @@ export const serveAuthHttpWith = Effect.fn(function* (
     projects: Context.get(services, ProjectService.ProjectService),
     eventSink: Context.get(services, EventSink.EventSinkV2),
     sql: Context.get(services, SqlClient.SqlClient),
+    /** A new folder in the Hub's Projects folder: where a User other than the Owner roots one. */
+    newProjectFolder: (name: string) =>
+      `${Context.get(services, ServerConfig.ServerConfig).baseDir}/projects/${name}`,
   };
 });
 

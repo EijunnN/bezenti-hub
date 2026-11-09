@@ -32,6 +32,11 @@ import * as AccessChanges from "../auth/AccessChanges.ts";
 import * as AccessPolicy from "../auth/AccessPolicy.ts";
 import * as CommandActor from "../auth/CommandActor.ts";
 import * as AuditLog from "../audit/AuditLog.ts";
+import {
+  PROJECT_FOLDER_CHANGE_REFUSED,
+  PROJECT_FOLDER_REFUSED,
+  THREAD_WORKTREE_REFUSED,
+} from "./directoryRoots.ts";
 
 export class SpaceDirectoryStorageError extends Schema.TaggedError<SpaceDirectoryStorageError>()(
   "SpaceDirectoryStorageError",
@@ -73,6 +78,9 @@ const DENIED_ACTION_LABELS: Record<string, string> = {
 
 /** What to tell someone who can see the item but may not act on it. */
 const deniedMessage = (action: string, reason: string): string | undefined => {
+  if (reason === "folder-not-allowed") return PROJECT_FOLDER_REFUSED;
+  if (reason === "folder-owner-only") return PROJECT_FOLDER_CHANGE_REFUSED;
+  if (reason === "worktree-not-allowed") return THREAD_WORKTREE_REFUSED;
   if (action === "thread.continue" && reason === "not-yours") {
     return "Only the person who started this Thread can continue it. Start a new Thread to build on it.";
   }

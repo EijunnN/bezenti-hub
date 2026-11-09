@@ -225,7 +225,7 @@ it.effect(
             commandId: `${type}-${id}`,
             projectId: id,
             title: id,
-            workspaceRoot: `/work/${id}`,
+            workspaceRoot: server.newProjectFolder(id),
             ...(type === "project.update" ? { archived: true } : {}),
           },
         });

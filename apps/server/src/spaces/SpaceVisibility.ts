@@ -23,6 +23,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
+import * as DirectoryRoots from "./directoryRoots.ts";
 import * as SpaceDirectory from "./SpaceDirectory.ts";
 
 const encodeIds = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
@@ -71,13 +72,14 @@ export const threadInSpaces = (
         WHERE visible_project.project_id = ${sql.literal(alias)}.project_id
       )) IN (SELECT value FROM json_each(${encodeIds(spaceIds)}))`;
 
-const isWithin = (path: Path.Path, root: string, candidate: string) => {
-  const relative = path.relative(root, candidate);
-  return (
-    relative === "" ||
-    (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
-  );
-};
+/**
+ * A Thread's worktree as a folder on the Hub's disk: only while it runs on the Hub machine. Another
+ * machine's path names nothing here, and what it records is not checked against the Hub's disk.
+ */
+const hubWorktree = (sql: SqlClient.SqlClient, alias: string) =>
+  sql`CASE WHEN COALESCE(${sql.literal(alias)}.active_environment_id, ${HUB_MACHINE_ENVIRONMENT_ID})
+      = ${HUB_MACHINE_ENVIRONMENT_ID}
+    THEN json_extract(${sql.literal(alias)}.payload_json, '$.worktreePath') END`;
 
 export class SpaceVisibility extends Context.Service<
   SpaceVisibility,
@@ -176,45 +178,9 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const fileSystem = yield* Effect.serviceOption(FileSystem.FileSystem);
 
-  /**
-   * Where a path leads once its links resolve: its deepest existing ancestor's real path, with
-   * the rest as named. Lexical where the server has no filesystem.
-   */
-  const realOf = Effect.fn("SpaceVisibility.realOf")(function* (candidate: string) {
-    const resolved = path.resolve(candidate);
-    if (Option.isNone(fileSystem)) return resolved;
-    let existing = resolved;
-    const rest: Array<string> = [];
-    while (true) {
-      const real = yield* fileSystem.value.realPath(existing).pipe(Effect.option);
-      if (Option.isSome(real)) return path.join(real.value, ...rest);
-      const parent = path.dirname(existing);
-      if (parent === existing) return resolved;
-      rest.unshift(path.basename(existing));
-      existing = parent;
-    }
-  });
-
-  /** Whether `directory` leads inside one of `roots`, links resolved on both sides. */
-  const within = Effect.fn("SpaceVisibility.within")(function* (
-    roots: ReadonlyArray<string>,
-    directory: string,
-  ) {
-    // Only an absolute path without `..` or `~`: resolved lexically first, it could name
-    // another place than the one opened through a link.
-    if (
-      !path.isAbsolute(directory) ||
-      directory.startsWith("~") ||
-      directory.split(/[\\/]/u).includes("..")
-    ) {
-      return false;
-    }
-    const target = yield* realOf(directory);
-    for (const root of roots) {
-      if (isWithin(path, yield* realOf(root), target)) return true;
-    }
-    return false;
-  });
+  const directories = { path, fileSystem };
+  const within = (roots: ReadonlyArray<string>, directory: string) =>
+    DirectoryRoots.withinRoots(directories, roots, directory);
 
   // A failed read must not widen what anyone sees, so it fails the request instead.
   const of = Effect.fn("SpaceVisibility.of")(function* (userId: UserId | undefined) {
@@ -388,7 +354,7 @@ const make = Effect.gen(function* () {
       return spaceId === `personal:${userId}` || role === "admin" || role === "member";
     });
     const roots = yield* sql<{ readonly root: string | null }>`
-      SELECT COALESCE(json_extract(t.payload_json, '$.worktreePath'), p.workspace_root) AS root
+      SELECT COALESCE(${hubWorktree(sql, "t")}, p.workspace_root) AS root
       FROM orchestration_v2_projection_threads t
       LEFT JOIN projection_projects p ON p.project_id = t.project_id
       WHERE t.owner_user_id = ${userId} AND t.deleted_at IS NULL
@@ -410,7 +376,7 @@ const make = Effect.gen(function* () {
   ) {
     if (visibility.all) return true;
     const roots = yield* sql<{ readonly root: string | null }>`
-      SELECT json_extract(t.payload_json, '$.worktreePath') AS root
+      SELECT ${hubWorktree(sql, "t")} AS root
       FROM orchestration_v2_projection_threads t
       WHERE t.deleted_at IS NULL AND ${threadInSpaces(sql, "t", visibility.spaceIds)}
       UNION
@@ -444,38 +410,18 @@ const make = Effect.gen(function* () {
     sharedRoots: ReadonlyArray<string>,
   ) {
     if (userId === undefined || visibility.all) return true;
-    if (
-      !path.isAbsolute(directory) ||
-      directory.startsWith("~") ||
-      directory.split(/[\\/]/u).includes("..")
-    ) {
-      return false;
-    }
-    const target = yield* realOf(directory);
+    if (!DirectoryRoots.isPlainAbsolute(path, directory)) return false;
     // Its parent, links resolved, must be where the path names it: a link swapped in on the way
     // would put the checkout elsewhere.
-    const parent = path.dirname(path.resolve(directory));
-    const realParent = yield* realOf(parent);
+    const target = yield* DirectoryRoots.realOf(directories, directory);
+    const realParent = yield* DirectoryRoots.realOf(
+      directories,
+      path.dirname(path.resolve(directory)),
+    );
     if (path.dirname(target) !== realParent) return false;
     if (yield* mayUseDirectory(visibility, userId, directory)) return true;
-    // In a shared root only a new folder right in it, which no Project holds: not inside
-    // another Space's Project kept there.
-    const exists = Option.isSome(fileSystem)
-      ? yield* fileSystem.value.exists(target).pipe(Effect.orElseSucceed(() => true))
-      : false;
-    if (exists) return false;
-    let inSharedRoot = false;
-    for (const root of sharedRoots) {
-      if ((yield* realOf(root)) === realParent) inSharedRoot = true;
-    }
-    if (!inSharedRoot) return false;
-    const projectRoots = yield* sql<{ readonly root: string }>`
-      SELECT workspace_root AS root FROM projection_projects WHERE deleted_at IS NULL
-    `.pipe(Effect.orDie);
-    return !(yield* within(
-      projectRoots.map((row) => row.root),
-      directory,
-    ));
+    // In a shared root only a new folder right in it, which no Project holds.
+    return yield* DirectoryRoots.isNewFolderIn(directories, sql, directory, sharedRoots);
   });
 
   return SpaceVisibility.of({

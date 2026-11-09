@@ -142,6 +142,8 @@ const make = Effect.gen(function* () {
         projectId: ProjectId.make(id),
         title,
         workspaceRoot,
+        // A Scratch Thread's folder, which the Hub made.
+        workspaceRootFromHub: true,
       })
       .pipe(
         Effect.map(({ project }) => project.id),

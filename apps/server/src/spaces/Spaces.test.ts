@@ -78,7 +78,7 @@ it.effect(
             commandId: `create-${id}`,
             projectId: id,
             title: id,
-            workspaceRoot: `/work/${id}`,
+            workspaceRoot: server.newProjectFolder(id),
             ...extra,
           },
         });
