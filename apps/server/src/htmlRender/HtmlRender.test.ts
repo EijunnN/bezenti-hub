@@ -13,6 +13,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Result from "effect/Result";
 import * as NodeDgram from "node:dgram";
 import * as NodeHttp from "node:http";
 import * as NodeURL from "node:url";
@@ -141,7 +142,7 @@ describe("HtmlRender", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
-  it.effect("reads an image where the checked path led, not where a swapped link leads", () =>
+  it.effect("never inlines the file a link swapped in after the check leads to", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -160,17 +161,69 @@ describe("HtmlRender", () => {
       );
       yield* fileSystem.symlink(allowed, link);
       const realSecret = yield* fileSystem.realPath(secret);
-      const prepared = yield* htmlRender.prepare(`<img src="${link}">`, (file) =>
-        // The link is swapped to the secret right after the check.
-        Effect.gen(function* () {
-          yield* fileSystem.remove(link);
-          yield* fileSystem.symlink(secret, link);
-          return file !== realSecret && file !== secret;
-        }).pipe(Effect.orDie),
+      const prepared = yield* htmlRender
+        .prepare(`<img src="${link}">`, (file) =>
+          // The link is swapped to the secret right after each check.
+          Effect.gen(function* () {
+            yield* fileSystem.remove(link);
+            yield* fileSystem.symlink(secret, link);
+            return file !== realSecret && file !== secret;
+          }).pipe(Effect.orDie),
+        )
+        .pipe(Effect.result);
+      // Whatever the swap catches, the secret is never inlined: the image is left out instead.
+      if (Result.isSuccess(prepared)) {
+        expect(prepared.success).not.toContain(
+          Base64.encode('<svg xmlns="http://www.w3.org/2000/svg" id="no"/>'),
+        );
+      } else {
+        expect(prepared.failure).toBeInstanceOf(HtmlRender.HtmlRenderImagesNotFoundError);
+      }
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("never inlines a file reached through a folder swapped in after the check", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const htmlRender = yield* HtmlRender.HtmlRender;
+      const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-html-dirswap-" });
+      const allowedDir = path.join(directory, "allowed");
+      const secretDir = path.join(directory, "secret");
+      const via = path.join(directory, "via");
+      yield* fileSystem.makeDirectory(allowedDir);
+      yield* fileSystem.makeDirectory(secretDir);
+      yield* fileSystem.writeFileString(
+        path.join(allowedDir, "image.svg"),
+        '<svg xmlns="http://www.w3.org/2000/svg" id="ok"/>',
       );
-      expect(prepared).toContain(
-        Base64.encode('<svg xmlns="http://www.w3.org/2000/svg" id="ok"/>'),
+      yield* fileSystem.writeFileString(
+        path.join(secretDir, "image.svg"),
+        '<svg xmlns="http://www.w3.org/2000/svg" id="no"/>',
       );
+      yield* fileSystem.symlink(allowedDir, via);
+      const realSecretDir = yield* fileSystem.realPath(secretDir);
+      const prepared = yield* htmlRender
+        .prepare(`<img src="${path.join(via, "image.svg")}">`, (file) =>
+          // The checked file's own folder is swapped for a link to another right after a check.
+          Effect.gen(function* () {
+            const allowed = !file.startsWith(realSecretDir) && !file.startsWith(secretDir);
+            if (yield* fileSystem.exists(path.join(allowedDir, "image.svg"))) {
+              const swapped = yield* fileSystem.readLink(allowedDir).pipe(Effect.option);
+              if (Option.isNone(swapped)) {
+                yield* fileSystem.rename(allowedDir, `${allowedDir}-moved`);
+                yield* fileSystem.symlink(secretDir, allowedDir);
+              }
+            }
+            return allowed;
+          }).pipe(Effect.orDie),
+        )
+        .pipe(Effect.result);
+      if (Result.isSuccess(prepared)) {
+        expect(prepared.success).not.toContain(
+          Base64.encode('<svg xmlns="http://www.w3.org/2000/svg" id="no"/>'),
+        );
+      }
     }).pipe(Effect.provide(layerTest)),
   );
 

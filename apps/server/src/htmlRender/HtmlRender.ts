@@ -25,7 +25,6 @@ import * as Option from "effect/Option";
 import type * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
-import * as Stream from "effect/Stream";
 import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { resolveAttachmentRelativePath } from "../attachmentPaths.ts";
@@ -242,6 +241,42 @@ const afterDoctype = (text: string, from: number) => {
   return -1;
 };
 
+const sameFile = (a: FileSystem.File.Info, b: FileSystem.File.Info) =>
+  a.dev === b.dev && Option.isSome(a.ino) && Option.isSome(b.ino) && a.ino.value === b.ino.value;
+
+/**
+ * Reads up to the image cap through one open handle, then checks the file that handle holds is
+ * the one the path leads to now and that the caller may read it: a link or folder swapped in
+ * between the check and the read is caught, as the bytes read are judged by the file read.
+ */
+const readChecked = Effect.fn("HtmlRender.readChecked")(function* (
+  filePath: string,
+  mayRead: MayReadImage,
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  return yield* Effect.scoped(
+    Effect.gen(function* () {
+      const handle = yield* fileSystem.open(filePath, { flag: "r" });
+      const opened = yield* handle.stat;
+      if (opened.type !== "File") return yield* Effect.fail("not a file" as const);
+      const chunks: Array<Uint8Array> = [];
+      let total = 0;
+      while (total <= MAX_IMAGE_BYTES) {
+        const chunk = yield* handle.readAlloc(MAX_IMAGE_BYTES + 1 - total);
+        if (Option.isNone(chunk) || chunk.value.byteLength === 0) break;
+        chunks.push(chunk.value);
+        total += chunk.value.byteLength;
+      }
+      const real = yield* fileSystem.realPath(filePath);
+      const now = yield* fileSystem.stat(real);
+      if (!sameFile(opened, now) || !(yield* mayRead(real))) {
+        return yield* Effect.fail("not the checked file" as const);
+      }
+      return Buffer.concat(chunks);
+    }),
+  );
+});
+
 const inlineLocalImages = Effect.fn("HtmlRender.inlineLocalImages")(function* (
   html: string,
   mayRead: MayReadImage,
@@ -296,9 +331,7 @@ const inlineLocalImages = Effect.fn("HtmlRender.inlineLocalImages")(function* (
     files.filter((file) => file.size !== undefined),
     (file) =>
       Effect.gen(function* () {
-        const read = yield* fileSystem
-          .stream(file.real ?? filePathFor(file.path), { bytesToRead: MAX_IMAGE_BYTES + 1 })
-          .pipe(Stream.mkUint8Array, Effect.option);
+        const read = yield* readChecked(filePathFor(file.path), mayRead).pipe(Effect.option);
         if (Option.isNone(read) || !isImageBytes(read.value)) return [];
         const bytes = read.value;
         if (bytes.byteLength > MAX_IMAGE_BYTES) {
