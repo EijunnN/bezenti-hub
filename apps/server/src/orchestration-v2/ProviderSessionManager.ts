@@ -25,6 +25,8 @@ import * as FiberSet from "effect/FiberSet";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as SqlClient from "effect/sql/SqlClient";
+import { boundSpaceOf, sandboxSpaceOf } from "../sandboxes/sandboxSpace.ts";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
@@ -357,6 +359,7 @@ export const layerWithOptions = (
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
       const providerEventIngestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const sqlClient = yield* Effect.serviceOption(SqlClient.SqlClient);
       const agentScope = yield* AgentScope;
       const agentAccessSettings = Effect.fn("ProviderSessionManagerV2.agentAccessSettings")(
         function* (threadId: ThreadId) {
@@ -469,19 +472,43 @@ export const layerWithOptions = (
                 >(["orchestration", "worktree", "pull-requests"]);
                 if (browserToolsAvailable) capabilities.add("preview");
                 if (deviceToolsAvailable) capabilities.add("device");
-                const thread = yield* projectionStore
-                  .getThread(threadId)
-                  .pipe(Effect.orElseSucceed(() => undefined));
-                const subagent = thread?.lineage.relationshipToParent === "subagent";
                 // The agent reads as the Thread's owner; a child the server made has none of its
                 // own and reads as its root's. Neither (from before Spaces) reads as the Owner.
-                const userId =
-                  thread?.ownerUserId ??
-                  (thread === undefined || thread.lineage.rootThreadId === thread.id
-                    ? undefined
-                    : (yield* projectionStore
+                // A failed read gives it no credential at all, never one that sees everything.
+                const read = yield* projectionStore.getThread(threadId).pipe(Effect.option);
+                const thread = Option.getOrUndefined(read);
+                const root =
+                  thread === undefined ||
+                  thread.ownerUserId !== undefined ||
+                  thread.lineage.rootThreadId === thread.id
+                    ? Option.some(undefined)
+                    : yield* projectionStore
                         .getThread(thread.lineage.rootThreadId)
-                        .pipe(Effect.orElseSucceed(() => undefined)))?.ownerUserId);
+                        .pipe(Effect.option);
+                if (Option.isNone(read) || Option.isNone(root)) {
+                  yield* mcpSessionRegistry.revokeThread(threadId);
+                  yield* mcpSessions.clear(threadId);
+                  return { mcpCredentialId: undefined, issued: false };
+                }
+                const subagent = thread?.lineage.relationshipToParent === "subagent";
+                const userId = thread?.ownerUserId ?? root.value?.ownerUserId;
+                // On a machine bound to one Space the credential reads only that Space.
+                const environmentId = thread?.activeEnvironmentId ?? undefined;
+                const bound =
+                  environmentId === undefined
+                    ? Option.some(undefined)
+                    : Option.isSome(sqlClient)
+                      ? yield* boundSpaceOf(environmentId).pipe(
+                          Effect.provideService(SqlClient.SqlClient, sqlClient.value),
+                          Effect.option,
+                        )
+                      : Option.some(sandboxSpaceOf(environmentId));
+                if (Option.isNone(bound)) {
+                  yield* mcpSessionRegistry.revokeThread(threadId);
+                  yield* mcpSessions.clear(threadId);
+                  return { mcpCredentialId: undefined, issued: false };
+                }
+                const spaceLimit = bound.value;
                 const existing = yield* mcpSessions.read(threadId);
                 if (existing !== undefined) {
                   // Reserve before async validation so release cannot revoke between validation and reservation.
@@ -503,9 +530,9 @@ export const layerWithOptions = (
                     resolved.thread.providerInstanceId === providerInstanceId &&
                     resolved.capabilities.has("preview") === browserToolsAvailable &&
                     resolved.capabilities.has("device") === deviceToolsAvailable &&
-                    // A credential issued while the lineage read failed is replaced once it works.
                     (resolved.thread.subagent === true) === subagent &&
-                    resolved.userId === userId
+                    resolved.userId === userId &&
+                    resolved.spaceLimit === spaceLimit
                   ) {
                     return { mcpCredentialId: existing.providerSessionId, issued: false };
                   }
@@ -519,6 +546,7 @@ export const layerWithOptions = (
                   capabilities,
                   subagent,
                   userId,
+                  spaceLimit,
                 });
                 yield* mcpSessions.set(credential.config);
                 reserveMcpCredential(threadId, credential.config.providerSessionId);

@@ -9,6 +9,7 @@ import {
   type ProviderInteractionMode,
   type RuntimeMode,
   type ThreadId,
+  type SpaceId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -121,6 +122,11 @@ export interface McpInvocationScope {
    * for a Thread with no owner), which reads as the Owner.
    */
   readonly userId?: UserId;
+  /**
+   * The one Space an agent's credential reads in, when its Thread runs on a machine bound to that
+   * Space (its Sandbox, a dedicated machine): every agent there can read the others' tokens.
+   */
+  readonly spaceLimit?: SpaceId;
 }
 
 /**

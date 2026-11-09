@@ -772,6 +772,17 @@ function runBrowserAccessScenario(input: {
       if (input.createThread !== false) {
         yield* eventSink.write({
           events: [
+            // A delegated child's root, whose owner the child's agent reads as.
+            ...(input.delegatedBy === undefined
+              ? []
+              : [
+                  yield* makeThreadCreatedEvent({
+                    idAllocator,
+                    threadId: input.delegatedBy,
+                    now,
+                    projectId,
+                  }),
+                ]),
             yield* makeThreadCreatedEvent({
               idAllocator,
               threadId,
@@ -1889,6 +1900,78 @@ it.effect.each([
         assert.equal(resolved?.thread.subagent, subagent);
         assert.equal(resolved?.userId, owner);
         yield* manager.close(providerSessionId);
+      });
+
+      yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1_000, mcpConfigs })));
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 limits the MCP credential of an agent in a Sandbox to the Sandbox's Space",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const mcpConfigs = yield* Ref.make<
+        ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
+      >([]);
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-provider-session-manager-sandboxed");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const created = yield* makeThreadCreatedEvent({ idAllocator, threadId, now });
+        yield* eventSink.write({
+          events: [
+            {
+              ...created,
+              payload: {
+                ...created.payload,
+                ownerUserId: UserId.make("member-1"),
+                activeEnvironmentId: EnvironmentId.make("sandbox:acme"),
+              },
+            },
+          ],
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        const token = (yield* Ref.get(mcpConfigs))[0]?.authorizationHeader.replace(
+          /^Bearer\s+/,
+          "",
+        );
+        assert.isDefined(token);
+        const resolved = yield* registry.resolve(token!);
+        assert.equal(resolved?.spaceLimit, "acme");
+        yield* manager.close(providerSessionId).pipe(Effect.ignore);
+      });
+
+      yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1_000, mcpConfigs })));
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 gives an agent no MCP credential when its Thread cannot be read, never one that sees everything",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const mcpConfigs = yield* Ref.make<
+        ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
+      >([]);
+      const effect = Effect.gen(function* () {
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const threadId = ThreadId.make("thread-provider-session-manager-unreadable");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        assert.deepEqual(yield* Ref.get(mcpConfigs), [undefined]);
+        yield* manager.close(providerSessionId).pipe(Effect.ignore);
       });
 
       yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1_000, mcpConfigs })));

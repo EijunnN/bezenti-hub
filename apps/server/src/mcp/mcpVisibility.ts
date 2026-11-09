@@ -18,10 +18,19 @@ export const spaceVisibilityService = Effect.serviceOption(SpaceVisibility.Space
 
 /** What an MCP caller may see: its User's Spaces, or everything for a caller with no User. */
 export const visibilityOf = Effect.fn("mcp.visibilityOf")(function* (
-  scope: Pick<McpInvocationScope, "userId">,
+  scope: Pick<McpInvocationScope, "userId" | "spaceLimit">,
 ) {
-  if (scope.userId === undefined) return SpaceVisibility.everything;
-  return yield* (yield* spaceVisibilityService).of(scope.userId);
+  const visibility =
+    scope.userId === undefined
+      ? SpaceVisibility.everything
+      : yield* (yield* spaceVisibilityService).of(scope.userId);
+  const limit = scope.spaceLimit;
+  if (limit === undefined) return visibility;
+  // An agent on a machine bound to one Space reads only that Space, whatever its User sees.
+  return {
+    all: false,
+    spaceIds: visibility.all || visibility.spaceIds.includes(limit) ? [limit] : [],
+  } satisfies SpaceVisibility.Visibility;
 });
 
 /** The shells among `shells` the caller may see. */
