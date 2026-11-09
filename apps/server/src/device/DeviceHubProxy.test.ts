@@ -82,6 +82,7 @@ const fixture = (
           ? layerSeesEverything
           : Layer.succeed(SpaceVisibility.SpaceVisibility, {
               of: () => Effect.succeed({ all: false, spaceIds: [] }),
+              ofSession: () => Effect.succeed({ all: false, spaceIds: [] }),
               visibleThreadIds: (_visibility: unknown, ids: ReadonlyArray<string>) =>
                 Effect.succeed(new Set(ids.filter((id) => member.visible.has(id)))),
               workableThreadIds: (_v: unknown, _u: unknown, ids: ReadonlyArray<string>) =>

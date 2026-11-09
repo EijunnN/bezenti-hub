@@ -295,6 +295,7 @@ it.effect("reaches only the browser of a Thread the User works, as preview.open 
       SpaceVisibility.SpaceVisibility,
       SpaceVisibility.SpaceVisibility.of({
         of: () => Effect.succeed({ all: false, spaceIds: [] }),
+        ofSession: () => Effect.succeed({ all: false, spaceIds: [] }),
         // A check that breaks (here, for "broken") must still answer not found.
         claimWork: (_visibility: unknown, _userId: unknown, threadId: string) =>
           threadId === "broken"
