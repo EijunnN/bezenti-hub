@@ -178,6 +178,16 @@ export class SpaceVisibility extends Context.Service<
      * them work, or as a new folder right in one of `sharedRoots` (the Hub's Projects folder) that
      * no Project holds. Its parent must resolve where it is named. Ask again just before writing.
      */
+    /**
+     * Whether the User may root a new Project at `directory`: the Owner anywhere, anyone else only
+     * in a new folder right in one of `sharedRoots` that no Project holds (`ProjectService`'s rule).
+     */
+    readonly mayRootProject: (
+      visibility: Visibility,
+      userId: UserId | undefined,
+      directory: string,
+      sharedRoots: ReadonlyArray<string>,
+    ) => Effect.Effect<boolean>;
     readonly mayCreateDirectory: (
       visibility: Visibility,
       userId: UserId | undefined,
@@ -493,6 +503,16 @@ const make = Effect.gen(function* () {
       : Option.none();
   });
 
+  const mayRootProject = Effect.fn("SpaceVisibility.mayRootProject")(function* (
+    visibility: Visibility,
+    userId: UserId | undefined,
+    directory: string,
+    sharedRoots: ReadonlyArray<string>,
+  ) {
+    if (userId === undefined || visibility.all) return true;
+    return yield* DirectoryRoots.isNewFolderIn(directories, sql, directory, sharedRoots);
+  });
+
   const mayCreateDirectory = Effect.fn("SpaceVisibility.mayCreateDirectory")(function* (
     visibility: Visibility,
     userId: UserId | undefined,
@@ -527,6 +547,7 @@ const make = Effect.gen(function* () {
     mayUseDirectory,
     mayReadDirectory,
     mayCreateDirectory,
+    mayRootProject,
     hubThreadFolder,
   });
 });

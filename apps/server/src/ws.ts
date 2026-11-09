@@ -1430,7 +1430,10 @@ export const layerWsRpc = (
         Effect.flatMap(deviceViewer, (viewer) => DeviceAccess.deviceStateFor(viewer, state));
 
       // Where this connection's User may clone (`CloneDestination`), read afresh each time.
-      const requireCloneDestination = (destinationPath: string) =>
+      const requireCloneDestination = (
+        destinationPath: string,
+        options?: { readonly asProject?: boolean },
+      ) =>
         currentVisibility.pipe(
           Effect.flatMap((visibility) =>
             CloneDestination.requireCloneDestination(
@@ -1440,6 +1443,7 @@ export const layerWsRpc = (
                 spaceVisibility: Effect.succeed(spaceVisibility),
                 projectsRoot: Effect.succeed(managedFolders.namedProjectsRoot),
               },
+              options,
             ),
           ),
         );
@@ -2817,7 +2821,7 @@ export const layerWsRpc = (
         [WS_METHODS.sourceControlStarred]: (input) => sourceControlSignIn.starred(input),
         [WS_METHODS.sourceControlStar]: (input) => sourceControlSignIn.star(input),
         [WS_METHODS.projectCloneStart]: (input) =>
-          requireCloneDestination(input.destinationPath).pipe(
+          requireCloneDestination(input.destinationPath, { asProject: true }).pipe(
             Effect.andThen(
               projectCloneTracker.start(
                 input,

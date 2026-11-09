@@ -21,6 +21,7 @@ export const layerSeesEverything = Layer.merge(
       mayUseDirectory: () => Effect.succeed(true),
       mayReadDirectory: () => Effect.succeed(true),
       mayCreateDirectory: () => Effect.succeed(true),
+      mayRootProject: () => Effect.succeed(true),
       hubThreadFolder: () => Effect.succeedNone,
     }),
   ),

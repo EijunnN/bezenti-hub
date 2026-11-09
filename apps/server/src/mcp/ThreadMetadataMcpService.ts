@@ -16,6 +16,7 @@ import * as Layer from "effect/Layer";
 
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
+import { visibleShells } from "./mcpVisibility.ts";
 import { threadNotFound } from "./threadAccess.ts";
 
 export class ThreadMetadataMcpService extends Context.Service<
@@ -141,7 +142,12 @@ const make = Effect.gen(function* () {
           ),
         ),
       );
-    if (shell === null || shell.deletedAt !== null) {
+    // A Thread the caller cannot see answers exactly like a missing one.
+    if (
+      shell === null ||
+      shell.deletedAt !== null ||
+      (yield* visibleShells(scope, [shell])).length === 0
+    ) {
       return yield* threadNotFound(threadManagement, threadId, `Thread ${threadId} was not found.`);
     }
     const requestKey =

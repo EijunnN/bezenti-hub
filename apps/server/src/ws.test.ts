@@ -4220,13 +4220,24 @@ describe("Space visibility", () => {
               ),
               refused,
             );
-            // In the Hub's Projects folder or a folder of her team's Project, it starts.
+            // In the Hub's Projects folder it starts as a new Project.
             assert.equal(
               yield* clone(asGrace, "grace-clone", path.join(process.cwd(), "grace-clone-target")),
               "reached",
             );
+            // Inside her team's Project a plain clone starts, but not one that becomes a Project:
+            // that folder is no Project root of hers, and she is told so before anything runs.
             assert.equal(
               yield* clone(asGrace, "grace-vendor", "/work/acme-app/vendor/lib"),
+              PROJECT_FOLDER_REFUSED,
+            );
+            assert.equal(
+              yield* outcome(
+                asGrace[WS_METHODS.sourceControlCloneRepository]({
+                  remoteUrl: "https://example.com/acme/app.git",
+                  destinationPath: "/work/acme-app/vendor/lib",
+                } as never),
+              ),
               "reached",
             );
             assert.equal(yield* clone(asOwner, "owner-clone", "/srv/owner-clone"), "reached");
@@ -4239,9 +4250,9 @@ describe("Space visibility", () => {
                     .toSorted(),
                 ),
               );
-            assert.deepEqual(yield* seen(asGrace), ["grace-clone", "grace-vendor"]);
+            assert.deepEqual(yield* seen(asGrace), ["grace-clone"]);
             assert.deepEqual(yield* seen(asLinus), []);
-            assert.deepEqual(yield* seen(asOwner), ["grace-clone", "grace-vendor", "owner-clone"]);
+            assert.deepEqual(yield* seen(asOwner), ["grace-clone", "owner-clone"]);
             // Nor does anyone but her (or the Owner) cancel hers.
             const cancel = (client: Client, projectId: string) =>
               client[WS_METHODS.projectCloneCancel]({ projectId: ProjectId.make(projectId) });

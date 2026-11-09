@@ -5,6 +5,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
+import { PROJECT_FOLDER_REFUSED } from "../spaces/directoryRoots.ts";
 import type * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 
 export const CLONE_DESTINATION_REFUSED =
@@ -23,6 +24,8 @@ export const requireCloneDestination = Effect.fn("cloneDestination.require")(fun
     readonly spaceVisibility: Effect.Effect<SpaceVisibility.SpaceVisibility["Service"]>;
     readonly projectsRoot: Effect.Effect<string>;
   },
+  /** The clone becomes a new Project there, so its folder must also be one a Project may take. */
+  options?: { readonly asProject?: boolean },
 ) {
   if (caller.visibility.all || caller.userId === undefined) return;
   const spaceVisibility = yield* hub.spaceVisibility;
@@ -32,10 +35,23 @@ export const requireCloneDestination = Effect.fn("cloneDestination.require")(fun
     destinationPath,
     [yield* hub.projectsRoot],
   );
-  if (allowed) return;
-  return yield* new SourceControlRepositoryError({
-    operation: "cloneRepository",
-    provider: SourceControlProviderKind.make("unknown"),
-    detail: CLONE_DESTINATION_REFUSED,
-  });
+  if (!allowed) {
+    return yield* new SourceControlRepositoryError({
+      operation: "cloneRepository",
+      provider: SourceControlProviderKind.make("unknown"),
+      detail: CLONE_DESTINATION_REFUSED,
+    });
+  }
+  if (
+    options?.asProject === true &&
+    !(yield* spaceVisibility.mayRootProject(caller.visibility, caller.userId, destinationPath, [
+      yield* hub.projectsRoot,
+    ]))
+  ) {
+    return yield* new SourceControlRepositoryError({
+      operation: "cloneRepository",
+      provider: SourceControlProviderKind.make("unknown"),
+      detail: PROJECT_FOLDER_REFUSED,
+    });
+  }
 });
