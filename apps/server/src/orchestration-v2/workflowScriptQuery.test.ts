@@ -69,12 +69,15 @@ describe("workflow script containment", () => {
                 shell("grandchild", "child"),
                 shell("sibling", null),
               ]),
+              // The child's records cannot be read: skipped, not the whole answer.
               subagents: (id) =>
-                Effect.succeed(
-                  ran[id] === undefined
-                    ? []
-                    : ([{ workflow: { runHandles: { scriptPath: ran[id] } } }] as never),
-                ),
+                id === "child"
+                  ? Effect.fail("unreadable")
+                  : Effect.succeed(
+                      ran[id] === undefined
+                        ? []
+                        : ([{ workflow: { runHandles: { scriptPath: ran[id] } } }] as never),
+                    ),
             },
           });
         assert.include((yield* read("parent", scriptPath)).contents, "export const meta");
@@ -82,7 +85,7 @@ describe("workflow script containment", () => {
         assert.include((yield* read("parent", child)).contents, "the child's script");
         // Not one beside it, nor an ancestor's from a child.
         assert.equal((yield* Effect.flip(read("parent", sibling))).reason, "not-found");
-        assert.equal((yield* Effect.flip(read("child", scriptPath))).reason, "not-found");
+        assert.equal((yield* Effect.flip(read("grandchild", scriptPath))).reason, "not-found");
       }),
   );
 

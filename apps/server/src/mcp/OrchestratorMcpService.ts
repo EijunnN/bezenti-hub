@@ -125,7 +125,12 @@ import {
   taskPrompt,
 } from "./delegatedTaskModes.ts";
 import { hiddenThread, isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
-import { spaceVisibilityService, visibilityOf, visibleShells } from "./mcpVisibility.ts";
+import {
+  freshVisibilityOf,
+  spaceVisibilityService,
+  visibilityOf,
+  visibleShells,
+} from "./mcpVisibility.ts";
 import { visibleScheduledTasks } from "../scheduledTasks/visibleScheduledTasks.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 
@@ -1211,6 +1216,30 @@ const make = Effect.gen(function* () {
           .getProjectThreadRecords({ projectId: shell.projectId, threadId }, [])
           .pipe(Effect.mapError(threadManagementFailure));
   });
+
+  // Fails with "not found" once the caller's access changes so that it no longer sees the Thread;
+  // never ends otherwise. For waits that outlast one check of visibility.
+  const untilHidden = (scope: McpInvocationScope, threadId: ThreadId) =>
+    scope.userId === undefined
+      ? Effect.never
+      : Effect.scoped(
+          Effect.gen(function* () {
+            const spaceVisibility = yield* spaceVisibilityService;
+            const changes = yield* spaceVisibility.subscribeAccessChanges(scope.userId);
+            yield* changes.pipe(
+              Stream.runForEach(() =>
+                Effect.gen(function* () {
+                  const visibility = yield* freshVisibilityOf(scope);
+                  const seen =
+                    visibility.all ||
+                    (yield* spaceVisibility.visibleThreadIds(visibility, [threadId])).has(threadId);
+                  if (!seen) return yield* hiddenThread(`Thread ${threadId} was not found.`);
+                }),
+              ),
+            );
+            return yield* Effect.never;
+          }),
+        );
 
   const loadScopedThread = Effect.fn("OrchestratorMcpService.loadScopedThread")(function* (
     scope: McpInvocationScope,
@@ -3042,7 +3071,11 @@ const make = Effect.gen(function* () {
           ),
           ...(input.untilDelegatedWorkSettled === true ? { untilDelegatedWorkSettled: true } : {}),
         })
-        .pipe(Effect.mapError(threadManagementFailure));
+        .pipe(
+          Effect.mapError(threadManagementFailure),
+          // A wait ends as soon as the caller can no longer see the Thread (a Membership ended).
+          (wait) => Effect.raceFirst(wait, untilHidden(scope, input.threadId)),
+        );
       const status = result.run === null ? "idle" : runOutcome(result.run);
       const taskId = result.run?.delegatedTaskId;
       const ownedTask =

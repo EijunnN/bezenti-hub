@@ -3412,6 +3412,47 @@ describe("OrchestratorMcpService thread lookup", () => {
     }),
   );
 
+  it.effect("ends a User's wait once they can no longer see the Thread", () =>
+    Effect.gen(function* () {
+      const sent = yield* Ref.make(0);
+      const visible = { ...launched, id: bareId };
+      let seen = true;
+      const error = yield* Effect.gen(function* () {
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+        return yield* mcp
+          .waitForThread({ ...client, userId: UserId.make("grace") }, { threadId: bareId })
+          .pipe(Effect.flip);
+      }).pipe(
+        Effect.provide(
+          service([visible], sent, {
+            getProjectThreadRecords: () => Effect.succeed({ thread: visible } as never),
+            waitForThread: () => Effect.never,
+          }),
+        ),
+        Effect.provide(
+          Layer.succeed(
+            SpaceVisibility.SpaceVisibility,
+            SpaceVisibility.SpaceVisibility.of({
+              of: () => Effect.succeed({ all: false, spaceIds: [] }),
+              visibleThreadIds: (_visibility: unknown, ids: ReadonlyArray<string>) =>
+                Effect.succeed(new Set(seen ? ids : [])),
+              // Her Membership ends while she waits.
+              subscribeAccessChanges: () =>
+                Effect.succeed(
+                  Stream.fromEffect(
+                    Effect.sync(() => {
+                      seen = false;
+                    }),
+                  ),
+                ),
+            } as never),
+          ),
+        ),
+      );
+      assert.equal(error.code, "thread_not_found");
+    }),
+  );
+
   it.effect("refuses waiting without orchestration capability before reading the target", () =>
     Effect.gen(function* () {
       const sent = yield* Ref.make(0);

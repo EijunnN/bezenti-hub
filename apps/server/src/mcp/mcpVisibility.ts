@@ -17,18 +17,27 @@ export const spaceVisibilityService = Effect.serviceOption(SpaceVisibility.Space
   ),
 );
 
-/** The current tool call's caller visibility, read once per call by `McpToolAccess`. */
-export const CallerVisibility = Context.Reference<Option.Option<SpaceVisibility.Visibility>>(
-  "t3/mcp/mcpVisibility/CallerVisibility",
-  { defaultValue: () => Option.none() },
-);
+/**
+ * The current tool call's caller visibility, read once per call by `McpToolAccess`, for that
+ * call's own scope only.
+ */
+export const CallerVisibility = Context.Reference<
+  Option.Option<{ readonly scope: object; readonly visibility: SpaceVisibility.Visibility }>
+>("t3/mcp/mcpVisibility/CallerVisibility", { defaultValue: () => Option.none() });
 
 /** What an MCP caller may see: its User's Spaces, or everything for a caller with no User. */
 export const visibilityOf = Effect.fn("mcp.visibilityOf")(function* (
   scope: Pick<McpInvocationScope, "userId" | "spaceLimit">,
 ) {
   const cached = yield* CallerVisibility;
-  if (Option.isSome(cached)) return cached.value;
+  if (Option.isSome(cached) && cached.value.scope === scope) return cached.value.visibility;
+  return yield* freshVisibilityOf(scope);
+});
+
+/** `visibilityOf` read now, for a long wait that must notice access it lost meanwhile. */
+export const freshVisibilityOf = Effect.fn("mcp.freshVisibilityOf")(function* (
+  scope: Pick<McpInvocationScope, "userId" | "spaceLimit">,
+) {
   const visibility =
     scope.userId === undefined
       ? SpaceVisibility.everything

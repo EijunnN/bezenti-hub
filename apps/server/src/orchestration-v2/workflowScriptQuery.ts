@@ -43,16 +43,23 @@ export const readThreadWorkflowScript = Effect.fn("orchestration.readThreadWorkf
         }
       }
     }
-    let recorded = false;
-    for (const threadId of below) {
-      const subagents = yield* input.threads.subagents(threadId).pipe(Effect.mapError(unreadable));
-      if (
-        subagents.some((subagent) => subagent.workflow?.runHandles?.scriptPath === input.scriptPath)
-      ) {
-        recorded = true;
-        break;
-      }
-    }
+    // Read at once; a Thread whose records cannot be read is skipped, not the whole answer, though
+    // the Thread asked about must itself be readable.
+    const records = yield* Effect.forEach(
+      [...below],
+      (threadId) =>
+        input.threads
+          .subagents(threadId)
+          .pipe(
+            threadId === input.threadId
+              ? Effect.mapError(unreadable)
+              : Effect.orElseSucceed(() => []),
+          ),
+      { concurrency: 8 },
+    );
+    const recorded = records.some((subagents) =>
+      subagents.some((subagent) => subagent.workflow?.runHandles?.scriptPath === input.scriptPath),
+    );
     if (!recorded) {
       return yield* new OrchestrationGetWorkflowScriptError({
         reason: "not-found",

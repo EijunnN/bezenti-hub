@@ -34,7 +34,12 @@ import {
 // repository): every tool runs with it, as every WS call does, never with the default of all.
 const callerVisibility = Effect.serviceOption(McpInvocationContext.McpInvocationContext).pipe(
   Effect.flatMap((scope) =>
-    Option.isNone(scope) ? Effect.succeed(SpaceVisibility.everything) : visibilityOf(scope.value),
+    Option.isNone(scope)
+      ? Effect.succeed({ scope: {}, visibility: SpaceVisibility.everything })
+      : Effect.map(visibilityOf(scope.value), (visibility) => ({
+          scope: scope.value as object,
+          visibility,
+        })),
   ),
 );
 
@@ -44,10 +49,10 @@ const asCaller = <Handler>(handle: Handler): Handler =>
     if (!Effect.isEffect(result)) return result;
     // @effect-diagnostics-next-line anyUnknownInErrorContext:off unsafeEffectTypeAssertion:off - a handler's own channels pass through unchanged.
     const effect = result as Effect.Effect<unknown>;
-    return Effect.flatMap(callerVisibility, (visibility) =>
+    return Effect.flatMap(callerVisibility, (caller) =>
       effect.pipe(
-        Effect.provideService(SpaceVisibility.RequestVisibility, visibility),
-        Effect.provideService(CallerVisibility, Option.some(visibility)),
+        Effect.provideService(SpaceVisibility.RequestVisibility, caller.visibility),
+        Effect.provideService(CallerVisibility, Option.some(caller)),
       ),
     );
   }) as Handler;
