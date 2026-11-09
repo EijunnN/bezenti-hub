@@ -195,6 +195,7 @@ import {
 } from "./assets/AttachmentUpload.ts";
 import * as EnvironmentExecutor from "./environment/EnvironmentExecutor.ts";
 import { readThreadWorkflowScript } from "./orchestration-v2/workflowScriptQuery.ts";
+import * as ScheduledTaskVisibility from "./scheduledTasks/visibleScheduledTasks.ts";
 import { withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
@@ -1383,26 +1384,15 @@ export const layerWsRpc = (
       const visibleScheduledTasks = Effect.fn("ws.scheduledTasks.visible")(function* (
         result: ScheduledTaskListResult,
       ) {
-        const visibility = yield* currentVisibility;
-        if (visibility.all) return result;
-        const [projects, threads] = yield* Effect.all([
-          spaceVisibility.visibleProjectIds(
-            visibility,
-            result.tasks.map((task) => task.projectId),
-          ),
-          spaceVisibility.hiddenThreadIds(
-            visibility,
-            result.tasks.flatMap((task) => (task.threadId === null ? [] : [task.threadId])),
-          ),
-        ]);
-        return {
-          ...result,
-          tasks: result.tasks.filter(
-            (task) =>
-              projects.has(task.projectId) &&
-              (task.threadId === null || !threads.has(task.threadId)),
-          ),
-        };
+        const tasks = yield* ScheduledTaskVisibility.visibleScheduledTasks(
+          {
+            visibility: yield* currentVisibility,
+            userId: principal.userId,
+            spaceVisibility: Effect.succeed(spaceVisibility),
+          },
+          result.tasks,
+        );
+        return { ...result, tasks };
       });
       // Terminals and previews are their Thread owner's, or the draft's User's: show only those.
       const withoutHiddenThreads = Effect.fn("ws.withoutHiddenThreads")(function* <A>(

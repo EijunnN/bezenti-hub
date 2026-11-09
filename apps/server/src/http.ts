@@ -3,11 +3,14 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  WS_METHODS,
 } from "@t3tools/contracts";
+import { authorizeSessionAsRpc } from "./auth/RpcAuthorization.ts";
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
 import { injectMcpAppCookieBootstrap, injectMcpAppThemeBootstrap } from "@t3tools/shared/mcpApp";
 import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
 import * as ByteSize from "effect/ByteSize";
+import * as HttpIncomingMessage from "effect/http/HttpIncomingMessage";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -317,7 +320,11 @@ const authenticateRawRouteWithScope =
     if (!session.scopes.includes(scope)) {
       return yield* failEnvironmentScopeRequired(scope);
     }
+    return session;
   });
+
+// A browser's traces go to the Installation's collector, which only its Owner reads.
+const OTLP_TRACES_MAX_BYTES = 4 * 1024 * 1024;
 
 export const layerServerEnvironmentHttpApi = HttpApiBuilder.group(
   EnvironmentHttpApi,
@@ -343,15 +350,36 @@ export const layerOtlpTracesProxyRoute = HttpRouter.add(
   "POST",
   OTLP_TRACES_PROXY_PATH,
   Effect.gen(function* () {
-    yield* authenticateRawRouteWithScope(AuthOrchestrationOperateScope);
+    const session = yield* authenticateRawRouteWithScope(AuthOrchestrationOperateScope);
     const request = yield* HttpServerRequest.HttpServerRequest;
+    // The rule of reading those traces back (`server.getTraceDiagnostics`): only the Owner's
+    // clients write to the Installation's collector. Anyone else's are dropped quietly, so their
+    // exporters do not retry, and so is anything over the limit.
+    const ownersClient = yield* authorizeSessionAsRpc(
+      WS_METHODS.serverGetTraceDiagnostics,
+      {},
+      session,
+    ).pipe(
+      Effect.as(true),
+      Effect.orElseSucceed(() => false),
+    );
+    // A declared length over the cap is dropped before reading; chunked bodies hit the reader cap.
+    const length = Number(request.headers["content-length"] ?? 0);
+    if (!ownersClient || length > OTLP_TRACES_MAX_BYTES) {
+      return HttpServerResponse.empty({ status: 204 });
+    }
     const config = yield* ServerConfig.ServerConfig;
     const otlpTracesUrl = config.otlpTracesUrl;
     const otlpHeaders = config.otlpTracesExport.headers;
     const browserTraceCollector = yield* BrowserTraceCollector.BrowserTraceCollector;
     const httpClient = yield* HttpClient.HttpClient;
     const serialization = yield* OtlpSerialization.OtlpSerialization;
-    const bodyJson = cast<unknown, OtlpTracer.TraceData>(yield* request.json);
+    const body = yield* request.json.pipe(
+      Effect.provideService(HttpIncomingMessage.MaxBodySize, ByteSize.bytes(OTLP_TRACES_MAX_BYTES)),
+      Effect.option,
+    );
+    if (Option.isNone(body)) return HttpServerResponse.empty({ status: 204 });
+    const bodyJson = cast<unknown, OtlpTracer.TraceData>(body.value);
 
     yield* Effect.try({
       try: () => decodeOtlpTraceRecords(bodyJson),

@@ -125,7 +125,8 @@ import {
   taskPrompt,
 } from "./delegatedTaskModes.ts";
 import { hiddenThread, isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
-import { visibleShells } from "./mcpVisibility.ts";
+import { spaceVisibilityService, visibilityOf, visibleShells } from "./mcpVisibility.ts";
+import { visibleScheduledTasks } from "../scheduledTasks/visibleScheduledTasks.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -1221,6 +1222,10 @@ const make = Effect.gen(function* () {
       caller.parent !== undefined && threadId === caller.parent.thread.id
         ? caller.parent
         : yield* loadTargetThread(threadId, includeHistory);
+    // Waiting on, interrupting or messaging a Thread reads it: a hidden one is not there.
+    if ((yield* visibleShells(scope, [target.thread])).length === 0) {
+      return yield* hiddenThread(`Thread ${threadId} was not found.`);
+    }
     return { ...caller, target } as const;
   });
 
@@ -1939,9 +1944,18 @@ const make = Effect.gen(function* () {
               failure("orchestration_error", `Could not list scheduled tasks: ${error.message}`),
             ),
           );
+        // As the app lists them (`visibleScheduledTasks`).
+        const visible = yield* visibleScheduledTasks(
+          {
+            visibility: yield* visibilityOf(scope),
+            userId: scope.userId,
+            spaceVisibility: spaceVisibilityService,
+          },
+          tasks,
+        );
         return {
           tasks: yield* Effect.forEach(
-            tasks.filter((task) => projectId === undefined || task.projectId === projectId),
+            visible.filter((task) => projectId === undefined || task.projectId === projectId),
             (task) => summarizeScheduledTask(scope, { parent, limits }, task),
           ),
         };

@@ -21,6 +21,7 @@ import {
   ProviderTurnId,
   RunId,
   ThreadId,
+  UserId,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2StoredEvent,
   type OrchestrationV2ThreadProjection,
@@ -64,6 +65,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.ts";
+import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import { resolveRuntimeMode } from "./delegatedTaskModes.ts";
 import type { ProjectionRecordFilter } from "../orchestration-v2/ProjectionStore.ts";
@@ -2646,6 +2648,58 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
     );
 
+    it.effect(
+      "lists, for a User, only tasks of Projects they see, and the webhook of their own",
+      () =>
+        Effect.gen(function* () {
+          const upserted = yield* Ref.make(0);
+          const grace = UserId.make("grace");
+          const asGrace: McpInvocationScope = {
+            ...supervisedClient,
+            userId: grace,
+            client: { sessionId: "grace", label: "Claude Code", access: "full-access" },
+          };
+          const seesScheduledProject = Layer.succeed(
+            SpaceVisibility.SpaceVisibility,
+            SpaceVisibility.SpaceVisibility.of({
+              of: () => Effect.succeed({ all: false, spaceIds: [] }),
+              visibleProjectIds: (_visibility: unknown, ids: ReadonlyArray<ProjectId>) =>
+                Effect.succeed(new Set(ids.filter((id) => id === projectId))),
+              hiddenThreadIds: () => Effect.succeed(new Set<string>()),
+            } as never),
+          );
+          const listed = yield* OrchestratorMcpService.OrchestratorMcpService.pipe(
+            Effect.flatMap((mcp) => mcp.listScheduledTasks(asGrace, {})),
+            Effect.provide(
+              service(
+                [
+                  task({
+                    id: ScheduledTaskId.make("scheduled-task:owners"),
+                    ownerUserId: UserId.make("owner"),
+                  }),
+                  task({ id: ScheduledTaskId.make("scheduled-task:graces"), ownerUserId: grace }),
+                  task({
+                    id: ScheduledTaskId.make("scheduled-task:hidden"),
+                    projectId: ProjectId.make("project:hidden"),
+                    ownerUserId: grace,
+                  }),
+                ],
+                null,
+                upserted,
+              ),
+            ),
+            Effect.provide(seesScheduledProject),
+          );
+          assert.deepEqual(
+            listed.tasks.map((listedTask) => [listedTask.scheduledTaskId, listedTask.webhookUrl]),
+            [
+              ["scheduled-task:owners", undefined],
+              ["scheduled-task:graces", "https://t3.example/hooks/secret"],
+            ],
+          );
+        }),
+    );
+
     it.effect("checks a bound task against its thread's current modes", () =>
       Effect.gen(function* () {
         const upserted = yield* Ref.make(0);
@@ -3322,6 +3376,39 @@ describe("OrchestratorMcpService thread lookup", () => {
       assert.equal(read.message, `Thread ${bareId} is no longer available.`);
       assert.equal(send.message, `Thread ${bareId} was not found.`);
       assert.equal(wait.message, send.message);
+    }),
+  );
+
+  it.effect("answers a User's wait on a Thread they cannot see like a missing one", () =>
+    Effect.gen(function* () {
+      const sent = yield* Ref.make(0);
+      const waited = yield* Ref.make(0);
+      const hidden = { ...launched, id: bareId };
+      const error = yield* Effect.gen(function* () {
+        const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+        return yield* mcp
+          .waitForThread({ ...client, userId: UserId.make("grace") }, { threadId: bareId })
+          .pipe(Effect.flip);
+      }).pipe(
+        Effect.provide(
+          service([hidden], sent, {
+            getProjectThreadRecords: () => Effect.succeed({ thread: hidden } as never),
+            waitForThread: () =>
+              Ref.update(waited, (count) => count + 1).pipe(Effect.as({} as never)),
+          }),
+        ),
+        Effect.provide(
+          Layer.succeed(
+            SpaceVisibility.SpaceVisibility,
+            SpaceVisibility.SpaceVisibility.of({
+              of: () => Effect.succeed({ all: false, spaceIds: [] }),
+              visibleThreadIds: () => Effect.succeed(new Set()),
+            } as never),
+          ),
+        ),
+      );
+      assert.equal(error.code, "thread_not_found");
+      assert.equal(yield* Ref.get(waited), 0);
     }),
   );
 
