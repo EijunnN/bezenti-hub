@@ -317,10 +317,11 @@ export const authorizeSessionAsRpc = Effect.fn("RpcAuthorization.authorizeSessio
   session: {
     readonly scopes: Iterable<AuthEnvironmentScope>;
     readonly userId?: UserId | undefined;
+    readonly subject: string;
   },
 ) {
   const spaceVisibility = yield* SpaceVisibility.SpaceVisibility;
-  const visibility = yield* spaceVisibility.of(session.userId);
+  const visibility = yield* spaceVisibility.ofSession(session);
   yield* authorizeRpcCall(
     method,
     payload,

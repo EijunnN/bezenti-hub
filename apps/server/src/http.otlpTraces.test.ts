@@ -62,8 +62,8 @@ it.effect("only the Owner's clients write to the Installation's trace collector"
       const visibility = Layer.succeed(
         SpaceVisibility.SpaceVisibility,
         SpaceVisibility.SpaceVisibility.of({
-          of: () =>
-            Effect.succeed(owner ? SpaceVisibility.everything : { all: false, spaceIds: [] }),
+          ofSession: () =>
+            Effect.succeed(owner ? SpaceVisibility.everything : SpaceVisibility.nothing),
         } as never),
       );
       return HttpRouter.toWebHandler(

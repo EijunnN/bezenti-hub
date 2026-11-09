@@ -3712,9 +3712,14 @@ describe("Space visibility", () => {
     withTeam(({ server }) =>
       Effect.gen(function* () {
         const anonymous = yield* connectWriter(server, undefined);
-        assert.equal(
-          refusal(yield* dispatch(anonymous, { type: "thread.archive", threadId: "acme-thread" })),
-          "This session belongs to no User. Sign in again.",
+        // It sees no Space, so the Thread is missing to it before any command is decided.
+        const archived = yield* dispatch(anonymous, {
+          type: "thread.archive",
+          threadId: "acme-thread",
+        });
+        assert.isTrue(
+          Result.isFailure(archived) &&
+            (archived.failure as { readonly _tag: string })._tag === "SpaceResourceNotFoundError",
         );
       }),
     ),
@@ -4393,6 +4398,37 @@ describe("Space visibility", () => {
                   ...ref,
                   projectId: "globex-app",
                   action: "merge",
+                } as never),
+              ),
+              "SpaceResourceNotFoundError",
+            );
+          }),
+        ),
+    );
+
+    it.effect(
+      "a session that names no User, once an Owner exists, reaches nothing of the Installation and sees no Space",
+      () =>
+        withTeam(({ server }) =>
+          Effect.gen(function* () {
+            const userless = yield* connect(
+              server,
+              undefined,
+              Layer.empty,
+              AuthStandardClientScopes,
+            );
+            assert.equal(
+              yield* outcome(userless[WS_METHODS.serverGetProcessDiagnostics]({})),
+              INSTALLATION_OWNER_ONLY_MESSAGE,
+            );
+            assert.equal(
+              yield* outcome(
+                userless[WS_METHODS.assetsCreateUrl]({
+                  resource: {
+                    _tag: "media-file",
+                    threadId: "acme-thread",
+                    path: "/work/acme-app/shot.png",
+                  },
                 } as never),
               ),
               "SpaceResourceNotFoundError",

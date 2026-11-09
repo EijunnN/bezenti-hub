@@ -10,6 +10,7 @@ export const layerSeesEverything = Layer.merge(
     SpaceVisibility.SpaceVisibility,
     SpaceVisibility.SpaceVisibility.of({
       of: () => Effect.succeed(SpaceVisibility.everything),
+      ofSession: () => Effect.succeed(SpaceVisibility.everything),
       viewer: () => Effect.succeed(Effect.succeed(SpaceVisibility.everything)),
       subscribeAccessChanges: () => Effect.succeed(Stream.empty),
       visibleThreadIds: (_visibility, threadIds) => Effect.succeed(new Set(threadIds)),

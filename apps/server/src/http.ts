@@ -32,6 +32,7 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import { OtlpTracer, OtlpSerialization } from "effect/observability";
 
 import * as ServerConfig from "./config.ts";
+import * as SpaceVisibility from "./spaces/SpaceVisibility.ts";
 import { ASSET_ROUTE_PREFIX, readMcpAppHtml, resolveAsset } from "./assets/AssetAccess.ts";
 import { sourceControlMediaResponse } from "./assets/sourceControlMediaResponse.ts";
 import { statMediaFile, streamMediaFile, type OpenMediaFile } from "./assets/MediaFile.ts";
@@ -351,10 +352,12 @@ export const layerOtlpTracesProxyRoute = HttpRouter.add(
   Effect.gen(function* () {
     const session = yield* authenticateRawRouteWithScope(AuthOrchestrationOperateScope);
     const request = yield* HttpServerRequest.HttpServerRequest;
-    // The rule of reading those traces back (`server.getTraceDiagnostics`, Owner only): a
-    // session other than the Owner's never holds `diagnostics:read` (`heldByUser`). Anyone else's
-    // traces are dropped quietly, so their exporters do not retry, and so is anything too large.
-    const ownersClient = session.scopes.includes(AuthDiagnosticsReadScope);
+    // The rule of reading those traces back (`server.getTraceDiagnostics`, the Installation's):
+    // the Owner's own session, judged by who it is, not only by its scopes. Anyone else's traces
+    // are dropped quietly, so their exporters do not retry, and so is anything too large.
+    const ownersClient =
+      session.scopes.includes(AuthDiagnosticsReadScope) &&
+      (yield* (yield* SpaceVisibility.SpaceVisibility).ofSession(session)).all;
     // A declared length over the cap is dropped before reading; chunked bodies hit the reader cap.
     const length = Number(request.headers["content-length"] ?? 0);
     if (!ownersClient || length > OTLP_TRACES_MAX_BYTES) {

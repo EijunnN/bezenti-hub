@@ -221,7 +221,7 @@ const handler = Effect.gen(function* () {
   // A User who does not see everything reaches only a device open in one of their Threads,
   // named by `threadId`, and drives it only in a Thread they work (`DeviceAccess`).
   const spaceVisibility = yield* SpaceVisibility.SpaceVisibility;
-  const visibility = yield* spaceVisibility.of(session.userId);
+  const visibility = yield* spaceVisibility.ofSession(session);
   if (!visibility.all) {
     const params = url.value.searchParams;
     const threadId = params.get("threadId");

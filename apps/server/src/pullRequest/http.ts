@@ -26,7 +26,7 @@ export const layer = HttpApiBuilder.group(
         yield* annotateEnvironmentRequest(args.endpoint.name);
         yield* requireEnvironmentScope(AuthOrchestrationReadScope);
         const principal = yield* EnvironmentAuthenticatedPrincipal;
-        const visibility = yield* spaceVisibility.of(principal.userId);
+        const visibility = yield* spaceVisibility.ofSession(principal);
         // The rule of reading a change request's files over the socket. A hidden Project, like a
         // missing one, has no checkout to read the change request from.
         yield* authorizeSessionAsRpc(

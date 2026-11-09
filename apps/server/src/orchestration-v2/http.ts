@@ -64,7 +64,7 @@ export const layer = HttpApiBuilder.group(
     // Per request: what this session's User may see.
     const requestVisibility = Effect.gen(function* () {
       const principal = yield* EnvironmentAuthenticatedPrincipal;
-      return yield* spaceVisibility.of(principal.userId);
+      return yield* spaceVisibility.ofSession(principal);
     });
 
     // A Thread the session may not see answers exactly like a missing one.

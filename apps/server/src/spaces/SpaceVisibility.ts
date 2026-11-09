@@ -26,6 +26,7 @@ import * as Stream from "effect/Stream";
 import * as ServerConfig from "../config.ts";
 import * as DirectoryRoots from "./directoryRoots.ts";
 import * as SpaceDirectory from "./SpaceDirectory.ts";
+import { SHELL_SESSION_SUBJECT } from "../auth/CommandActor.ts";
 
 const encodeIds = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 
@@ -34,6 +35,9 @@ export type Visibility =
   { readonly all: true } | { readonly all: false; readonly spaceIds: ReadonlyArray<SpaceId> };
 
 export const everything: Visibility = { all: true };
+
+/** Sees no Space at all: a session that names no User once an Owner exists. */
+export const nothing: Visibility = { all: false, spaceIds: [] };
 
 /**
  * What the current request may see, for services that pick Projects themselves (a Pull Request
@@ -99,6 +103,14 @@ export class SpaceVisibility extends Context.Service<
   {
     /** What the User may see now; no User is the Owner (MCP tools, the CLI, scheduled tasks). */
     readonly of: (userId: UserId | undefined) => Effect.Effect<Visibility>;
+    /**
+     * What a request's session may see: its User's view; with no User, everything only before an
+     * Owner exists (or for the Hub's own shell), else nothing, whatever scopes it was issued.
+     */
+    readonly ofSession: (session: {
+      readonly userId?: UserId | undefined;
+      readonly subject: string;
+    }) => Effect.Effect<Visibility>;
     /**
      * A view of `of` for one connection: resolved once, and again only after a Space or
      * Membership changed.
@@ -263,6 +275,18 @@ const make = Effect.gen(function* () {
     if (userId === undefined) return everything;
     const viewable = yield* spaces.viewableSpaces(userId).pipe(Effect.orDie);
     return viewable === "all" ? everything : ({ all: false, spaceIds: viewable } as const);
+  });
+
+  const ofSession = Effect.fn("SpaceVisibility.ofSession")(function* (session: {
+    readonly userId?: UserId | undefined;
+    readonly subject: string;
+  }) {
+    if (session.userId !== undefined) return yield* of(session.userId);
+    if (session.subject === SHELL_SESSION_SUBJECT) return everything;
+    const owners = yield* sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count FROM users WHERE is_owner = 1
+    `.pipe(Effect.orDie);
+    return (owners[0]?.count ?? 0) === 0 ? everything : nothing;
   });
 
   const viewer = Effect.fn("SpaceVisibility.viewer")(function* (userId: UserId | undefined) {
@@ -560,6 +584,7 @@ const make = Effect.gen(function* () {
 
   return SpaceVisibility.of({
     of,
+    ofSession,
     viewer,
     subscribeAccessChanges,
     visibleThreadIds,
@@ -601,8 +626,11 @@ export const layerCurrentViewer = Layer.effect(
     const visibility = yield* SpaceVisibility;
     const spaces = yield* SpaceDirectory.SpaceDirectory;
     const userId = principal.userId;
+    // A session with no User sees nothing once an Owner exists, Installation RPCs included.
+    const sessionView = userId === undefined ? yield* visibility.ofSession(principal) : undefined;
     return CurrentViewer.of({
-      visibility: yield* visibility.viewer(userId),
+      visibility:
+        sessionView === undefined ? yield* visibility.viewer(userId) : Effect.succeed(sessionView),
       lostAccessSince: Effect.fn("CurrentViewer.lostAccessSince")(function* (sequence: number) {
         if (userId === undefined) return false;
         // A failed read must not let a stale client keep what it may no longer see.

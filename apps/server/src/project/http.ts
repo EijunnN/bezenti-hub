@@ -63,7 +63,7 @@ export const layer = HttpApiBuilder.group(
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationReadScope);
           const principal = yield* EnvironmentAuthenticatedPrincipal;
-          const visibility = yield* spaceVisibility.of(principal.userId);
+          const visibility = yield* spaceVisibility.ofSession(principal);
           return yield* projects
             .snapshotFor(visibility)
             .pipe(
