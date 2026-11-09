@@ -10,6 +10,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import type {
@@ -1647,6 +1648,75 @@ it.effect(
       // The Owner still reads another repository on the host through it.
       yield* service.diff(other).pipe(Effect.ignore);
       assert.deepStrictEqual(reached, ["pingdotgg/t3code", "someone/private"]);
+    }),
+);
+
+it.effect(
+  "routes a Member's call through the Project they name when two Projects hold the repository",
+  () =>
+    Effect.gen(function* () {
+      const checkout = (id: string, spaceId: string) => ({
+        ...project({
+          id,
+          title: id,
+          workspaceRoot: `/${id}`,
+          repository: "team/repo",
+          provider: "forgejo",
+          host: "ssh.code.example",
+          remoteUrl: "git@ssh.code.example:team/repo.git",
+        }),
+        spaceId: SpaceId.make(spaceId),
+      });
+      const seen: Array<string> = [];
+      const service = yield* makeService({
+        projects: [checkout("pa", "acme"), checkout("pb", "globex")],
+        providers: [
+          fakePullRequestProvider(SourceControlProviderKind.make("forgejo"), {
+            getChangeRequestSummary: (input: { readonly cwd?: string; readonly host: string }) =>
+              Effect.sync(() => {
+                seen.push(input.cwd ?? input.host);
+                return changeRequest(42, "2026-07-02T00:00:00Z");
+              }),
+          } as never),
+        ],
+        resolveHandle: ({ context }) => {
+          if (context?.requestedHost === undefined) {
+            return Effect.succeed({ context: context!, provider: undefined as never });
+          }
+          return Effect.succeed({
+            context: {
+              ...context,
+              provider: {
+                kind: SourceControlProviderKind.make("forgejo"),
+                name: "Forgejo",
+                baseUrl: "http://code.example:3000",
+              },
+            },
+            provider: undefined as never,
+          });
+        },
+      });
+      const summary = yield* service
+        .summary(
+          {
+            projectId: "pb" as ProjectId,
+            host: "code.example:3000",
+            repository: "team/repo",
+            number: 42,
+          },
+          { recoverTransientFailure: false },
+        )
+        .pipe(
+          Effect.provideService(SpaceVisibility.RequestVisibility, {
+            all: false,
+            spaceIds: [SpaceId.make("acme"), SpaceId.make("globex")],
+          }),
+          Effect.result,
+        );
+      assert.isTrue(
+        Result.isSuccess(summary),
+        String(Result.isFailure(summary) && summary.failure),
+      );
     }),
 );
 

@@ -970,26 +970,15 @@ export const make = Effect.gen(function* () {
       }),
     );
 
-  // A User who does not see everything reaches only the repository of a Project they see, with
-  // the Hub's credentials: never another repository read through that Project's checkout.
+  // A User who does not see everything reaches, with the Hub's credentials, only a repository a
+  // Project they see holds, through the Project the call names (whose Role rules the transport
+  // checked): never another through a checkout, nor one with no checkout.
   const requireProject = (ref: PullRequestRef): Effect.Effect<SupportedProject, PullRequestError> =>
     Effect.flatMap(SpaceVisibility.RequestVisibility, (visibility) =>
-      routeProject(ref).pipe(
+      routeProject(ref, visibility.all).pipe(
+        Effect.flatMap((route) => preferNamedProject(ref, route)),
         Effect.filterOrFail(
-          (route) => {
-            if (visibility.all) return true;
-            // The Project's own repository, as its checkout names it, not the route's.
-            const own = route.project.repositoryIdentity?.canonicalKey;
-            const key = (value: string) =>
-              sourceControlDefinitions.canonicalRepositoryKey(value.toLowerCase());
-            // And through the Project the call names, whose Role rules the transport checked: one
-            // routed to another Project could be one where the caller is only a Guest.
-            return (
-              route.project.id === ref.projectId &&
-              own !== undefined &&
-              key(own) === key(`${route.host}/${ref.repository.trim()}`)
-            );
-          },
+          (route) => visibility.all || route.project.id === ref.projectId,
           () =>
             new PullRequestOperationError({
               operation: "resolveRepository",
@@ -999,8 +988,34 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+  // Two Projects can hold one repository (two Spaces, two checkouts): a route that landed on
+  // another than the one the call names goes through the named one when it holds the same.
+  const preferNamedProject = (
+    ref: PullRequestRef,
+    route: SupportedProject,
+  ): Effect.Effect<SupportedProject, PullRequestError> => {
+    if (route.project.id === ref.projectId) return Effect.succeed(route);
+    const keyOf = (candidate: SupportedProject) =>
+      candidate.repositoryKey ??
+      sourceControlDefinitions.canonicalRepositoryKey(
+        (candidate.project.repositoryIdentity?.canonicalKey ?? "").toLowerCase(),
+      );
+    return listWorkspaceProjects({ projectId: ref.projectId }).pipe(
+      Effect.map(({ supported }) => {
+        const named = supported[0];
+        return named !== undefined && keyOf(named) !== "" && keyOf(named) === keyOf(route)
+          ? { ...route, project: named.project }
+          : route;
+      }),
+    );
+  };
+
   // Azure derives organization from the checkout; require the matching repository.
-  const routeProject = (ref: PullRequestRef): Effect.Effect<SupportedProject, PullRequestError> =>
+  const routeProject = (
+    ref: PullRequestRef,
+    /** Whether a call may reach a repository no checkout of its route holds (the Owner's). */
+    beyondCheckouts: boolean,
+  ): Effect.Effect<SupportedProject, PullRequestError> =>
     listWorkspaceProjects({ projectId: ref.projectId }).pipe(
       Effect.flatMap(({ supported }): Effect.Effect<SupportedProject, PullRequestError> => {
         const own = supported[0];
@@ -1045,7 +1060,7 @@ export const make = Effect.gen(function* () {
               return Effect.gen(function* () {
                 const publicHost = sourceControlDefinitions.findByPublicHost(host);
                 const api = publicHost === undefined ? null : registry.get(publicHost.kind);
-                if (api?.readsPublicHostWithoutCheckout) {
+                if (beyondCheckouts && api?.readsPublicHostWithoutCheckout) {
                   const selected = yield* projects.getShell(ref.projectId).pipe(
                     Effect.mapError(
                       (cause) =>
@@ -1072,6 +1087,18 @@ export const make = Effect.gen(function* () {
                 }
                 return yield* new PullRequestUnavailableError({ reason: "provider-unsupported" });
               });
+            }
+            if (
+              route.repositoryKey === null &&
+              route.repository.toLowerCase() !== repository.toLowerCase() &&
+              !beyondCheckouts
+            ) {
+              return Effect.fail(
+                new PullRequestOperationError({
+                  operation: "resolveRepository",
+                  detail: "The change request does not belong to the selected project.",
+                }),
+              );
             }
             return Effect.succeed(
               route.repositoryKey !== null ||
