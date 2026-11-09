@@ -2465,6 +2465,29 @@ describe("Space visibility", () => {
             });
             assert.notEqual(moved.status, 200);
             assert.include(messageOf(moved.body), PROJECT_FOLDER_CHANGE_REFUSED);
+            // Refused before the folder is looked at: a missing one answers the same.
+            const toMissing = yield* server.request("/api/projects/mutate", {
+              cookie: grace.cookie,
+              body: {
+                type: "project.update",
+                commandId: "roots-move-grace-missing",
+                projectId: `roots-project-${created - 1}`,
+                workspaceRoot: "/missing/folder",
+              },
+            });
+            assert.include(messageOf(toMissing.body), PROJECT_FOLDER_CHANGE_REFUSED);
+            // Nor names an icon outside her Project, which would be served from anywhere.
+            const icon = yield* server.request("/api/projects/mutate", {
+              cookie: grace.cookie,
+              body: {
+                type: "project.update",
+                commandId: "roots-icon-grace",
+                projectId: `roots-project-${created - 1}`,
+                faviconPath: "/etc/ssh/host.png",
+              },
+            });
+            assert.notEqual(icon.status, 200);
+            assert.include(messageOf(icon.body), "Only the Owner of this Hub can use an image");
             // The Owner uses any folder.
             assert.equal((yield* create(owner, "/srv/owner-app")).status, 200);
             assert.isDefined(yield* ownerOf(server));
@@ -2613,6 +2636,141 @@ describe("Space visibility", () => {
           assert.isFalse(yield* spaceVisibility.mayUseDirectory(graceSees, grace.userId, "/etc"));
         }),
       ),
+    );
+
+    it.effect(
+      "a recorded root counts only if today's rule passes: a Member's old Project at /, a Thread's unchecked folder",
+      () =>
+        withTeam(({ server, acme, grace }) =>
+          Effect.gen(function* () {
+            // Recorded before the rule: Grace's Project at the Hub's root, and Threads whose
+            // folders nobody checked (a machine that was removed, a move to the Hub that kept it).
+            yield* server.sql`
+              INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json,
+                created_at, updated_at, space_id, owner_user_id)
+              VALUES ('grace-root', 'grace-root', '/', '[]', '2026-01-01T00:00:00.000Z',
+                '2026-01-01T00:00:00.000Z', ${acme}, ${grace.userId})
+            `;
+            yield* server.eventSink.write({
+              events: [
+                threadCreated({
+                  id: "grace-unplaced",
+                  projectId: "acme-app",
+                  spaceId: acme,
+                  ownerUserId: grace.userId,
+                  worktreePath: "/home/owner/private",
+                }),
+                threadCreated({
+                  id: "grace-moved",
+                  projectId: "acme-app",
+                  spaceId: acme,
+                  ownerUserId: grace.userId,
+                  worktreePath: "/srv/other-machine/app",
+                }),
+              ],
+            });
+            yield* server.sql`
+              UPDATE orchestration_v2_projection_threads SET active_environment_id = 'hub'
+              WHERE thread_id = 'grace-moved'
+            `;
+            const spaceVisibility = Context.get(server.services, SpaceVisibility.SpaceVisibility);
+            const graceSees = yield* spaceVisibility.of(grace.userId);
+            for (const directory of ["/etc", "/home/owner/private", "/srv/other-machine/app"]) {
+              assert.isFalse(
+                yield* spaceVisibility.mayReadDirectory(graceSees, directory),
+                `read ${directory}`,
+              );
+              assert.isFalse(
+                yield* spaceVisibility.mayUseDirectory(graceSees, grace.userId, directory),
+                `use ${directory}`,
+              );
+            }
+            // The Owner's Project stays a root for its Members.
+            assert.isTrue(yield* spaceVisibility.mayReadDirectory(graceSees, "/work/acme-app/src"));
+            // A call on the Thread's own folder, with no folder named, is refused too.
+            const asGrace = yield* connect(server, grace.userId);
+            const read = yield* asGrace[WS_METHODS.projectsReadFile]({
+              threadId: "grace-unplaced",
+              cwd: "/home/owner/private",
+              relativePath: "id_ed25519",
+            } as never).pipe(Effect.flip);
+            assert.equal((read as { readonly _tag?: string })._tag, "SpaceResourceNotFoundError");
+          }),
+        ),
+    );
+
+    it.effect(
+      "a monorepo Project's Thread works only in its own part of a worktree, whoever's it is",
+      () =>
+        withTeam(({ server, owner, acme, globex, grace }) =>
+          Effect.gen(function* () {
+            const fs = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const repo = yield* fs.makeTempDirectoryScoped({ prefix: "t3-roots-mono-" });
+            const elsewhere = yield* fs.makeTempDirectoryScoped({ prefix: "t3-roots-mono-wt-" });
+            yield* fs.makeDirectory(path.join(repo, ".git", "worktrees", "b-feature"), {
+              recursive: true,
+            });
+            const worktree = path.join(elsewhere, "b-feature");
+            for (const part of ["packages/a", "packages/b"]) {
+              yield* fs.makeDirectory(path.join(repo, part), { recursive: true });
+              yield* fs.makeDirectory(path.join(worktree, part), { recursive: true });
+            }
+            yield* fs.writeFileString(
+              path.join(worktree, ".git"),
+              `gitdir: ${path.join(repo, ".git", "worktrees", "b-feature")}
+`,
+            );
+            yield* fs.writeFileString(
+              path.join(repo, ".git", "worktrees", "b-feature", "gitdir"),
+              `${worktree}/.git
+`,
+            );
+            for (const [id, part, spaceId] of [
+              ["mono-a", "packages/a", acme],
+              ["mono-b", "packages/b", globex],
+            ] as const) {
+              const created = yield* server.request("/api/projects/mutate", {
+                cookie: owner,
+                body: {
+                  type: "project.create",
+                  commandId: `create-${id}`,
+                  projectId: id,
+                  title: id,
+                  workspaceRoot: path.join(repo, part),
+                  spaceId,
+                },
+              });
+              assert.equal(created.status, 200);
+            }
+            yield* server.eventSink.write({
+              events: [
+                threadCreated({
+                  id: "grace-mono",
+                  projectId: "mono-a",
+                  spaceId: acme,
+                  ownerUserId: grace.userId,
+                  worktreePath: worktree,
+                }),
+              ],
+            });
+            const spaceVisibility = Context.get(server.services, SpaceVisibility.SpaceVisibility);
+            const graceSees = yield* spaceVisibility.of(grace.userId);
+            assert.isTrue(
+              yield* spaceVisibility.mayReadDirectory(graceSees, path.join(worktree, "packages/a")),
+            );
+            assert.isFalse(
+              yield* spaceVisibility.mayReadDirectory(graceSees, path.join(worktree, "packages/b")),
+            );
+            assert.isFalse(
+              yield* spaceVisibility.mayUseDirectory(
+                graceSees,
+                grace.userId,
+                path.join(worktree, "packages/b"),
+              ),
+            );
+          }),
+        ),
     );
   });
 
@@ -3179,20 +3337,28 @@ describe("Space visibility", () => {
               body: { permission: "personalSpace.create", granted },
             });
           assert.equal((yield* setPersonal(true)).status, 200);
+          // Her own Project in the Hub's Projects folder, and a Thread in it.
+          const notesRoot = server.newProjectFolder("grace-notes");
+          yield* server.sql`
+            INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json,
+              created_at, updated_at, space_id, owner_user_id)
+            VALUES ('grace-notes', 'grace-notes', ${notesRoot}, '[]', '2026-01-01T00:00:00.000Z',
+              '2026-01-01T00:00:00.000Z', ${`personal:${grace.userId}`}, ${grace.userId})
+          `;
           yield* server.eventSink.write({
             events: [
               threadCreated({
                 id: "notes-thread",
-                projectId: "acme-app",
+                projectId: "grace-notes",
                 spaceId: `personal:${grace.userId}`,
                 ownerUserId: grace.userId,
-                worktreePath: "/wt/notes",
+                worktreePath: `${notesRoot}/notes`,
               }),
             ],
           });
           const visibility = Context.get(server.services, SpaceVisibility.SpaceVisibility);
           const mayUseNotes = Effect.flatMap(visibility.of(grace.userId), (seen) =>
-            visibility.mayUseDirectory(seen, grace.userId, "/wt/notes"),
+            visibility.mayUseDirectory(seen, grace.userId, `${notesRoot}/notes`),
           );
           assert.isTrue(yield* mayUseNotes);
 
@@ -3783,7 +3949,7 @@ describe("Space visibility", () => {
     );
 
     it.effect("an asset URL serves only Hub files from folders the User may read", () =>
-      withTeam(({ server, grace, ada, gus }) =>
+      withTeam(({ server, owner, grace, ada, gus }) =>
         Effect.gen(function* () {
           const asset = (client: Client, resource: Record<string, unknown>) =>
             outcome(client[WS_METHODS.assetsCreateUrl]({ resource } as never));
@@ -3791,6 +3957,14 @@ describe("Space visibility", () => {
           const outside = [
             { _tag: "media-file", threadId: "grace-thread", path: "/etc/ssh/ssh_host_rsa_key" },
             { _tag: "media-file", threadId: "grace-thread", path: "/work/acme-app/../../etc/x" },
+            // Relative paths that climb out of the Thread's folder or name a home.
+            {
+              _tag: "media-file",
+              threadId: "grace-thread",
+              path: "../../../../home/owner/.ssh/id_ed25519",
+            },
+            { _tag: "media-file", threadId: "grace-thread", path: "~/.ssh/id_ed25519" },
+            { _tag: "media-file", threadId: "grace-thread", path: "..\\..\\secrets.png" },
             { _tag: "draft-workspace-file", cwd: "/", path: "etc/passwd" },
             { _tag: "draft-workspace-file", cwd: "/work/acme-app", path: "../globex-app/.env" },
             { _tag: "project-favicon", cwd: "/work/globex-app" },
@@ -3819,6 +3993,27 @@ describe("Space visibility", () => {
             AuthStandardClientScopes,
           );
           assert.notEqual(yield* asset(asOwner, outside[0]!), refused);
+          // An icon the Owner pointed outside the Project is no way out of it for a Member.
+          const pointed = yield* server.request("/api/projects/mutate", {
+            cookie: owner,
+            body: {
+              type: "project.update",
+              commandId: "acme-icon-outside",
+              projectId: "acme-app",
+              faviconPath: "/etc/ssh/host.png",
+            },
+          });
+          assert.equal(pointed.status, 200);
+          const asGrace = yield* connect(
+            server,
+            grace.userId,
+            Layer.empty,
+            AuthStandardClientScopes,
+          );
+          assert.equal(
+            yield* asset(asGrace, { _tag: "project-favicon", cwd: "/work/acme-app" }),
+            "AssetWorkspaceContextNotFoundError",
+          );
         }),
       ),
     );

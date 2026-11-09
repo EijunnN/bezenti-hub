@@ -81,6 +81,9 @@ const deniedMessage = (action: string, reason: string): string | undefined => {
   if (reason === "folder-not-allowed") return PROJECT_FOLDER_REFUSED;
   if (reason === "folder-owner-only") return PROJECT_FOLDER_CHANGE_REFUSED;
   if (reason === "worktree-not-allowed") return THREAD_WORKTREE_REFUSED;
+  if (reason === "icon-owner-only") {
+    return "Only the Owner of this Hub can use an image outside the Project as its icon.";
+  }
   if (action === "thread.continue" && reason === "not-yours") {
     return "Only the person who started this Thread can continue it. Start a new Thread to build on it.";
   }

@@ -198,6 +198,7 @@ import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import { threadAccessOf } from "./commandAccess.ts";
 import * as DirectoryRoots from "../spaces/directoryRoots.ts";
+import * as ServerConfig from "../config.ts";
 
 const isMessageQuestionAnswer = Schema.is(
   Schema.Union([TrimmedNonEmptyString, Schema.NonEmptyArray(TrimmedNonEmptyString)]),
@@ -1071,6 +1072,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
   // The server provides it; orchestrator tests without Spaces leave every command unchecked.
   const spaces = yield* Effect.serviceOption(SpaceDirectory.SpaceDirectory);
+  const serverConfig = yield* Effect.serviceOption(ServerConfig.ServerConfig);
   const nextTurnItemOrdinal = (
     projection: Pick<OrchestrationV2ThreadProjection, "thread"> &
       Partial<Pick<OrchestrationV2ThreadProjection, "turnItems">>,
@@ -13348,13 +13350,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     if ((yield* directory.viewableSpaces(actor)) === "all") return;
     const project = projectId === undefined ? Option.none() : yield* projects.get(projectId);
+    const folders = Option.map(serverConfig, (config) =>
+      Object.values(DirectoryRoots.hubFoldersOf(path, config.baseDir)),
+    );
     const allowed =
       Option.isSome(project) &&
-      (yield* DirectoryRoots.isProjectWorktree(
-        { path, fileSystem: Option.some(fileSystem) },
-        project.value.workspaceRoot,
-        worktreePath,
-      ));
+      Option.isSome(folders) &&
+      Option.isSome(
+        yield* DirectoryRoots.projectWorktreeRoot(
+          { path, fileSystem: Option.some(fileSystem) },
+          project.value.workspaceRoot,
+          worktreePath,
+          folders.value,
+        ),
+      );
     if (!allowed) {
       return yield* new SpaceDirectory.SpaceAccessDeniedError({
         action: "thread.continue",

@@ -10,6 +10,8 @@ import * as Option from "effect/Option";
 import type * as Path from "effect/Path";
 import type * as SqlClient from "effect/sql/SqlClient";
 
+import { scratchRootOf } from "../environment/ScratchWorkspace.ts";
+
 export const PROJECT_FOLDER_REFUSED =
   "You can only create a Project in a new folder in the Hub's Projects folder. Only the Owner of this Hub can use another folder.";
 export const PROJECT_FOLDER_CHANGE_REFUSED =
@@ -112,55 +114,122 @@ export const isNewFolderIn = Effect.fn("directoryRoots.isNewFolderIn")(function*
 export const projectsRootOf = (path: Path.Path, baseDir: string) =>
   path.resolve(baseDir, "projects");
 
+/** The Hub's own folders: its data folder, its Projects folder and its Scratch folder. */
+export const hubFoldersOf = (path: Path.Path, baseDir: string) => ({
+  data: path.resolve(baseDir),
+  projects: projectsRootOf(path, baseDir),
+  scratch: scratchRootOf(path, baseDir),
+});
+
 /**
- * Whether a Thread of the Project at `projectRoot` may record `worktreePath` as its folder: inside
- * the Project, or a linked worktree of the repository the Project is in (its `.git` file names a
- * worktree entry of that repository, and the entry names it back).
+ * Whether a recorded Project root is one today's rule lets a User other than the Owner trust: the
+ * Owner's (or one from before Users), or a folder right in the Hub's Projects or Scratch folder.
+ * Read at every check, so a root recorded before the rule existed is not trusted either.
  */
-export const isProjectWorktree = Effect.fn("directoryRoots.isProjectWorktree")(function* (
+export const isTrustedProjectRoot = Effect.fn("directoryRoots.isTrustedProjectRoot")(function* (
+  services: DirectoryServices,
+  root: string,
+  byOwner: boolean,
+  baseDir: string | undefined,
+) {
+  if (byOwner) return true;
+  if (baseDir === undefined || !isPlainAbsolute(services.path, root)) return false;
+  const folders = hubFoldersOf(services.path, baseDir);
+  const parent = services.path.dirname(yield* realOf(services, root));
+  for (const shared of [folders.projects, folders.scratch]) {
+    if ((yield* realOf(services, shared)) === parent) return true;
+  }
+  return false;
+});
+
+/**
+ * The folder a Thread of the Project at `projectRoot` works in when it records `worktreePath`:
+ * the path inside the Project, or the Project's own part of a linked worktree of its repository
+ * (so monorepo Projects claim none of each other's). None otherwise, or for a repository holding
+ * the Hub's own folders.
+ */
+export const projectWorktreeRoot = Effect.fn("directoryRoots.projectWorktreeRoot")(function* (
   services: DirectoryServices,
   projectRoot: string,
   worktreePath: string,
+  hubFolders: ReadonlyArray<string>,
 ) {
   const { path } = services;
-  if (!isPlainAbsolute(path, worktreePath)) return false;
-  if (yield* withinRoots(services, [projectRoot], worktreePath)) return true;
-  if (Option.isNone(services.fileSystem)) return false;
+  const none = Option.none<string>();
+  if (!isPlainAbsolute(path, worktreePath)) return none;
+  if (yield* withinRoots(services, [projectRoot], worktreePath)) return Option.some(worktreePath);
+  if (Option.isNone(services.fileSystem)) return none;
   const fileSystem = services.fileSystem.value;
   const read = (file: string) =>
     fileSystem.readFileString(file).pipe(
       Effect.map((text) => text.trim()),
       Effect.option,
     );
-  const worktree = yield* realOf(services, worktreePath);
-  const pointer = yield* read(path.join(worktree, ".git"));
-  if (Option.isNone(pointer) || !pointer.value.startsWith("gitdir:")) return false;
-  const entry = yield* realOf(
-    services,
-    path.resolve(worktree, pointer.value.slice("gitdir:".length).trim()),
-  );
-  // The repository the Project's folder is in (a Project can be a folder inside it, or itself a
-  // linked worktree): the first `.git` up from its root, through `commondir` for a worktree.
+  const isDirectory = (file: string) =>
+    fileSystem.stat(file).pipe(
+      Effect.map((info) => info.type === "Directory"),
+      Effect.orElseSucceed(() => false),
+    );
+  const gitDirOf = Effect.fn(function* (directory: string) {
+    const own = yield* read(path.join(directory, ".git"));
+    if (Option.isNone(own) || !own.value.startsWith("gitdir:")) return Option.none<string>();
+    return Option.some(path.resolve(directory, own.value.slice("gitdir:".length).trim()));
+  });
+  // The repository the Project's folder is in: the first `.git` up from its root (through
+  // `commondir` when the Project is itself a linked worktree), and that repository's top.
+  const realProject = yield* realOf(services, projectRoot);
   let common: string | undefined;
-  for (let directory = yield* realOf(services, projectRoot); common === undefined;) {
-    const dotGit = path.join(directory, ".git");
-    const info = yield* fileSystem.stat(dotGit).pipe(Effect.option);
-    if (Option.isSome(info) && info.value.type === "Directory") common = dotGit;
-    else if (Option.isSome(info)) {
-      const own = yield* read(dotGit);
-      if (Option.isNone(own) || !own.value.startsWith("gitdir:")) return false;
-      const gitDir = path.resolve(directory, own.value.slice("gitdir:".length).trim());
-      const shared = yield* read(path.join(gitDir, "commondir"));
-      common = Option.isSome(shared) ? path.resolve(gitDir, shared.value) : gitDir;
+  let top: string | undefined;
+  for (let directory = realProject; common === undefined;) {
+    if (yield* isDirectory(path.join(directory, ".git"))) {
+      common = path.join(directory, ".git");
+      top = directory;
+    } else {
+      const gitDir = yield* gitDirOf(directory);
+      if (Option.isSome(gitDir)) {
+        const shared = yield* read(path.join(gitDir.value, "commondir"));
+        common = Option.isSome(shared) ? path.resolve(gitDir.value, shared.value) : gitDir.value;
+        top = directory;
+      } else {
+        const parent = path.dirname(directory);
+        if (parent === directory) return none;
+        directory = parent;
+      }
+    }
+  }
+  if (top === undefined) return none;
+  for (const folder of hubFolders) {
+    if (isWithin(path, top, yield* realOf(services, folder))) return none;
+  }
+  // The linked worktree `worktreePath` is in: the first `.git` file up from it.
+  const realWorktree = yield* realOf(services, worktreePath);
+  let worktreeTop: string | undefined;
+  let entry: string | undefined;
+  for (let directory = realWorktree; worktreeTop === undefined;) {
+    const gitDir = yield* gitDirOf(directory);
+    if (Option.isSome(gitDir)) {
+      worktreeTop = directory;
+      entry = yield* realOf(services, gitDir.value);
     } else {
       const parent = path.dirname(directory);
-      if (parent === directory) return false;
+      if (parent === directory) return none;
       directory = parent;
     }
   }
+  if (entry === undefined) return none;
   const entries = yield* realOf(services, path.join(common, "worktrees"));
-  if (path.dirname(entry) !== entries) return false;
+  if (path.dirname(entry) !== entries) return none;
   const back = yield* read(path.join(entry, "gitdir"));
-  if (Option.isNone(back)) return false;
-  return (yield* realOf(services, path.resolve(entry, back.value))) === path.join(worktree, ".git");
+  if (Option.isNone(back)) return none;
+  if (
+    (yield* realOf(services, path.resolve(entry, back.value))) !== path.join(worktreeTop, ".git")
+  ) {
+    return none;
+  }
+  const own = path.join(worktreeTop, path.relative(top, realProject));
+  // The worktree itself (or a folder above the Project's part) works in the Project's part; a
+  // folder inside it, in that folder.
+  if (isWithin(path, own, realWorktree)) return Option.some(realWorktree);
+  if (isWithin(path, realWorktree, own)) return Option.some(own);
+  return none;
 });

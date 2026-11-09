@@ -100,7 +100,16 @@ const layerProjects = RuntimeLayer.layerProjectService.pipe(
   Layer.provide(
     Layer.mergeAll(
       Layer.succeed(WorkspacePaths.WorkspacePaths, {
-        normalizeWorkspaceRoot: (workspaceRoot) => Effect.succeed(workspaceRoot),
+        // A folder under /missing does not exist, so a test can tell whether it was looked at.
+        normalizeWorkspaceRoot: (workspaceRoot) =>
+          workspaceRoot.startsWith("/missing/")
+            ? Effect.fail(
+                new WorkspacePaths.WorkspaceRootNotExistsError({
+                  workspaceRoot,
+                  normalizedWorkspaceRoot: workspaceRoot,
+                }) as never,
+              )
+            : Effect.succeed(workspaceRoot),
         resolveRelativePathWithinRoot: ({ workspaceRoot, relativePath }) =>
           Effect.succeed({ absolutePath: `${workspaceRoot}/${relativePath}`, relativePath }),
       }),

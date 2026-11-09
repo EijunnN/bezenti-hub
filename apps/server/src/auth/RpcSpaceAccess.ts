@@ -19,6 +19,7 @@ import {
   type WsRpcGroup,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Stream from "effect/Stream";
 import type * as RpcGroup from "effect/rpc/RpcGroup";
@@ -302,9 +303,11 @@ const assetReadTargets = (payload: unknown): ReadonlyArray<string> | "refused" =
   const path = stringField(resource, "path");
   const cwd = stringField(resource, "cwd");
   if (tag === "media-file" && path !== undefined) {
-    const named = localWorkspaceTargets(WS_METHODS.assetsCreateUrl, { path }, ["path"]);
-    // A relative path is the Thread's own file, which the Thread's visibility covers.
-    return named === "refused" && !/^([\/]|[a-zA-Z]:)/u.test(path) ? [] : named;
+    // A plain relative path is the Thread's own file, which the Thread's rule covers; one that
+    // climbs out or names a home is refused, never left unchecked.
+    if (path.startsWith("~") || path.split(/[\\/]/u).includes("..")) return "refused";
+    if (!/^([\\/]|[a-zA-Z]:)/u.test(path)) return [];
+    return localWorkspaceTargets(WS_METHODS.assetsCreateUrl, { path }, ["path"]);
   }
   if (tag === "draft-workspace-file") {
     return localWorkspaceTargets(WS_METHODS.assetsCreateUrl, { cwd, relativePath: path });
@@ -429,14 +432,15 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
     return;
   }
   const threadId = stringField(payload, "threadId");
+  let threadFolder: string | undefined;
   if (access === "readIfThread" || access === "workIfThread") {
     // With no Thread, a draft's (no row yet), or one on the Hub machine, the call runs on the
     // Hub's own disk: what it opens must be what the User may read, or work in for a write.
-    if (
-      !visibility.all &&
-      ((yield* isDraftOrNone(threadId)) ||
-        (threadId !== undefined && (yield* spaceVisibility.threadOnHubMachine(threadId))))
-    ) {
+    const hubFolder =
+      visibility.all || threadId === undefined
+        ? Option.none<string | null>()
+        : yield* spaceVisibility.hubThreadFolder(threadId);
+    if (!visibility.all && ((yield* isDraftOrNone(threadId)) || Option.isSome(hubFolder))) {
       const named = localWorkspaceTargets(method, payload);
       if (named === "refused") return yield* notFound();
       for (const target of named) {
@@ -448,7 +452,21 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
       }
     }
     if (threadId === undefined) return;
+    // So must the Hub Thread's own folder, once the Thread is the User's to read or work: a folder
+    // today's rule does not trust is no folder of theirs.
+    const folder = Option.getOrNull(hubFolder);
+    if (folder !== null) {
+      threadFolder = folder;
+    }
   }
+  const requireThreadFolder = Effect.fn(function* () {
+    if (threadFolder === undefined) return;
+    const allowed =
+      access === "workIfThread"
+        ? yield* spaceVisibility.mayUseDirectory(visibility, userId, threadFolder)
+        : yield* spaceVisibility.mayReadDirectory(visibility, threadFolder);
+    if (!allowed) return yield* notFound();
+  });
   // Before the Owner's early return: the Owner's drafts are held too, so no one else works them.
   if (access === "work" || access === "workIfThread") {
     const threadId = stringField(payload, "threadId");
@@ -468,7 +486,7 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
         });
       }
     }
-    return;
+    return yield* requireThreadFolder();
   }
   if (access === "owned") {
     const threads = idsUnder(payload, THREAD_KEYS);
@@ -532,7 +550,7 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
       idsUnder(payload, THREAD_KEYS),
     );
     if (hidden.size > 0) return yield* notFound();
-    return;
+    return yield* requireThreadFolder();
   }
   if (access === "named") {
     if (method === WS_METHODS.assetsCreateUrl) {

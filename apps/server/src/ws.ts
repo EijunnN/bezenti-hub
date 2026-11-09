@@ -3031,6 +3031,20 @@ export const layerWsRpc = (
                   resource: input.resource,
                 });
               }
+              // An icon the Project names outside its folder is served only from a folder the User
+              // may read, as any host file is.
+              const iconPath = project.value.faviconPath;
+              const visibility = yield* currentVisibility;
+              if (
+                iconPath != null &&
+                !visibility.all &&
+                (path.isAbsolute(iconPath) ||
+                  iconPath.startsWith("~") ||
+                  iconPath.includes("..")) &&
+                !(yield* spaceVisibility.mayReadDirectory(visibility, iconPath))
+              ) {
+                return yield* new AssetWorkspaceContextNotFoundError({ resource: input.resource });
+              }
               // Clone projects precede their files; clients retry asset URLs after clone completion.
               const clone = yield* projectCloneTracker.get(project.value.projectId);
               return yield* issueAssetUrl({

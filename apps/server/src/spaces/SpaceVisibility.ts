@@ -23,6 +23,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
+import * as ServerConfig from "../config.ts";
 import * as DirectoryRoots from "./directoryRoots.ts";
 import * as SpaceDirectory from "./SpaceDirectory.ts";
 
@@ -72,14 +73,26 @@ export const threadInSpaces = (
         WHERE visible_project.project_id = ${sql.literal(alias)}.project_id
       )) IN (SELECT value FROM json_each(${encodeIds(spaceIds)}))`;
 
-/**
- * A Thread's worktree as a folder on the Hub's disk: only while it runs on the Hub machine. Another
- * machine's path names nothing here, and what it records is not checked against the Hub's disk.
- */
+/** A recorded folder that may serve as a root, with what today's rule needs to trust it. */
+/** A Thread's recorded worktree, when it runs on the Hub machine (or names no machine). */
 const hubWorktree = (sql: SqlClient.SqlClient, alias: string) =>
   sql`CASE WHEN COALESCE(${sql.literal(alias)}.active_environment_id, ${HUB_MACHINE_ENVIRONMENT_ID})
       = ${HUB_MACHINE_ENVIRONMENT_ID}
     THEN json_extract(${sql.literal(alias)}.payload_json, '$.worktreePath') END`;
+
+/** Whether the Project aliased `alias` was created by the Owner, or before Users existed. */
+const byOwner = (sql: SqlClient.SqlClient, alias: string) =>
+  sql`(${sql.literal(alias)}.owner_user_id IS NULL OR ${sql.literal(alias)}.owner_user_id IN
+    (SELECT user_id FROM users WHERE is_owner = 1))`;
+
+interface RootRow {
+  readonly root: string | null;
+  readonly projectRoot: string | null;
+  /** The Project was created by the Owner (or before Users). */
+  readonly byOwner: number;
+  /** A Thread's worktree, rather than a Project's root. */
+  readonly worktree: number;
+}
 
 export class SpaceVisibility extends Context.Service<
   SpaceVisibility,
@@ -172,10 +185,11 @@ export class SpaceVisibility extends Context.Service<
       sharedRoots: ReadonlyArray<string>,
     ) => Effect.Effect<boolean>;
     /**
-     * Whether the Thread runs on the Hub machine (or names none), deleted or not, read as
-     * `ActiveEnvironmentResolver` reads it: its workspace calls then run on the Hub's disk.
+     * The folder a Thread works in on the Hub's disk (its worktree, else its Project's root) when
+     * it runs on the Hub machine (or names none), deleted or not, read as
+     * `ActiveEnvironmentResolver` reads it; none for a Thread elsewhere or with no row.
      */
-    readonly threadOnHubMachine: (threadId: string) => Effect.Effect<boolean>;
+    readonly hubThreadFolder: (threadId: string) => Effect.Effect<Option.Option<string | null>>;
   }
 >()("t3/spaces/SpaceVisibility") {}
 
@@ -190,6 +204,39 @@ const make = Effect.gen(function* () {
   const directories = { path, fileSystem };
   const within = (roots: ReadonlyArray<string>, directory: string) =>
     DirectoryRoots.withinRoots(directories, roots, directory);
+  const config = yield* Effect.serviceOption(ServerConfig.ServerConfig);
+  const baseDir = Option.getOrUndefined(Option.map(config, (found) => found.baseDir));
+  const hubFolders =
+    baseDir === undefined ? [] : Object.values(DirectoryRoots.hubFoldersOf(path, baseDir));
+
+  // Whether `directory` is inside a recorded root today's rule trusts (`directoryRoots`), so rows
+  // from before the rule or another machine's paths count only if they pass. Only roots that
+  // could hold `directory` are checked against the disk.
+  const withinTrusted = Effect.fn("SpaceVisibility.withinTrusted")(function* (
+    rows: ReadonlyArray<RootRow>,
+    directory: string,
+  ) {
+    for (const row of rows) {
+      if (row.root === null || row.projectRoot === null) continue;
+      if (!(yield* within([row.root], directory))) continue;
+      const trustedProject = yield* DirectoryRoots.isTrustedProjectRoot(
+        directories,
+        row.projectRoot,
+        row.byOwner === 1,
+        baseDir,
+      );
+      if (!trustedProject) continue;
+      if (row.worktree !== 1) return true;
+      const own = yield* DirectoryRoots.projectWorktreeRoot(
+        directories,
+        row.projectRoot,
+        row.root,
+        hubFolders,
+      );
+      if (Option.isSome(own) && (yield* within([own.value], directory))) return true;
+    }
+    return false;
+  });
 
   // A failed read must not widen what anyone sees, so it fails the request instead.
   const of = Effect.fn("SpaceVisibility.of")(function* (userId: UserId | undefined) {
@@ -382,21 +429,22 @@ const make = Effect.gen(function* () {
   ) {
     if (userId === undefined || visibility.all) return true;
     const writable = yield* writableSpaces(visibility, userId);
-    const roots = yield* sql<{ readonly root: string | null }>`
-      SELECT COALESCE(${hubWorktree(sql, "t")}, p.workspace_root) AS root
+    const rows = yield* sql<RootRow>`
+      SELECT COALESCE(${hubWorktree(sql, "t")}, p.workspace_root) AS root,
+        p.workspace_root AS "projectRoot", ${byOwner(sql, "p")} AS "byOwner",
+        ${hubWorktree(sql, "t")} IS NOT NULL AS worktree
       FROM orchestration_v2_projection_threads t
-      LEFT JOIN projection_projects p ON p.project_id = t.project_id
+      JOIN projection_projects p ON p.project_id = t.project_id
       WHERE t.owner_user_id = ${userId} AND t.deleted_at IS NULL
         AND ${threadInSpaces(sql, "t", visibility.spaceIds)}
       UNION
-      SELECT workspace_root AS root FROM projection_projects
+      SELECT workspace_root AS root, workspace_root AS "projectRoot",
+        ${byOwner(sql, "projection_projects")} AS "byOwner", 0 AS worktree
+      FROM projection_projects
       WHERE deleted_at IS NULL
         AND space_id IN (SELECT value FROM json_each(${encodeIds(writable)}))
     `.pipe(Effect.orDie);
-    return yield* within(
-      roots.flatMap((row) => (row.root === null ? [] : [row.root])),
-      directory,
-    );
+    return yield* withinTrusted(rows, directory);
   });
 
   const mayReadDirectory = Effect.fn("SpaceVisibility.mayReadDirectory")(function* (
@@ -404,32 +452,39 @@ const make = Effect.gen(function* () {
     directory: string,
   ) {
     if (visibility.all) return true;
-    const roots = yield* sql<{ readonly root: string | null }>`
-      SELECT ${hubWorktree(sql, "t")} AS root
+    const rows = yield* sql<RootRow>`
+      SELECT ${hubWorktree(sql, "t")} AS root, p.workspace_root AS "projectRoot",
+        ${byOwner(sql, "p")} AS "byOwner", 1 AS worktree
       FROM orchestration_v2_projection_threads t
+      JOIN projection_projects p ON p.project_id = t.project_id
       WHERE t.deleted_at IS NULL AND ${threadInSpaces(sql, "t", visibility.spaceIds)}
       UNION
-      SELECT workspace_root AS root FROM projection_projects
+      SELECT workspace_root AS root, workspace_root AS "projectRoot",
+        ${byOwner(sql, "projection_projects")} AS "byOwner", 0 AS worktree
+      FROM projection_projects
       WHERE deleted_at IS NULL
         AND space_id IN (SELECT value FROM json_each(${encodeIds(visibility.spaceIds)}))
     `.pipe(Effect.orDie);
-    return yield* within(
-      roots.flatMap((row) => (row.root === null ? [] : [row.root])),
-      directory,
-    );
+    return yield* withinTrusted(rows, directory);
   });
 
-  const threadOnHubMachine = Effect.fn("SpaceVisibility.threadOnHubMachine")(function* (
+  const hubThreadFolder = Effect.fn("SpaceVisibility.hubThreadFolder")(function* (
     threadId: string,
   ) {
-    const [row] = yield* sql<{ readonly environmentId: string | null }>`
-      SELECT active_environment_id AS "environmentId" FROM orchestration_v2_projection_threads
-      WHERE thread_id = ${threadId}
+    const [row] = yield* sql<{
+      readonly environmentId: string | null;
+      readonly folder: string | null;
+    }>`
+      SELECT t.active_environment_id AS "environmentId",
+        COALESCE(json_extract(t.payload_json, '$.worktreePath'), p.workspace_root) AS folder
+      FROM orchestration_v2_projection_threads t
+      LEFT JOIN projection_projects p ON p.project_id = t.project_id
+      WHERE t.thread_id = ${threadId}
     `.pipe(Effect.orDie);
-    return (
-      row !== undefined &&
+    return row !== undefined &&
       (row.environmentId ?? HUB_MACHINE_ENVIRONMENT_ID) === HUB_MACHINE_ENVIRONMENT_ID
-    );
+      ? Option.some(row.folder)
+      : Option.none();
   });
 
   const mayCreateDirectory = Effect.fn("SpaceVisibility.mayCreateDirectory")(function* (
@@ -466,7 +521,7 @@ const make = Effect.gen(function* () {
     mayUseDirectory,
     mayReadDirectory,
     mayCreateDirectory,
-    threadOnHubMachine,
+    hubThreadFolder,
   });
 });
 

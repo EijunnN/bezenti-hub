@@ -570,16 +570,26 @@ export const make = Effect.gen(function* () {
           });
         }
       }
-      const previousRoot = existing.value.workspaceRoot;
-      const workspaceRoot =
-        input.workspaceRoot === undefined
-          ? previousRoot
-          : yield* normalizeWorkspaceRoot({
-              projectId: input.projectId,
-              workspaceRoot: input.workspaceRoot,
-            });
+      // An icon outside the Project's folder is served from wherever it names: the Owner's call.
       if (
-        workspaceRoot !== previousRoot &&
+        input.faviconPath != null &&
+        (input.faviconPath.startsWith("/") ||
+          input.faviconPath.startsWith("\\") ||
+          /^[a-zA-Z]:/u.test(input.faviconPath) ||
+          input.faviconPath.startsWith("~") ||
+          input.faviconPath.split(/[\\/]/u).includes("..")) &&
+        !(yield* actsForInstallation(Option.getOrUndefined(yield* spaces.actingUser)))
+      ) {
+        return yield* new SpaceDirectory.SpaceAccessDeniedError({
+          action: "project.manage",
+          reason: "icon-owner-only",
+        });
+      }
+      const previousRoot = existing.value.workspaceRoot;
+      // Before the folder is looked at, so the refusal says nothing about what exists on disk.
+      if (
+        input.workspaceRoot !== undefined &&
+        input.workspaceRoot !== previousRoot &&
         !(yield* actsForInstallation(Option.getOrUndefined(yield* spaces.actingUser)))
       ) {
         return yield* new SpaceDirectory.SpaceAccessDeniedError({
@@ -587,6 +597,13 @@ export const make = Effect.gen(function* () {
           reason: "folder-owner-only",
         });
       }
+      const workspaceRoot =
+        input.workspaceRoot === undefined
+          ? previousRoot
+          : yield* normalizeWorkspaceRoot({
+              projectId: input.projectId,
+              workspaceRoot: input.workspaceRoot,
+            });
       yield* commit({
         type: "project.meta.update",
         commandId: input.commandId,
