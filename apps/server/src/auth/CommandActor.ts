@@ -3,7 +3,7 @@
  * mutate route); an MCP call acts as its credential's User. Nothing a client sends sets it.
  * Only the server's own work (effect worker, reactors, scheduled runs) has no actor at all.
  */
-import type { UserId } from "@t3tools/contracts";
+import type { SpaceId, UserId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -22,9 +22,15 @@ export const SHELL_SESSION_SUBJECT = "t3-shell";
 export type Actor =
   /** The server's own work, or the shell's (`via: "cli"`) when it runs the services itself. */
   | { readonly _tag: "Server"; readonly via?: "cli" }
-  | { readonly _tag: "User"; readonly userId: UserId; readonly via?: ActorVia }
+  | {
+      readonly _tag: "User";
+      readonly userId: UserId;
+      readonly via?: ActorVia;
+      /** An agent on a machine bound to one Space acts only there (`McpInvocationScope`). */
+      readonly spaceLimit?: SpaceId;
+    }
   /** An agent in a Thread from before owners were recorded, which is the Owner's. */
-  | { readonly _tag: "ThreadOwner" }
+  | { readonly _tag: "ThreadOwner"; readonly spaceLimit?: SpaceId }
   /** A request whose session names no User, which only works before an Owner exists. */
   | { readonly _tag: "NoUser" };
 
@@ -40,10 +46,16 @@ export const resolve: Effect.Effect<Actor> = Effect.gen(function* () {
   if (explicit._tag !== "Server" || explicit.via !== undefined) return explicit;
   const mcp = yield* Effect.serviceOption(McpInvocationContext.McpInvocationContext);
   if (Option.isNone(mcp)) return SERVER;
-  const { userId, thread } = mcp.value;
-  if (userId !== undefined) return { _tag: "User", userId, via: "agent" };
-  return thread !== undefined ? { _tag: "ThreadOwner" } : { _tag: "NoUser" };
+  const { userId, thread, spaceLimit } = mcp.value;
+  const limit = spaceLimit === undefined ? {} : { spaceLimit };
+  if (userId !== undefined) return { _tag: "User", userId, via: "agent", ...limit };
+  return thread !== undefined ? { _tag: "ThreadOwner", ...limit } : { _tag: "NoUser" };
 });
+
+/** The one Space the current actor may act in, when its credential is bound to one. */
+export const spaceLimit: Effect.Effect<SpaceId | undefined> = Effect.map(resolve, (actor) =>
+  actor._tag === "User" || actor._tag === "ThreadOwner" ? actor.spaceLimit : undefined,
+);
 
 /** The acting User, for stamping receipts and new Threads; undefined when none is named. */
 export const current: Effect.Effect<UserId | undefined> = Effect.map(resolve, (actor) =>

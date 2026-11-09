@@ -405,6 +405,10 @@ const make = Effect.gen(function* () {
     const principal = yield* spaces.principalOf(userId).pipe(Effect.orDie);
     return visibility.spaceIds.filter((spaceId) => {
       const role = principal.roles.get(spaceId);
+      // The Owner works every Space but another User's Personal space, also when a credential
+      // limits them to one Space.
+      if (principal.isOwner)
+        return !spaceId.startsWith("personal:") || spaceId === `personal:${userId}`;
       return spaceId === `personal:${userId}` || role === "admin" || role === "member";
     });
   });
@@ -415,7 +419,9 @@ const make = Effect.gen(function* () {
     projectIds: ReadonlyArray<ProjectId>,
   ) {
     if (visibility.all) return new Set(projectIds);
-    if (userId === undefined || projectIds.length === 0) return new Set<ProjectId>();
+    if (projectIds.length === 0) return new Set<ProjectId>();
+    // No User (a Thread from before owners) acts as the Owner, within what it may see.
+    if (userId === undefined) return yield* visibleProjectIds(visibility, projectIds);
     return yield* visibleProjectIds(
       { all: false, spaceIds: yield* writableSpaces(visibility, userId) },
       projectIds,

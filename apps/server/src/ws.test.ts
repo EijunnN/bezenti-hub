@@ -2794,6 +2794,80 @@ describe("Space visibility", () => {
     ),
   );
 
+  it.effect(
+    "an agent on a machine bound to one Space acts only there, with its User's rights in it",
+    () =>
+      withTeam(({ server, acme, globex }) =>
+        Effect.gen(function* () {
+          const services = yield* Layer.build(layerOrchestration(server));
+          const orchestrator = Context.get(services, Orchestrator.OrchestratorV2);
+          const [ownerRow] = yield* server.sql<{ userId: string }>`
+            SELECT user_id AS "userId" FROM users WHERE is_owner = 1
+          `;
+          const ownerId = UserId.make(ownerRow!.userId);
+          // The Owner's agent in Acme's Sandbox, whose token any agent there could read.
+          const inAcme: McpInvocationContext.McpInvocationScope = {
+            environmentId: EnvironmentId.make(`sandbox:${acme}`),
+            requestNamespace: "acme-agent",
+            thread: undefined,
+            client: undefined,
+            capabilities: new Set(["orchestration"]),
+            issuedAt: 1,
+            userId: ownerId,
+            spaceLimit: SpaceId.make(acme),
+          };
+          const archive = (threadId: string) =>
+            orchestrator
+              .dispatch({
+                type: "thread.archive",
+                commandId: CommandId.make(`limited-archive-${threadId}`),
+                threadId: ThreadId.make(threadId),
+              })
+              .pipe(
+                Effect.provideService(McpInvocationContext.McpInvocationContext, inAcme),
+                Effect.result,
+                Effect.map((result) =>
+                  Result.isSuccess(result)
+                    ? "archived"
+                    : String((result.failure.cause as { _tag?: string } | undefined)?._tag),
+                ),
+              );
+          // The Owner's own Personal space and another Organization are out of reach, as missing.
+          assert.equal(yield* archive("legacy-thread"), "SpaceResourceNotFoundError");
+          assert.equal(yield* archive("globex-thread"), "SpaceResourceNotFoundError");
+          assert.equal(yield* archive("acme-thread"), "archived");
+          // Nor creates elsewhere.
+          const created = yield* server.projects
+            .create({
+              commandId: CommandId.make("limited-create"),
+              projectId: ProjectId.make("limited-project"),
+              title: "limited",
+              workspaceRoot: "/srv/limited",
+              spaceId: SpaceId.make(globex),
+            })
+            .pipe(
+              Effect.provideService(McpInvocationContext.McpInvocationContext, inAcme),
+              Effect.flip,
+            );
+          assert.include(created.message, "works only in the Space of the machine");
+          // Within Acme it keeps the Owner's rights: it works Acme's Projects.
+          const spaceVisibility = Context.get(server.services, SpaceVisibility.SpaceVisibility);
+          const workable = yield* spaceVisibility.workableProjectIds(
+            { all: false, spaceIds: [SpaceId.make(acme)] },
+            ownerId,
+            [ProjectId.make("acme-app")],
+          );
+          assert.isTrue(workable.has(ProjectId.make("acme-app")));
+          const ownerless = yield* spaceVisibility.workableProjectIds(
+            { all: false, spaceIds: [SpaceId.make(acme)] },
+            undefined,
+            [ProjectId.make("acme-app")],
+          );
+          assert.isTrue(ownerless.has(ProjectId.make("acme-app")));
+        }),
+      ),
+  );
+
   it.effect("guest links are an Admin's, only in Organizations", () =>
     withTeam(({ server, grace, ada }) =>
       Effect.gen(function* () {

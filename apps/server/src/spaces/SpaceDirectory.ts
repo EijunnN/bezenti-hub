@@ -81,6 +81,9 @@ const deniedMessage = (action: string, reason: string): string | undefined => {
   if (reason === "folder-not-allowed") return PROJECT_FOLDER_REFUSED;
   if (reason === "folder-owner-only") return PROJECT_FOLDER_CHANGE_REFUSED;
   if (reason === "worktree-not-allowed") return THREAD_WORKTREE_REFUSED;
+  if (reason === "space-limited") {
+    return "This agent works only in the Space of the machine it runs on.";
+  }
   if (reason === "icon-owner-only") {
     return "Only the Owner of this Hub can use an image outside the Project as its icon.";
   }
@@ -1014,6 +1017,11 @@ const make = Effect.gen(function* () {
         (legacyOwner === undefined ? undefined : personalSpaceIdOf(legacyOwner));
     }
     spaceId ??= claim.spaceId ?? personalSpaceIdOf(actor);
+    // An agent bound to one Space's machine creates nothing elsewhere.
+    const limit = yield* CommandActor.spaceLimit;
+    if (limit !== undefined && spaceId !== limit) {
+      return yield* new SpaceAccessDeniedError({ action: claim.action, reason: "space-limited" });
+    }
     const [space, principal] = yield* Effect.all(
       [findSpace(spaceId).pipe(Effect.mapError(storageError)), principalOf(actor)],
       { concurrency: "unbounded" },
@@ -1143,6 +1151,9 @@ const make = Effect.gen(function* () {
     if (Option.isNone(row) || row.value.spaceId === null || row.value.kind === null) {
       return yield* hiddenOrMissing();
     }
+    // An agent bound to one Space's machine reaches nothing in another, writes included.
+    const limit = yield* CommandActor.spaceLimit;
+    if (limit !== undefined && row.value.spaceId !== limit) return yield* hiddenOrMissing();
     const resource: AccessPolicy.SpaceResource = {
       id: row.value.spaceId,
       kind: row.value.kind,

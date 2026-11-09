@@ -1,4 +1,5 @@
 import type { OrchestrationV2ThreadShell, ProjectId } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
@@ -16,10 +17,18 @@ export const spaceVisibilityService = Effect.serviceOption(SpaceVisibility.Space
   ),
 );
 
+/** The current tool call's caller visibility, read once per call by `McpToolAccess`. */
+export const CallerVisibility = Context.Reference<Option.Option<SpaceVisibility.Visibility>>(
+  "t3/mcp/mcpVisibility/CallerVisibility",
+  { defaultValue: () => Option.none() },
+);
+
 /** What an MCP caller may see: its User's Spaces, or everything for a caller with no User. */
 export const visibilityOf = Effect.fn("mcp.visibilityOf")(function* (
   scope: Pick<McpInvocationScope, "userId" | "spaceLimit">,
 ) {
+  const cached = yield* CallerVisibility;
+  if (Option.isSome(cached)) return cached.value;
   const visibility =
     scope.userId === undefined
       ? SpaceVisibility.everything
@@ -36,7 +45,7 @@ export const visibilityOf = Effect.fn("mcp.visibilityOf")(function* (
 /** The shells among `shells` the caller may see. */
 export const visibleShells = Effect.fn("mcp.visibleShells")(function* <
   A extends Pick<OrchestrationV2ThreadShell, "id">,
->(scope: Pick<McpInvocationScope, "userId">, shells: ReadonlyArray<A>) {
+>(scope: Pick<McpInvocationScope, "userId" | "spaceLimit">, shells: ReadonlyArray<A>) {
   const visibility = yield* visibilityOf(scope);
   if (visibility.all) return shells;
   const visible = yield* (yield* spaceVisibilityService).visibleThreadIds(
@@ -48,7 +57,7 @@ export const visibleShells = Effect.fn("mcp.visibleShells")(function* <
 
 /** Whether the caller may see the Project; a hidden one is answered like a missing one. */
 export const seesProjectId = Effect.fn("mcp.seesProjectId")(function* (
-  scope: Pick<McpInvocationScope, "userId">,
+  scope: Pick<McpInvocationScope, "userId" | "spaceLimit">,
   projectId: ProjectId,
 ) {
   const visibility = yield* visibilityOf(scope);

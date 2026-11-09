@@ -18,7 +18,7 @@ import {
 } from "../orchestration-v2/DispatchModeLimit.ts";
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
-import { visibilityOf } from "./mcpVisibility.ts";
+import { CallerVisibility, visibilityOf } from "./mcpVisibility.ts";
 import { resolveInteractionMode, resolveRuntimeMode } from "./delegatedTaskModes.ts";
 import {
   assertFullAccess,
@@ -45,7 +45,10 @@ const asCaller = <Handler>(handle: Handler): Handler =>
     // @effect-diagnostics-next-line anyUnknownInErrorContext:off unsafeEffectTypeAssertion:off - a handler's own channels pass through unchanged.
     const effect = result as Effect.Effect<unknown>;
     return Effect.flatMap(callerVisibility, (visibility) =>
-      Effect.provideService(effect, SpaceVisibility.RequestVisibility, visibility),
+      effect.pipe(
+        Effect.provideService(SpaceVisibility.RequestVisibility, visibility),
+        Effect.provideService(CallerVisibility, Option.some(visibility)),
+      ),
     );
   }) as Handler;
 
