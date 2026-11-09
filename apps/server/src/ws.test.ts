@@ -3046,6 +3046,29 @@ describe("Space visibility", () => {
               Effect.flip,
             );
           assert.include(created.message, "works only in the Space of the machine");
+          // Every Space action passes the same check: none on another Space, no Project move out.
+          const directory = Context.get(server.services, SpaceDirectory.SpaceDirectory);
+          const limited = <A, E>(effect: Effect.Effect<A, E>) =>
+            effect.pipe(
+              Effect.provideService(McpInvocationContext.McpInvocationContext, inAcme),
+              Effect.result,
+              Effect.map(Result.isSuccess),
+            );
+          assert.isFalse(
+            yield* limited(directory.authorize(ownerId, "space.view", SpaceId.make(globex))),
+          );
+          assert.isTrue(
+            yield* limited(directory.authorize(ownerId, "space.view", SpaceId.make(acme))),
+          );
+          assert.isFalse(
+            yield* limited(
+              server.projects.move({
+                commandId: CommandId.make("limited-move"),
+                projectId: ProjectId.make("acme-app"),
+                spaceId: SpaceId.make(globex),
+              }),
+            ),
+          );
           // Within Acme it keeps the Owner's rights: it works Acme's Projects.
           const spaceVisibility = Context.get(server.services, SpaceVisibility.SpaceVisibility);
           const workable = yield* spaceVisibility.workableProjectIds(
@@ -4219,7 +4242,7 @@ describe("Space visibility", () => {
     );
 
     it.effect("an asset URL serves only Hub files from folders the User may read", () =>
-      withTeam(({ server, owner, grace, ada, gus }) =>
+      withTeam(({ server, owner, acme, grace, ada, gus }) =>
         Effect.gen(function* () {
           const asset = (client: Client, resource: Record<string, unknown>) =>
             outcome(client[WS_METHODS.assetsCreateUrl]({ resource } as never));
@@ -4282,6 +4305,54 @@ describe("Space visibility", () => {
           );
           assert.equal(
             yield* asset(asGrace, { _tag: "project-favicon", cwd: "/work/acme-app" }),
+            "AssetWorkspaceContextNotFoundError",
+          );
+          // Nor an icon inside a Project that links out of it; a name merely holding ".." is fine.
+          const fs = yield* FileSystem.FileSystem;
+          const nodePath = yield* Path.Path;
+          const iconRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-icon-project-" });
+          const outsideRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-icon-outside-" });
+          yield* fs.writeFileString(nodePath.join(outsideRoot, "secret.png"), "secret");
+          yield* fs.makeDirectory(nodePath.join(iconRoot, "linked"));
+          yield* fs.makeDirectory(nodePath.join(iconRoot, "plain"));
+          yield* fs.symlink(
+            nodePath.join(outsideRoot, "secret.png"),
+            nodePath.join(iconRoot, "linked", "icon.png"),
+          );
+          yield* fs.writeFileString(nodePath.join(iconRoot, "plain", "logo..png"), "logo");
+          const iconProject = (faviconPath: string, id: string) =>
+            Effect.gen(function* () {
+              yield* server.request("/api/projects/mutate", {
+                cookie: owner,
+                body: {
+                  type: "project.create",
+                  commandId: `icon-create-${id}`,
+                  projectId: `icon-${id}`,
+                  title: id,
+                  workspaceRoot: nodePath.join(iconRoot, id),
+                  createWorkspaceRootIfMissing: true,
+                  spaceId: acme,
+                },
+              });
+              yield* server.request("/api/projects/mutate", {
+                cookie: owner,
+                body: {
+                  type: "project.update",
+                  commandId: `icon-set-${id}`,
+                  projectId: `icon-${id}`,
+                  faviconPath,
+                },
+              });
+              return nodePath.join(iconRoot, id);
+            });
+          const linked = yield* iconProject("icon.png", "linked");
+          const plain = yield* iconProject("logo..png", "plain");
+          assert.equal(
+            yield* asset(asGrace, { _tag: "project-favicon", cwd: linked }),
+            "AssetWorkspaceContextNotFoundError",
+          );
+          assert.notEqual(
+            yield* asset(asGrace, { _tag: "project-favicon", cwd: plain }),
             "AssetWorkspaceContextNotFoundError",
           );
         }),

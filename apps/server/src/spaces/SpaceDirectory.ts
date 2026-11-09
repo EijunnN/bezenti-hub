@@ -191,6 +191,28 @@ export class SpaceNotFoundError extends Schema.TaggedError<SpaceNotFoundError>()
   }
 }
 
+/**
+ * The Spaces an action on `resource` concerns; one with no Space (the Installation, a User)
+ * concerns one no Space-limited agent has, `"installation"`.
+ */
+const spacesOf = (resource: AccessPolicy.Resource): ReadonlyArray<string> => {
+  switch (resource.kind) {
+    case "organization":
+    case "personal":
+      return [resource.id];
+    case "thread":
+    case "project":
+    case "membership":
+      return [resource.space.id];
+    case "move":
+      return [resource.from.id, resource.to.id];
+    case "environment":
+      return resource.space === undefined ? [] : [resource.space.id];
+    default:
+      return ["installation"];
+  }
+};
+
 const isAccessDenied = Schema.is(SpaceAccessDeniedError);
 const isNotFound = Schema.is(SpaceNotFoundError);
 
@@ -826,16 +848,22 @@ const make = Effect.gen(function* () {
       .map((row) => row.spaceId);
   });
 
+  // Every action the policy decides passes here, so an agent bound to one Space's machine
+  // (`CommandActor.spaceLimit`) acts in no other Space and on nothing Installation-wide.
   const requireAllowed = (
     principal: AccessPolicy.Principal,
     action: AccessPolicy.Action,
     resource: AccessPolicy.Resource,
-  ) => {
-    const decision = AccessPolicy.decide(principal, action, resource);
-    return decision._tag === "Allow"
-      ? Effect.void
-      : Effect.fail(new SpaceAccessDeniedError({ action, reason: decision.reason }));
-  };
+  ) =>
+    Effect.flatMap(CommandActor.spaceLimit, (limit) => {
+      if (limit !== undefined && !spacesOf(resource).every((spaceId) => spaceId === limit)) {
+        return Effect.fail(new SpaceAccessDeniedError({ action, reason: "space-limited" }));
+      }
+      const decision = AccessPolicy.decide(principal, action, resource);
+      return decision._tag === "Allow"
+        ? Effect.void
+        : Effect.fail(new SpaceAccessDeniedError({ action, reason: decision.reason }));
+    });
 
   const listUsers = Effect.fn("SpaceDirectory.listUsers")(function* (actorUserId: UserId) {
     const principal = yield* principalOf(actorUserId);
@@ -1017,11 +1045,6 @@ const make = Effect.gen(function* () {
         (legacyOwner === undefined ? undefined : personalSpaceIdOf(legacyOwner));
     }
     spaceId ??= claim.spaceId ?? personalSpaceIdOf(actor);
-    // An agent bound to one Space's machine creates nothing elsewhere.
-    const limit = yield* CommandActor.spaceLimit;
-    if (limit !== undefined && spaceId !== limit) {
-      return yield* new SpaceAccessDeniedError({ action: claim.action, reason: "space-limited" });
-    }
     const [space, principal] = yield* Effect.all(
       [findSpace(spaceId).pipe(Effect.mapError(storageError)), principalOf(actor)],
       { concurrency: "unbounded" },
