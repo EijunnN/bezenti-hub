@@ -83,6 +83,18 @@ const hubWorktree = (sql: SqlClient.SqlClient, alias: string) =>
       = ${HUB_MACHINE_ENVIRONMENT_ID}
     THEN json_extract(${sql.literal(alias)}.payload_json, '$.worktreePath') END`;
 
+/** Whether another User's Thread recorded the worktree of the Thread aliased `alias` before it. */
+const claimedEarlier = (sql: SqlClient.SqlClient, alias: string) =>
+  sql`EXISTS (SELECT 1 FROM orchestration_v2_projection_threads earlier
+    WHERE earlier.thread_id <> ${sql.literal(alias)}.thread_id
+      AND json_extract(earlier.payload_json, '$.worktreePath')
+        = json_extract(${sql.literal(alias)}.payload_json, '$.worktreePath')
+      AND earlier.owner_user_id IS NOT NULL
+      AND earlier.owner_user_id <> COALESCE(${sql.literal(alias)}.owner_user_id, '')
+      AND (earlier.created_at < ${sql.literal(alias)}.created_at
+        OR (earlier.created_at = ${sql.literal(alias)}.created_at
+          AND earlier.thread_id < ${sql.literal(alias)}.thread_id)))`;
+
 /** Whether the Project aliased `alias` was created by the Owner, or before Users existed. */
 const byOwner = (sql: SqlClient.SqlClient, alias: string) =>
   sql`(${sql.literal(alias)}.owner_user_id IS NULL OR ${sql.literal(alias)}.owner_user_id IN
@@ -96,6 +108,8 @@ interface RootRow {
   readonly byOwner: number;
   /** A Thread's worktree, rather than a Project's root. */
   readonly worktree: number;
+  /** Another User's Thread recorded the same folder first. */
+  readonly claimedEarlier: number;
 }
 
 export class SpaceVisibility extends Context.Service<
@@ -265,7 +279,18 @@ const make = Effect.gen(function* () {
         row.root,
         hub === undefined ? undefined : [hub.data, hub.projects, hub.scratch],
       );
-      if (Option.isSome(own) && (yield* within([own.value], directory))) return true;
+      if (Option.isNone(own)) continue;
+      // In the Scratch folder a Thread gets only one folder right in it, and only if no other
+      // User's Thread recorded that folder first; never the Scratch folder itself.
+      const realOwn = yield* DirectoryRoots.realOf(directories, own.value);
+      if (hub !== undefined && realOwn === hub.scratch) continue;
+      if (
+        (yield* DirectoryRoots.isScratchRoot(directories, row.projectRoot, hub)) &&
+        (hub === undefined || path.dirname(realOwn) !== hub.scratch || row.claimedEarlier === 1)
+      ) {
+        continue;
+      }
+      if (yield* within([own.value], directory)) return true;
     }
     return false;
   });
@@ -495,7 +520,7 @@ const make = Effect.gen(function* () {
     const rows = yield* sql<RootRow>`
       SELECT COALESCE(${hubWorktree(sql, "t")}, p.workspace_root) AS root,
         p.workspace_root AS "projectRoot", ${byOwner(sql, "p")} AS "byOwner",
-        ${hubWorktree(sql, "t")} IS NOT NULL AS worktree
+        ${hubWorktree(sql, "t")} IS NOT NULL AS worktree, ${claimedEarlier(sql, "t")} AS "claimedEarlier"
       FROM orchestration_v2_projection_threads t
       JOIN projection_projects p ON p.project_id = t.project_id
       WHERE (${userId ?? null} IS NULL OR t.owner_user_id = ${userId ?? null})
@@ -503,7 +528,7 @@ const make = Effect.gen(function* () {
         AND ${threadInSpaces(sql, "t", visibility.spaceIds)}
       UNION
       SELECT workspace_root AS root, workspace_root AS "projectRoot",
-        ${byOwner(sql, "projection_projects")} AS "byOwner", 0 AS worktree
+        ${byOwner(sql, "projection_projects")} AS "byOwner", 0 AS worktree, 0 AS "claimedEarlier"
       FROM projection_projects
       WHERE deleted_at IS NULL
         AND space_id IN (SELECT value FROM json_each(${encodeIds(writable)}))
@@ -518,13 +543,13 @@ const make = Effect.gen(function* () {
     if (visibility.all) return true;
     const rows = yield* sql<RootRow>`
       SELECT ${hubWorktree(sql, "t")} AS root, p.workspace_root AS "projectRoot",
-        ${byOwner(sql, "p")} AS "byOwner", 1 AS worktree
+        ${byOwner(sql, "p")} AS "byOwner", 1 AS worktree, ${claimedEarlier(sql, "t")} AS "claimedEarlier"
       FROM orchestration_v2_projection_threads t
       JOIN projection_projects p ON p.project_id = t.project_id
       WHERE t.deleted_at IS NULL AND ${threadInSpaces(sql, "t", visibility.spaceIds)}
       UNION
       SELECT workspace_root AS root, workspace_root AS "projectRoot",
-        ${byOwner(sql, "projection_projects")} AS "byOwner", 0 AS worktree
+        ${byOwner(sql, "projection_projects")} AS "byOwner", 0 AS worktree, 0 AS "claimedEarlier"
       FROM projection_projects
       WHERE deleted_at IS NULL
         AND space_id IN (SELECT value FROM json_each(${encodeIds(visibility.spaceIds)}))

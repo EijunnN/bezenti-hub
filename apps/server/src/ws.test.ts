@@ -2717,6 +2717,113 @@ describe("Space visibility", () => {
     );
 
     it.effect(
+      "a Member's Scratch Thread takes only a folder of its own, never the Scratch folder or another User's",
+      () =>
+        withTeam(({ server, owner, grace, ada }) =>
+          Effect.gen(function* () {
+            const path = yield* Path.Path;
+            const fs = yield* FileSystem.FileSystem;
+            const config = Context.get(server.services, ServerConfigModule.ServerConfig);
+            const scratch = path.resolve(config.baseDir, "scratch");
+            const adaFolder = `${scratch}/2026-11-09-ada`;
+            const graceFolder = `${scratch}/2026-11-09-grace`;
+            yield* fs.makeDirectory(adaFolder, { recursive: true });
+            yield* fs.makeDirectory(graceFolder, { recursive: true });
+            for (const userId of [grace.userId, ada.userId]) {
+              const granted = yield* server.request(
+                `/api/installation/users/${userId}/permissions`,
+                { cookie: owner, body: { permission: "personalSpace.create", granted: true } },
+              );
+              assert.equal(granted.status, 200);
+            }
+            yield* server.sql`
+              INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json,
+                created_at, updated_at, space_id, owner_user_id)
+              VALUES ('scratch', 'No project', ${scratch}, '[]', '2026-01-01T00:00:00.000Z',
+                '2026-01-01T00:00:00.000Z', ${`personal:${grace.userId}`}, ${grace.userId})
+            `;
+            yield* server.eventSink.write({
+              events: [
+                threadCreated({
+                  id: "ada-scratch",
+                  projectId: "scratch",
+                  spaceId: `personal:${ada.userId}`,
+                  ownerUserId: ada.userId,
+                  worktreePath: adaFolder,
+                }),
+                threadCreated({
+                  id: "grace-scratch",
+                  projectId: "scratch",
+                  spaceId: `personal:${grace.userId}`,
+                  ownerUserId: grace.userId,
+                  worktreePath: graceFolder,
+                }),
+              ],
+            });
+            const services = yield* Layer.build(layerOrchestration(server));
+            const orchestrator = Context.get(services, Orchestrator.OrchestratorV2);
+            let sentCommands = 0;
+            const setFolder = (worktreePath: string) =>
+              orchestrator
+                .dispatch({
+                  type: "thread.metadata.update",
+                  commandId: CommandId.make(`scratch-folder-${(sentCommands += 1)}`),
+                  threadId: ThreadId.make("grace-scratch"),
+                  worktreePath,
+                } as never)
+                .pipe(
+                  CommandActor.actAs(grace.userId),
+                  Effect.result,
+                  Effect.map((result) =>
+                    Result.isSuccess(result)
+                      ? "set"
+                      : (SpaceDirectory.spaceRefusalMessage(result.failure) ?? "failed"),
+                  ),
+                );
+            // Writing: not the Scratch folder, not Ada's folder, not a folder inside hers.
+            assert.equal(yield* setFolder(scratch), THREAD_WORKTREE_REFUSED);
+            assert.equal(yield* setFolder(adaFolder), THREAD_WORKTREE_REFUSED);
+            assert.equal(yield* setFolder(`${adaFolder}/src`), THREAD_WORKTREE_REFUSED);
+            // Her own folder, or a new one of her own, still works.
+            assert.equal(yield* setFolder(`${scratch}/2026-11-09-grace-2`), "set");
+            assert.equal(yield* setFolder(graceFolder), "set");
+            // Reading: rows recorded anyway (before the rule, by a move) open nothing of Ada's.
+            yield* server.eventSink.write({
+              events: [
+                threadCreated({
+                  id: "grace-whole-scratch",
+                  projectId: "scratch",
+                  spaceId: `personal:${grace.userId}`,
+                  ownerUserId: grace.userId,
+                  worktreePath: scratch,
+                }),
+                threadCreated({
+                  id: "grace-takes-ada",
+                  projectId: "scratch",
+                  spaceId: `personal:${grace.userId}`,
+                  ownerUserId: grace.userId,
+                  worktreePath: adaFolder,
+                }),
+              ],
+            });
+            const spaceVisibility = Context.get(server.services, SpaceVisibility.SpaceVisibility);
+            const graceSees = yield* spaceVisibility.of(grace.userId);
+            assert.isFalse(yield* spaceVisibility.mayReadDirectory(graceSees, adaFolder));
+            assert.isFalse(
+              yield* spaceVisibility.mayUseDirectory(graceSees, grace.userId, `${adaFolder}/x`),
+            );
+            assert.isFalse(yield* spaceVisibility.mayReadDirectory(graceSees, scratch));
+            assert.isTrue(yield* spaceVisibility.mayReadDirectory(graceSees, graceFolder));
+            // Ada keeps her own folder.
+            const adaSees = yield* spaceVisibility.of(ada.userId);
+            assert.isTrue(
+              yield* spaceVisibility.mayUseDirectory(adaSees, ada.userId, `${adaFolder}/x`),
+            );
+          }),
+        ),
+    );
+
+    it.effect(
       "a Space-limited agent of an ownerless Thread keeps to its Space's folders, and a Hub Thread with no folder is refused",
       () =>
         withTeam(({ server, acme, grace }) =>

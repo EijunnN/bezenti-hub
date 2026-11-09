@@ -87,6 +87,19 @@ const make = Effect.gen(function* () {
     const snapshot = yield* Effect.flatten(
       threads.readShellSnapshot({ worktreePath: folder }),
     ).pipe(Effect.mapError(fail("Could not read the threads in this folder.")));
+    // A Scratch folder is one User's: one another User's Thread also records is no Thread's own
+    // to make a Project of.
+    if (
+      [...snapshot.threads, ...snapshot.archivedThreads].some(
+        // A child the server made carries no owner of its own and follows its root.
+        (candidate) =>
+          candidate.ownerUserId !== undefined && candidate.ownerUserId !== thread.ownerUserId,
+      )
+    ) {
+      return yield* new ScratchThreadPromotionError({
+        reason: "Only a No project thread with its own folder can become a project.",
+      });
+    }
     const moveSet = new Map<ThreadId, OrchestrationV2ThreadShell>();
     if (isScratch) moveSet.set(thread.id, thread);
     for (const candidate of [...snapshot.threads, ...snapshot.archivedThreads]) {

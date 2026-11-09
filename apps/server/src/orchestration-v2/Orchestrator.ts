@@ -93,6 +93,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
@@ -199,6 +200,7 @@ import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import { threadAccessOf } from "./commandAccess.ts";
 import * as DirectoryRoots from "../spaces/directoryRoots.ts";
 import * as ServerConfig from "../config.ts";
+import { scratchRootOf } from "../environment/ScratchWorkspace.ts";
 
 const isMessageQuestionAnswer = Schema.is(
   Schema.Union([TrimmedNonEmptyString, Schema.NonEmptyArray(TrimmedNonEmptyString)]),
@@ -1073,6 +1075,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   // The server provides it; orchestrator tests without Spaces leave every command unchecked.
   const spaces = yield* Effect.serviceOption(SpaceDirectory.SpaceDirectory);
   const serverConfig = yield* Effect.serviceOption(ServerConfig.ServerConfig);
+  const sqlClient = yield* Effect.serviceOption(SqlClient.SqlClient);
   const nextTurnItemOrdinal = (
     projection: Pick<OrchestrationV2ThreadProjection, "thread"> &
       Partial<Pick<OrchestrationV2ThreadProjection, "turnItems">>,
@@ -13365,12 +13368,47 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           Option.getOrUndefined(folders),
         ),
       );
-    if (!allowed) {
+    // The Scratch Project holds every User's Scratch Threads: a Thread there takes one folder
+    // right in the Scratch folder that no other User's Thread records, never the whole folder.
+    const scratchClaimed =
+      allowed &&
+      Option.isSome(project) &&
+      Option.isSome(serverConfig) &&
+      (yield* isScratchClaimRefused(
+        serverConfig.value.baseDir,
+        project.value.workspaceRoot,
+        worktreePath,
+        command.threadId,
+        actor,
+      ));
+    if (!allowed || scratchClaimed) {
       return yield* new SpaceDirectory.SpaceAccessDeniedError({
         action: "thread.continue",
         reason: "worktree-not-allowed",
       });
     }
+  });
+
+  const isScratchClaimRefused = Effect.fn("orchestrationV2.isScratchClaimRefused")(function* (
+    baseDir: string,
+    projectRoot: string,
+    worktreePath: string,
+    threadId: ThreadId,
+    actor: UserId,
+  ) {
+    const directories = { path, fileSystem: Option.some(fileSystem) };
+    const scratch = yield* DirectoryRoots.realOf(directories, scratchRootOf(path, baseDir));
+    if ((yield* DirectoryRoots.realOf(directories, projectRoot)) !== scratch) return false;
+    const folder = yield* DirectoryRoots.realOf(directories, worktreePath);
+    if (path.dirname(folder) !== scratch) return true;
+    if (Option.isNone(sqlClient)) return true;
+    const others = yield* sqlClient.value<{ readonly count: number }>`
+      SELECT COUNT(*) AS count FROM orchestration_v2_projection_threads
+      WHERE thread_id <> ${threadId}
+        AND json_extract(payload_json, '$.worktreePath') IN (${worktreePath}, ${folder})
+        AND owner_user_id IS NOT NULL AND owner_user_id <> ${actor}
+    `.pipe(Effect.orElseSucceed(() => [{ count: 1 }]));
+    return (others[0]?.count ?? 1) > 0;
   });
 
   /** `sideChatIds` are the live side chats a `thread.delete` cascades to, read under their locks. */
