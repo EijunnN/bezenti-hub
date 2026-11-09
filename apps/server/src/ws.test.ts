@@ -2784,6 +2784,19 @@ describe("Space visibility", () => {
             assert.equal(yield* setFolder(scratch), THREAD_WORKTREE_REFUSED);
             assert.equal(yield* setFolder(adaFolder), THREAD_WORKTREE_REFUSED);
             assert.equal(yield* setFolder(`${adaFolder}/src`), THREAD_WORKTREE_REFUSED);
+            // Nor the folder of a Thread from before Users, which is the Owner's.
+            const legacyFolder = `${scratch}/2026-11-09-legacy`;
+            yield* server.eventSink.write({
+              events: [
+                threadCreated({
+                  id: "legacy-scratch",
+                  projectId: "scratch",
+                  spaceId: `personal:${grace.userId}`,
+                  worktreePath: legacyFolder,
+                }),
+              ],
+            });
+            assert.equal(yield* setFolder(legacyFolder), THREAD_WORKTREE_REFUSED);
             // Her own folder, or a new one of her own, still works.
             assert.equal(yield* setFolder(`${scratch}/2026-11-09-grace-2`), "set");
             assert.equal(yield* setFolder(graceFolder), "set");

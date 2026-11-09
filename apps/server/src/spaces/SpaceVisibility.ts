@@ -83,14 +83,23 @@ const hubWorktree = (sql: SqlClient.SqlClient, alias: string) =>
       = ${HUB_MACHINE_ENVIRONMENT_ID}
     THEN json_extract(${sql.literal(alias)}.payload_json, '$.worktreePath') END`;
 
+/**
+ * Whose the Thread aliased `alias` is: its own owner, else its root's (a child the server made),
+ * else the Owner's (from before Users).
+ */
+export const effectiveOwner = (sql: SqlClient.SqlClient, alias: string) =>
+  sql`COALESCE(${sql.literal(alias)}.owner_user_id,
+    (SELECT root_owner.owner_user_id FROM orchestration_v2_projection_threads root_owner
+      WHERE root_owner.thread_id = json_extract(${sql.literal(alias)}.payload_json, '$.lineage.rootThreadId')),
+    (SELECT user_id FROM users WHERE is_owner = 1), '')`;
+
 /** Whether another User's Thread recorded the worktree of the Thread aliased `alias` before it. */
 const claimedEarlier = (sql: SqlClient.SqlClient, alias: string) =>
   sql`EXISTS (SELECT 1 FROM orchestration_v2_projection_threads earlier
     WHERE earlier.thread_id <> ${sql.literal(alias)}.thread_id
       AND json_extract(earlier.payload_json, '$.worktreePath')
         = json_extract(${sql.literal(alias)}.payload_json, '$.worktreePath')
-      AND earlier.owner_user_id IS NOT NULL
-      AND earlier.owner_user_id <> COALESCE(${sql.literal(alias)}.owner_user_id, '')
+      AND ${effectiveOwner(sql, "earlier")} <> ${effectiveOwner(sql, alias)}
       AND (earlier.created_at < ${sql.literal(alias)}.created_at
         OR (earlier.created_at = ${sql.literal(alias)}.created_at
           AND earlier.thread_id < ${sql.literal(alias)}.thread_id)))`;

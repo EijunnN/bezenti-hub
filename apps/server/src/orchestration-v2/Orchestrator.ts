@@ -201,6 +201,7 @@ import { threadAccessOf } from "./commandAccess.ts";
 import * as DirectoryRoots from "../spaces/directoryRoots.ts";
 import * as ServerConfig from "../config.ts";
 import { scratchRootOf } from "../environment/ScratchWorkspace.ts";
+import { effectiveOwner } from "../spaces/SpaceVisibility.ts";
 
 const isMessageQuestionAnswer = Schema.is(
   Schema.Union([TrimmedNonEmptyString, Schema.NonEmptyArray(TrimmedNonEmptyString)]),
@@ -13402,11 +13403,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const folder = yield* DirectoryRoots.realOf(directories, worktreePath);
     if (path.dirname(folder) !== scratch) return true;
     if (Option.isNone(sqlClient)) return true;
-    const others = yield* sqlClient.value<{ readonly count: number }>`
-      SELECT COUNT(*) AS count FROM orchestration_v2_projection_threads
-      WHERE thread_id <> ${threadId}
-        AND json_extract(payload_json, '$.worktreePath') IN (${worktreePath}, ${folder})
-        AND owner_user_id IS NOT NULL AND owner_user_id <> ${actor}
+    const sql = sqlClient.value;
+    const others = yield* sql<{ readonly count: number }>`
+      SELECT COUNT(*) AS count FROM orchestration_v2_projection_threads other
+      WHERE other.thread_id <> ${threadId}
+        AND json_extract(other.payload_json, '$.worktreePath') IN (${worktreePath}, ${folder})
+        AND ${effectiveOwner(sql, "other")} <> ${actor}
     `.pipe(Effect.orElseSucceed(() => [{ count: 1 }]));
     return (others[0]?.count ?? 1) > 0;
   });
