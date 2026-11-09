@@ -2465,6 +2465,18 @@ describe("Space visibility", () => {
             });
             assert.notEqual(moved.status, 200);
             assert.include(messageOf(moved.body), PROJECT_FOLDER_CHANGE_REFUSED);
+            // The same folder spelled another way is no move.
+            const respelled = yield* server.request("/api/projects/mutate", {
+              cookie: grace.cookie,
+              body: {
+                type: "project.update",
+                commandId: "roots-respell-grace",
+                projectId: `roots-project-${created - 1}`,
+                workspaceRoot: `${path.join(projects, "grace-new")}/`,
+                title: "renamed",
+              },
+            });
+            assert.equal(respelled.status, 200, messageOf(respelled.body));
             // Refused before the folder is looked at: a missing one answers the same.
             const toMissing = yield* server.request("/api/projects/mutate", {
               cookie: grace.cookie,
@@ -2634,6 +2646,157 @@ describe("Space visibility", () => {
           const graceSees = yield* spaceVisibility.of(grace.userId);
           assert.isFalse(yield* spaceVisibility.mayReadDirectory(graceSees, "/etc"));
           assert.isFalse(yield* spaceVisibility.mayUseDirectory(graceSees, grace.userId, "/etc"));
+        }),
+      ),
+    );
+
+    it.effect(
+      "Scratch Threads keep their folders, whoever made the Scratch Project, but not the whole Scratch folder",
+      () =>
+        withTeam(({ server, owner, grace, ada }) =>
+          Effect.gen(function* () {
+            const path = yield* Path.Path;
+            const config = Context.get(server.services, ServerConfigModule.ServerConfig);
+            const scratch = path.resolve(config.baseDir, "scratch");
+            const grant = (userId: string) =>
+              server.request(`/api/installation/users/${userId}/permissions`, {
+                cookie: owner,
+                body: { permission: "personalSpace.create", granted: true },
+              });
+            assert.equal((yield* grant(grace.userId)).status, 200);
+            assert.equal((yield* grant(ada.userId)).status, 200);
+            // Grace was the first to ask for Scratch, so the Scratch Project is stamped hers.
+            yield* server.sql`
+              INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json,
+                created_at, updated_at, space_id, owner_user_id)
+              VALUES ('scratch', 'No project', ${scratch}, '[]', '2026-01-01T00:00:00.000Z',
+                '2026-01-01T00:00:00.000Z', ${`personal:${grace.userId}`}, ${grace.userId})
+            `;
+            yield* server.eventSink.write({
+              events: [
+                threadCreated({
+                  id: "ada-scratch",
+                  projectId: "scratch",
+                  spaceId: `personal:${ada.userId}`,
+                  ownerUserId: ada.userId,
+                  worktreePath: `${scratch}/2026-11-09-ada`,
+                }),
+              ],
+            });
+            const spaceVisibility = Context.get(server.services, SpaceVisibility.SpaceVisibility);
+            const adaSees = yield* spaceVisibility.of(ada.userId);
+            assert.isTrue(
+              yield* spaceVisibility.mayReadDirectory(adaSees, `${scratch}/2026-11-09-ada/notes`),
+            );
+            assert.isTrue(
+              yield* spaceVisibility.mayUseDirectory(
+                adaSees,
+                ada.userId,
+                `${scratch}/2026-11-09-ada`,
+              ),
+            );
+            // Grace sees the Scratch Project's Space, but not Ada's Scratch folder through it.
+            const graceSees = yield* spaceVisibility.of(grace.userId);
+            assert.isFalse(
+              yield* spaceVisibility.mayReadDirectory(graceSees, `${scratch}/2026-11-09-ada`),
+            );
+            // A file call on Ada's Scratch Thread reaches the file services.
+            const asAda = yield* connect(server, ada.userId);
+            const read = yield* asAda[WS_METHODS.projectsReadFile]({
+              threadId: "ada-scratch",
+              cwd: `${scratch}/2026-11-09-ada`,
+              relativePath: "notes.md",
+            } as never).pipe(
+              Effect.flip,
+              Effect.map((error) => (error as { readonly _tag: string })._tag),
+              Effect.catchCause(() => Effect.succeed("reached")),
+            );
+            assert.notEqual(read, "SpaceResourceNotFoundError");
+          }),
+        ),
+    );
+
+    it.effect(
+      "a Space-limited agent of an ownerless Thread keeps to its Space's folders, and a Hub Thread with no folder is refused",
+      () =>
+        withTeam(({ server, acme, grace }) =>
+          Effect.gen(function* () {
+            const spaceVisibility = Context.get(server.services, SpaceVisibility.SpaceVisibility);
+            const acmeOnly = { all: false, spaceIds: [SpaceId.make(acme)] } as const;
+            assert.isFalse(yield* spaceVisibility.mayUseDirectory(acmeOnly, undefined, "/etc"));
+            assert.isTrue(
+              yield* spaceVisibility.mayUseDirectory(acmeOnly, undefined, "/work/acme-app/src"),
+            );
+            assert.isFalse(
+              yield* spaceVisibility.mayRootProject(acmeOnly, undefined, "/srv/anywhere", [
+                "/srv/projects",
+              ]),
+            );
+            assert.equal(
+              yield* spaceVisibility.claimWork(acmeOnly, undefined, "globex-thread"),
+              "hidden",
+            );
+            // A Hub Thread whose Project row is gone has no folder to check: refused.
+            yield* server.eventSink.write({
+              events: [
+                threadCreated({
+                  id: "grace-orphan",
+                  projectId: "no-such-project",
+                  spaceId: acme,
+                  ownerUserId: grace.userId,
+                }),
+              ],
+            });
+            yield* server.sql`
+              UPDATE orchestration_v2_projection_threads
+              SET payload_json = json_set(payload_json, '$.worktreePath', NULL)
+              WHERE thread_id = 'grace-orphan'
+            `;
+            const asGrace = yield* connect(server, grace.userId);
+            const read = yield* asGrace[WS_METHODS.projectsReadFile]({
+              threadId: "grace-orphan",
+              cwd: "/work/acme-app",
+              relativePath: "README.md",
+            } as never).pipe(
+              Effect.flip,
+              Effect.map((error) => (error as { readonly _tag: string })._tag),
+              Effect.catchCause(() => Effect.succeed("reached")),
+            );
+            assert.equal(read, "SpaceResourceNotFoundError");
+          }),
+        ),
+    );
+
+    it.effect("a Member's Thread folder inside the Project needs no more of the Hub's setup", () =>
+      withTeam(({ server, acme, grace }) =>
+        Effect.gen(function* () {
+          yield* server.eventSink.write({
+            events: [
+              threadCreated({
+                id: "grace-inside",
+                projectId: "acme-app",
+                spaceId: acme,
+                ownerUserId: grace.userId,
+              }),
+            ],
+          });
+          // The orchestration without the Hub's config (as in a test of it, or a slim host).
+          const services = yield* Layer.build(
+            layerOrchestration({
+              ...server,
+              services: Context.omit(ServerConfigModule.ServerConfig)(server.services) as never,
+            }),
+          );
+          const orchestrator = Context.get(services, Orchestrator.OrchestratorV2);
+          const set = yield* orchestrator
+            .dispatch({
+              type: "thread.metadata.update",
+              commandId: CommandId.make("inside-no-config"),
+              threadId: ThreadId.make("grace-inside"),
+              worktreePath: "/work/acme-app/packages/x",
+            } as never)
+            .pipe(CommandActor.actAs(grace.userId), Effect.result);
+          assert.isTrue(Result.isSuccess(set));
         }),
       ),
     );

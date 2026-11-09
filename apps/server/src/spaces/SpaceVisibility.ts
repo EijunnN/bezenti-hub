@@ -73,7 +73,6 @@ export const threadInSpaces = (
         WHERE visible_project.project_id = ${sql.literal(alias)}.project_id
       )) IN (SELECT value FROM json_each(${encodeIds(spaceIds)}))`;
 
-/** A recorded folder that may serve as a root, with what today's rule needs to trust it. */
 /** A Thread's recorded worktree, when it runs on the Hub machine (or names no machine). */
 const hubWorktree = (sql: SqlClient.SqlClient, alias: string) =>
   sql`CASE WHEN COALESCE(${sql.literal(alias)}.active_environment_id, ${HUB_MACHINE_ENVIRONMENT_ID})
@@ -85,6 +84,7 @@ const byOwner = (sql: SqlClient.SqlClient, alias: string) =>
   sql`(${sql.literal(alias)}.owner_user_id IS NULL OR ${sql.literal(alias)}.owner_user_id IN
     (SELECT user_id FROM users WHERE is_owner = 1))`;
 
+/** A recorded folder that may serve as a root, with what today's rule needs to trust it. */
 interface RootRow {
   readonly root: string | null;
   readonly projectRoot: string | null;
@@ -174,13 +174,9 @@ export class SpaceVisibility extends Context.Service<
       directory: string,
     ) => Effect.Effect<boolean>;
     /**
-     * Whether the User may create `directory` (a clone's checkout): where `mayUseDirectory` lets
-     * them work, or as a new folder right in one of `sharedRoots` (the Hub's Projects folder) that
-     * no Project holds. Its parent must resolve where it is named. Ask again just before writing.
-     */
-    /**
-     * Whether the User may root a new Project at `directory`: the Owner anywhere, anyone else only
-     * in a new folder right in one of `sharedRoots` that no Project holds (`ProjectService`'s rule).
+     * Whether the User may root a new Project at `directory`: one who sees everything anywhere,
+     * anyone else (a Space-limited agent included) only in a new folder right in one of
+     * `sharedRoots` that no Project holds (`ProjectService`'s rule).
      */
     readonly mayRootProject: (
       visibility: Visibility,
@@ -188,6 +184,11 @@ export class SpaceVisibility extends Context.Service<
       directory: string,
       sharedRoots: ReadonlyArray<string>,
     ) => Effect.Effect<boolean>;
+    /**
+     * Whether the User may create `directory` (a clone's checkout): where `mayUseDirectory` lets
+     * them work, or as a new folder right in one of `sharedRoots` (the Hub's Projects folder) that
+     * no Project holds. Its parent must resolve where it is named. Ask again just before writing.
+     */
     readonly mayCreateDirectory: (
       visibility: Visibility,
       userId: UserId | undefined,
@@ -216,8 +217,12 @@ const make = Effect.gen(function* () {
     DirectoryRoots.withinRoots(directories, roots, directory);
   const config = yield* Effect.serviceOption(ServerConfig.ServerConfig);
   const baseDir = Option.getOrUndefined(Option.map(config, (found) => found.baseDir));
-  const hubFolders =
-    baseDir === undefined ? [] : Object.values(DirectoryRoots.hubFoldersOf(path, baseDir));
+  // The Hub's own folders as their links lead, resolved once (on first use, as they may not
+  // exist yet when the layer is built).
+  const hubReals =
+    baseDir === undefined
+      ? Effect.succeed(undefined)
+      : yield* Effect.cached(DirectoryRoots.hubFolderReals(directories, baseDir));
 
   // Whether `directory` is inside a recorded root today's rule trusts (`directoryRoots`), so rows
   // from before the rule or another machine's paths count only if they pass. Only roots that
@@ -226,6 +231,7 @@ const make = Effect.gen(function* () {
     rows: ReadonlyArray<RootRow>,
     directory: string,
   ) {
+    const hub = yield* hubReals;
     for (const row of rows) {
       if (row.root === null || row.projectRoot === null) continue;
       if (!(yield* within([row.root], directory))) continue;
@@ -233,15 +239,19 @@ const make = Effect.gen(function* () {
         directories,
         row.projectRoot,
         row.byOwner === 1,
-        baseDir,
+        hub,
       );
       if (!trustedProject) continue;
-      if (row.worktree !== 1) return true;
+      // The Scratch folder holds every User's Scratch Threads: only a Thread's own folder in it.
+      if (row.worktree !== 1) {
+        if (!(yield* DirectoryRoots.isScratchRoot(directories, row.root, hub))) return true;
+        continue;
+      }
       const own = yield* DirectoryRoots.projectWorktreeRoot(
         directories,
         row.projectRoot,
         row.root,
-        hubFolders,
+        hub === undefined ? undefined : [hub.data, hub.projects, hub.scratch],
       );
       if (Option.isSome(own) && (yield* within([own.value], directory))) return true;
     }
@@ -390,7 +400,12 @@ const make = Effect.gen(function* () {
     threadId: string,
     options?: { readonly drafts?: boolean },
   ) {
-    if (userId === undefined) return "allowed" as const;
+    if (userId === undefined) {
+      // No User acts as the Owner, but a limited view (a Space-limited agent) still bounds it.
+      if (visibility.all) return "allowed" as const;
+      const hidden = yield* hiddenThreadIds(visibility, [threadId]);
+      return hidden.has(threadId) ? ("hidden" as const) : ("allowed" as const);
+    }
     const access = yield* workOf(visibility, userId, [threadId], {
       claim: true,
       drafts: options?.drafts ?? true,
@@ -403,7 +418,12 @@ const make = Effect.gen(function* () {
     userId: UserId | undefined,
     threadIds: ReadonlyArray<string>,
   ) {
-    if (userId === undefined || threadIds.length === 0) return new Set(threadIds);
+    if (threadIds.length === 0) return new Set(threadIds);
+    if (userId === undefined) {
+      if (visibility.all) return new Set(threadIds);
+      const hidden = yield* hiddenThreadIds(visibility, threadIds);
+      return new Set(threadIds.filter((threadId) => !hidden.has(threadId)));
+    }
     const access = yield* workOf(visibility, userId, threadIds, { claim: false, drafts: true });
     return new Set(threadIds.filter((threadId) => access.get(threadId) === "allowed"));
   });
@@ -443,15 +463,19 @@ const make = Effect.gen(function* () {
     userId: UserId | undefined,
     directory: string,
   ) {
-    if (userId === undefined || visibility.all) return true;
-    const writable = yield* writableSpaces(visibility, userId);
+    if (visibility.all) return true;
+    // No User but a limited view (a Space-limited agent of a Thread from before owners) acts as
+    // the Owner would, within that view.
+    const writable =
+      userId === undefined ? visibility.spaceIds : yield* writableSpaces(visibility, userId);
     const rows = yield* sql<RootRow>`
       SELECT COALESCE(${hubWorktree(sql, "t")}, p.workspace_root) AS root,
         p.workspace_root AS "projectRoot", ${byOwner(sql, "p")} AS "byOwner",
         ${hubWorktree(sql, "t")} IS NOT NULL AS worktree
       FROM orchestration_v2_projection_threads t
       JOIN projection_projects p ON p.project_id = t.project_id
-      WHERE t.owner_user_id = ${userId} AND t.deleted_at IS NULL
+      WHERE (${userId ?? null} IS NULL OR t.owner_user_id = ${userId ?? null})
+        AND t.deleted_at IS NULL
         AND ${threadInSpaces(sql, "t", visibility.spaceIds)}
       UNION
       SELECT workspace_root AS root, workspace_root AS "projectRoot",
@@ -509,7 +533,7 @@ const make = Effect.gen(function* () {
     directory: string,
     sharedRoots: ReadonlyArray<string>,
   ) {
-    if (userId === undefined || visibility.all) return true;
+    if (visibility.all) return true;
     return yield* DirectoryRoots.isNewFolderIn(directories, sql, directory, sharedRoots);
   });
 
@@ -519,7 +543,7 @@ const make = Effect.gen(function* () {
     directory: string,
     sharedRoots: ReadonlyArray<string>,
   ) {
-    if (userId === undefined || visibility.all) return true;
+    if (visibility.all) return true;
     if (!DirectoryRoots.isPlainAbsolute(path, directory)) return false;
     // Its parent, links resolved, must be where the path names it: a link swapped in on the way
     // would put the checkout elsewhere.

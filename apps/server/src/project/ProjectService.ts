@@ -53,6 +53,7 @@ import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as CommandActor from "../auth/CommandActor.ts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import type * as AuditLog from "../audit/AuditLog.ts";
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
@@ -453,15 +454,32 @@ export const make = Effect.gen(function* () {
   });
 
   /** Whether the User acts for the whole Installation: the Owner, or anyone before one exists. */
+  // An agent bound to one Space's machine never does, whoever its User is.
   const actsForInstallation = (userId: UserId | undefined) =>
-    userId === undefined
-      ? Effect.succeed(true)
-      : spaces.viewableSpaces(userId).pipe(
-          Effect.map((viewable) => viewable === "all"),
-          Effect.mapError(
-            (cause) => new ProjectOperationError({ operation: "check-folder", cause }),
-          ),
-        );
+    Effect.flatMap(CommandActor.spaceLimit, (limit) =>
+      limit !== undefined
+        ? Effect.succeed(false)
+        : userId === undefined
+          ? Effect.succeed(true)
+          : spaces.viewableSpaces(userId).pipe(
+              Effect.map((viewable) => viewable === "all"),
+              Effect.mapError(
+                (cause) => new ProjectOperationError({ operation: "check-folder", cause }),
+              ),
+            ),
+    );
+
+  // The same folder however it is spelled, read without touching the disk.
+  const sameFolder = Effect.fn("ProjectService.sameFolder")(function* (a: string, b: string) {
+    const home = yield* HostProcess.HomeDirectory;
+    const lexical = (candidate: string) =>
+      path.resolve(
+        candidate === "~" || candidate.startsWith("~/")
+          ? path.join(home, candidate.slice(1))
+          : candidate,
+      );
+    return lexical(a) === lexical(b);
+  });
 
   // A Project's root is what the directory checks trust (`SpaceVisibility.mayReadDirectory`):
   // the Owner roots one anywhere; anyone else only in a new folder right in the Hub's Projects
@@ -495,8 +513,10 @@ export const make = Effect.gen(function* () {
       });
       // The folder is checked, made and claimed as one step, so two creates (from different
       // Spaces, say) never both find the same folder new.
+      // Keyed by where the folder leads (its nearest existing parent's real path and the rest), so
+      // two spellings of one folder, or a link to it, wait for each other.
       const workspaceRoot = yield* rootClaims.withLock(
-        path.resolve(input.workspaceRoot),
+        yield* DirectoryRoots.realOf(directories, path.resolve(input.workspaceRoot)),
         Effect.gen(function* () {
           if (input.workspaceRootFromHub !== true) {
             yield* requireProjectRoot(actorUserId, input.workspaceRoot);
@@ -582,11 +602,7 @@ export const make = Effect.gen(function* () {
       // An icon outside the Project's folder is served from wherever it names: the Owner's call.
       if (
         input.faviconPath != null &&
-        (input.faviconPath.startsWith("/") ||
-          input.faviconPath.startsWith("\\") ||
-          /^[a-zA-Z]:/u.test(input.faviconPath) ||
-          input.faviconPath.startsWith("~") ||
-          input.faviconPath.split(/[\\/]/u).includes("..")) &&
+        DirectoryRoots.leavesFolder(input.faviconPath) &&
         !(yield* actsForInstallation(Option.getOrUndefined(yield* spaces.actingUser)))
       ) {
         return yield* new SpaceDirectory.SpaceAccessDeniedError({
@@ -598,7 +614,7 @@ export const make = Effect.gen(function* () {
       // Before the folder is looked at, so the refusal says nothing about what exists on disk.
       if (
         input.workspaceRoot !== undefined &&
-        input.workspaceRoot !== previousRoot &&
+        !(yield* sameFolder(input.workspaceRoot, previousRoot)) &&
         !(yield* actsForInstallation(Option.getOrUndefined(yield* spaces.actingUser)))
       ) {
         return yield* new SpaceDirectory.SpaceAccessDeniedError({

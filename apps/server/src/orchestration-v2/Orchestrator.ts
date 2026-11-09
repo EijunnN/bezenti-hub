@@ -13353,15 +13353,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const folders = Option.map(serverConfig, (config) =>
       Object.values(DirectoryRoots.hubFoldersOf(path, config.baseDir)),
     );
+    // A folder inside the Project needs nothing else; a linked worktree also needs the Hub's own
+    // folders, without which it is refused.
     const allowed =
       Option.isSome(project) &&
-      Option.isSome(folders) &&
       Option.isSome(
         yield* DirectoryRoots.projectWorktreeRoot(
           { path, fileSystem: Option.some(fileSystem) },
           project.value.workspaceRoot,
           worktreePath,
-          folders.value,
+          Option.getOrUndefined(folders),
         ),
       );
     if (!allowed) {

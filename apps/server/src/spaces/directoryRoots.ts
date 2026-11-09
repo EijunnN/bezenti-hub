@@ -121,26 +121,66 @@ export const hubFoldersOf = (path: Path.Path, baseDir: string) => ({
   scratch: scratchRootOf(path, baseDir),
 });
 
+/** The Hub's own folders as their links lead, resolved once per check. */
+export interface HubFolderReals {
+  readonly data: string;
+  readonly projects: string;
+  readonly scratch: string;
+}
+
+export const hubFolderReals = Effect.fn("directoryRoots.hubFolderReals")(function* (
+  services: DirectoryServices,
+  baseDir: string,
+) {
+  const folders = hubFoldersOf(services.path, baseDir);
+  return {
+    data: yield* realOf(services, folders.data),
+    projects: yield* realOf(services, folders.projects),
+    scratch: yield* realOf(services, folders.scratch),
+  } satisfies HubFolderReals;
+});
+
 /**
  * Whether a recorded Project root is one today's rule lets a User other than the Owner trust: the
- * Owner's (or one from before Users), or a folder right in the Hub's Projects or Scratch folder.
- * Read at every check, so a root recorded before the rule existed is not trusted either.
+ * Owner's (or from before Users), the Hub-made Scratch root whoever made it, or a folder right in
+ * the Hub's Projects or Scratch folder. Read at every check, old rows included.
  */
 export const isTrustedProjectRoot = Effect.fn("directoryRoots.isTrustedProjectRoot")(function* (
   services: DirectoryServices,
   root: string,
   byOwner: boolean,
-  baseDir: string | undefined,
+  hub: HubFolderReals | undefined,
 ) {
   if (byOwner) return true;
-  if (baseDir === undefined || !isPlainAbsolute(services.path, root)) return false;
-  const folders = hubFoldersOf(services.path, baseDir);
-  const parent = services.path.dirname(yield* realOf(services, root));
-  for (const shared of [folders.projects, folders.scratch]) {
-    if ((yield* realOf(services, shared)) === parent) return true;
-  }
-  return false;
+  if (hub === undefined || !isPlainAbsolute(services.path, root)) return false;
+  const real = yield* realOf(services, root);
+  if (real === hub.scratch) return true;
+  const parent = services.path.dirname(real);
+  return parent === hub.projects || parent === hub.scratch;
 });
+
+/** Whether `root` is the Hub's Scratch folder, which no Thread's caller gets whole. */
+export const isScratchRoot = Effect.fn("directoryRoots.isScratchRoot")(function* (
+  services: DirectoryServices,
+  root: string,
+  hub: HubFolderReals | undefined,
+) {
+  return hub !== undefined && (yield* realOf(services, root)) === hub.scratch;
+});
+
+/**
+ * Whether a path a client names for something kept inside a folder (an icon, a Thread's file)
+ * leaves it: absolute, a home (`~`), or climbing out with a `..` segment.
+ */
+export const leavesFolder = (relative: string) =>
+  relative.startsWith("/") ||
+  relative.startsWith("\\") ||
+  /^[a-zA-Z]:/u.test(relative) ||
+  climbsOrHome(relative);
+
+/** Whether a path names a home (`~`) or has a `..` segment, so it is not the place it reads as. */
+export const climbsOrHome = (candidate: string) =>
+  candidate.startsWith("~") || candidate.split(/[\\/]/u).includes("..");
 
 /**
  * The folder a Thread of the Project at `projectRoot` works in when it records `worktreePath`:
@@ -152,13 +192,14 @@ export const projectWorktreeRoot = Effect.fn("directoryRoots.projectWorktreeRoot
   services: DirectoryServices,
   projectRoot: string,
   worktreePath: string,
-  hubFolders: ReadonlyArray<string>,
+  /** The Hub's own folders; without them only a folder inside the Project qualifies. */
+  hubFolders: ReadonlyArray<string> | undefined,
 ) {
   const { path } = services;
   const none = Option.none<string>();
   if (!isPlainAbsolute(path, worktreePath)) return none;
   if (yield* withinRoots(services, [projectRoot], worktreePath)) return Option.some(worktreePath);
-  if (Option.isNone(services.fileSystem)) return none;
+  if (Option.isNone(services.fileSystem) || hubFolders === undefined) return none;
   const fileSystem = services.fileSystem.value;
   const read = (file: string) =>
     fileSystem.readFileString(file).pipe(

@@ -25,6 +25,7 @@ import * as Stream from "effect/Stream";
 import type * as RpcGroup from "effect/rpc/RpcGroup";
 
 import type * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
+import { climbsOrHome, leavesFolder } from "../spaces/directoryRoots.ts";
 import { localWorkspaceTargets } from "../workspace/localWorkspaceTargets.ts";
 
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
@@ -305,8 +306,9 @@ const assetReadTargets = (payload: unknown): ReadonlyArray<string> | "refused" =
   if (tag === "media-file" && path !== undefined) {
     // A plain relative path is the Thread's own file, which the Thread's rule covers; one that
     // climbs out or names a home is refused, never left unchecked.
-    if (path.startsWith("~") || path.split(/[\\/]/u).includes("..")) return "refused";
-    if (!/^([\\/]|[a-zA-Z]:)/u.test(path)) return [];
+    if (!leavesFolder(path)) return [];
+    // An absolute host file is checked as one; anything else that leaves is refused.
+    if (climbsOrHome(path)) return "refused";
     return localWorkspaceTargets(WS_METHODS.assetsCreateUrl, { path }, ["path"]);
   }
   if (tag === "draft-workspace-file") {
@@ -432,7 +434,7 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
     return;
   }
   const threadId = stringField(payload, "threadId");
-  let threadFolder: string | undefined;
+  let threadFolder: string | null | undefined;
   if (access === "readIfThread" || access === "workIfThread") {
     // With no Thread, a draft's (no row yet), or one on the Hub machine, the call runs on the
     // Hub's own disk: what it opens must be what the User may read, or work in for a write.
@@ -454,13 +456,12 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
     if (threadId === undefined) return;
     // So must the Hub Thread's own folder, once the Thread is the User's to read or work: a folder
     // today's rule does not trust is no folder of theirs.
-    const folder = Option.getOrNull(hubFolder);
-    if (folder !== null) {
-      threadFolder = folder;
-    }
+    // A Hub Thread whose folder cannot be told (no worktree, no Project row) has none of theirs.
+    if (Option.isSome(hubFolder)) threadFolder = hubFolder.value;
   }
   const requireThreadFolder = Effect.fn(function* () {
     if (threadFolder === undefined) return;
+    if (threadFolder === null) return yield* notFound();
     const allowed =
       access === "workIfThread"
         ? yield* spaceVisibility.mayUseDirectory(visibility, userId, threadFolder)
