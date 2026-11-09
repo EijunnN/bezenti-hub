@@ -30,6 +30,7 @@ import {
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { authorizeAsRpc } from "../../rpcAccess.ts";
+import { visibleShells } from "../../mcpVisibility.ts";
 import * as SpaceVisibility from "../../../spaces/SpaceVisibility.ts";
 import {
   type ListThreadPullRequestsResult,
@@ -229,7 +230,12 @@ const make = Effect.gen(function* () {
       Effect.map(Option.fromNullishOr),
       Effect.mapError((cause) => new Failure({ cause })),
     );
-    if (Option.isNone(thread) || thread.value.deletedAt !== null) {
+    // A Thread the caller cannot see is missing, before any answer says what it links.
+    if (
+      Option.isNone(thread) ||
+      thread.value.deletedAt !== null ||
+      (yield* visibleShells(scope, [thread.value])).length === 0
+    ) {
       return yield* new PullRequestThreadNotFoundError({ threadId });
     }
     return thread.value;

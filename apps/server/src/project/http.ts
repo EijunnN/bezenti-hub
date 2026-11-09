@@ -5,6 +5,7 @@ import {
   EnvironmentHttpConflictError,
   EnvironmentHttpForbiddenError,
   requiredScopesForProjectMutation,
+  WS_METHODS,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
@@ -18,6 +19,7 @@ import {
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as CommandActor from "../auth/CommandActor.ts";
+import { authorizeSessionAsRpc } from "../auth/RpcAuthorization.ts";
 import * as ProjectCloneTracker from "./ProjectCloneTracker.ts";
 import * as ProjectService from "./ProjectService.ts";
 import { mutateProjectWithClone } from "./ProjectMutation.ts";
@@ -77,16 +79,11 @@ export const layer = HttpApiBuilder.group(
             yield* requireEnvironmentScope(scope);
           }
           const principal = yield* EnvironmentAuthenticatedPrincipal;
-          // Changing a Project the User cannot see answers like changing a missing one.
-          if (args.payload.type !== "project.create") {
-            const visibility = yield* spaceVisibility.of(principal.userId);
-            const visible = yield* spaceVisibility.visibleProjectIds(visibility, [
-              args.payload.projectId,
-            ]);
-            if (!visible.has(args.payload.projectId)) {
-              return yield* failEnvironmentInvalidRequest("invalid_command");
-            }
-          }
+          // The socket's own rule for `projects.mutate`: changing a Project the User cannot see
+          // answers like changing a missing one.
+          yield* authorizeSessionAsRpc(WS_METHODS.projectsMutate, args.payload, principal).pipe(
+            Effect.catch(() => failEnvironmentInvalidRequest("invalid_command")),
+          );
           const operation = mutateProjectWithClone(
             projects,
             projectClones,

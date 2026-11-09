@@ -10,6 +10,7 @@ import {
   type PullRequestReviewGuideResult,
   type ThreadPullRequestLink,
   SourceControlProviderKind,
+  UserId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -21,6 +22,7 @@ import * as Stream from "effect/Stream";
 import type { Tool } from "effect/ai";
 
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
+import * as SpaceVisibility from "../../../spaces/SpaceVisibility.ts";
 import {
   type PullRequestTestThread,
   v2PullRequestThread,
@@ -41,7 +43,9 @@ const testCrypto = SecureRandom.make((size) => new Uint8Array(size).fill(7));
 
 const invocation = (
   capabilities: ReadonlyArray<McpInvocationContext.McpCapability>,
+  userId?: UserId,
 ): McpInvocationContext.McpInvocationScope => ({
+  ...(userId === undefined ? {} : { userId }),
   environmentId: EnvironmentId.make("environment-1"),
   requestNamespace: "provider-session-1",
   thread: {
@@ -137,6 +141,8 @@ interface HarnessOptions {
   readonly project?: OrchestrationProjectShell | null;
   readonly reject?: (command: OrchestrationCommand) => string | null;
   readonly projects?: ReadonlyArray<OrchestrationProjectShell>;
+  /** Calls as a User who sees no Thread. */
+  readonly seesNothing?: boolean;
   readonly generate?: (
     input: PullRequestRef,
   ) => Effect.Effect<
@@ -196,6 +202,13 @@ const makeHarness = Effect.fn("makePullRequestsToolkitHarness")(function* (
     }),
     Layer.succeed(SecureRandom.SecureRandom, testCrypto),
     McpToolAccessTestkit.liveThreadsLayer,
+    Layer.succeed(
+      SpaceVisibility.SpaceVisibility,
+      SpaceVisibility.SpaceVisibility.of({
+        of: () => Effect.succeed({ all: false, spaceIds: [] }),
+        visibleThreadIds: () => Effect.succeed(new Set()),
+      } as never),
+    ),
   );
   const toolkit = yield* PullRequestsToolkit.pipe(
     Effect.provide(
@@ -215,7 +228,10 @@ const makeHarness = Effect.fn("makePullRequestsToolkitHarness")(function* (
       Effect.map(
         (chunk) => chunk.at(-1)!.result as Tool.Success<(typeof PullRequestsToolkit.tools)[Name]>,
       ),
-      Effect.provideService(McpInvocationContext.McpInvocationContext, invocation(capabilities)),
+      Effect.provideService(
+        McpInvocationContext.McpInvocationContext,
+        invocation(capabilities, options.seesNothing === true ? UserId.make("grace") : undefined),
+      ),
       Effect.provide(layerDependencies),
     );
   return { commands, guideRequests, call };
@@ -233,6 +249,25 @@ describe("pull request toolkit handlers", () => {
         capability: "pull-requests",
         threadId: THREAD_ID,
       });
+      expect(yield* Ref.get(harness.commands)).toEqual([]);
+    }),
+  );
+
+  it.effect("answers for a Thread the caller cannot see as for a missing one", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        thread: makeThread([makeLink(123)]),
+        seesNothing: true,
+      });
+      const url = "https://github.com/t3tools/t3code/pull/123";
+      const failures = [
+        yield* harness.call("link_pull_request", { url }).pipe(Effect.flip),
+        yield* harness.call("unlink_pull_request", { url }).pipe(Effect.flip),
+        yield* harness.call("list_thread_pull_requests", {}).pipe(Effect.flip),
+      ];
+      for (const failure of failures) {
+        expect(failure).toMatchObject({ _tag: "PullRequestThreadNotFoundError" });
+      }
       expect(yield* Ref.get(harness.commands)).toEqual([]);
     }),
   );

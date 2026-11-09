@@ -151,6 +151,9 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 ),
               )).projectId
             : yield* resolveProjectId(context, input.projectId);
+        // As launching from the app: a Project the caller cannot see is missing, before its
+        // folder or branches are read.
+        if (input.scratch !== true) yield* requireVisibleProject(projectId);
         const readProject = Project.ProjectService.pipe(
           Effect.flatMap((projects) => projects.getById(projectId)),
           Effect.mapError(unavailable),
