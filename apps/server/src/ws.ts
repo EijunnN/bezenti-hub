@@ -194,7 +194,6 @@ import {
   rememberPendingUploader,
 } from "./assets/AttachmentUpload.ts";
 import * as EnvironmentExecutor from "./environment/EnvironmentExecutor.ts";
-import { readThreadWorkflowScript } from "./orchestration-v2/workflowScriptQuery.ts";
 import * as ScheduledTaskVisibility from "./scheduledTasks/visibleScheduledTasks.ts";
 import { withTerminalOutputWindow } from "./terminal/OutputProtocol.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
@@ -2075,12 +2074,7 @@ export const layerWsRpc = (
         [ORCHESTRATION_V2_WS_METHODS.forceStopThread]: (input) =>
           threadManagement.forceStopThread(input),
         [ORCHESTRATION_V2_WS_METHODS.getWorkflowScript]: (input) =>
-          readThreadWorkflowScript({
-            scriptPath: input.scriptPath,
-            subagents: threadManagement
-              .getThreadRecords(input.threadId, ["subagents"])
-              .pipe(Effect.map((records) => records.subagents)),
-          }),
+          threadManagement.getWorkflowScript(input),
         [ORCHESTRATION_V2_WS_METHODS.getNativeChildWork]: (input) =>
           nativeChildWork.getNativeChildWork(input),
         [ORCHESTRATION_V2_WS_METHODS.getTurnItem]: (input) =>

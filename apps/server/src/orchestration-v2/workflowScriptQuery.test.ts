@@ -42,19 +42,48 @@ describe("workflow script containment", () => {
       }),
   );
 
-  effectIt.effect("serves a Thread only a script one of its own workflows recorded", () =>
-    Effect.gen(function* () {
-      const threadRan = (path: string) =>
-        Effect.succeed([{ workflow: { runHandles: { scriptPath: path } } }] as never);
-      const own = yield* readThreadWorkflowScript({ scriptPath, subagents: threadRan(scriptPath) });
-      assert.include(own.contents, "export const meta");
-      const another = NodePath.join(root, "another-session.js");
-      NodeFS.writeFileSync(another, "someone else's script");
-      const refused = yield* Effect.flip(
-        readThreadWorkflowScript({ scriptPath: another, subagents: threadRan(scriptPath) }),
-      );
-      assert.equal(refused.reason, "not-found");
-    }),
+  effectIt.effect(
+    "serves a Thread a script its own workflows or those of Threads below it recorded, no other",
+    () =>
+      Effect.gen(function* () {
+        const shell = (id: string, parent: string | null) =>
+          ({ id, lineage: { parentThreadId: parent } }) as never;
+        const ran: Record<string, string> = {};
+        const child = NodePath.join(root, "child.js");
+        const sibling = NodePath.join(root, "sibling.js");
+        NodeFS.writeFileSync(child, "the child's script");
+        NodeFS.writeFileSync(sibling, "a sibling's script");
+        ran["parent"] = scriptPath;
+        ran["grandchild"] = child;
+        ran["sibling"] = sibling;
+        const read = (threadId: string, path: string) =>
+          readThreadWorkflowScript({
+            threadId: threadId as never,
+            scriptPath: path,
+            threads: {
+              // The family as the caller sees it: the parent, its child and grandchild, and a
+              // Thread beside the parent.
+              family: Effect.succeed([
+                shell("parent", null),
+                shell("child", "parent"),
+                shell("grandchild", "child"),
+                shell("sibling", null),
+              ]),
+              subagents: (id) =>
+                Effect.succeed(
+                  ran[id] === undefined
+                    ? []
+                    : ([{ workflow: { runHandles: { scriptPath: ran[id] } } }] as never),
+                ),
+            },
+          });
+        assert.include((yield* read("parent", scriptPath)).contents, "export const meta");
+        // A nested child's workflow, from its ancestor's view.
+        assert.include((yield* read("parent", child)).contents, "the child's script");
+        // Not one beside it, nor an ancestor's from a child.
+        assert.equal((yield* Effect.flip(read("parent", sibling))).reason, "not-found");
+        assert.equal((yield* Effect.flip(read("child", scriptPath))).reason, "not-found");
+      }),
   );
 
   effectIt.effect("serves a real script under the projects root", () =>

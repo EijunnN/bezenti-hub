@@ -6,6 +6,7 @@ import {
   PREVIEW_STREAM_HOST_SETUP_CLOSE_CODE,
   PreviewStreamHostSetup,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -58,11 +59,10 @@ const mayReachTabs = (
     session,
   ).pipe(
     Effect.as(true),
-    Effect.catchTags({
-      SpaceResourceNotFoundError: () => Effect.succeed(false),
-      SpaceActionDeniedError: () => Effect.succeed(false),
-      EnvironmentAuthorizationError: () => Effect.succeed(false),
-    }),
+    // Fails closed: any failure of the check, a defect included, answers as not found.
+    Effect.catchCause((cause) =>
+      Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.succeed(false),
+    ),
   );
 
 const isAck = (message: unknown) =>

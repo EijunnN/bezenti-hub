@@ -1,32 +1,59 @@
 import {
   OrchestrationGetWorkflowScriptError,
   type OrchestrationV2Subagent,
+  type OrchestrationV2ThreadShell,
+  type ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { readContainedWorkflowFile } from "./workflowFileRead.ts";
 
 /**
- * A workflow script of one Thread: only a path one of its own workflows recorded, so a caller
- * who may read the Thread reads no other session's script under the shared root.
+ * A workflow script of one Thread: only a path a workflow of the Thread, or of a Thread below it
+ * the caller sees, recorded, so a caller who may read the Thread reads no other session's script
+ * under the shared root.
  */
 export const readThreadWorkflowScript = Effect.fn("orchestration.readThreadWorkflowScript")(
   function* <E>(input: {
+    readonly threadId: ThreadId;
     readonly scriptPath: string;
-    readonly subagents: Effect.Effect<ReadonlyArray<OrchestrationV2Subagent>, E>;
+    readonly threads: {
+      /** The Thread's family, as far as the caller may see it. */
+      readonly family: Effect.Effect<ReadonlyArray<OrchestrationV2ThreadShell>, E>;
+      readonly subagents: (
+        threadId: ThreadId,
+      ) => Effect.Effect<ReadonlyArray<OrchestrationV2Subagent>, E>;
+    };
   }) {
-    const subagents = yield* input.subagents.pipe(
-      Effect.mapError(
-        (cause) =>
-          new OrchestrationGetWorkflowScriptError({
-            reason: "read-failed",
-            scriptPath: input.scriptPath,
-            cause,
-          }),
-      ),
-    );
-    if (
-      !subagents.some((subagent) => subagent.workflow?.runHandles?.scriptPath === input.scriptPath)
-    ) {
+    const unreadable = (cause: unknown) =>
+      new OrchestrationGetWorkflowScriptError({
+        reason: "read-failed",
+        scriptPath: input.scriptPath,
+        cause,
+      });
+    const family = yield* input.threads.family.pipe(Effect.mapError(unreadable));
+    // The Thread and every visible Thread below it.
+    const below = new Set<ThreadId>([input.threadId]);
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const shell of family) {
+        const parent = shell.lineage.parentThreadId;
+        if (!below.has(shell.id) && parent !== null && below.has(parent)) {
+          below.add(shell.id);
+          grew = true;
+        }
+      }
+    }
+    let recorded = false;
+    for (const threadId of below) {
+      const subagents = yield* input.threads.subagents(threadId).pipe(Effect.mapError(unreadable));
+      if (
+        subagents.some((subagent) => subagent.workflow?.runHandles?.scriptPath === input.scriptPath)
+      ) {
+        recorded = true;
+        break;
+      }
+    }
+    if (!recorded) {
       return yield* new OrchestrationGetWorkflowScriptError({
         reason: "not-found",
         scriptPath: input.scriptPath,

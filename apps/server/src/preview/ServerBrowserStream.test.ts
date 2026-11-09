@@ -295,10 +295,13 @@ it.effect("reaches only the browser of a Thread the User works, as preview.open 
       SpaceVisibility.SpaceVisibility,
       SpaceVisibility.SpaceVisibility.of({
         of: () => Effect.succeed({ all: false, spaceIds: [] }),
+        // A check that breaks (here, for "broken") must still answer not found.
         claimWork: (_visibility: unknown, _userId: unknown, threadId: string) =>
-          Effect.succeed(
-            threadId === "mine" ? "allowed" : threadId === "teams" ? "not-yours" : "hidden",
-          ),
+          threadId === "broken"
+            ? Effect.die("the visibility read failed")
+            : Effect.succeed(
+                threadId === "mine" ? "allowed" : threadId === "teams" ? "not-yours" : "hidden",
+              ),
       } as never),
     );
     const handler = yield* Effect.acquireRelease(
@@ -320,7 +323,7 @@ it.effect("reaches only the browser of a Thread the User works, as preview.open 
         handler.handler(new Request(`http://t3.test/api/preview-stream${path}`, init)),
       ).pipe(Effect.map((response) => response.status));
     const upgrade = { headers: { upgrade: "websocket" } };
-    for (const threadId of ["teams", "hidden"]) {
+    for (const threadId of ["teams", "hidden", "broken"]) {
       expect(yield* status(`/ws?threadId=${threadId}&tabId=tab-1`, upgrade)).toBe(404);
       expect(yield* status(`/ws?threadId=${threadId}&tabId=tab-1&interactive=false`, upgrade)).toBe(
         404,

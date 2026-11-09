@@ -33,6 +33,7 @@ import {
   type OrchestrationV2ThreadTranscript,
   type OrchestrationV2ThreadShell,
   type OrchestrationV2TurnItem,
+  OrchestrationGetWorkflowScriptError,
   ProjectId,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   ProviderInstanceId,
@@ -76,6 +77,8 @@ import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
+import { readThreadWorkflowScript } from "./workflowScriptQuery.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as EnvironmentDemand from "../environment/EnvironmentDemand.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
@@ -415,6 +418,17 @@ export interface ThreadManagementServiceShape {
     readonly itemId: TurnItemId;
   }) => Effect.Effect<OrchestrationV2GetTurnItemResult, Orchestrator.OrchestratorV2Error>;
   readonly getThreadRecords: Orchestrator.OrchestratorV2["Service"]["getThreadRecords"];
+  /**
+   * A workflow script a workflow of the Thread, or of a Thread below it the request may see
+   * (`RequestVisibility`), recorded; any other path answers not-found.
+   */
+  readonly getWorkflowScript: (input: {
+    readonly threadId: ThreadId;
+    readonly scriptPath: string;
+  }) => Effect.Effect<
+    { readonly scriptPath: string; readonly contents: string; readonly truncated: boolean },
+    OrchestrationGetWorkflowScriptError
+  >;
   readonly getThreadProjection: (
     threadId: ThreadId,
   ) => Effect.Effect<OrchestrationV2ThreadProjection, Orchestrator.OrchestratorV2Error>;
@@ -1748,7 +1762,25 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
     if (failures[0] !== undefined) return yield* failures[0];
   });
 
-  return ThreadManagementService.of({
+  const service: ThreadManagementService["Service"] = ThreadManagementService.of({
+    getWorkflowScript: Effect.fn("ThreadManagementService.getWorkflowScript")(function* (input) {
+      const visibility = yield* SpaceVisibility.RequestVisibility;
+      return yield* readThreadWorkflowScript({
+        ...input,
+        threads: {
+          family: Effect.flatten(
+            service.readShellSnapshot({
+              familyOf: input.threadId,
+              spaceIds: SpaceVisibility.spaceFilter(visibility),
+            }),
+          ).pipe(Effect.map((snapshot) => [...snapshot.threads, ...snapshot.archivedThreads])),
+          subagents: (threadId) =>
+            service
+              .getThreadRecords(threadId, ["subagents"])
+              .pipe(Effect.map((records) => records.subagents)),
+        },
+      });
+    }),
     authorizeThread,
     ensureLegacyTranscript,
     searchThreadStream: (input) =>
@@ -1844,6 +1876,7 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
     streamStoredEventsFrom: orchestrator.streamStoredEventsFrom,
     streamDomainEvents: orchestrator.streamDomainEvents,
   });
+  return service;
 });
 
 const layerLegacyV1ThreadImporterNoop = Layer.succeed(
