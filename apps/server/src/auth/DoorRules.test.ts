@@ -6,6 +6,7 @@ import * as NodeURL from "node:url";
 import { EnvironmentHttpApi } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as HttpApi from "effect/http-api/HttpApi";
+import { Tool } from "effect/ai";
 
 import { HTTP_ENDPOINT_RULES, MCP_TOOL_RULES, RAW_ROUTE_RULES } from "./DoorRules.ts";
 import { spaceAccessForRpcMethod } from "./RpcSpaceAccess.ts";
@@ -38,12 +39,20 @@ const rawRoutes = files.flatMap(({ file, text }) => [
   ),
 ]);
 
-// A tool named by a constant is listed by the constant's name.
-const mcpTools = files.flatMap(({ text }) =>
-  Array.from(
-    text.matchAll(/Tool\.make\(\s*(?:"([^"]+)"|([A-Za-z_][\w.]*))\s*,/g),
-    (match) => match[1] ?? match[2]!,
-  ),
+// Every module that makes MCP tools, loaded: the tool names come from the Tool objects themselves.
+const toolModules = files.filter(({ text }) => /Tool\.make\(/.test(text));
+const mcpTools = (
+  await Promise.all(
+    toolModules.map(({ file }) => import(NodeURL.pathToFileURL(NodePath.join(SRC, file)).href)),
+  )
+).flatMap((module: Record<string, unknown>) =>
+  Object.values(module).flatMap((value) => {
+    if (Tool.isUserDefined(value)) return [value.name];
+    const tools = (value as { readonly tools?: unknown } | null)?.tools;
+    return tools !== null && typeof tools === "object"
+      ? Object.values(tools).flatMap((tool) => (Tool.isUserDefined(tool) ? [tool.name] : []))
+      : [];
+  }),
 );
 
 const endpoints = (() => {

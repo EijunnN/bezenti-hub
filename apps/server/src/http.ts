@@ -1,11 +1,10 @@
 import * as Mime from "effect/http/Mime";
 import {
   AuthOrchestrationOperateScope,
+  AuthDiagnosticsReadScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
-  WS_METHODS,
 } from "@t3tools/contracts";
-import { authorizeSessionAsRpc } from "./auth/RpcAuthorization.ts";
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
 import { injectMcpAppCookieBootstrap, injectMcpAppThemeBootstrap } from "@t3tools/shared/mcpApp";
 import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
@@ -352,17 +351,10 @@ export const layerOtlpTracesProxyRoute = HttpRouter.add(
   Effect.gen(function* () {
     const session = yield* authenticateRawRouteWithScope(AuthOrchestrationOperateScope);
     const request = yield* HttpServerRequest.HttpServerRequest;
-    // The rule of reading those traces back (`server.getTraceDiagnostics`): only the Owner's
-    // clients write to the Installation's collector. Anyone else's are dropped quietly, so their
-    // exporters do not retry, and so is anything over the limit.
-    const ownersClient = yield* authorizeSessionAsRpc(
-      WS_METHODS.serverGetTraceDiagnostics,
-      {},
-      session,
-    ).pipe(
-      Effect.as(true),
-      Effect.orElseSucceed(() => false),
-    );
+    // The rule of reading those traces back (`server.getTraceDiagnostics`, Owner only): a
+    // session other than the Owner's never holds `diagnostics:read` (`heldByUser`). Anyone else's
+    // traces are dropped quietly, so their exporters do not retry, and so is anything too large.
+    const ownersClient = session.scopes.includes(AuthDiagnosticsReadScope);
     // A declared length over the cap is dropped before reading; chunked bodies hit the reader cap.
     const length = Number(request.headers["content-length"] ?? 0);
     if (!ownersClient || length > OTLP_TRACES_MAX_BYTES) {

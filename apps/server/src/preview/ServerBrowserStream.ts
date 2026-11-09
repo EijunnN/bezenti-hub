@@ -60,8 +60,9 @@ const mayReachTabs = (
   ).pipe(
     Effect.as(true),
     // Fails closed: any failure of the check, a defect included, answers as not found.
-    Effect.catchCause((cause) =>
-      Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.succeed(false),
+    Effect.catchCauseIf(
+      (cause) => !Cause.hasInterruptsOnly(cause),
+      () => Effect.succeed(false),
     ),
   );
 

@@ -1,6 +1,5 @@
 import {
   CommandId,
-  ORCHESTRATION_V2_WS_METHODS,
   WS_METHODS,
   type OrchestrationProjectShell,
   type OrchestrationV2ThreadShell,
@@ -529,18 +528,9 @@ const make = Effect.gen(function* () {
         };
       }),
     ),
+    // `requireThread` answers a Thread the caller cannot see like a missing one.
     list_thread_pull_requests: McpToolAccess.reads((input) =>
       requireThread(PullRequestListFailedError, input.threadId).pipe(
-        // Reading a Thread's links is reading the Thread: a hidden one answers like a missing one.
-        Effect.tap((thread) =>
-          authorizeAsRpc(ORCHESTRATION_V2_WS_METHODS.getThreadProjection, {
-            threadId: thread.id,
-          }).pipe(
-            Effect.catch(() =>
-              Effect.fail(new PullRequestThreadNotFoundError({ threadId: thread.id })),
-            ),
-          ),
-        ),
         Effect.map(listThreadPullRequests),
       ),
     ),
