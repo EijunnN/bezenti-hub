@@ -982,7 +982,13 @@ export const make = Effect.gen(function* () {
             const own = route.project.repositoryIdentity?.canonicalKey;
             const key = (value: string) =>
               sourceControlDefinitions.canonicalRepositoryKey(value.toLowerCase());
-            return own !== undefined && key(own) === key(`${route.host}/${ref.repository.trim()}`);
+            // And through the Project the call names, whose Role rules the transport checked: one
+            // routed to another Project could be one where the caller is only a Guest.
+            return (
+              route.project.id === ref.projectId &&
+              own !== undefined &&
+              key(own) === key(`${route.host}/${ref.repository.trim()}`)
+            );
           },
           () =>
             new PullRequestOperationError({

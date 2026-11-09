@@ -141,6 +141,39 @@ describe("HtmlRender", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect("reads an image where the checked path led, not where a swapped link leads", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const htmlRender = yield* HtmlRender.HtmlRender;
+      const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-html-swap-" });
+      const allowed = path.join(directory, "allowed.svg");
+      const secret = path.join(directory, "secret.svg");
+      const link = path.join(directory, "link.svg");
+      yield* fileSystem.writeFileString(
+        allowed,
+        '<svg xmlns="http://www.w3.org/2000/svg" id="ok"/>',
+      );
+      yield* fileSystem.writeFileString(
+        secret,
+        '<svg xmlns="http://www.w3.org/2000/svg" id="no"/>',
+      );
+      yield* fileSystem.symlink(allowed, link);
+      const realSecret = yield* fileSystem.realPath(secret);
+      const prepared = yield* htmlRender.prepare(`<img src="${link}">`, (file) =>
+        // The link is swapped to the secret right after the check.
+        Effect.gen(function* () {
+          yield* fileSystem.remove(link);
+          yield* fileSystem.symlink(secret, link);
+          return file !== realSecret && file !== secret;
+        }).pipe(Effect.orDie),
+      );
+      expect(prepared).toContain(
+        Base64.encode('<svg xmlns="http://www.w3.org/2000/svg" id="ok"/>'),
+      );
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("leaves out, like a missing one, an image the caller may not read", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

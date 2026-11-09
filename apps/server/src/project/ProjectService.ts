@@ -241,6 +241,7 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const directories = { path, fileSystem: yield* Effect.serviceOption(FileSystem.FileSystem) };
   const projectLocks = yield* KeyedLock.make<ProjectId>();
+  const rootClaims = yield* KeyedLock.make<string>();
   const workspaceLocks = yield* KeyedLock.make<string>();
 
   const toProject = (
@@ -492,23 +493,31 @@ export const make = Effect.gen(function* () {
         actorUserId,
         spaceId: input.spaceId,
       });
-      if (input.workspaceRootFromHub !== true) {
-        yield* requireProjectRoot(actorUserId, input.workspaceRoot);
-      }
-      const workspaceRoot = yield* normalizeWorkspaceRoot({
-        projectId: input.projectId,
-        workspaceRoot: input.workspaceRoot,
-        createIfMissing: input.createWorkspaceRootIfMissing ?? false,
-      });
-      yield* commit({
-        type: "project.create",
-        commandId: input.commandId,
-        projectId: input.projectId,
-        title: input.title,
-        workspaceRoot,
-        ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
-        ...stamp,
-      });
+      // The folder is checked, made and claimed as one step, so two creates (from different
+      // Spaces, say) never both find the same folder new.
+      const workspaceRoot = yield* rootClaims.withLock(
+        path.resolve(input.workspaceRoot),
+        Effect.gen(function* () {
+          if (input.workspaceRootFromHub !== true) {
+            yield* requireProjectRoot(actorUserId, input.workspaceRoot);
+          }
+          const workspaceRoot = yield* normalizeWorkspaceRoot({
+            projectId: input.projectId,
+            workspaceRoot: input.workspaceRoot,
+            createIfMissing: input.createWorkspaceRootIfMissing ?? false,
+          });
+          yield* commit({
+            type: "project.create",
+            commandId: input.commandId,
+            projectId: input.projectId,
+            title: input.title,
+            workspaceRoot,
+            ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
+            ...stamp,
+          });
+          return workspaceRoot;
+        }),
+      );
       yield* projectEnrichment.invalidate([workspaceRoot]);
       return yield* readCommitted(input.projectId);
     },

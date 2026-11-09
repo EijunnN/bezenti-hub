@@ -2638,6 +2638,39 @@ describe("Space visibility", () => {
       ),
     );
 
+    it.effect("two Spaces racing for the same new folder: only one Project takes it", () =>
+      withTeam(({ server, acme, globex, grace, linus }) =>
+        Effect.gen(function* () {
+          const contested = server.newProjectFolder("contested");
+          const create = (cookie: string, spaceId: string, id: string) =>
+            server.request("/api/projects/mutate", {
+              cookie,
+              body: {
+                type: "project.create",
+                commandId: `race-${id}`,
+                projectId: `race-${id}`,
+                title: id,
+                workspaceRoot: contested,
+                createWorkspaceRootIfMissing: true,
+                spaceId,
+              },
+            });
+          const [first, second] = yield* Effect.all(
+            [create(grace.cookie, acme, "acme"), create(linus.cookie, globex, "globex")],
+            { concurrency: "unbounded" },
+          );
+          assert.deepEqual(
+            [first.status, second.status].filter((status) => status === 200),
+            [200],
+          );
+          const rows = yield* server.sql<{ count: number }>`
+            SELECT COUNT(*) AS count FROM projection_projects WHERE workspace_root = ${contested}
+          `;
+          assert.equal(rows[0]?.count, 1);
+        }),
+      ),
+    );
+
     it.effect(
       "a recorded root counts only if today's rule passes: a Member's old Project at /, a Thread's unchecked folder",
       () =>

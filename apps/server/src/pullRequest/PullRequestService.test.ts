@@ -1610,6 +1610,40 @@ it.effect(
       assert.deepStrictEqual(reached, []);
       yield* asMember(service.diff({ ...other, repository: "pingdotgg/t3code" }));
       assert.deepStrictEqual(reached, ["pingdotgg/t3code"]);
+      // Nor reaches, through the Project it names, another visible Project's repository: its Role
+      // there (a Guest's, say) is not the one the call was checked against.
+      const other2 = yield* makeService({
+        projects: [
+          {
+            ...project({ id: "pa", title: "a", workspaceRoot: "/a", repository: "team/a" }),
+            spaceId: SpaceId.make("acme"),
+          },
+          {
+            ...project({ id: "pb", title: "b", workspaceRoot: "/b", repository: "team/b" }),
+            spaceId: SpaceId.make("globex"),
+          },
+        ],
+        providers: [
+          fakePullRequestProvider(SourceControlProviderKind.make("github"), {
+            getDiff: (input: { readonly repository: string }) =>
+              Effect.sync(() => {
+                reached.push(input.repository);
+                return { patch: "", truncated: false } as never;
+              }),
+          } as never),
+        ],
+      });
+      const routed = yield* other2
+        .diff({ projectId: "pa" as ProjectId, host: "github.com", repository: "team/b", number: 2 })
+        .pipe(
+          Effect.provideService(SpaceVisibility.RequestVisibility, {
+            all: false,
+            spaceIds: [SpaceId.make("acme"), SpaceId.make("globex")],
+          }),
+          Effect.flip,
+        );
+      assert.strictEqual(routed._tag, "PullRequestOperationError");
+      assert.deepStrictEqual(reached, ["pingdotgg/t3code"]);
       // The Owner still reads another repository on the host through it.
       yield* service.diff(other).pipe(Effect.ignore);
       assert.deepStrictEqual(reached, ["pingdotgg/t3code", "someone/private"]);

@@ -250,16 +250,23 @@ const inlineLocalImages = Effect.fn("HtmlRender.inlineLocalImages")(function* (
   const references = findLocalImages(html);
   const files = yield* Effect.forEach(
     [...new Set(references.map((reference) => reference.path))],
+    // The file is checked and read by where its links lead, so a link swapped in after the
+    // check cannot point the read elsewhere.
     (path) =>
-      mayRead(filePathFor(path)).pipe(
-        Effect.flatMap((readable) =>
-          readable ? fileSystem.stat(filePathFor(path)) : Effect.fail(undefined),
+      fileSystem.realPath(filePathFor(path)).pipe(
+        Effect.flatMap((real) =>
+          mayRead(real).pipe(
+            Effect.flatMap((readable) =>
+              readable ? fileSystem.stat(real) : Effect.fail(undefined),
+            ),
+            Effect.map((info) => ({
+              path,
+              real,
+              size: info.type === "File" ? Number(info.size) : undefined,
+            })),
+          ),
         ),
-        Effect.map((info) => ({
-          path,
-          size: info.type === "File" ? Number(info.size) : undefined,
-        })),
-        Effect.orElseSucceed(() => ({ path, size: undefined })),
+        Effect.orElseSucceed(() => ({ path, real: undefined, size: undefined })),
       ),
     { concurrency: 8 },
   );
@@ -290,7 +297,7 @@ const inlineLocalImages = Effect.fn("HtmlRender.inlineLocalImages")(function* (
     (file) =>
       Effect.gen(function* () {
         const read = yield* fileSystem
-          .stream(filePathFor(file.path), { bytesToRead: MAX_IMAGE_BYTES + 1 })
+          .stream(file.real ?? filePathFor(file.path), { bytesToRead: MAX_IMAGE_BYTES + 1 })
           .pipe(Stream.mkUint8Array, Effect.option);
         if (Option.isNone(read) || !isImageBytes(read.value)) return [];
         const bytes = read.value;
