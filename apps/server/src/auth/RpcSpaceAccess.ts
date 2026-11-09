@@ -47,6 +47,8 @@ export type RpcSpaceAccess =
   | "workIfThread"
   | "readDirectory"
   | "workDirectory"
+  // A Project the User works in (not a Guest's): changes made with the Hub's credentials.
+  | "workProject"
   | "installation"
   | { readonly unscoped: string };
 
@@ -164,24 +166,24 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.pullRequestsChecks]: "project",
   [WS_METHODS.pullRequestsActivity]: "project",
   [WS_METHODS.pullRequestsReviewGuide]: "project",
-  [WS_METHODS.pullRequestsGenerateReviewGuide]: "project",
+  [WS_METHODS.pullRequestsGenerateReviewGuide]: "workProject",
   [WS_METHODS.pullRequestsThreadComments]: "project",
   [WS_METHODS.pullRequestsDiffFileContents]: "project",
   [WS_METHODS.pullRequestsFilesViewed]: "project",
   [WS_METHODS.pullRequestsChangeBreakdown]: "project",
   [WS_METHODS.pullRequestsSetFilesViewed]: "project",
-  [WS_METHODS.pullRequestsRunAction]: "project",
-  [WS_METHODS.pullRequestsUpdate]: "project",
-  [WS_METHODS.pullRequestsComment]: "project",
-  [WS_METHODS.pullRequestsUpdateComment]: "project",
-  [WS_METHODS.pullRequestsSubmitReview]: "project",
-  [WS_METHODS.pullRequestsReplyToThread]: "project",
-  [WS_METHODS.pullRequestsSetThreadResolution]: "project",
-  [WS_METHODS.pullRequestsSetReaction]: "project",
+  [WS_METHODS.pullRequestsRunAction]: "workProject",
+  [WS_METHODS.pullRequestsUpdate]: "workProject",
+  [WS_METHODS.pullRequestsComment]: "workProject",
+  [WS_METHODS.pullRequestsUpdateComment]: "workProject",
+  [WS_METHODS.pullRequestsSubmitReview]: "workProject",
+  [WS_METHODS.pullRequestsReplyToThread]: "workProject",
+  [WS_METHODS.pullRequestsSetThreadResolution]: "workProject",
+  [WS_METHODS.pullRequestsSetReaction]: "workProject",
   [WS_METHODS.pullRequestsReviewerCandidates]: "project",
-  [WS_METHODS.pullRequestsRequestReviewers]: "project",
+  [WS_METHODS.pullRequestsRequestReviewers]: "workProject",
   [WS_METHODS.pullRequestsLabelCandidates]: "project",
-  [WS_METHODS.pullRequestsSetLabels]: "project",
+  [WS_METHODS.pullRequestsSetLabels]: "workProject",
   // Git and other work on a folder with no Thread to place it: on the Hub's own disk.
   [WS_METHODS.subscribeVcsStatus]: "readDirectory",
   [WS_METHODS.vcsPull]: "workDirectory",
@@ -507,6 +509,22 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
     return yield* requireVisible(threads, idsUnder(payload, PROJECT_KEYS));
   }
   if (access === "project") return yield* requireVisible([], idsUnder(payload, PROJECT_KEYS));
+  if (access === "workProject") {
+    const projects: ReadonlyArray<string> = idsUnder(payload, PROJECT_KEYS);
+    if (projects.length === 0) return yield* notFound();
+    yield* requireVisible([], projects);
+    const workable = yield* spaceVisibility.workableProjectIds(
+      visibility,
+      userId,
+      projects as ReadonlyArray<ProjectId>,
+    );
+    if (projects.some((id) => !workable.has(id as ProjectId))) {
+      return yield* new SpaceActionDeniedError({
+        message: "Only Members and Admins of this Project's Space can change its pull requests.",
+      });
+    }
+    return;
+  }
   if (access === "readIfThread") {
     // A draft has no row yet and stays shown, as composer searches start before the Thread.
     const hidden = yield* spaceVisibility.hiddenThreadIds(

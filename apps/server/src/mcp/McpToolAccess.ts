@@ -5,6 +5,7 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Struct from "effect/Struct";
 import type * as Layer from "effect/Layer";
@@ -15,7 +16,9 @@ import {
   DispatchModeLimit,
   type DispatchModeRefusal,
 } from "../orchestration-v2/DispatchModeLimit.ts";
+import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import { visibilityOf } from "./mcpVisibility.ts";
 import { resolveInteractionMode, resolveRuntimeMode } from "./delegatedTaskModes.ts";
 import {
   assertFullAccess,
@@ -26,6 +29,25 @@ import {
   readCaller,
   unavailable,
 } from "./threadAccess.ts";
+
+// What the caller may see, for services that pick Projects themselves (Pull Requests routed by
+// repository): every tool runs with it, as every WS call does, never with the default of all.
+const callerVisibility = Effect.serviceOption(McpInvocationContext.McpInvocationContext).pipe(
+  Effect.flatMap((scope) =>
+    Option.isNone(scope) ? Effect.succeed(SpaceVisibility.everything) : visibilityOf(scope.value),
+  ),
+);
+
+const asCaller = <Handler>(handle: Handler): Handler =>
+  ((params: unknown) => {
+    const result = (handle as (params: unknown) => unknown)(params);
+    if (!Effect.isEffect(result)) return result;
+    // @effect-diagnostics-next-line anyUnknownInErrorContext:off unsafeEffectTypeAssertion:off - a handler's own channels pass through unchanged.
+    const effect = result as Effect.Effect<unknown>;
+    return Effect.flatMap(callerVisibility, (visibility) =>
+      Effect.provideService(effect, SpaceVisibility.RequestVisibility, visibility),
+    );
+  }) as Handler;
 
 /** Private constructors only enforce types; the token also blocks runtime construction. */
 const builtHere: unique symbol = Symbol("t3/mcp/McpToolAccess/builtHere");
@@ -61,7 +83,7 @@ export class Declaration<out Handler> {
   }
   static {
     declare = (handle) => new Declaration(builtHere, handle);
-    checkedHandler = Struct.lambda<CheckedHandler>((declaration) => declaration.#handle);
+    checkedHandler = Struct.lambda<CheckedHandler>((declaration) => asCaller(declaration.#handle));
   }
 }
 

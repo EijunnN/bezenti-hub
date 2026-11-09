@@ -970,8 +970,31 @@ export const make = Effect.gen(function* () {
       }),
     );
 
-  // Azure derives organization from the checkout; require the matching repository.
+  // A User who does not see everything reaches only the repository of a Project they see, with
+  // the Hub's credentials: never another repository read through that Project's checkout.
   const requireProject = (ref: PullRequestRef): Effect.Effect<SupportedProject, PullRequestError> =>
+    Effect.flatMap(SpaceVisibility.RequestVisibility, (visibility) =>
+      routeProject(ref).pipe(
+        Effect.filterOrFail(
+          (route) => {
+            if (visibility.all) return true;
+            // The Project's own repository, as its checkout names it, not the route's.
+            const own = route.project.repositoryIdentity?.canonicalKey;
+            const key = (value: string) =>
+              sourceControlDefinitions.canonicalRepositoryKey(value.toLowerCase());
+            return own !== undefined && key(own) === key(`${route.host}/${ref.repository.trim()}`);
+          },
+          () =>
+            new PullRequestOperationError({
+              operation: "resolveRepository",
+              detail: "The change request does not belong to the selected project.",
+            }),
+        ),
+      ),
+    );
+
+  // Azure derives organization from the checkout; require the matching repository.
+  const routeProject = (ref: PullRequestRef): Effect.Effect<SupportedProject, PullRequestError> =>
     listWorkspaceProjects({ projectId: ref.projectId }).pipe(
       Effect.flatMap(({ supported }): Effect.Effect<SupportedProject, PullRequestError> => {
         const own = supported[0];

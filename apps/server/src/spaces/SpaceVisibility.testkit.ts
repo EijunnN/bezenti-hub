@@ -15,6 +15,7 @@ export const layerSeesEverything = Layer.merge(
       visibleThreadIds: (_visibility, threadIds) => Effect.succeed(new Set(threadIds)),
       hiddenThreadIds: () => Effect.succeed(new Set<string>()),
       visibleProjectIds: (_visibility, projectIds) => Effect.succeed(new Set(projectIds)),
+      workableProjectIds: (_visibility, _userId, projectIds) => Effect.succeed(new Set(projectIds)),
       claimWork: () => Effect.succeed("allowed" as const),
       workableThreadIds: (_visibility, _userId, threadIds) => Effect.succeed(new Set(threadIds)),
       mayUseDirectory: () => Effect.succeed(true),

@@ -49,6 +49,15 @@ const MUTABLE_PATHS: ReadonlyArray<RegExp> = [
   /^\/vendor\/serve-emu\/api\/fold$/,
 ];
 
+// Paths that name no one device: the hub's device list and health.
+const DEVICELESS_PATHS: ReadonlyArray<RegExp> = [
+  /^\/api\/devices(\/ws)?$/,
+  /^\/vendor\/serve-(sim|emu)\/api$/,
+  /^\/vendor\/serve-emu\/health$/,
+];
+// What a client of a User other than the Owner may pass on to the hub besides the device.
+const FORWARDED_PARAMS = new Set(["device", "limit", "video", "frame-meta"]);
+
 const ALLOWED_WS_PATHS: ReadonlyArray<RegExp> = [
   /^\/api\/devices\/ws$/,
   /^\/vendor\/serve-sim\/helper\/ws$/,
@@ -214,15 +223,31 @@ const handler = Effect.gen(function* () {
   const spaceVisibility = yield* SpaceVisibility.SpaceVisibility;
   const visibility = yield* spaceVisibility.of(session.userId);
   if (!visibility.all) {
-    const threadId = url.value.searchParams.get("threadId");
+    const params = url.value.searchParams;
+    const threadId = params.get("threadId");
+    // The device is the one the path or `device` names, and it must be one: a path that targets
+    // a device without naming it, or two names, would reach whichever the hub picks.
+    const named = [
+      ...new Set([...(HELPER_DEVICE.exec(hubPath)?.slice(1) ?? []), ...params.getAll("device")]),
+    ];
+    const deviceless = matches(DEVICELESS_PATHS);
     const allowed =
       threadId !== null &&
+      named.length <= 1 &&
+      (deviceless || named.length === 1) &&
+      [...params.keys()].every(
+        (name) =>
+          FORWARDED_PARAMS.has(name) ||
+          name === "threadId" ||
+          name === "hostId" ||
+          name === "wsTicket",
+      ) &&
       (yield* DeviceAccess.mayUseDevice(
         { visibility, userId: session.userId, spaceVisibility },
         yield* devices.state,
         {
-          hostId: url.value.searchParams.get("hostId") ?? "local",
-          deviceId: HELPER_DEVICE.exec(hubPath)?.[1],
+          hostId: params.get("hostId") ?? "local",
+          deviceId: named[0],
           threadId,
           control: controlsDevice,
         },

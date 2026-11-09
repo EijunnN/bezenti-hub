@@ -1,4 +1,4 @@
-import { SourceControlProviderKind } from "@t3tools/contracts";
+import { SourceControlProviderKind, SpaceId } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as KeyValueStore from "effect/persistence/KeyValueStore";
@@ -24,6 +24,7 @@ import * as ServerSettingsService from "../serverSettings.ts";
 import { PullRequestOperationError } from "@t3tools/contracts";
 
 import * as ProjectService from "../project/ProjectService.ts";
+import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as PullRequestFilesViewed from "../persistence/PullRequestFilesViewed.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
@@ -1561,6 +1562,58 @@ it.effect("refuses a repository that does not belong to the requested project", 
 
     assert.strictEqual(error._tag, "PullRequestOperationError");
   }),
+);
+
+it.effect(
+  "reaches, for a User who does not see everything, only the Project's own repository",
+  () =>
+    Effect.gen(function* () {
+      const reached: Array<string> = [];
+      const service = yield* makeService({
+        projects: [
+          {
+            ...project({
+              id: "p1",
+              title: "t3code",
+              workspaceRoot: "/a",
+              repository: "pingdotgg/t3code",
+            }),
+            spaceId: SpaceId.make("acme"),
+          },
+        ],
+        providers: [
+          fakePullRequestProvider(SourceControlProviderKind.make("github"), {
+            readsPublicHostWithoutCheckout: true,
+            getDiff: (input: { readonly repository: string }) =>
+              Effect.sync(() => {
+                reached.push(input.repository);
+                return { patch: "", truncated: false } as never;
+              }),
+          } as never),
+        ],
+      });
+      const asMember = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+        effect.pipe(
+          Effect.provideService(SpaceVisibility.RequestVisibility, {
+            all: false,
+            spaceIds: [SpaceId.make("acme")],
+          }),
+        );
+      const other = {
+        projectId: "p1" as ProjectId,
+        host: "github.com",
+        repository: "someone/private",
+        number: 1,
+      };
+      const refused = yield* asMember(service.diff(other)).pipe(Effect.flip);
+      assert.strictEqual(refused._tag, "PullRequestOperationError");
+      assert.deepStrictEqual(reached, []);
+      yield* asMember(service.diff({ ...other, repository: "pingdotgg/t3code" }));
+      assert.deepStrictEqual(reached, ["pingdotgg/t3code"]);
+      // The Owner still reads another repository on the host through it.
+      yield* service.diff(other).pipe(Effect.ignore);
+      assert.deepStrictEqual(reached, ["pingdotgg/t3code", "someone/private"]);
+    }),
 );
 
 it.effect("routes explicit Forgejo HTTP authorities through SSH checkouts after refinement", () =>

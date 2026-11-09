@@ -24,6 +24,8 @@ import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
 import { routeLayer } from "./ServerBrowserStream.ts";
+import { layerSeesEverything } from "../spaces/SpaceVisibility.testkit.ts";
+import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 
 const platformLayer = NodeHttpPlatform.layer.pipe(Layer.provideMerge(NodeServices.layer));
 
@@ -105,6 +107,7 @@ it.effect.each([
         routeLayer.pipe(
           Layer.provide(Layer.succeed(ServerBrowser.ServerBrowser, browser)),
           Layer.provide(platformLayer),
+          Layer.provide(layerSeesEverything),
         ),
         { disableListenLog: true },
       ).pipe(Layer.provideMerge(NodeHttpServer.layerTest), Layer.provide(auth.layer)),
@@ -173,6 +176,7 @@ it.effect("sends replies ahead of stale frames and only the newest frame after a
         routeLayer.pipe(
           Layer.provide(Layer.succeed(ServerBrowser.ServerBrowser, browser)),
           Layer.provide(platformLayer),
+          Layer.provide(layerSeesEverything),
         ),
         { disableListenLog: true },
       ).pipe(
@@ -248,6 +252,7 @@ it.effect.each([
           routeLayer.pipe(
             Layer.provide(Layer.succeed(ServerBrowser.ServerBrowser, browser)),
             Layer.provide(platformLayer),
+            Layer.provide(layerSeesEverything),
             Layer.provideMerge(auth.layer),
           ),
           { disableLogger: true },
@@ -264,6 +269,74 @@ it.effect.each([
     );
     expect(response.status).toBe(testCase.status);
     expect(attachments).toBe(0);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("reaches only the browser of a Thread the User works, as preview.open does", () =>
+  Effect.gen(function* () {
+    const auth = makeAuth([AuthOrchestrationReadScope, AuthPreviewOperateScope]);
+    const reached: Array<string> = [];
+    const browser = ServerBrowser.ServerBrowser.of({
+      clearProfile: () => Effect.void,
+      profileReporter: Effect.succeed(() => Effect.void),
+      openDownload: (input) =>
+        Effect.sync(() => reached.push(`download:${input.threadId}`)).pipe(
+          Effect.as(Option.none()),
+        ),
+      answerFileChooser: (input) =>
+        Effect.sync(() => reached.push(`upload:${input.threadId}`)).pipe(Effect.as(false)),
+      attachViewer: (input) => {
+        reached.push(`view:${input.threadId}`);
+        return Effect.fail(new ServerBrowser.ServerBrowserTabNotFoundError(input));
+      },
+    });
+    // A Member: her own Thread, a teammate's she sees, and another Space's.
+    const member = Layer.succeed(
+      SpaceVisibility.SpaceVisibility,
+      SpaceVisibility.SpaceVisibility.of({
+        of: () => Effect.succeed({ all: false, spaceIds: [] }),
+        claimWork: (_visibility: unknown, _userId: unknown, threadId: string) =>
+          Effect.succeed(
+            threadId === "mine" ? "allowed" : threadId === "teams" ? "not-yours" : "hidden",
+          ),
+      } as never),
+    );
+    const handler = yield* Effect.acquireRelease(
+      Effect.sync(() =>
+        HttpRouter.toWebHandler(
+          routeLayer.pipe(
+            Layer.provide(Layer.succeed(ServerBrowser.ServerBrowser, browser)),
+            Layer.provide(platformLayer),
+            Layer.provide(member),
+            Layer.provideMerge(auth.layer),
+          ),
+          { disableLogger: true },
+        ),
+      ),
+      ({ dispose }) => Effect.promise(dispose),
+    );
+    const status = (path: string, init?: RequestInit) =>
+      Effect.promise(() =>
+        handler.handler(new Request(`http://t3.test/api/preview-stream${path}`, init)),
+      ).pipe(Effect.map((response) => response.status));
+    const upgrade = { headers: { upgrade: "websocket" } };
+    for (const threadId of ["teams", "hidden"]) {
+      expect(yield* status(`/ws?threadId=${threadId}&tabId=tab-1`, upgrade)).toBe(404);
+      expect(yield* status(`/ws?threadId=${threadId}&tabId=tab-1&interactive=false`, upgrade)).toBe(
+        404,
+      );
+      expect(yield* status(`/download?threadId=${threadId}&tabId=tab-1&id=d`)).toBe(404);
+      expect(
+        yield* status(`/upload?threadId=${threadId}&tabId=tab-1&chooser=c`, {
+          method: "POST",
+          body: new FormData(),
+        }),
+      ).toBe(404);
+    }
+    expect(reached).toEqual([]);
+    yield* status("/ws?threadId=mine&tabId=tab-1", upgrade);
+    yield* status("/download?threadId=mine&tabId=tab-1&id=d");
+    expect(reached).toEqual(["view:mine", "download:mine"]);
   }).pipe(Effect.scoped),
 );
 
@@ -294,6 +367,7 @@ it.effect("serves a tab's download only to an authorized session", () =>
               routeLayer.pipe(
                 Layer.provide(Layer.succeed(ServerBrowser.ServerBrowser, browser)),
                 Layer.provide(platformLayer),
+                Layer.provide(layerSeesEverything),
                 Layer.provideMerge(makeAuth(scopes, undefined).layer),
               ),
               { disableLogger: true },
@@ -343,6 +417,7 @@ it.effect("passes uploaded files to the page's open picker and needs operate sco
               routeLayer.pipe(
                 Layer.provide(Layer.succeed(ServerBrowser.ServerBrowser, browser)),
                 Layer.provide(platformLayer),
+                Layer.provide(layerSeesEverything),
                 Layer.provideMerge(makeAuth(scopes, undefined).layer),
               ),
               { disableLogger: true },
@@ -402,6 +477,7 @@ it.effect.each([
         routeLayer.pipe(
           Layer.provide(Layer.succeed(ServerBrowser.ServerBrowser, browser)),
           Layer.provide(platformLayer),
+          Layer.provide(layerSeesEverything),
         ),
         { disableListenLog: true },
       ).pipe(

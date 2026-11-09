@@ -111,6 +111,15 @@ export class SpaceVisibility extends Context.Service<
       visibility: Visibility,
       threadIds: ReadonlyArray<string>,
     ) => Effect.Effect<ReadonlySet<string>>;
+    /**
+     * The ids among `projectIds` the User works in: in a Space where their Role creates Projects
+     * (their Personal space, or as a Member or Admin; not a Guest's).
+     */
+    readonly workableProjectIds: (
+      visibility: Visibility,
+      userId: UserId | undefined,
+      projectIds: ReadonlyArray<ProjectId>,
+    ) => Effect.Effect<ReadonlySet<ProjectId>>;
     /** The ids among `projectIds` the principal may see. */
     readonly visibleProjectIds: (
       visibility: Visibility,
@@ -342,17 +351,37 @@ const make = Effect.gen(function* () {
     return new Set(threadIds.filter((threadId) => access.get(threadId) === "allowed"));
   });
 
+  const writableSpaces = Effect.fn("SpaceVisibility.writableSpaces")(function* (
+    visibility: { readonly spaceIds: ReadonlyArray<SpaceId> },
+    userId: UserId,
+  ) {
+    const principal = yield* spaces.principalOf(userId).pipe(Effect.orDie);
+    return visibility.spaceIds.filter((spaceId) => {
+      const role = principal.roles.get(spaceId);
+      return spaceId === `personal:${userId}` || role === "admin" || role === "member";
+    });
+  });
+
+  const workableProjectIds = Effect.fn("SpaceVisibility.workableProjectIds")(function* (
+    visibility: Visibility,
+    userId: UserId | undefined,
+    projectIds: ReadonlyArray<ProjectId>,
+  ) {
+    if (visibility.all) return new Set(projectIds);
+    if (userId === undefined || projectIds.length === 0) return new Set<ProjectId>();
+    return yield* visibleProjectIds(
+      { all: false, spaceIds: yield* writableSpaces(visibility, userId) },
+      projectIds,
+    );
+  });
+
   const mayUseDirectory = Effect.fn("SpaceVisibility.mayUseDirectory")(function* (
     visibility: Visibility,
     userId: UserId | undefined,
     directory: string,
   ) {
     if (userId === undefined || visibility.all) return true;
-    const principal = yield* spaces.principalOf(userId).pipe(Effect.orDie);
-    const writable = visibility.spaceIds.filter((spaceId) => {
-      const role = principal.roles.get(spaceId);
-      return spaceId === `personal:${userId}` || role === "admin" || role === "member";
-    });
+    const writable = yield* writableSpaces(visibility, userId);
     const roots = yield* sql<{ readonly root: string | null }>`
       SELECT COALESCE(${hubWorktree(sql, "t")}, p.workspace_root) AS root
       FROM orchestration_v2_projection_threads t
@@ -431,6 +460,7 @@ const make = Effect.gen(function* () {
     visibleThreadIds,
     hiddenThreadIds,
     visibleProjectIds,
+    workableProjectIds,
     claimWork,
     workableThreadIds,
     mayUseDirectory,

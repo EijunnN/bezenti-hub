@@ -1536,6 +1536,8 @@ describe("Space visibility", () => {
     WS_METHODS.subscribeDiscoveredLocalServers,
     WS_METHODS.previewStopLocalServer,
     WS_METHODS.assetsCreateUrl,
+    WS_METHODS.pullRequestsRunAction,
+    WS_METHODS.pullRequestsDetail,
   ] as const;
   const group = WsRpcGroup.omit(
     ...[...WsRpcGroup.requests.keys()].filter(
@@ -3819,6 +3821,48 @@ describe("Space visibility", () => {
           assert.notEqual(yield* asset(asOwner, outside[0]!), refused);
         }),
       ),
+    );
+
+    it.effect(
+      "a Guest reads a Project's pull requests but changes none; Members and Admins do",
+      () =>
+        withTeam(({ server, grace, ada, gus }) =>
+          Effect.gen(function* () {
+            const ref = { projectId: "acme-app", repository: "acme/app", number: 7 };
+            const merge = (client: Client) =>
+              outcome(
+                client[WS_METHODS.pullRequestsRunAction]({ ...ref, action: "merge" } as never),
+              );
+            const read = (client: Client) =>
+              outcome(client[WS_METHODS.pullRequestsDetail](ref as never));
+            const refused =
+              "Only Members and Admins of this Project's Space can change its pull requests.";
+            const asGus = yield* connect(server, gus.userId, Layer.empty, AuthStandardClientScopes);
+            assert.equal(yield* merge(asGus), refused);
+            assert.notEqual(yield* read(asGus), "SpaceResourceNotFoundError");
+            for (const userId of [grace.userId, ada.userId]) {
+              const client = yield* connect(server, userId, Layer.empty, AuthStandardClientScopes);
+              assert.notEqual(yield* merge(client), refused);
+            }
+            // Another Space's Project answers like a missing one.
+            const asGrace = yield* connect(
+              server,
+              grace.userId,
+              Layer.empty,
+              AuthStandardClientScopes,
+            );
+            assert.equal(
+              yield* outcome(
+                asGrace[WS_METHODS.pullRequestsRunAction]({
+                  ...ref,
+                  projectId: "globex-app",
+                  action: "merge",
+                } as never),
+              ),
+              "SpaceResourceNotFoundError",
+            );
+          }),
+        ),
     );
 
     it.effect("a Member's session holds none of the Installation's scopes; the Owner's all", () =>

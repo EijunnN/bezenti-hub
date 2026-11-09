@@ -314,10 +314,28 @@ it("lets a Member reach only a device open in a Thread of theirs, and drive it o
   expect(requests).toEqual([]);
   // Watching a teammate's device, and driving only one's own.
   expect(await status(stream("tablet", "teams"))).toBe(200);
-  const tune = (threadId: string) =>
-    status(`/vendor/serve-emu/api/stream-settings?threadId=${threadId}`, { method: "POST" });
+  const tune = (threadId: string, device = "tablet") =>
+    status(`/vendor/serve-emu/api/stream-settings?threadId=${threadId}&device=${device}`, {
+      method: "POST",
+    });
   expect(await tune("teams")).toBe(404);
-  expect(await tune("mine")).toBe(200);
+  expect(await tune("mine", "phone")).toBe(200);
+  const reached = requests.length;
+  // A path that targets a device names the Thread's own, once, and passes nothing else on.
+  expect(await tune("mine", "other")).toBe(404);
+  expect(
+    await status("/vendor/serve-emu/api/stream-settings?threadId=mine", { method: "POST" }),
+  ).toBe(404);
+  expect(await status("/vendor/serve-sim/api/screenshot?threadId=mine")).toBe(404);
+  expect(
+    await status("/vendor/serve-sim/api/screenshot?threadId=mine&device=phone&device=other"),
+  ).toBe(404);
+  expect(await status(`${stream("phone", "mine")}&device=other`)).toBe(404);
+  expect(await status("/vendor/serve-sim/api/screenshot?threadId=mine&device=phone&udid=x")).toBe(
+    404,
+  );
+  expect(requests.length).toBe(reached);
+  expect(await status("/vendor/serve-sim/api/screenshot?threadId=mine&device=phone")).toBe(200);
   // The Thread named never reaches the hub.
   expect(requests.every((url) => !url.includes("threadId"))).toBe(true);
 });

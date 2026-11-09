@@ -2,6 +2,7 @@ import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequ
 import {
   AuthOrchestrationReadScope,
   AuthPreviewOperateScope,
+  WS_METHODS,
   PREVIEW_STREAM_HOST_SETUP_CLOSE_CODE,
   PreviewStreamHostSetup,
 } from "@t3tools/contracts";
@@ -21,9 +22,11 @@ import {
 import * as Socket from "effect/socket/Socket";
 
 import { authenticateMediaRequest } from "../auth/http.ts";
+import { authorizeSessionAsRpc } from "../auth/RpcAuthorization.ts";
 import { assetResponseHeaders } from "../http.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
+import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import { requestUrl } from "../requestUrl.ts";
 
 const PREVIEW_STREAM_ROUTE_PREFIX = "/api/preview-stream";
@@ -39,6 +42,28 @@ const intParam = (params: URLSearchParams, name: string, fallback: number, max: 
 };
 
 type Frame = Extract<ServerBrowser.ServerBrowserViewerOutput, { readonly _tag: "frame" }>;
+
+/**
+ * Whether the session may watch (as `preview.list`) or drive (as `preview.open`) the Thread's
+ * tabs: the RPCs' own rule, so only the Thread's owner reaches its browser and its cookies.
+ */
+const mayReachTabs = (
+  session: Parameters<typeof authorizeSessionAsRpc>[2],
+  threadId: string,
+  operate: boolean,
+) =>
+  authorizeSessionAsRpc(
+    operate ? WS_METHODS.previewOpen : WS_METHODS.previewList,
+    { threadId },
+    session,
+  ).pipe(
+    Effect.as(true),
+    Effect.catchTags({
+      SpaceResourceNotFoundError: () => Effect.succeed(false),
+      SpaceActionDeniedError: () => Effect.succeed(false),
+      EnvironmentAuthorizationError: () => Effect.succeed(false),
+    }),
+  );
 
 const isAck = (message: unknown) =>
   typeof message === "object" && message !== null && "type" in message && message.type === "ack";
@@ -76,7 +101,11 @@ const makeHandler = Effect.fnUntraced(function* (browser: ServerBrowser.ServerBr
     session.scopes.includes(AuthPreviewOperateScope) && params.get("interactive") !== "false";
   const threadId = params.get("threadId") ?? "";
   const tabId = params.get("tabId") ?? "";
-  if (threadId.length === 0 || tabId.length === 0) {
+  if (
+    threadId.length === 0 ||
+    tabId.length === 0 ||
+    !(yield* mayReachTabs(session, threadId, canOperate))
+  ) {
     return HttpServerResponse.text("Not Found", { status: 404 });
   }
   return yield* Effect.scoped(
@@ -226,7 +255,10 @@ const serveDownload = Effect.fnUntraced(function* (
   browser: ServerBrowser.ServerBrowser["Service"],
   params: URLSearchParams,
 ) {
-  yield* authenticateMediaRequest(AuthOrchestrationReadScope);
+  const session = yield* authenticateMediaRequest(AuthOrchestrationReadScope);
+  if (!(yield* mayReachTabs(session, params.get("threadId") ?? "", false))) {
+    return HttpServerResponse.text("Not Found", { status: 404 });
+  }
   const download = yield* browser.openDownload({
     threadId: params.get("threadId") ?? "",
     tabId: params.get("tabId") ?? "",
@@ -247,7 +279,10 @@ const UPLOAD_MAX_FILES = 20;
 // The request span already covers this upload route.
 const receiveUpload = Effect.fnUntraced(
   function* (browser: ServerBrowser.ServerBrowser["Service"], params: URLSearchParams) {
-    yield* authenticateMediaRequest(AuthPreviewOperateScope);
+    const session = yield* authenticateMediaRequest(AuthPreviewOperateScope);
+    if (!(yield* mayReachTabs(session, params.get("threadId") ?? "", true))) {
+      return HttpServerResponse.text("Not Found", { status: 404 });
+    }
     const request = yield* HttpServerRequest.HttpServerRequest;
     const fs = yield* FileSystem.FileSystem;
     const parts = yield* request.multipart.pipe(
@@ -289,7 +324,10 @@ export const routeLayer = HttpRouter.use((router) =>
   Effect.gen(function* () {
     const browser = yield* ServerBrowser.ServerBrowser;
     const platform = yield* Effect.context<
-      HttpPlatform.HttpPlatform | FileSystem.FileSystem | Path.Path
+      | HttpPlatform.HttpPlatform
+      | FileSystem.FileSystem
+      | Path.Path
+      | SpaceVisibility.SpaceVisibility
     >();
     const handler = makeHandler(browser).pipe(Effect.provideContext(platform));
     yield* router.add("GET", `${PREVIEW_STREAM_ROUTE_PREFIX}/*`, handler);

@@ -308,6 +308,28 @@ export const authorizeRpcCall = (
   });
 
 /**
+ * `authorizeRpcCall` for an HTTP route that does what an RPC does, as the request's session: the
+ * route answers with that RPC's own refusal, so no route keeps a rule of its own.
+ */
+export const authorizeSessionAsRpc = Effect.fn("RpcAuthorization.authorizeSessionAsRpc")(function* (
+  method: string,
+  payload: unknown,
+  session: {
+    readonly scopes: Iterable<AuthEnvironmentScope>;
+    readonly userId?: UserId | undefined;
+  },
+) {
+  const spaceVisibility = yield* SpaceVisibility.SpaceVisibility;
+  const visibility = yield* spaceVisibility.of(session.userId);
+  yield* authorizeRpcCall(
+    method,
+    payload,
+    { scopes: new Set(session.scopes), visibility, userId: session.userId },
+    spaceVisibility,
+  );
+});
+
+/**
  * The scopes a User holds where no session carries any (an MCP caller): what a session of theirs
  * is read with, so the Owner every standard scope and anyone else none of the Installation's.
  */

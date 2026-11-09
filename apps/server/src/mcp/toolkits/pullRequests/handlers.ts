@@ -1,5 +1,7 @@
 import {
   CommandId,
+  ORCHESTRATION_V2_WS_METHODS,
+  WS_METHODS,
   type OrchestrationProjectShell,
   type OrchestrationV2ThreadShell,
   type SourceControlProviderKind,
@@ -27,6 +29,8 @@ import {
 } from "../../../sourceControl/threadPullRequests.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
+import { authorizeAsRpc } from "../../rpcAccess.ts";
+import * as SpaceVisibility from "../../../spaces/SpaceVisibility.ts";
 import {
   type ListThreadPullRequestsResult,
   PullRequestLinkFailedError,
@@ -312,9 +316,13 @@ const make = Effect.gen(function* () {
             Effect.orElseSucceed(() => null),
             Effect.map((shell) => shell ?? undefined),
           );
-    const known = yield* projects
+    // Only Projects the caller sees can hold the pull request it names.
+    const visibility = yield* SpaceVisibility.RequestVisibility;
+    const known = (yield* projects
       .listShells()
-      .pipe(Effect.mapError((cause) => new PullRequestListFailedError({ cause })));
+      .pipe(Effect.mapError((cause) => new PullRequestListFailedError({ cause })))).filter(
+      (project) => SpaceVisibility.seesProject(visibility, project),
+    );
     const callerProject = known.find((project) => project.id === callerThread?.projectId);
     // A pull request named by host and repository builds its URL through the project that holds
     // it, which need not be the caller's.
@@ -517,6 +525,16 @@ const make = Effect.gen(function* () {
     ),
     list_thread_pull_requests: McpToolAccess.reads((input) =>
       requireThread(PullRequestListFailedError, input.threadId).pipe(
+        // Reading a Thread's links is reading the Thread: a hidden one answers like a missing one.
+        Effect.tap((thread) =>
+          authorizeAsRpc(ORCHESTRATION_V2_WS_METHODS.getThreadProjection, {
+            threadId: thread.id,
+          }).pipe(
+            Effect.catch(() =>
+              Effect.fail(new PullRequestThreadNotFoundError({ threadId: thread.id })),
+            ),
+          ),
+        ),
         Effect.map(listThreadPullRequests),
       ),
     ),
@@ -554,7 +572,12 @@ const make = Effect.gen(function* () {
                   }).message,
                 };
               }
-              return yield* reviewGuides.generate(guideReference(entry.project, entry.target)).pipe(
+              // The same check as generating it from the app: a Role that works the Project.
+              return yield* authorizeAsRpc(
+                WS_METHODS.pullRequestsGenerateReviewGuide,
+                guideReference(entry.project, entry.target),
+              ).pipe(
+                Effect.andThen(reviewGuides.generate(guideReference(entry.project, entry.target))),
                 Effect.map((result) => ({
                   ...identity,
                   outcome: result.started ? ("started" as const) : ("running" as const),
@@ -585,6 +608,10 @@ const make = Effect.gen(function* () {
             repository: entry?.target.repository ?? input.repository ?? "",
           });
         }
+        yield* authorizeAsRpc(
+          WS_METHODS.pullRequestsReviewGuide,
+          guideReference(entry.project, entry.target),
+        );
         const result = yield* reviewGuides.get(guideReference(entry.project, entry.target)).pipe(
           Effect.mapError(
             (error) =>
