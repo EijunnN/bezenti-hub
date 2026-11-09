@@ -20,6 +20,8 @@ import * as NodeURL from "node:url";
 import { resolveAttachmentPathById } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as HtmlRender from "./HtmlRender.ts";
+
+const anyFile = () => Effect.succeed(true);
 import { HtmlRenderBrowserError } from "./headlessChrome.ts";
 import * as PreviewBrowser from "../preview/PreviewBrowser.ts";
 import * as PreviewBrowserHost from "../preview/PreviewBrowserHost.ts";
@@ -79,6 +81,7 @@ describe("HtmlRender", () => {
           ...kept.map((src) => `<img src="${src}">`),
           "</body></html>",
         ].join(""),
+        anyFile,
       );
 
       const pngUri = `data:image/png;base64,${Base64.encode(PNG_BYTES)}`;
@@ -102,16 +105,18 @@ describe("HtmlRender", () => {
         "<div style='top:.5svh'></div>",
         "<div style=height:100vh></div>",
       ]) {
-        const error = yield* htmlRender.prepare(page).pipe(Effect.flip);
+        const error = yield* htmlRender.prepare(page, anyFile).pipe(Effect.flip);
         expect(error).toBeInstanceOf(HtmlRender.HtmlRenderViewportHeightError);
       }
       yield* htmlRender.prepare(
         '<style>main{width:100vw;height:320px}</style><img src="data:image/png;base64,AB1vh+2vh/3vhC">',
+        anyFile,
       );
       yield* htmlRender.prepare(
         "<p>Avoid 100vh here.</p><!-- <div style=\"height:100vh\"></div> --><script>const unit = '100vh';</script>",
+        anyFile,
       );
-      yield* htmlRender.prepare(`<style>${"1".repeat(200_000)}vx</style>`);
+      yield* htmlRender.prepare(`<style>${"1".repeat(200_000)}vx</style>`, anyFile);
     }).pipe(Effect.provide(layerTest)),
   );
 
@@ -130,9 +135,31 @@ describe("HtmlRender", () => {
       ].join("\n");
       yield* fileSystem.writeFileString(svg, source);
 
-      const prepared = yield* htmlRender.prepare(`<img src="${svg}">`);
+      const prepared = yield* htmlRender.prepare(`<img src="${svg}">`, anyFile);
 
       expect(prepared).toContain(`data:image/svg+xml;base64,${Base64.encode(source)}`);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("leaves out, like a missing one, an image the caller may not read", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const htmlRender = yield* HtmlRender.HtmlRender;
+      const directory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-html-hidden-" });
+      const svg = path.join(directory, "secret.svg");
+      yield* fileSystem.writeFileString(svg, '<svg xmlns="http://www.w3.org/2000/svg"/>');
+      const asked: Array<string> = [];
+      const error = yield* htmlRender
+        .prepare(`<img src="${svg}">`, (file) =>
+          Effect.sync(() => {
+            asked.push(file);
+            return false;
+          }),
+        )
+        .pipe(Effect.flip);
+      expect(error).toBeInstanceOf(HtmlRender.HtmlRenderImagesNotFoundError);
+      expect(asked).toEqual([svg]);
     }).pipe(Effect.provide(layerTest)),
   );
 
@@ -166,6 +193,7 @@ describe("HtmlRender", () => {
       const error = yield* htmlRender
         .prepare(
           `<img src="${missing}"><img src='${folder}'><img src="C:\\nope\\shot.webp"><img src="${secret}"><img src="${report}"><img src="${config}"><img src="${stalling}"><img src="${unclosed}"><img src="${upper}"><img src="${longer}">`,
+          anyFile,
         )
         .pipe(Effect.flip);
 
@@ -204,6 +232,7 @@ describe("HtmlRender", () => {
       yield* mcpSessions.set(session);
 
       const reference = yield* htmlRender.publish({
+        mayRead: anyFile,
         threadId,
         html: `<p>Quarterly revenue</p>${" ".repeat(8_000)}`,
         title: "  Revenue  ",
@@ -238,22 +267,22 @@ describe("HtmlRender", () => {
       ).toBe(undefined);
       expect(yield* mcpSessions.takeHtmlRender(threadId, page)).toEqual(reference);
       expect(yield* mcpSessions.takeHtmlRender(threadId, page)).toBe(undefined);
-      const reused = yield* htmlRender.publish({ threadId, ...page });
+      const reused = yield* htmlRender.publish({ mayRead: anyFile, threadId, ...page });
       yield* mcpSessions.set({ ...session, browserToolsAvailable: true });
       expect(yield* mcpSessions.takeHtmlRender(threadId, page)).toEqual(reused);
 
-      yield* htmlRender.publish({ threadId, ...page });
+      yield* htmlRender.publish({ mayRead: anyFile, threadId, ...page });
       yield* mcpSessions.set({
         ...session,
         providerSessionId: "replacement-credential",
         providerInstanceId: ProviderInstanceId.make("antigravity"),
         authorizationHeader: "Bearer replacement-token",
       });
-      const replacement = yield* htmlRender.publish({ threadId, ...page });
+      const replacement = yield* htmlRender.publish({ mayRead: anyFile, threadId, ...page });
       expect(yield* mcpSessions.takeHtmlRender(threadId, page)).toEqual(replacement);
       expect(yield* mcpSessions.takeHtmlRender(threadId, page)).toBe(undefined);
       // Clearing the thread's MCP session drops the pages it kept.
-      yield* htmlRender.publish({ threadId, ...page });
+      yield* htmlRender.publish({ mayRead: anyFile, threadId, ...page });
       yield* mcpSessions.clear(threadId);
       expect(yield* mcpSessions.takeHtmlRender(threadId, page)).toBe(undefined);
     }).pipe(Effect.provide(layerTest)),
@@ -273,7 +302,9 @@ describe("HtmlRender", () => {
           .readDirectory(config.attachmentsDir, { recursive: true })
           .pipe(Effect.map((names) => names.filter((name) => name.endsWith(".html"))));
 
-        const publishing = yield* htmlRender.publish({ threadId, ...page }).pipe(Effect.forkChild);
+        const publishing = yield* htmlRender
+          .publish({ mayRead: anyFile, threadId, ...page })
+          .pipe(Effect.forkChild);
         yield* Deferred.await(measuring);
         expect(yield* storedPages).toHaveLength(1);
         yield* Fiber.interrupt(publishing);
@@ -300,7 +331,7 @@ describe("HtmlRender", () => {
           const path = yield* Path.Path;
           const file = yield* fileSystem.makeTempFileScoped({ prefix: "t3-browser-spawn-" });
           const outcome = yield* HtmlRender.HtmlRender.use((htmlRender) =>
-            htmlRender.preview({ html: "<p>x</p>" }).pipe(Effect.flip),
+            htmlRender.preview({ mayRead: anyFile, html: "<p>x</p>" }).pipe(Effect.flip),
           ).pipe(
             Effect.provide(layerHtmlRender(path.join(file, "chrome-headless-shell"))),
             Effect.exit,
@@ -364,7 +395,7 @@ fs.createReadStream(null, { fd: 3 }).on("end", quit).on("data", (chunk) => {
           );
 
           const preview = yield* HtmlRender.HtmlRender.use((htmlRender) =>
-            htmlRender.preview({ html: "<p>x</p>" }),
+            htmlRender.preview({ mayRead: anyFile, html: "<p>x</p>" }),
           ).pipe(Effect.provide(layerHtmlRender(executable)));
           const logged = preview.consoleMessages[0]?.text ?? "";
           expect(logged.isWellFormed()).toBe(true);
@@ -392,7 +423,9 @@ fs.createReadStream(null, { fd: 3 }).on("end", quit).on("data", (chunk) => {
           const { error, baseDir } = yield* Effect.gen(function* () {
             const { baseDir } = yield* ServerConfig.ServerConfig;
             const htmlRender = yield* HtmlRender.HtmlRender;
-            const error = yield* htmlRender.preview({ html: "<p>x</p>" }).pipe(Effect.flip);
+            const error = yield* htmlRender
+              .preview({ mayRead: anyFile, html: "<p>x</p>" })
+              .pipe(Effect.flip);
             return { error, baseDir };
           }).pipe(
             Effect.provide(layerHtmlRender(executable)),
@@ -413,6 +446,7 @@ fs.createReadStream(null, { fd: 3 }).on("end", quit).on("data", (chunk) => {
         const htmlRender = yield* HtmlRender.HtmlRender;
         for (const appearance of [undefined, "dark", "light"] as const) {
           const preview = yield* htmlRender.preview({
+            mayRead: anyFile,
             appearance,
             html: [
               "<style>h1{color:#18181b}@media(prefers-color-scheme:dark){h1{color:#fafafa}}</style>",
@@ -444,6 +478,7 @@ fs.createReadStream(null, { fd: 3 }).on("end", quit).on("data", (chunk) => {
         const secretUrl = NodeURL.pathToFileURL(secret).href;
 
         const preview = yield* htmlRender.preview({
+          mayRead: anyFile,
           html: [
             `<script src="${secretUrl}"></script>`,
             `<iframe src="${secretUrl}" onload="console.log('frame loaded')"></iframe>`,
@@ -494,6 +529,7 @@ fs.createReadStream(null, { fd: 3 }).on("end", quit).on("data", (chunk) => {
       yield* Effect.gen(function* () {
         const htmlRender = yield* HtmlRender.HtmlRender;
         yield* htmlRender.preview({
+          mayRead: anyFile,
           html: [
             `<img src="${origin}/x.png"><iframe src="${origin}/"></iframe>`,
             `<script type="speculationrules">{"prefetch":[{"source":"list","urls":["${origin}/prefetch"]}]}</script>`,

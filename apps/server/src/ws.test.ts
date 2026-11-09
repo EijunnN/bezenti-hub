@@ -1535,6 +1535,7 @@ describe("Space visibility", () => {
     WS_METHODS.attachmentsDelete,
     WS_METHODS.subscribeDiscoveredLocalServers,
     WS_METHODS.previewStopLocalServer,
+    WS_METHODS.assetsCreateUrl,
   ] as const;
   const group = WsRpcGroup.omit(
     ...[...WsRpcGroup.requests.keys()].filter(
@@ -3777,6 +3778,47 @@ describe("Space visibility", () => {
             ]);
           }),
         ),
+    );
+
+    it.effect("an asset URL serves only Hub files from folders the User may read", () =>
+      withTeam(({ server, grace, ada, gus }) =>
+        Effect.gen(function* () {
+          const asset = (client: Client, resource: Record<string, unknown>) =>
+            outcome(client[WS_METHODS.assetsCreateUrl]({ resource } as never));
+          const refused = "SpaceResourceNotFoundError";
+          const outside = [
+            { _tag: "media-file", threadId: "grace-thread", path: "/etc/ssh/ssh_host_rsa_key" },
+            { _tag: "media-file", threadId: "grace-thread", path: "/work/acme-app/../../etc/x" },
+            { _tag: "draft-workspace-file", cwd: "/", path: "etc/passwd" },
+            { _tag: "draft-workspace-file", cwd: "/work/acme-app", path: "../globex-app/.env" },
+            { _tag: "project-favicon", cwd: "/work/globex-app" },
+            { _tag: "github-media", cwd: "/work/globex-app", url: "https://example.com/a.png" },
+          ];
+          const inside = [
+            { _tag: "media-file", threadId: "grace-thread", path: "/work/acme-app/shot.png" },
+            { _tag: "draft-workspace-file", cwd: "/work/acme-app", path: "docs/shot.png" },
+          ];
+          for (const userId of [grace.userId, ada.userId, gus.userId]) {
+            const client = yield* connect(server, userId, Layer.empty, AuthStandardClientScopes);
+            for (const resource of outside) {
+              assert.deepEqual(
+                [userId, resource, yield* asset(client, resource)],
+                [userId, resource, refused],
+              );
+            }
+            for (const resource of inside) {
+              assert.notEqual(yield* asset(client, resource), refused);
+            }
+          }
+          const asOwner = yield* connect(
+            server,
+            yield* ownerUserId(server),
+            Layer.empty,
+            AuthStandardClientScopes,
+          );
+          assert.notEqual(yield* asset(asOwner, outside[0]!), refused);
+        }),
+      ),
     );
 
     it.effect("a Member's session holds none of the Installation's scopes; the Owner's all", () =>

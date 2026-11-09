@@ -11,6 +11,7 @@ import {
   ORCHESTRATION_V2_WS_METHODS,
   type ProjectId,
   SpaceActionDeniedError,
+  SOURCE_CONTROL_MEDIA_ASSET,
   SpaceResourceNotFoundError,
   type ThreadId,
   type UserId,
@@ -287,6 +288,31 @@ const DIRECTORY_TARGET_FIELDS: Partial<Record<string, ReadonlyArray<string>>> = 
   [WS_METHODS.vcsRemoveWorktree]: ["path"],
 };
 
+/**
+ * The Hub folders an asset URL would serve from with no Thread to place it: a host file, a
+ * draft's folder, a Project's favicon folder, the repository whose credential fetches host media.
+ */
+const assetReadTargets = (payload: unknown): ReadonlyArray<string> | "refused" => {
+  const resource = Predicate.isObject(payload)
+    ? (payload as { readonly resource?: unknown }).resource
+    : undefined;
+  const tag = stringField(resource, "_tag");
+  const path = stringField(resource, "path");
+  const cwd = stringField(resource, "cwd");
+  if (tag === "media-file" && path !== undefined) {
+    const named = localWorkspaceTargets(WS_METHODS.assetsCreateUrl, { path }, ["path"]);
+    // A relative path is the Thread's own file, which the Thread's visibility covers.
+    return named === "refused" && !/^([\/]|[a-zA-Z]:)/u.test(path) ? [] : named;
+  }
+  if (tag === "draft-workspace-file") {
+    return localWorkspaceTargets(WS_METHODS.assetsCreateUrl, { cwd, relativePath: path });
+  }
+  if (tag === "project-favicon" || tag === SOURCE_CONTROL_MEDIA_ASSET) {
+    return localWorkspaceTargets(WS_METHODS.assetsCreateUrl, { cwd });
+  }
+  return [];
+};
+
 /** Every string under one of `keys`, at any depth of the payload. */
 const idsUnder = (value: unknown, keys: ReadonlySet<string>, into: Array<string> = []) => {
   if (Array.isArray(value)) {
@@ -491,6 +517,15 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
     return;
   }
   if (access === "named") {
+    if (method === WS_METHODS.assetsCreateUrl) {
+      const targets = assetReadTargets(payload);
+      if (targets === "refused") return yield* notFound();
+      for (const target of targets) {
+        if (!(yield* spaceVisibility.mayReadDirectory(visibility, target))) {
+          return yield* notFound();
+        }
+      }
+    }
     yield* requireVisible([], idsUnder(payload, PROJECT_KEYS));
     const hidden = yield* spaceVisibility.hiddenThreadIds(
       visibility,

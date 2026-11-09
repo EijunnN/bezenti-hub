@@ -117,20 +117,31 @@ export interface HtmlPreview {
   readonly missingImages?: ReadonlyArray<string>;
 }
 
+/**
+ * Whether the caller may read a Hub file an image path names (`SpaceVisibility.mayReadDirectory`):
+ * one it may not is left out like a missing one.
+ */
+export type MayReadImage = (path: string) => Effect.Effect<boolean>;
+
 export class HtmlRender extends Context.Service<
   HtmlRender,
   {
-    readonly prepare: (html: string) => Effect.Effect<string, HtmlRenderPrepareError>;
+    readonly prepare: (
+      html: string,
+      mayRead: MayReadImage,
+    ) => Effect.Effect<string, HtmlRenderPrepareError>;
     readonly publish: (input: {
       readonly threadId: ThreadId;
       readonly html: string;
       readonly title: string;
       readonly height: number;
+      readonly mayRead: MayReadImage;
     }) => Effect.Effect<HtmlRenderReference, HtmlRenderPrepareError | HtmlRenderStoreError>;
     readonly preview: (input: {
       readonly html: string;
       readonly width?: number | undefined;
       readonly appearance?: ThemeAppearance | undefined;
+      readonly mayRead: MayReadImage;
     }) => Effect.Effect<
       HtmlPreview,
       | Exclude<HtmlRenderPrepareError, HtmlRenderImagesNotFoundError>
@@ -231,13 +242,19 @@ const afterDoctype = (text: string, from: number) => {
   return -1;
 };
 
-const inlineLocalImages = Effect.fn("HtmlRender.inlineLocalImages")(function* (html: string) {
+const inlineLocalImages = Effect.fn("HtmlRender.inlineLocalImages")(function* (
+  html: string,
+  mayRead: MayReadImage,
+) {
   const fileSystem = yield* FileSystem.FileSystem;
   const references = findLocalImages(html);
   const files = yield* Effect.forEach(
     [...new Set(references.map((reference) => reference.path))],
     (path) =>
-      fileSystem.stat(filePathFor(path)).pipe(
+      mayRead(filePathFor(path)).pipe(
+        Effect.flatMap((readable) =>
+          readable ? fileSystem.stat(filePathFor(path)) : Effect.fail(undefined),
+        ),
         Effect.map((info) => ({
           path,
           size: info.type === "File" ? Number(info.size) : undefined,
@@ -401,12 +418,14 @@ const make = Effect.gen(function* () {
   );
 
   // The bootstrap goes in first so its head scan never runs over inlined image data.
-  const inline = (html: string) =>
-    inlineLocalImages(injectHtmlRenderBootstrap(html)).pipe(Effect.provideContext(services));
+  const inline = (html: string, mayRead: MayReadImage) =>
+    inlineLocalImages(injectHtmlRenderBootstrap(html), mayRead).pipe(
+      Effect.provideContext(services),
+    );
 
-  const prepare = Effect.fn("HtmlRender.prepare")(function* (html: string) {
+  const prepare = Effect.fn("HtmlRender.prepare")(function* (html: string, mayRead: MayReadImage) {
     yield* rejectViewportHeight(html);
-    const inlined = yield* inline(html);
+    const inlined = yield* inline(html, mayRead);
     if (inlined.missing.length > 0) {
       return yield* new HtmlRenderImagesNotFoundError({ paths: inlined.missing });
     }
@@ -418,8 +437,9 @@ const make = Effect.gen(function* () {
     readonly html: string;
     readonly title: string;
     readonly height: number;
+    readonly mayRead: MayReadImage;
   }) {
-    const html = yield* prepare(input.html);
+    const html = yield* prepare(input.html, input.mayRead);
     // The `-html` id suffix makes the asset route serve it as a sandboxed text/html document.
     const attachmentId = createAttachmentId(input.threadId, "html");
     const filePath =
@@ -467,6 +487,7 @@ const make = Effect.gen(function* () {
     readonly html: string;
     readonly width?: number | undefined;
     readonly appearance?: ThemeAppearance | undefined;
+    readonly mayRead: MayReadImage;
   }) {
     const width = Math.min(
       MAX_PREVIEW_WIDTH,
@@ -474,7 +495,7 @@ const make = Effect.gen(function* () {
     );
     const appearance = input.appearance ?? "dark";
     yield* rejectViewportHeight(input.html);
-    const inlined = yield* inline(input.html);
+    const inlined = yield* inline(input.html, input.mayRead);
     const executable = yield* previewBrowser.executable;
     const theme = htmlRenderTheme(
       appearance === "light" ? T3_CODE_LIGHT_THEME_COLORS : T3_CODE_DARK_THEME_COLORS,

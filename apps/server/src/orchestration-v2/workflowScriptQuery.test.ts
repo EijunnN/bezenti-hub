@@ -8,7 +8,7 @@ import { it as effectIt } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import { afterAll, assert, describe } from "vite-plus/test";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
-import { readWorkflowScript } from "./workflowScriptQuery.ts";
+import { readThreadWorkflowScript, readWorkflowScript } from "./workflowScriptQuery.ts";
 
 const root = NodePath.join(NodeOS.homedir(), ".claude", "projects", "__wf_script_test__");
 NodeFS.mkdirSync(root, { recursive: true });
@@ -40,6 +40,21 @@ describe("workflow script containment", () => {
         const error = yield* Effect.flip(readWorkflowScript({ scriptPath: fifo }));
         assert.equal(error.reason, "not-regular-file");
       }),
+  );
+
+  effectIt.effect("serves a Thread only a script one of its own workflows recorded", () =>
+    Effect.gen(function* () {
+      const threadRan = (path: string) =>
+        Effect.succeed([{ workflow: { runHandles: { scriptPath: path } } }] as never);
+      const own = yield* readThreadWorkflowScript({ scriptPath, subagents: threadRan(scriptPath) });
+      assert.include(own.contents, "export const meta");
+      const another = NodePath.join(root, "another-session.js");
+      NodeFS.writeFileSync(another, "someone else's script");
+      const refused = yield* Effect.flip(
+        readThreadWorkflowScript({ scriptPath: another, subagents: threadRan(scriptPath) }),
+      );
+      assert.equal(refused.reason, "not-found");
+    }),
   );
 
   effectIt.effect("serves a real script under the projects root", () =>
