@@ -779,20 +779,32 @@ User's: what a call opens on it is checked against the folders the User may read
 inlining). The Owner reads everything; `filesystem:read` alone no longer opens a path outside
 those folders for anyone else.
 
-Those checks trust two roots, so both come from the Hub's own records, never from what a
-client sends ([directoryRoots](../../apps/server/src/spaces/directoryRoots.ts)):
+Those checks trust two kinds of root, and only under today's rule
+([directoryRoots](../../apps/server/src/spaces/directoryRoots.ts)), applied when the rule is
+written and again every time a folder is checked, so a row recorded before the rule, by
+another machine, or by a move that kept an old path, counts only if it passes:
 
-- A Project's workspace root. The Owner picks any folder; anyone else creates a Project only in
-  a new folder right in the Hub's Projects folder that no Project holds (as a clone's
-  destination), or in one the Hub made for it (a named Project, a promoted Scratch Thread), and
-  never moves it elsewhere. `ProjectService.create`/`update` enforce it, so WS, HTTP, MCP and
-  clones meet the same rule.
-- A Thread's worktree, only while the Thread runs on the Hub machine (another machine's path
-  names nothing on this disk and counts as no root). Anyone but the Owner records one only
-  inside the Thread's Project or as a linked worktree of the repository the Project is in;
-  the orchestrator checks it on `thread.create` and `thread.metadata.update` for every actor.
+- A Project's workspace root: one the Owner chose (or from before Users), or a folder right in
+  the Hub's Projects or Scratch folder. Anyone but the Owner creates a Project only in a new
+  folder right in the Projects folder that no Project holds (claimed under a lock, so two
+  Spaces never take the same one), or in one the Hub made for it (a named Project, a promoted
+  Scratch Thread), and never moves it or points its icon outside it. `ProjectService` enforces
+  this for every transport; cloning that makes a Project asks the same rule up front.
+- A Thread's worktree while it runs on the Hub machine (or names none): only inside its
+  Project, or the Project's own part of a linked worktree of the repository it is in (the
+  worktree plus the Project's path in the repository, so monorepo Projects of different Spaces
+  claim none of each other's). A repository that holds the Hub's own folders never qualifies.
+  The orchestrator refuses others on `thread.create` and `thread.metadata.update`.
 
-Rows written before this rule are trusted as they are.
+Nothing is rewritten: a root that fails today's rule stays recorded and works as before for
+the Owner, who sees everything. For everyone else it is simply no folder of theirs: terminals,
+files and assets there are refused as missing until the Owner moves the Project into the
+Projects folder or the Thread back into its Project.
+
+An agent's MCP credential on a machine bound to one Space (its Sandbox, a dedicated machine)
+reads and acts only in that Space (`spaceLimit`), with its User's rights there:
+`SpaceVisibility` filters what it reads, and `SpaceDirectory.authorizeItem` and
+`claimCreation`, which every write passes, refuse the rest.
 
 Every other door decides with the rule of the RPC it mirrors: HTTP routes call
 `authorizeSessionAsRpc`, MCP tools `authorizeAsRpc`, and both run with the caller's
