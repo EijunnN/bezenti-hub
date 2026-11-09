@@ -305,7 +305,8 @@ const make = Effect.gen(function* () {
   /**
    * A Sandbox, and a machine dedicated to a Space, runs only its own Space's Threads: one whose
    * Project moved to another Space since it was placed (or a machine dedicated elsewhere since)
-   * starts nothing new there (spec 3, until ticket 12 moves such Threads).
+   * starts nothing new there (spec 3, until ticket 12 moves such Threads). A personal machine
+   * runs only while its owner is in the Thread's Space.
    */
   const requireSandboxSpace = Effect.fn("RemoteEnvironments.requireSandboxSpace")(function* (
     link: Link,
@@ -319,7 +320,6 @@ const make = Effect.gen(function* () {
       Effect.provideService(SqlClient.SqlClient, sql),
       Effect.mapError(refuse),
     );
-    if (sandboxSpace === undefined) return;
     const [row] = yield* sql<{ readonly spaceId: string | null }>`
       SELECT COALESCE(t.space_id, p.space_id,
         'personal:' || (SELECT user_id FROM users WHERE is_owner = 1)) AS "spaceId"
@@ -331,6 +331,31 @@ const make = Effect.gen(function* () {
         refuse(new SpaceCheckUnavailableError({ environmentId: link.environmentId, cause })),
       ),
     );
+    if (sandboxSpace === undefined) {
+      // A personal machine runs a Thread only while its owner may still work in the Thread's
+      // Space (`environment.use` is checked when placing; resumes and continuations have no
+      // actor): once they left it, or were disabled or removed, nothing new starts there.
+      const [personal] = yield* sql<{ readonly usable: number }>`
+        SELECT (u.removed_at IS NULL AND u.disabled_at IS NULL AND (
+          u.is_owner = 1
+          OR ${row?.spaceId ?? null} = 'personal:' || u.user_id
+          OR EXISTS (SELECT 1 FROM space_memberships m
+            WHERE m.user_id = u.user_id AND m.space_id = ${row?.spaceId ?? null})
+        )) AS usable
+        FROM environments e JOIN users u ON u.user_id = e.owner_user_id
+        WHERE e.environment_id = ${link.environmentId} AND e.mode = 'personal'
+      `.pipe(
+        Effect.mapError((cause) =>
+          refuse(new SpaceCheckUnavailableError({ environmentId: link.environmentId, cause })),
+        ),
+      );
+      if (personal === undefined || personal.usable === 1) return;
+      return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+        driver,
+        detail:
+          "This Thread's machine belongs to someone no longer in its Space. Move it to another Environment.",
+      });
+    }
     if (row?.spaceId === sandboxSpace) return;
     const mismatch = new SandboxSpaceMismatchError({
       environmentId: link.environmentId,

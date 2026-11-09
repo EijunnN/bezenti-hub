@@ -307,6 +307,25 @@ it.live("an MCP client Grace approves reads and creates as Grace, not as the Own
   }),
 );
 
+it.live("removing Grace revokes the MCP clients she approved", () =>
+  Effect.gen(function* () {
+    const { server, owner, grace } = yield* hub;
+    const { token } = yield* authorizeClient(server, grace.cookie);
+    assert.equal((yield* mcpScope(server, token))?.userId, grace.userId);
+    const removed = yield* server.request(`/api/installation/users/${grace.userId}/status`, {
+      body: { status: "removed" },
+      cookie: owner,
+    });
+    assert.equal(removed.status, 200);
+    assert.isUndefined(yield* mcpScope(server, token));
+    const live = yield* server.sql<{ count: number }>`
+      SELECT COUNT(*) AS count FROM auth_sessions
+      WHERE user_id = ${grace.userId} AND revoked_at IS NULL
+    `;
+    assert.equal(live[0]?.count, 0);
+  }),
+);
+
 it.live("the client shows in Grace's sessions, Grace can revoke it, and others cannot", () =>
   Effect.gen(function* () {
     const { server, owner, grace, linus } = yield* hub;

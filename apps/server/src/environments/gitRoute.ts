@@ -315,7 +315,6 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
   yield* deps.repositories.ensure(key.value);
   const contentType = request.headers["content-type"];
   const contentEncoding = request.headers["content-encoding"];
-  const gitProtocol = request.headers["git-protocol"];
   const env = {
     ...isolatedEnvironment(deps.nullDevice, [
       ["http.receivepack", "true"],
@@ -341,7 +340,8 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
     ...(contentType === undefined ? {} : { CONTENT_TYPE: contentType }),
     ...(contentEncoding === undefined ? {} : { HTTP_CONTENT_ENCODING: contentEncoding }),
     ...(contentLength === undefined ? {} : { CONTENT_LENGTH: contentLength }),
-    ...(gitProtocol === undefined ? {} : { GIT_PROTOCOL: gitProtocol }),
+    // No GIT_PROTOCOL: version 2 serves any object a machine names by id, hidden refs or not,
+    // so every machine speaks version 0, where only advertised tips are wanted.
   };
 
   // The child lives until the response body is sent, or the request fails before it starts.

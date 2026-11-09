@@ -1200,6 +1200,22 @@ describe("Hub repository", () => {
       const seen = (yield* on(desktop, "ls-remote")).stdout;
       assert.notInclude(seen, checkpointRef);
       assert.notInclude(seen, headRef);
+      // Nor fetches a hidden object by its id, in any protocol version.
+      const sha = (yield* git(workspaceRoot, ["rev-parse", checkpointRef])).stdout.trim();
+      const fresh = `${workspaceRoot}-fresh`;
+      yield* git(workspaceRoot, ["init", "-q", fresh]);
+      for (const version of ["2", "0"]) {
+        const remote = HubRepository.withEnvironmentCredential(
+          HubRepository.hubRepositoryUrl(hub.server.url, { projectId }),
+          desktop.credential,
+        );
+        const stolen = yield* git(
+          fresh,
+          ["-c", `protocol.version=${version}`, "fetch", "-q", remote.url, sha],
+          { env: remote.env ?? {} },
+        );
+        assert.notEqual(stolen.exitCode, 0, `protocol ${version}`);
+      }
       assert.notEqual((yield* on(desktop, "push", `+HEAD:${checkpointRef}`)).exitCode, 0);
       assert.notEqual((yield* on(desktop, "push", `+HEAD:${headRef}`)).exitCode, 0);
       assert.notEqual((yield* on(laptop, "push", "+HEAD:refs/heads/main")).exitCode, 0);
@@ -3837,6 +3853,70 @@ describe("Hub con Environments: the Sandbox of a Space", () => {
         current = (current as { readonly cause?: unknown }).cause;
       }
       assert.include(causes, "SandboxSpaceMismatchError");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("starts nothing on a personal machine whose owner left the Thread's Space", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const hub = yield* makeHub();
+      const acme = yield* createOrganization(hub, "Acme");
+      const grace = UserId.make("member-1");
+      yield* addMember(hub.server, { id: grace, displayName: "Grace" });
+      yield* joinOrganization(hub.server, acme, grace, "member");
+      const projectId = ProjectId.make("project:acme-laptop");
+      yield* seedProject(hub.server, {
+        projectId,
+        title: "Acme",
+        defaultModelSelection: null,
+        spaceId: acme,
+      });
+      const laptop = yield* hub.join({ name: "Laptop", adapters: idleAdapters(instanceId) });
+      yield* hub.server.sql`
+        UPDATE environments SET owner_user_id = ${grace}, mode = 'personal'
+        WHERE environment_id = ${laptop.environmentId}
+      `;
+      const threadId = ThreadId.make("thread:acme-laptop");
+      const modelSelection = { instanceId, model: "claude-sonnet-4-6" };
+      yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("command:acme-laptop-thread"),
+        threadId,
+        projectId,
+        title: "Acme on the Laptop",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        activeEnvironmentId: laptop.environmentId,
+      });
+      // Grace leaves Acme: a resume, which has no actor, finds her machine no longer usable.
+      yield* hub.server.sql`DELETE FROM space_memberships WHERE user_id = ${grace}`;
+      const executors = hub.service(EnvironmentExecutor.EnvironmentExecutorRegistry);
+      const adapter = yield* (yield* executors.get(laptop.environmentId)).provider.adapters.get(
+        instanceId,
+      );
+      const refused = yield* adapter
+        .openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("provider-session:acme-laptop"),
+          modelSelection,
+          runtimePolicy: { runtimeMode: "full-access", interactionMode: "default", cwd: "/x" },
+        })
+        .pipe(Effect.provideService(Scope.Scope, yield* Effect.scope), Effect.flip);
+      const details: Array<string> = [];
+      for (let current: unknown = refused; typeof current === "object" && current !== null;) {
+        const failure = current as { readonly detail?: unknown; readonly message?: unknown };
+        details.push(String(failure.detail ?? failure.message));
+        current = (current as { readonly cause?: unknown }).cause;
+      }
+      assert.isTrue(
+        details.some((detail) => detail.includes("no longer in its Space")),
+        details.join(" | "),
+      );
     }).pipe(Effect.scoped),
   );
 });
