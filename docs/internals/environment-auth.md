@@ -395,7 +395,10 @@ carry an owner, so the first User to work it holds it in memory
 and preview streams show each User only what they may work. A launch whose
 client-chosen id names an existing Thread fails before anything is provisioned,
 alike for hidden and visible Threads, and Pull Request
-calls routed by repository see only visible Projects (`RequestVisibility`).
+calls routed by repository see only visible Projects (`RequestVisibility`, which MCP tools
+carry too) and reach only such a Project's own repository with the Hub's credentials; changing
+a Pull Request (merge, review, labels, guides) takes a Role that works the Project
+(`workProject`), not a Guest's.
 
 An Organization's lifecycle is the Owner's
 ([OrganizationLifecycle](../../apps/server/src/spaces/OrganizationLifecycle.ts)).
@@ -767,13 +770,34 @@ back to the reusable credential. OAuth exchanges create ordinary local bearer
 or DPoP children with normal expiry and revocation. The reusable cookie expires
 after 30 days.
 
-## The environment is the filesystem boundary
+## Folders on the Hub's disk
 
-Projects are organizational boundaries, not filesystem sandboxes.
-`filesystem:read` permits reading files the server account can read, including
-absolute paths outside a project. This lets clients display artifacts that an
-agent writes in a temporary directory. Relative paths and writes still follow
-the [workspace path rules](../../apps/server/src/workspace/WorkspaceFileSystem.ts).
+Projects are not filesystem sandboxes, but on a Hub with Members the Hub's disk is not one
+User's: what a call opens on it is checked against the folders the User may read or work in
+(`SpaceVisibility.mayReadDirectory` / `mayUseDirectory`, used by `RpcSpaceAccess` for
+`readDirectory`, `workDirectory`, `readIfThread`, `workIfThread`, asset URLs and MCP image
+inlining). The Owner reads everything; `filesystem:read` alone no longer opens a path outside
+those folders for anyone else.
+
+Those checks trust two roots, so both come from the Hub's own records, never from what a
+client sends ([directoryRoots](../../apps/server/src/spaces/directoryRoots.ts)):
+
+- A Project's workspace root. The Owner picks any folder; anyone else creates a Project only in
+  a new folder right in the Hub's Projects folder that no Project holds (as a clone's
+  destination), or in one the Hub made for it (a named Project, a promoted Scratch Thread), and
+  never moves it elsewhere. `ProjectService.create`/`update` enforce it, so WS, HTTP, MCP and
+  clones meet the same rule.
+- A Thread's worktree, only while the Thread runs on the Hub machine (another machine's path
+  names nothing on this disk and counts as no root). Anyone but the Owner records one only
+  inside the Thread's Project or as a linked worktree of the repository the Project is in;
+  the orchestrator checks it on `thread.create` and `thread.metadata.update` for every actor.
+
+Rows written before this rule are trusted as they are.
+
+Every other door decides with the rule of the RPC it mirrors: HTTP routes call
+`authorizeSessionAsRpc`, MCP tools `authorizeAsRpc`, and both run with the caller's
+`RequestVisibility`. [DoorRules](../../apps/server/src/auth/DoorRules.ts) lists each HTTP
+endpoint, raw route and MCP tool with its rule, and its test fails on a new door that has none.
 
 Signed asset URLs are bearer credentials. A URL for media on the host grants
 access to one canonical file and its device/inode identity, not its containing directory.
@@ -782,9 +806,9 @@ file's identity when serving it, so atomic replacement requires a new URL while
 editing the same file in place does not. An HTML file authorized this way cannot
 load sibling assets; directory-scoped workspace previews are a separate grant.
 Clients should share the authored file reference so they do not disclose the
-temporary URL's credential. `filesystem:read` is checked when the URL is minted,
-not when it is served: a URL issued before the grant was revoked keeps working
-until it expires, and it is not bound to the session that minted it.
+temporary URL's credential. Access is checked when the URL is minted, not when it
+is served: a URL issued before access was revoked keeps working until it expires,
+and it is not bound to the session that minted it.
 
 Host videos can change in place. Their [HTTP
 responses](../../apps/server/src/http.ts) omit cache validators because file

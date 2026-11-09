@@ -114,8 +114,8 @@ export const projectsRootOf = (path: Path.Path, baseDir: string) =>
 
 /**
  * Whether a Thread of the Project at `projectRoot` may record `worktreePath` as its folder: inside
- * the Project, or a linked worktree of its repository (its `.git` file names a worktree entry of
- * the Project's repository, and that entry names it back).
+ * the Project, or a linked worktree of the repository the Project is in (its `.git` file names a
+ * worktree entry of that repository, and the entry names it back).
  */
 export const isProjectWorktree = Effect.fn("directoryRoots.isProjectWorktree")(function* (
   services: DirectoryServices,
@@ -139,7 +139,26 @@ export const isProjectWorktree = Effect.fn("directoryRoots.isProjectWorktree")(f
     services,
     path.resolve(worktree, pointer.value.slice("gitdir:".length).trim()),
   );
-  const entries = yield* realOf(services, path.join(projectRoot, ".git", "worktrees"));
+  // The repository the Project's folder is in (a Project can be a folder inside it, or itself a
+  // linked worktree): the first `.git` up from its root, through `commondir` for a worktree.
+  let common: string | undefined;
+  for (let directory = yield* realOf(services, projectRoot); common === undefined;) {
+    const dotGit = path.join(directory, ".git");
+    const info = yield* fileSystem.stat(dotGit).pipe(Effect.option);
+    if (Option.isSome(info) && info.value.type === "Directory") common = dotGit;
+    else if (Option.isSome(info)) {
+      const own = yield* read(dotGit);
+      if (Option.isNone(own) || !own.value.startsWith("gitdir:")) return false;
+      const gitDir = path.resolve(directory, own.value.slice("gitdir:".length).trim());
+      const shared = yield* read(path.join(gitDir, "commondir"));
+      common = Option.isSome(shared) ? path.resolve(gitDir, shared.value) : gitDir;
+    } else {
+      const parent = path.dirname(directory);
+      if (parent === directory) return false;
+      directory = parent;
+    }
+  }
+  const entries = yield* realOf(services, path.join(common, "worktrees"));
   if (path.dirname(entry) !== entries) return false;
   const back = yield* read(path.join(entry, "gitdir"));
   if (Option.isNone(back)) return false;
