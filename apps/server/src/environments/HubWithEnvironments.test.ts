@@ -4025,9 +4025,17 @@ describe("Hub con Environments: checkouts from the Hub repository", () => {
                 "origin",
                 "https://t3:s3cret-token@git.example.invalid/acme/web.git",
               ]);
-              // What the Hub last fetched of it: `main` one commit behind the Hub's.
+              // What the Hub last fetched of it: `main` one commit behind the Hub's. `main` has
+              // no upstream; `feature/login` tracks its own.
               yield* git(root, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
               yield* git(root, ["branch", "feature/login"]);
+              yield* git(root, ["update-ref", "refs/remotes/origin/feature/login", "HEAD"]);
+              yield* git(root, ["config", "branch.feature/login.remote", "origin"]);
+              yield* git(root, [
+                "config",
+                "branch.feature/login.merge",
+                "refs/heads/feature/login",
+              ]);
               yield* git(root, [...commitAs, "--allow-empty", "-m", "Main moves on"]);
             }),
         });
@@ -4056,9 +4064,18 @@ describe("Hub con Environments: checkouts from the Hub repository", () => {
           yield* revOf(checkout, "refs/remotes/origin/main"),
           yield* revOf(hubCheckout, "refs/remotes/origin/main"),
         );
+        // Each branch tracks what it tracks on the Hub, and nothing else.
+        assert.notEqual(
+          (yield* git(checkout, ["rev-parse", "--abbrev-ref", "main@{upstream}"])).exitCode,
+          0,
+        );
         assert.equal(
-          (yield* git(checkout, ["rev-parse", "--abbrev-ref", "main@{upstream}"])).stdout.trim(),
-          "origin/main",
+          (yield* git(checkout, [
+            "rev-parse",
+            "--abbrev-ref",
+            "feature/login@{upstream}",
+          ])).stdout.trim(),
+          "origin/feature/login",
         );
         const config = yield* readText(`${checkout}/.git/config`);
         assert.notInclude(config, "s3cret");
@@ -4420,6 +4437,44 @@ describe("Hub con Environments: checkouts from the Hub repository", () => {
         assert.include(failed.message, "from the Hub");
         const checkout = yield* checkoutOn(hub, laptop, projectId);
         assert.isFalse(yield* exists(checkout));
+      }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "a Project in a folder of its repository is cloned whole, its folder where it works",
+    () =>
+      Effect.gen(function* () {
+        const instanceId = ProviderInstanceId.make("claudeAgent");
+        const hub = yield* makeHub();
+        const laptop = yield* hub.join({ name: "Laptop", adapters: idleAdapters(instanceId) });
+        const projectId = ProjectId.make("project:web");
+        const { workspaceRoot } = yield* seedProject(hub.server, {
+          projectId,
+          title: "Web",
+          defaultModelSelection: null,
+          subfolder: "packages/web",
+        });
+        const top = workspaceRoot.slice(0, -"/packages/web".length);
+        const executor = yield* hub
+          .service(EnvironmentExecutor.EnvironmentExecutorRegistry)
+          .get(laptop.environmentId)
+          .pipe(Effect.orDie);
+        const fetched = yield* executor.workspace.move
+          .fetch({ projectId, refs: [] })
+          .pipe(Effect.orDie);
+        // The checkout is the Project's folder, inside the whole repository made from the Hub.
+        assert.isTrue(fetched.checkout.endsWith("/packages/web"), fetched.checkout);
+        assert.equal((yield* readText(`${fetched.checkout}/README.md`)).trim(), "# Subfolder");
+        assert.equal(
+          (yield* git(fetched.checkout, ["rev-parse", "--show-toplevel"])).stdout.trim(),
+          fetched.checkout.slice(0, -"/packages/web".length),
+        );
+        assert.equal(yield* revOf(fetched.checkout, "refs/heads/main"), yield* revOf(top, "main"));
+        const repository = yield* hub
+          .service(HubRepository.HubRepositories)
+          .ensure({ projectId })
+          .pipe(Effect.orDie);
+        assert.include(yield* refsIn(repository, "refs/t3/project/"), `${BRANCHES}main`);
       }).pipe(Effect.scoped),
   );
 

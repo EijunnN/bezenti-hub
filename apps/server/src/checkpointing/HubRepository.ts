@@ -19,7 +19,6 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import type * as PlatformError from "effect/PlatformError";
-import * as Schedule from "effect/Schedule";
 import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -34,7 +33,6 @@ export const HUB_REPOSITORY_ROUTE_PREFIX = "/api/git";
 const HUB_REPOSITORY_USERNAME = "t3-environment";
 const CREDENTIAL_VARIABLE = "T3CODE_HUB_GIT_CREDENTIAL";
 const TRANSFER_TIMEOUT_MS = 10 * 60_000;
-const MIRROR_TIMEOUT = "1 minute";
 
 /**
  * Where a Thread's own refs live in the Hub repository: its working branch and recovered changes.
@@ -48,7 +46,7 @@ export const threadRefPrefixes = (threadId: string) => {
 /**
  * The Project's checkout as the Hub's own checkout of it has it, which new checkouts are made
  * from: its branches, `origin`'s tracking refs and its HEAD. Only the Hub writes here (a copy of
- * its checkout, `HubRepositories.mirrorBranches`); every machine that may work in the Project reads
+ * its checkout, `HubRepositories.mirrorCheckout`); every machine that may work in the Project reads
  * it; nothing of a Thread's is under it.
  */
 export const PROJECT_REFS_PREFIX = "refs/t3/project/";
@@ -84,7 +82,7 @@ export const remoteWithoutCredentials = (remoteUrl: string) => {
       url.password = "";
       changed = true;
     }
-    if (url.username !== "" && TOKEN_USER.test(decodeURIComponent(url.username))) {
+    if (url.username !== "" && isTokenUser(url.username)) {
       url.username = "";
       changed = true;
     }
@@ -97,8 +95,22 @@ export const remoteWithoutCredentials = (remoteUrl: string) => {
     }
     return changed ? url.toString() : remoteUrl;
   } catch {
-    // A path or an scp-like `user@host:path`: nothing secret in it.
-    return remoteUrl;
+    // A path or an scp-like `user@host:path` has nothing secret in it; a URL that does not
+    // parse keeps no user information at all.
+    return URL_SCHEME.test(remoteUrl)
+      ? remoteUrl.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#]*@/iu, "$1")
+      : remoteUrl;
+  }
+};
+
+const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//iu;
+
+/** A URL user that is a token; one that does not decode is treated as one. */
+const isTokenUser = (user: string) => {
+  try {
+    return TOKEN_USER.test(decodeURIComponent(user));
+  } catch {
+    return true;
   }
 };
 
@@ -172,6 +184,46 @@ export const withEnvironmentCredential = (url: string, credential: string): HubR
     },
   };
 };
+
+/**
+ * A git query's trimmed output, or null when git answers "none" (exit 1 by default, or one of
+ * `absent`); any other failure is git's error, never an empty answer.
+ */
+export const gitRead = (
+  vcs: VcsProcess.VcsProcess["Service"],
+  input: {
+    readonly operation: string;
+    readonly cwd: string;
+    readonly args: ReadonlyArray<string>;
+    readonly absent?: ReadonlyArray<number>;
+  },
+) =>
+  vcs
+    .run({
+      operation: input.operation,
+      command: "git",
+      cwd: input.cwd,
+      args: [...input.args],
+      allowNonZeroExit: true,
+    })
+    .pipe(
+      Effect.flatMap((output) => {
+        if (output.exitCode === 0) {
+          const text = output.stdout.trim();
+          return Effect.succeed(text.length === 0 ? null : text);
+        }
+        if ((input.absent ?? [1]).includes(output.exitCode)) return Effect.succeed(null);
+        return Effect.fail(
+          new VcsProcessExitError({
+            operation: input.operation,
+            command: "git",
+            cwd: input.cwd,
+            exitCode: output.exitCode,
+            detail: output.stderr.trim().slice(0, 2_000) || "git failed.",
+          }),
+        );
+      }),
+    );
 
 /** Git with git's own message on failure; it names the URL, never the credential. */
 const gitIn = (
@@ -309,10 +361,16 @@ const fetchRefPrefix = Effect.fn("HubRepository.fetchRefPrefix")(function* (inpu
 const isTransientFileError = (error: PlatformError.PlatformError) =>
   error.reason._tag === "Busy" || error.reason._tag === "PermissionDenied";
 
+/** A branch of the Hub's checkout whose upstream is `origin`'s `merge` (`branch.<b>.merge`). */
+export interface HubUpstream {
+  readonly branch: string;
+  readonly merge: string;
+}
+
 /**
  * Makes `target` as the Hub's checkout is (`PROJECT_REFS_PREFIX`): branches, `origin`'s tracking
- * refs and upstream, `branch` checked out (else HEAD's commit, detached; else main or master).
- * `origin` is the Project's own remote. Built in a sibling folder and renamed into place.
+ * refs and the upstreams the Hub's branches have, `branch` checked out (else HEAD's commit,
+ * detached; else main or master). Built in a sibling folder and renamed into place.
  */
 export const cloneFromHub = Effect.fn("HubRepository.cloneFromHub")(function* (
   deps: {
@@ -325,6 +383,7 @@ export const cloneFromHub = Effect.fn("HubRepository.cloneFromHub")(function* (
     readonly remote: HubRemote;
     readonly originUrl: string | null;
     readonly branch: string | undefined;
+    readonly upstreams: ReadonlyArray<HubUpstream>;
   },
 ) {
   const { fileSystem, vcs } = deps;
@@ -337,10 +396,7 @@ export const cloneFromHub = Effect.fn("HubRepository.cloneFromHub")(function* (
   });
   const run = (args: ReadonlyArray<string>, remote?: HubRemote) =>
     gitIn(vcs, { operation, cwd: staging, args, ...(remote === undefined ? {} : { remote }) });
-  const read = (args: ReadonlyArray<string>) =>
-    vcs
-      .run({ operation, command: "git", cwd: staging, args: [...args], allowNonZeroExit: true })
-      .pipe(Effect.map((output) => (output.exitCode === 0 ? output.stdout.trim() : "")));
+  const read = (args: ReadonlyArray<string>) => gitRead(vcs, { operation, cwd: staging, args });
   return yield* Effect.gen(function* () {
     yield* run(["init", "--quiet"]);
     yield* run(
@@ -360,60 +416,85 @@ export const cloneFromHub = Effect.fn("HubRepository.cloneFromHub")(function* (
       ],
       input.remote,
     );
-    const branches = (yield* read(["for-each-ref", "--format=%(refname:strip=2)", "refs/heads/"]))
+    const branches = (
+      (yield* read(["for-each-ref", "--format=%(refname:strip=2)", "refs/heads/"])) ?? ""
+    )
       .split("\n")
       .filter((line) => line.length > 0);
     const head = yield* read(["rev-parse", "--verify", "--quiet", `${CHECKOUT_HEAD_PREFIX}HEAD`]);
     const branch =
       input.branch !== undefined && branches.includes(input.branch)
         ? input.branch
-        : head !== ""
+        : head !== null
           ? undefined
           : ["main", "master"].find((name) => branches.includes(name));
-    if (branch === undefined && head === "") {
+    if (branch === undefined && head === null) {
       return yield* new VcsProcessExitError({
         operation,
         command: "git",
         cwd: input.target,
         exitCode: 1,
-        detail: "The Hub's repository has nothing of the Project to check out.",
+        detail: NOTHING_TO_CHECK_OUT,
       });
     }
     if (branch === undefined) {
-      yield* run(["update-ref", "--no-deref", "HEAD", head]);
+      yield* run(["update-ref", "--no-deref", "HEAD", head!]);
     } else {
       yield* run(["symbolic-ref", "HEAD", `refs/heads/${branch}`]);
     }
     yield* run(["update-ref", "-d", `${CHECKOUT_HEAD_PREFIX}HEAD`]);
     if (input.originUrl !== null) {
       yield* run(["remote", "add", "--", "origin", input.originUrl]);
-      if (
-        branch !== undefined &&
-        (yield* read(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`])) !== ""
-      ) {
-        yield* run(["config", `branch.${branch}.remote`, "origin"]);
-        yield* run(["config", `branch.${branch}.merge`, `refs/heads/${branch}`]);
+      // Each branch tracks what it tracks in the Hub's checkout, and nothing else.
+      for (const upstream of input.upstreams) {
+        if (!branches.includes(upstream.branch)) continue;
+        yield* run(["config", `branch.${upstream.branch}.remote`, "origin"]);
+        yield* run(["config", `branch.${upstream.branch}.merge`, upstream.merge]);
       }
     }
     yield* run(["reset", "--hard", "--quiet"]);
-    yield* fileSystem.rename(staging, input.target).pipe(
-      Effect.retry({
-        while: isTransientFileError,
-        times: 5,
-        schedule: Schedule.exponential("100 millis"),
-      }),
-      // Another session made it meanwhile: that one is the checkout.
-      Effect.catch((cause) =>
-        fileSystem
-          .exists(input.target)
-          .pipe(Effect.flatMap((exists) => (exists ? Effect.void : Effect.fail(cause)))),
-      ),
-    );
+    yield* renameIntoPlace(fileSystem, staging, input.target);
   }).pipe(
     // On every path, made or not: once renamed, nothing is left under the staging name.
     Effect.ensuring(fileSystem.remove(staging, { recursive: true }).pipe(Effect.ignore)),
   );
 });
+
+/** Why a clone from the Hub failed for good: it has nothing of the Project to check out. */
+const NOTHING_TO_CHECK_OUT = "The Hub's repository has nothing of the Project to check out.";
+
+/**
+ * Renames `staging` to `target`. Another session that made `target` meanwhile made the checkout:
+ * that one stays. A rename another process briefly holds is tried again, a few times.
+ */
+const renameIntoPlace = Effect.fn("HubRepository.renameIntoPlace")(function* (
+  fileSystem: FileSystem.FileSystem,
+  staging: string,
+  target: string,
+) {
+  for (let attempt = 0; ; attempt += 1) {
+    const renamed = yield* Effect.result(fileSystem.rename(staging, target));
+    if (renamed._tag === "Success") return;
+    if (yield* fileSystem.exists(target).pipe(Effect.orElseSucceed(() => false))) return;
+    if (attempt >= 5 || !isTransientFileError(renamed.failure)) {
+      return yield* renamed.failure;
+    }
+    yield* Effect.sleep(100 * 2 ** attempt);
+  }
+});
+
+/**
+ * Whether a clone from the Hub may succeed if tried again: the network, the Hub answering 5xx, or
+ * a timeout. A refusal (401, 403, 404), a Hub with nothing to check out or a local failure is not.
+ */
+export const isTransientHubFailure = (error: { readonly _tag: string; readonly detail?: string }) =>
+  error._tag === "VcsProcessTimeoutError" ||
+  (error._tag === "VcsProcessExitError" &&
+    error.detail !== NOTHING_TO_CHECK_OUT &&
+    TRANSIENT_GIT_FAILURE.test(error.detail ?? ""));
+
+const TRANSIENT_GIT_FAILURE =
+  /returned error: 5\d\d|could not resolve host|failed to connect|connection (refused|reset|timed out)|timed out|rpc failed|early eof|unexpected disconnect|empty reply|remote end hung up|operation too slow/iu;
 
 export interface CheckoutTransferInput extends HubRepositoryKey {
   /** A folder of the checkout (or scratch workspace) on this machine. */
@@ -600,23 +681,24 @@ export const layer = Layer.effect(
       return repository;
     });
 
-    // When the latest copy of each Project started, and the lock that runs one copy at a time.
-    const mirrors = new Map<ProjectId, { readonly lock: Semaphore.Semaphore; at: number }>();
+    // For each Project a copy is wanted for: the lock that runs one copy at a time, when the
+    // latest successful copy started, and how many clones wait on it (none: the entry goes).
+    const mirrors = new Map<
+      ProjectId,
+      { readonly lock: Semaphore.Semaphore; at: number; waiting: number }
+    >();
     const copyCheckout = Effect.fn("HubRepositories.copyCheckout")(function* (
       projectId: ProjectId,
       checkout: string,
     ) {
       if (!(yield* fileSystem.exists(checkout).pipe(Effect.orElseSucceed(() => false)))) return;
       const repository = yield* ensure({ projectId });
-      const head = yield* vcs
-        .run({
+      const head =
+        (yield* gitRead(vcs, {
           operation: "HubRepositories.mirrorCheckout",
-          command: "git",
           cwd: checkout,
           args: ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
-          allowNonZeroExit: true,
-        })
-        .pipe(Effect.map((output) => output.exitCode === 0));
+        })) !== null;
       const inRepository = (args: ReadonlyArray<string>) =>
         gitIn(vcs, {
           operation: "HubRepositories.mirrorCheckout",
@@ -640,16 +722,32 @@ export const layer = Layer.effect(
     });
     const mirrorCheckout = Effect.fn("HubRepositories.mirrorCheckout")(
       function* (projectId: ProjectId, checkout: string) {
-        const mirror = mirrors.get(projectId) ?? { lock: Semaphore.makeUnsafe(1), at: 0 };
+        const mirror = mirrors.get(projectId) ?? {
+          lock: Semaphore.makeUnsafe(1),
+          at: Number.NEGATIVE_INFINITY,
+          waiting: 0,
+        };
         mirrors.set(projectId, mirror);
+        mirror.waiting += 1;
         const askedAt = yield* Clock.currentTimeMillis;
-        // Clones that ask together share one copy: one started after a clone asked is as fresh as
-        // a copy of its own would be.
+        // Clones that ask together share one copy: one that started after a clone asked, and
+        // succeeded, is as fresh as a copy of its own would be. A failed one counts for nobody.
         yield* Effect.gen(function* () {
           if (mirror.at >= askedAt) return;
-          mirror.at = yield* Clock.currentTimeMillis;
-          yield* copyCheckout(projectId, checkout).pipe(Effect.timeout(MIRROR_TIMEOUT));
-        }).pipe(mirror.lock.withPermits(1));
+          const startedAt = yield* Clock.currentTimeMillis;
+          yield* copyCheckout(projectId, checkout);
+          mirror.at = startedAt;
+        }).pipe(
+          mirror.lock.withPermits(1),
+          Effect.ensuring(
+            Effect.sync(() => {
+              mirror.waiting -= 1;
+              if (mirror.waiting === 0 && mirrors.get(projectId) === mirror) {
+                mirrors.delete(projectId);
+              }
+            }),
+          ),
+        );
       },
       Effect.catch((cause) =>
         Effect.logWarning("The Hub could not copy its checkout of the Project", { cause }),

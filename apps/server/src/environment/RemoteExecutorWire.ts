@@ -112,12 +112,24 @@ export const WireCheckout = Schema.Struct({
   /**
    * Present when the Hub has its own checkout of the Project in a root it trusts: a new checkout
    * is made from the Hub's copy of it (`refs/t3/project/`) with the Environment credential, or
-   * fails; `branch` is the one the Hub's checkout is on (none: its HEAD is detached). A machine
-   * from before it ignores this and clones `cloneUrl`.
+   * fails; `branch` is the one the Hub's checkout is on (none: its HEAD is detached). Sent only
+   * to machines of executor contract 9 or later.
    */
   fromHub: Schema.optionalKey(
-    Schema.Struct({ projectId: ProjectId, branch: Schema.optionalKey(Schema.String) }),
+    Schema.Struct({
+      projectId: ProjectId,
+      branch: Schema.optionalKey(Schema.String),
+      /** The Hub's branches whose upstream is `origin`: the new checkout's track the same. */
+      upstreams: Schema.optionalKey(
+        Schema.Array(Schema.Struct({ branch: Schema.String, merge: Schema.String })),
+      ),
+    }),
   ),
+  /**
+   * Where the Project's folder is in its repository ("packages/web"), when not at its top: `path`
+   * ends with it, and a new checkout makes the repository at `path` without it.
+   */
+  subfolder: Schema.optionalKey(Schema.String),
   /** A Thread without a Project: `path` is its scratch workspace, made (with git) when missing. */
   scratch: Schema.optionalKey(Schema.Boolean),
   hubRefs: Schema.optionalKey(

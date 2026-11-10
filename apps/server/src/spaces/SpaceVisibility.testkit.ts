@@ -24,7 +24,7 @@ export const layerSeesEverything = Layer.merge(
       mayCreateDirectory: () => Effect.succeed(true),
       mayRootProject: () => Effect.succeed(true),
       hubThreadFolder: () => Effect.succeedNone,
-      trustedProjectRoot: () => Effect.succeedNone,
+      trustedProjectRepository: () => Effect.succeedNone,
     }),
   ),
   SpaceVisibility.layerCurrentViewerOwner,

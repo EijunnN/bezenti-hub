@@ -316,15 +316,18 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
   }
   yield* deps.repositories.ensure(key.value);
   // A new checkout's fetch (only that: routine fetches never wait on it) first has the Hub copy
-  // its own checkout of the Project, from a root today's rule trusts; from any other, nothing.
+  // its own checkout of the Project, from the top of a repository today's rule trusts; from any
+  // other, nothing. Every machine the Hub sends `fromHub` to sends the header (contract 9).
   if (
     key.value.scratchThreadId === undefined &&
     service === "git-upload-pack" &&
     request.method === "GET" &&
     request.headers[HubRepository.CHECKOUT_HEADER.toLowerCase()] !== undefined
   ) {
-    const root = yield* deps.visibility.trustedProjectRoot(projectId);
-    if (Option.isSome(root)) yield* deps.repositories.mirrorCheckout(projectId, root.value);
+    const repository = yield* deps.visibility.trustedProjectRepository(projectId);
+    if (Option.isSome(repository)) {
+      yield* deps.repositories.mirrorCheckout(projectId, repository.value.top);
+    }
   }
   const contentType = request.headers["content-type"];
   const contentEncoding = request.headers["content-encoding"];

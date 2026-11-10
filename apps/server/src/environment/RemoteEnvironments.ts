@@ -160,6 +160,26 @@ export interface RemoteConnection {
   readonly flushAcks: Effect.Effect<void>;
 }
 
+/** The executor contract from which a machine makes new checkouts from the Hub (`fromHub`). */
+const FROM_HUB_CONTRACT_VERSION = 9;
+
+/** The Hub's branches whose upstream is `origin`, from `git config --get-regexp`'s lines. */
+const originUpstreams = (config: string): Array<HubRepository.HubUpstream> => {
+  const remotes = new Map<string, string>();
+  const merges = new Map<string, string>();
+  for (const line of config.split("\n")) {
+    const space = line.indexOf(" ");
+    if (space === -1) continue;
+    const key = line.slice(0, space);
+    const value = line.slice(space + 1).trim();
+    if (key.endsWith(".remote")) remotes.set(key.slice("branch.".length, -".remote".length), value);
+    if (key.endsWith(".merge")) merges.set(key.slice("branch.".length, -".merge".length), value);
+  }
+  return [...remotes]
+    .filter(([branch, remote]) => remote === "origin" && merges.has(branch))
+    .map(([branch]) => ({ branch, merge: merges.get(branch)! }));
+};
+
 export class RemoteEnvironments extends Context.Service<
   RemoteEnvironments,
   {
@@ -476,12 +496,26 @@ const make = Effect.gen(function* () {
       ),
     );
 
+  /**
+   * The Hub's own checkout of the Project as new checkouts on this machine are made from it: the
+   * top of a repository today's rule trusts, and the Project's folder in it. None for a machine
+   * from before contract 9, which knows neither.
+   */
+  const trustedRepositoryFor = (link: Link, projectId: ProjectId) =>
+    link.contractVersion < FROM_HUB_CONTRACT_VERSION || Option.isNone(visibility)
+      ? Effect.succeed(Option.none<{ readonly top: string; readonly subfolder: string }>())
+      : visibility.value.trustedProjectRepository(projectId);
+
   const pathsOf = (link: Link) =>
     ProjectCheckouts.environmentPaths({
       environmentId: link.environmentId,
       workspaceRoot: link.workspaceRoot,
       checkouts,
       projects,
+      subfolderOf: (projectId) =>
+        trustedRepositoryFor(link, projectId).pipe(
+          Effect.map((found) => (Option.isSome(found) ? found.value.subfolder : "")),
+        ),
     });
 
   /** The ready checkpoint refs of the Thread the Hub repository has. */
@@ -533,53 +567,81 @@ const make = Effect.gen(function* () {
       } satisfies WireCheckout;
     }
     const project = yield* projects.get(projectId).pipe(Effect.option, Effect.map(Option.flatten));
-    // A new checkout is made from the Hub's copy of its own checkout, when that is in a root
-    // today's rule trusts and has a commit; else from the Project's own remote.
-    const trusted = Option.isNone(visibility)
-      ? Option.none<string>()
-      : yield* visibility.value.trustedProjectRoot(projectId);
-    // A line of git's output in the Hub's checkout of the Project, or null.
-    const says = (cwd: string | undefined, operation: string, args: ReadonlyArray<string>) =>
-      cwd === undefined || Option.isNone(vcs)
+    // A new checkout is made from the Hub's copy of its own checkout, when that is the top of a
+    // repository today's rule trusts, with a commit, and the machine knows how (contract 9); else
+    // from the Project's own remote.
+    const repository = yield* trustedRepositoryFor(link, projectId);
+    const read = (
+      cwd: string,
+      operation: string,
+      args: ReadonlyArray<string>,
+      absent?: ReadonlyArray<number>,
+    ) =>
+      Option.isNone(vcs)
         ? Effect.succeed(null)
-        : vcs.value
-            .run({ operation, command: "git", args: [...args], cwd, allowNonZeroExit: true })
-            .pipe(
-              Effect.map((output) =>
-                output.exitCode === 0 && output.stdout.trim().length > 0
-                  ? output.stdout.trim()
-                  : null,
-              ),
-              Effect.orElseSucceed(() => null),
-            );
-    const hubRoot = Option.getOrUndefined(trusted);
-    const { origin, branch, head } = yield* Effect.all(
+        : HubRepository.gitRead(vcs.value, {
+            operation,
+            cwd,
+            args,
+            ...(absent === undefined ? {} : { absent }),
+          });
+    const top = Option.getOrUndefined(Option.map(repository, (found) => found.top));
+    const { origin, branch, head, upstreams } = yield* Effect.all(
       {
-        origin: says(
-          Option.getOrUndefined(Option.map(project, (found) => found.workspaceRoot)),
-          "RemoteEnvironments.originUrl",
-          ["remote", "get-url", "origin"],
-        ),
-        branch: says(hubRoot, "RemoteEnvironments.hubBranch", [
-          "symbolic-ref",
-          "--quiet",
-          "--short",
-          "HEAD",
-        ]),
-        head: says(hubRoot, "RemoteEnvironments.hubHead", [
-          "rev-parse",
-          "--verify",
-          "--quiet",
-          "HEAD^{commit}",
-        ]),
+        // No remote named `origin` (2), or a folder that is no repository (128): none to clone.
+        origin: Option.isNone(project)
+          ? Effect.succeed(null)
+          : read(
+              project.value.workspaceRoot,
+              "RemoteEnvironments.originUrl",
+              ["remote", "get-url", "origin"],
+              [2, 128],
+            ),
+        branch:
+          top === undefined
+            ? Effect.succeed(null)
+            : read(top, "RemoteEnvironments.hubBranch", [
+                "symbolic-ref",
+                "--quiet",
+                "--short",
+                "HEAD",
+              ]),
+        head:
+          top === undefined
+            ? Effect.succeed(null)
+            : read(top, "RemoteEnvironments.hubHead", [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "HEAD^{commit}",
+              ]),
+        upstreams:
+          top === undefined
+            ? Effect.succeed(null)
+            : read(top, "RemoteEnvironments.hubUpstreams", [
+                "config",
+                "--local",
+                "--get-regexp",
+                "^branch\\..*\\.(remote|merge)$",
+              ]),
       },
       { concurrency: "unbounded" },
     );
     const uploaded = yield* uploadedRefsOf(threadId);
+    const subfolder = Option.getOrUndefined(Option.map(repository, (found) => found.subfolder));
     return {
       path: path.value,
       cloneUrl: origin === null ? null : HubRepository.remoteWithoutCredentials(origin),
-      ...(head === null ? {} : { fromHub: { projectId, ...(branch === null ? {} : { branch }) } }),
+      ...(head === null
+        ? {}
+        : {
+            fromHub: {
+              projectId,
+              ...(branch === null ? {} : { branch }),
+              upstreams: originUpstreams(upstreams ?? ""),
+            },
+          }),
+      ...(subfolder === undefined || subfolder === "" ? {} : { subfolder }),
       ...(uploaded.length === 0 ? {} : { hubRefs: { projectId, refs: [...uploaded] } }),
     } satisfies WireCheckout;
   });
@@ -720,6 +782,16 @@ const make = Effect.gen(function* () {
                     cause,
                   }),
               ),
+            ),
+          ).pipe(
+            // The Hub's own checkout could not be read: the session says so, never a lesser one.
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterOpenSessionError({
+                  driver,
+                  providerSessionId: input.providerSessionId,
+                  cause,
+                }),
             ),
           );
       const mcp = yield* mcpSessions.read(input.threadId);

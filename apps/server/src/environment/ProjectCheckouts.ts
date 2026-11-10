@@ -162,14 +162,17 @@ export const hubMachinePaths = (
   makePaths(HUB_MACHINE_ENVIRONMENT_ID, (projectId) => hubMachineRoot(projects, projectId));
 
 /**
- * Another Environment: the checkout chosen there, else `<workspace root>/<Project slug>`. The
- * workspace root is the Environment's own, as it reports it.
+ * Another Environment: the checkout chosen there, else `<workspace root>/<Project slug>`, and in
+ * it the Project's folder in its repository when that is not the top (`subfolderOf`), where the
+ * repository is made at the slug. The workspace root is the Environment's own, as it reports it.
  */
 export const environmentPaths = (input: {
   readonly environmentId: EnvironmentId;
   readonly workspaceRoot: string;
   readonly checkouts: ProjectCheckouts["Service"];
   readonly projects: ProjectStore.ProjectStoreV2["Service"];
+  /** The Project's folder in its repository on the Hub ("packages/web"), "" at its top. */
+  readonly subfolderOf?: (projectId: ProjectId) => Effect.Effect<string>;
 }): EnvironmentWorkspacePaths =>
   makePaths(
     input.environmentId,
@@ -179,8 +182,13 @@ export const environmentPaths = (input: {
         projectId,
       });
       if (Option.isSome(chosen)) return chosen;
-      return Option.map(yield* hubMachineRoot(input.projects, projectId), (hubCheckout) =>
-        joinUnderRoot(input.workspaceRoot, projectCheckoutSlug({ projectId, hubCheckout })),
+      const hubCheckout = yield* hubMachineRoot(input.projects, projectId);
+      if (Option.isNone(hubCheckout)) return Option.none<string>();
+      const repository = joinUnderRoot(
+        input.workspaceRoot,
+        projectCheckoutSlug({ projectId, hubCheckout: hubCheckout.value }),
       );
+      const subfolder = input.subfolderOf === undefined ? "" : yield* input.subfolderOf(projectId);
+      return Option.some(subfolder === "" ? repository : joinUnderRoot(repository, subfolder));
     }),
   );

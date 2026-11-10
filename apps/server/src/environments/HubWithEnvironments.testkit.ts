@@ -936,6 +936,8 @@ export const seedProject = Effect.fn("HubWithEnvironments.seedProject")(function
      * is the Hub's scratch folder, with no repository of its own.
      */
     readonly scratch?: boolean;
+    /** The Project is this folder of the repository ("packages/web"), not its top. */
+    readonly subfolder?: string;
   },
 ) {
   const fs = yield* FileSystem.FileSystem;
@@ -959,9 +961,14 @@ export const seedProject = Effect.fn("HubWithEnvironments.seedProject")(function
     yield* git("config", "user.email", "hub@example.com");
     yield* git("config", "user.name", "Hub");
     yield* fs.writeFileString(path.join(root, "README.md"), "# Remote project\n");
-    yield* git("add", "README.md");
+    if (input.subfolder !== undefined) {
+      yield* fs.makeDirectory(path.join(root, input.subfolder), { recursive: true });
+      yield* fs.writeFileString(path.join(root, input.subfolder, "README.md"), "# Subfolder\n");
+    }
+    yield* git("add", ".");
     yield* git("commit", "-m", "Initial commit");
     yield* git("remote", "add", "origin", root);
+    if (input.subfolder !== undefined) workspaceRoot = path.join(root, input.subfolder);
   }
   const projects = Context.get(
     server.services as unknown as Context.Context<ProjectStore.ProjectStoreV2>,

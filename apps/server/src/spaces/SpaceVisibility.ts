@@ -237,10 +237,14 @@ export class SpaceVisibility extends Context.Service<
      */
     readonly hubThreadFolder: (threadId: string) => Effect.Effect<Option.Option<string | null>>;
     /**
-     * The Project's root on the Hub's disk when today's rule trusts it (`directoryRoots`, as
-     * the directory checks read it); none for a deleted Project or a root it does not trust.
+     * The repository of the Project's root on the Hub's disk when today's rule trusts both
+     * (`directoryRoots`, as the directory checks read them): its `top`, and the Project's
+     * `subfolder` in it ("" at the top, "/"-separated). None for a deleted Project, a root it
+     * does not trust, or one in no repository it trusts.
      */
-    readonly trustedProjectRoot: (projectId: ProjectId) => Effect.Effect<Option.Option<string>>;
+    readonly trustedProjectRepository: (
+      projectId: ProjectId,
+    ) => Effect.Effect<Option.Option<{ readonly top: string; readonly subfolder: string }>>;
   }
 >()("t3/spaces/SpaceVisibility") {}
 
@@ -550,22 +554,35 @@ const make = Effect.gen(function* () {
     return yield* withinTrusted(rows, directory);
   });
 
-  const trustedProjectRoot = Effect.fn("SpaceVisibility.trustedProjectRoot")(function* (
+  const trustedProjectRepository = Effect.fn("SpaceVisibility.trustedProjectRepository")(function* (
     projectId: ProjectId,
   ) {
+    const none = Option.none<{ readonly top: string; readonly subfolder: string }>();
     const [row] = yield* sql<{ readonly root: string; readonly byOwner: number }>`
-      SELECT workspace_root AS root, ${byOwner(sql, "projection_projects")} AS "byOwner"
-      FROM projection_projects
-      WHERE project_id = ${projectId} AND deleted_at IS NULL
-    `.pipe(Effect.orDie);
-    if (row === undefined) return Option.none<string>();
+        SELECT workspace_root AS root, ${byOwner(sql, "projection_projects")} AS "byOwner"
+        FROM projection_projects
+        WHERE project_id = ${projectId} AND deleted_at IS NULL
+      `.pipe(Effect.orDie);
+    if (row === undefined) return none;
+    const hub = yield* hubReals;
     const trusted = yield* DirectoryRoots.isTrustedProjectRoot(
       directories,
       row.root,
       row.byOwner === 1,
-      yield* hubReals,
+      hub,
     );
-    return trusted ? Option.some(row.root) : Option.none<string>();
+    if (!trusted || hub === undefined) return none;
+    const repository = yield* DirectoryRoots.projectRepository(directories, row.root, [
+      hub.data,
+      hub.projects,
+      hub.scratch,
+    ]);
+    if (Option.isNone(repository)) return none;
+    const { top, project } = repository.value;
+    return Option.some({
+      top,
+      subfolder: path.relative(top, project).split(path.sep).filter(Boolean).join("/"),
+    });
   });
 
   const mayReadDirectory = Effect.fn("SpaceVisibility.mayReadDirectory")(function* (
@@ -655,7 +672,7 @@ const make = Effect.gen(function* () {
     mayCreateDirectory,
     mayRootProject,
     hubThreadFolder,
-    trustedProjectRoot,
+    trustedProjectRepository,
   });
 });
 

@@ -22,8 +22,10 @@ import {
 /**
  * 8: previews through the Hub (`preview.proxyHttp`, `preview.proxySocket`,
  * `preview.proxySocketSend`). A machine reports its own in its hello.
+ * 9: new checkouts from the Hub's copy of its checkout (`WireCheckout.fromHub` and `subfolder`,
+ * the `X-T3-Checkout` fetch); the Hub sends `fromHub` only to machines of 9 or later.
  */
-export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 8;
+export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 9;
 
 /**
  * The Hub machine's Environment id. It is a constant so the `environments` table can seed the

@@ -38,6 +38,7 @@ import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -305,8 +306,26 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
       ).pipe(Effect.mapError((cause) => cause.message));
     }
     if (yield* fileSystem.exists(checkout.path).pipe(Effect.orElseSucceed(() => false))) return;
+    // A Project in a folder of its repository: the repository is made at `path` without it.
+    const suffix = checkout.subfolder === undefined ? "" : `/${checkout.subfolder}`;
+    const normalized = checkout.path.split(NodePath.sep).join("/");
+    if (suffix !== "" && !normalized.endsWith(suffix)) {
+      return yield* Effect.fail(
+        `The Project's checkout ${checkout.path} is not its repository's folder ${checkout.subfolder}.`,
+      );
+    }
+    const repository = suffix === "" ? checkout.path : checkout.path.slice(0, -suffix.length);
+    if (
+      suffix !== "" &&
+      (yield* fileSystem.exists(repository).pipe(Effect.orElseSucceed(() => false)))
+    ) {
+      return yield* Effect.fail(
+        `${repository} exists on this machine but has no ${checkout.subfolder}: update it, or remove it to have it made again.`,
+      );
+    }
     // The Hub has a checkout of the Project: the new one is made from it, or not at all. A Hub
-    // that fails is retried, never replaced by `origin`.
+    // that fails for a moment is tried again, within the time a clone of `origin` gets; a refusal
+    // or a Hub with nothing to check out is not. It is never replaced by `origin`.
     if (checkout.fromHub !== undefined) {
       if (input.credential === undefined || Option.isNone(vcs)) {
         return yield* Effect.fail(
@@ -316,16 +335,25 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
       return yield* HubRepository.cloneFromHub(
         { vcs: vcs.value, fileSystem, path: NodePath },
         {
-          target: checkout.path,
+          target: repository,
           remote: HubRepository.withEnvironmentCredential(
             HubRepository.hubRepositoryUrl(input.hubUrl, { projectId: checkout.fromHub.projectId }),
             input.credential,
           ),
           originUrl: checkout.cloneUrl,
           branch: checkout.fromHub.branch,
+          upstreams: checkout.fromHub.upstreams ?? [],
         },
       ).pipe(
-        Effect.retry({ times: HUB_CLONE_RETRIES, schedule: Schedule.exponential("1 second") }),
+        Effect.retry({
+          while: HubRepository.isTransientHubFailure,
+          times: HUB_CLONE_RETRIES,
+          schedule: Schedule.exponential("1 second"),
+        }),
+        Effect.timeoutOrElse({
+          duration: Duration.millis(CLONE_TIMEOUT_MS),
+          orElse: () => Effect.fail({ message: "it took longer than a clone may." }),
+        }),
         Effect.mapError(
           (cause) => `Could not make the Project's checkout from the Hub: ${cause.message}`,
         ),
@@ -338,18 +366,18 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
       );
     }
     yield* fileSystem
-      .makeDirectory(NodePath.dirname(checkout.path), { recursive: true })
+      .makeDirectory(NodePath.dirname(repository), { recursive: true })
       .pipe(
         Effect.mapError(
-          (cause) => `Could not create ${NodePath.dirname(checkout.path)}: ${cause.message}`,
+          (cause) => `Could not create ${NodePath.dirname(repository)}: ${cause.message}`,
         ),
       );
     yield* vcs.value
       .run({
         operation: "EnvironmentAgent.cloneCheckout",
         command: "git",
-        args: ["clone", "--", checkout.cloneUrl, checkout.path],
-        cwd: NodePath.dirname(checkout.path),
+        args: ["clone", "--", checkout.cloneUrl, repository],
+        cwd: NodePath.dirname(repository),
         timeoutMs: CLONE_TIMEOUT_MS,
       })
       .pipe(Effect.mapError((cause) => `Could not clone the Project: ${cause.message}`));
