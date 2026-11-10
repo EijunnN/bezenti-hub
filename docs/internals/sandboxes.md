@@ -28,10 +28,12 @@ What the credential reaches is decided by the Space, never by a User:
   A Sandbox makes a new checkout of a Project from the Hub's copy of its own checkout in that
   repository (`refs/t3/project/`, which only the Hub writes and the Sandbox only reads), with the
   credential; `origin` in the checkout is the Project's own remote, without its password or token.
-  A Hub that fails is retried and then the checkout fails: it never falls back to `origin`, which
-  inside the container may be a path on the Hub or a private remote. Only when the Hub has no
-  checkout of the Project with a commit, or its root is one the directory rule does not trust, is
-  `origin` cloned instead (overview, «New checkouts from the Hub»).
+  A transient Hub failure (network, 5xx, timeout) is tried again, within a clone's time; any
+  failure then fails the checkout: it never falls back to `origin`, which inside the container may
+  be a path on the Hub or a private remote. Only when the Hub has no checkout of the Project with a
+  commit in a repository the directory rules trust is `origin` cloned instead. A Project in a
+  folder of its repository gets the whole repository, and works in its folder (overview, «New
+  checkouts from the Hub»).
 - A Sandbox never `leave`s, and is not renamed or removed as a machine. Archiving its Organization
   stops it and nothing starts it meanwhile; deleting the Organization revokes the credential and
   removes its row and home.

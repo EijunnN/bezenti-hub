@@ -46,3 +46,17 @@
   - Un Guest con máquina personal lee el código (spec 1: crea Threads).
   - Un rebase en el Hub cambia `main` para los checkouts nuevos. Es lo esperado: el Hub manda.
   - Para raíces sin confianza el Hub sigue leyendo su `origin` (comportamiento anterior).
+
+**Revisión final:**
+
+- **Project en una subcarpeta del repositorio** (`/repo/packages/web`): se copia desde la raíz del repositorio (`directoryRoots.projectRepository`, la misma regla del ticket 17: la raíz no contiene carpetas del Hub). En la máquina, el checkout por defecto es `<raíz>/<slug>/packages/web`, con el repositorio entero en `<slug>` (`WireCheckout.subfolder`).
+- **Copia:**
+  - tiene el tiempo de una transferencia (10 min);
+  - `at` solo cuenta una copia que terminó bien;
+  - la entrada del mapa se borra cuando nadie espera.
+- **URL:** una URL que no se decodifica no conserva la información de usuario.
+- **Decisión sobre agentes viejos:** `fromHub` y `subfolder` solo van a máquinas con contrato de executor 9 o superior (sube de 8 a 9). Las demás clonan `cloneUrl` como antes y nunca leen la copia sin la cabecera.
+- **Reintentos:** solo fallos transitorios (red, 5xx, timeouts), dentro del `CLONE_TIMEOUT_MS`.
+- **Upstreams:** se copia el upstream real de cada rama del Hub (`branch.<b>.remote/merge` con remote `origin`). Si la rama no tiene upstream, no se pone ninguno.
+- **Rename:** antes de reintentar comprueba si el destino ya existe.
+- **Lecturas git:** un solo helper (`gitRead`) que distingue «no hay» de un fallo real.
