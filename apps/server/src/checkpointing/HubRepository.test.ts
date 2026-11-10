@@ -41,9 +41,20 @@ it.live("the credential helper answers the Hub only, not a host git is sent to",
 
 it("a remote another machine's checkout names keeps no password or token of the Hub's", () => {
   const cases: ReadonlyArray<readonly [string, string]> = [
-    ["https://t3:s3cret@git.example.com/acme/web.git", "https://git.example.com/acme/web.git"],
-    ["https://x-access-token@git.example.com/a/b.git", "https://git.example.com/a/b.git"],
+    // The password goes; the user stays, unless it is itself a token.
+    ["https://t3:s3cret@git.example.com/acme/web.git", "https://t3@git.example.com/acme/web.git"],
+    ["https://alice@git.example.com/a/b.git", "https://alice@git.example.com/a/b.git"],
+    [
+      "https://ghp_0123456789abcdefghijABCDEFGHIJ012345@github.com/a/b.git",
+      "https://github.com/a/b.git",
+    ],
+    ["https://glpat-AbCdEf0123456789xyzW@gitlab.com/a/b.git", "https://gitlab.com/a/b.git"],
+    // A secret query parameter goes; the others stay.
     ["https://git.example.com/a/b.git?token=s3cret", "https://git.example.com/a/b.git"],
+    [
+      "https://git.example.com/a/b.git?ref=main&private_token=s3cret",
+      "https://git.example.com/a/b.git?ref=main",
+    ],
     ["ssh://git:s3cret@git.example.com/a/b.git", "ssh://git@git.example.com/a/b.git"],
     ["ssh://git@git.example.com/a/b.git", "ssh://git@git.example.com/a/b.git"],
     ["git@git.example.com:a/b.git", "git@git.example.com:a/b.git"],

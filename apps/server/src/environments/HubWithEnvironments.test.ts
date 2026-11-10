@@ -3980,6 +3980,13 @@ describe("Hub con Environments: checkouts from the Hub repository", () => {
     return {
       git: (...args: ReadonlyArray<string>) =>
         git(cwd, [args[0]!, remote.url, ...args.slice(1)], { env: remote.env ?? {} }),
+      /** As a new checkout asks, with the header that has the Hub bring its branches in first. */
+      checkout: (...args: ReadonlyArray<string>) =>
+        git(
+          cwd,
+          ["-c", "http.extraHeader=X-T3-Checkout: 1", args[0]!, remote.url, ...args.slice(1)],
+          { env: remote.env ?? {} },
+        ),
       advertised: HttpClient.HttpClient.pipe(
         Effect.flatMap((client) =>
           client.execute(
@@ -3996,12 +4003,16 @@ describe("Hub con Environments: checkouts from the Hub repository", () => {
   };
 
   it.live(
-    "a machine without the checkout clones it from the Hub, `origin` the Project's own remote",
+    "a machine without the checkout clones it from the Hub: its HEAD, `origin`'s tracking refs",
     () =>
       Effect.gen(function* () {
         const loaded = yield* loadFixture("simple");
         const hub = yield* makeHub();
         const laptop = yield* hub.join({ name: "Laptop", adapters: loaded.adapters });
+        const desktop = yield* hub.join({
+          name: "Desktop",
+          adapters: idleAdapters(loaded.variant.modelSelection.instanceId),
+        });
         let hubCheckout = "";
         const result = yield* replayOn(hub, laptop, loaded, {
           afterSeed: (root) =>
@@ -4014,6 +4025,8 @@ describe("Hub con Environments: checkouts from the Hub repository", () => {
                 "origin",
                 "https://t3:s3cret-token@git.example.invalid/acme/web.git",
               ]);
+              // What the Hub last fetched of it: `main` one commit behind the Hub's.
+              yield* git(root, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
               yield* git(root, ["branch", "feature/login"]);
               yield* git(root, [...commitAs, "--allow-empty", "-m", "Main moves on"]);
             }),
@@ -4024,8 +4037,8 @@ describe("Hub con Environments: checkouts from the Hub repository", () => {
         const projectId = result.projections.get(threadId)!.thread.projectId;
         const checkout = yield* checkoutOn(hub, laptop, projectId);
 
-        // The Hub's branches, the one it is on checked out; `origin` is the Project's remote,
-        // without the Hub's credentials in it.
+        // The Hub's branches and the one it is on; `origin` is the Project's remote without the
+        // Hub's password, with its tracking refs and the branch's upstream.
         assert.equal(yield* revOf(checkout, "refs/heads/main"), yield* revOf(hubCheckout, "main"));
         assert.equal(
           yield* revOf(checkout, "refs/heads/feature/login"),
@@ -4037,10 +4050,20 @@ describe("Hub con Environments: checkouts from the Hub repository", () => {
         );
         assert.equal(
           (yield* git(checkout, ["remote", "get-url", "origin"])).stdout.trim(),
-          "https://git.example.invalid/acme/web.git",
+          "https://t3@git.example.invalid/acme/web.git",
         );
-        assert.notInclude(yield* readText(`${checkout}/.git/config`), "s3cret");
-        assert.notInclude(yield* readText(`${checkout}/.git/config`), "/api/git/");
+        assert.equal(
+          yield* revOf(checkout, "refs/remotes/origin/main"),
+          yield* revOf(hubCheckout, "refs/remotes/origin/main"),
+        );
+        assert.equal(
+          (yield* git(checkout, ["rev-parse", "--abbrev-ref", "main@{upstream}"])).stdout.trim(),
+          "origin/main",
+        );
+        const config = yield* readText(`${checkout}/.git/config`);
+        assert.notInclude(config, "s3cret");
+        assert.notInclude(config, "/api/git/");
+        assert.deepEqual(yield* refsIn(`${checkout}/.git`, "refs/t3/checkout/"), []);
         assert.equal((yield* readText(`${checkout}/README.md`)).trim(), "# Remote project");
 
         // The Hub keeps them under a namespace of its own; nothing of the Thread's is a branch.
@@ -4051,49 +4074,50 @@ describe("Hub con Environments: checkouts from the Hub repository", () => {
         assert.includeMembers(yield* refsIn(repository, "refs/t3/project/"), [
           `${BRANCHES}main`,
           `${BRANCHES}feature/login`,
+          "refs/t3/project/remotes/origin/main",
         ]);
         assert.deepEqual(yield* refsIn(repository, "refs/heads/"), []);
+        const mirroredMain = yield* bareRevOf(repository, `${BRANCHES}main`);
 
-        // The machine's next upload contributes its branches: new ones and fast-forwards, never a
-        // rewrite of one the Hub has.
+        // A machine's own branches never reach the Hub, its uploads included.
         yield* awaitUploaded(hub, threadId, 1);
         yield* git(checkout, [...commitAs, "--allow-empty", "-m", "Laptop work"]);
         yield* git(checkout, ["branch", "laptop/spike"]);
-        const tree = (yield* git(checkout, ["rev-parse", "HEAD^{tree}"])).stdout.trim();
-        const orphan = (yield* git(checkout, [
-          "-c",
-          "user.email=l@example.com",
-          "-c",
-          "user.name=L",
-          "commit-tree",
-          tree,
-          "-m",
-          "Rewritten",
-        ])).stdout.trim();
-        yield* git(checkout, ["branch", "-f", "feature/login", orphan]);
         const projection = yield* hub
           .service(Orchestrator.OrchestratorV2)
           .getThreadProjection(threadId);
         const ready = projection.checkpoints.find((checkpoint) => checkpoint.status === "ready");
         assert.isDefined(ready);
-        const executor = yield* hub
-          .service(EnvironmentExecutor.EnvironmentExecutorRegistry)
-          .get(laptop.environmentId)
-          .pipe(Effect.orDie);
-        yield* executor.workspace.hubRepository
+        const executorOf = (environment: TestEnvironment) =>
+          hub
+            .service(EnvironmentExecutor.EnvironmentExecutorRegistry)
+            .get(environment.environmentId)
+            .pipe(Effect.orDie);
+        yield* (yield* executorOf(laptop)).workspace.hubRepository
           .push({ cwd: checkout, projectId, checkpointRefs: [ready.ref] })
           .pipe(Effect.orDie);
+        assert.notInclude(yield* refsIn(repository, "refs/t3/project/"), `${BRANCHES}laptop/spike`);
+        assert.equal(yield* bareRevOf(repository, `${BRANCHES}main`), mirroredMain);
+
+        // The Hub's checkout is rebased and drops a branch. A routine fetch mirrors nothing...
+        yield* git(hubCheckout, [...commitAs, "--amend", "--allow-empty", "-m", "Main rewritten"]);
+        yield* git(hubCheckout, ["branch", "-D", "feature/login"]);
+        const laptopRemote = repositoryAs(hub, laptop.credential, { projectId }, checkout);
+        assert.equal((yield* laptopRemote.git("ls-remote")).exitCode, 0);
+        assert.equal(yield* bareRevOf(repository, `${BRANCHES}main`), mirroredMain);
+        // ...a new checkout gets the Hub's as they are now.
+        const fetched = yield* (yield* executorOf(desktop)).workspace.move
+          .fetch({ projectId, refs: [] })
+          .pipe(Effect.orDie);
         assert.equal(
-          yield* bareRevOf(repository, `${BRANCHES}main`),
-          yield* revOf(checkout, "refs/heads/main"),
+          yield* revOf(fetched.checkout, "refs/heads/main"),
+          yield* revOf(hubCheckout, "main"),
         );
-        assert.equal(
-          yield* bareRevOf(repository, `${BRANCHES}laptop/spike`),
-          yield* revOf(checkout, "refs/heads/main"),
-        );
-        assert.equal(
-          yield* bareRevOf(repository, `${BRANCHES}feature/login`),
-          yield* revOf(hubCheckout, "feature/login"),
+        assert.equal(yield* revOf(fetched.checkout, "refs/heads/feature/login"), "");
+        assert.equal(yield* revOf(fetched.checkout, "refs/heads/laptop/spike"), "");
+        assert.notInclude(
+          yield* refsIn(repository, "refs/t3/project/"),
+          `${BRANCHES}feature/login`,
         );
         // Nothing of the Hub's was written into its own checkout of the Project.
         assert.deepEqual(yield* refsIn(`${hubCheckout}/.git`, "refs/t3/"), []);
@@ -4231,33 +4255,37 @@ describe("Hub con Environments: checkouts from the Hub repository", () => {
         // starts Threads in the Space (spec 1), and runs them on that machine alone.
         const main = (yield* git(workspaceRoot, ["rev-parse", "HEAD"])).stdout.trim();
         for (const machine of [adas, graces, linuses, acmeSandbox]) {
-          const listed = yield* on(machine).git("ls-remote");
+          // As a new checkout asks: the Hub brings its checkout's branches in first.
+          const listed = yield* on(machine).checkout("ls-remote");
           succeeded(listed);
-          assert.deepEqual(listed.stdout.trim().split("\n"), [`${main}\t${BRANCHES}main`]);
+          const refs = listed.stdout.trim().split("\n");
+          assert.include(refs, `${main}\t${BRANCHES}main`);
+          for (const line of refs) assert.match(line, /\trefs\/t3\/project\//u);
         }
         assert.include((yield* on(laptop).git("ls-remote")).stdout, `${BRANCHES}main`);
         assert.include((yield* on(laptop).git("ls-remote")).stdout, headRef);
 
-        // A Member's machine adds a branch and moves one forward; the others read it.
+        // Only the Hub writes them: no machine creates, moves, rewrites or deletes one.
         const fresh = `${workspaceRoot}-graces`;
         yield* git(workspaceRoot, ["clone", "-q", workspaceRoot, fresh]);
         yield* git(fresh, [...commitAs, "--allow-empty", "-m", "Grace's work"]);
-        const gracesWork = (yield* git(fresh, ["rev-parse", "HEAD"])).stdout.trim();
         const fromFresh = (machine: { readonly credential: string }) =>
           repositoryAs(hub, machine.credential, { projectId }, fresh);
-        succeeded(yield* fromFresh(graces).git("push", `HEAD:${BRANCHES}grace/work`));
-        succeeded(yield* fromFresh(graces).git("push", `HEAD:${BRANCHES}main`));
-        assert.include(
-          (yield* on(acmeSandbox).git("ls-remote")).stdout,
-          `${gracesWork}\t${BRANCHES}grace/work`,
-        );
-        // Nobody deletes one, nor writes beside the branches.
-        assert.notEqual((yield* on(graces).git("push", `:${BRANCHES}grace/work`)).exitCode, 0);
-        assert.notEqual((yield* on(laptop).git("push", `:${BRANCHES}main`)).exitCode, 0);
-        assert.notEqual(
-          (yield* fromFresh(graces).git("push", "HEAD:refs/t3/project/tags/v1")).exitCode,
-          0,
-        );
+        for (const machine of [laptop, adas, graces, linuses, acmeSandbox]) {
+          for (const refspec of [
+            `HEAD:${BRANCHES}work`,
+            `HEAD:${BRANCHES}main`,
+            `+HEAD:${BRANCHES}main`,
+            `:${BRANCHES}main`,
+            "HEAD:refs/t3/project/remotes/origin/main",
+            "HEAD:refs/t3/project/tags/v1",
+          ]) {
+            assert.notEqual((yield* fromFresh(machine).git("push", refspec)).exitCode, 0, refspec);
+          }
+        }
+        assert.deepEqual((yield* on(acmeSandbox).git("ls-remote")).stdout.trim().split("\n"), [
+          `${main}\t${BRANCHES}main`,
+        ]);
         assert.notEqual((yield* fromFresh(acmeSandbox).git("push", `HEAD:${headRef}`)).exitCode, 0);
 
         // The Sandbox of another Space neither reads nor writes them.
@@ -4269,13 +4297,6 @@ describe("Hub con Environments: checkouts from the Hub repository", () => {
         // Nor a Member's or a Guest's machine those of a Space they are not in.
         for (const machine of [graces, linuses]) {
           assert.equal(yield* on(machine, { projectId: globexProject }).advertised, 403);
-          assert.notEqual(
-            (yield* repositoryAs(hub, machine.credential, { projectId: globexProject }, fresh).git(
-              "push",
-              `HEAD:${BRANCHES}elsewhere`,
-            )).exitCode,
-            0,
-          );
         }
         // A Guest's machine no longer reads them once the Guest left the Space.
         yield* hub.server.sql`
@@ -4284,7 +4305,6 @@ describe("Hub con Environments: checkouts from the Hub repository", () => {
         yield* hub.service(SpaceDirectory.SpaceDirectory).changed;
         assert.equal(yield* on(linuses).advertised, 403);
         assert.equal(yield* on(globexSandbox, { projectId: globexProject }).advertised, 200);
-        assert.notInclude((yield* on(acmeSandbox).git("ls-remote")).stdout, `${BRANCHES}elsewhere`);
       }).pipe(Effect.scoped),
   );
 
@@ -4319,6 +4339,113 @@ describe("Hub con Environments: checkouts from the Hub repository", () => {
       assert.equal(
         (yield* git(fetched.checkout, ["remote", "get-url", "origin"])).stdout.trim(),
         remote,
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a root today's rule does not trust gives no branches: the machine clones `origin`", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const hub = yield* makeHub();
+      const laptop = yield* hub.join({ name: "Laptop", adapters: idleAdapters(instanceId) });
+      yield* addMember(hub.server, { id: "member-1", displayName: "Grace Hopper" });
+      const projectId = ProjectId.make("project:graces-folder");
+      const { workspaceRoot } = yield* seedProject(hub.server, {
+        projectId,
+        title: "Grace's folder",
+        defaultModelSelection: null,
+      });
+      // Recorded by a Member outside the Hub's Projects folder, as before today's rule.
+      yield* hub.server.sql`
+        UPDATE projection_projects SET owner_user_id = 'member-1' WHERE project_id = ${projectId}
+      `;
+      const repository = yield* hub
+        .service(HubRepository.HubRepositories)
+        .ensure({ projectId })
+        .pipe(Effect.orDie);
+      const listed = yield* repositoryAs(
+        hub,
+        laptop.credential,
+        { projectId },
+        workspaceRoot,
+      ).checkout("ls-remote");
+      assert.equal(listed.exitCode, 0, listed.stderr);
+      assert.notInclude(listed.stdout, "refs/t3/project/");
+      assert.deepEqual(yield* refsIn(repository, "refs/t3/project/"), []);
+      const executor = yield* hub
+        .service(EnvironmentExecutor.EnvironmentExecutorRegistry)
+        .get(laptop.environmentId)
+        .pipe(Effect.orDie);
+      const fetched = yield* executor.workspace.move
+        .fetch({ projectId, refs: [] })
+        .pipe(Effect.orDie);
+      // Cloned from the Project's own remote (here the folder itself), as before.
+      assert.equal(
+        yield* revOf(fetched.checkout, "refs/remotes/origin/main"),
+        yield* revOf(workspaceRoot, "main"),
+      );
+      assert.deepEqual(yield* refsIn(repository, "refs/t3/project/"), []);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "a Hub that cannot serve the checkout fails the clone, never falling back to `origin`",
+    () =>
+      Effect.gen(function* () {
+        const instanceId = ProviderInstanceId.make("claudeAgent");
+        const hub = yield* makeHub();
+        const laptop = yield* hub.join({ name: "Laptop", adapters: idleAdapters(instanceId) });
+        const projectId = ProjectId.make("project:broken");
+        yield* seedProject(hub.server, {
+          projectId,
+          title: "Broken",
+          defaultModelSelection: null,
+        });
+        // The Hub's repository of the Project is unreadable; its `origin` (the folder) is not.
+        const repository = yield* hub
+          .service(HubRepository.HubRepositories)
+          .ensure({ projectId })
+          .pipe(Effect.orDie);
+        yield* Effect.promise(() => NodeFSP.writeFile(`${repository}/HEAD`, "not a ref\n"));
+        yield* Effect.promise(() => NodeFSP.rm(`${repository}/objects`, { recursive: true }));
+        const executor = yield* hub
+          .service(EnvironmentExecutor.EnvironmentExecutorRegistry)
+          .get(laptop.environmentId)
+          .pipe(Effect.orDie);
+        const failed = yield* executor.workspace.move
+          .fetch({ projectId, refs: [] })
+          .pipe(Effect.flip);
+        assert.include(failed.message, "from the Hub");
+        const checkout = yield* checkoutOn(hub, laptop, projectId);
+        assert.isFalse(yield* exists(checkout));
+      }).pipe(Effect.scoped),
+  );
+
+  it.live("a Hub checkout on a detached HEAD gives new checkouts that commit, detached", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const hub = yield* makeHub();
+      const laptop = yield* hub.join({ name: "Laptop", adapters: idleAdapters(instanceId) });
+      const projectId = ProjectId.make("project:detached");
+      const { workspaceRoot } = yield* seedProject(hub.server, {
+        projectId,
+        title: "Detached",
+        defaultModelSelection: null,
+      });
+      yield* git(workspaceRoot, ["checkout", "-q", "--detach"]);
+      yield* git(workspaceRoot, [...commitAs, "--allow-empty", "-m", "On no branch"]);
+      const executor = yield* hub
+        .service(EnvironmentExecutor.EnvironmentExecutorRegistry)
+        .get(laptop.environmentId)
+        .pipe(Effect.orDie);
+      const fetched = yield* executor.workspace.move
+        .fetch({ projectId, refs: [] })
+        .pipe(Effect.orDie);
+      assert.equal(yield* revOf(fetched.checkout, "HEAD"), yield* revOf(workspaceRoot, "HEAD"));
+      assert.notEqual((yield* git(fetched.checkout, ["symbolic-ref", "-q", "HEAD"])).exitCode, 0);
+      assert.equal(
+        yield* revOf(fetched.checkout, "refs/heads/main"),
+        yield* revOf(workspaceRoot, "main"),
       );
     }).pipe(Effect.scoped),
   );
