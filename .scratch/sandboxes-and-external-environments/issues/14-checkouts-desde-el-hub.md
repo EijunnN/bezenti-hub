@@ -12,32 +12,37 @@
 - [x] Las reglas de refs por máquina del spec 2 se mantienen (una máquina no lee checkpoints de Threads ajenos). Red-first.
 - [x] Tests en el testkit y con el runtime Podman.
 
-**Hecho** (rama `impl/sbx-14`):
+**Hecho** (rama `impl/sbx-14`, revisado tras la primera revisión):
 
-- **Namespace:** el repositorio del Hub de cada Project guarda sus ramas en `refs/t3/project/heads/<rama>` (`HubRepository.PROJECT_BRANCHES_PREFIX`). Los refs de Threads siguen como estaban.
-- **Cómo llegan las ramas:**
-  - Desde el checkout del Hub: cada fetch de `/api/git/<projectId>` (el anuncio de upload-pack) trae antes las ramas del `workspaceRoot` del Project (`HubRepositories.mirrorBranches`). Así cubre «al añadir el Project» y «cada fetch»: el primer clon de cualquier máquina ya las ve, entre por la puerta que entre. El checkout del Hub solo se lee.
-  - Desde las máquinas: cada `checkpoint.push` de un checkout de Project ofrece `refs/heads/*` (`makeCheckoutTransfers.push`). Es la misma ruta para el Hub machine y para las máquinas unidas.
-  - Solo fast-forward en ambos sentidos (sin `+`): una rama se crea o avanza y nunca se reescribe. Nadie borra.
-- **Clon:** `provider.openSession` y `move.fetch` llevan `WireCheckout.fromHub` (`projectId` y la rama en la que está el checkout del Hub). La máquina (`HubRepository.cloneFromHub`) hace `git init` en una carpeta hermana, fetch `+refs/t3/project/heads/*:refs/heads/*` con su Environment credential, checkout de esa rama (si no, `main`, `master` o la primera) y `origin` = el remoto propio. Después renombra la carpeta a su sitio. Ni la URL ni la credencial del Hub quedan en el config del checkout.
-- **`origin`:** es el `origin` del checkout del Hub sin contraseña, token ni query (`remoteWithoutCredentials`). Los push a `origin` siguen siendo cosa del User, con sus propias credenciales. Las ramas nuevas no tienen upstream hasta que el User haga fetch de `origin`.
-- **Respaldo:** si el Hub no tiene ninguna rama del Project (su checkout aún no tiene commits), se clona `origin` como antes. Una máquina anterior ignora `fromHub` y hace lo mismo. No hace falta subir la versión del contrato (8): el campo es opcional.
-- **Reglas de la ruta git** (`refPrefixesFor`):
-  - Cualquier máquina que la ruta ya acepta para el Project lee y escribe `refs/t3/project/heads/`. Son las máquinas cuyo dueño puede iniciar Threads en su Space (Owner, Admin, Member y también Guest, que según el spec 1 crea Threads y las corre en su máquina personal) y el Sandbox o las máquinas dedicadas del Space.
-  - El repositorio propio de un Thread sin Project no tiene ese namespace.
-  - Los checkpoints y los refs de Threads ajenos siguen ocultos (v0, `hideRefs`).
-  - `DoorRules` actualizado.
-- **Tests:** en `HubWithEnvironments.test.ts`, «checkouts from the Hub repository»:
-  - remoto privado con token en un Laptop;
+- **Copia del checkout del Hub:** `refs/t3/project/` en el repositorio del Project guarda las ramas (`heads/`), los refs de seguimiento de `origin` (`remotes/origin/`, sin `origin/HEAD`) y el commit de HEAD (`checkout/HEAD`) del `workspaceRoot` del Hub (`HubRepositories.mirrorCheckout`). Se copia con `+` y `--prune`: el checkout del Hub manda, así que un rebase o una rama borrada llegan al siguiente checkout nuevo.
+- **Solo el Hub escribe ahí.** Las máquinas que la ruta git acepta para el Project leen `refs/t3/project/` y no escriben nada: `refPrefixesFor` no les da prefijo de escritura y la ruta rechaza el push antes de que git lo vea. `checkpoint.push` ya no publica `refs/heads/*`, así que las ramas propias de una máquina nunca llegan al Hub.
+- **Cuándo se copia:** solo para un checkout nuevo. Su fetch manda la cabecera `X-T3-Checkout` (`http.extraHeader`). En ese anuncio de upload-pack la ruta copia antes, una copia a la vez por Project (los clones que piden a la vez comparten una), con un límite de un minuto. Un fallo se registra y no bloquea. Los fetch de checkpoints no mandan la cabecera ni esperan.
+- **Raíz de confianza:** solo se copia desde una raíz que la regla de hoy acepta (`SpaceVisibility.trustedProjectRoot`, la misma regla de `directoryRoots` que usan las comprobaciones de carpetas). Desde otra raíz no se copia nada.
+- **Clon (`HubRepository.cloneFromHub`):**
+  - Las ramas pasan a ser las ramas locales, y `remotes/origin/*` pasa a `refs/remotes/origin/*`.
+  - Checkout de la rama del Hub. Si el HEAD del Hub está suelto, ese commit en HEAD suelto. Solo si no se puede leer HEAD, `main` o `master`. Nunca la primera alfabéticamente.
+  - `origin` es el remoto propio, con upstream `origin/<rama>` si el Hub tenía ese ref de seguimiento.
+  - El clon se hace en una carpeta hermana. El rename se reintenta ante Busy/PermissionDenied, y la carpeta temporal se borra en todos los caminos.
+  - Un fallo del Hub se reintenta 3 veces con backoff y luego el checkout falla. Nunca cae a `origin` por un error.
+- **Respaldo a `origin`:** solo cuando `fromHub` no viene, es decir, cuando el Hub no tiene un checkout del Project con commits en una raíz de confianza.
+- **`origin` y `cloneUrl`:** se quita la contraseña, un usuario que es en sí un token y los parámetros de query con nombre de credencial. El usuario y los demás parámetros se quedan. El token nunca sale del Hub.
+  - Una máquina anterior ignora `fromHub` y clona ese mismo `cloneUrl` sin token. Un remoto privado que antes clonaba gracias a la URL del Hub ahora falla ahí hasta actualizarla.
+- **Lecturas git en el Hub:** las dos (o tres) lecturas git de `checkoutFor` corren en paralelo.
+- **Tests (red-first):** en `HubWithEnvironments.test.ts`, «checkouts from the Hub repository»:
+  - HEAD, refs de seguimiento y upstream;
+  - las ramas privadas de una máquina no llegan al Hub;
+  - un fetch rutinario no copia nada;
+  - un rebase y un borrado en el Hub llegan a un checkout nuevo;
+  - ninguna máquina escribe en `refs/t3/project/` (Owner, Admin, Member, Guest, Sandbox), y el Sandbox de otro Space y un Space ajeno no leen;
+  - una raíz sin confianza no copia nada y se clona `origin`;
+  - un Hub roto falla sin caer a `origin`;
+  - HEAD suelto;
   - Sandbox con `origin` = ruta del Hub;
-  - roles y Spaces (Owner, Admin, Member, Guest, Sandbox de otro Space, Member y Guest en un Space ajeno, Guest que deja el Space);
-  - respaldo a `origin`;
-  - Podman real con `origin` = ruta del Hub.
+  - Podman real.
 
-  También `HubRepository.test.ts` (`remoteWithoutCredentials`).
+  También `HubRepository.test.ts` (`remoteWithoutCredentials`). DoorRules actualizado.
 
 - **Riesgos:**
-  - Una rama reescrita (rebase o force) no llega a checkouts nuevos.
-  - Una rama borrada en el checkout del Hub sigue en el Hub.
-  - Una máquina del Project puede adelantar `main` del Hub para los clones siguientes, con la misma confianza que tiene para empujar al `origin`.
-  - Como en los refs de Thread, una máquina que conoce el SHA de un objeto ajeno podría crear una rama que apunte a él sin enviarlo (git no lo comprueba). Requiere conocer el SHA.
+  - Un Guest con máquina personal lee el código (spec 1: crea Threads).
+  - Un rebase en el Hub cambia `main` para los checkouts nuevos. Es lo esperado: el Hub manda.
+  - Para raíces sin confianza el Hub sigue leyendo su `origin` (comportamiento anterior).

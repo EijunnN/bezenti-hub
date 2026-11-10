@@ -129,10 +129,10 @@ export const RAW_ROUTE_RULES: Readonly<Record<string, DoorRule>> = {
     "the Environment credential; what it may run is the executor's per-machine rules",
   ),
   "environments/gitRoute.ts: GET path": own(
-    "the Environment credential; refs of Threads it runs and its Project's branches (refs/t3/project/heads/), protocol v0 only",
+    "the Environment credential; refs of Threads it runs; reads (never writes) the Hub's copy of its Project's checkout, refs/t3/project/; protocol v0 only",
   ),
   "environments/gitRoute.ts: POST path": own(
-    "the Environment credential; refs of Threads it runs and its Project's branches (refs/t3/project/heads/), protocol v0 only",
+    "the Environment credential; refs of Threads it runs; reads (never writes) the Hub's copy of its Project's checkout, refs/t3/project/; protocol v0 only",
   ),
   "guest/http.ts: GET GUEST_ATTACHMENT_ROUTE": GUEST,
   "guest/http.ts: GET GUEST_COMMAND_OUTPUT_ROUTE": GUEST,
