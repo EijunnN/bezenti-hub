@@ -44,6 +44,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -81,6 +82,8 @@ const IDEMPOTENCY_MEMORY = 512;
 /** Unacknowledged events kept per session; past it the oldest go and a reconnect cannot fill them. */
 const SPOOL_LIMIT = 5_000;
 const CLONE_TIMEOUT_MS = 10 * 60_000;
+/** A new checkout from the Hub is tried again this many times, with backoff, before it fails. */
+const HUB_CLONE_RETRIES = 3;
 /** The driver named in errors about a session this machine does not have. */
 const UNKNOWN_DRIVER = ProviderDriverKind.make("environment");
 
@@ -284,9 +287,9 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
     );
 
   /**
-   * The Project's checkout: used where it is, else made from the Project's branches in the Hub
-   * repository (with this machine's credential, `origin` the Project's own remote), else, when the
-   * Hub has none, cloned from the Project's own remote. A Thread without a Project's scratch
+   * The Project's checkout: used where it is, else made from the Hub's copy of its own checkout
+   * (with this machine's credential, `origin` the Project's own remote) when the Hub has one, else
+   * cloned from the Project's own remote. A Thread without a Project's scratch
    * workspace is made empty instead, as its own git repository.
    */
   const ensureCheckout = Effect.fn("EnvironmentAgent.ensureCheckout")(function* (
@@ -302,9 +305,15 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
       ).pipe(Effect.mapError((cause) => cause.message));
     }
     if (yield* fileSystem.exists(checkout.path).pipe(Effect.orElseSucceed(() => false))) return;
-    let fromHubFailure: string | undefined;
-    if (checkout.fromHub !== undefined && input.credential !== undefined && Option.isSome(vcs)) {
-      const cloned = yield* HubRepository.cloneFromHub(
+    // The Hub has a checkout of the Project: the new one is made from it, or not at all. A Hub
+    // that fails is retried, never replaced by `origin`.
+    if (checkout.fromHub !== undefined) {
+      if (input.credential === undefined || Option.isNone(vcs)) {
+        return yield* Effect.fail(
+          `This machine cannot make the Project's checkout ${checkout.path} from the Hub.`,
+        );
+      }
+      return yield* HubRepository.cloneFromHub(
         { vcs: vcs.value, fileSystem, path: NodePath },
         {
           target: checkout.path,
@@ -315,17 +324,17 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
           originUrl: checkout.cloneUrl,
           branch: checkout.fromHub.branch,
         },
-      ).pipe(Effect.result);
-      if (cloned._tag === "Success" && cloned.success) return;
-      if (cloned._tag === "Failure") {
-        fromHubFailure = `Could not make the Project's checkout from the Hub: ${cloned.failure.message}`;
-        yield* Effect.logWarning(fromHubFailure);
-      }
+      ).pipe(
+        Effect.retry({ times: HUB_CLONE_RETRIES, schedule: Schedule.exponential("1 second") }),
+        Effect.mapError(
+          (cause) => `Could not make the Project's checkout from the Hub: ${cause.message}`,
+        ),
+      );
     }
+    // The Hub has none (no checkout of its own, or one in a root it does not trust): `origin`.
     if (checkout.cloneUrl === null || Option.isNone(vcs)) {
       return yield* Effect.fail(
-        fromHubFailure ??
-          `The Project's checkout ${checkout.path} does not exist on this machine, and the Project has no remote to clone.`,
+        `The Project's checkout ${checkout.path} does not exist on this machine, and the Project has no remote to clone.`,
       );
     }
     yield* fileSystem
@@ -343,13 +352,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
         cwd: NodePath.dirname(checkout.path),
         timeoutMs: CLONE_TIMEOUT_MS,
       })
-      .pipe(
-        Effect.mapError((cause) =>
-          [`Could not clone the Project: ${cause.message}`, fromHubFailure]
-            .filter((line) => line !== undefined)
-            .join("\n"),
-        ),
-      );
+      .pipe(Effect.mapError((cause) => `Could not clone the Project: ${cause.message}`));
   });
 
   // The Hub's repository of a Project, over HTTP with this machine's credential.

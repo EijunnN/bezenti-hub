@@ -12,11 +12,15 @@ import {
   VcsProcessExitError,
   VcsUnsupportedOperationError,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import type * as PlatformError from "effect/PlatformError";
+import * as Schedule from "effect/Schedule";
+import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
@@ -30,6 +34,7 @@ export const HUB_REPOSITORY_ROUTE_PREFIX = "/api/git";
 const HUB_REPOSITORY_USERNAME = "t3-environment";
 const CREDENTIAL_VARIABLE = "T3CODE_HUB_GIT_CREDENTIAL";
 const TRANSFER_TIMEOUT_MS = 10 * 60_000;
+const MIRROR_TIMEOUT = "1 minute";
 
 /**
  * Where a Thread's own refs live in the Hub repository: its working branch and recovered changes.
@@ -41,33 +46,56 @@ export const threadRefPrefixes = (threadId: string) => {
 };
 
 /**
- * Where the Hub keeps the Project's branches, the ones a machine's new checkout starts from: those
- * of the Hub's own checkout and those the machines working on the Project offer. Every machine
- * that may work in the Project reads them; nothing of a Thread's is under it.
+ * The Project's checkout as the Hub's own checkout of it has it, which new checkouts are made
+ * from: its branches, `origin`'s tracking refs and its HEAD. Only the Hub writes here (a copy of
+ * its checkout, `HubRepositories.mirrorBranches`); every machine that may work in the Project reads
+ * it; nothing of a Thread's is under it.
  */
-export const PROJECT_BRANCHES_PREFIX = "refs/t3/project/heads/";
-/** Branches into the Hub's namespace, without `+`: new ones and fast-forwards only. */
-const BRANCHES_TO_HUB = `refs/heads/*:${PROJECT_BRANCHES_PREFIX}*`;
+export const PROJECT_REFS_PREFIX = "refs/t3/project/";
+const PROJECT_BRANCHES_PREFIX = `${PROJECT_REFS_PREFIX}heads/`;
+const PROJECT_REMOTES_PREFIX = `${PROJECT_REFS_PREFIX}remotes/origin/`;
+/** The commit the Hub's checkout has checked out, as `<prefix>HEAD`. */
+const PROJECT_HEAD_PREFIX = `${PROJECT_REFS_PREFIX}checkout/`;
+/** Where a new checkout keeps that commit while it is made; removed once it is. */
+const CHECKOUT_HEAD_PREFIX = "refs/t3/checkout/";
+/**
+ * The header a new checkout's fetch sends: the route brings the Hub checkout's refs in first.
+ * Routine fetches (checkpoints) do not send it, and never wait on that copy.
+ */
+export const CHECKOUT_HEADER = "X-T3-Checkout";
+
+/** A query parameter or URL user that is a credential, not a name. */
+const SECRET_QUERY = /token|secret|password|passwd|auth|key|sig|credential/iu;
+const TOKEN_USER = /^(gh[opsur]_|github_pat_|glpat-|xox[abp]-)|^[A-Za-z0-9_-]{32,}$/u;
 
 /**
- * A remote URL as another machine's checkout may name it: without the password or token the Hub's
- * own checkout may keep in it (an HTTP URL's user and query, an SSH URL's password).
+ * A remote URL as another machine's checkout names it: without the password the Hub's own checkout
+ * may keep in it. The user stays unless it is itself a token; a query parameter stays unless its
+ * name says it is a credential.
  */
 export const remoteWithoutCredentials = (remoteUrl: string) => {
   try {
     const url = new URL(remoteUrl);
-    if (url.protocol === "http:" || url.protocol === "https:") {
-      if (url.username === "" && url.password === "" && url.search === "") return remoteUrl;
+    if (url.protocol !== "http:" && url.protocol !== "https:" && url.protocol !== "ssh:") {
+      return remoteUrl;
+    }
+    let changed = false;
+    if (url.password !== "") {
+      url.password = "";
+      changed = true;
+    }
+    if (url.username !== "" && TOKEN_USER.test(decodeURIComponent(url.username))) {
       url.username = "";
-      url.password = "";
-      url.search = "";
-      return url.toString();
+      changed = true;
     }
-    if (url.protocol === "ssh:" && url.password !== "") {
-      url.password = "";
-      return url.toString();
+    const secretNames = Array.from(url.searchParams.keys()).filter((name) =>
+      SECRET_QUERY.test(name),
+    );
+    for (const name of secretNames) {
+      url.searchParams.delete(name);
+      changed = true;
     }
-    return remoteUrl;
+    return changed ? url.toString() : remoteUrl;
   } catch {
     // A path or an scp-like `user@host:path`: nothing secret in it.
     return remoteUrl;
@@ -277,41 +305,14 @@ const fetchRefPrefix = Effect.fn("HubRepository.fetchRefPrefix")(function* (inpu
   });
 });
 
-/**
- * Offers the checkout's branches to the Hub: new ones and fast-forwards land; one rewritten here,
- * or behind the Hub's, stays as the Hub has it. Best effort: a branch refused never fails the
- * upload it rides along with.
- */
-const publishBranches = Effect.fn("HubRepository.publishBranches")(function* (input: {
-  readonly cwd: string;
-  readonly remote: HubRemote;
-}) {
-  const vcs = yield* VcsProcess.VcsProcess;
-  yield* gitIn(vcs, {
-    operation: "HubRepository.publishBranches",
-    cwd: input.cwd,
-    remote: input.remote,
-    args: [
-      "-c",
-      "push.followTags=false",
-      "push",
-      "--no-verify",
-      "--recurse-submodules=no",
-      "--quiet",
-      input.remote.url,
-      BRANCHES_TO_HUB,
-    ],
-  }).pipe(
-    Effect.catch((cause) =>
-      Effect.logDebug("Some branches were not offered to the Hub repository", { cause }),
-    ),
-  );
-});
+/** A rename that another process (an indexer, an antivirus) briefly holds may succeed in a moment. */
+const isTransientFileError = (error: PlatformError.PlatformError) =>
+  error.reason._tag === "Busy" || error.reason._tag === "PermissionDenied";
 
 /**
- * Makes `target` from the Hub's branches of the Project (`branch`, else main, master, the first,
- * checked out); `origin` is the Project's own remote, nothing of the Hub's stays in its config.
- * Made in a sibling folder and renamed into place. False, making nothing, when the Hub has none.
+ * Makes `target` as the Hub's checkout is (`PROJECT_REFS_PREFIX`): branches, `origin`'s tracking
+ * refs and upstream, `branch` checked out (else HEAD's commit, detached; else main or master).
+ * `origin` is the Project's own remote. Built in a sibling folder and renamed into place.
  */
 export const cloneFromHub = Effect.fn("HubRepository.cloneFromHub")(function* (
   deps: {
@@ -327,6 +328,7 @@ export const cloneFromHub = Effect.fn("HubRepository.cloneFromHub")(function* (
   },
 ) {
   const { fileSystem, vcs } = deps;
+  const operation = "HubRepository.cloneFromHub";
   const parent = deps.path.dirname(input.target);
   yield* fileSystem.makeDirectory(parent, { recursive: true });
   const staging = yield* fileSystem.makeTempDirectory({
@@ -334,16 +336,17 @@ export const cloneFromHub = Effect.fn("HubRepository.cloneFromHub")(function* (
     prefix: `.${deps.path.basename(input.target)}.clone-`,
   });
   const run = (args: ReadonlyArray<string>, remote?: HubRemote) =>
-    gitIn(vcs, {
-      operation: "HubRepository.cloneFromHub",
-      cwd: staging,
-      args,
-      ...(remote === undefined ? {} : { remote }),
-    });
+    gitIn(vcs, { operation, cwd: staging, args, ...(remote === undefined ? {} : { remote }) });
+  const read = (args: ReadonlyArray<string>) =>
+    vcs
+      .run({ operation, command: "git", cwd: staging, args: [...args], allowNonZeroExit: true })
+      .pipe(Effect.map((output) => (output.exitCode === 0 ? output.stdout.trim() : "")));
   return yield* Effect.gen(function* () {
     yield* run(["init", "--quiet"]);
     yield* run(
       [
+        "-c",
+        `http.extraHeader=${CHECKOUT_HEADER}: 1`,
         "fetch",
         "--no-tags",
         "--no-write-fetch-head",
@@ -352,36 +355,64 @@ export const cloneFromHub = Effect.fn("HubRepository.cloneFromHub")(function* (
         "--quiet",
         input.remote.url,
         `+${PROJECT_BRANCHES_PREFIX}*:refs/heads/*`,
+        `+${PROJECT_HEAD_PREFIX}*:${CHECKOUT_HEAD_PREFIX}*`,
+        ...(input.originUrl === null ? [] : [`+${PROJECT_REMOTES_PREFIX}*:refs/remotes/origin/*`]),
       ],
       input.remote,
     );
-    const branches = (yield* run([
-      "for-each-ref",
-      "--format=%(refname:strip=2)",
-      "refs/heads/",
-    ])).stdout
+    const branches = (yield* read(["for-each-ref", "--format=%(refname:strip=2)", "refs/heads/"]))
       .split("\n")
       .filter((line) => line.length > 0);
-    const chosen =
-      [input.branch, "main", "master"].find(
-        (branch) => branch !== undefined && branches.includes(branch),
-      ) ?? branches[0];
-    if (chosen === undefined) return false;
-    if (input.originUrl !== null) yield* run(["remote", "add", "--", "origin", input.originUrl]);
-    yield* run(["symbolic-ref", "HEAD", `refs/heads/${chosen}`]);
+    const head = yield* read(["rev-parse", "--verify", "--quiet", `${CHECKOUT_HEAD_PREFIX}HEAD`]);
+    const branch =
+      input.branch !== undefined && branches.includes(input.branch)
+        ? input.branch
+        : head !== ""
+          ? undefined
+          : ["main", "master"].find((name) => branches.includes(name));
+    if (branch === undefined && head === "") {
+      return yield* new VcsProcessExitError({
+        operation,
+        command: "git",
+        cwd: input.target,
+        exitCode: 1,
+        detail: "The Hub's repository has nothing of the Project to check out.",
+      });
+    }
+    if (branch === undefined) {
+      yield* run(["update-ref", "--no-deref", "HEAD", head]);
+    } else {
+      yield* run(["symbolic-ref", "HEAD", `refs/heads/${branch}`]);
+    }
+    yield* run(["update-ref", "-d", `${CHECKOUT_HEAD_PREFIX}HEAD`]);
+    if (input.originUrl !== null) {
+      yield* run(["remote", "add", "--", "origin", input.originUrl]);
+      if (
+        branch !== undefined &&
+        (yield* read(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`])) !== ""
+      ) {
+        yield* run(["config", `branch.${branch}.remote`, "origin"]);
+        yield* run(["config", `branch.${branch}.merge`, `refs/heads/${branch}`]);
+      }
+    }
     yield* run(["reset", "--hard", "--quiet"]);
-    // Another session made it meanwhile: that one is the checkout.
-    yield* fileSystem
-      .rename(staging, input.target)
-      .pipe(
-        Effect.catch((cause) =>
-          fileSystem
-            .exists(input.target)
-            .pipe(Effect.flatMap((exists) => (exists ? Effect.void : Effect.fail(cause)))),
-        ),
-      );
-    return true;
-  }).pipe(Effect.ensuring(fileSystem.remove(staging, { recursive: true }).pipe(Effect.ignore)));
+    yield* fileSystem.rename(staging, input.target).pipe(
+      Effect.retry({
+        while: isTransientFileError,
+        times: 5,
+        schedule: Schedule.exponential("100 millis"),
+      }),
+      // Another session made it meanwhile: that one is the checkout.
+      Effect.catch((cause) =>
+        fileSystem
+          .exists(input.target)
+          .pipe(Effect.flatMap((exists) => (exists ? Effect.void : Effect.fail(cause)))),
+      ),
+    );
+  }).pipe(
+    // On every path, made or not: once renamed, nothing is left under the staging name.
+    Effect.ensuring(fileSystem.remove(staging, { recursive: true }).pipe(Effect.ignore)),
+  );
 });
 
 export interface CheckoutTransferInput extends HubRepositoryKey {
@@ -439,16 +470,7 @@ export const makeCheckoutTransfers = (input: {
       );
     };
   return {
-    // A Project's checkout offers its branches with each upload: the Hub machine's and a joined
-    // one's alike, so every checkout's work reaches the next one made.
-    push: (request) =>
-      transfer("HubRepository.push", (args) =>
-        request.scratchThreadId === undefined
-          ? pushRefs(args).pipe(
-              Effect.andThen(args.refs.length === 0 ? Effect.void : publishBranches(args)),
-            )
-          : pushRefs(args),
-      )(request),
+    push: transfer("HubRepository.push", pushRefs),
     fetch: transfer("HubRepository.fetch", fetchMissingRefs),
     fetchPrefix: (request) => {
       const { vcs, remoteOf } = input;
@@ -497,11 +519,12 @@ export class HubRepositories extends Context.Service<
     /** Creates the bare repository when there is none; its absolute path. */
     readonly ensure: (key: HubRepositoryKey) => Effect.Effect<string, VcsError>;
     /**
-     * Brings the branches of the Hub's own checkout of the Project (`checkout`, on this disk) into
-     * the Project's repository, under `PROJECT_BRANCHES_PREFIX`: new ones and fast-forwards. Best
-     * effort: a folder that is gone or no repository changes nothing.
+     * Makes the Project's `PROJECT_REFS_PREFIX` a copy of the Hub's checkout at `checkout` (a
+     * root today's rule trusts; the caller checks): its branches, `origin`'s tracking refs and
+     * HEAD's commit, forced and pruned, as the Hub's checkout is authoritative. One at a time per
+     * Project; clones asking together share one. Best effort: never fails its caller.
      */
-    readonly mirrorBranches: (projectId: ProjectId, checkout: string) => Effect.Effect<void>;
+    readonly mirrorCheckout: (projectId: ProjectId, checkout: string) => Effect.Effect<void>;
     /** Whether the repository has every one of the refs. */
     readonly hasRefs: (
       key: HubRepositoryKey,
@@ -577,30 +600,59 @@ export const layer = Layer.effect(
       return repository;
     });
 
-    const mirrorBranches = Effect.fn("HubRepositories.mirrorBranches")(
-      function* (projectId: ProjectId, checkout: string) {
-        if (!(yield* fileSystem.exists(checkout).pipe(Effect.orElseSucceed(() => false)))) return;
-        const repository = yield* ensure({ projectId });
-        // Without `+`: a branch the Hub's checkout rewrote, or one behind what a machine offered,
-        // keeps the Hub repository's.
-        yield* gitIn(vcs, {
-          operation: "HubRepositories.mirrorBranches",
+    // When the latest copy of each Project started, and the lock that runs one copy at a time.
+    const mirrors = new Map<ProjectId, { readonly lock: Semaphore.Semaphore; at: number }>();
+    const copyCheckout = Effect.fn("HubRepositories.copyCheckout")(function* (
+      projectId: ProjectId,
+      checkout: string,
+    ) {
+      if (!(yield* fileSystem.exists(checkout).pipe(Effect.orElseSucceed(() => false)))) return;
+      const repository = yield* ensure({ projectId });
+      const head = yield* vcs
+        .run({
+          operation: "HubRepositories.mirrorCheckout",
+          command: "git",
+          cwd: checkout,
+          args: ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+          allowNonZeroExit: true,
+        })
+        .pipe(Effect.map((output) => output.exitCode === 0));
+      const inRepository = (args: ReadonlyArray<string>) =>
+        gitIn(vcs, {
+          operation: "HubRepositories.mirrorCheckout",
           cwd: root,
-          args: [
-            "--git-dir",
-            repository,
-            "fetch",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "--recurse-submodules=no",
-            "--quiet",
-            checkout,
-            BRANCHES_TO_HUB,
-          ],
+          args: ["--git-dir", repository, ...args],
         });
+      yield* inRepository([
+        "fetch",
+        "--prune",
+        "--no-tags",
+        "--no-write-fetch-head",
+        "--recurse-submodules=no",
+        "--quiet",
+        checkout,
+        `+refs/heads/*:${PROJECT_BRANCHES_PREFIX}*`,
+        `+refs/remotes/origin/*:${PROJECT_REMOTES_PREFIX}*`,
+        "^refs/remotes/origin/HEAD",
+        ...(head ? [`+HEAD:${PROJECT_HEAD_PREFIX}HEAD`] : []),
+      ]);
+      if (!head) yield* inRepository(["update-ref", "-d", `${PROJECT_HEAD_PREFIX}HEAD`]);
+    });
+    const mirrorCheckout = Effect.fn("HubRepositories.mirrorCheckout")(
+      function* (projectId: ProjectId, checkout: string) {
+        const mirror = mirrors.get(projectId) ?? { lock: Semaphore.makeUnsafe(1), at: 0 };
+        mirrors.set(projectId, mirror);
+        const askedAt = yield* Clock.currentTimeMillis;
+        // Clones that ask together share one copy: one started after a clone asked is as fresh as
+        // a copy of its own would be.
+        yield* Effect.gen(function* () {
+          if (mirror.at >= askedAt) return;
+          mirror.at = yield* Clock.currentTimeMillis;
+          yield* copyCheckout(projectId, checkout).pipe(Effect.timeout(MIRROR_TIMEOUT));
+        }).pipe(mirror.lock.withPermits(1));
       },
       Effect.catch((cause) =>
-        Effect.logDebug("Some Project branches were not mirrored", { cause }),
+        Effect.logWarning("The Hub could not copy its checkout of the Project", { cause }),
       ),
     );
 
@@ -608,7 +660,7 @@ export const layer = Layer.effect(
       root,
       directoryOf: directoryNameOf,
       ensure,
-      mirrorBranches,
+      mirrorCheckout,
       hasRefs: Effect.fn("HubRepositories.hasRefs")(function* (key, refs) {
         const repository = pathOf(key);
         if (!(yield* initialized(repository))) return false;

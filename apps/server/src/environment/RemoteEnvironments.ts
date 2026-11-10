@@ -62,6 +62,7 @@ import {
   SandboxSpaceMismatchError,
   SpaceCheckUnavailableError,
 } from "../sandboxes/sandboxSpace.ts";
+import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as EnvironmentDemand from "./EnvironmentDemand.ts";
 import * as EnvironmentExecutor from "./EnvironmentExecutor.ts";
@@ -273,6 +274,7 @@ const make = Effect.gen(function* () {
   const digester = yield* Digest.Digest;
   // Without git processes (orchestration-only hosts) a missing checkout is not cloned.
   const vcs = yield* Effect.serviceOption(VcsProcess.VcsProcess);
+  const visibility = yield* Effect.serviceOption(SpaceVisibility.SpaceVisibility);
   // A Sandbox is told which turns run on it, so an image update never cuts one short.
   const demand = yield* Effect.serviceOption(EnvironmentDemand.EnvironmentDemand);
   const turnKey = (providerSessionId: string, runOrdinal: number) =>
@@ -531,18 +533,17 @@ const make = Effect.gen(function* () {
       } satisfies WireCheckout;
     }
     const project = yield* projects.get(projectId).pipe(Effect.option, Effect.map(Option.flatten));
+    // A new checkout is made from the Hub's copy of its own checkout, when that is in a root
+    // today's rule trusts and has a commit; else from the Project's own remote.
+    const trusted = Option.isNone(visibility)
+      ? Option.none<string>()
+      : yield* visibility.value.trustedProjectRoot(projectId);
     // A line of git's output in the Hub's checkout of the Project, or null.
-    const hubCheckoutSays = (operation: string, args: ReadonlyArray<string>) =>
-      Option.isNone(project) || Option.isNone(vcs)
+    const says = (cwd: string | undefined, operation: string, args: ReadonlyArray<string>) =>
+      cwd === undefined || Option.isNone(vcs)
         ? Effect.succeed(null)
         : vcs.value
-            .run({
-              operation,
-              command: "git",
-              args: [...args],
-              cwd: project.value.workspaceRoot,
-              allowNonZeroExit: true,
-            })
+            .run({ operation, command: "git", args: [...args], cwd, allowNonZeroExit: true })
             .pipe(
               Effect.map((output) =>
                 output.exitCode === 0 && output.stdout.trim().length > 0
@@ -551,23 +552,34 @@ const make = Effect.gen(function* () {
               ),
               Effect.orElseSucceed(() => null),
             );
-    const origin = yield* hubCheckoutSays("RemoteEnvironments.originUrl", [
-      "remote",
-      "get-url",
-      "origin",
-    ]);
-    const branch = yield* hubCheckoutSays("RemoteEnvironments.hubBranch", [
-      "symbolic-ref",
-      "--quiet",
-      "--short",
-      "HEAD",
-    ]);
+    const hubRoot = Option.getOrUndefined(trusted);
+    const { origin, branch, head } = yield* Effect.all(
+      {
+        origin: says(
+          Option.getOrUndefined(Option.map(project, (found) => found.workspaceRoot)),
+          "RemoteEnvironments.originUrl",
+          ["remote", "get-url", "origin"],
+        ),
+        branch: says(hubRoot, "RemoteEnvironments.hubBranch", [
+          "symbolic-ref",
+          "--quiet",
+          "--short",
+          "HEAD",
+        ]),
+        head: says(hubRoot, "RemoteEnvironments.hubHead", [
+          "rev-parse",
+          "--verify",
+          "--quiet",
+          "HEAD^{commit}",
+        ]),
+      },
+      { concurrency: "unbounded" },
+    );
     const uploaded = yield* uploadedRefsOf(threadId);
     return {
       path: path.value,
       cloneUrl: origin === null ? null : HubRepository.remoteWithoutCredentials(origin),
-      // The Hub repository mirrors the Hub's checkout when the machine fetches from it.
-      fromHub: { projectId, ...(branch === null ? {} : { branch }) },
+      ...(head === null ? {} : { fromHub: { projectId, ...(branch === null ? {} : { branch }) } }),
       ...(uploaded.length === 0 ? {} : { hubRefs: { projectId, refs: [...uploaded] } }),
     } satisfies WireCheckout;
   });

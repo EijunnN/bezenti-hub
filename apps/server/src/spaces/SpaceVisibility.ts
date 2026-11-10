@@ -236,6 +236,11 @@ export class SpaceVisibility extends Context.Service<
      * `ActiveEnvironmentResolver` reads it; none for a Thread elsewhere or with no row.
      */
     readonly hubThreadFolder: (threadId: string) => Effect.Effect<Option.Option<string | null>>;
+    /**
+     * The Project's root on the Hub's disk when today's rule trusts it (`directoryRoots`, as
+     * the directory checks read it); none for a deleted Project or a root it does not trust.
+     */
+    readonly trustedProjectRoot: (projectId: ProjectId) => Effect.Effect<Option.Option<string>>;
   }
 >()("t3/spaces/SpaceVisibility") {}
 
@@ -545,6 +550,24 @@ const make = Effect.gen(function* () {
     return yield* withinTrusted(rows, directory);
   });
 
+  const trustedProjectRoot = Effect.fn("SpaceVisibility.trustedProjectRoot")(function* (
+    projectId: ProjectId,
+  ) {
+    const [row] = yield* sql<{ readonly root: string; readonly byOwner: number }>`
+      SELECT workspace_root AS root, ${byOwner(sql, "projection_projects")} AS "byOwner"
+      FROM projection_projects
+      WHERE project_id = ${projectId} AND deleted_at IS NULL
+    `.pipe(Effect.orDie);
+    if (row === undefined) return Option.none<string>();
+    const trusted = yield* DirectoryRoots.isTrustedProjectRoot(
+      directories,
+      row.root,
+      row.byOwner === 1,
+      yield* hubReals,
+    );
+    return trusted ? Option.some(row.root) : Option.none<string>();
+  });
+
   const mayReadDirectory = Effect.fn("SpaceVisibility.mayReadDirectory")(function* (
     visibility: Visibility,
     directory: string,
@@ -632,6 +655,7 @@ const make = Effect.gen(function* () {
     mayCreateDirectory,
     mayRootProject,
     hubThreadFolder,
+    trustedProjectRoot,
   });
 });
 

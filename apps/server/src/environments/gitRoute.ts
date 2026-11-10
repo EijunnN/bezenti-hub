@@ -1,8 +1,8 @@
 /**
  * `/api/git/<projectId>` and `/api/git/thread/<threadId>` (a Thread without a Project): the Hub
- * repository over git smart HTTP, relayed to `git http-backend`. A machine sees and writes the
- * refs of Threads it runs and the Project's branches (`refs/t3/project/heads/`), in Projects where
- * its owner may start Threads (a Sandbox: in its own Space); nobody deletes.
+ * repository over git smart HTTP, relayed to `git http-backend`. A machine sees and writes the refs
+ * of Threads it runs and reads the copy of the Hub's checkout (`refs/t3/project/`), in Projects
+ * where its owner may start Threads (a Sandbox: in its own Space); nobody deletes.
  */
 import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -26,6 +26,7 @@ import { checkpointRefForScopeOrdinal } from "../orchestration-v2/CheckpointServ
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { requestUrl } from "../requestUrl.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as EnvironmentRegistry from "./EnvironmentRegistry.ts";
 import { bearerOf, isSecureEnvironmentTransport } from "./http.ts";
 
@@ -186,6 +187,7 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
   readonly repositories: HubRepository.HubRepositories["Service"];
   readonly registry: EnvironmentRegistry.EnvironmentRegistry["Service"];
   readonly spaces: SpaceDirectory.SpaceDirectory["Service"];
+  readonly visibility: SpaceVisibility.SpaceVisibility["Service"];
   readonly projects: ProjectStore.ProjectStoreV2["Service"];
   readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly sql: SqlClient.SqlClient;
@@ -313,12 +315,16 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
     return HttpServerResponse.text("Forbidden", { status: 403 });
   }
   yield* deps.repositories.ensure(key.value);
-  // A fetch from a Project's repository first brings in the branches of the Hub's own checkout,
-  // so a new checkout starts from what the Hub has now.
-  if (key.value.scratchThreadId === undefined && service === "git-upload-pack") {
-    if (request.method === "GET") {
-      yield* deps.repositories.mirrorBranches(projectId, project.value.workspaceRoot);
-    }
+  // A new checkout's fetch (only that: routine fetches never wait on it) first has the Hub copy
+  // its own checkout of the Project, from a root today's rule trusts; from any other, nothing.
+  if (
+    key.value.scratchThreadId === undefined &&
+    service === "git-upload-pack" &&
+    request.method === "GET" &&
+    request.headers[HubRepository.CHECKOUT_HEADER.toLowerCase()] !== undefined
+  ) {
+    const root = yield* deps.visibility.trustedProjectRoot(projectId);
+    if (Option.isSome(root)) yield* deps.repositories.mirrorCheckout(projectId, root.value);
   }
   const contentType = request.headers["content-type"];
   const contentEncoding = request.headers["content-encoding"];
@@ -476,7 +482,7 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
  * The ref namespaces the machine may see and write in the Project's repository: those of the
  * Threads it is the Active environment of. The target of a Thread's running move may also read
  * them, to fetch what the Thread continues from, but writes none until the Thread is its own. In a
- * Project's repository (not a Thread's own) also the Project's branches.
+ * Project's repository (not a Thread's own) it also reads the copy of the Hub's checkout.
  */
 const refPrefixesFor = Effect.fn("HubRepositoryHttp.refPrefixesFor")(function* (
   deps: { readonly sql: SqlClient.SqlClient; readonly digest: Digest.Digest["Service"] },
@@ -525,11 +531,11 @@ const refPrefixesFor = Effect.fn("HubRepositoryHttp.refPrefixesFor")(function* (
     // The target of a move uploads what it sets aside of its own before the Thread is its own.
     writable.add(HubRepository.threadRefPrefixes(row.threadId)[1]);
   }
-  // A Project's branches are for every machine that may work in it (the caller checked that): its
-  // new checkouts are made from them, and it offers its own. A Thread's own repository has none.
+  // The copy of the Project's checkout is for every machine that may work in it (the caller
+  // checked that) to read, its new checkouts made from it; only the Hub writes it. A Thread's own
+  // repository has none.
   if (key.scratchThreadId === undefined) {
-    readable.add(HubRepository.PROJECT_BRANCHES_PREFIX);
-    writable.add(HubRepository.PROJECT_BRANCHES_PREFIX);
+    readable.add(HubRepository.PROJECT_REFS_PREFIX);
   }
   return { readable: [...readable], writable: [...writable] };
 });
@@ -543,6 +549,7 @@ export const layer = HttpRouter.use((router) =>
       repositories: repositories.value,
       registry: yield* EnvironmentRegistry.EnvironmentRegistry,
       spaces: yield* SpaceDirectory.SpaceDirectory,
+      visibility: yield* SpaceVisibility.SpaceVisibility,
       projects: yield* ProjectStore.ProjectStoreV2,
       spawner: yield* ChildProcessSpawner.ChildProcessSpawner,
       sql: yield* SqlClient.SqlClient,

@@ -4283,8 +4283,10 @@ describe("Hub con Environments: checkouts from the Hub repository", () => {
             assert.notEqual((yield* fromFresh(machine).git("push", refspec)).exitCode, 0, refspec);
           }
         }
+        // Still the Hub's copy, unchanged.
         assert.deepEqual((yield* on(acmeSandbox).git("ls-remote")).stdout.trim().split("\n"), [
-          `${main}\t${BRANCHES}main`,
+          `${main}	refs/t3/project/checkout/HEAD`,
+          `${main}	${BRANCHES}main`,
         ]);
         assert.notEqual((yield* fromFresh(acmeSandbox).git("push", `HEAD:${headRef}`)).exitCode, 0);
 

@@ -105,14 +105,15 @@ export type WireMcpCredential = typeof WireMcpCredential.Type;
 export const WireCheckout = Schema.Struct({
   path: Schema.String,
   /**
-   * The Project's own remote (`origin` of the Hub's checkout, without credentials): a new checkout
-   * names it as `origin`, and is cloned from it only when the Hub repository has no branches.
+   * The Project's own remote (the Hub checkout's `origin`, its password or token removed): a new
+   * checkout names it `origin`, and is cloned from it only when `fromHub` is absent.
    */
   cloneUrl: Schema.NullOr(Schema.String),
   /**
-   * The Project's repository on the Hub, whose branches (`refs/t3/project/heads/`) a new checkout
-   * is made from with the Environment credential; `branch` is the one the Hub's checkout is on.
-   * A machine from before it ignores this and clones `cloneUrl`.
+   * Present when the Hub has its own checkout of the Project in a root it trusts: a new checkout
+   * is made from the Hub's copy of it (`refs/t3/project/`) with the Environment credential, or
+   * fails; `branch` is the one the Hub's checkout is on (none: its HEAD is detached). A machine
+   * from before it ignores this and clones `cloneUrl`.
    */
   fromHub: Schema.optionalKey(
     Schema.Struct({ projectId: ProjectId, branch: Schema.optionalKey(Schema.String) }),
