@@ -8,7 +8,12 @@ import { describe, expect, it } from "@effect/vitest";
 import * as HttpApi from "effect/http-api/HttpApi";
 import { Tool } from "effect/ai";
 
-import { HTTP_ENDPOINT_RULES, MCP_TOOL_RULES, RAW_ROUTE_RULES } from "./DoorRules.ts";
+import {
+  AMBIENT_COOKIE_RULES,
+  HTTP_ENDPOINT_RULES,
+  MCP_TOOL_RULES,
+  RAW_ROUTE_RULES,
+} from "./DoorRules.ts";
 import { spaceAccessForRpcMethod } from "./RpcSpaceAccess.ts";
 
 const SRC = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "..");
@@ -37,6 +42,8 @@ const rawRoutes = files.flatMap(({ file, text }) => [
     text.matchAll(/McpServer\.layerHttp\(\{[^}]*?path:\s*("[^"]+")/gs),
     (match) => `${file}: * ${match[1]}`,
   ),
+  // A global middleware sees every request before any route, and may answer it itself.
+  ...(/HttpRouter\.middleware\(/.test(text) ? [`${file}: middleware`] : []),
 ]);
 
 // Every module that makes MCP tools, loaded: the tool names come from the Tool objects themselves.
@@ -96,5 +103,46 @@ describe("every door of the Hub declares its rule", () => {
       ...Object.values(MCP_TOOL_RULES),
     ].flatMap((rule) => ("rpc" in rule ? [rule.rpc] : []));
     expect(twins.filter((method) => spaceAccessForRpcMethod(method) === undefined)).toEqual([]);
+  });
+});
+
+describe("no door takes the Hub's cookies from a preview's own origin", () => {
+  it("names, for every raw route and the HTTP API, how a preview origin's request is kept off", () => {
+    const doors = [...new Set(rawRoutes), "HttpApi"];
+    expect({
+      undeclared: doors.filter((door) => !Object.hasOwn(AMBIENT_COOKIE_RULES, door)).toSorted(),
+      stale: Object.keys(AMBIENT_COOKIE_RULES)
+        .filter((door) => !doors.includes(door))
+        .toSorted(),
+    }).toEqual({ undeclared: [], stale: [] });
+  });
+
+  it("applies crossesFromPreviewOrigin wherever a cookie is read off a request", () => {
+    // Every module that reads a cookie or the session credential itself: each must refuse one
+    // a preview origin's page sent, and its doors must say so.
+    const readers = files.filter(
+      ({ text }) => /\.cookies\[/.test(text) || /\bselectRequestCredential\(request/.test(text),
+    );
+    expect(readers.map(({ file }) => file).toSorted()).toEqual([
+      "auth/EnvironmentAuth.ts",
+      "auth/http.ts",
+      "guest/http.ts",
+      "preview/hubPreviewRoute.ts",
+    ]);
+    for (const { file, text } of readers) {
+      // auth/http.ts reads the credential only behind EnvironmentAuth's own check.
+      if (file === "auth/http.ts") continue;
+      expect(text, file).toMatch(/crossesFromPreviewOrigin\(/);
+    }
+    const cookieDoors = Object.entries(AMBIENT_COOKIE_RULES).filter(([door]) =>
+      ["guest/http.ts: ", "preview/hubPreviewRoute.ts: *"].some((prefix) =>
+        door.startsWith(prefix),
+      ),
+    );
+    expect(
+      cookieDoors
+        .filter(([door, rule]) => !("refused" in rule) && !door.includes("/redeem"))
+        .map(([door]) => door),
+    ).toEqual([]);
   });
 });

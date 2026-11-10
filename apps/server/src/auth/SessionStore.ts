@@ -376,6 +376,8 @@ export class SessionStore extends Context.Service<
   {
     readonly cookieName: string;
     readonly legacyCookieName: string | undefined;
+    /** Previews have origins of their own: over HTTPS only the `__Host-` cookie counts. */
+    readonly hostCookieRequired: boolean;
     readonly issue: (input?: {
       /** A fixed lifetime; without one a browser session lasts 30 days from its last use. */
       readonly ttl?: Duration.Duration;
@@ -1230,6 +1232,7 @@ const make = Effect.gen(function* () {
   return SessionStore.of({
     cookieName,
     legacyCookieName,
+    hostCookieRequired: serverConfig.previewOrigin !== undefined,
     issue,
     verify,
     issueWebSocketToken,

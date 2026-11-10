@@ -778,6 +778,9 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.provide(layerCommandReadiness),
   Layer.provide(ServerHttp.layerBrowserApiCors),
   Layer.provide(ServerHttp.layerHttpCompression),
+  // Inside client admission (the forwarded Host it resolves), outside every other middleware and
+  // route: a request to a preview origin never reaches the Hub (CORS, sign-in, API, files).
+  Layer.provide(HubPreviewRoute.previewOriginLayer),
   Layer.provide(ServerHttp.layerClientConnection),
 );
 

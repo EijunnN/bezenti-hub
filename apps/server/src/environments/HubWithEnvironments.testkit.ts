@@ -44,6 +44,7 @@ import * as CheckpointDiffQuery from "../checkpointing/CheckpointDiffQuery.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as ServerConfig from "../config.ts";
+import type { PreviewOriginPattern } from "../preview/PreviewOrigin.ts";
 import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
@@ -691,6 +692,10 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     readonly hubRunsAgents?: boolean;
     /** Why there are no Sandboxes, as the Hub says it (with `sandboxes: false`). */
     readonly sandboxesUnavailable?: string;
+    /** Previews on their own origin (`T3CODE_PREVIEW_ORIGIN`). */
+    readonly previewOrigin?: PreviewOriginPattern;
+    /** The Hub's published address (`T3CODE_PUBLIC_URL`). */
+    readonly publicUrl?: URL;
   } = {},
 ) {
   const sandboxRoot = yield* FileSystem.FileSystem.pipe(
@@ -720,6 +725,8 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
         );
   const { server, authenticator, owner } = yield* hubWithOwner({
     listen: true,
+    ...(options.previewOrigin === undefined ? {} : { previewOrigin: options.previewOrigin }),
+    ...(options.publicUrl === undefined ? {} : { publicUrl: options.publicUrl }),
     extend: withOrchestration(options.textGeneration),
     ...(options.sandboxes === false ? {} : { sandboxRuntime }),
     registry: {

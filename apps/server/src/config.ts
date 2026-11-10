@@ -12,6 +12,7 @@ import type { OtlpEndpointSource } from "@t3tools/contracts";
 import { sweepStalePendingAttachments } from "./attachmentStore.ts";
 import type { TrustedProxies } from "./auth/clientConnection.ts";
 import type { JoinedHubState } from "./environments/joinedHubState.ts";
+import type { PreviewOriginPattern } from "./preview/PreviewOrigin.ts";
 import {
   DEFAULT_SIGNAL_EXPORT,
   nodeProcessRuntimeAttributes,
@@ -100,6 +101,11 @@ export class ServerConfig extends Context.Service<
     readonly trustedProxies?: TrustedProxies | undefined;
     /** The origin the Hub is published on (T3CODE_PUBLIC_URL); passkeys are bound to it. */
     readonly publicUrl?: URL | undefined;
+    /**
+     * Where previews get an origin of their own (T3CODE_PREVIEW_ORIGIN, `https://*.<zone>`);
+     * without it they stay sandboxed paths on the Hub's origin.
+     */
+    readonly previewOrigin?: PreviewOriginPattern | undefined;
     readonly noBrowser: boolean;
     readonly startupPresentation: StartupPresentation;
     readonly desktopBootstrapToken: string | undefined;

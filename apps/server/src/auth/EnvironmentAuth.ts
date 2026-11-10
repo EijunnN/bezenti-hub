@@ -64,7 +64,12 @@ import * as UserDirectory from "./UserDirectory.ts";
 import { REUSABLE_DEV_SESSION_EXPIRES_AT, resolveReusableDevAuth } from "./ReusableDevAuth.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
 import { OwnerPresence } from "./OwnerPresence.ts";
-import type { AuthRequestMetadata } from "./utils.ts";
+import {
+  type AuthRequestMetadata,
+  type SessionCookieNames,
+  sessionCookieNameFor,
+} from "./utils.ts";
+import { crossesFromPreviewOrigin, type PreviewOriginPattern } from "../preview/PreviewOrigin.ts";
 import { headerList, isLoopbackClientAddress, isPrivateClientAddress } from "./clientConnection.ts";
 import * as AuditLog from "../audit/AuditLog.ts";
 import { DESKTOP_RENDERER_ORIGINS } from "../httpCors.ts";
@@ -845,12 +850,22 @@ function parseDpopToken(request: HttpServerRequest.HttpServerRequest): string | 
   return token.length > 0 ? token : null;
 }
 
+/**
+ * The credential a request carries: the browser session cookie (`__Host-` first, see
+ * `sessionCookieNameFor`), else a bearer or DPoP token, else the legacy cookie. With previews on
+ * their own origin an HTTPS request's bare-named cookies do not count: a preview subdomain could
+ * have set them for the Hub's domain.
+ */
 export function selectRequestCredential(
   request: HttpServerRequest.HttpServerRequest,
-  cookieName: string,
-  legacyCookieName: string | undefined,
+  names: SessionCookieNames,
 ) {
-  const cookieToken = request.cookies[cookieName];
+  const hostCookie = request.cookies[sessionCookieNameFor(names.cookieName, true)];
+  if (hostCookie) {
+    return { token: hostCookie, source: "cookie" } as const;
+  }
+  const bareCookiesCount = !(names.hostCookieRequired && request.protocol === "https");
+  const cookieToken = bareCookiesCount ? request.cookies[names.cookieName] : undefined;
   if (cookieToken) {
     return { token: cookieToken, source: "cookie" } as const;
   }
@@ -865,7 +880,10 @@ export function selectRequestCredential(
     return { token: dpopToken, source: "dpop" } as const;
   }
 
-  const legacyToken = legacyCookieName ? request.cookies[legacyCookieName] : undefined;
+  const legacyToken =
+    bareCookiesCount && names.legacyCookieName
+      ? request.cookies[names.legacyCookieName]
+      : undefined;
   if (legacyToken !== undefined) {
     return { token: legacyToken, source: "legacy-cookie" } as const;
   }
@@ -878,13 +896,16 @@ type RequestCredentialSource = NonNullable<ReturnType<typeof selectRequestCreden
 export const isBrowserCookieCredential = (source: RequestCredentialSource | "dev-cookie") =>
   source === "cookie" || source === "legacy-cookie" || source === "dev-cookie";
 
-// Missing Origin allows same-origin reads and non-browser clients; otherwise require
-// same-origin Sec-Fetch-Site, this server's host, or a trusted app origin. A trusted proxy's
-// X-Forwarded-Host has already replaced Host (clientConnection); from anyone else it is ignored.
+// Never from a preview's own origin (crossesFromPreviewOrigin). Then a missing Origin allows
+// same-origin reads and non-browser clients; otherwise require same-origin Sec-Fetch-Site, this
+// server's host, or a trusted app origin. A trusted proxy's X-Forwarded-Host has already
+// replaced Host (clientConnection); from anyone else it is ignored.
 function isBrowserOriginAllowed(
   request: HttpServerRequest.HttpServerRequest,
   trustedOrigins: ReadonlySet<string>,
+  previewOrigin: PreviewOriginPattern | undefined,
 ): boolean {
+  if (crossesFromPreviewOrigin(previewOrigin, request.headers)) return false;
   const origin = request.headers.origin;
   if (origin === undefined) return true;
   if (request.headers["sec-fetch-site"] === "same-origin") return true;
@@ -1007,11 +1028,7 @@ export const make = Effect.gen(function* () {
   };
 
   const resolveRequestCredential = (request: HttpServerRequest.HttpServerRequest) => {
-    const selectedCredential = selectRequestCredential(
-      request,
-      sessions.cookieName,
-      sessions.legacyCookieName,
-    );
+    const selectedCredential = selectRequestCredential(request, sessions);
     const hasAuthorization = request.headers.authorization !== undefined;
     const devCookieToken = devAuth ? request.cookies[devAuth.cookieName] : undefined;
     return (
@@ -1040,7 +1057,7 @@ export const make = Effect.gen(function* () {
     }
     if (
       isBrowserCookieCredential(credential.source) &&
-      !isBrowserOriginAllowed(request, trustedBrowserOrigins)
+      !isBrowserOriginAllowed(request, trustedBrowserOrigins, config.previewOrigin)
     ) {
       return Effect.fail(
         new ServerAuthInvalidCredentialError({
@@ -1874,7 +1891,10 @@ export const make = Effect.gen(function* () {
   // A passkey is bound to the page's origin, so only an origin the cookie rules accept may use one.
   const resolvePasskeyOrigin = (request: HttpServerRequest.HttpServerRequest) => {
     const origin = request.headers.origin;
-    if (origin === undefined || !isBrowserOriginAllowed(request, trustedBrowserOrigins)) {
+    if (
+      origin === undefined ||
+      !isBrowserOriginAllowed(request, trustedBrowserOrigins, config.previewOrigin)
+    ) {
       return Effect.fail(new ServerAuthInvalidOriginError({}));
     }
     try {
@@ -1908,11 +1928,7 @@ export const make = Effect.gen(function* () {
         diagnostic: "The managed policy allows account sign-in only on this machine.",
       });
     }
-    const previousCredential = selectRequestCredential(
-      request,
-      sessions.cookieName,
-      sessions.legacyCookieName,
-    );
+    const previousCredential = selectRequestCredential(request, sessions);
     const previousSession =
       previousCredential === undefined || !isBrowserCookieCredential(previousCredential.source)
         ? undefined

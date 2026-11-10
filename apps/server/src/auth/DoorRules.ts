@@ -158,6 +158,12 @@ export const RAW_ROUTE_RULES: Readonly<Record<string, DoorRule>> = {
     WS_METHODS.previewOpen,
   ),
   "preview/hubPreviewRoute.ts: * `${HUB_PREVIEW_ROUTE_PREFIX}/*`": rpc(WS_METHODS.previewProxyUrl),
+  "preview/hubPreviewRoute.ts: middleware": rpc(WS_METHODS.previewProxyUrl),
+  "auth/clientAdmission.ts: middleware": own(
+    "every request: public clients wait for an Owner; answers nothing else itself",
+  ),
+  "http.ts: middleware": own("compression; answers nothing itself"),
+  "server.ts: middleware": own("waits for startup; answers nothing itself"),
   'ws.ts: GET "/ws"': own("a session; every RPC by RPC_SPACE_ACCESS"),
 };
 
@@ -246,4 +252,61 @@ export const MCP_TOOL_RULES: Readonly<Record<string, DoorRule>> = {
   unwatch_pull_request: PULL_REQUEST_LINK,
   watch_pull_request: PULL_REQUEST_LINK,
   write_pull_request_guides: rpc(WS_METHODS.pullRequestsGenerateReviewGuide),
+};
+
+/**
+ * How each door keeps a page on a preview's own origin (ticket 15) from the Hub's ambient cookies:
+ * `refused` doors drop a cookie for a request `crossesFromPreviewOrigin`; `none` doors take no
+ * ambient cookie. DoorRules.test.ts lists every raw route and the HTTP API here.
+ */
+export type AmbientCookieRule = { readonly refused: string } | { readonly none: string };
+
+const refused = (how: string): AmbientCookieRule => ({ refused: how });
+const none = (why: string): AmbientCookieRule => ({ none: why });
+
+const BY_ENVIRONMENT_AUTH = refused(
+  "EnvironmentAuth.authenticateRequest: a cookie counts only past isBrowserOriginAllowed",
+);
+const GUEST_COOKIE = refused(
+  "guest/http.ts guestSessionCookie: no guest cookie from a preview origin",
+);
+const ENVIRONMENT_CREDENTIAL = none("the Environment credential in Authorization; no cookie");
+
+export const AMBIENT_COOKIE_RULES: Readonly<Record<string, AmbientCookieRule>> = {
+  HttpApi: BY_ENVIRONMENT_AUTH,
+  "auth/clientAdmission.ts: middleware": none("reads no credential"),
+  "device/DeviceHubProxy.ts: * `${DeviceService.DEVICE_HUB_ROUTE_PREFIX}/*`": BY_ENVIRONMENT_AUTH,
+  'environments/JoinedHub.ts: GET "/health"': none("public, on a joined machine"),
+  "environments/connectRoute.ts: GET ENVIRONMENT_CONNECT_PATH": ENVIRONMENT_CREDENTIAL,
+  "environments/gitRoute.ts: GET path": ENVIRONMENT_CREDENTIAL,
+  "environments/gitRoute.ts: POST path": ENVIRONMENT_CREDENTIAL,
+  "guest/http.ts: GET GUEST_ATTACHMENT_ROUTE": GUEST_COOKIE,
+  "guest/http.ts: GET GUEST_COMMAND_OUTPUT_ROUTE": GUEST_COOKIE,
+  "guest/http.ts: GET GUEST_HISTORY_ROUTE": GUEST_COOKIE,
+  "guest/http.ts: GET GUEST_ITEM_ROUTE": GUEST_COOKIE,
+  "guest/http.ts: GET GUEST_MEDIA_ROUTE": GUEST_COOKIE,
+  "guest/http.ts: GET GUEST_RENDER_ROUTE": GUEST_COOKIE,
+  "guest/http.ts: GET `${GUEST_ROUTE_PREFIX}/session`": GUEST_COOKIE,
+  "guest/http.ts: GET `${GUEST_ROUTE_PREFIX}/stream`": GUEST_COOKIE,
+  "guest/http.ts: POST `${GUEST_ROUTE_PREFIX}/messages`": GUEST_COOKIE,
+  "guest/http.ts: POST `${GUEST_ROUTE_PREFIX}/redeem`": none("spends a guest link's token"),
+  'http.ts: GET "*"': none(
+    "public static files; HTML is not framed by a preview (frame-ancestors)",
+  ),
+  "http.ts: GET `${ASSET_ROUTE_PREFIX}/*`": none("a signed asset URL; no cookie"),
+  "http.ts: POST OTLP_TRACES_PROXY_PATH": BY_ENVIRONMENT_AUTH,
+  "http.ts: POST `${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/*`": none("a signed upload token; no cookie"),
+  "http.ts: middleware": none("compression; reads no credential"),
+  'mcp/McpHttpServer.ts: * "/mcp"': none("a bearer MCP credential; no cookie"),
+  "preview/ServerBrowserStream.ts: GET `${PREVIEW_STREAM_ROUTE_PREFIX}/*`": BY_ENVIRONMENT_AUTH,
+  "preview/ServerBrowserStream.ts: POST `${PREVIEW_STREAM_ROUTE_PREFIX}/upload`":
+    BY_ENVIRONMENT_AUTH,
+  "preview/hubPreviewRoute.ts: * `${HUB_PREVIEW_ROUTE_PREFIX}/*`": refused(
+    "its own crossesFromPreviewOrigin before reading the Hub session",
+  ),
+  "preview/hubPreviewRoute.ts: middleware": none(
+    "a preview's own host: only that preview's host-only cookie, never a Hub cookie",
+  ),
+  "server.ts: middleware": none("waits for startup; reads no credential"),
+  'ws.ts: GET "/ws"': BY_ENVIRONMENT_AUTH,
 };

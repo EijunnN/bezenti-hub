@@ -57,6 +57,28 @@ export function resolveLegacySessionCookieName(input: {
 }
 
 /**
+ * Over HTTPS a browser session cookie is `__Host-<name>`: browsers accept a cookie so named only
+ * from this very host, `Secure`, on `/` and without `Domain`, so no other host, a preview
+ * subdomain included, can set or shadow it (cookie tossing). Plain HTTP (a loopback or LAN Hub)
+ * cannot hold one and keeps the bare name.
+ */
+const HOST_COOKIE_PREFIX = "__Host-";
+
+export const sessionCookieNameFor = (name: string, secure: boolean): string =>
+  secure ? `${HOST_COOKIE_PREFIX}${name}` : name;
+
+/** The names a browser session cookie is read under, and when the bare ones still count. */
+export interface SessionCookieNames {
+  readonly cookieName: string;
+  readonly legacyCookieName: string | undefined;
+  /**
+   * With previews on their own origin, an HTTPS request counts only the `__Host-` cookie: a bare
+   * one may have been set by a preview subdomain for the Hub's domain.
+   */
+  readonly hostCookieRequired: boolean;
+}
+
+/**
  * The loopback address a server given `host` listens on, or undefined when it may listen beyond
  * this machine. Unset means 127.0.0.1. Only a loopback literal or `localhost` counts: Node listens
  * on every interface for an empty host, and any other name resolves through DNS.

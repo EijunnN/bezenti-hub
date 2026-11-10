@@ -33,6 +33,7 @@ import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
+import { newPreviewId } from "./PreviewOrigin.ts";
 import {
   PREVIEW_PROXY_CONTRACT_VERSION,
   PreviewProxyError,
@@ -58,8 +59,18 @@ export interface PreviewAddress {
   readonly port: number;
   /** The preview cookie's value: given to a browser that opened the page signed in. */
   readonly pass: string;
+  /**
+   * Its subdomain under `T3CODE_PREVIEW_ORIGIN` (`newPreviewId`): its own, never another
+   * address's, so no two Users, Spaces or sessions share an origin.
+   */
+  readonly originId: string;
   expiresAtMillis: number;
 }
+
+/** How long a handoff into a preview's own origin may wait to be spent; once only. */
+const PREVIEW_HANDOFF_TTL_MS = 60_000;
+/** Handoffs not yet spent, across every User: past this the oldest go. */
+const MAX_PENDING_HANDOFFS = 1_024;
 
 /** Who a request says it is: its Hub session's User, and the preview cookie it carries. */
 export interface PreviewCredentials {
@@ -110,6 +121,24 @@ export class HubPreviews extends Context.Service<
       token: string,
       credentials: PreviewCredentials,
     ) => Effect.Effect<PreviewResolution>;
+    /**
+     * Checks one request on a preview's own origin: only that origin's cookie counts (the Hub's
+     * session never reaches it), then the same check as `resolve`.
+     */
+    readonly resolveOrigin: (
+      originId: string,
+      pass: Option.Option<string>,
+    ) => Effect.Effect<PreviewResolution>;
+    /**
+     * A one-time code that lets a browser into the address's own origin, for a request
+     * `resolve` just opened with its User's Hub session; it lasts `PREVIEW_HANDOFF_TTL_MS`.
+     */
+    readonly handoff: (address: PreviewAddress) => Effect.Effect<string>;
+    /** Spends a handoff code on the origin it was made for: the address's cookie value. */
+    readonly redeemHandoff: (
+      originId: string,
+      code: string,
+    ) => Effect.Effect<Option.Option<PreviewAddress>>;
     /**
      * Completes once the address's User may no longer use it (session ended, access changed, the
      * Thread moved, the address expired): a live socket under it closes then.
@@ -212,6 +241,11 @@ const makeWith = Effect.fn("HubPreviews.make")(function* (options: HubPreviewsOp
   // Starts a stopped Sandbox and keeps it from idling; absent without a Sandbox runtime.
   const demand = yield* Effect.serviceOption(EnvironmentDemand.EnvironmentDemand);
   const recheckEvery = options.recheckEvery ?? "30 seconds";
+  if (config.previewOrigin === undefined && config.joinedHub === undefined) {
+    yield* Effect.logInfo(
+      "Previews are served sandboxed at /preview/<token>/ on the Hub's origin: dev servers that use fetch() or ES modules (Vite) do not work there. Set T3CODE_PREVIEW_ORIGIN (https://*.<preview domain>) to give each preview an origin of its own.",
+    );
+  }
   // Sandboxes of the process runtime share the Hub's loopback: none may reach a port of the Hub.
   const sandboxRuntime = yield* Config.String("T3CODE_SANDBOX_RUNTIME").pipe(
     Config.option,
@@ -251,7 +285,12 @@ const makeWith = Effect.fn("HubPreviews.make")(function* (options: HubPreviewsOp
   // In least-recently-used order: a Map keeps insertion order, and a use re-inserts.
   const addresses = new Map<string, PreviewAddress>();
   const byKey = new Map<string, string>();
-  const keyOf = (address: Omit<PreviewAddress, "token" | "pass" | "expiresAtMillis">) =>
+  const byOrigin = new Map<string, string>();
+  // Handoff codes into a preview's own origin, by code: the address's token and when it lapses.
+  const handoffs = new Map<string, { readonly token: string; readonly expiresAtMillis: number }>();
+  const keyOf = (
+    address: Omit<PreviewAddress, "token" | "pass" | "originId" | "expiresAtMillis">,
+  ) =>
     JSON.stringify([
       address.principal,
       address.sessionId,
@@ -268,8 +307,12 @@ const makeWith = Effect.fn("HubPreviews.make")(function* (options: HubPreviewsOp
     checks.delete(token);
     if (address === undefined) return;
     addresses.delete(token);
+    byOrigin.delete(address.originId);
     const key = keyOf(address);
     if (byKey.get(key) === token) byKey.delete(key);
+    for (const [code, handoff] of handoffs) {
+      if (handoff.token === token) handoffs.delete(code);
+    }
   };
   const touch = (address: PreviewAddress, now: number) => {
     address.expiresAtMillis = now + PREVIEW_ADDRESS_IDLE_TTL_MS;
@@ -295,7 +338,7 @@ const makeWith = Effect.fn("HubPreviews.make")(function* (options: HubPreviewsOp
    * Thread's Active environment as just read.
    */
   const check = Effect.fn("HubPreviews.check")(function* (
-    address: Omit<PreviewAddress, "token" | "pass" | "expiresAtMillis">,
+    address: Omit<PreviewAddress, "token" | "pass" | "originId" | "expiresAtMillis">,
     environmentId: EnvironmentId,
   ): Effect.fn.Return<Checked> {
     // An address is for one machine: the Thread moved, so its dev servers are elsewhere.
@@ -392,9 +435,11 @@ const makeWith = Effect.fn("HubPreviews.make")(function* (options: HubPreviewsOp
           ...wanted,
           token: randomToken(),
           pass: randomToken(),
+          originId: newPreviewId(),
           expiresAtMillis: now,
         };
         byKey.set(key, made.token);
+        byOrigin.set(made.originId, made.token);
       }
       touch(made, now);
       const path = `${HUB_PREVIEW_ROUTE_PREFIX}/${made.token}/`;
@@ -408,15 +453,34 @@ const makeWith = Effect.fn("HubPreviews.make")(function* (options: HubPreviewsOp
     },
   );
 
+  /** A request whose credential matched `known`: the address's rule, checked as it comes. */
+  const serve = Effect.fn("HubPreviews.serve")(function* (
+    known: PreviewAddress,
+  ): Effect.fn.Return<PreviewResolution> {
+    const now = yield* Clock.currentTimeMillis;
+    const checked = yield* checkCached(known);
+    if (checked._tag !== "open") return checked;
+    touch(known, now);
+    // Each request served is use: the Sandbox's idle time starts again.
+    if (Option.isSome(demand)) yield* demand.value.touch(known.environmentId);
+    return { _tag: "open", address: known, target: checked.target, name: checked.name };
+  });
+
+  /** The live address under `token`, forgetting it once it lapsed. */
+  const live = Effect.fn("HubPreviews.live")(function* (token: string | undefined) {
+    const known = token === undefined ? undefined : addresses.get(token);
+    if (known === undefined) return undefined;
+    if (known.expiresAtMillis <= (yield* Clock.currentTimeMillis)) {
+      forget(known.token);
+      return undefined;
+    }
+    return known;
+  });
+
   const resolve: HubPreviews["Service"]["resolve"] = Effect.fn("HubPreviews.resolve")(
     function* (token, credentials) {
-      const known = addresses.get(token);
+      const known = yield* live(token);
       if (known === undefined) return REFUSED;
-      const now = yield* Clock.currentTimeMillis;
-      if (known.expiresAtMillis <= now) {
-        forget(token);
-        return REFUSED;
-      }
       if (Option.isSome(credentials.hubUser)) {
         // Someone else's Hub session: another User opened this User's link.
         if ((yield* principalOf(credentials.hubUser.value)) !== known.principal) return REFUSED;
@@ -424,19 +488,48 @@ const makeWith = Effect.fn("HubPreviews.make")(function* (options: HubPreviewsOp
         // The address alone is not enough: a leaked link opens nothing.
         return { _tag: "unauthenticated" } as const;
       }
-      const checked = yield* checkCached(known);
-      if (checked._tag !== "open") return checked;
-      touch(known, now);
-      // Each request served is use: the Sandbox's idle time starts again.
-      if (Option.isSome(demand)) yield* demand.value.touch(known.environmentId);
-      return {
-        _tag: "open",
-        address: known,
-        target: checked.target,
-        name: checked.name,
-      } as const;
+      return yield* serve(known);
     },
   );
+
+  const resolveOrigin: HubPreviews["Service"]["resolveOrigin"] = Effect.fn(
+    "HubPreviews.resolveOrigin",
+  )(function* (originId, pass) {
+    const known = yield* live(byOrigin.get(originId));
+    if (known === undefined) return REFUSED;
+    // Only this origin's own cookie: a host-only one the handoff set, for this address alone.
+    if (Option.isNone(pass) || pass.value !== known.pass) {
+      return { _tag: "unauthenticated" } as const;
+    }
+    return yield* serve(known);
+  });
+
+  const handoff: HubPreviews["Service"]["handoff"] = Effect.fn("HubPreviews.handoff")(
+    function* (address) {
+      const now = yield* Clock.currentTimeMillis;
+      for (const [code, pending] of handoffs) {
+        if (pending.expiresAtMillis <= now || handoffs.size >= MAX_PENDING_HANDOFFS) {
+          handoffs.delete(code);
+        }
+      }
+      const code = randomToken();
+      handoffs.set(code, { token: address.token, expiresAtMillis: now + PREVIEW_HANDOFF_TTL_MS });
+      return code;
+    },
+  );
+
+  const redeemHandoff: HubPreviews["Service"]["redeemHandoff"] = Effect.fn(
+    "HubPreviews.redeemHandoff",
+  )(function* (originId, code) {
+    const pending = handoffs.get(code);
+    // Spent on its first presentation, whatever comes of it.
+    handoffs.delete(code);
+    if (pending === undefined || pending.expiresAtMillis <= (yield* Clock.currentTimeMillis)) {
+      return Option.none();
+    }
+    const known = yield* live(pending.token);
+    return known !== undefined && known.originId === originId ? Option.some(known) : Option.none();
+  });
 
   const whileAllowed: HubPreviews["Service"]["whileAllowed"] = (address) =>
     Effect.scoped(
@@ -474,7 +567,15 @@ const makeWith = Effect.fn("HubPreviews.make")(function* (options: HubPreviewsOp
       for (const port of ports) declaredHubPorts.add(port);
     });
 
-  return HubPreviews.of({ address, resolve, whileAllowed, hubPorts });
+  return HubPreviews.of({
+    address,
+    resolve,
+    resolveOrigin,
+    handoff,
+    redeemHandoff,
+    whileAllowed,
+    hubPorts,
+  });
 });
 
 export const layerWith = (options: HubPreviewsOptions = {}) =>

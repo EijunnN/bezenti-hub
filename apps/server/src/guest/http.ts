@@ -23,6 +23,7 @@ import * as ByteSize from "effect/ByteSize";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { HttpRouter, HttpServerRequest, HttpServerResponse, Multipart } from "effect/http";
@@ -30,7 +31,9 @@ import * as HttpIncomingMessage from "effect/http/HttpIncomingMessage";
 
 import { htmlRenderFileName } from "@t3tools/shared/htmlRender";
 
+import * as ServerConfig from "../config.ts";
 import { assetFileResponse, downloadContentDisposition } from "../http.ts";
+import { crossesFromPreviewOrigin } from "../preview/PreviewOrigin.ts";
 import type { GuestUpload } from "./guestAttachments.ts";
 import { GuestShareAccessError, GuestShareService } from "./GuestShareService.ts";
 
@@ -78,15 +81,27 @@ const badRequest = HttpServerResponse.json(
   { status: 400, headers: NO_STORE },
 );
 
-const sessionFor = (request: HttpServerRequest.HttpServerRequest, shareId: string | null) =>
-  shareId === null ? "" : (request.cookies[guestSessionCookieName(shareId)] ?? "");
+/**
+ * The guest session cookie for `shareId`, never from a page on a preview's own origin, which must
+ * not use the Hub's cookies (`crossesFromPreviewOrigin`, the rule of every cookie door).
+ */
+export const guestSessionCookie = (
+  request: HttpServerRequest.HttpServerRequest,
+  shareId: string | null,
+) =>
+  Effect.map(Effect.serviceOption(ServerConfig.ServerConfig), (config) =>
+    shareId === null ||
+    crossesFromPreviewOrigin(Option.getOrUndefined(config)?.previewOrigin, request.headers)
+      ? ""
+      : (request.cookies[guestSessionCookieName(shareId)] ?? ""),
+  );
 
 const requestedShareId = (request: HttpServerRequest.HttpServerRequest) =>
   new URLSearchParams(request.url.split("?", 2)[1] ?? "").get(GUEST_SHARE_PARAM);
 
 /** The session for the share the request names in `?share=`. */
-const sessionToken = Effect.map(HttpServerRequest.HttpServerRequest, (request) =>
-  sessionFor(request, requestedShareId(request)),
+const sessionToken = Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) =>
+  guestSessionCookie(request, requestedShareId(request)),
 );
 
 /** The `?item=` a per-item route names. */
@@ -216,7 +231,7 @@ const submitRoute = HttpRouter.add(
     // The session is checked before the body is read, so only a guest can make the server parse
     // and store up to 10 MB.
     const shareId = requestedShareId(request);
-    const session = sessionFor(request, shareId);
+    const session = yield* guestSessionCookie(request, shareId);
     yield* guestShares.check(session);
     const submission = yield* readSubmission;
     if (submission === null || submission.fields.shareId !== shareId) return yield* badRequest;

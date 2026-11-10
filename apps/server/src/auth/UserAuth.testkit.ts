@@ -36,6 +36,7 @@ import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as HubEnvironmentsHttp from "../environments/http.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as HubPreviewRoute from "../preview/hubPreviewRoute.ts";
+import type { PreviewOriginPattern } from "../preview/PreviewOrigin.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as SandboxImageHttp from "../sandboxes/http.ts";
 import * as SandboxImage from "../sandboxes/SandboxImage.ts";
@@ -184,7 +185,7 @@ type TestRegistryOptions = EnvironmentRegistry.RegistryOptions & {
 };
 
 const makeLayerServices = (
-  config: { readonly publicUrl?: URL },
+  config: { readonly publicUrl?: URL; readonly previewOrigin?: PreviewOriginPattern },
   sandboxRuntime?: TestSandboxRuntime,
   { hubRunsAgents = true, ...registryOptions }: TestRegistryOptions = {},
   sandboxImageBuilder?: SandboxImage.SandboxImageBuilder["Service"],
@@ -255,6 +256,8 @@ export type HubServices = Layer.Success<ReturnType<typeof makeLayerServices>>;
 export const serveAuthHttpWith = Effect.fn(function* (
   config: {
     readonly publicUrl?: URL;
+    /** Previews on their own origin (`T3CODE_PREVIEW_ORIGIN`). */
+    readonly previewOrigin?: PreviewOriginPattern;
     readonly listen?: boolean;
     /**
      * More services over the same database, such as a running orchestration (the «Hub con
@@ -276,7 +279,10 @@ export const serveAuthHttpWith = Effect.fn(function* (
 ) {
   const base = yield* Layer.build(
     makeLayerServices(
-      config.publicUrl === undefined ? {} : { publicUrl: config.publicUrl },
+      {
+        ...(config.publicUrl === undefined ? {} : { publicUrl: config.publicUrl }),
+        ...(config.previewOrigin === undefined ? {} : { previewOrigin: config.previewOrigin }),
+      },
       config.sandboxRuntime,
       config.registry,
       config.sandboxImageBuilder,
@@ -314,6 +320,8 @@ export const serveAuthHttpWith = Effect.fn(function* (
         EnvironmentGitRoute.layer.pipe(Layer.provide(Layer.succeedContext(services))),
         // Only with previews among the services (the «Hub con Environments» testkit).
         HubPreviewRoute.routeLayer.pipe(Layer.provide(Layer.succeedContext(services))),
+        // Hosts under the preview zone go to previews before any route, as in the server.
+        HubPreviewRoute.previewOriginLayer.pipe(Layer.provide(Layer.succeedContext(services))),
       ),
       { disableListenLog: true, disableLogger: true },
     ).pipe(
@@ -340,6 +348,8 @@ export const serveAuthHttpWith = Effect.fn(function* (
       headers?: Record<string, string>;
       /** An `application/x-www-form-urlencoded` body, as OAuth token requests send. */
       form?: Record<string, string>;
+      /** Sent without `Origin`, as a browser sends a same-site subresource or navigation. */
+      omitOrigin?: boolean;
     },
   ) =>
     Effect.promise(async () => {
@@ -348,7 +358,7 @@ export const serveAuthHttpWith = Effect.fn(function* (
           method: init?.body === undefined && init?.form === undefined ? "GET" : "POST",
           headers: {
             [ORCHESTRATION_PROTOCOL_HEADER]: String(ORCHESTRATION_PROTOCOL_VERSION),
-            origin: ORIGIN,
+            ...(init?.omitOrigin === true ? {} : { origin: ORIGIN }),
             host: RP_ID,
             "content-type":
               init?.form === undefined ? "application/json" : "application/x-www-form-urlencoded",
@@ -363,14 +373,17 @@ export const serveAuthHttpWith = Effect.fn(function* (
         requestContext,
       );
       const text = await response.text();
+      // The session cookie set, `__Host-` over HTTPS; not the bare one expired beside it.
       const setCookie = response.headers
         .getSetCookie()
-        .find((cookie) => cookie.startsWith("t3_session_"));
+        .find((cookie) => /^(__Host-)?t3_session_[^=]*=[^;]/.test(cookie));
       return {
         status: response.status,
         body: (text.length > 0 ? decodeJson(text) : null) as Record<string, unknown>,
         cookie: setCookie?.split(";", 1)[0],
         setCookie,
+        /** Every cookie the answer sets or expires. */
+        setCookies: response.headers.getSetCookie(),
       };
     });
   return {

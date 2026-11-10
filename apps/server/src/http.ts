@@ -729,10 +729,14 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
 
     const contentType = isHtml ? "text/html; charset=utf-8" : mimeType;
     // Pages that approve access must not be framed by another site (clickjacking the consent).
+    // With previews on their own origin no page is framed by another: a preview subdomain is
+    // same-site, so a frame there would carry the Hub's SameSite=Lax session.
     const frameHeaders: Record<string, string> =
       isHtml && CONSENT_PAGE_PATHS.has(url.value.pathname.replace(/\/+$/u, ""))
         ? { "X-Frame-Options": "DENY", "Content-Security-Policy": "frame-ancestors 'none'" }
-        : {};
+        : isHtml && config.previewOrigin !== undefined
+          ? { "X-Frame-Options": "SAMEORIGIN", "Content-Security-Policy": "frame-ancestors 'self'" }
+          : {};
     Object.assign(headers, frameHeaders);
     if (opened.file === null && request.method !== "HEAD") {
       const fileSystem = yield* FileSystem.FileSystem;

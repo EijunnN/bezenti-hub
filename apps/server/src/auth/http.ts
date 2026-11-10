@@ -26,6 +26,7 @@ import { parseOAuthScope } from "@t3tools/shared/oauthScope";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
 import * as Cookies from "effect/http/Cookies";
@@ -37,7 +38,7 @@ import * as CurrentPrincipal from "./CurrentPrincipal.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as SessionStore from "./SessionStore.ts";
 import * as UserDirectory from "./UserDirectory.ts";
-import { deriveAuthClientMetadata } from "./utils.ts";
+import { deriveAuthClientMetadata, sessionCookieNameFor } from "./utils.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
 import { requestUrl } from "../requestUrl.ts";
 
@@ -217,31 +218,48 @@ const appendCookies = (cookies: ReturnType<typeof Cookies.set>) =>
 
 /** Session cookies are `Secure` whenever the client reached the server over HTTPS. */
 const sessionCookieAttributes = HttpServerRequest.HttpServerRequest.pipe(
-  Effect.map((request) =>
-    request.protocol === "https"
-      ? { ...SESSION_COOKIE_ATTRIBUTES, secure: true }
-      : SESSION_COOKIE_ATTRIBUTES,
-  ),
+  Effect.map((request) => ({
+    ...SESSION_COOKIE_ATTRIBUTES,
+    secure: request.protocol === "https",
+  })),
 );
+
+/**
+ * The session cookie under the name this request's transport takes (`__Host-` over HTTPS, see
+ * `sessionCookieNameFor`). Over HTTPS the bare-named one is expired with it, so a session from
+ * before the prefix moves to it on its next check instead of signing out.
+ */
+const sessionCookie = (
+  cookies: Cookies.Cookies,
+  cookieName: string,
+  token: string,
+  expiresAt: DateTime.DateTime,
+) =>
+  Effect.map(sessionCookieAttributes, (attributes) => {
+    const set = Cookies.set(
+      cookies,
+      sessionCookieNameFor(cookieName, attributes.secure === true),
+      token,
+      { ...attributes, expires: DateTime.toDate(expiresAt) },
+    );
+    return attributes.secure === true
+      ? Result.flatMap(set, (next) => Cookies.expireCookie(next, cookieName, attributes))
+      : set;
+  });
 
 export const appendSessionCookie = (
   cookieName: string,
   token: string,
   expiresAt: DateTime.DateTime,
-) =>
-  Effect.flatMap(sessionCookieAttributes, (attributes) =>
-    appendCookies(
-      Cookies.set(Cookies.empty, cookieName, token, {
-        ...attributes,
-        expires: DateTime.toDate(expiresAt),
-      }),
-    ),
-  );
+) => Effect.flatMap(sessionCookie(Cookies.empty, cookieName, token, expiresAt), appendCookies);
 
+/** Signing out clears both names a session cookie may be under. */
 const expireSessionCookies = (cookieNames: ReadonlyArray<string>) =>
   Effect.flatMap(sessionCookieAttributes, (attributes) =>
     Effect.forEach(
-      cookieNames,
+      attributes.secure === true
+        ? cookieNames.flatMap((name) => [name, sessionCookieNameFor(name, true)])
+        : cookieNames,
       (cookieName) => appendCookies(Cookies.expireCookie(Cookies.empty, cookieName, attributes)),
       { discard: true },
     ),
@@ -567,11 +585,7 @@ export const layer = HttpApiBuilder.group(
             yield* annotateEnvironmentRequest(args.endpoint.name);
             const request = yield* HttpServerRequest.HttpServerRequest;
             const result = yield* serverAuth.getSessionState(request);
-            const credential = EnvironmentAuth.selectRequestCredential(
-              request,
-              sessions.cookieName,
-              sessions.legacyCookieName,
-            );
+            const credential = EnvironmentAuth.selectRequestCredential(request, sessions);
             // Re-sent on every check so a sliding session keeps its cookie as long as its row.
             if (
               (credential?.source === "cookie" || credential?.source === "legacy-cookie") &&
@@ -595,11 +609,7 @@ export const layer = HttpApiBuilder.group(
           function* (args) {
             yield* annotateEnvironmentRequest(args.endpoint.name);
             const request = yield* HttpServerRequest.HttpServerRequest;
-            const previousCredential = EnvironmentAuth.selectRequestCredential(
-              request,
-              sessions.cookieName,
-              sessions.legacyCookieName,
-            );
+            const previousCredential = EnvironmentAuth.selectRequestCredential(request, sessions);
             const result = yield* serverAuth.createBrowserSession(
               args.payload.credential,
               deriveAuthClientMetadata({ request }),
@@ -608,17 +618,28 @@ export const layer = HttpApiBuilder.group(
                 ? previousCredential.token
                 : undefined,
             );
-            const cookieName = result.cookieName ?? sessions.cookieName;
             const attributes = yield* sessionCookieAttributes;
+            // The reusable dev token keeps its own cookie; a session gets the Hub's (`__Host-`).
             const selectedCookie = yield* Effect.fromResult(
-              Cookies.set(Cookies.empty, cookieName, result.sessionToken, {
-                ...attributes,
-                expires: DateTime.toDate(result.response.expiresAt),
-              }),
+              result.cookieName === undefined
+                ? yield* sessionCookie(
+                    Cookies.empty,
+                    sessions.cookieName,
+                    result.sessionToken,
+                    result.response.expiresAt,
+                  )
+                : Cookies.set(Cookies.empty, result.cookieName, result.sessionToken, {
+                    ...attributes,
+                    expires: DateTime.toDate(result.response.expiresAt),
+                  }),
             ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")));
             const sessionCookies = result.expireNormalCookie
               ? yield* Effect.fromResult(
-                  Cookies.expireCookie(selectedCookie, sessions.cookieName, attributes),
+                  Cookies.expireCookie(
+                    selectedCookie,
+                    sessionCookieNameFor(sessions.cookieName, attributes.secure === true),
+                    attributes,
+                  ),
                 ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")))
               : selectedCookie;
 

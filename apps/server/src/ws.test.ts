@@ -768,7 +768,11 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(ServerLifecycleEvents.ServerLifecycleEvents)({}),
   Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({}),
   Layer.mock(SpaceDirectory.SpaceDirectory)({}),
-  Layer.mock(SessionStore.SessionStore)({ cookieName: "config-test", legacyCookieName: undefined }),
+  Layer.mock(SessionStore.SessionStore)({
+    cookieName: "config-test",
+    legacyCookieName: undefined,
+    hostCookieRequired: false,
+  }),
   Layer.mock(SourceControlDiscovery.SourceControlDiscovery)({}),
   Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({}),
   Layer.mock(SourceControlSignIn.SourceControlSignIn)({}),

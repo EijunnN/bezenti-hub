@@ -31,6 +31,7 @@ import * as ServerConfig from "../config.ts";
 import { expandHomePath, resolveBaseDir } from "../os-jank.ts";
 import { isProcessAlive, readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import { readJoinedHubState } from "../environments/joinedHubState.ts";
+import { parsePreviewOrigin } from "../preview/PreviewOrigin.ts";
 
 const modeFlag = Flag.Literals("mode", ServerConfig.RuntimeMode.literals).pipe(
   Flag.withDescription("Runtime mode. `desktop` keeps loopback defaults unless overridden."),
@@ -223,6 +224,19 @@ const PublicUrlConfig = Config.URL("T3CODE_PUBLIC_URL").pipe(
   Config.option,
   Config.map(Option.getOrUndefined),
 );
+
+// Previews on their own origin (spec 3 ticket 15); see docs/internals/sandboxes.md.
+const previewOriginConfig = (hub: { readonly publicUrl?: URL; readonly host?: string }) =>
+  Config.String("T3CODE_PREVIEW_ORIGIN").pipe(
+    Config.mapEffect((value) => {
+      const parsed = parsePreviewOrigin(value, hub);
+      return Result.isSuccess(parsed)
+        ? Effect.succeed(parsed.success)
+        : Effect.fail(invalidConfig(parsed.failure));
+    }),
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  );
 
 export interface CliServerFlags {
   readonly mode: Option.Option<ServerConfig.RuntimeMode>;
@@ -492,6 +506,14 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
           privateNetworkOnly ? "0.0.0.0" : mode === "desktop" ? "127.0.0.1" : undefined,
         );
   const logLevel = Option.getOrElse(cliLogLevel, () => env.logLevel);
+  // A joined machine serves no previews; only a Hub reads where they go.
+  const previewOrigin =
+    joinedHub === undefined
+      ? yield* previewOriginConfig({
+          ...(publicUrl === undefined ? {} : { publicUrl }),
+          ...(host === undefined ? {} : { host }),
+        })
+      : undefined;
 
   const otel = yield* OtelEnvironment.load;
 
@@ -561,6 +583,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     ...(devAuthToken === undefined ? {} : { devAuthToken }),
     ...(trustedProxies === undefined ? {} : { trustedProxies }),
     ...(publicUrl === undefined ? {} : { publicUrl }),
+    ...(previewOrigin === undefined ? {} : { previewOrigin }),
     devAllowedOrigins: env.devAllowedOrigins,
     noBrowser: noBrowser || joinedHub !== undefined,
     startupPresentation,
