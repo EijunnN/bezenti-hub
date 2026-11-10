@@ -220,8 +220,13 @@ on the Hub does not exist, and a private remote needs credentials no machine sho
 - **Only from a trusted repository:** the copy is made only when today's root rule trusts the
   Project's `workspaceRoot` and the repository it is in (`SpaceVisibility.trustedProjectRepository`:
   the `directoryRoots` rules the directory checks use, `isTrustedProjectRoot` and
-  `projectRepository`, whose top holds none of the Hub's own folders). From any other, nothing is
-  copied and no `fromHub` is sent.
+  `projectRepository`, whose top holds none of the Hub's own folders). A top above the Project's
+  root is trusted only when it holds no other Project of any Space, passes the root rule itself and
+  is no home folder (`isHomeFolder`), so one Space's Project never carries another's code. From any
+  other, nothing is copied and no `fromHub` is sent.
+- **The Hub's reads never fail a session:** git failing in the Hub's checkout, unable to start
+  there, or the folder gone means no `fromHub` (and no `cloneUrl` when `origin` cannot be read);
+  the machine uses the checkout it has, or clones what it can.
 - **Which machines:** `fromHub` and `subfolder` go only to machines of executor contract 9 or later,
   which send the header. A machine from before gets the old checkout, a clone of
   `cloneUrl` at `<workspace root>/<slug>`.

@@ -60,3 +60,4 @@
 - **Upstreams:** se copia el upstream real de cada rama del Hub (`branch.<b>.remote/merge` con remote `origin`). Si la rama no tiene upstream, no se pone ninguno.
 - **Rename:** antes de reintentar comprueba si el destino ya existe.
 - **Lecturas git:** un solo helper (`gitRead`) que distingue «no hay» de un fallo real.
+- **Comprobación final:** la raíz de un repositorio por encima de la raíz del Project solo vale si no contiene otro Project de ningún Space, pasa la regla de raíces y no es una carpeta home (`directoryRoots.isHomeFolder`). Si no, no se envía `fromHub`. Un fallo de lectura en el checkout del Hub (git falla, no arranca o la carpeta ya no existe) nunca hace fallar la sesión: solo significa que no se envía `fromHub`.

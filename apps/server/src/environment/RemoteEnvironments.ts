@@ -160,6 +160,9 @@ export interface RemoteConnection {
   readonly flushAcks: Effect.Effect<void>;
 }
 
+/** A read of the Hub's own checkout that failed, told apart from git's answer of none. */
+const UNREADABLE = Symbol("unreadable");
+
 /** The executor contract from which a machine makes new checkouts from the Hub (`fromHub`). */
 const FROM_HUB_CONTRACT_VERSION = 9;
 
@@ -584,7 +587,16 @@ const make = Effect.gen(function* () {
             cwd,
             args,
             ...(absent === undefined ? {} : { absent }),
-          });
+          }).pipe(
+            // The Hub's own checkout could not be read (git failed there, could not start, or
+            // its folder is gone): the session still opens, as it did without the Hub's copy.
+            Effect.catch((cause) =>
+              Effect.logWarning("The Hub could not read its checkout of the Project", {
+                projectId,
+                cause,
+              }).pipe(Effect.as(UNREADABLE)),
+            ),
+          );
     const top = Option.getOrUndefined(Option.map(repository, (found) => found.top));
     const { origin, branch, head, upstreams } = yield* Effect.all(
       {
@@ -629,16 +641,22 @@ const make = Effect.gen(function* () {
     );
     const uploaded = yield* uploadedRefsOf(threadId);
     const subfolder = Option.getOrUndefined(Option.map(repository, (found) => found.subfolder));
+    // Any of the Hub's reads failing: no copy is offered; the machine clones `origin` if it must.
+    const offered =
+      head !== null && head !== UNREADABLE && branch !== UNREADABLE && upstreams !== UNREADABLE;
     return {
       path: path.value,
-      cloneUrl: origin === null ? null : HubRepository.remoteWithoutCredentials(origin),
-      ...(head === null
+      cloneUrl:
+        origin === null || origin === UNREADABLE
+          ? null
+          : HubRepository.remoteWithoutCredentials(origin),
+      ...(!offered
         ? {}
         : {
             fromHub: {
               projectId,
-              ...(branch === null ? {} : { branch }),
-              upstreams: originUpstreams(upstreams ?? ""),
+              ...(branch === null || branch === UNREADABLE ? {} : { branch }),
+              upstreams: originUpstreams(upstreams === UNREADABLE ? "" : (upstreams ?? "")),
             },
           }),
       ...(subfolder === undefined || subfolder === "" ? {} : { subfolder }),

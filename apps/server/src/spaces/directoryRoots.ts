@@ -249,6 +249,22 @@ export const projectRepository = Effect.fn("directoryRoots.projectRepository")(f
 });
 
 /**
+ * Whether `directory` (its links resolved) is a home folder: this process's, one right in
+ * `/home` or `/Users`, `/root`, or a filesystem root. Such a folder is never a Project's repository.
+ */
+export const isHomeFolder = Effect.fn("directoryRoots.isHomeFolder")(function* (
+  services: DirectoryServices,
+  directory: string,
+) {
+  const { path } = services;
+  const real = yield* realOf(services, directory);
+  const home = process.env.HOME ?? process.env.USERPROFILE;
+  if (home !== undefined && home !== "" && real === (yield* realOf(services, home))) return true;
+  const parent = path.dirname(real);
+  return parent === real || parent === "/home" || parent === "/Users" || real === "/root";
+});
+
+/**
  * A Thread's folder for a Project: `worktreePath` inside the Project, or a linked worktree of the
  * Project's repository (`projectRepository`), narrowed to the Project's part of it.
  */

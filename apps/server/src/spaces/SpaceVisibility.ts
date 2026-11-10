@@ -579,6 +579,24 @@ const make = Effect.gen(function* () {
     ]);
     if (Option.isNone(repository)) return none;
     const { top, project } = repository.value;
+    // Above the Project's root, the repository is the Project's only when it holds no other
+    // Project (of any Space), is a root the same rule trusts, and is no home folder.
+    if (top !== project) {
+      const others = yield* sql<{ readonly root: string }>`
+        SELECT workspace_root AS root FROM projection_projects
+        WHERE project_id <> ${projectId} AND deleted_at IS NULL
+      `.pipe(Effect.orDie);
+      for (const other of others) {
+        if (yield* DirectoryRoots.withinRoots(directories, [top], other.root)) return none;
+      }
+      const topTrusted = yield* DirectoryRoots.isTrustedProjectRoot(
+        directories,
+        top,
+        row.byOwner === 1,
+        hub,
+      );
+      if (!topTrusted || (yield* DirectoryRoots.isHomeFolder(directories, top))) return none;
+    }
     return Option.some({
       top,
       subfolder: path.relative(top, project).split(path.sep).filter(Boolean).join("/"),
