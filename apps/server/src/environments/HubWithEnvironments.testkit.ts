@@ -938,12 +938,16 @@ export const seedProject = Effect.fn("HubWithEnvironments.seedProject")(function
     readonly scratch?: boolean;
     /** The Project is this folder of the repository ("packages/web"), not its top. */
     readonly subfolder?: string;
+    /** An existing folder (of another Project's repository, say) instead of a new repository. */
+    readonly workspaceRoot?: string;
   },
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   let workspaceRoot: string;
-  if (input.scratch === true) {
+  if (input.workspaceRoot !== undefined) {
+    workspaceRoot = input.workspaceRoot;
+  } else if (input.scratch === true) {
     const config = Context.get(
       server.services as unknown as Context.Context<ServerConfig.ServerConfig>,
       ServerConfig.ServerConfig,

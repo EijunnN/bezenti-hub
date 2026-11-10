@@ -4478,6 +4478,82 @@ describe("Hub con Environments: checkouts from the Hub repository", () => {
       }).pipe(Effect.scoped),
   );
 
+  it.live("a repository that holds another Project, of another Space, is never copied", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const hub = yield* makeHub();
+      const laptop = yield* hub.join({ name: "Laptop", adapters: idleAdapters(instanceId) });
+      const acme = yield* createOrganization(hub, "Acme");
+      const globex = yield* createOrganization(hub, "Globex");
+      // One monorepo of the Owner's: `packages/web` is Acme's Project, `packages/billing` Globex's.
+      const web = ProjectId.make("project:web");
+      const { workspaceRoot } = yield* seedProject(hub.server, {
+        projectId: web,
+        title: "Web",
+        defaultModelSelection: null,
+        spaceId: acme,
+        subfolder: "packages/web",
+      });
+      const top = workspaceRoot.slice(0, -"/packages/web".length);
+      yield* Effect.promise(() => NodeFSP.mkdir(`${top}/packages/billing`, { recursive: true }));
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(`${top}/packages/billing/SECRET.md`, "Globex billing\n"),
+      );
+      yield* git(top, ["add", "."]);
+      yield* git(top, [...commitAs, "-m", "Billing"]);
+      yield* seedProject(hub.server, {
+        projectId: ProjectId.make("project:billing"),
+        title: "Billing",
+        defaultModelSelection: null,
+        spaceId: globex,
+        workspaceRoot: `${top}/packages/billing`,
+      });
+      const repository = yield* hub
+        .service(HubRepository.HubRepositories)
+        .ensure({ projectId: web })
+        .pipe(Effect.orDie);
+      // As a new checkout asks: nothing of the monorepo is copied for Acme's machines.
+      const listed = yield* repositoryAs(hub, laptop.credential, { projectId: web }, top).checkout(
+        "ls-remote",
+      );
+      assert.equal(listed.exitCode, 0, listed.stderr);
+      assert.notInclude(listed.stdout, "refs/t3/project/");
+      const executor = yield* hub
+        .service(EnvironmentExecutor.EnvironmentExecutorRegistry)
+        .get(laptop.environmentId)
+        .pipe(Effect.orDie);
+      yield* executor.workspace.move.fetch({ projectId: web, refs: [] }).pipe(Effect.orDie);
+      assert.deepEqual(yield* refsIn(repository, "refs/t3/project/"), []);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a Hub whose checkout git cannot read, or that is gone, opens sessions as before", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const hub = yield* makeHub();
+      const laptop = yield* hub.join({ name: "Laptop", adapters: idleAdapters(instanceId) });
+      const projectId = ProjectId.make("project:unreadable");
+      const { workspaceRoot } = yield* seedProject(hub.server, {
+        projectId,
+        title: "Unreadable",
+        defaultModelSelection: null,
+      });
+      const executor = yield* hub
+        .service(EnvironmentExecutor.EnvironmentExecutorRegistry)
+        .get(laptop.environmentId)
+        .pipe(Effect.orDie);
+      const fetchOnLaptop = executor.workspace.move.fetch({ projectId, refs: [] });
+      // The Laptop has its checkout; then the Hub's git fails there (exit 128)...
+      yield* fetchOnLaptop.pipe(Effect.orDie);
+      yield* Effect.promise(() => NodeFSP.writeFile(`${workspaceRoot}/.git/HEAD`, "not a ref\n"));
+      assert.equal((yield* git(workspaceRoot, ["rev-parse", "HEAD"])).exitCode, 128);
+      yield* fetchOnLaptop.pipe(Effect.orDie);
+      // ...or the Hub's checkout is gone altogether: git cannot even start there.
+      yield* Effect.promise(() => NodeFSP.rm(workspaceRoot, { recursive: true, force: true }));
+      yield* fetchOnLaptop.pipe(Effect.orDie);
+    }).pipe(Effect.scoped),
+  );
+
   it.live("a Hub checkout on a detached HEAD gives new checkouts that commit, detached", () =>
     Effect.gen(function* () {
       const instanceId = ProviderInstanceId.make("claudeAgent");
