@@ -38,3 +38,19 @@ it.live("the credential helper answers the Hub only, not a host git is sent to",
     assert.notInclude(yield* fill("https://127.0.0.1:7123/api/git/project"), CREDENTIAL);
   }),
 );
+
+it("a remote another machine's checkout names keeps no password or token of the Hub's", () => {
+  const cases: ReadonlyArray<readonly [string, string]> = [
+    ["https://t3:s3cret@git.example.com/acme/web.git", "https://git.example.com/acme/web.git"],
+    ["https://x-access-token@git.example.com/a/b.git", "https://git.example.com/a/b.git"],
+    ["https://git.example.com/a/b.git?token=s3cret", "https://git.example.com/a/b.git"],
+    ["ssh://git:s3cret@git.example.com/a/b.git", "ssh://git@git.example.com/a/b.git"],
+    ["ssh://git@git.example.com/a/b.git", "ssh://git@git.example.com/a/b.git"],
+    ["git@git.example.com:a/b.git", "git@git.example.com:a/b.git"],
+    ["https://git.example.com/a/b.git", "https://git.example.com/a/b.git"],
+    ["/srv/repos/acme", "/srv/repos/acme"],
+  ];
+  for (const [remote, named] of cases) {
+    assert.equal(HubRepository.remoteWithoutCredentials(remote), named, remote);
+  }
+});

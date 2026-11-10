@@ -1184,8 +1184,22 @@ describe("Hub repository", () => {
         ordinalWithinScope: 1,
       }).pipe(Effect.provide(NodeCrypto.layer));
       const headRef = `${HubRepository.threadRefPrefixes(threadId)[0]}head`;
-      yield* git(workspaceRoot, ["update-ref", checkpointRef, "HEAD"]);
-      yield* git(workspaceRoot, ["update-ref", headRef, "HEAD"]);
+      // A checkpoint is a commit of its own, never a tip of the Project's branches (which every
+      // machine working in the Project reads).
+      const checkpointCommit = (yield* git(workspaceRoot, [
+        "-c",
+        "user.email=hub@example.com",
+        "-c",
+        "user.name=Hub",
+        "commit-tree",
+        "HEAD^{tree}",
+        "-p",
+        "HEAD",
+        "-m",
+        "Checkpoint",
+      ])).stdout.trim();
+      yield* git(workspaceRoot, ["update-ref", checkpointRef, checkpointCommit]);
+      yield* git(workspaceRoot, ["update-ref", headRef, checkpointCommit]);
       const on = (machine: TestEnvironment, ...args: ReadonlyArray<string>) => {
         const remote = HubRepository.withEnvironmentCredential(
           HubRepository.hubRepositoryUrl(hub.server.url, { projectId }),
@@ -1910,11 +1924,14 @@ describe("Hub con Environments: moving a Thread", () => {
         desktop: true,
       });
       assert.isDefined(desktop);
-      // The Desktop has no checkout and the Project no remote to clone it from.
-      const project = Option.getOrThrow(
-        yield* hub.service(ProjectStore.ProjectStoreV2).get(projectId),
+      // Where the Desktop's checkout goes is a file: nothing is cloned, and git cannot work there.
+      const desktopCheckout = yield* checkoutOn(hub, desktop, projectId);
+      yield* Effect.promise(() =>
+        NodeFSP.mkdir(desktopCheckout.slice(0, desktopCheckout.lastIndexOf("/")), {
+          recursive: true,
+        }),
       );
-      yield* git(project.workspaceRoot, ["remote", "remove", "origin"]);
+      yield* Effect.promise(() => NodeFSP.writeFile(desktopCheckout, "not a checkout\n"));
 
       yield* dispatchMove(hub, {
         commandId: "command:move-fails",
@@ -1925,7 +1942,7 @@ describe("Hub con Environments: moving a Thread", () => {
       const failed = yield* settledMove(hub, threadId);
       assert.equal(failed.move?.status, "failed");
       assert.equal(failed.move?.failure?.step, "fetching");
-      assert.include(failed.move?.failure?.message ?? "", "no remote to clone");
+      assert.include(failed.move?.failure?.message ?? "", desktopCheckout);
       assert.equal(failed.activeEnvironmentId, laptop.environmentId);
       const audited = yield* hub.server.sql<{ readonly detail: string }>`
         SELECT detail_json AS detail FROM audit_log WHERE action = 'thread.move'
@@ -1933,7 +1950,7 @@ describe("Hub con Environments: moving a Thread", () => {
       const failure = JSON.parse(audited.at(-1)?.detail ?? "{}");
       assert.equal(failure.outcome, "failed");
       assert.equal(failure.failedStep, "fetching");
-      assert.include(failure.failureMessage, "no remote to clone");
+      assert.equal(failure.failureMessage, failed.move?.failure?.message);
       // It can be moved again once the cause is gone; a running move is not stuck.
       assert.equal(
         (yield* hub.service(ProjectionStore.ProjectionStoreV2).getThread(threadId)).move?.status,
@@ -4263,6 +4280,41 @@ describe("Hub con Environments: checkouts from the Hub repository", () => {
         assert.equal(yield* on(globexSandbox, { projectId: globexProject }).advertised, 200);
         assert.notInclude((yield* on(acmeSandbox).git("ls-remote")).stdout, `${BRANCHES}elsewhere`);
       }).pipe(Effect.scoped),
+  );
+
+  it.live("with no branches on the Hub, a machine clones the Project's own remote", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const hub = yield* makeHub();
+      const laptop = yield* hub.join({ name: "Laptop", adapters: idleAdapters(instanceId) });
+      const projectId = ProjectId.make("project:fresh");
+      const { workspaceRoot } = yield* seedProject(hub.server, {
+        projectId,
+        title: "Fresh",
+        defaultModelSelection: null,
+      });
+      // The Project's remote has the history; the Hub's checkout has no branch yet.
+      const remote = `${workspaceRoot}-remote.git`;
+      yield* git(workspaceRoot, ["clone", "-q", "--bare", workspaceRoot, remote]);
+      yield* git(workspaceRoot, ["remote", "set-url", "origin", remote]);
+      yield* git(workspaceRoot, ["checkout", "-q", "--orphan", "unborn"]);
+      yield* git(workspaceRoot, ["branch", "-D", "main"]);
+      const executor = yield* hub
+        .service(EnvironmentExecutor.EnvironmentExecutorRegistry)
+        .get(laptop.environmentId)
+        .pipe(Effect.orDie);
+      const fetched = yield* executor.workspace.move
+        .fetch({ projectId, refs: [] })
+        .pipe(Effect.orDie);
+      assert.equal(
+        yield* revOf(fetched.checkout, "refs/remotes/origin/main"),
+        yield* bareRevOf(remote, "refs/heads/main"),
+      );
+      assert.equal(
+        (yield* git(fetched.checkout, ["remote", "get-url", "origin"])).stdout.trim(),
+        remote,
+      );
+    }).pipe(Effect.scoped),
   );
 
   describe.skipIf(!rootlessPodmanAvailable)("in Podman", () => {
