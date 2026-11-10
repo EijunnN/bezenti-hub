@@ -25,6 +25,10 @@ What the credential reaches is decided by the Space, never by a User:
   longer the Sandbox's (`SandboxSpaceMismatchError`), until moving such Threads exists.
 - The [git route](../../apps/server/src/environments/gitRoute.ts) serves a Sandbox only the
   repositories of its own Space: a Project's, or a Thread's own repository by the Thread's Space.
+  A Sandbox makes its checkout of a Project from that repository's branches
+  (`refs/t3/project/heads/`), never from the Project's `origin`, which inside the container may be
+  a path on the Hub or a private remote; `origin` stays the Project's own remote in the checkout
+  (overview, «Project branches»).
 - A Sandbox never `leave`s, and is not renamed or removed as a machine. Archiving its Organization
   stops it and nothing starts it meanwhile; deleting the Organization revokes the credential and
   removes its row and home.

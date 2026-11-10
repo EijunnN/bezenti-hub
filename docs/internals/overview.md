@@ -149,8 +149,9 @@ on its own in-process executor. Constraints that span both halves:
 - Attachments stay on the Hub. A turn sends each one's id and SHA-256; the machine fetches the ones
   it lacks with `attachment.read`, which answers only attachments a live session's turn sent to
   that machine, while the Thread still runs there.
-- The machine uses the Project's checkout where it is, else clones the Hub checkout's `origin`
-  there; when the Hub repository has the Thread's checkpoints, the session's open names them and
+- The machine uses the Project's checkout where it is, else makes it from the Project's branches in
+  the Hub repository (see «Project branches» below), cloning the Hub checkout's `origin` only when
+  the Hub has none; when the Hub repository has the Thread's checkpoints, the session's open names them and
   the checkout fetches the ones it lacks. New worktrees are still made on the Hub machine only, so
   placing a Thread that asks for one (a launch strategy, or a `thread.create` with a worktree) on
   another Environment is refused; only a move (below) makes one elsewhere.
@@ -191,6 +192,40 @@ the granted ref is unhidden for that push alone, and does not exist yet, so noth
 Nobody deletes a ref; an update need not fast-forward, since a rollback reuses its own
 checkpoint refs. Transfers always name the Hub repository by URL or path, never a remote of the
 checkout, so nothing reaches `origin`.
+
+#### Project branches
+
+A machine without a Project's checkout (a Sandbox, a dedicated or personal machine) makes it from
+the Hub repository, never from the Project's own remote: inside a Sandbox an `origin` that is a
+path on the Hub does not exist, and a private remote needs credentials no machine should hold. The
+Hub keeps the Project's branches under `refs/t3/project/heads/<branch>`
+(`HubRepository.PROJECT_BRANCHES_PREFIX`):
+
+- **From the Hub's checkout:** each fetch from `/api/git/<projectId>` (the upload-pack
+  advertisement) first fetches the branches of the Project's `workspaceRoot` on the Hub's disk into
+  that namespace (`HubRepositories.mirrorBranches`), so a new checkout starts from what the Hub has
+  at that moment. The Hub's checkout itself is only read.
+- **From the machines:** every `checkpoint.push` of a Project's checkout (the Hub machine's and a
+  joined one's alike, `makeCheckoutTransfers.push`) also offers `refs/heads/*` there.
+- **Fast-forwards only:** both ways push and fetch without `+`, so a branch is created or moved
+  forward and never rewritten; one rewritten somewhere keeps the Hub's version (a rewritten branch
+  does not reach new checkouts; a branch deleted on the Hub's checkout stays). Nobody deletes one.
+- **Who reads and writes them:** every machine the route serves for that Project, which is every
+  machine whose owner may start Threads in its Space (a Guest's personal machine included, as a
+  Guest starts Threads there) and the Space's Sandbox and dedicated machines. A Thread's own
+  repository (`/api/git/thread/<id>`) has no such namespace. The refs of Threads stay hidden as
+  before: the namespace is the only thing every machine of the Project sees.
+
+The session's open and `move.fetch` carry `WireCheckout.fromHub` (`projectId`, and the branch the
+Hub's checkout is on). The machine (`HubRepository.cloneFromHub`) runs `git init` in a sibling
+folder, fetches `+refs/t3/project/heads/*:refs/heads/*` with its Environment credential, checks out
+that branch (else `main`, `master`, the first), adds `origin` as the Project's own remote and
+renames the folder into place; the Hub's URL and credential never enter the checkout's config.
+`origin` is the Hub checkout's `origin` without a password, token or query
+(`remoteWithoutCredentials`), so pushes to it stay the User's business with their own credentials.
+The new branches have no upstream until the User fetches `origin`. Only when the Hub has no branch
+of the Project (its checkout has no commit yet) does the machine clone `origin` as before, and a
+machine from before this field ignores it and does the same.
 
 Turn and Thread diffs read the Hub repository once both checkpoints are marked uploaded (a ref
 there may be an older capture of a reused ordinal), so they work with the machine offline; until

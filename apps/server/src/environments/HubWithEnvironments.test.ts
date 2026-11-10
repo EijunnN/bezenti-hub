@@ -3122,6 +3122,12 @@ describe("Hub con Environments: Threads without a Project", () => {
         const pushed = yield* on(laptop, own, "push", `+${headRef}:${headRef}`);
         assert.equal(pushed.exitCode, 0, pushed.stderr);
         assert.include((yield* on(laptop, own, "ls-remote")).stdout, headRef);
+        // It has no Project branches: nothing is written beside the Thread's refs.
+        assert.notEqual(
+          (yield* on(laptop, own, "push", "HEAD:refs/t3/project/heads/main")).exitCode,
+          0,
+        );
+        assert.notInclude((yield* on(laptop, own, "ls-remote")).stdout, "refs/t3/project/");
 
         // Another machine of the same User, and another User's, neither read nor write it.
         assert.equal(yield* advertised(desktop, own), 403);
