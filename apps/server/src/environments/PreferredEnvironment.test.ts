@@ -51,7 +51,8 @@ describe("a Project's preferred Environment", () => {
           commandId: "create-api",
           projectId,
           title: "api",
-          workspaceRoot: "/work/api",
+          // A new folder right in the Hub's Projects folder: the only one a Member may root.
+          workspaceRoot: server.newProjectFolder("api"),
           spaceId: acmeId,
         },
       });
