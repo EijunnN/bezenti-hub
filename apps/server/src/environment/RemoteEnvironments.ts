@@ -51,7 +51,7 @@ import * as Stream from "effect/Stream";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import type { CheckpointStoreError } from "../checkpointing/Errors.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
-import type * as HubRepository from "../checkpointing/HubRepository.ts";
+import * as HubRepository from "../checkpointing/HubRepository.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -531,14 +531,15 @@ const make = Effect.gen(function* () {
       } satisfies WireCheckout;
     }
     const project = yield* projects.get(projectId).pipe(Effect.option, Effect.map(Option.flatten));
-    const cloneUrl =
+    // A line of git's output in the Hub's checkout of the Project, or null.
+    const hubCheckoutSays = (operation: string, args: ReadonlyArray<string>) =>
       Option.isNone(project) || Option.isNone(vcs)
-        ? null
-        : yield* vcs.value
+        ? Effect.succeed(null)
+        : vcs.value
             .run({
-              operation: "RemoteEnvironments.originUrl",
+              operation,
               command: "git",
-              args: ["remote", "get-url", "origin"],
+              args: [...args],
               cwd: project.value.workspaceRoot,
               allowNonZeroExit: true,
             })
@@ -550,10 +551,23 @@ const make = Effect.gen(function* () {
               ),
               Effect.orElseSucceed(() => null),
             );
+    const origin = yield* hubCheckoutSays("RemoteEnvironments.originUrl", [
+      "remote",
+      "get-url",
+      "origin",
+    ]);
+    const branch = yield* hubCheckoutSays("RemoteEnvironments.hubBranch", [
+      "symbolic-ref",
+      "--quiet",
+      "--short",
+      "HEAD",
+    ]);
     const uploaded = yield* uploadedRefsOf(threadId);
     return {
       path: path.value,
-      cloneUrl,
+      cloneUrl: origin === null ? null : HubRepository.remoteWithoutCredentials(origin),
+      // The Hub repository mirrors the Hub's checkout when the machine fetches from it.
+      fromHub: { projectId, ...(branch === null ? {} : { branch }) },
       ...(uploaded.length === 0 ? {} : { hubRefs: { projectId, refs: [...uploaded] } }),
     } satisfies WireCheckout;
   });

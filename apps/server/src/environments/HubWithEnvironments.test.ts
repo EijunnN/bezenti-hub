@@ -4204,9 +4204,10 @@ describe("Hub con Environments: checkouts from the Hub repository", () => {
         succeeded(yield* on(laptop).git("push", `+${headRef}:${headRef}`));
 
         // Owner, Admin, Member and the Space's Sandbox read the Project's branches, and only
-        // those: the Thread's refs stay its machine's.
+        // those: the Thread's refs stay its machine's. So does a Guest's own machine: a Guest
+        // starts Threads in the Space (spec 1), and runs them on that machine alone.
         const main = (yield* git(workspaceRoot, ["rev-parse", "HEAD"])).stdout.trim();
-        for (const machine of [adas, graces, acmeSandbox]) {
+        for (const machine of [adas, graces, linuses, acmeSandbox]) {
           const listed = yield* on(machine).git("ls-remote");
           succeeded(listed);
           assert.deepEqual(listed.stdout.trim().split("\n"), [`${main}\t${BRANCHES}main`]);
@@ -4236,16 +4237,29 @@ describe("Hub con Environments: checkouts from the Hub repository", () => {
         );
         assert.notEqual((yield* fromFresh(acmeSandbox).git("push", `HEAD:${headRef}`)).exitCode, 0);
 
-        // A Guest's machine, and the Sandbox of another Space, neither read nor write them.
-        for (const machine of [linuses, globexSandbox]) {
-          assert.equal(yield* on(machine).advertised, 403);
+        // The Sandbox of another Space neither reads nor writes them.
+        assert.equal(yield* on(globexSandbox).advertised, 403);
+        assert.notEqual(
+          (yield* fromFresh(globexSandbox).git("push", `HEAD:${BRANCHES}elsewhere`)).exitCode,
+          0,
+        );
+        // Nor a Member's or a Guest's machine those of a Space they are not in.
+        for (const machine of [graces, linuses]) {
+          assert.equal(yield* on(machine, { projectId: globexProject }).advertised, 403);
           assert.notEqual(
-            (yield* fromFresh(machine).git("push", `HEAD:${BRANCHES}elsewhere`)).exitCode,
+            (yield* repositoryAs(hub, machine.credential, { projectId: globexProject }, fresh).git(
+              "push",
+              `HEAD:${BRANCHES}elsewhere`,
+            )).exitCode,
             0,
           );
         }
-        // Nor a Member's machine those of a Space she is not in.
-        assert.equal(yield* on(graces, { projectId: globexProject }).advertised, 403);
+        // A Guest's machine no longer reads them once the Guest left the Space.
+        yield* hub.server.sql`
+          DELETE FROM space_memberships WHERE space_id = ${acme} AND user_id = ${linus.userId}
+        `;
+        yield* hub.service(SpaceDirectory.SpaceDirectory).changed;
+        assert.equal(yield* on(linuses).advertised, 403);
         assert.equal(yield* on(globexSandbox, { projectId: globexProject }).advertised, 200);
         assert.notInclude((yield* on(acmeSandbox).git("ls-remote")).stdout, `${BRANCHES}elsewhere`);
       }).pipe(Effect.scoped),
