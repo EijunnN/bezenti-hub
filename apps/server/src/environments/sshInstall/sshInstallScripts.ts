@@ -39,43 +39,78 @@ export const sshUsernameRefusal = (username: string): string | undefined => {
 export const machineNameRefusal = (name: string): string | undefined =>
   CONTROL.test(name) ? "The machine's name cannot hold control characters." : undefined;
 
-const ipv4Bytes = (address: string) => address.split(".").map((part) => Number(part));
-
-/** Lowercase, without an IPv6 zone, and an IPv4 address written as IPv6 as IPv4. */
-const plainAddress = (address: string) => {
-  const lower = address.toLowerCase().replace(/%.*$/u, "");
-  return /^::ffff:(\d+\.\d+\.\d+\.\d+)$/u.exec(lower)?.[1] ?? lower;
+/**
+ * The address's bytes, however it is written: 4 for IPv4, also written as IPv6 (IPv4-mapped, dotted
+ * or hex, and the old IPv4-compatible form); 16 for any other IPv6 (its zone dropped). Undefined
+ * when it is no IP address.
+ */
+const addressBytes = (address: string): ReadonlyArray<number> | undefined => {
+  const text = address.trim().toLowerCase().replace(/%.*$/u, "");
+  if (NodeNet.isIPv4(text)) return text.split(".").map(Number);
+  if (!NodeNet.isIPv6(text)) return undefined;
+  // A dotted IPv4 tail as its two groups.
+  const hex = text.replace(/(\d+)\.(\d+)\.(\d+)\.(\d+)$/u, (_, a, b, c, d) =>
+    [(Number(a) << 8) | Number(b), (Number(c) << 8) | Number(d)]
+      .map((n) => n.toString(16))
+      .join(":"),
+  );
+  const [left = "", right] = hex.split("::");
+  const groupsOf = (part: string) => (part === "" ? [] : part.split(":"));
+  const groups =
+    right === undefined
+      ? groupsOf(left)
+      : [
+          ...groupsOf(left),
+          ...Array.from<string>({
+            length: 8 - groupsOf(left).length - groupsOf(right).length,
+          }).fill("0"),
+          ...groupsOf(right),
+        ];
+  if (groups.length !== 8) return undefined;
+  const bytes = groups.flatMap((group) => {
+    const value = Number.parseInt(group, 16);
+    return [value >> 8, value & 0xff];
+  });
+  const zeros = (from: number, to: number) => bytes.slice(from, to).every((byte) => byte === 0);
+  const mapped = zeros(0, 10) && bytes[10] === 0xff && bytes[11] === 0xff;
+  // `::a.b.c.d`, but not `::` or `::1`.
+  const compatible = zeros(0, 12) && !zeros(12, 15);
+  return mapped || compatible ? bytes.slice(12) : bytes;
 };
+
+const sameAddress = (a: ReadonlyArray<number>, b: ReadonlyArray<number>) =>
+  a.length === b.length && a.every((byte, index) => byte === b[index]);
 
 /**
  * Where the Hub never opens SSH (docs/internals/sandboxes.md, «Installing over SSH»): link-local,
  * unspecified, multicast and broadcast addresses, and the Hub's own machine (loopback, or one of
- * `hubHost.ownAddresses`) unless `hubHost` is undefined (development only). Undefined when allowed.
+ * `hubHost.ownAddresses`) unless `hubHost` is undefined (development only). Judged by the address's
+ * bytes, so no way of writing it gets past. Undefined when allowed.
  */
 export const forbiddenSshAddress = (
   address: string,
   hubHost: { readonly ownAddresses: ReadonlyArray<string> } | undefined,
 ): string | undefined => {
-  const ip = plainAddress(address);
-  const family = NodeNet.isIP(ip);
-  if (family === 4) {
-    const [a, b] = ipv4Bytes(ip);
+  const bytes = addressBytes(address);
+  if (bytes === undefined) return "not an IP address";
+  const [a = 0, b = 0] = bytes;
+  if (bytes.length === 4) {
     if (a === 169 && b === 254) return "a link-local address";
     if (a === 0) return "an unspecified address";
-    if (a !== undefined && a >= 224) return "a multicast or reserved address";
+    if (a >= 224) return "a multicast or reserved address";
     if (hubHost !== undefined && a === 127) return "the Hub's own machine";
-  } else if (family === 6) {
-    if (ip === "::") return "an unspecified address";
-    if (/^fe[89ab]/u.test(ip)) return "a link-local address";
-    if (ip.startsWith("ff")) return "a multicast address";
-    if (hubHost !== undefined && ip === "::1") return "the Hub's own machine";
   } else {
-    return "not an IP address";
+    if (bytes.every((byte) => byte === 0)) return "an unspecified address";
+    if (a === 0xfe && (b & 0xc0) === 0x80) return "a link-local address";
+    if (a === 0xff) return "a multicast address";
+    const loopback = bytes.slice(0, 15).every((byte) => byte === 0) && bytes[15] === 1;
+    if (hubHost !== undefined && loopback) return "the Hub's own machine";
   }
-  if (hubHost?.ownAddresses.some((own) => plainAddress(own) === ip)) {
-    return "the Hub's own machine";
-  }
-  return undefined;
+  const own = hubHost?.ownAddresses.some((other) => {
+    const otherBytes = addressBytes(other);
+    return otherBytes !== undefined && sameAddress(otherBytes, bytes);
+  });
+  return own === true ? "the Hub's own machine" : undefined;
 };
 
 /** `SHA256:<base64 without padding>` of the key's wire blob, as `ssh-keygen -lf` prints it. */
@@ -92,41 +127,54 @@ export const hostKeyAlgorithm = (blob: Uint8Array): string => {
 
 const REDACTED = "[redacted]";
 const PRIVATE_KEY_MARKER = /-----(?:BEGIN|END) [A-Z0-9 ]*PRIVATE KEY-----/u;
-/** Key lines shorter than this are too common to be telling (and too short to leak a key). */
-const MIN_KEY_FRAGMENT = 16;
+/**
+ * Any run of this many characters of a secret is redacted wherever it shows, so a piece of it (cut
+ * by a chunk, a line or a column) goes too. A secret shorter than this goes when whole.
+ */
+const SECRET_WINDOW = 12;
 
 /**
- * Removes from a line of the machine's output anything of the run's secrets: the private key (any
- * of its lines, or a PEM marker of any key), its passphrase and the run's grant. The key never
- * reaches the machine; this is in case it is there anyway, or something echoes it.
+ * Removes from a line of the machine's output anything of the run's secrets: any piece of at least
+ * 12 characters of the private key's body, its passphrase or the run's grant, a PEM marker of any
+ * key, and a shorter passphrase whole. The key never reaches the machine; this is in case it is
+ * there anyway, or something echoes it.
  */
 export const makeScrubber = (secrets: {
   readonly privateKey?: string | undefined;
   readonly passphrase?: string | undefined;
   readonly grant?: string | undefined;
 }) => {
-  const fragments = new Set<string>();
-  if (secrets.privateKey !== undefined) {
-    for (const line of secrets.privateKey.split(/\r?\n/u)) {
-      const trimmed = line.trim();
-      if (trimmed.length >= MIN_KEY_FRAGMENT) fragments.add(trimmed);
+  const windows = new Set<string>();
+  const whole = new Set<string>();
+  const add = (secret: string) => {
+    if (secret.length < SECRET_WINDOW) {
+      if (secret.length > 0) whole.add(secret);
+      return;
     }
-    const body = secrets.privateKey
-      .split(/\r?\n/u)
-      .filter((line) => !line.startsWith("-----"))
-      .join("")
-      .trim();
-    if (body.length >= MIN_KEY_FRAGMENT) fragments.add(body);
+    for (let index = 0; index + SECRET_WINDOW <= secret.length; index++) {
+      windows.add(secret.slice(index, index + SECRET_WINDOW));
+    }
+  };
+  if (secrets.privateKey !== undefined) {
+    const lines = secrets.privateKey.split(/\r?\n/u).map((line) => line.trim());
+    add(lines.filter((line) => !line.startsWith("-----")).join(""));
   }
-  if (secrets.passphrase !== undefined && secrets.passphrase.length > 0) {
-    fragments.add(secrets.passphrase);
-  }
-  if (secrets.grant !== undefined && secrets.grant.length > 0) fragments.add(secrets.grant);
-  // Longest first, so a whole body goes before the lines it is made of.
-  const ordered = [...fragments].toSorted((a, b) => b.length - a.length);
+  if (secrets.passphrase !== undefined) add(secrets.passphrase);
+  if (secrets.grant !== undefined) add(secrets.grant);
+  const ordered = [...whole].toSorted((a, b) => b.length - a.length);
   return (line: string): string => {
     if (PRIVATE_KEY_MARKER.test(line)) return REDACTED;
-    let scrubbed = line;
+    const covered = new Uint8Array(line.length);
+    for (let index = 0; index + SECRET_WINDOW <= line.length; index++) {
+      if (windows.has(line.slice(index, index + SECRET_WINDOW))) {
+        covered.fill(1, index, index + SECRET_WINDOW);
+      }
+    }
+    let scrubbed = "";
+    for (let index = 0; index < line.length; index++) {
+      if (covered[index] === 0) scrubbed += line[index];
+      else if (index === 0 || covered[index - 1] === 0) scrubbed += REDACTED;
+    }
     for (const fragment of ordered) scrubbed = scrubbed.replaceAll(fragment, REDACTED);
     return scrubbed;
   };
@@ -141,7 +189,8 @@ const RUNNER = '"$HOME/.t3/ssh-install/t3"';
 
 /**
  * 1. The system and Podman: Linux, not root, rootless Podman; installed with passwordless sudo when
- * missing, otherwise it stops with what to do. Exit codes 10-14 say which check refused.
+ * missing, otherwise it stops with what to do; with a systemd user manager, lingering (turned on
+ * when allowed). Exit codes 10-15 say which check refused.
  */
 export const checkScript = (): string =>
   `${header("check")}
@@ -158,6 +207,20 @@ fi
 if [ "$(id -u)" = 0 ]; then
   printf 'Connect as a non-root user: the machine runs its work in rootless Podman.\\n' >&2
   exit 11
+fi
+# With a systemd user manager its service is a user unit: without lingering it stops at logout.
+if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+  user="$(id -un)"
+  lingering() { loginctl show-user "$user" -p Linger 2>/dev/null | sed -n 's/^Linger=//p'; }
+  if [ "$(lingering)" != yes ]; then
+    loginctl enable-linger "$user" >/dev/null 2>&1 || sudo -n loginctl enable-linger "$user" >/dev/null 2>&1
+  fi
+  if [ "$(lingering)" != yes ]; then
+    printf 'Lingering is off for %s, so its T3 Code service would stop when they log out, and could not be turned on.\\n' "$user" >&2
+    printf 'As root on the machine: loginctl enable-linger %s; then add the machine again.\\n' "$user" >&2
+    exit 15
+  fi
+  printf 'Lingering is on: its service runs without anyone logged in.\\n'
 fi
 if ! command -v podman >/dev/null 2>&1; then
   if ! sudo -n true >/dev/null 2>&1; then
@@ -191,6 +254,59 @@ if [ "$(printf '%s' "$rootless" | tail -n 1)" != true ]; then
   exit 14
 fi
 printf 'Rootless Podman is ready.\\n'
+`;
+
+/** A step's exit code when another step (of an earlier run) still runs on the machine. */
+export const STEP_BUSY_EXIT = 75;
+
+/**
+ * Runs a step in a process group of its own (`setsid`, its id in `~/.t3/ssh-install/step.pid`),
+ * stdin passed on. Until it ends or `stopStepScript` stops it, a later step (of «Try again» too)
+ * refuses with `STEP_BUSY_EXIT`: a step whose SSH channel is gone goes on there.
+ */
+export const stepCommand = (script: string): string =>
+  `# T3 Code: add a machine over SSH, its step in a process group of its own
+dir="$HOME/.t3/ssh-install"
+mkdir -p "$dir" && chmod 700 "$dir" || exit 1
+pidfile="$dir/step.pid"
+if [ -s "$pidfile" ]; then
+  group="$(cat "$pidfile")"
+  if kill -0 "-$group" 2>/dev/null; then
+    printf 'Another installation is still running on this machine (process group %s). Wait for it to end, or stop it there with: kill -- -%s\\n' "$group" "$group" >&2
+    exit ${STEP_BUSY_EXIT}
+  fi
+fi
+if ! command -v setsid >/dev/null 2>&1; then
+  printf 'setsid (util-linux) is missing on the machine.\\n' >&2
+  exit 1
+fi
+exec 3<&0
+setsid sh -c 'printf "%s\\n" "$$" > "$1"; exec sh -c "$2"' t3-step "$pidfile" ${shellQuote(script)} <&3 3<&- &
+child=$!
+exec 3<&-
+wait "$child"
+code=$?
+rm -f "$pidfile"
+exit "$code"
+`;
+
+/** Stops the step still running on the machine, its whole process group. */
+export const stopStepScript = (): string =>
+  `# T3 Code: add a machine over SSH (stop)
+pidfile="$HOME/.t3/ssh-install/step.pid"
+[ -s "$pidfile" ] || exit 0
+group="$(cat "$pidfile")"
+if kill -TERM "-$group" 2>/dev/null; then
+  i=0
+  while [ "$i" -lt 20 ] && kill -0 "-$group" 2>/dev/null; do
+    sleep 0.25
+    i=$((i + 1))
+  done
+  kill -KILL "-$group" 2>/dev/null
+  printf 'Stopped what the step was still doing on the machine.\\n'
+fi
+rm -f "$pidfile"
+exit 0
 `;
 
 /**

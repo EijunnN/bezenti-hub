@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- reads the Hub's files and its machine's addresses.
 import * as NodeFS from "node:fs";
+import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
@@ -9,7 +10,7 @@ import * as NodePath from "node:path";
  * Owner confirms its host key, the Hub runs the four steps there, the machine redeems the run's
  * one-use grant as `t3 join --grant-on-stdin` does and its service asks the Hub how it is used.
  */
-import { assert, describe, expect, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 import {
   type EnvironmentId,
   type SshInstallRun,
@@ -22,8 +23,10 @@ import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Tracer from "effect/Tracer";
@@ -58,6 +61,7 @@ const POLICY: SshInstall.SshInstallPolicy["Service"] = {
   grantTtlMs: 60_000,
   // Its SSH servers listen on this machine's loopback.
   allowHubHost: true,
+  agentSocket: null,
 };
 
 const sha256 = (value: string) =>
@@ -243,7 +247,6 @@ describe("Hub con Environments: add a machine over SSH", () => {
         assert.deepEqual(run.hostKey, {
           algorithm: "ssh-ed25519",
           fingerprint: machine.fingerprint,
-          known: false,
         });
         assert.notInclude(machine.authentications, "publickey");
         assert.deepEqual(machine.steps, []);
@@ -376,6 +379,8 @@ describe("Hub con Environments: add a machine over SSH", () => {
         readonly error: RegExp;
         readonly output?: string;
         readonly undone: boolean;
+        /** Whether it says what it left on the machine: anything from the install step on. */
+        readonly leftover: boolean;
       }> = [
         {
           name: "no Podman and no sudo",
@@ -387,6 +392,7 @@ describe("Hub con Environments: add a machine over SSH", () => {
           error: /Podman is missing/u,
           output: "Podman is not installed, and deploy cannot use sudo.",
           undone: false,
+          leftover: false,
         },
         {
           name: "a failed install",
@@ -398,6 +404,7 @@ describe("Hub con Environments: add a machine over SSH", () => {
           error: /Install T3 Code failed \(exit code 1\)/u,
           output: "curl: (22) The requested URL returned error: 404",
           undone: false,
+          leftover: true,
         },
         {
           // Joined already (to this Hub or another): what is there is not this run's to undo.
@@ -410,6 +417,7 @@ describe("Hub con Environments: add a machine over SSH", () => {
           error: /Register the machine failed/u,
           output: "This machine is already joined to https://other.example.",
           undone: false,
+          leftover: true,
         },
         {
           name: "a lost connection",
@@ -419,6 +427,7 @@ describe("Hub con Environments: add a machine over SSH", () => {
           failedAt: "install",
           error: /connection was lost/u,
           undone: false,
+          leftover: true,
         },
         {
           name: "a service that never reaches the Hub",
@@ -426,6 +435,7 @@ describe("Hub con Environments: add a machine over SSH", () => {
           failedAt: "service",
           error: /did not reach the Hub in time/u,
           undone: true,
+          leftover: true,
         },
       ];
       for (const testCase of cases) {
@@ -450,6 +460,13 @@ describe("Hub con Environments: add a machine over SSH", () => {
           machine.steps.some((step) => step.step === "undo"),
           testCase.undone,
           testCase.name,
+        );
+        assert.equal(
+          (failed?.output ?? []).some((line) =>
+            line.includes("Left on the machine: ~/.t3/ssh-install"),
+          ),
+          testCase.leftover,
+          `${testCase.name}: ${JSON.stringify(failed?.output)}`,
         );
       }
       // No machine of any of them is live, and the one that had registered was removed, audited.
@@ -758,6 +775,7 @@ describe("Hub con Environments: add a machine over SSH", () => {
         assert.include(new TextDecoder().decode(Option.getOrThrow(kept)), "correct horse battery");
 
         // Removing the machine forgets its key and its host record.
+        const forgotten = yield* hub.service(SshInstall.SshInstall).forgotten;
         const removed = yield* hub.server.request("/api/environments/remove", {
           cookie: hub.owner,
           body: { environmentId },
@@ -767,7 +785,8 @@ describe("Hub con Environments: add a machine over SSH", () => {
           hub.service(ServerConfig.ServerConfig).secretsDir,
           `${SshInstall.keptKeySecretName(environmentId)}.bin`,
         );
-        yield* Effect.promise(() => expect.poll(() => NodeFS.existsSync(keptFile)).toBe(false));
+        assert.equal(yield* PubSub.take(forgotten), environmentId);
+        assert.isFalse(NodeFS.existsSync(keptFile));
         const hosts = yield* hub.server.sql<{ readonly count: number }>`
           SELECT COUNT(*) AS count FROM environment_ssh_hosts
         `;
@@ -799,6 +818,8 @@ describe("Hub con Environments: add a machine over SSH", () => {
         { username: "-oProxyCommand=x" },
         { hubUrl: "http://hub.example.com" },
         { auth: { kind: "key", privateKey: "not a key" } },
+        // The Hub's process has no SSH agent here (its policy says so).
+        { auth: { kind: "agent" } },
         { spaceId: "no-such-space" },
         // Refused by the schema itself: the answer must not echo the key either.
         { port: 0 },
@@ -825,6 +846,141 @@ describe("Hub con Environments: add a machine over SSH", () => {
       });
       assert.equal(remote.status, 400);
       assert.deepEqual(machine.steps, []);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("releases a run whose start stops before the host key is shown", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub({ sshInstallPolicy: POLICY });
+      const { acme } = yield* acmeWithPeople(hub);
+      const service = hub.service(SshInstall.SshInstall);
+      const ownerId = yield* ownerIdOf(hub);
+      // A port that takes the connection and never says anything.
+      const sockets = new Set<NodeNet.Socket>();
+      const connected = yield* Deferred.make<void>();
+      const silent = NodeNet.createServer((socket) => {
+        sockets.add(socket);
+        Deferred.doneUnsafe(connected, Effect.void);
+      });
+      yield* Effect.callback<void>((resume) => {
+        silent.listen(0, "127.0.0.1", () => resume(Effect.void));
+      });
+      const port = (silent.address() as NodeNet.AddressInfo).port;
+      const machine = yield* makeTestMachine();
+      const request = decodeStartRequest({ ...startBody(machine, acme), port });
+      const starting = yield* service.start(ownerId, request).pipe(Effect.forkChild);
+      // The Hub is waiting for its host key there.
+      yield* Deferred.await(connected);
+      yield* Fiber.interrupt(starting);
+      yield* Effect.callback<void>((resume) => {
+        silent.close(() => resume(Effect.void));
+        for (const socket of sockets) socket.destroy();
+      });
+      // Nothing holds that address: the next run is not refused as under way.
+      const again = yield* service.start(ownerId, request).pipe(Effect.result);
+      assert.equal(again._tag, "Success", JSON.stringify(again));
+      if (again._tag === "Success") assert.equal(again.success.state, "failed");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("cancels a run confirmed a moment before, and ends it only once", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub({ sshInstallPolicy: POLICY });
+      const { acme } = yield* acmeWithPeople(hub);
+      const service = hub.service(SshInstall.SshInstall);
+      const ownerId = yield* ownerIdOf(hub);
+      for (const concurrently of [false, true]) {
+        const machine = yield* makeTestMachine();
+        machine.setHandler(healthyMachine(hub).handler);
+        const started = yield* service.start(ownerId, decodeStartRequest(startBody(machine, acme)));
+        const confirm = service.confirm(ownerId, {
+          runId: started.runId,
+          fingerprint: started.hostKey?.fingerprint ?? "",
+        });
+        const cancel = service.cancel(ownerId, started.runId);
+        if (concurrently) {
+          yield* Effect.all([Effect.result(confirm), cancel], { concurrency: "unbounded" });
+        } else {
+          yield* confirm;
+          yield* cancel;
+        }
+        const done = yield* service.awaitFinished(started.runId);
+        assert.equal(done.state, "cancelled", JSON.stringify(done));
+        assert.equal(done.error, "Cancelled by the Owner.");
+        assert.isNull(done.environmentId);
+        assert.notInclude(
+          machine.steps.map((step) => step.step),
+          "register",
+        );
+        // Later answers do not change how it ended.
+        yield* service.cancel(ownerId, started.runId);
+        const after = yield* service.status(ownerId, started.runId);
+        assert.equal(after.state, "cancelled");
+        assert.equal(after.finishedAt, done.finishedAt);
+      }
+      const listed = yield* listEnvironments(hub.server, hub.owner);
+      assert.deepEqual(
+        listed.filter((environment) => environment.name === "Acme VPS"),
+        [],
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("forgets a host key not confirmed in time, with every step not run", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub({ sshInstallPolicy: { ...POLICY, hostKeyTtlMs: 200 } });
+      const { acme } = yield* acmeWithPeople(hub);
+      const service = hub.service(SshInstall.SshInstall);
+      const machine = yield* makeTestMachine();
+      const started = yield* service.start(
+        yield* ownerIdOf(hub),
+        decodeStartRequest(startBody(machine, acme)),
+      );
+      const done = yield* service.awaitFinished(started.runId);
+      assert.equal(done.state, "cancelled");
+      assert.match(done.error ?? "", /not confirmed in time/u);
+      assert.deepEqual(
+        done.steps.map((step) => step.state),
+        ["cancelled", "cancelled", "cancelled", "cancelled"],
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("stops a step that takes too long on the machine too", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub({
+        sshInstallPolicy: { ...POLICY, stepTimeoutMs: { ...POLICY.stepTimeoutMs, install: 400 } },
+      });
+      const { acme } = yield* acmeWithPeople(hub);
+      const machine = yield* makeTestMachine();
+      machine.setHandler(healthyMachine(hub, { install: () => Effect.never }).handler);
+      const done = yield* installOver(hub, machine, acme);
+      assert.equal(done.state, "failed", JSON.stringify(done));
+      assert.match(done.error ?? "", /took too long/u);
+      // The step runs in a process group of its own there, which the Hub stops.
+      assert.include(machine.steps[1]?.script ?? "", "setsid");
+      assert.deepEqual(
+        machine.steps.map((step) => step.step),
+        ["check", "install", "stop"],
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("scrubs a line before it cuts it, so no piece of the key is left at the cut", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub({ sshInstallPolicy: POLICY });
+      const { acme } = yield* acmeWithPeople(hub);
+      const machine = yield* makeTestMachine();
+      const keyLine = keyFragments(machine.privateKey)[0]!;
+      machine.setHandler(
+        healthyMachine(hub, {
+          check: (request) => written(request, `${"y".repeat(1985)}${keyLine}\n`, 0),
+        }).handler,
+      );
+      const done = yield* installOver(hub, machine, acme);
+      assert.equal(done.state, "succeeded", JSON.stringify(done));
+      const shown = JSON.stringify(done);
+      assert.notInclude(shown, keyLine.slice(0, 15));
     }).pipe(Effect.scoped),
   );
 });

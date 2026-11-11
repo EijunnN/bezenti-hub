@@ -409,11 +409,7 @@ function RunView(props: { readonly run: SshInstallRun }) {
   if (run.state === "awaiting-host-key" && run.hostKey !== null) {
     return (
       <div className="grid gap-2 text-sm">
-        <p>
-          {run.hostKey.known
-            ? `${target} shows the host key stored when it was installed:`
-            : `${target} shows this host key. Check it is the machine's before you trust it:`}
-        </p>
+        <p>{`${target} shows this host key. Check it is the machine's before you trust it:`}</p>
         <p
           aria-label="Host key fingerprint"
           className="rounded-md bg-muted/50 p-2 font-mono text-xs break-all"

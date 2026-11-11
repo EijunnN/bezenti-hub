@@ -37,9 +37,11 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import type * as Scope from "effect/Scope";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import packageJson from "../../../package.json" with { type: "json" };
@@ -59,6 +61,9 @@ import {
   registerScript,
   serviceScript,
   sshUsernameRefusal,
+  STEP_BUSY_EXIT,
+  stepCommand,
+  stopStepScript,
   undoScript,
 } from "./sshInstallScripts.ts";
 
@@ -84,6 +89,8 @@ export class SshInstallPolicy extends Context.Service<
      * and tests only (`T3CODE_SSH_INSTALL_ALLOW_HUB_HOST=1`), as their SSH servers are there.
      */
     readonly allowHubHost: boolean;
+    /** The Hub process's SSH agent (`SSH_AUTH_SOCK`), for runs that sign in with it. */
+    readonly agentSocket: string | null;
   }
 >()("t3/environments/sshInstall/SshInstall/SshInstallPolicy") {}
 
@@ -109,6 +116,7 @@ const policyFromConfig = Effect.gen(function* () {
   // Development: the machine runs T3 from a checkout at this path (with its own Node).
   const nodeScriptPath = yield* optionalSetting("T3CODE_SSH_INSTALL_NODE_SCRIPT");
   const allowHubHost = (yield* optionalSetting("T3CODE_SSH_INSTALL_ALLOW_HUB_HOST")) === "1";
+  const agentSocket = yield* optionalSetting("SSH_AUTH_SOCK");
   return SshInstallPolicy.of({
     runner: {
       archiveVersion: packageJson.version,
@@ -123,6 +131,7 @@ const policyFromConfig = Effect.gen(function* () {
     hostKeyTtlMs: 10 * MINUTE,
     grantTtlMs: 5 * MINUTE,
     allowHubHost,
+    agentSocket: agentSocket === "" ? null : agentSocket,
   });
 });
 
@@ -184,6 +193,8 @@ export class SshInstall extends Context.Service<
       actorUserId: UserId,
       runId: string,
     ) => Effect.Effect<SshInstallRun, OwnerOnlyError | SshInstallRunNotFoundError>;
+    /** Each machine whose kept key and host record the Hub has forgotten, once it is removed. */
+    readonly forgotten: Effect.Effect<PubSub.Subscription<EnvironmentId>, never, Scope.Scope>;
     /** `t3 join --grant-on-stdin` on the machine: registers it for the run that issued the grant. */
     readonly redeemGrant: (
       input: EnvironmentJoinGrantRequest,
@@ -209,6 +220,10 @@ const LINE_MAX_CHARS = 2_000;
 /** Finished runs the Hub remembers, the newest. */
 const FINISHED_RUNS_KEPT = 20;
 const UNDO_TIMEOUT_MS = 30_000;
+const STOP_TIMEOUT_MS = 15_000;
+const DNS_TIMEOUT_MS = 10_000;
+/** A line without its end yet longer than this is shown as it is: scrubbed, then cut. */
+const PARTIAL_MAX_CHARS = 4 * LINE_MAX_CHARS;
 /** Kept with the machine when the Owner asks to (`keepForUpdates`). */
 export const keptKeySecretName = (environmentId: string) => `ssh-install-key-${environmentId}`;
 const KeptKey = Schema.Struct({
@@ -216,6 +231,14 @@ const KeptKey = Schema.Struct({
   passphrase: Schema.optionalKey(Schema.String),
 });
 const encodeKeptKey = Schema.encodeSync(Schema.fromJsonString(KeptKey));
+
+/**
+ * What a run that stopped from its install step on leaves on the machine, and how to remove it.
+ * The Hub does not remove it there itself: «Try again» uses it, and a machine joined some other way
+ * may too.
+ */
+const leftoverNote = (version: string) =>
+  `Left on the machine: ~/.t3/ssh-install (T3 Code ${version} and its logs) and, if its build began, the Sandbox image localhost/t3code-sandbox:${version}. «Try again» uses them. If nothing else there uses T3 Code, remove them there with: rm -rf ~/.t3/ssh-install; podman rmi localhost/t3code-sandbox:${version}`;
 
 interface MutableStep {
   readonly id: SshInstallStepId;
@@ -241,7 +264,7 @@ interface Run {
   credentials: SshClient.SshCredentials | undefined;
   scrub: (line: string) => string;
   state: SshInstallRun["state"];
-  hostKey: { algorithm: string; fingerprint: string; known: boolean } | null;
+  hostKey: { algorithm: string; fingerprint: string } | null;
   steps: Array<MutableStep>;
   error: string | null;
   environmentId: EnvironmentId | null;
@@ -249,6 +272,12 @@ interface Run {
   finishedAt: string | null;
   /** Set as the run starts ending: a grant redeemed after this undoes itself. */
   closing: boolean;
+  /** The Owner asked to cancel: the run stops before its next step, however far it got. */
+  cancelRequested: boolean;
+  /** Set once it has ended, the first time: it ends once. */
+  ended: boolean;
+  /** Forgets the run when its host key is not confirmed in time; gone once it is, or it ends. */
+  hostKeyTimer: Fiber.Fiber<void, never> | undefined;
   /** Done once the run has ended. */
   readonly done: Deferred.Deferred<void>;
   fiber: Fiber.Fiber<void, never> | undefined;
@@ -268,7 +297,10 @@ const viewOf = (run: Run): SshInstallRun => ({
     id: step.id,
     title: STEP_TITLES[step.id],
     state: step.state,
-    output: step.partial === "" ? [...step.output] : [...step.output, run.scrub(step.partial)],
+    output:
+      step.partial === ""
+        ? [...step.output]
+        : [...step.output, run.scrub(step.partial).slice(0, LINE_MAX_CHARS)],
   })),
   error: run.error,
   environmentId: run.environmentId,
@@ -321,16 +353,21 @@ const make = Effect.gen(function* () {
     }
   };
 
+  // Each line is scrubbed whole and only then cut: no piece of a secret is left at the cut.
   const appendOutput = (run: Run, step: MutableStep, chunk: string) => {
     const parts = (step.partial + chunk).split(/\r\n|\r|\n/u);
-    step.partial = (parts.pop() ?? "").slice(0, LINE_MAX_CHARS);
-    for (const line of parts) step.output.push(run.scrub(line.slice(0, LINE_MAX_CHARS)));
+    step.partial = parts.pop() ?? "";
+    if (step.partial.length > PARTIAL_MAX_CHARS) {
+      parts.push(step.partial);
+      step.partial = "";
+    }
+    for (const line of parts) step.output.push(run.scrub(line).slice(0, LINE_MAX_CHARS));
     if (step.output.length > OUTPUT_LINES_KEPT) {
       step.output.splice(0, step.output.length - OUTPUT_LINES_KEPT);
     }
   };
   const flushOutput = (run: Run, step: MutableStep) => {
-    if (step.partial !== "") step.output.push(run.scrub(step.partial));
+    if (step.partial !== "") step.output.push(run.scrub(step.partial).slice(0, LINE_MAX_CHARS));
     step.partial = "";
   };
   const say = (run: Run, step: MutableStep, line: string) => appendOutput(run, step, `${line}\n`);
@@ -350,6 +387,34 @@ const make = Effect.gen(function* () {
   });
 
   const refuse = (message: string) => Effect.fail(new SshInstallRefusedError({ message }));
+
+  /** Ends the run, once: the key goes, the steps not run say so, and its host key timer stops. */
+  const finish = Effect.fn("SshInstall.finish")(function* (
+    run: Run,
+    outcome:
+      | { readonly _tag: "succeeded" }
+      | { readonly _tag: "failed"; readonly message: string }
+      | { readonly _tag: "cancelled"; readonly message?: string },
+  ) {
+    if (run.ended) return;
+    run.ended = true;
+    run.credentials = undefined;
+    run.state = outcome._tag;
+    run.error =
+      outcome._tag === "failed"
+        ? run.scrub(outcome.message)
+        : outcome._tag === "cancelled"
+          ? (outcome.message ?? "Cancelled by the Owner.")
+          : null;
+    for (const step of run.steps) {
+      if (step.state === "pending" && outcome._tag !== "succeeded") step.state = "cancelled";
+    }
+    run.finishedAt = yield* nowIso;
+    const timer = run.hostKeyTimer;
+    run.hostKeyTimer = undefined;
+    if (timer !== undefined) yield* Fiber.interrupt(timer);
+    yield* Deferred.succeed(run.done, undefined);
+  });
 
   const start: SshInstall["Service"]["start"] = Effect.fn("SshInstall.start")(
     function* (actorUserId, input) {
@@ -382,8 +447,8 @@ const make = Effect.gen(function* () {
         if (refusal !== undefined) return yield* refuse(refusal);
         credentials = { kind: "key", privateKey, passphrase };
       } else {
-        const agentSocket = process.env.SSH_AUTH_SOCK;
-        if (agentSocket === undefined || agentSocket === "") {
+        const agentSocket = policy.agentSocket;
+        if (agentSocket === null) {
           return yield* refuse("The Hub's process has no SSH agent (SSH_AUTH_SOCK is not set).");
         }
         credentials = { kind: "agent", agentSocket };
@@ -392,7 +457,12 @@ const make = Effect.gen(function* () {
       const addresses = yield* Effect.tryPromise({
         try: () => NodeDnsPromises.lookup(host, { all: true, verbatim: true }),
         catch: () => new SshInstallRefusedError({ message: `${host} does not resolve.` }),
-      });
+      }).pipe(
+        Effect.timeoutOrElse({
+          duration: DNS_TIMEOUT_MS,
+          orElse: () => refuse(`${host} did not resolve in time.`),
+        }),
+      );
       const hubHost = policy.allowHubHost
         ? undefined
         : {
@@ -436,6 +506,9 @@ const make = Effect.gen(function* () {
         keyKept: false,
         finishedAt: null,
         closing: false,
+        cancelRequested: false,
+        ended: false,
+        hostKeyTimer: undefined,
         fiber: undefined,
         done: yield* Deferred.make<void>(),
       };
@@ -454,61 +527,70 @@ const make = Effect.gen(function* () {
           message: `A run to ${host}:${input.port} is already under way.`,
         });
       }
-      const failEarly = Effect.fn("SshInstall.failEarly")(function* (message: string) {
-        run.state = "failed";
-        run.error = message;
-        run.credentials = undefined;
-        for (const step of run.steps) step.state = "cancelled";
-        run.finishedAt = yield* nowIso;
-        yield* Deferred.succeed(run.done, undefined);
-        return viewOf(run);
-      });
-      const probed = yield* SshClient.probeHostKey({ address, port: input.port }).pipe(
-        Effect.timeoutOrElse({
-          duration: 30_000,
-          orElse: () =>
-            Effect.fail(
-              new SshClient.SshFailure({
-                reason: "timeout",
-                detail: "The machine did not answer SSH in time.",
-              }),
-            ),
-        }),
-        Effect.result,
-      );
-      if (probed._tag === "Failure") return yield* failEarly(probed.failure.detail);
-      const fingerprint = hostKeyFingerprint(probed.success);
-      const algorithm = hostKeyAlgorithm(probed.success);
-      const stored = yield* storedHostKey(host, input.port);
-      if (stored !== undefined && stored.fingerprint !== fingerprint) {
-        run.hostKey = { algorithm, fingerprint, known: false };
-        return yield* failEarly(
-          `The machine's host key changed: ${stored.name} was installed with ${stored.fingerprint}, and ${host}:${input.port} now shows ${fingerprint}. The Hub did not sign in. If the machine was reinstalled, remove ${stored.name} first.`,
+      const failEarly = (message: string) =>
+        finish(run, { _tag: "failed", message }).pipe(
+          Effect.andThen(Effect.sync(() => viewOf(run))),
         );
-      }
-      run.hostKey = { algorithm, fingerprint, known: stored !== undefined };
-      // That machine is joined already: a second registration would only fail there, and undoing
-      // it must not touch the machine that is.
-      if (stored !== undefined) {
-        return yield* failEarly(
-          `${host}:${input.port} is already installed as ${stored.name}. To install it again, remove ${stored.name} first.`,
-        );
-      }
-      // Not confirmed in time: the key goes.
-      yield* Effect.sleep(policy.hostKeyTtlMs).pipe(
-        Effect.andThen(
-          Effect.gen(function* () {
-            if (run.state !== "awaiting-host-key") return;
-            run.state = "cancelled";
-            run.error = "The host key was not confirmed in time; add the machine again.";
-            run.credentials = undefined;
-            run.finishedAt = yield* nowIso;
-            yield* Deferred.succeed(run.done, undefined);
+      // Whatever stops it before the host key is shown (an error, an interrupt) ends the run.
+      return yield* Effect.gen(function* () {
+        const probed = yield* SshClient.probeHostKey({ address, port: input.port }).pipe(
+          Effect.timeoutOrElse({
+            duration: 30_000,
+            orElse: () =>
+              Effect.fail(
+                new SshClient.SshFailure({
+                  reason: "timeout",
+                  detail: "The machine did not answer SSH in time.",
+                }),
+              ),
           }),
+          Effect.result,
+        );
+        if (probed._tag === "Failure") return yield* failEarly(probed.failure.detail);
+        const fingerprint = hostKeyFingerprint(probed.success);
+        const algorithm = hostKeyAlgorithm(probed.success);
+        const stored = yield* storedHostKey(host, input.port);
+        run.hostKey = { algorithm, fingerprint };
+        if (stored !== undefined && stored.fingerprint !== fingerprint) {
+          return yield* failEarly(
+            `The machine's host key changed: ${stored.name} was installed with ${stored.fingerprint}, and ${host}:${input.port} now shows ${fingerprint}. The Hub did not sign in. If the machine was reinstalled, remove ${stored.name} first.`,
+          );
+        }
+        // That machine is joined already: a second registration would only fail there, and undoing
+        // it must not touch the machine that is.
+        if (stored !== undefined) {
+          return yield* failEarly(
+            `${host}:${input.port} is already installed as ${stored.name}. To install it again, remove ${stored.name} first.`,
+          );
+        }
+        // Not confirmed in time: the run ends and its key goes.
+        run.hostKeyTimer = yield* Effect.sleep(policy.hostKeyTtlMs).pipe(
+          Effect.andThen(
+            Effect.suspend(() => {
+              run.hostKeyTimer = undefined;
+              return run.state === "awaiting-host-key"
+                ? finish(run, {
+                    _tag: "cancelled",
+                    message: "The host key was not confirmed in time; add the machine again.",
+                  })
+                : Effect.void;
+            }),
+          ),
+          Effect.forkIn(scope),
+        );
+        return viewOf(run);
+      }).pipe(
+        Effect.onExit((exit) =>
+          Exit.isSuccess(exit)
+            ? Effect.void
+            : finish(
+                run,
+                Cause.hasInterrupts(exit.cause)
+                  ? { _tag: "cancelled", message: "The run stopped before its host key was shown." }
+                  : { _tag: "failed", message: "The run could not start." },
+              ),
         ),
-        Effect.forkIn(scope),
       );
-      return viewOf(run);
     },
   );
 
@@ -574,18 +656,44 @@ const make = Effect.gen(function* () {
     script: string,
     stdin: string | undefined,
   ) {
+    if (run.cancelRequested) return yield* Effect.interrupt;
     const step = run.steps.find((entry) => entry.id === id)!;
     step.state = "running";
     const exitCode = yield* session
-      .exec(script, {
+      .exec(stepCommand(script), {
         ...(stdin === undefined ? {} : { stdin }),
         onOutput: (chunk) => appendOutput(run, step, chunk),
         timeoutMs: policy.stepTimeoutMs[id],
       })
       .pipe(
+        // Its SSH channel closed, the step would go on there: its process group is stopped.
+        Effect.onExit((exit) =>
+          Effect.gen(function* () {
+            flushOutput(run, step);
+            const leftRunning =
+              Exit.isFailure(exit) &&
+              (Cause.hasInterrupts(exit.cause) ||
+                exit.cause.reasons.some(
+                  (reason) => Cause.isFailReason(reason) && reason.error.reason === "timeout",
+                ));
+            if (!leftRunning) return;
+            yield* session
+              .exec(stopStepScript(), {
+                onOutput: (chunk) => appendOutput(run, step, chunk),
+                timeoutMs: STOP_TIMEOUT_MS,
+              })
+              .pipe(Effect.ignore);
+            flushOutput(run, step);
+          }),
+        ),
         Effect.mapError((failure) => new StepFailed({ message: failure.detail })),
-        Effect.onExit(() => Effect.sync(() => flushOutput(run, step))),
       );
+    if (exitCode === STEP_BUSY_EXIT) {
+      return yield* new StepFailed({
+        message:
+          "Another installation is still running on the machine; its output says how to stop it there.",
+      });
+    }
     if (exitCode !== 0) {
       return yield* new StepFailed({
         message:
@@ -657,6 +765,7 @@ const make = Effect.gen(function* () {
     if (credentials === undefined) return yield* new StepFailed({ message: "The run ended." });
     let session: SshClient.SshSession | undefined;
     const work = Effect.gen(function* () {
+      if (run.cancelRequested) return yield* Effect.interrupt;
       const check = run.steps[0]!;
       check.state = "running";
       say(run, check, `Connecting to ${run.username}@${run.host}:${run.port}...`);
@@ -722,32 +831,14 @@ const make = Effect.gen(function* () {
               const step = run.steps.find((entry) => entry.state === "running");
               if (step !== undefined) step.state = interrupted ? "cancelled" : "failed";
               yield* undo(run, session);
+              const install = run.steps[1]!;
+              if (step !== undefined && install.state !== "pending") {
+                say(run, step, leftoverNote(policy.version));
+              }
             }),
       ),
       Effect.scoped,
     );
-  });
-
-  const finish = Effect.fn("SshInstall.finish")(function* (
-    run: Run,
-    outcome:
-      | { readonly _tag: "succeeded" }
-      | { readonly _tag: "failed"; readonly message: string }
-      | { readonly _tag: "cancelled" },
-  ) {
-    run.credentials = undefined;
-    run.state = outcome._tag;
-    run.error =
-      outcome._tag === "failed"
-        ? run.scrub(outcome.message)
-        : outcome._tag === "cancelled"
-          ? "Cancelled by the Owner."
-          : null;
-    run.finishedAt = yield* nowIso;
-    for (const step of run.steps) {
-      if (step.state === "pending" && outcome._tag !== "succeeded") step.state = "cancelled";
-    }
-    yield* Deferred.succeed(run.done, undefined);
   });
 
   const confirm: SshInstall["Service"]["confirm"] = Effect.fn("SshInstall.confirm")(
@@ -766,6 +857,9 @@ const make = Effect.gen(function* () {
         });
       }
       run.state = "running";
+      const timer = run.hostKeyTimer;
+      run.hostKeyTimer = undefined;
+      if (timer !== undefined) yield* Fiber.interrupt(timer);
       run.fiber = yield* steps(run, fingerprint).pipe(
         Effect.matchCauseEffect({
           onSuccess: () => finish(run, { _tag: "succeeded" }),
@@ -793,11 +887,16 @@ const make = Effect.gen(function* () {
     function* (actorUserId, runId) {
       yield* requireOwner(actorUserId);
       const run = yield* find(runId);
+      if (run.ended) return viewOf(run);
+      // Recorded first: a run whose steps have not started yet stops before the first one.
+      run.cancelRequested = true;
       if (run.state === "awaiting-host-key") {
         yield* finish(run, { _tag: "cancelled" });
-      } else if (run.state === "running" && run.fiber !== undefined) {
+      } else if (run.fiber !== undefined) {
         // Waits for the undo: the answer shows what was cleaned up.
         yield* Fiber.interrupt(run.fiber);
+        // A run interrupted before it began has run none of its own handlers.
+        yield* finish(run, { _tag: "cancelled" });
       }
       return viewOf(run);
     },
@@ -866,12 +965,16 @@ const make = Effect.gen(function* () {
   );
 
   // A machine removed (from Settings, `t3 leave`, or an undo): its kept key and record go too.
+  const forgotten = yield* PubSub.unbounded<EnvironmentId>();
   yield* registry.removed.pipe(
     Stream.runForEach((environmentId) =>
       Effect.gen(function* () {
         yield* secrets.remove(keptKeySecretName(environmentId));
         yield* sql`DELETE FROM environment_ssh_hosts WHERE environment_id = ${environmentId}`;
-      }).pipe(Effect.ignore({ log: true })),
+      }).pipe(
+        Effect.ignore({ log: true }),
+        Effect.andThen(PubSub.publish(forgotten, environmentId)),
+      ),
     ),
     Effect.forkIn(scope),
   );
@@ -884,7 +987,15 @@ const make = Effect.gen(function* () {
     return viewOf(run);
   });
 
-  return SshInstall.of({ start, confirm, cancel, status, awaitFinished, redeemGrant });
+  return SshInstall.of({
+    start,
+    confirm,
+    cancel,
+    status,
+    awaitFinished,
+    redeemGrant,
+    forgotten: PubSub.subscribe(forgotten),
+  });
 });
 
 export const layer = Layer.effect(SshInstall, make);

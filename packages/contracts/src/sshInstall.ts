@@ -66,8 +66,6 @@ export const SshInstallHostKey = Schema.Struct({
   algorithm: Schema.String,
   /** `SHA256:<base64>`, as `ssh-keygen -lf` prints it. */
   fingerprint: Schema.String,
-  /** A machine registered from this address stored this same key. */
-  known: Schema.Boolean,
 });
 export type SshInstallHostKey = typeof SshInstallHostKey.Type;
 

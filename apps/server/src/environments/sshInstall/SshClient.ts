@@ -11,7 +11,7 @@ import type * as Scope from "effect/Scope";
 // ssh2 is CommonJS: Node sees only its default export.
 import ssh2, { type ConnectConfig } from "ssh2";
 
-import { hostKeyFingerprint } from "./sshInstallScripts.ts";
+import { hostKeyFingerprint, shellQuote } from "./sshInstallScripts.ts";
 
 const { Client, utils: SshUtils } = ssh2;
 type Client = InstanceType<typeof Client>;
@@ -163,7 +163,7 @@ export interface SshSession {
 }
 
 /** `sh -c '<script>'`: the user's login shell only parses the quoting. */
-const asShCommand = (script: string) => `sh -c '${script.replaceAll("'", "'\\''")}'`;
+const asShCommand = (script: string) => `sh -c ${shellQuote(script)}`;
 
 /**
  * Signs in to the machine whose host key has this fingerprint, and nothing else. Closed with the

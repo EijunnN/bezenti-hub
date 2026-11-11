@@ -19,6 +19,8 @@ import {
   registerScript,
   shellQuote,
   sshUsernameRefusal,
+  stepCommand,
+  stopStepScript,
 } from "./sshInstallScripts.ts";
 
 const SshUtils = ssh2.utils;
@@ -42,15 +44,24 @@ const runWithFakeT3 = (script: string) => {
   }
 };
 
-/** Runs the check step with a `podman` that answers as given (and warns on standard error). */
-const runCheckWithPodman = (rootless: string) => {
+/**
+ * Runs the check step with a `podman` that answers as given (and warns on standard error), no
+ * systemd user manager and no sudo unless `fakes` adds commands of its own.
+ */
+const runCheckWithPodman = (rootless: string, fakes: Record<string, string> = {}) => {
   const bin = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-ssh-check-"));
   try {
-    NodeFS.writeFileSync(
-      NodePath.join(bin, "podman"),
-      `#!/bin/sh\ncase "$1" in\n  --version) echo "podman version 3.4.4" ;;\n  info) echo 'level=warning msg="/ is not a shared mount"' >&2; echo ${rootless} ;;\nesac\n`,
-    );
-    NodeFS.chmodSync(NodePath.join(bin, "podman"), 0o755);
+    const commands: Record<string, string> = {
+      podman: `case "$1" in\n  --version) echo "podman version 3.4.4" ;;\n  info) echo 'level=warning msg="/ is not a shared mount"' >&2; echo ${rootless} ;;\nesac`,
+      systemctl: "exit 1",
+      loginctl: "exit 1",
+      sudo: "exit 1",
+      ...fakes,
+    };
+    for (const [name, body] of Object.entries(commands)) {
+      NodeFS.writeFileSync(NodePath.join(bin, name), `#!/bin/sh\n${body}\n`);
+      NodeFS.chmodSync(NodePath.join(bin, name), 0o755);
+    }
     const result = NodeChildProcess.spawnSync("sh", ["-c", checkScript()], {
       env: { HOME: bin, PATH: `${bin}:/usr/bin:/bin` },
       encoding: "utf8",
@@ -160,5 +171,132 @@ describe("SSH install scripts", () => {
     const blob = parsed.getPublicSSH();
     expect(hostKeyAlgorithm(blob)).toBe("ssh-ed25519");
     expect(hostKeyFingerprint(blob)).toMatch(/^SHA256:[A-Za-z0-9+/]{43}$/u);
+  });
+
+  it.skipIf(HostProcess.Platform.defaultValue() !== "linux" || process.getuid?.() === 0)(
+    "check: with a systemd user manager, lingering is on or turned on, or it stops at once",
+    () => {
+      const systemd = { systemctl: "exit 0" };
+      const lingering = runCheckWithPodman("true", {
+        ...systemd,
+        loginctl: 'case "$1" in show-user) echo Linger=yes ;; *) exit 1 ;; esac',
+      });
+      expect(lingering.code).toBe(0);
+      expect(lingering.output).toContain("Lingering is on");
+      const enabled = runCheckWithPodman("true", {
+        ...systemd,
+        loginctl:
+          'case "$1" in show-user) [ -f "$HOME/on" ] && echo Linger=yes || echo Linger=no ;; enable-linger) touch "$HOME/on" ;; esac',
+      });
+      expect(enabled.code).toBe(0);
+      expect(enabled.output).toContain("Lingering is on");
+      const refused = runCheckWithPodman("true", {
+        ...systemd,
+        loginctl: 'case "$1" in show-user) echo Linger=no ;; *) exit 1 ;; esac',
+      });
+      expect(refused.code).toBe(15);
+      expect(refused.output).toContain("loginctl enable-linger");
+      // It stops before Podman is installed or anything else is done.
+      expect(refused.output).not.toContain("Rootless Podman is ready.");
+      // No systemd user manager: the service runs in the background, lingering does not matter.
+      expect(runCheckWithPodman("true").code).toBe(0);
+    },
+  );
+
+  it.skipIf(HostProcess.Platform.defaultValue() !== "linux")(
+    "run each step in a process group of its own that a second step waits on and stop ends",
+    async () => {
+      const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-ssh-step-"));
+      const env = { HOME: home, PATH: "/usr/bin:/bin" };
+      const run = (script: string, input = "") =>
+        NodeChildProcess.spawnSync("sh", ["-c", stepCommand(script)], {
+          env,
+          input,
+          encoding: "utf8",
+        });
+      try {
+        // Its standard input reaches the step, and its exit code comes back.
+        const echoed = run("cat; exit 3", "the runner");
+        expect(echoed.stdout).toBe("the runner");
+        expect(echoed.status).toBe(3);
+        // A step still running (its SSH channel gone) holds the machine.
+        const long = NodeChildProcess.spawn(
+          "sh",
+          ["-c", stepCommand("sleep 60 & sleep 60; echo never")],
+          { env, stdio: "ignore" },
+        );
+        const exited = new Promise<void>((resolve) => long.on("exit", () => resolve()));
+        const pidfile = NodePath.join(home, ".t3", "ssh-install", "step.pid");
+        for (let i = 0; i < 100 && !NodeFS.existsSync(pidfile); i++) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+        }
+        const group = NodeFS.readFileSync(pidfile, "utf8").trim();
+        const second = run("echo second");
+        expect(second.status).toBe(75);
+        expect(second.stderr).toContain("Another installation is still running");
+        expect(second.stdout).not.toContain("second");
+        // Stopping ends the whole group, its children too.
+        const stopped = NodeChildProcess.spawnSync("sh", ["-c", stopStepScript()], {
+          env,
+          encoding: "utf8",
+        });
+        expect(stopped.status).toBe(0);
+        await exited;
+        const alive = NodeChildProcess.spawnSync("sh", ["-c", `kill -0 -${group}`]);
+        expect(alive.status).not.toBe(0);
+        expect(run("echo again").stdout).toBe("again\n");
+      } finally {
+        NodeFS.rmSync(home, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("judge every way of writing an address by its bytes", () => {
+    const hubHost = { ownAddresses: ["192.168.1.5", "2001:db8::5"] };
+    for (const address of [
+      "0:0:0:0:0:0:0:1",
+      "0000:0000:0000:0000:0000:0000:0000:0001",
+      "::0:1",
+      "::ffff:7f00:1",
+      "::ffff:127.0.0.1",
+      "0:0:0:0:0:ffff:127.0.0.1",
+      "::FFFF:7F00:0001",
+      "::127.0.0.1",
+      "::ffff:c0a8:105",
+      "::ffff:192.168.1.5",
+      "2001:0db8:0000:0000:0000:0000:0000:0005",
+      "2001:db8:0:0::5",
+    ]) {
+      expect(forbiddenSshAddress(address, hubHost), address).toBe("the Hub's own machine");
+    }
+    for (const address of ["0:0:0:0:0:0:0:0", "::ffff:0.0.0.0", "::ffff:0:0"]) {
+      expect(forbiddenSshAddress(address, hubHost), address).toBe("an unspecified address");
+    }
+    for (const address of ["::ffff:a9fe:a9fe", "FE80:0:0::1", "fe80::1%eth0"]) {
+      expect(forbiddenSshAddress(address, hubHost), address).toBe("a link-local address");
+    }
+    // The Hub's own addresses in any form too.
+    expect(forbiddenSshAddress("192.168.1.5", { ownAddresses: ["::ffff:c0a8:105"] })).toBe(
+      "the Hub's own machine",
+    );
+    expect(forbiddenSshAddress("2001:db8::6", hubHost)).toBeUndefined();
+    expect(forbiddenSshAddress("::ffff:c0a8:106", hubHost)).toBeUndefined();
+    expect(forbiddenSshAddress("not-an-ip", hubHost)).toBe("not an IP address");
+  });
+
+  it("scrub any long piece of the key or the grant, not only whole lines", () => {
+    const pair = SshUtils.generateKeyPairSync("ed25519");
+    const grant = "Gq3ZyX0vWk2LmN8pRt5UaB7cDe9FgHiJ4kLmNoPqRsT";
+    const scrub = makeScrubber({ privateKey: pair.private, grant });
+    const body = pair.private
+      .split("\n")
+      .filter((line) => line !== "" && !line.startsWith("-"))
+      .join("");
+    for (const piece of [body.slice(30, 50), body.slice(65, 85), grant.slice(5, 20)]) {
+      expect(scrub(`before ${piece} after`), piece).toBe("before [redacted] after");
+    }
+    // Glued to other text, a piece of it still goes, and the rest of the line stays.
+    expect(scrub(`x=${body.slice(100, 130)}!`)).toBe("x=[redacted]!");
+    expect(scrub("podman version 3.4.4")).toBe("podman version 3.4.4");
   });
 });
