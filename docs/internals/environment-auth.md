@@ -104,11 +104,13 @@ shadow it (cookie tossing). Every response that sets it over HTTPS also expires 
 one, so a session from before moves to the prefix on its next check (`/api/auth/session`, which
 re-sends the cookie anyway) rather than signing out; sign-out expires both names. Plain HTTP (the
 desktop app's loopback server, a LAN or dev Hub) cannot hold a `__Host-` cookie and keeps the bare
-name. `selectRequestCredential` reads the `__Host-` cookie first. With previews on their own origin
+name. The reusable dev token's cookie (`t3_dev_session_<id>`) follows the same rule, and setting
+it expires the session cookie under both names. Every Hub cookie, guest ones included, is read by
+`readHubCookie`: the `__Host-` name first; with previews on their own origin
 (`T3CODE_PREVIEW_ORIGIN`) an HTTPS request's bare-named (and legacy `t3_session`) cookie no longer
-counts at all, since a preview could have set it for the Hub's domain: a browser that never
-checked in since the upgrade signs in once more. A cookie, of either name, is also ignored on any
-request `crossesFromPreviewOrigin` (see
+counts at all, since a preview could have set it for the Hub's domain, so a browser that never
+checked in since the upgrade signs in once more; and no cookie counts on a request from a preview
+page (`crossesFromPreviewOrigin`), which also signs nobody in (see
 [Sandboxes: previews on their own origin](sandboxes.md#previews-on-their-own-origin)).
 
 ### App sign-in

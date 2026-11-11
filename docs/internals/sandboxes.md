@@ -651,13 +651,18 @@ startup line saying so. Parsing and matching live in
   Thread moving, losing the Thread or the Space, or the address expiring (an hour unused) ends the
   origin at once; a dev server that stops answers `502`.
 - **What crosses.** The dev server still sees `Host: localhost:<port>` and `Origin:
-  http://localhost:<port>`, never the Hub's credentials or client addresses. The page's own cookies
-  pass both ways, minus `__Host-t3_preview`, `t3_preview` and anything named like a Hub session.
-  The dev server's `Set-Cookie` loses any `Domain` (host-only, so no cookie reaches the Hub's
-  domain or a sibling preview), and one naming the preview's cookie is dropped. Its own
-  `Content-Security-Policy`, `Referrer-Policy`, `Clear-Site-Data` and service workers stand;
-  `Strict-Transport-Security`, `Public-Key-Pins` and `Alt-Svc` are dropped. A redirect to the dev
-  server itself lands on the preview's origin.
+  http://localhost:<port>`, never the Hub's credentials or client addresses. On its own origin the
+  page's own cookies (`t3_session…` ones included: the Hub's are host-only and never reach a
+  preview host, so these are a previewed app's, T3 Code's own among them) and its own
+  `Authorization` pass both ways, minus `__Host-t3_preview` alone. The dev server's `Set-Cookie`
+  loses any `Domain` (host-only, so no cookie reaches the Hub's domain or a sibling preview), and
+  one naming the preview's cookie is dropped. Its own `Content-Security-Policy`, `Referrer-Policy`
+  and service workers stand. `Clear-Site-Data` is dropped on every origin (browsers apply
+  `"cookies"` to the whole registrable domain: it would sign the User out of the Hub and of other
+  previews), as are `Strict-Transport-Security`, `Public-Key-Pins` and `Alt-Svc`. A redirect to the
+  dev server itself lands on the preview's origin.
+- **Handoffs pending** are capped per User (16; past that their own oldest go, never another
+  User's) and indexed by address, so ending one drops its codes at once.
 - **Nothing in the zone reaches the Hub.** `previewOriginLayer`, a global middleware inside client
   admission (so a trusted proxy's forwarded host counts) and outside every other middleware and
   route, takes every request whose host is under the zone: exactly `<id>.<zone>` on the pattern's
@@ -666,24 +671,32 @@ startup line saying so. Parsing and matching live in
   the server browser's `/api/preview-stream` are never served on a preview's host (Host header
   confusion), and a wildcard cannot match the Hub's own host.
 - **The Hub's cookie doors.** A subdomain of the Hub's own domain is same-site, so `SameSite`
-  does not keep the Hub's cookie from its requests. `crossesFromPreviewOrigin` is the one rule:
-  a request whose `Origin` or `Referer` is in the zone, or a same-site request that names no
-  origin and is not a top-level document navigation (an `<img>`, `<script>`, `<iframe>`), carries
-  no Hub session. EnvironmentAuth applies it before its origin check, so every door that
-  authenticates through it (the HTTP API, `/ws`, OTLP, the device hub, the preview stream) refuses
-  such a cookie; the guest routes and the preview route call it themselves. Nor does any door set or
-  clear a session cookie for such a request (`auth/http.ts`, the guest redeem): a page there could
-  otherwise sign the browser in as someone else (login CSRF) or out. `DoorRules`
+  does not keep the Hub's cookie from its requests. `crossesFromPreviewOrigin` is the one rule: a
+  request whose `Origin` or `Referer` is in the zone came from a preview page. Every Hub cookie
+  (session, legacy, dev token, guest) is read in one place, `readHubCookie`: none for such a
+  request, `__Host-<name>` first, and a bare name only where no preview could have planted it
+  (previews off, or plain HTTP). So EnvironmentAuth (the HTTP API, `/ws`, OTLP, the device hub, the
+  preview stream, passkey ceremonies), the guest routes and the preview route never see a cookie a
+  preview page sent, and nothing reads the browser's existing session to replace or revoke it for
+  one. A preview page signs nobody in: every sign-in (`startUserBrowserSession`: password, TOTP,
+  recovery code, passkey, reset, Owner registration, Invitations) and pairing redemption refuse it
+  before issuing anything, and no door sets or clears a Hub or guest cookie for it (login CSRF,
+  forced sign-out). Not caught: a same-site embed naming neither header (an `<img>` with
+  `referrerpolicy="no-referrer"`): such a GET changes nothing on the Hub and its answer is unreadable
+  there, while the dev web app's legitimate same-site images keep working. With the setting on, the
+  Hub's HTML is served with `frame-ancestors 'self'`, so a preview cannot frame it. `DoorRules`
   (`AMBIENT_COOKIE_RULES`) names, for every raw route, middleware and the HTTP API, whether it takes
-  a cookie and how a preview origin is refused, and its test fails on an undeclared door or a
-  module that reads a cookie without the rule. The Environment socket, git routes and MCP take no
-  cookie. With the setting on, the Hub's HTML is served with `frame-ancestors 'self'`, so a
-  preview cannot frame the Hub with its session.
+  a cookie and how a preview origin is refused; its test fails on an undeclared door, on any cookie
+  read outside `readHubCookie` (bar the preview route's own preview cookies), and on a module that
+  sets a Hub cookie without asking `fromPreviewOrigin`. The Environment socket, git routes and MCP
+  take no cookie.
 - **Cookie tossing.** A preview page can set a cookie with `Domain=<the Hub's domain>` for the
-  Hub. Over HTTPS the Hub's session cookie is `__Host-<name>`, which browsers accept only from the
-  Hub's own host, `Secure`, on `/`, without `Domain`; see
-  [environment-auth](environment-auth.md#the-session-cookie). With the setting on, an HTTPS
-  request's bare-named session cookie no longer counts, so a tossed one signs nobody in.
+  Hub. Over HTTPS the Hub's session and dev-token cookies are `__Host-<name>`, and guest cookies
+  always are (on `/`, so they can be): browsers accept those only from the Hub's own host,
+  `Secure`, on `/`, without `Domain`; see
+  [environment-auth](environment-auth.md#the-session-cookie). Each sets alongside an expiry of its
+  bare name, so sessions and guests from before move over. With the setting on, an HTTPS request's
+  bare-named cookie counts for nothing, so a tossed one signs nobody in.
 - **Plain HTTP under `localhost`** (`http://*.localhost:<port>`) is for development: browsers
   treat it as secure, so `__Host-` cookies work, but the Hub's own cookie over plain HTTP keeps its
   bare name.
