@@ -225,6 +225,14 @@ const PublicUrlConfig = Config.URL("T3CODE_PUBLIC_URL").pipe(
   Config.map(Option.getOrUndefined),
 );
 
+// The master key that encrypts the Hub's secrets, when not `<stateDir>/master.key` (spec 5).
+const MasterKeyFileConfig = Config.String("T3CODE_MASTER_KEY_FILE").pipe(
+  Config.option,
+  Config.map((value) =>
+    Option.getOrUndefined(Option.filter(value, (file) => file.trim().length > 0)),
+  ),
+);
+
 // Previews on their own origin (spec 3 ticket 15); see docs/internals/sandboxes.md.
 const previewOriginConfig = (hub: { readonly publicUrl?: URL; readonly host?: string }) =>
   Config.String("T3CODE_PREVIEW_ORIGIN").pipe(
@@ -378,6 +386,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     mode === "web" && devUrl !== undefined ? yield* DevAuthTokenConfig : undefined;
   const trustedProxies = yield* TrustedProxiesConfig;
   const publicUrl = yield* PublicUrlConfig;
+  const masterKeyFile = yield* MasterKeyFileConfig;
   const explicitBaseDir = resolveOptionPrecedence(
     normalizedFlags.baseDir,
     Option.fromUndefinedOr(env.t3Home),
@@ -600,6 +609,9 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     tailscaleServeEnabled: tailscaleServeEnabled && joinedHub === undefined,
     tailscaleServePort,
     ...(joinedHub === undefined ? {} : { joinedHub }),
+    ...(masterKeyFile === undefined
+      ? {}
+      : { masterKeyFile: path.resolve(yield* expandHomePath(masterKeyFile.trim())) }),
   };
 
   return config;

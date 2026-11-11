@@ -79,6 +79,7 @@ import {
   SpaceSummary,
 } from "./spaces.ts";
 import { AuditLogPage, AuditLogQuery } from "./audit.ts";
+import { MasterKeyBackupRequest, MasterKeyBackupResult, MasterKeyStatus } from "./vaults.ts";
 import {
   ChangeHubEnvironmentModeRequest,
   EnvironmentJoinApproveRequest,
@@ -231,6 +232,7 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "audit_log_failed",
   "environments_failed",
   "sandbox_image_failed",
+  "master_key_failed",
   "internal_error",
 ]);
 export type EnvironmentInternalErrorReason = typeof EnvironmentInternalErrorReason.Type;
@@ -1504,6 +1506,31 @@ class EnvironmentSandboxImageHttpApi extends HttpApiGroup.make("sandboxImage")
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
+// The master key that encrypts the Hub's secrets: the Owner only, the backup with a strong factor
+// in the request. HTTP rather than WS, so the key never passes through subscriptions or caches.
+const EnvironmentVaultsErrors = [
+  EnvironmentHttpForbiddenError,
+  EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+
+class EnvironmentVaultsHttpApi extends HttpApiGroup.make("vaults")
+  .add(
+    HttpApiEndpoint.get("masterKeyStatus", "/api/vaults/master-key", {
+      headers: OptionalBearerHeaders,
+      success: MasterKeyStatus,
+      error: EnvironmentVaultsErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("masterKeyBackup", "/api/vaults/master-key/backup", {
+      headers: OptionalBearerHeaders,
+      payload: MasterKeyBackupRequest,
+      success: MasterKeyBackupResult,
+      error: [...EnvironmentVaultsErrors, EnvironmentRateLimitedError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  ) {}
+
 export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentMetadataHttpApi)
   .add(EnvironmentAuthHttpApi)
@@ -1518,4 +1545,5 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentAuditHttpApi)
   .add(EnvironmentHubEnvironmentsHttpApi)
   .add(EnvironmentSandboxImageHttpApi)
+  .add(EnvironmentVaultsHttpApi)
   .add(EnvironmentWebhooksHttpApi) {}

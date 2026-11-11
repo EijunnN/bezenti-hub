@@ -39,6 +39,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as HubPreviewRoute from "../preview/hubPreviewRoute.ts";
 import type { PreviewOriginPattern } from "../preview/PreviewOrigin.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import * as VaultsHttp from "../vaults/http.ts";
 import * as SandboxImageHttp from "../sandboxes/http.ts";
 import * as SandboxImage from "../sandboxes/SandboxImage.ts";
 import type * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
@@ -89,6 +90,7 @@ class AuthTestApi extends HttpApi.make("environment")
   .add(EnvironmentHttpApi.groups.audit)
   .add(EnvironmentHttpApi.groups.environments)
   .add(EnvironmentHttpApi.groups.sandboxImage)
+  .add(EnvironmentHttpApi.groups.vaults)
   .add(EnvironmentHttpApi.groups.projects)
   .add(EnvironmentHttpApi.groups.orchestration)
   .add(EnvironmentHttpApi.groups.pullRequests)
@@ -316,6 +318,7 @@ export const serveAuthHttpWith = Effect.fn(function* (
     Layer.provide(AuditHttp.layer),
     Layer.provide(HubEnvironmentsHttp.layer),
     Layer.provide(SandboxImageHttp.layer),
+    Layer.provide(VaultsHttp.layer),
     Layer.provide(ProjectHttp.layer),
     Layer.provide(OrchestrationHttp.layer),
     Layer.provide(PullRequestHttp.layer),

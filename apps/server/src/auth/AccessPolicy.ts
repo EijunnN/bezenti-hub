@@ -170,7 +170,12 @@ export type Action =
   /** See a Sandbox's resource use and limits: the Owner, an Admin of its Space. */
   | "sandbox.inspect"
   /** Start, stop or restart a Sandbox by hand and change its limits: the Owner. */
-  | "sandbox.manage";
+  | "sandbox.manage"
+  /**
+   * See the master key's status and download its backup: the Owner alone, decided on the
+   * Installation. Whoever holds it reads every secret from a copy of the Hub's disk.
+   */
+  | "masterKey.backup";
 
 /** Actions that read or manage rather than add something to the Space. */
 const NON_CREATING: ReadonlySet<Action> = new Set([
@@ -517,7 +522,7 @@ export function decide(principal: Principal, action: Action, resource: Resource)
       ? allow
       : deny("missing-installation-permission");
   }
-  if (action === "environment.dedicate") {
+  if (action === "environment.dedicate" || action === "masterKey.backup") {
     if (resource.kind !== "installation") return deny("wrong-resource");
     return principal.isOwner ? allow : deny("owner-only");
   }

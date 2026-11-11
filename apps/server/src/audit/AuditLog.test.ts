@@ -595,6 +595,9 @@ it.effect(
         "sandbox.limits.change",
         // environments/HubWithEnvironments.sandboxImage.test.ts
         "sandbox.image.update",
+        // vaults/MasterKeyHttp.test.ts and cli/secrets.test.ts
+        "secret.master_key.export",
+        "secret.master_key.rotate",
       ];
       const hooks = ["secret.reveal", "secret.edit"];
       assert.sameMembers(

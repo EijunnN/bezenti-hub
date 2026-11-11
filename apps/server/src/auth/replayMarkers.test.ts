@@ -58,6 +58,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("replayMarkers", 
           ...REAL_SECRET_NAMES.map((name) => `${name}.bin`),
           "dpop-proof-at-max-age.bin",
           pendingSetFile,
+          // The master key's check, sealed by the key the store opened with.
+          "master-key.check",
         ].toSorted(),
       );
     }).pipe(

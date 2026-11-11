@@ -352,7 +352,8 @@ const accountChangeFailures = {
     failEnvironmentInternal("internal_error", error),
 };
 
-const failAccountChange = <A, R>(
+/** A step-up (password and code, or a passkey) refused, throttled or unreadable, over HTTP. */
+export const failAccountChange = <A, R>(
   effect: Effect.Effect<
     A,
     | UserDirectory.AccountChangeRefusedError

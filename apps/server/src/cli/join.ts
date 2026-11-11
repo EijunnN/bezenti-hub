@@ -166,7 +166,9 @@ const runWithSecrets = Effect.fn("cli.join.runWithSecrets")(function* <A, E, R>(
     quietLogs: true,
   });
   return yield* run(config).pipe(
-    Effect.provide(ServerSecretStore.layer.pipe(Layer.provideMerge(ServerConfig.layer(config)))),
+    Effect.provide(
+      ServerSecretStore.layerJoinedMachine.pipe(Layer.provideMerge(ServerConfig.layer(config))),
+    ),
   );
 });
 

@@ -133,6 +133,8 @@ export const AUDIT_ACTION_LABELS: Record<AuditAction, string> = {
   "cliSession.issue": "Issued a CLI token",
   "secret.reveal": "Revealed a secret",
   "secret.edit": "Edited a secret",
+  "secret.master_key.export": "Backed up the master key",
+  "secret.master_key.rotate": "Rotated the master key",
   "environment.register": "Registered an Environment",
   "environment.rename": "Renamed an Environment",
   "environment.remove": "Removed an Environment",

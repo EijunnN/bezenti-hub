@@ -23,6 +23,10 @@ const OWNER = own("the Installation's Owner only, plus the access scopes");
 const SSH_INSTALL = own(
   "SshInstall: EnvironmentRegistry.authorizeDedicate (the Owner only) on every call, the progress included; no WS or MCP door",
 );
+/** Whoever holds the master key reads every secret from a copy of the disk. */
+const MASTER_KEY = own(
+  "AccessPolicy `masterKey.backup` on the Installation (the Owner only), plus the access scopes; the backup also needs a strong factor in the request (UserDirectory.confirmStrongFactor) and is audited before the key leaves; no WS or MCP door",
+);
 const WEBHOOK = own("the task's secret token in the path; runs as the task's creator");
 const THREAD_READ = own(
   "SpaceVisibility.visibleThreadIds like getThreadProjection: hidden answers thread_not_found",
@@ -128,6 +132,8 @@ export const HTTP_ENDPOINT_RULES: Readonly<Record<string, DoorRule>> = {
   "spaces.members": SPACES,
   "spaces.removeMember": SPACES,
   "spaces.restoreOrganization": SPACES,
+  "vaults.masterKeyBackup": MASTER_KEY,
+  "vaults.masterKeyStatus": MASTER_KEY,
   "webhooks.webhookGet": WEBHOOK,
   "webhooks.webhookPatch": WEBHOOK,
   "webhooks.webhookPost": WEBHOOK,

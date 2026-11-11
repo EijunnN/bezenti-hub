@@ -1,3 +1,8 @@
+/**
+ * The Hub's secrets, one file per name in `<stateDir>/secrets`, each sealed with the master key
+ * without its callers knowing. A joined machine keeps the credential its Hub writes as written (a
+ * Sandbox mounts it read-only): see docs/internals/secrets.md.
+ */
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
@@ -7,9 +12,12 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
 import * as PlatformError from "effect/PlatformError";
+import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
+import * as MasterKeyFile from "./MasterKeyFile.ts";
+import * as SecretCipher from "./SecretCipher.ts";
 
 const secretStoreErrorContext = {
   resource: Schema.String,
@@ -150,8 +158,37 @@ export class ServerSecretStore extends Context.Service<
   }
 >()("t3/auth/ServerSecretStore") {}
 
-/** @public */
-export const make = Effect.gen(function* () {
+export interface MasterKeyStatus {
+  readonly keyFile: string;
+  readonly keyId: string;
+  /** When this key was last exported (Settings or `t3 secrets key export`); null until then. */
+  readonly backedUpAt: string | null;
+}
+
+/** The master key's backup: whether this key has one, and handing it out. */
+export class MasterKeyBackup extends Context.Service<
+  MasterKeyBackup,
+  {
+    readonly status: Effect.Effect<MasterKeyStatus, MasterKeyFile.MasterKeyError>;
+    /** The key's text: only for the Owner, never for a log, a span or an error. */
+    readonly readKey: Effect.Effect<Redacted.Redacted<string>, MasterKeyFile.MasterKeyError>;
+    /** Records that this key was handed out at `at`; the caller audits it. */
+    readonly recordBackup: (
+      at: string,
+    ) => Effect.Effect<MasterKeyStatus, MasterKeyFile.MasterKeyError>;
+  }
+>()("t3/auth/ServerSecretStore/MasterKeyBackup") {}
+
+const BACKUP_RECORD = "master-key-backup";
+const BackupRecord = Schema.fromJsonString(
+  Schema.Struct({ keyId: Schema.String, backedUpAt: Schema.String }),
+);
+const decodeBackupRecord = Schema.decodeOption(BackupRecord);
+const encodeBackupRecord = Schema.encodeEffect(BackupRecord);
+
+const makeWith = Effect.fn("ServerSecretStore.make")(function* (options: {
+  readonly encrypt: "hub" | "never";
+}) {
   const crypto = yield* SecureRandom.SecureRandom;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -168,7 +205,36 @@ export const make = Effect.gen(function* () {
     ),
   );
 
+  const joinedMachine =
+    options.encrypt === "never" ||
+    serverConfig.joinedHub !== undefined ||
+    (yield* fileSystem.exists(serverConfig.joinedHubPath).pipe(Effect.orElseSucceed(() => false)));
+  const keyring = joinedMachine ? undefined : yield* MasterKeyFile.openKeyring();
+
   const resolveSecretPath = (name: string) => path.join(serverConfig.secretsDir, `${name}.bin`);
+
+  const sealFor = (name: string, value: Uint8Array) =>
+    keyring === undefined
+      ? value
+      : SecretCipher.seal(keyring.current, "server-secret", name, value);
+
+  const openFor = (name: string, stored: Uint8Array) => {
+    if (keyring === undefined) return Effect.succeed(stored);
+    const opened = SecretCipher.open(keyring.keys, "server-secret", name, stored);
+    return opened._tag === "opened"
+      ? Effect.succeed(opened.plaintext)
+      : Effect.fail(
+          new SecretStoreDecodeError({
+            resource: `secret ${name}`,
+            cause:
+              opened._tag === "unknown-key"
+                ? `sealed by another master key (id ${opened.keyId})`
+                : opened._tag === "not-sealed"
+                  ? "stored in clear"
+                  : "altered, or moved from another name",
+          }),
+        );
+  };
 
   const get: ServerSecretStore["Service"]["get"] = (name) =>
     fileSystem.readFile(resolveSecretPath(name)).pipe(
@@ -182,6 +248,9 @@ export const make = Effect.gen(function* () {
                 cause,
               }),
             ),
+      ),
+      Effect.flatMap((found): Effect.Effect<Option.Option<Uint8Array>, SecretStoreError> =>
+        Option.isNone(found) ? Effect.succeedNone : openFor(name, found.value).pipe(Effect.asSome),
       ),
       Effect.withSpan("ServerSecretStore.get"),
     );
@@ -199,7 +268,7 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((uuid) => {
         const tempPath = `${secretPath}.${uuid}.tmp`;
         return Effect.gen(function* () {
-          yield* fileSystem.writeFile(tempPath, value);
+          yield* fileSystem.writeFile(tempPath, sealFor(name, value), { mode: 0o600 });
           yield* fileSystem.chmod(tempPath, 0o600);
           yield* fileSystem.rename(tempPath, secretPath);
           yield* fileSystem.chmod(secretPath, 0o600);
@@ -241,7 +310,7 @@ export const make = Effect.gen(function* () {
           yield* Effect.scoped(
             Effect.gen(function* () {
               const file = yield* fileSystem.open(tempPath, { flag: "wx", mode: 0o600 });
-              yield* file.writeAll(value);
+              yield* file.writeAll(sealFor(name, value));
               yield* file.sync;
             }),
           );
@@ -318,14 +387,81 @@ export const make = Effect.gen(function* () {
       Effect.withSpan("ServerSecretStore.remove"),
     );
 
-  return ServerSecretStore.of({
-    directory: serverConfig.secretsDir,
-    get,
-    set,
-    create,
-    getOrCreateRandom,
-    remove,
+  const notEncrypted = Effect.fail(
+    new MasterKeyFile.MasterKeyError({
+      reason: "not-encrypted",
+      detail: "This machine is joined to a Hub: its secrets are not encrypted with a master key.",
+    }),
+  );
+
+  const statusOf = (current: MasterKeyFile.Keyring) =>
+    get(BACKUP_RECORD).pipe(
+      Effect.map((stored) =>
+        Option.flatMap(stored, (bytes) => decodeBackupRecord(new TextDecoder().decode(bytes))),
+      ),
+      Effect.mapError(
+        (cause) =>
+          new MasterKeyFile.MasterKeyError({
+            reason: "io",
+            detail: "Could not read the master key's backup record.",
+            cause,
+          }),
+      ),
+      Effect.map((record): MasterKeyStatus => ({
+        keyFile: current.keyFile,
+        keyId: current.current.id,
+        backedUpAt: Option.match(record, {
+          // A backup of a key since rotated away is no backup of this one.
+          onSome: (value) => (value.keyId === current.current.id ? value.backedUpAt : null),
+          onNone: () => null,
+        }),
+      })),
+    );
+
+  const backup = MasterKeyBackup.of({
+    status: keyring === undefined ? notEncrypted : statusOf(keyring),
+    readKey:
+      keyring === undefined
+        ? notEncrypted
+        : Effect.sync(() => Redacted.make(keyring.current.exportText())),
+    recordBackup: Effect.fn("MasterKeyBackup.recordBackup")(function* (at: string) {
+      if (keyring === undefined) return yield* notEncrypted;
+      const record = yield* encodeBackupRecord({
+        keyId: keyring.current.id,
+        backedUpAt: at,
+      }).pipe(Effect.orDie);
+      yield* set(BACKUP_RECORD, new TextEncoder().encode(record)).pipe(
+        Effect.mapError(
+          (cause) =>
+            new MasterKeyFile.MasterKeyError({
+              reason: "io",
+              detail: "Could not record the master key's backup.",
+              cause,
+            }),
+        ),
+      );
+      return yield* statusOf(keyring);
+    }),
   });
+
+  return Context.make(
+    ServerSecretStore,
+    ServerSecretStore.of({
+      directory: serverConfig.secretsDir,
+      get,
+      set,
+      create,
+      getOrCreateRandom,
+      remove,
+    }),
+  ).pipe(Context.add(MasterKeyBackup, backup));
 });
 
-export const layer = Layer.effect(ServerSecretStore, make);
+/** @public */
+export const make = Effect.map(makeWith({ encrypt: "hub" }), Context.get(ServerSecretStore));
+
+/** The Hub's store: encrypted unless this state directory is a joined machine's. */
+export const layer = Layer.effectContext(makeWith({ encrypt: "hub" }));
+
+/** `t3 join`: the machine about to join keeps its credential as joined machines do, in clear. */
+export const layerJoinedMachine = Layer.effectContext(makeWith({ encrypt: "never" }));

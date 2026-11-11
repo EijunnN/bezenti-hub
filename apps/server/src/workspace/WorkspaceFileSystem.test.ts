@@ -282,10 +282,14 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         const cwd = yield* makeTempDir;
         yield* writeTextFile(config.secretsDir, "example.bin", "example\n");
         yield* writeTextFile(config.stateDir, "statev2.sqlite", "example\n");
+        yield* writeTextFile(config.stateDir, "master.key", "example\n");
+        yield* writeTextFile(config.stateDir, "master.key.previous", "example\n");
 
         for (const input of [
           { cwd, relativePath: path.join(config.secretsDir, "example.bin") },
           { cwd: config.stateDir, relativePath: "statev2.sqlite" },
+          { cwd: config.stateDir, relativePath: "master.key" },
+          { cwd: config.stateDir, relativePath: "master.key.previous" },
         ]) {
           const error = yield* workspaceFileSystem.readFile(input).pipe(Effect.flip);
           expect(error).toBeInstanceOf(WorkspacePaths.WorkspacePathOutsideRootError);

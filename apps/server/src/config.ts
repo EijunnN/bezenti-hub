@@ -125,6 +125,11 @@ export class ServerConfig extends Context.Service<
      * user WebSocket, only `/health` on loopback, and keeps one socket open to the Hub.
      */
     readonly joinedHub?: JoinedHubState | undefined;
+    /**
+     * Where the master key that encrypts the Hub's secrets lives (`T3CODE_MASTER_KEY_FILE`), when
+     * not `<stateDir>/master.key`: off the disk that is backed up, for instance.
+     */
+    readonly masterKeyFile?: string | undefined;
   }
 >()("t3/config/ServerConfig") {
   static readonly layerTest = (

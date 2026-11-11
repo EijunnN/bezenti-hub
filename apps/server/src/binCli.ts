@@ -20,6 +20,7 @@ import { extendConnectionAttemptTimeout, keepOutboundFetchOnHttp1 } from "./outb
 import { sharedServerCommandFlags } from "./cli/config.ts";
 import { projectCommand } from "./cli/project.ts";
 import { sandboxCommand } from "./cli/sandbox.ts";
+import { secretsCommand } from "./cli/secrets.ts";
 import { threadCommand } from "./cli/thread.ts";
 import { runDefaultServerCommand, serveCommand, startCommand } from "./cli/server.ts";
 import { uninstallCommand } from "./cli/uninstall.ts";
@@ -62,6 +63,7 @@ export const makeCli = () =>
       joinCommand,
       leaveCommand,
       sandboxCommand,
+      secretsCommand,
       serviceCommand,
       uninstallCommand,
       serviceLauncherCommand,

@@ -1298,6 +1298,43 @@ const rows: ReadonlyArray<
     acmeSandbox(ORG),
     deny("user-inactive"),
   ],
+  // The master key that encrypts every secret: only the Owner backs it up (spec 5 «Vaults»).
+  ["Owner backs up the master key", owner, "masterKey.backup", AccessPolicy.installation, allow],
+  [
+    "an Admin does not back up the master key",
+    admin,
+    "masterKey.backup",
+    AccessPolicy.installation,
+    deny("owner-only"),
+  ],
+  [
+    "a Member does not back up the master key",
+    member,
+    "masterKey.backup",
+    AccessPolicy.installation,
+    deny("owner-only"),
+  ],
+  [
+    "a Guest does not back up the master key",
+    guest,
+    "masterKey.backup",
+    AccessPolicy.installation,
+    deny("owner-only"),
+  ],
+  [
+    "a User with every Installation permission does not back up the master key",
+    principal("grace", { permissions: ["environments.registerOwn", "personalSpace.create"] }),
+    "masterKey.backup",
+    AccessPolicy.installation,
+    deny("owner-only"),
+  ],
+  [
+    "the master key is backed up on the Installation, not a Space",
+    owner,
+    "masterKey.backup",
+    organization,
+    deny("wrong-resource"),
+  ],
   // Dedicated machines: the Owner gives one to an Organization, whose Users who work there use it
   // for its Threads, as its Sandbox; other Spaces neither see nor use it.
   ["Owner dedicates machines", owner, "environment.dedicate", AccessPolicy.installation, allow],

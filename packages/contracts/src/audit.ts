@@ -34,6 +34,8 @@ export const AuditAction = Schema.Literals([
   "cliSession.issue",
   "secret.reveal",
   "secret.edit",
+  "secret.master_key.export",
+  "secret.master_key.rotate",
   "environment.register",
   "environment.rename",
   "environment.remove",
@@ -99,6 +101,10 @@ export const AUDIT_DETAIL_KEYS = {
   "cliSession.issue": ["sessionId", "label", "scopes"],
   "secret.reveal": ["vault"],
   "secret.edit": ["vault"],
+  /** `settings` or `cli`, and the key's id (a fingerprint, never the key). */
+  "secret.master_key.export": ["via", "keyId"],
+  /** The key ids before and after (fingerprints, never keys). */
+  "secret.master_key.rotate": ["via", "from", "keyId"],
   /**
    * `mode` personal or dedicated (with its `spaceId`), `via` join or ssh (with the `host` the Hub
    * installed it on, never its key).
