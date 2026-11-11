@@ -121,14 +121,14 @@ El Hub cifra todo su almacén de secretos con una **clave maestra** que vive en 
 
 ### Quién hace qué (tabla en `AccessPolicy`)
 
-| Acción | Owner | Admin (de la Organization) | Member | Guest |
-| --- | --- | --- | --- | --- |
-| Crear, borrar, archivar Vaults; permitirlos | sí | no | no | no |
-| Editar el Main vault | sí | no | no | no |
-| Añadir, sustituir, borrar secretos de un Vault permitido a su Organization | sí | sí, sin leer valores | no | no |
-| Elegir Vaults por defecto de su Space y por Project | sí | sí | no | no |
-| Ver nombres y descripciones de lo que recibe un Thread visible | sí | sí | sí | sí |
-| Revelar un valor | sí, con factor fuerte reciente (5 min) | no | no | no |
+| Acción                                                                     | Owner                                  | Admin (de la Organization) | Member | Guest |
+| -------------------------------------------------------------------------- | -------------------------------------- | -------------------------- | ------ | ----- |
+| Crear, borrar, archivar Vaults; permitirlos                                | sí                                     | no                         | no     | no    |
+| Editar el Main vault                                                       | sí                                     | no                         | no     | no    |
+| Añadir, sustituir, borrar secretos de un Vault permitido a su Organization | sí                                     | sí, sin leer valores       | no     | no    |
+| Elegir Vaults por defecto de su Space y por Project                        | sí                                     | sí                         | no     | no    |
+| Ver nombres y descripciones de lo que recibe un Thread visible             | sí                                     | sí                         | sí     | sí    |
+| Revelar un valor                                                           | sí, con factor fuerte reciente (5 min) | no                         | no     | no    |
 
 - Un Personal space: su dueño ve nombres; el Owner decide qué Vaults recibe (el dueño no edita salvo que sea el Owner).
 - Revelar no existe en móvil.
@@ -258,7 +258,9 @@ Cada puerta nueva se declara donde le toca y el test de inventario de `DoorRules
   8. Clientes: desktop y móvil.
   9. Inventario de puertas y pase completo.
 
-## Preguntas abiertas
+## Preguntas abiertas (decididas)
+
+El Owner aceptó todas las recomendaciones el 2026-11-11; cada «Recomendación» de abajo es la decisión.
 
 1. **¿Un Vault permitido a un User entra en sus turnos dentro del Sandbox compartido de una Organization?** La decisión 3 permite Vaults a Users, pero en un Sandbox compartido otros agentes del Space pueden leer el entorno. Recomendación: sí, solo en los turnos, terminales y scripts de ese User, con el aviso del riesgo al permitirlo.
 2. **¿Los Guests reciben los Vaults del Space en sus Threads?** La decisión 6 les deja ver solo nombres; la 7 aplica los defectos a los Threads del Space. Recomendación: sí reciben los defectos (un Guest puede ejecutar Threads), y el Owner o un Admin los quitan por Project si no deben.

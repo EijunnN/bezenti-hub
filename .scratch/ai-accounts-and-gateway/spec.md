@@ -174,19 +174,19 @@ Por eso no basta con ponerlo delante: las decisiones 2 y 8 de «Cuentas de IA» 
 - **Relay local:** el agente joined abre un relay HTTP en `127.0.0.1` (puerto aleatorio por máquina) que reenvía `/api/ai/*` al Hub: en un Sandbox o máquina dedicada, por el socket UNIX del Hub (la única ruta al Hub, spec 3); en una máquina personal, por la URL del Hub. El relay no autentica ni guarda nada: la gateway key sigue siendo necesaria. En el Hub machine en proceso (desarrollo), el relay es la propia ruta local.
 - **Variables por provider** (el driver las pone en el entorno del proceso; reservadas en la lista compartida del spec 5):
 
-| Provider (driver) | Camino | Cómo |
-| --- | --- | --- |
-| Claude Code (`claudeAgent`) | Gateway | `ANTHROPIC_BASE_URL` = relay `/api/ai/anthropic`, `ANTHROPIC_AUTH_TOKEN` = gateway key, `ANTHROPIC_MODEL` según el selector |
-| Codex (`codex`) | Gateway | provider de modelo propio por `-c model_providers.t3=…` (`base_url` = relay `/api/ai/openai/v1`, `env_key` = `T3_AI_GATEWAY_KEY`, `wire_api = "responses"`) |
-| OpenCode (`opencode`) | Gateway | configuración de provider inyectada por el driver con `baseURL` del relay y la key |
-| Pi (`pi`) | Gateway | provider propio en su configuración de modelos con `baseUrl` del relay |
-| Grok (`grok`) | Gateway si su CLI acepta `GROK_CLI_CHAT_PROXY_BASE_URL` para el chat (comprobar en el ticket 07); si no, directa con `XAI_API_KEY` | |
-| Antigravity (`agy`, `antigravity`) | Directa | solo métodos «Gemini API key» (`GEMINI_API_KEY`) y «Vertex» (cuenta de servicio); «Google account» y «Gemini Enterprise» deshabilitados en turnos del Hub |
-| Cursor (`cursor`) | Directa | `CURSOR_API_KEY` |
-| Kiro (`kiro`) | Directa | `KIRO_API_KEY` |
-| Fx (`fx`) | Directa | `AI_GATEWAY_API_KEY` (Vercel AI Gateway) |
-| Muse (`muse`) | Directa | `META_API_KEY` |
-| ACP Registry (`acpRegistry`) | Directa solo para agentes con una credencial de API conocida (Devin: `DEVIN_TOKEN`); el resto no se ofrece en turnos del Hub | |
+| Provider (driver)                  | Camino                                                                                                                             | Cómo                                                                                                                                                        |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude Code (`claudeAgent`)        | Gateway                                                                                                                            | `ANTHROPIC_BASE_URL` = relay `/api/ai/anthropic`, `ANTHROPIC_AUTH_TOKEN` = gateway key, `ANTHROPIC_MODEL` según el selector                                 |
+| Codex (`codex`)                    | Gateway                                                                                                                            | provider de modelo propio por `-c model_providers.t3=…` (`base_url` = relay `/api/ai/openai/v1`, `env_key` = `T3_AI_GATEWAY_KEY`, `wire_api = "responses"`) |
+| OpenCode (`opencode`)              | Gateway                                                                                                                            | configuración de provider inyectada por el driver con `baseURL` del relay y la key                                                                          |
+| Pi (`pi`)                          | Gateway                                                                                                                            | provider propio en su configuración de modelos con `baseUrl` del relay                                                                                      |
+| Grok (`grok`)                      | Gateway si su CLI acepta `GROK_CLI_CHAT_PROXY_BASE_URL` para el chat (comprobar en el ticket 07); si no, directa con `XAI_API_KEY` |                                                                                                                                                             |
+| Antigravity (`agy`, `antigravity`) | Directa                                                                                                                            | solo métodos «Gemini API key» (`GEMINI_API_KEY`) y «Vertex» (cuenta de servicio); «Google account» y «Gemini Enterprise» deshabilitados en turnos del Hub   |
+| Cursor (`cursor`)                  | Directa                                                                                                                            | `CURSOR_API_KEY`                                                                                                                                            |
+| Kiro (`kiro`)                      | Directa                                                                                                                            | `KIRO_API_KEY`                                                                                                                                              |
+| Fx (`fx`)                          | Directa                                                                                                                            | `AI_GATEWAY_API_KEY` (Vercel AI Gateway)                                                                                                                    |
+| Muse (`muse`)                      | Directa                                                                                                                            | `META_API_KEY`                                                                                                                                              |
+| ACP Registry (`acpRegistry`)       | Directa solo para agentes con una credencial de API conocida (Devin: `DEVIN_TOKEN`); el resto no se ofrece en turnos del Hub       |                                                                                                                                                             |
 
 - **Sin logins ambientales:** en turnos del Hub, cada driver arranca su CLI con un home de configuración propio del Thread (patrón de `CodexHomeLayout`/`ClaudeHome`), sin las credenciales del usuario del sistema ni las del volumen del Sandbox. Las logins de provider del spec 3 en los volúmenes de Sandbox dejan de usarse; el login de ChatGPT gestionado de Codex (`CodexChatGptAuth`, `CodexManagedTokenBroker`) y el login de Google de Antigravity (`AntigravityAuth`) no se ofrecen en Environments del Hub (la suscripción entra como AI account).
 - **Credenciales directas:** se entregan por `secretEnv` (spec 5, ticket 04), solo al proceso del provider de un Thread cuya AI account elegida es esa, y el `SecretMasker` las enmascara como `[NOMBRE_DE_VARIABLE]`. Se cuentan en el panel «Secrets» del Thread como «AI account credential».
@@ -221,17 +221,17 @@ Por eso no basta con ponerlo delante: las decisiones 2 y 8 de «Cuentas de IA» 
 
 ### Puertas
 
-| Puerta | Qué se declara |
-| --- | --- |
-| WS (`RPC_SPACE_ACCESS`) | `aiAccounts.list` (filtrada por lo permitido), `aiAccounts.create/update/delete/allow/reorder`, `aiAccounts.login.start/complete` (Installation, solo Owner), `aiGateway.status/checkForUpdates/update/rollback` (solo Owner), `aiGatewayKeys.list/create/revoke` (propias; Owner todas), `aiUsage.summary`, `thread.setAiAccount` (regla de `thread.continue`) |
-| HttpApi (`HTTP_ENDPOINT_RULES`) | ninguna nueva, salvo gemelas de las RPC si existen |
-| Raw routes (`RAW_ROUTE_RULES`) | `/api/ai/*`: solo gateway key válida, no revocada, con `AllowedAiAccounts` en cada petición |
-| Cookies (`AMBIENT_COOKIE_RULES`) | `/api/ai/*`: refused |
-| MCP (`MCP_TOOL_RULES`) | ninguna herramienta nueva; ninguna existente devuelve credenciales ni gateway keys |
-| Executor wire | `aiGateway` solo en `provider.openSession` hacia la Active environment del Thread; omitido del registro de frames |
-| Socket del Sandbox | el relay solo reenvía `/api/ai/*` |
-| Logs, OTLP, argumentos | sin credenciales, gateway keys, management key ni prompts; CLIProxyAPI arrancado solo con `-config` |
-| CLIProxyAPI | solo loopback; Management API solo desde el Hub; nada de Sandboxes |
+| Puerta                           | Qué se declara                                                                                                                                                                                                                                                                                                                                                  |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| WS (`RPC_SPACE_ACCESS`)          | `aiAccounts.list` (filtrada por lo permitido), `aiAccounts.create/update/delete/allow/reorder`, `aiAccounts.login.start/complete` (Installation, solo Owner), `aiGateway.status/checkForUpdates/update/rollback` (solo Owner), `aiGatewayKeys.list/create/revoke` (propias; Owner todas), `aiUsage.summary`, `thread.setAiAccount` (regla de `thread.continue`) |
+| HttpApi (`HTTP_ENDPOINT_RULES`)  | ninguna nueva, salvo gemelas de las RPC si existen                                                                                                                                                                                                                                                                                                              |
+| Raw routes (`RAW_ROUTE_RULES`)   | `/api/ai/*`: solo gateway key válida, no revocada, con `AllowedAiAccounts` en cada petición                                                                                                                                                                                                                                                                     |
+| Cookies (`AMBIENT_COOKIE_RULES`) | `/api/ai/*`: refused                                                                                                                                                                                                                                                                                                                                            |
+| MCP (`MCP_TOOL_RULES`)           | ninguna herramienta nueva; ninguna existente devuelve credenciales ni gateway keys                                                                                                                                                                                                                                                                              |
+| Executor wire                    | `aiGateway` solo en `provider.openSession` hacia la Active environment del Thread; omitido del registro de frames                                                                                                                                                                                                                                               |
+| Socket del Sandbox               | el relay solo reenvía `/api/ai/*`                                                                                                                                                                                                                                                                                                                               |
+| Logs, OTLP, argumentos           | sin credenciales, gateway keys, management key ni prompts; CLIProxyAPI arrancado solo con `-config`                                                                                                                                                                                                                                                             |
+| CLIProxyAPI                      | solo loopback; Management API solo desde el Hub; nada de Sandboxes                                                                                                                                                                                                                                                                                              |
 
 ### Clientes
 
@@ -282,7 +282,9 @@ Por eso no basta con ponerlo delante: las decisiones 2 y 8 de «Cuentas de IA» 
   12. Clientes: desktop y móvil.
   13. Inventario de puertas y pase completo.
 
-## Preguntas abiertas
+## Preguntas abiertas (decididas)
+
+El Owner aceptó todas las recomendaciones el 2026-11-11; cada «Recomendación» de abajo es la decisión.
 
 1. **Grok, Fx, Muse y Kiro:** el código no deja claro si sus CLIs aceptan una base URL propia para el chat. Recomendación: tratarlos como «directa» (tabla) salvo Grok, que el ticket 07 prueba con `GROK_CLI_CHAT_PROXY_BASE_URL`; si funciona, pasa a la gateway.
 2. **¿A qué Space va el uso de una clave de CLI local?** Recomendación: cada clave se ata a un Space al crearla (por defecto el Personal space) y su uso cuenta en ese Space; un User con varios Spaces crea una clave por Space.
