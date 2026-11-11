@@ -312,7 +312,13 @@ interface ServerTab {
 
   readonly desktop: { readonly close: () => Promise<void> } | null;
   readonly profileId: string | undefined;
-  /** Whose profiles this tab's Thread uses (`PreviewProfiles`); null when nobody's can be told. */
+  /**
+   * Whose profile the tab uses, decided once when it is set up (`PreviewProfiles.ownerFor`): its
+   * opener's, an agent's tab its Thread owner's, a popup its opener tab's. Null when nobody's can
+   * be told (its context is then a throwaway one).
+   */
+  readonly profileOwner: PreviewProfiles.ProfileOwner | null;
+  /** The User whose profile catalog and recording frame rate the tab uses; null for none. */
   readonly profileUser: string | null;
   readonly openerTabId: string | undefined;
 
@@ -371,6 +377,8 @@ const AGENT_TAB_IDLE_MS = 30 * 60 * 1000;
 const IDLE_SWEEP_INTERVAL = "1 minute";
 /** How often profiles are checked against their Users' access and their limits. */
 const PROFILE_SWEEP_INTERVAL = "1 hour";
+/** A Thread's owner, for status reads with no tab, is looked up at most this often. */
+const THREAD_OWNER_TTL_MS = 5_000;
 /** A profile nobody opened for this long goes. */
 const PROFILE_MAX_IDLE_MS = 30 * 24 * 60 * 60 * 1000;
 /** A closed profile over this loses its caches, then everything if that is not enough. */
@@ -506,7 +514,20 @@ const make = Effect.gen(function* () {
   >();
 
   const closedPendingTabs = new Set<string>();
-  const adoptedPages = new Map<string, { readonly page: Page; readonly openerTabId: string }>();
+  const adoptedPages = new Map<
+    string,
+    {
+      readonly page: Page;
+      readonly openerTabId: string;
+      readonly profileOwner: PreviewProfiles.ProfileOwner | null;
+      readonly profileUser: string | null;
+    }
+  >();
+  /** Whose profile an agent's new tab uses, as its open resolved it, until the tab sets up. */
+  const resolvedOwners = new Map<
+    string,
+    { readonly owner: PreviewProfiles.ProfileOwner | null; readonly catalogUser: string | null }
+  >();
   const closedSessions = new Set<string>();
   let hostConnectionId: string | null = null;
   let viewerResizeOrder = 0;
@@ -822,6 +843,8 @@ const make = Effect.gen(function* () {
   ): Promise<ServerTab> => {
     const adopted = adoptedPages.get(tabKey(snapshot.threadId, snapshot.tabId));
     adoptedPages.delete(tabKey(snapshot.threadId, snapshot.tabId));
+    const resolved = resolvedOwners.get(tabKey(snapshot.threadId, snapshot.tabId));
+    resolvedOwners.delete(tabKey(snapshot.threadId, snapshot.tabId));
     const desktop =
       adopted === undefined && (await desktopRenders(snapshot))
         ? await connectDesktop(snapshot)
@@ -836,10 +859,15 @@ const make = Effect.gen(function* () {
       );
     }
     // Whose profile this tab uses, by the rule every door goes by. Unknown: a throwaway context.
-    const owner =
-      desktop === null
-        ? Option.getOrNull(await runPromise(profiles.ownerOfThread(snapshot.threadId)))
-        : null;
+    const openedBy = await runPromise(manager.openerOf(snapshot.threadId, snapshot.tabId));
+    const owner = adopted
+      ? adopted.profileOwner
+      : resolved
+        ? resolved.owner
+        : Option.getOrNull(await runPromise(profiles.ownerFor(snapshot.threadId, openedBy)));
+    const profileUser = adopted
+      ? adopted.profileUser
+      : (owner?.userId ?? resolved?.catalogUser ?? openedBy ?? null);
     const isolatedContext =
       adopted === undefined &&
       desktop === null &&
@@ -895,7 +923,8 @@ const make = Effect.gen(function* () {
       isolatedContext,
       desktop: desktop === null ? null : { close: desktop.close },
       profileId: snapshot.profileId,
-      profileUser: owner?.userId ?? null,
+      profileOwner: owner,
+      profileUser,
       openerTabId: adopted?.openerTabId,
       downloads: [],
       fileChooser: null,
@@ -1069,8 +1098,7 @@ const make = Effect.gen(function* () {
       Effect.logWarning("server preview could not clear earlier downloads", { cause }),
     ),
   );
-  // Before profiles were per User, every User shared `profiles/`; whose its sign-ins were cannot
-  // be told, so it goes.
+  // `profiles/` is keyed by no User: whose its sign-ins are cannot be told, so it goes.
   yield* Effect.tryPromise(() =>
     NodeFSP.rm(NodePath.join(config.stateDir, "server-browser", "profiles"), {
       recursive: true,
@@ -1386,6 +1414,8 @@ const make = Effect.gen(function* () {
           adoptedPages.set(tabKey(snapshot.threadId, snapshot.tabId), {
             page: popup,
             openerTabId: opener.tabId,
+            profileOwner: opener.profileOwner,
+            profileUser: opener.profileUser,
           }),
       }),
     ).then(
@@ -1607,9 +1637,22 @@ const make = Effect.gen(function* () {
     };
   };
 
-  /** The User whose profiles a Thread's tabs use, or null. */
-  const threadProfileUser = async (threadId: string) =>
-    Option.getOrNull(await runPromise(profiles.ownerOfThread(threadId)))?.userId ?? null;
+  // Status reads with no tab come often: a Thread's owner is looked up at most once a while.
+  const threadOwners = new Map<
+    string,
+    { readonly at: number; readonly owner: Promise<PreviewProfiles.ProfileOwner | null> }
+  >();
+  const recentThreadOwner = (threadId: string) => {
+    const now = Date.now();
+    for (const [key, cached] of threadOwners) {
+      if (now - cached.at > THREAD_OWNER_TTL_MS) threadOwners.delete(key);
+    }
+    const cached = threadOwners.get(threadId);
+    if (cached) return cached.owner;
+    const owner = runPromise(profiles.ownerOfThread(threadId)).then(Option.getOrNull);
+    threadOwners.set(threadId, { at: now, owner });
+    return owner;
+  };
 
   const resolveOpenProfile = (
     requested: string | undefined,
@@ -1634,8 +1677,9 @@ const make = Effect.gen(function* () {
   const statusWithTitle = async (
     tab: ServerTab | undefined,
     agentSessionId?: string,
-    /** With no tab, the Thread whose User's catalog it reports. */
+    /** With no tab, the Thread whose User's catalog it reports, else the agent's own User's. */
     threadId?: string,
+    actingUserId?: string,
   ): Promise<PreviewAutomationStatus> => {
     if (!tab) {
       return {
@@ -1645,7 +1689,11 @@ const make = Effect.gen(function* () {
         url: null,
         title: null,
         loading: false,
-        ...profileStatus(threadId === undefined ? null : await threadProfileUser(threadId)),
+        ...profileStatus(
+          (threadId === undefined ? null : (await recentThreadOwner(threadId))?.userId) ??
+            actingUserId ??
+            null,
+        ),
       };
     }
     const url = ServerBrowserPage.withoutDataPayload(tab.page.url());
@@ -2008,6 +2056,7 @@ const make = Effect.gen(function* () {
             : tabs.get(tabKey(request.threadId, request.tabId)),
           request.agentSessionId,
           request.threadId,
+          request.actingUserId,
         );
       case "open": {
         if (!request.agentSessionId)
@@ -2060,9 +2109,13 @@ const make = Effect.gen(function* () {
             ? found
             : undefined;
         const navigationTimeout = Math.min(request.timeoutMs, NAVIGATION_TIMEOUT_MS);
-        const profileId = existing
-          ? undefined
-          : resolveOpenProfile(open.profileId, await threadProfileUser(request.threadId));
+        // Resolved once: the catalog it names from and the profile it opens are the same User's.
+        const threadOwner = existing
+          ? null
+          : Option.getOrNull(await runPromise(profiles.ownerOfThread(request.threadId)));
+        // A draft has no owner yet: the agent's own User names, and the tab stays a throwaway.
+        const catalogUser = threadOwner?.userId ?? request.actingUserId ?? null;
+        const profileId = existing ? undefined : resolveOpenProfile(open.profileId, catalogUser);
         if (!existing) closeIdleAgentTabs();
         const tab =
           existing ??
@@ -2074,6 +2127,11 @@ const make = Effect.gen(function* () {
               runtime: "server",
               reveal: false,
               automationOwner: request.agentSessionId,
+              beforePublish: (snapshot) =>
+                resolvedOwners.set(tabKey(snapshot.threadId, snapshot.tabId), {
+                  owner: threadOwner,
+                  catalogUser,
+                }),
             }),
           ));
         if (existing?.dialog)
@@ -2854,48 +2912,73 @@ const make = Effect.gen(function* () {
    * Removes the profiles of a User (all when omitted) in Spaces they no longer keep them in: a
    * removed User, a Space they left, a folder named under another key, or one that does not say.
    */
-  const reconcileProfiles = Effect.fn("ServerBrowser.reconcileProfiles")(function* (
-    userId?: string,
-  ) {
-    const found = yield* Effect.tryPromise(() => contexts.owners());
-    for (const entry of found) {
-      if (userId !== undefined && entry.userFolder !== profiles.userFolder(userId)) continue;
-      const place = entry.owner === null ? null : profiles.place(entry.owner, "");
-      const kept =
-        entry.owner !== null &&
-        place?.userFolder === entry.userFolder &&
-        place.spaceFolder === entry.spaceFolder &&
-        (yield* profiles.keeps(entry.owner));
-      if (!kept) {
-        yield* Effect.tryPromise(() =>
-          contexts.removeProfiles(entry.userFolder, entry.spaceFolder),
-        );
+  const reconcileProfiles = (userId?: string) =>
+    Effect.tryPromise(() =>
+      contexts.reconcile(
+        async (entry) => {
+          if (entry.owner === null) return false;
+          const place = profiles.place(entry.owner, "");
+          if (place.userFolder !== entry.userFolder || place.spaceFolder !== entry.spaceFolder) {
+            return false;
+          }
+          return runPromise(profiles.keeps(entry.owner));
+        },
+        userId === undefined ? undefined : profiles.userFolder(userId),
+      ),
+    ).pipe(Effect.withSpan("ServerBrowser.reconcileProfiles"));
+
+  /** Closes `userId`'s open tabs whose profile they may no longer use, throwaway ones included. */
+  const closeTabsOutOfReach = (userId: string) =>
+    Effect.promise(async () => {
+      for (const tab of tabs.values()) {
+        const owner = tab.profileOwner;
+        if (owner === null || owner.userId !== userId) continue;
+        if (!(await runPromise(profiles.keeps(owner)))) dropTab(tab, true);
       }
-    }
-  });
+    });
+
   const sweepProfiles = Clock.currentTimeMillis.pipe(
     Effect.flatMap((now) =>
       Effect.tryPromise(() =>
         contexts.sweep({ now, maxIdleMs: PROFILE_MAX_IDLE_MS, maxBytes: PROFILE_MAX_BYTES }),
       ),
     ),
+    Effect.withSpan("ServerBrowser.sweepProfiles"),
   );
   yield* (yield* profiles.accessChanges).pipe(
     Stream.runForEach((userId) =>
-      reconcileProfiles(userId).pipe(
-        Effect.catch((cause) =>
-          Effect.logWarning("server preview could not remove a User's profiles", { cause }),
-        ),
+      Effect.all(
+        [
+          closeTabsOutOfReach(userId),
+          reconcileProfiles(userId).pipe(
+            Effect.catch((cause) =>
+              Effect.logWarning("server preview could not remove a User's profiles", { cause }),
+            ),
+          ),
+        ],
+        { discard: true },
       ),
     ),
     Effect.forkScoped,
   );
+  // At startup and hourly: whose profiles may stay. Its failure never stops the sweep.
   yield* reconcileProfiles().pipe(
-    Effect.andThen(sweepProfiles),
     Effect.catch((cause) =>
-      Effect.logWarning("server preview could not bound its profiles", { cause }),
+      Effect.logWarning("server preview could not remove profiles nobody may use", { cause }),
     ),
     Effect.repeat(Schedule.spaced(PROFILE_SWEEP_INTERVAL)),
+    Effect.forkScoped,
+  );
+  // Hourly, not at startup: what the profiles keep on disk.
+  yield* Effect.sleep(PROFILE_SWEEP_INTERVAL).pipe(
+    Effect.andThen(
+      sweepProfiles.pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("server preview could not bound its profiles", { cause }),
+        ),
+        Effect.repeat(Schedule.spaced(PROFILE_SWEEP_INTERVAL)),
+      ),
+    ),
     Effect.forkScoped,
   );
 

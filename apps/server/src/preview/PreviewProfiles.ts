@@ -1,7 +1,8 @@
 /**
  * Whose a preview browser profile is, for every door to the server browser (WS, preview-stream,
- * MCP, popups): the Thread's effective owner (as `claimWork`) in the Thread's Space. Folder names
- * are keyed hashes: they neither collide nor tell whose they are.
+ * MCP, popups), in the Thread's Space: the User who opened the tab, or for an agent's tab the
+ * Thread's effective owner (as `claimWork`). Folder names are keyed hashes: they neither collide
+ * nor tell whose they are.
  */
 // @effect-diagnostics nodeBuiltinImport:off - HMAC of folder names, synchronously.
 import * as NodeCrypto from "node:crypto";
@@ -42,11 +43,22 @@ export class PreviewProfiles extends Context.Service<
      * gets a throwaway context of its own, never a persistent one.
      */
     readonly ownerOfThread: (threadId: string) => Effect.Effect<Option.Option<ProfileOwner>>;
+    /**
+     * Whose profile a tab of the Thread uses: `openedBy`'s, the person who opened it, in the
+     * Thread's Space; with nobody, the Thread's owner's (an agent's tab). None as `ownerOfThread`.
+     */
+    readonly ownerFor: (
+      threadId: string,
+      openedBy: string | undefined,
+    ) => Effect.Effect<Option.Option<ProfileOwner>>;
     /** Where `owner`'s profile `profileId` lives. */
     readonly place: (owner: ProfileOwner, profileId: string) => ProfilePlace;
     readonly userFolder: (userId: string) => string;
     readonly profileFolder: (profileId: string) => string;
-    /** Whether `owner` still keeps profiles in that Space: not removed, and still sees it. */
+    /**
+     * Whether `owner` still keeps profiles in that Space: not removed, and still sees it. No User's
+     * (before there was an Owner) are not kept once there is one.
+     */
     readonly keeps: (owner: ProfileOwner) => Effect.Effect<boolean>;
     /** Subscribes now: each User whose Memberships or status changed, to re-check their profiles. */
     readonly accessChanges: Effect.Effect<Stream.Stream<string>, never, Scope.Scope>;
@@ -73,6 +85,12 @@ export const make = (input: {
   const names = folderNames(input.key);
   return PreviewProfiles.of({
     ownerOfThread: input.ownerOfThread,
+    ownerFor: Effect.fn("PreviewProfiles.ownerFor")(function* (threadId, openedBy) {
+      const owner = yield* input.ownerOfThread(threadId);
+      return Option.map(owner, (found) =>
+        openedBy === undefined ? found : { userId: openedBy, spaceId: found.spaceId },
+      );
+    }),
     place: (owner, profileId) => ({
       owner: { userId: owner.userId, spaceId: owner.spaceId },
       userFolder: names.userFolder(owner.userId),
@@ -110,7 +128,12 @@ export const layer = Layer.effect(
 
     const keeps = Effect.fn("PreviewProfiles.keeps")(
       function* (owner: ProfileOwner) {
-        if (owner.userId === NO_USER) return true;
+        if (owner.userId === NO_USER) {
+          const [found] = yield* sql<{ readonly one: number }>`
+            SELECT 1 AS one FROM users WHERE is_owner = 1 LIMIT 1
+          `;
+          return found === undefined;
+        }
         const userId = owner.userId as UserId;
         const user = yield* spaces.installationUser(userId);
         if (Option.isNone(user) || user.value.status === "removed") return false;

@@ -780,7 +780,11 @@ export const make = Effect.gen(function* () {
       previewCall(
         input.threadId,
         acting(caller),
-        (previews) => previews.open(input),
+        // A server tab a person opens browses in that person's profile (PreviewProfiles).
+        (previews) =>
+          previews.open(
+            caller.userId === undefined ? input : { ...input, openedBy: caller.userId },
+          ),
         (forward) => forward.call("preview.open", input),
       ),
     previewResize: (input: PreviewResizeInput, caller: WorkspaceCaller) =>

@@ -615,6 +615,8 @@ export const PreviewAutomationRequest = Schema.Struct({
   tabIdExplicit: Schema.optional(Schema.Boolean),
   /** Supplied by the broker from authenticated scope, never from tool input. */
   agentSessionId: Schema.optional(Schema.String),
+  /** The User the agent acts as, from authenticated scope: whose profile catalog it names from. */
+  actingUserId: Schema.optional(Schema.String),
   operation: PreviewAutomationOperation,
   input: Schema.Unknown,
   timeoutMs: Schema.Int.check(Schema.isGreaterThan(0)),

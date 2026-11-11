@@ -173,9 +173,20 @@ describe("ServerBrowserContexts", () => {
     expect(launches.persistent).toHaveBeenCalledTimes(2);
     expect(release).toHaveBeenCalledTimes(3);
     expect(launches.mkdir).toHaveBeenCalledWith(directoryOf("work/team"), { recursive: true });
+    // Whose the Space folder is goes in whole, before the profile folder exists.
+    const ownerFile = `/test/profiles/${USER}/${SPACE}/owner.json`;
     expect(launches.writeFile).toHaveBeenCalledWith(
-      `/test/profiles/${USER}/${SPACE}/owner.json`,
+      expect.stringMatching(/owner\.json\..+\.tmp$/),
       JSON.stringify({ userId: "alice", spaceId: "acme" }),
+    );
+    expect(launches.rename).toHaveBeenCalledWith(
+      expect.stringMatching(/owner\.json\..+\.tmp$/),
+      ownerFile,
+    );
+    expect(launches.rename.mock.invocationCallOrder[0]).toBeLessThan(
+      launches.mkdir.mock.invocationCallOrder.find(
+        (_, index) => launches.mkdir.mock.calls[index]?.[0] === directoryOf("work/team"),
+      )!,
     );
     await pool.close();
     expect(human.close).toHaveBeenCalledTimes(1);
@@ -377,8 +388,6 @@ describe("ServerBrowserContexts while a profile opens", () => {
     launches.persistent.mockResolvedValue(human as unknown as BrowserContext);
     // Its folders exist, but its owner is not written yet.
     const ownerWritten = Promise.withResolvers<void>();
-    launches.writeFile.mockImplementationOnce(() => ownerWritten.promise);
-    launches.rename.mockImplementationOnce(() => ownerWritten.promise);
     launches.readdir.mockImplementation(async (directory: string) =>
       directory === "/test/profiles"
         ? [folderEntry(USER)]
@@ -386,20 +395,79 @@ describe("ServerBrowserContexts while a profile opens", () => {
           ? [folderEntry(SPACE)]
           : [],
     );
+    const written = new Map<string, string>();
+    launches.writeFile.mockImplementation(async (file: string, text: string) => {
+      written.set(file, text);
+    });
+    launches.rename.mockImplementation(async (from: string, to: string) => {
+      await ownerWritten.promise;
+      written.set(to, written.get(from)!);
+    });
+    launches.readFile.mockImplementation(async (file: string) => {
+      const text = written.get(file);
+      if (text === undefined) throw new Error("ENOENT");
+      return text;
+    });
     const pool = new ServerBrowserContexts(options());
     const opening = pool.contextFor(place("work/team"));
     await vi.waitFor(() => expect(launches.mkdir).toHaveBeenCalled());
-    // What the reconcile does: folders that do not say whose they are go.
-    const reconciling = (async () => {
-      for (const entry of await pool.owners()) {
-        if (entry.owner === null) await pool.removeProfiles(entry.userFolder, entry.spaceFolder);
-      }
-    })();
+    // Folders that do not say whose they are go.
+    const reconciling = pool.reconcile(async (entry) => entry.owner !== null);
     ownerWritten.resolve();
     await reconciling;
     await opening;
     expect(human.close).not.toHaveBeenCalled();
     expect(launches.rm).not.toHaveBeenCalled();
+    await pool.close();
+  });
+});
+
+describe("ServerBrowserContexts bounds", () => {
+  it("marks a profile used only when it simply closed, never one a removal deletes", async () => {
+    const human = makeContext();
+    launches.persistent.mockResolvedValue(human as unknown as BrowserContext);
+    const pool = new ServerBrowserContexts(options());
+    await pool.contextFor(place("work/team"));
+    launches.utimes.mockClear();
+    launches.writeFile.mockClear();
+    await pool.removeProfiles(USER, SPACE);
+    await pool.reconcile(async () => true);
+    expect(launches.utimes).not.toHaveBeenCalled();
+    expect(launches.writeFile).not.toHaveBeenCalled();
+    await pool.close();
+  });
+
+  it("opens a profile while a sweep measures others: the sweep takes no lock to read", async () => {
+    launches.persistent.mockImplementation(async () => makeContext() as unknown as BrowserContext);
+    launches.readdir.mockImplementation(async (directory: string) =>
+      directory === "/test/profiles"
+        ? [folderEntry(USER)]
+        : directory === `/test/profiles/${USER}`
+          ? [folderEntry(SPACE)]
+          : directory === `/test/profiles/${USER}/${SPACE}`
+            ? [folderEntry(FOLDERS["never-opened"]!)]
+            : [],
+    );
+    // Used recently, but over its size: it loses its caches.
+    launches.stat.mockResolvedValue({ mtimeMs: 10_000 });
+    const measuring = Promise.withResolvers<void>();
+    const measured = Promise.withResolvers<void>();
+    launches.lstat.mockImplementationOnce(async () => {
+      measured.resolve();
+      await measuring.promise;
+      return { isDirectory: () => false, size: 1 };
+    });
+    const pool = new ServerBrowserContexts(options());
+    const sweeping = pool.sweep({ now: 10_000, maxIdleMs: 1_000, maxBytes: 0 });
+    await measured.promise;
+    await pool.contextFor(place("work/team"));
+    measuring.resolve();
+    await sweeping;
+    expect(launches.rm).toHaveBeenCalledWith(`${directoryOf("never-opened")}/Default/Cache`, {
+      recursive: true,
+      force: true,
+    });
+    expect(launches.rm).not.toHaveBeenCalledWith(directoryOf("never-opened"), expect.anything());
     await pool.close();
   });
 });

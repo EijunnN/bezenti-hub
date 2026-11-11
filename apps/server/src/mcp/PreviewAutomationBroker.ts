@@ -641,6 +641,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
             tabId: requestContext.tabId,
             tabIdExplicit: input.tabId !== undefined,
             agentSessionId: hostAssignmentKey(input.scope),
+            ...(input.scope.userId === undefined ? {} : { actingUserId: input.scope.userId }),
             operation: input.operation,
             input: input.input,
             timeoutMs,

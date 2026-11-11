@@ -35,6 +35,8 @@ export class PreviewManager extends Context.Service<
     readonly open: (
       input: PreviewOpenInput & {
         readonly automationOwner?: string;
+        /** The User who opened it (WS `preview.open`); none for an agent's or a popup. */
+        readonly openedBy?: string;
         /** Runs before the `opened` event publishes, so subscribers find state keyed by the tab. */
         readonly beforePublish?: (snapshot: PreviewSessionSnapshot) => void;
       },
@@ -56,6 +58,8 @@ export class PreviewManager extends Context.Service<
       input: PreviewAdjustInput,
     ) => Effect.Effect<PreviewSessionSnapshot, PreviewError>;
     readonly close: (input: PreviewCloseInput) => Effect.Effect<void, PreviewError>;
+    /** The User who opened an open tab, as `open` was told; undefined for anyone else's. */
+    readonly openerOf: (threadId: string, tabId: string) => Effect.Effect<string | undefined>;
     readonly list: (input: PreviewListInput) => Effect.Effect<PreviewListResult>;
     readonly events: Stream.Stream<PreviewEvent>;
     readonly subscribeEvents: Effect.Effect<PubSub.Subscription<PreviewEvent>, never, Scope.Scope>;
@@ -123,6 +127,8 @@ export const make = Effect.gen(function* PreviewManagerMake() {
   const serverEpoch = yield* random.uuidV4();
   const stateRef = yield* SynchronizedRef.make<ManagerState>(initialState);
   const eventsPubSub = yield* PubSub.unbounded<PreviewEvent>();
+  // Set before `opened` publishes, so a subscriber setting up the tab finds it.
+  const openers = new Map<string, string>();
   const events: Stream.Stream<PreviewEvent> = Stream.fromPubSub(eventsPubSub);
 
   /** Publish inside the lock to preserve state-transition order. */
@@ -204,6 +210,9 @@ export const make = Effect.gen(function* PreviewManagerMake() {
             tabId,
             snapshot,
           });
+          if (input.openedBy !== undefined) {
+            openers.set(compositeKey(input.threadId, tabId), input.openedBy);
+          }
           input.beforePublish?.(snapshot);
           yield* PubSub.publish(eventsPubSub, {
             type: "opened",
@@ -380,6 +389,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
         for (const target of targets) {
           revision += 1;
           sessions.delete(compositeKey(target.threadId, target.tabId));
+          openers.delete(compositeKey(target.threadId, target.tabId));
           eventsToEmit.push({
             type: "closed",
             threadId: target.threadId,
@@ -455,6 +465,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     resize,
     adjust,
     close,
+    openerOf: (threadId, tabId) => Effect.sync(() => openers.get(compositeKey(threadId, tabId))),
     list,
     events,
     subscribeEvents: PubSub.subscribe(eventsPubSub),

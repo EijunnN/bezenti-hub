@@ -107,8 +107,13 @@ export const presentAsChrome = async (
 export class ServerBrowserContexts {
   private readonly options: Options;
   private readonly contexts = new Map<string, Promise<BrowserContext>>();
-  /** Removals run one at a time; a persistent profile opens only after the last one ends. */
-  private removals: Promise<void> = Promise.resolve();
+  /**
+   * Work on profile folders, one step at a time: preparing a profile to open, removing profiles,
+   * marking one used. A profile asked for after a removal opens after it.
+   */
+  private queue: Promise<void> = Promise.resolve();
+  /** Persistent profiles whose preparing step has not run: a queued step never waits on them. */
+  private readonly preparing = new Set<string>();
   private browser: Promise<Browser> | undefined;
   private closing: Promise<void> | undefined;
 
@@ -167,6 +172,12 @@ export class ServerBrowserContexts {
     return this.browser;
   }
 
+  private enqueue<A>(step: () => Promise<A>): Promise<A> {
+    const run = this.queue.then(step);
+    this.queue = run.then(constVoid, constVoid);
+    return run;
+  }
+
   /**
    * The context of a persistent profile (`place`), or with `isolationKey` a throwaway one of its
    * own (incognito, an agent's tab, a tab whose owner is unknown). Never one shared otherwise.
@@ -180,22 +191,36 @@ export class ServerBrowserContexts {
     const key = persistent === null ? isolatedKey(isolationKey!) : placeKey(persistent);
     const cached = this.contexts.get(key);
     if (cached) return cached;
-    const removed = persistent === null ? Promise.resolve() : this.removals.catch(constVoid);
-    const pending = removed
-      .then(() => this.createContext(persistent))
-      .then(async (context) => {
-        context.on("close", () => {
-          if (this.contexts.get(key) === pending) this.contexts.delete(key);
-          if (persistent !== null) void this.touch(persistent).catch(constVoid);
-          this.options.onContextClose?.(context);
-        });
-        for (const page of context.pages()) await page.close().catch(constVoid);
-        if (this.closing) {
-          await context.close().catch(constVoid);
-          throw new Error("The preview browser is closed.");
+    let created: Promise<BrowserContext>;
+    if (persistent === null) {
+      created = this.sharedBrowser().then((browser) => browser.newContext(CONTEXT_OPTIONS));
+    } else {
+      this.preparing.add(key);
+      created = this.enqueue(async () => {
+        try {
+          await this.prepare(persistent);
+        } finally {
+          this.preparing.delete(key);
         }
-        return context;
+      }).then(() => this.launchPersistent(persistent));
+    }
+    const pending = created.then(async (context) => {
+      context.on("close", () => {
+        // A removal took it out first and deletes its folder: only one that simply closed is used.
+        const simplyClosed = this.contexts.get(key) === pending;
+        if (simplyClosed) this.contexts.delete(key);
+        if (persistent !== null && simplyClosed) {
+          void this.enqueue(() => this.touch(persistent)).catch(constVoid);
+        }
+        this.options.onContextClose?.(context);
       });
+      for (const page of context.pages()) await page.close().catch(constVoid);
+      if (this.closing) {
+        await context.close().catch(constVoid);
+        throw new Error("The preview browser is closed.");
+      }
+      return context;
+    });
     this.contexts.set(key, pending);
     void pending.catch(() => {
       if (this.contexts.get(key) === pending) this.contexts.delete(key);
@@ -203,26 +228,28 @@ export class ServerBrowserContexts {
     return pending;
   }
 
-  private async createContext(place: ProfilePlace | null) {
-    const contextOptions = { viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2 };
-    if (place === null) {
-      const browser = await this.sharedBrowser();
-      return browser.newContext(contextOptions);
-    }
-    const directory = this.profileDirectory(place);
-    await NodeFSP.mkdir(directory, { recursive: true });
-    await NodeFSP.writeFile(
-      NodePath.join(this.options.profilesDir, place.userFolder, place.spaceFolder, OWNER_FILE),
-      JSON.stringify(place.owner),
-    );
+  /** Whose the Space folder is goes in first, so no profile folder exists without it. */
+  private async prepare(place: ProfilePlace) {
+    const spaceDir = NodePath.join(this.options.profilesDir, place.userFolder, place.spaceFolder);
+    await NodeFSP.mkdir(spaceDir, { recursive: true });
+    const ownerFile = NodePath.join(spaceDir, OWNER_FILE);
+    const written = `${ownerFile}.${process.pid}-${(this.writes += 1)}.tmp`;
+    await NodeFSP.writeFile(written, JSON.stringify(place.owner));
+    await NodeFSP.rename(written, ownerFile);
+    await NodeFSP.mkdir(this.profileDirectory(place), { recursive: true });
     await this.touch(place);
+  }
+
+  private writes = 0;
+
+  private async launchPersistent(place: ProfilePlace) {
     const { executable, args, ...options } = await this.launchOptions();
     const { chromium } = loadPlaywright();
     return this.launch(executable, (executablePath) =>
-      chromium.launchPersistentContext(directory, {
+      chromium.launchPersistentContext(this.profileDirectory(place), {
         ...options,
         args: [...args, `--disk-cache-size=${DISK_CACHE_BYTES}`],
-        ...contextOptions,
+        ...CONTEXT_OPTIONS,
         executablePath,
       }),
     );
@@ -237,6 +264,7 @@ export class ServerBrowserContexts {
     );
   }
 
+  /** Marks a profile used; never makes a folder a removal deleted. */
   private async touch(place: ProfilePlace) {
     const marker = NodePath.join(this.profileDirectory(place), LAST_USED_FILE);
     const now = Date.now() / 1000;
@@ -268,22 +296,21 @@ export class ServerBrowserContexts {
     remove: () => Promise<void>,
   ) {
     // Taken now, so a request right after this call opens a new context, after the removal.
+    const open = this.takeOpen(matches);
+    return this.enqueue(async () => {
+      await closeContexts(open);
+      await remove();
+    });
+  }
+
+  /** Takes the contexts of profiles whose folders `matches` out of the pool, to close. */
+  private takeOpen(matches: (folders: ReadonlyArray<string>) => boolean) {
     const open = [...this.contexts.entries()].filter(([key]) => {
       const folders = foldersOfKey(key);
       return folders !== null && matches(folders);
     });
     for (const [key] of open) this.contexts.delete(key);
-    const removal = this.removals.catch(constVoid).then(async () => {
-      await Promise.all(
-        open.map(async ([, pending]) => {
-          const context = await pending.catch(() => undefined);
-          await context?.close();
-        }),
-      );
-      await remove();
-    });
-    this.removals = removal;
-    return removal;
+    return open.map(([, pending]) => pending);
   }
 
   /** One profile of one User, in every Space they have it. */
@@ -334,14 +361,34 @@ export class ServerBrowserContexts {
     );
   }
 
-  /** Each Space folder on disk with whose it says it is: null when it does not say. */
-  async owners() {
-    const found: Array<{
-      readonly userFolder: string;
-      readonly spaceFolder: string;
-      readonly owner: { readonly userId: string; readonly spaceId: string } | null;
-    }> = [];
-    for (const userFolder of await readFolders(this.options.profilesDir)) {
+  /**
+   * In one step, so no profile opens halfway through it: each Space folder (of `userFolder`, or
+   * every one) whose owner `keep` refuses goes, its open profiles closed first. A folder that does
+   * not say whose it is gets `owner` null. Profiles asked for after this call are left alone.
+   */
+  reconcile(keep: (entry: SpaceFolder) => Promise<boolean>, userFolder?: string) {
+    return this.enqueue(async () => {
+      for (const entry of await this.spaceFolders(userFolder)) {
+        if (await keep(entry)) continue;
+        const open = this.takeOpen(
+          (folders) =>
+            folders[0] === entry.userFolder &&
+            folders[1] === entry.spaceFolder &&
+            !this.preparing.has(placeKeyOf(folders)),
+        );
+        await closeContexts(open);
+        await NodeFSP.rm(
+          NodePath.join(this.options.profilesDir, entry.userFolder, entry.spaceFolder),
+          { recursive: true, force: true },
+        );
+      }
+    });
+  }
+
+  private async spaceFolders(onlyUser?: string) {
+    const found: Array<SpaceFolder> = [];
+    const users = onlyUser === undefined ? await readFolders(this.options.profilesDir) : [onlyUser];
+    for (const userFolder of users) {
       const userDir = NodePath.join(this.options.profilesDir, userFolder);
       for (const spaceFolder of await readFolders(userDir)) {
         const owner = await NodeFSP.readFile(
@@ -358,30 +405,41 @@ export class ServerBrowserContexts {
 
   /**
    * Bounds what profiles keep: a closed one unused for `maxIdleMs` goes; one over `maxBytes`
-   * loses its caches, then everything if that is not enough. Open profiles are left alone.
+   * loses its caches, then everything if that is not enough. Sizes are read outside the queue;
+   * each deletion takes it only briefly, and only for a profile still closed then.
    */
-  sweep(limits: ProfileLimits) {
-    return this.removeWhere(
-      () => false,
-      async () => {
-        const open = new Set(
-          [...this.contexts.keys()].flatMap((key) => {
-            const folders = foldersOfKey(key);
-            return folders === null ? [] : [folders.join("/")];
-          }),
-        );
-        for (const userFolder of await readFolders(this.options.profilesDir)) {
-          const userDir = NodePath.join(this.options.profilesDir, userFolder);
-          for (const spaceFolder of await readFolders(userDir)) {
-            const spaceDir = NodePath.join(userDir, spaceFolder);
-            for (const profileFolder of await readFolders(spaceDir)) {
-              if (open.has([userFolder, spaceFolder, profileFolder].join("/"))) continue;
-              await boundProfile(NodePath.join(spaceDir, profileFolder), limits);
+  async sweep(limits: ProfileLimits) {
+    for (const userFolder of await readFolders(this.options.profilesDir)) {
+      const userDir = NodePath.join(this.options.profilesDir, userFolder);
+      for (const spaceFolder of await readFolders(userDir)) {
+        const spaceDir = NodePath.join(userDir, spaceFolder);
+        for (const profileFolder of await readFolders(spaceDir)) {
+          const key = placeKeyOf([userFolder, spaceFolder, profileFolder]);
+          const directory = NodePath.join(spaceDir, profileFolder);
+          if (this.contexts.has(key)) continue;
+          const whileClosed = (step: () => Promise<void>) =>
+            this.enqueue(async () => {
+              if (!this.contexts.has(key)) await step();
+            });
+          if (await idle(directory, limits)) {
+            // Used since? Then it stays.
+            await whileClosed(async () => {
+              if (await idle(directory, limits)) await removeDirectory(directory);
+            });
+            continue;
+          }
+          if ((await sizeOf(directory)) <= limits.maxBytes) continue;
+          await whileClosed(async () => {
+            for (const cache of CACHE_FOLDERS) {
+              await removeDirectory(NodePath.join(directory, cache));
             }
+          });
+          if ((await sizeOf(directory)) > limits.maxBytes) {
+            await whileClosed(() => removeDirectory(directory));
           }
         }
-      },
-    );
+      }
+    }
   }
 
   close() {
@@ -399,6 +457,13 @@ export class ServerBrowserContexts {
   }
 }
 
+/** A Space folder of the profiles, and whose it says it is: null when it does not say. */
+export interface SpaceFolder {
+  readonly userFolder: string;
+  readonly spaceFolder: string;
+  readonly owner: { readonly userId: string; readonly spaceId: string } | null;
+}
+
 export interface ProfileLimits {
   readonly now: number;
   readonly maxIdleMs: number;
@@ -406,8 +471,27 @@ export interface ProfileLimits {
 }
 
 const isolatedKey = (isolationKey: string) => JSON.stringify(["isolated", isolationKey]);
+const placeKeyOf = (folders: ReadonlyArray<string>) => JSON.stringify(folders);
 const placeKey = (place: ProfilePlace) =>
-  JSON.stringify([place.userFolder, place.spaceFolder, place.profileFolder]);
+  placeKeyOf([place.userFolder, place.spaceFolder, place.profileFolder]);
+const CONTEXT_OPTIONS = { viewport: { width: 1280, height: 800 }, deviceScaleFactor: 2 };
+
+const closeContexts = (open: ReadonlyArray<Promise<BrowserContext>>) =>
+  Promise.all(
+    open.map(async (pending) => {
+      const context = await pending.catch(() => undefined);
+      await context?.close();
+    }),
+  );
+
+const removeDirectory = (directory: string) =>
+  NodeFSP.rm(directory, { recursive: true, force: true });
+
+/** Whether nobody opened the profile in `directory` for `maxIdleMs`; never marked counts. */
+const idle = async (directory: string, limits: ProfileLimits) => {
+  const used = await NodeFSP.stat(NodePath.join(directory, LAST_USED_FILE)).catch(() => null);
+  return used === null || limits.now - used.mtimeMs > limits.maxIdleMs;
+};
 /** The folders of a persistent profile's key; null for an isolated context's. */
 const foldersOfKey = (key: string): ReadonlyArray<string> | null => {
   const parsed = JSON.parse(key) as ReadonlyArray<string>;
@@ -438,15 +522,4 @@ const sizeOf = async (path: string): Promise<number> => {
     total += await sizeOf(NodePath.join(path, entry));
   }
   return total;
-};
-
-const boundProfile = async (directory: string, limits: ProfileLimits) => {
-  const remove = () => NodeFSP.rm(directory, { recursive: true, force: true });
-  const used = await NodeFSP.stat(NodePath.join(directory, LAST_USED_FILE)).catch(() => null);
-  if (used === null || limits.now - used.mtimeMs > limits.maxIdleMs) return remove();
-  if ((await sizeOf(directory)) <= limits.maxBytes) return;
-  for (const cache of CACHE_FOLDERS) {
-    await NodeFSP.rm(NodePath.join(directory, cache), { recursive: true, force: true });
-  }
-  if ((await sizeOf(directory)) > limits.maxBytes) await remove();
 };
