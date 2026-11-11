@@ -22,7 +22,8 @@ import { Atom } from "effect/reactivity";
 import { useState } from "react";
 
 import {
-  ENVIRONMENT_STATUS_LABELS,
+  environmentStatusLabel,
+  shownEnvironmentStatus,
   activeEnvironmentOf,
   environmentUnavailableReason,
   useHubEnvironments,
@@ -230,9 +231,9 @@ function MoveThreadDialog({
                     >
                       {candidates.map((environment) => {
                         const reason = reasonOf(environment);
-                        const status = environment.kind === "hub" ? "online" : environment.status;
+                        const status = shownEnvironmentStatus(environment);
                         const label = `${environment.name}, ${
-                          reason ?? ENVIRONMENT_STATUS_LABELS[status]
+                          reason ?? environmentStatusLabel(status, environment.kind)
                         }`;
                         return (
                           <label
@@ -248,7 +249,7 @@ function MoveThreadDialog({
                             <EnvironmentStatusDot status={status} />
                             <span className="font-medium">{environment.name}</span>
                             <span className="text-muted-foreground">
-                              {reason ?? ENVIRONMENT_STATUS_LABELS[status]}
+                              {reason ?? environmentStatusLabel(status, environment.kind)}
                             </span>
                           </label>
                         );

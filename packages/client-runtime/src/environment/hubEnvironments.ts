@@ -33,6 +33,40 @@ export const fetchRemoteHubEnvironments = (input: {
     ),
   );
 
+/** Every machine with its mode, Space and owner, for the Owner only (others get 403). */
+export const fetchRemoteHubEnvironmentOverview = (input: {
+  readonly httpBaseUrl: string;
+  readonly bearerToken: string;
+}) =>
+  makeEnvironmentHttpApiGroupClient(input.httpBaseUrl, "environments").pipe(
+    Effect.flatMap((client) =>
+      executeEnvironmentHttpRequest(
+        environmentEndpointUrl(input.httpBaseUrl, "/api/environments/overview"),
+        10_000,
+        client.overview({ headers: { authorization: `Bearer ${input.bearerToken}` } }),
+      ),
+    ),
+  );
+
+/** «Try again» on a Sandbox that failed to start, with a bearer session; answers once starting. */
+export const startRemoteHubEnvironment = (input: {
+  readonly httpBaseUrl: string;
+  readonly bearerToken: string;
+  readonly environmentId: EnvironmentId;
+}) =>
+  makeEnvironmentHttpApiGroupClient(input.httpBaseUrl, "environments").pipe(
+    Effect.flatMap((client) =>
+      executeEnvironmentHttpRequest(
+        environmentEndpointUrl(input.httpBaseUrl, "/api/environments/start"),
+        10_000,
+        client.start({
+          headers: { authorization: `Bearer ${input.bearerToken}` },
+          payload: { environmentId: input.environmentId },
+        }),
+      ),
+    ),
+  );
+
 /**
  * Status and providers change on heartbeats, every ten seconds on the Hub; a machine that drops
  * shows «Reconnecting» at once and «Offline» a minute later, so a short poll keeps rows live.
@@ -206,6 +240,104 @@ export const ENVIRONMENT_STATUS_LABELS: Record<HubEnvironmentStatus, string> = {
   failed: "Failed to start",
 };
 
+/** What a Sandbox's `online` reads as: its server runs. */
+const SANDBOX_RUNNING_LABEL = "Running";
+
+/**
+ * The status as it is shown: the Hub machine is always online (it is the Hub), whatever its row
+ * says.
+ */
+export function shownEnvironmentStatus(
+  environment: Pick<HubEnvironmentSummary, "kind" | "status">,
+): HubEnvironmentStatus {
+  return environment.kind === "hub" ? "online" : environment.status;
+}
+
+/**
+ * A status in words, the same on every client: «Running» for a Sandbox that is online, else
+ * `ENVIRONMENT_STATUS_LABELS`.
+ */
+export function environmentStatusLabel(
+  status: HubEnvironmentStatus,
+  kind: HubEnvironmentSummary["kind"],
+): string {
+  return kind === "sandbox" && status === "online"
+    ? SANDBOX_RUNNING_LABEL
+    : ENVIRONMENT_STATUS_LABELS[status];
+}
+
+/**
+ * The colour every client gives a status: green while it runs work, amber while it is on its way
+ * (reconnecting, starting), red once a start failed, grey while it is off (offline, stopped).
+ */
+export type EnvironmentStatusTone = "success" | "warning" | "danger" | "muted";
+
+export const ENVIRONMENT_STATUS_TONES: Record<HubEnvironmentStatus, EnvironmentStatusTone> = {
+  online: "success",
+  reconnecting: "warning",
+  starting: "warning",
+  failed: "danger",
+  offline: "muted",
+  stopped: "muted",
+};
+
+/** Whether a status dot pulses: only while a Sandbox is starting. */
+export const environmentStatusPulses = (status: HubEnvironmentStatus) => status === "starting";
+
+/**
+ * The four ways a machine is used: the Hub machine (the Hub's own process), a Space's Sandbox
+ * (the Hub runs it), a machine dedicated to a Space, and a User's personal machine.
+ */
+export type EnvironmentUse = "hub" | "sandbox" | "dedicated" | "personal";
+
+export function environmentUseOf(
+  environment: Pick<HubEnvironmentSummary, "kind" | "mode">,
+): EnvironmentUse {
+  if (environment.kind === "hub") return "hub";
+  if (environment.kind === "sandbox" || environment.mode === "sandbox") return "sandbox";
+  return environment.mode === "dedicated" ? "dedicated" : "personal";
+}
+
+export const ENVIRONMENT_USE_LABELS: Record<EnvironmentUse, string> = {
+  hub: "Hub machine",
+  sandbox: "Sandbox",
+  dedicated: "Dedicated machine",
+  personal: "Personal machine",
+};
+
+/**
+ * What a machine is, with its Space or owner as far as the viewer knows them: «Runs the Hub»,
+ * «Sandbox of Acme», «Dedicated to Acme», «Your personal machine», «Grace's personal machine».
+ */
+export function environmentUseDescription(
+  environment: Pick<HubEnvironmentSummary, "kind" | "mode" | "ownerUserId">,
+  context: {
+    /** The machine's Space by name; null or undefined when not known. */
+    readonly spaceName?: string | null | undefined;
+    /** The personal machine's owner by name, when the viewer knows it. */
+    readonly ownerName?: string | null | undefined;
+    /** Undefined when the viewer is not known (a session from before the Owner). */
+    readonly viewerUserId?: string | undefined;
+  } = {},
+): string {
+  switch (environmentUseOf(environment)) {
+    case "hub":
+      return "Runs the Hub";
+    case "sandbox":
+      return context.spaceName == null ? "Sandbox" : `Sandbox of ${context.spaceName}`;
+    case "dedicated":
+      return `Dedicated to ${context.spaceName ?? "a Space"}`;
+    case "personal":
+      if (context.viewerUserId !== undefined && environment.ownerUserId === context.viewerUserId) {
+        return "Your personal machine";
+      }
+      if (context.ownerName != null) return `${context.ownerName}'s personal machine`;
+      return context.viewerUserId === undefined
+        ? "Personal machine"
+        : "Another User's personal machine";
+  }
+}
+
 /** What a Thread says because of where it runs, beyond the machine's own status. */
 export type ThreadEnvironmentState =
   | "needs-environment"
@@ -255,12 +387,20 @@ export function activeEnvironmentOf(
   if (environment === undefined) return null;
   return {
     name: environment.name,
-    status: environment.kind === "hub" ? "online" : environment.status,
+    status: shownEnvironmentStatus(environment),
     isHubMachine: environment.kind === "hub",
     needsEnvironment: false,
     isSandbox: environment.kind === "sandbox",
     startError: environment.startError ?? null,
   };
+}
+
+/** A Thread's machine's status in words, as Settings says it for that machine. */
+export function activeEnvironmentStatusLabel(environment: ActiveEnvironmentView): string {
+  return environmentStatusLabel(
+    environment.status,
+    environment.isSandbox ? "sandbox" : environment.isHubMachine ? "hub" : "external",
+  );
 }
 
 /** "Laptop" while online, "Laptop, offline" otherwise: the words an accessible name ends with. */

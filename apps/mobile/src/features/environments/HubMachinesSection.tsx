@@ -1,93 +1,75 @@
-import { ENVIRONMENT_STATUS_LABELS } from "@t3tools/client-runtime/environment/hub-environments";
-import type { HubEnvironmentSummary } from "@t3tools/contracts";
 import { View } from "react-native";
 
 import { AppText as Text } from "../../components/ui/AppText";
-import { ListSection } from "../../components/ui/ListSection";
 import { Button } from "../../components/ui/Button";
-import {
-  refreshHubEnvironments,
-  useHubEnvironments,
-  useHubEnvironmentsStatus,
-} from "../../state/hubEnvironments";
+import { ListSection } from "../../components/ui/ListSection";
+import { useHubEnvironmentOverview } from "../../state/hubEnvironmentOverview";
 import { useSpaceSelections } from "../../state/spaces";
 import { useHubConnection } from "../../state/use-remote-environment-registry";
 import { EnvironmentStatusDot } from "./EnvironmentStatusDot";
-
-/** What one machine's row says: its status, system and how many Threads run there. */
-export function hubMachineDetails(environment: HubEnvironmentSummary): string {
-  const status = environment.kind === "hub" ? "online" : environment.status;
-  const running =
-    environment.runningThreadCount === 0
-      ? null
-      : `${environment.runningThreadCount} running ${environment.runningThreadCount === 1 ? "Thread" : "Threads"}`;
-  return [
-    environment.kind === "hub" ? "This Hub" : ENVIRONMENT_STATUS_LABELS[status],
-    environment.os,
-    running,
-  ]
-    .filter((part): part is string => part !== null)
-    .join(" · ");
-}
+import { hubMachineRow } from "./hubMachineRow";
 
 /**
- * «Machines on this Hub», for the Owner: each Environment with its live status, to read only.
- * Renaming, removing and approving machines stay on the web and desktop app.
+ * «Machines on this Hub», for the Owner only: every Environment with how it is used, its Space and
+ * live status, to read only. Its list comes from an endpoint only the Owner gets. Renaming,
+ * removing, dedicating and approving machines stay on the web and desktop app.
  */
 export function HubMachinesSection() {
   const hub = useHubConnection();
   const selections = useSpaceSelections();
   const isOwner = hub !== null && selections.get(hub.environmentId)?.view?.isOwner === true;
-  if (!isOwner) return null;
-  return <HubMachinesList />;
+  if (!isOwner || hub === null) return null;
+  return <HubMachinesList connection={hub} />;
 }
 
-function HubMachinesList() {
-  const environments = useHubEnvironments();
-  const status = useHubEnvironmentsStatus();
+function HubMachinesList(props: {
+  readonly connection: NonNullable<ReturnType<typeof useHubConnection>>;
+}) {
+  const { environments, failed, refresh } = useHubEnvironmentOverview(props.connection);
   return (
     <ListSection title="Machines on this Hub">
-      {status === "error" ? (
+      {failed ? (
         <View accessibilityRole="alert" className="flex-row items-center gap-3 px-4 py-3">
           <Text className="flex-1 text-sm text-danger-foreground">
             Could not load this Hub's machines.
           </Text>
-          <Button
-            label="Try again"
-            size="compact"
-            tone="secondary"
-            onPress={refreshHubEnvironments}
-          />
+          <Button label="Try again" size="compact" tone="secondary" onPress={refresh} />
         </View>
       ) : null}
-      {environments.length === 0 ? (
-        status === "loading" ? (
+      {environments === null ? (
+        failed ? null : (
           <Text className="px-4 py-3 text-sm text-foreground-muted">Loading machines…</Text>
-        ) : null
+        )
       ) : (
         environments.map((environment) => {
-          const details = hubMachineDetails(environment);
+          const row = hubMachineRow(environment);
           return (
             <View
               key={environment.id}
               accessible
-              accessibilityLabel={`${environment.name}, ${details}`}
+              accessibilityLabel={row.accessibilityLabel}
               className="flex-row items-center gap-3 px-4 py-3"
             >
-              <EnvironmentStatusDot
-                status={environment.kind === "hub" ? "online" : environment.status}
-              />
+              <EnvironmentStatusDot status={row.status} />
               <View className="flex-1">
-                <Text className="text-base">{environment.name}</Text>
-                <Text className="text-xs text-foreground-muted">{details}</Text>
+                <View className="flex-row items-center gap-2">
+                  <Text className="flex-shrink text-base" numberOfLines={1}>
+                    {environment.name}
+                  </Text>
+                  <Text className="text-xs text-foreground-muted">{row.mode}</Text>
+                </View>
+                <Text className="text-xs text-foreground-muted">{row.details}</Text>
+                {row.error === null ? null : (
+                  <Text className="text-xs text-danger-foreground">{row.error}</Text>
+                )}
               </View>
             </View>
           );
         })
       )}
       <Text className="px-4 pb-3 text-xs text-foreground-muted">
-        Machines join with <Text className="font-mono text-xs">t3 join</Text>. Rename or remove them
-        from the web or desktop app.
+        Machines join with <Text className="font-mono text-xs">t3 join</Text>. Rename, remove or
+        dedicate them from the web or desktop app.
       </Text>
     </ListSection>
   );

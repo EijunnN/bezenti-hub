@@ -24,10 +24,13 @@ export {
   SANDBOX_RETRY_LABEL,
   SANDBOX_STARTING_LABEL,
   activeEnvironmentLabel,
+  activeEnvironmentStatusLabel,
   activeEnvironmentOf,
+  environmentStatusLabel,
   environmentUnavailableReason,
   noPlacementReason,
   placeableEnvironments,
+  shownEnvironmentStatus,
   threadEnvironmentState,
 } from "@t3tools/client-runtime/environment/hub-environments";
 

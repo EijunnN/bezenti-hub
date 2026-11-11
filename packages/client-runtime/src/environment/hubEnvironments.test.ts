@@ -7,6 +7,7 @@ import {
   type OrchestrationV2ThreadMove,
   ProviderInstanceId,
   SpaceId,
+  UserId,
 } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -14,7 +15,13 @@ import {
   activeEnvironmentLabel,
   activeEnvironmentOf,
   canMoveThread,
+  ENVIRONMENT_STATUS_TONES,
+  environmentStatusLabel,
+  environmentStatusPulses,
   environmentUnavailableReason,
+  environmentUseDescription,
+  environmentUseOf,
+  shownEnvironmentStatus,
   makeHubEnvironmentsPoller,
   moveCandidates,
   moveProgressView,
@@ -345,5 +352,78 @@ describe("canMoveThread", () => {
     expect(
       canMoveThread({ canContinue: false, environmentCount: 0, activeEnvironmentId: null }),
     ).toBe(false);
+  });
+});
+
+describe("the same names, labels and colours on every client", () => {
+  const sandbox = environment({
+    id: EnvironmentId.make("sandbox:acme"),
+    name: "Acme Sandbox",
+    kind: "sandbox",
+    mode: "sandbox",
+  });
+  const vps = environment({
+    id: EnvironmentId.make("env-vps"),
+    name: "Acme VPS",
+    mode: "dedicated",
+  });
+  const laptop = environment({ id: laptopId, name: "Laptop", ownerUserId: UserId.make("user-1") });
+  const hub = environment({
+    id: HUB_MACHINE_ENVIRONMENT_ID,
+    name: "Hub machine",
+    kind: "hub",
+    status: "offline",
+  });
+
+  it("says «Running» for a Sandbox that is online and the same words otherwise", () => {
+    expect(environmentStatusLabel("online", "sandbox")).toBe("Running");
+    expect(environmentStatusLabel("online", "external")).toBe("Online");
+    expect(environmentStatusLabel("failed", "sandbox")).toBe("Failed to start");
+    expect(environmentStatusLabel("stopped", "sandbox")).toBe("Stopped");
+    expect(environmentStatusLabel("starting", "sandbox")).toBe("Starting");
+    expect(shownEnvironmentStatus(hub)).toBe("online");
+  });
+
+  it("gives each status one tone, and pulses only while starting", () => {
+    const statuses: ReadonlyArray<HubEnvironmentStatus> = [
+      "online",
+      "reconnecting",
+      "offline",
+      "stopped",
+      "starting",
+      "failed",
+    ];
+    expect(statuses.map((status) => ENVIRONMENT_STATUS_TONES[status])).toEqual([
+      "success",
+      "warning",
+      "muted",
+      "muted",
+      "warning",
+      "danger",
+    ]);
+    expect(statuses.filter(environmentStatusPulses)).toEqual(["starting"]);
+  });
+
+  it("names how each machine is used, with its Space or owner", () => {
+    expect([hub, sandbox, vps, laptop].map(environmentUseOf)).toEqual([
+      "hub",
+      "sandbox",
+      "dedicated",
+      "personal",
+    ]);
+    expect(environmentUseDescription(hub)).toBe("Runs the Hub");
+    expect(environmentUseDescription(sandbox, { spaceName: "Acme" })).toBe("Sandbox of Acme");
+    expect(environmentUseDescription(vps, { spaceName: "Acme" })).toBe("Dedicated to Acme");
+    expect(environmentUseDescription(vps)).toBe("Dedicated to a Space");
+    expect(environmentUseDescription(laptop, { viewerUserId: "user-1" })).toBe(
+      "Your personal machine",
+    );
+    expect(environmentUseDescription(laptop, { viewerUserId: "owner", ownerName: "Grace" })).toBe(
+      "Grace's personal machine",
+    );
+    expect(environmentUseDescription(laptop, { viewerUserId: "owner" })).toBe(
+      "Another User's personal machine",
+    );
+    expect(environmentUseDescription(laptop)).toBe("Personal machine");
   });
 });

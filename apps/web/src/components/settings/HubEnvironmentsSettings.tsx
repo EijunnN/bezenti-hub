@@ -1,3 +1,7 @@
+import {
+  environmentUseDescription,
+  shownEnvironmentStatus,
+} from "@t3tools/client-runtime/environment/hub-environments";
 import type { HubEnvironmentSummary, SpaceId } from "@t3tools/contracts";
 import { useEffect, useState } from "react";
 
@@ -10,7 +14,7 @@ import {
 } from "../../environments/primary/hubEnvironments";
 import { errorMessageOf } from "../../lib/errorMessage";
 import { useCurrentSpace } from "../../state/currentSpace";
-import { Badge } from "../ui/badge";
+import { EnvironmentStatusBadge } from "../EnvironmentStatusDot";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -27,34 +31,18 @@ import { SettingsRow, SettingsSection } from "./settingsLayout";
 // The list's status is computed on the Hub from heartbeats; polling keeps it current while open.
 const REFRESH_MS = 5_000;
 
-const STATUS_BADGES = {
-  online: { label: "Online", variant: "success" },
-  reconnecting: { label: "Reconnecting", variant: "warning" },
-  offline: { label: "Offline", variant: "outline" },
-  stopped: { label: "Stopped", variant: "outline" },
-  starting: { label: "Starting", variant: "warning" },
-  failed: { label: "Failed to start", variant: "error" },
-} as const;
-
 const gigabytes = (bytes: number) => `${(bytes / 1_000_000_000).toFixed(1)} GB`;
 
 function describe(
   environment: HubEnvironmentSummary,
   viewer: { readonly userId: string | undefined; readonly isOwner: boolean },
-  spaceName: (spaceId: string | null | undefined) => string,
+  spaceName: (spaceId: string | null | undefined) => string | null,
 ) {
   const parts = [
-    environment.kind === "hub"
-      ? "Runs the Hub"
-      : environment.kind === "sandbox"
-        ? "Sandbox"
-        : environment.mode === "dedicated"
-          ? `Dedicated to ${spaceName(environment.spaceId)}`
-          : viewer.userId === undefined
-            ? "Personal machine"
-            : environment.ownerUserId === viewer.userId
-              ? "Your personal machine"
-              : "Another User's personal machine",
+    environmentUseDescription(environment, {
+      spaceName: spaceName(environment.spaceId),
+      viewerUserId: viewer.userId,
+    }),
     environment.os,
     environment.lastSeenAt === null
       ? "never connected"
@@ -187,19 +175,23 @@ export function HubEnvironmentsSettings() {
         // A Space's Sandbox is listed once it has run; until then it is only a choice in the composer.
         .filter((environment) => environment.kind !== "sandbox" || environment.lastSeenAt !== null)
         .map((environment) => {
-          const badge = STATUS_BADGES[environment.status];
           return (
             <SettingsRow
               key={environment.id}
               title={
                 <span className="flex items-center gap-2">
                   {environment.name}
-                  <Badge size="sm" variant={badge.variant}>
-                    {badge.label}
-                  </Badge>
+                  <EnvironmentStatusBadge
+                    status={shownEnvironmentStatus(environment)}
+                    kind={environment.kind}
+                  />
                 </span>
               }
-              description={describe(environment, { userId, isOwner }, spaceName)}
+              description={describe(
+                environment,
+                { userId, isOwner },
+                (spaceId) => spaces?.find((space) => space.id === spaceId)?.name ?? null,
+              )}
               control={
                 manages(environment) && environment.kind !== "sandbox" ? (
                   <div className="flex gap-1">

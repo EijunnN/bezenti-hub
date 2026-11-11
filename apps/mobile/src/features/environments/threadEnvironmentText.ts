@@ -1,12 +1,12 @@
 import {
   type ActiveEnvironmentView,
-  ENVIRONMENT_STATUS_LABELS,
   NEEDS_ENVIRONMENT_LABEL,
   PAUSED_OFFLINE_LABEL,
   SANDBOX_FAILED_LABEL,
   SANDBOX_STARTING_LABEL,
   type ThreadEnvironmentState,
   activeEnvironmentLabel,
+  activeEnvironmentStatusLabel,
   threadEnvironmentState,
 } from "@t3tools/client-runtime/environment/hub-environments";
 import type { HubEnvironmentStatus } from "@t3tools/contracts";
@@ -18,6 +18,10 @@ export interface ThreadEnvironmentPresentation {
   readonly accessibilityText: string;
   readonly status: HubEnvironmentStatus;
   readonly state: ThreadEnvironmentState | null;
+  /** The machine's name, as every client names it. */
+  readonly environmentName: string;
+  /** Why a `failed` Sandbox's last start failed. */
+  readonly startError: string | null;
 }
 
 /**
@@ -49,7 +53,7 @@ export function threadEnvironmentPresentation(input: {
         ? `${stateLabel} · ${environment.name}`
         : environment.status === "online"
           ? environment.name
-          : `${environment.name} · ${ENVIRONMENT_STATUS_LABELS[environment.status]}`;
+          : `${environment.name} · ${activeEnvironmentStatusLabel(environment)}`;
   return {
     text,
     accessibilityText:
@@ -60,5 +64,30 @@ export function threadEnvironmentPresentation(input: {
           : `runs on ${activeEnvironmentLabel(environment)}`,
     status: environment.status,
     state,
+    environmentName: environment.name,
+    startError: environment.startError,
   };
+}
+
+/**
+ * What the notice above a Thread's messages says about where it runs, or null when there is
+ * nothing to say: its machine removed, a turn paused on a machine that is not online, or its
+ * Sandbox starting or failed to start (with why).
+ */
+export function threadEnvironmentNoticeText(
+  runsOn: ThreadEnvironmentPresentation | null,
+): string | null {
+  if (runsOn === null) return null;
+  switch (runsOn.state) {
+    case null:
+      return null;
+    case "needs-environment":
+      return "Needs an environment: the machine this Thread ran on was removed or no longer runs Threads. Move it to continue.";
+    case "sandbox-starting":
+      return `${SANDBOX_STARTING_LABEL} ${runsOn.environmentName} starts for this Thread's work; the Thread goes on once it runs.`;
+    case "sandbox-failed":
+      return `${SANDBOX_FAILED_LABEL}: ${runsOn.startError ?? "the Hub gave no reason"}`;
+    case "paused-offline":
+      return `${runsOn.text}. The turn resumes when the machine comes back, or move the Thread.`;
+  }
 }

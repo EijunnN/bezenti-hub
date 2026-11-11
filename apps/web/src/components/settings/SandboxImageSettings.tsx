@@ -8,7 +8,7 @@ import {
   updateSandboxImage,
 } from "../../environments/primary/sandboxImage";
 import { errorMessageOf } from "../../lib/errorMessage";
-import { Badge } from "../ui/badge";
+import { EnvironmentStatusBadge } from "../EnvironmentStatusDot";
 import { Button } from "../ui/button";
 import { receiveBuildLog, type ShownBuildLog } from "./sandboxImageLog";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
@@ -17,13 +17,6 @@ import { SettingsRow, SettingsSection } from "./settingsLayout";
 const BUILDING_REFRESH_MS = 1_000;
 const IDLE_REFRESH_MS = 5_000;
 const LOG_LINES_SHOWN = 40;
-
-const SANDBOX_BADGES = {
-  running: { label: "Running", variant: "success" },
-  starting: { label: "Starting", variant: "warning" },
-  stopped: { label: "Stopped", variant: "outline" },
-  failed: { label: "Failed to start", variant: "error" },
-} as const;
 
 function imageDescription(status: SandboxImageStatus) {
   const { image } = status;
@@ -202,7 +195,6 @@ export function SandboxImageSettings() {
         </SettingsRow>
       ) : null}
       {(status?.sandboxes ?? []).map((sandbox) => {
-        const badge = SANDBOX_BADGES[sandbox.status];
         const outdated =
           newest !== null && sandbox.imageVersion !== null && sandbox.imageVersion !== newest;
         return (
@@ -211,9 +203,10 @@ export function SandboxImageSettings() {
             title={
               <span className="flex items-center gap-2">
                 {sandbox.name}
-                <Badge size="sm" variant={badge.variant}>
-                  {badge.label}
-                </Badge>
+                <EnvironmentStatusBadge
+                  status={sandbox.status === "running" ? "online" : sandbox.status}
+                  kind="sandbox"
+                />
               </span>
             }
             description={sandboxDescription(sandbox, newest)}

@@ -49,6 +49,7 @@ import {
   type ActiveEnvironmentView,
   type ThreadEnvironmentState,
   ENVIRONMENT_STATUS_LABELS,
+  activeEnvironmentStatusLabel,
   NEEDS_ENVIRONMENT_LABEL,
   PAUSED_OFFLINE_LABEL,
   activeEnvironmentLabel,
@@ -477,8 +478,7 @@ export const ChatHeader = memo(function ChatHeader({
                   : ` · ${ENVIRONMENT_STATUS_LABELS[activeEnvironment.status]}`}
               </TooltipTrigger>
               <TooltipPopup side="top">
-                Runs on {activeEnvironment.name} ·{" "}
-                {ENVIRONMENT_STATUS_LABELS[activeEnvironment.status]}
+                Runs on {activeEnvironment.name} · {activeEnvironmentStatusLabel(activeEnvironment)}
               </TooltipPopup>
             </Tooltip>
           ) : null}

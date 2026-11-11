@@ -1,6 +1,7 @@
 import { type StaticScreenProps, useNavigation } from "@react-navigation/native";
 import {
-  ENVIRONMENT_STATUS_LABELS,
+  environmentStatusLabel,
+  shownEnvironmentStatus,
   canMoveThread,
   activeEnvironmentOf,
   environmentNameOf,
@@ -218,14 +219,14 @@ function MoveThreadForm({ threadRef }: { readonly threadRef: ScopedThreadRef }) 
               ) : (
                 candidates.map((environment, index) => {
                   const reason = reasonOf(environment);
-                  const status = environment.kind === "hub" ? "online" : environment.status;
+                  const status = shownEnvironmentStatus(environment);
                   return (
                     <View key={environment.id} className="flex-row items-center pl-3">
                       <EnvironmentStatusDot status={status} />
                       <View className="flex-1">
                         <ListChoiceRow
                           label={environment.name}
-                          description={reason ?? ENVIRONMENT_STATUS_LABELS[status]}
+                          description={reason ?? environmentStatusLabel(status, environment.kind)}
                           selected={target === environment.id}
                           disabled={reason !== null}
                           separated={index > 0}

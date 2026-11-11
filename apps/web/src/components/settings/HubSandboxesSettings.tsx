@@ -1,5 +1,6 @@
 import type {
   EnvironmentId,
+  HubDedicatedSpaceLimits,
   HubSandboxDetail,
   HubSandboxList,
   SandboxLimitEnforcement,
@@ -14,6 +15,7 @@ import {
   setHubSandboxLimits,
 } from "../../environments/primary/hubEnvironments";
 import { errorMessageOf } from "../../lib/errorMessage";
+import { EnvironmentStatusBadge } from "../EnvironmentStatusDot";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import {
@@ -31,15 +33,6 @@ import { SettingsRow, SettingsSection } from "./settingsLayout";
 // Status and use are read on the Hub; polling keeps them current while Settings is open.
 const REFRESH_MS = 5_000;
 const GIB = 1024 ** 3;
-
-const STATUS_BADGES = {
-  online: { label: "Running", variant: "success" },
-  reconnecting: { label: "Reconnecting", variant: "warning" },
-  offline: { label: "Offline", variant: "outline" },
-  stopped: { label: "Stopped", variant: "outline" },
-  starting: { label: "Starting", variant: "warning" },
-  failed: { label: "Failed", variant: "error" },
-} as const;
 
 const bytes = (value: number) =>
   value >= GIB ? `${(value / GIB).toFixed(1)} GiB` : `${Math.round(value / 1024 ** 2)} MiB`;
@@ -114,6 +107,46 @@ function describeSandbox(sandbox: HubSandboxDetail, enforcement: SandboxLimitEnf
           <span className="text-destructive-foreground">{sandbox.error}</span>
         </>
       ) : null}
+    </>
+  );
+}
+
+// A dedicated machine applies CPU, memory and processes itself; disk is the Hub's own check.
+const ON_DEDICATED_MACHINES: SandboxLimitEnforcement = {
+  cpus: true,
+  memory: true,
+  pids: true,
+  disk: false,
+  note: null,
+};
+
+/** The Space's name for a dedicated row, or «A Space» when the Owner has none for it. */
+const dedicatedSpaceLabel = (space: HubDedicatedSpaceLimits) => space.spaceName ?? "A Space";
+
+/** «Its own: 8.0 GiB memory; the rest are the defaults.», naming only the values it sets. */
+function ownLimitsText(own: SandboxLimits) {
+  const set = [
+    own.cpus === null ? null : `${own.cpus} CPUs`,
+    own.memoryBytes === null ? null : `${bytes(own.memoryBytes)} memory`,
+    own.pids === null ? null : `${own.pids} processes`,
+    own.diskBytes === null ? null : `${bytes(own.diskBytes)} disk`,
+  ].filter((part) => part !== null);
+  if (set.length === 0) return "Uses the default limits.";
+  return `Its own: ${set.join(" · ")}${set.length < 4 ? "; the rest are the defaults." : "."}`;
+}
+
+function describeDedicatedSpace(space: HubDedicatedSpaceLimits) {
+  return (
+    <>
+      {`Runs its Sandbox on ${space.machines.length === 1 ? "a machine" : "machines"} dedicated to it: ${space.machines
+        .map((machine) => machine.name)
+        .join(", ")}`}
+      <br />
+      {`Limits: ${describeLimits(space.effective, ON_DEDICATED_MACHINES)}`}
+      <br />
+      {ownLimitsText(space.own)}
+      <br />
+      Each machine applies them on its Sandbox&apos;s next start, up to what it has.
     </>
   );
 }
@@ -306,14 +339,55 @@ export function HubSandboxesSettings() {
           }
         />
       ) : null}
-      {list.sandboxes.length === 0 ? (
+      {list.sandboxes.length === 0 && (list.dedicatedSpaces ?? []).length === 0 ? (
         <SettingsRow
           title="No Sandboxes yet"
           description="A Space's Sandbox is made when its first Thread runs there."
         />
       ) : null}
+      {(list.dedicatedSpaces ?? []).map((space) => {
+        const [first] = space.machines;
+        const label = dedicatedSpaceLabel(space);
+        return (
+          <SettingsRow
+            key={`dedicated:${space.spaceId}`}
+            title={
+              <span className="flex flex-wrap items-center gap-2">
+                {`${label} · dedicated`}
+                {space.machines.map((machine) => (
+                  <EnvironmentStatusBadge
+                    key={machine.environmentId}
+                    status={machine.status}
+                    kind="external"
+                  />
+                ))}
+              </span>
+            }
+            description={describeDedicatedSpace(space)}
+            control={
+              first === undefined ? null : (
+                <Button
+                  aria-label={`Change limits of ${label} on its dedicated machines`}
+                  disabled={pending}
+                  size="xs"
+                  variant="outline"
+                  onClick={() =>
+                    setEditing({
+                      // The Hub sets the Space's own through any of its dedicated machines.
+                      environmentId: first.environmentId,
+                      title: `Limits of ${label} on its dedicated machines`,
+                      fields: toFields(space.own),
+                    })
+                  }
+                >
+                  Limits
+                </Button>
+              )
+            }
+          />
+        );
+      })}
       {list.sandboxes.map((sandbox) => {
-        const badge = STATUS_BADGES[sandbox.status];
         const running = sandbox.status === "online" || sandbox.status === "reconnecting";
         const busy = pending || sandbox.status === "starting";
         return (
@@ -322,9 +396,7 @@ export function HubSandboxesSettings() {
             title={
               <span className="flex items-center gap-2">
                 {sandbox.name}
-                <Badge size="sm" variant={badge.variant}>
-                  {badge.label}
-                </Badge>
+                <EnvironmentStatusBadge status={sandbox.status} kind="sandbox" />
               </span>
             }
             description={describeSandbox(sandbox, list.enforcement)}

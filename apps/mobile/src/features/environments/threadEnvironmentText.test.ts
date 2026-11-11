@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { threadEnvironmentPresentation } from "./threadEnvironmentText";
+import {
+  threadEnvironmentNoticeText,
+  threadEnvironmentPresentation,
+} from "./threadEnvironmentText";
 
 const laptop = (status: "online" | "reconnecting" | "offline") => ({
   name: "Laptop",
@@ -121,5 +124,81 @@ describe("threadEnvironmentPresentation", () => {
         turnUnderWay: true,
       }),
     ).toBeNull();
+  });
+});
+
+describe("a Thread on a Sandbox or a dedicated machine", () => {
+  const sandbox = (
+    status: "online" | "stopped" | "starting" | "failed",
+    startError: string | null = null,
+  ) =>
+    threadEnvironmentPresentation({
+      environment: {
+        name: "Acme Sandbox",
+        status,
+        isHubMachine: false,
+        needsEnvironment: false,
+        isSandbox: true,
+        startError,
+      },
+      hasJoinedEnvironments: true,
+      turnUnderWay: false,
+    });
+
+  it("names the Sandbox with its state, the same words as web", () => {
+    expect(sandbox("online")).toMatchObject({ text: "Acme Sandbox", state: null });
+    expect(sandbox("stopped")).toMatchObject({ text: "Acme Sandbox · Stopped", state: null });
+    expect(sandbox("starting")).toMatchObject({
+      text: "Starting the Sandbox… · Acme Sandbox",
+      state: "sandbox-starting",
+      status: "starting",
+    });
+    expect(sandbox("failed", "Podman is not installed")).toMatchObject({
+      text: "The Sandbox could not start · Acme Sandbox",
+      accessibilityText: "the sandbox could not start, runs on Acme Sandbox",
+      state: "sandbox-failed",
+    });
+  });
+
+  it("explains in the Thread why it waits: starting, failed with why, or needing an environment", () => {
+    expect(threadEnvironmentNoticeText(sandbox("online"))).toBeNull();
+    expect(threadEnvironmentNoticeText(sandbox("stopped"))).toBeNull();
+    expect(threadEnvironmentNoticeText(sandbox("starting"))).toBe(
+      "Starting the Sandbox… Acme Sandbox starts for this Thread's work; the Thread goes on once it runs.",
+    );
+    expect(threadEnvironmentNoticeText(sandbox("failed", "Podman is not installed"))).toBe(
+      "The Sandbox could not start: Podman is not installed",
+    );
+    const removed = threadEnvironmentPresentation({
+      environment: {
+        name: "No environment",
+        status: "offline",
+        isHubMachine: false,
+        needsEnvironment: true,
+        isSandbox: false,
+        startError: null,
+      },
+      hasJoinedEnvironments: false,
+      turnUnderWay: false,
+    });
+    expect(removed).toMatchObject({ text: "Needs an environment", state: "needs-environment" });
+    expect(threadEnvironmentNoticeText(removed)).toMatch(/^Needs an environment: /u);
+  });
+
+  it("names a dedicated machine like any machine, with its status", () => {
+    expect(
+      threadEnvironmentPresentation({
+        environment: {
+          name: "Acme VPS",
+          status: "offline",
+          isHubMachine: false,
+          needsEnvironment: false,
+          isSandbox: false,
+          startError: null,
+        },
+        hasJoinedEnvironments: true,
+        turnUnderWay: true,
+      }),
+    ).toMatchObject({ text: "Paused, environment offline · Acme VPS", state: "paused-offline" });
   });
 });
