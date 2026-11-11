@@ -655,8 +655,9 @@ const make = Effect.gen(function* () {
         : {
             fromHub: {
               projectId,
-              ...(branch === null || branch === UNREADABLE ? {} : { branch }),
-              upstreams: originUpstreams(upstreams === UNREADABLE ? "" : (upstreams ?? "")),
+              // `offered` already ruled UNREADABLE out for both.
+              ...(branch === null ? {} : { branch }),
+              upstreams: originUpstreams(upstreams ?? ""),
             },
           }),
       ...(subfolder === undefined || subfolder === "" ? {} : { subfolder }),
