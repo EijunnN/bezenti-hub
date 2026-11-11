@@ -598,6 +598,10 @@ describe("Hub con Environments: add a machine over SSH", () => {
       const refused = runOf(again.body);
       assert.equal(refused.state, "failed", JSON.stringify(refused));
       assert.match(refused.error ?? "", /already installed as Acme VPS/u);
+      assert.deepEqual(
+        refused.steps.map((step) => step.state),
+        ["cancelled", "cancelled", "cancelled", "cancelled"],
+      );
       // Nothing signed in or ran there: the machine that is there stays as it is.
       assert.equal(machine.authentications.slice(signIns).includes("publickey"), false);
       assert.deepEqual(

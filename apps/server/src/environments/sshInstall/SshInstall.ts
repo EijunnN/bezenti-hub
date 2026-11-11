@@ -458,6 +458,7 @@ const make = Effect.gen(function* () {
         run.state = "failed";
         run.error = message;
         run.credentials = undefined;
+        for (const step of run.steps) step.state = "cancelled";
         run.finishedAt = yield* nowIso;
         yield* Deferred.succeed(run.done, undefined);
         return viewOf(run);
