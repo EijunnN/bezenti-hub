@@ -321,6 +321,7 @@ const CHECK_EXITS: Record<number, string> = {
   12: "Podman is missing and could not be installed (no passwordless sudo, or no known package manager). Install rootless Podman there, then add the machine again.",
   13: "Installing Podman failed.",
   14: "Podman does not run rootless for that user.",
+  15: "Lingering is off for that user and could not be turned on (its service would stop at logout). As root there, run loginctl enable-linger with that user, then add the machine again.",
 };
 
 const make = Effect.gen(function* () {
