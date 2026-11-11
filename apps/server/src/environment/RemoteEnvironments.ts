@@ -36,6 +36,7 @@ import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import type * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -86,8 +87,14 @@ import {
   type WireSessionFeatures,
 } from "./RemoteExecutorWire.ts";
 
-/** How long a call made for an effect waits for a dropped Environment before giving up. */
-const RECONNECT_WAIT = "30 seconds";
+/**
+ * How long a call made for an effect waits for a dropped Environment before giving up, read when
+ * the Hub starts. Tests that need a machine's return awaited for good set it to infinity.
+ */
+export const ReconnectWait = Context.Reference<Duration.Input>(
+  "t3/environment/RemoteEnvironments/ReconnectWait",
+  { defaultValue: () => "30 seconds" },
+);
 /** Resends of one keyed call across reconnects; the machine answers each from its memory. */
 const MAX_RESENDS = 3;
 /** Lookups of a Thread's Active environment before an event is left for the next resend. */
@@ -306,6 +313,7 @@ const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
   const digester = yield* Digest.Digest;
+  const reconnectWait = yield* ReconnectWait;
   // Without git processes (orchestration-only hosts) a missing checkout is not cloned.
   const vcs = yield* Effect.serviceOption(VcsProcess.VcsProcess);
   const visibility = yield* Effect.serviceOption(SpaceVisibility.SpaceVisibility);
@@ -400,6 +408,10 @@ const make = Effect.gen(function* () {
     link: Link,
     operation: RemoteOperation,
     input: unknown,
+    options?: {
+      /** Stops waiting for the machine once the Hub is stopping, as then nothing reconnects. */
+      readonly whileHubRuns?: boolean;
+    },
   ): Effect.fn.Return<CallOutcome> {
     const spec = REMOTE_OPERATIONS[operation];
     const payload = yield* encodeJson(spec.input, input).pipe(Effect.orDie);
@@ -424,9 +436,16 @@ const make = Effect.gen(function* () {
       if (idempotencyKey === undefined || resends >= MAX_RESENDS) return { _tag: "unavailable" };
       // A newer socket may already be in place; otherwise wait, bounded, for one.
       if (link.channel === undefined || link.channel === channel) {
-        const reattached = yield* Deferred.await(link.attached).pipe(
-          Effect.timeoutOption(RECONNECT_WAIT),
-        );
+        const returned = Deferred.await(link.attached).pipe(Effect.timeoutOption(reconnectWait));
+        // Interruptible even in a finalizer, so the wait that loses the race ends with it.
+        const reattached = yield* options?.whileHubRuns === true
+          ? Effect.interruptible(
+              Effect.raceFirst(
+                returned,
+                registry.whenHubStops.pipe(Effect.as(Option.none<void>())),
+              ),
+            )
+          : returned;
         if (Option.isNone(reattached)) return { _tag: "unavailable" };
       }
     }
@@ -446,8 +465,9 @@ const make = Effect.gen(function* () {
     driver: ProviderDriverKind,
     operation: RemoteOperation,
     input: unknown,
+    options?: { readonly whileHubRuns?: boolean },
   ): Effect.Effect<A, ProviderAdapter.ProviderAdapterV2Error> =>
-    invoke(link, operation, input).pipe(
+    invoke(link, operation, input, options).pipe(
       Effect.flatMap((outcome) => {
         switch (outcome._tag) {
           case "ok":
@@ -862,11 +882,16 @@ const make = Effect.gen(function* () {
             }),
         ),
       );
+      // A stopping Hub tells only a machine connected now: one that is away finds the session
+      // gone when it returns and drops it (`retired`), as after any Hub restart.
       yield* Effect.addFinalizer(() =>
-        callProvider<void>(link, driver, "provider.detach", {
-          providerSessionId: input.providerSessionId,
-          input: {},
-        }).pipe(Effect.ignore, Effect.andThen(forget)),
+        callProvider<void>(
+          link,
+          driver,
+          "provider.detach",
+          { providerSessionId: input.providerSessionId, input: {} },
+          { whileHubRuns: true },
+        ).pipe(Effect.ignore, Effect.andThen(forget)),
       );
       return makeRuntime(link, driver, instanceId, input.providerSessionId, opened, sink);
     }),

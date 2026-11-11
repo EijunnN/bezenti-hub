@@ -26,6 +26,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -296,6 +297,13 @@ export interface EnvironmentExecutorRegistryShape {
   readonly register: (executor: EnvironmentExecutor) => Effect.Effect<void>;
   /** Removes a joined Environment's executor. The Hub machine's stays. */
   readonly unregister: (environmentId: EnvironmentId) => Effect.Effect<void>;
+  /**
+   * The Hub is stopping: what it still tells joined machines it tells only those connected now,
+   * without waiting for one that is away to return (it reconciles when it next connects).
+   */
+  readonly hubStopping: Effect.Effect<void>;
+  /** Resolves once the Hub is stopping. */
+  readonly whenHubStops: Effect.Effect<void>;
 }
 
 export class EnvironmentExecutorRegistry extends Context.Service<
@@ -695,6 +703,7 @@ const makeRegistry = Effect.fn("EnvironmentExecutor.makeRegistry")(function* (
     new Map([[hubMachine.environmentId, hubMachine]]),
   );
   const changed = yield* PubSub.sliding<void>(1);
+  const stopping = yield* Deferred.make<void>();
   const get: EnvironmentExecutorRegistryShape["get"] = (environmentId) =>
     Ref.get(executors).pipe(
       Effect.flatMap((byEnvironment) => {
@@ -736,6 +745,8 @@ const makeRegistry = Effect.fn("EnvironmentExecutor.makeRegistry")(function* (
       });
       yield* PubSub.publish(changed, undefined);
     }),
+    hubStopping: Deferred.succeed(stopping, undefined).pipe(Effect.asVoid),
+    whenHubStops: Deferred.await(stopping),
   });
 });
 

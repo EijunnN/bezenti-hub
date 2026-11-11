@@ -27,6 +27,7 @@ import type * as McpProviderSessions from "@t3tools/provider-core/server/McpProv
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { makeProviderReplayGate } from "@t3tools/provider-testing/replayGate";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -47,6 +48,7 @@ import {
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { materializeFixtureInput } from "../orchestration-v2/testkit/fixtures/shared.ts";
 import {
@@ -188,6 +190,31 @@ const holdingEvents = (adapters: Adapters, afterEvents: number) =>
     });
     return { layer, reached, release, ended };
   });
+
+/** Resolves `ended` when the machine's session ends there (its scope closes). */
+const notingSessionEnd = (adapters: Adapters, ended: Deferred.Deferred<void>): Adapters =>
+  Layer.effect(
+    ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+    Effect.map(ProviderAdapterRegistry.ProviderAdapterRegistryV2, (registry) => ({
+      ...registry,
+      get: (instanceId: ProviderInstanceId) =>
+        registry.get(instanceId).pipe(
+          Effect.map((adapter) => ({
+            ...adapter,
+            openSession: (open: ProviderAdapter.ProviderAdapterV2OpenSessionInput) =>
+              adapter
+                .openSession(open)
+                .pipe(
+                  Effect.tap(() =>
+                    Effect.addFinalizer(() =>
+                      Deferred.succeed(ended, undefined).pipe(Effect.asVoid),
+                    ),
+                  ),
+                ),
+          })),
+        ),
+    })),
+  ).pipe(Layer.provide(adapters));
 
 /** Turns that write `file` in their workspace, so each turn's checkpoint carries it. */
 const editingTurns = (adapters: Adapters, file: string, content: string) =>
@@ -492,6 +519,32 @@ describe("Hub con Environments: disconnections", () => {
       const result = yield* Fiber.join(replay);
       loaded.variant.assertOutput(result, loaded.transcript);
     }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "a Hub that stops does not wait for a machine that is away; back, the machine drops the session",
+    () =>
+      Effect.gen(function* () {
+        const loaded = yield* loadFixture("simple");
+        const ended = yield* Deferred.make<void>();
+        // Calls wait for good for the machine to return: only a Hub that does not wait can stop.
+        const hub = yield* makeHub({ reconnectWait: Duration.infinity });
+        const laptop = yield* hub.join({
+          name: "Laptop",
+          adapters: notingSessionEnd(loaded.adapters, ended),
+        });
+        const result = yield* replayOn(hub, laptop, loaded);
+        loaded.variant.assertOutput(result, loaded.transcript);
+        // Its session stays open on the Hub; then the machine goes away.
+        yield* goesAway(hub, laptop, laptop.disconnect);
+        // The Hub stops: its provider sessions are released without the machine.
+        yield* hub.service(ProviderSessionManager.ProviderSessionManagerV2).shutdown;
+        const asked = laptop.requests.length;
+        // Back, as after a Hub restart: the Hub no longer has the session, so the machine drops it.
+        yield* laptop.connect;
+        yield* Deferred.await(ended);
+        assert.notInclude(laptop.requests.slice(asked), "provider.detach");
+      }).pipe(Effect.scoped),
   );
 
   it.live(

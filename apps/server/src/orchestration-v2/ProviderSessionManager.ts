@@ -2142,6 +2142,8 @@ export const layerWithOptions = (
       // Shutdown must fit the launcher's 5 s deadline with up to 15 sessions.
       const sessionScopes = yield* Scope.make("parallel");
       const shutdown = Effect.gen(function* () {
+        // First, so no release below waits for a joined machine that is away.
+        if (Option.isSome(environments)) yield* environments.value.hubStopping;
         const activeSessions = [...(yield* Ref.get(sessions)).values()];
         yield* Effect.forEach(
           activeSessions,

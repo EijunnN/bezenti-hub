@@ -27,6 +27,7 @@ import type { McpProviderSessionConfig } from "@t3tools/provider-core/server/mcp
 import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textGeneration";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
+import type * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -199,13 +200,18 @@ const layerTextGeneration = (textGeneration: ProviderTextGeneration | undefined)
       );
 
 const withOrchestration =
-  (textGeneration: ProviderTextGeneration | undefined) =>
+  (textGeneration: ProviderTextGeneration | undefined, reconnectWait: Duration.Input | undefined) =>
   (services: Context.Context<HubServices>) =>
     Effect.gen(function* () {
       const orchestration = yield* Layer.build(
         layerHubOrchestration.pipe(
           Layer.provide(Layer.succeedContext(services)),
           Layer.provide(layerTextGeneration(textGeneration)),
+          Layer.provide(
+            reconnectWait === undefined
+              ? Layer.empty
+              : Layer.succeed(RemoteEnvironments.ReconnectWait, reconnectWait),
+          ),
         ),
       );
       const withRuntime = Context.merge(services, orchestration);
@@ -699,6 +705,8 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     readonly publicUrl?: URL;
     /** How the Owner's SSH installs run (timeouts, the T3 they install). */
     readonly sshInstallPolicy?: SshInstall.SshInstallPolicy["Service"];
+    /** How long the Hub's calls wait for a dropped machine to return (30 s by default). */
+    readonly reconnectWait?: Duration.Input;
   } = {},
 ) {
   const sandboxRoot = yield* FileSystem.FileSystem.pipe(
@@ -730,7 +738,7 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     listen: true,
     ...(options.previewOrigin === undefined ? {} : { previewOrigin: options.previewOrigin }),
     ...(options.publicUrl === undefined ? {} : { publicUrl: options.publicUrl }),
-    extend: withOrchestration(options.textGeneration),
+    extend: withOrchestration(options.textGeneration, options.reconnectWait),
     ...(options.sandboxes === false ? {} : { sandboxRuntime }),
     registry: {
       ...(options.hubRunsAgents === undefined ? {} : { hubRunsAgents: options.hubRunsAgents }),
