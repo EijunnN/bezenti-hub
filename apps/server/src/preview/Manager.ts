@@ -465,7 +465,9 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     resize,
     adjust,
     close,
-    openerOf: (threadId, tabId) => Effect.sync(() => openers.get(compositeKey(threadId, tabId))),
+    openerOf: Effect.fn("PreviewManager.openerOf")(function* (threadId: string, tabId: string) {
+      return openers.get(compositeKey(threadId, tabId));
+    }),
     list,
     events,
     subscribeEvents: PubSub.subscribe(eventsPubSub),
