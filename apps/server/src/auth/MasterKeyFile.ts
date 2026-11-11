@@ -50,11 +50,14 @@ export class MasterKeyError extends Schema.TaggedError<MasterKeyError>()("Master
 const fail = (reason: MasterKeyError["reason"], detail: string, cause?: unknown) =>
   Effect.fail(new MasterKeyError({ reason, detail, ...(cause === undefined ? {} : { cause }) }));
 
-/** Where the master key lives: `T3CODE_MASTER_KEY_FILE`, or `<stateDir>/master.key`. */
+/**
+ * Where the master key lives: `T3CODE_MASTER_KEY_FILE`, or beside the secrets folder
+ * (`<stateDir>/master.key`).
+ */
 export const masterKeyPath = Effect.fn("MasterKeyFile.masterKeyPath")(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const path = yield* Path.Path;
-  return config.masterKeyFile ?? path.join(config.stateDir, "master.key");
+  return config.masterKeyFile ?? path.join(path.dirname(config.secretsDir), "master.key");
 });
 
 const io = (what: string) => (cause: unknown) => fail("io", `Could not ${what}.`, cause);

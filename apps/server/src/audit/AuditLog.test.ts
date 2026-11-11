@@ -595,7 +595,7 @@ it.effect(
         "sandbox.limits.change",
         // environments/HubWithEnvironments.sandboxImage.test.ts
         "sandbox.image.update",
-        // vaults/MasterKeyHttp.test.ts and cli/secrets.test.ts
+        // vaults/MasterKeyHttp.test.ts (export); `t3 secrets key rotate` (cli/secrets.ts)
         "secret.master_key.export",
         "secret.master_key.rotate",
       ];
