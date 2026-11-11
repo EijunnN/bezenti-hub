@@ -780,6 +780,40 @@ startup line saying so. Parsing and matching live in
   treat it as secure, so `__Host-` cookies work, but the Hub's own cookie over plain HTTP keeps its
   bare name.
 
+## The server browser's profiles
+
+The Hub's own Chromium (`ServerBrowser`: tabs a client streams over `/api/preview-stream`, and the
+MCP `preview_*` tools) keeps persistent profiles: cookies, site storage, sign-ins. They are per
+User and per Space, so one User's sign-in in a preview never reaches another User's preview of the
+same app, nor the same User's preview in another Space.
+
+- **One rule, every door.** A tab's profile is decided once, when the tab is set up, from its
+  Thread (`PreviewProfiles.ownerOfThread`): the Thread's effective owner (its own, else its root's,
+  else the Owner's: the User `claimWork` lets work it) in the Thread's Space (`spaceOf`). Every door
+  reaches tabs through their Thread (WS `preview.open` through `PreviewManager`, popups, the MCP
+  tools through `PreviewAutomationBroker`, `/api/preview-stream` attaching to a tab), so all use
+  it. A Thread with no row (a draft) gets a throwaway context of its own, as incognito tabs and an
+  agent's tabs without a named profile always do; `ServerBrowserContexts.contextFor` refuses to
+  open a persistent profile without an owner.
+- **Folders.** `<state>/server-browser/user-profiles/<user>/<space>/<profile>/`, each name the first
+  128 bits of HMAC-SHA256 under a key in the Installation's secret store (`preview-profile-names`),
+  with the level in the hashed text. Names neither collide (also on case-insensitive disks) nor
+  tell whose they are; each Space folder holds an `owner.json` saying whose it is, for the sweeps.
+- **Clearing.** `preview.clearProfile` clears the caller's own profile of that id in every Space
+  they have it, never another User's. Clearing every User's profiles is a separate RPC,
+  `preview.clearAllProfiles`, the Owner's alone (an Installation RPC). `preview.reportProfiles`
+  records the catalog (names, default, recording frame rate) of the reporting client's own User;
+  a tab and an agent's `preview_open`/`preview_status` use the catalog of the Thread's User.
+- **Leaving.** On a Membership or status change (`SpaceDirectory.subscribeMembershipChanges`,
+  `subscribeUserStatusChanges`), and at startup and hourly, a User's Space folders go when they no
+  longer see that Space, or are removed (a disabled User keeps theirs), and so does any folder named
+  under another key or not saying whose it is. Open contexts close first.
+- **Bounds.** Chromium's HTTP cache is capped at 64 MB per profile (`--disk-cache-size`). Hourly, a
+  closed profile nobody opened for 30 days goes, and one over 512 MB loses its caches, then
+  everything if that is not enough.
+- **Before.** Every User shared `server-browser/profiles/<profile id>/`; whose its sign-ins were
+  cannot be told, so it is deleted at startup. Users sign in again in their own profiles.
+
 ## Dedicated machines
 
 A machine the Owner gave to one Organization (spec 3 ticket 09). On the Hub it is an External

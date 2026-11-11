@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off - Owns Playwright resources outside the Effect runtime.
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off - Owns Playwright resources and profile folders outside the Effect runtime.
 import { constVoid } from "effect/Function";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeModule from "node:module";
