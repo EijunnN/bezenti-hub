@@ -37,6 +37,8 @@ const SECRET_REQUEST_FAILURE_MESSAGES = {
     "That secretRef was already used or does not exist. Ask the user again with request_secret.",
   ref_expired: "That secretRef expired. Ask the user again with request_secret.",
   consume_failed: "Could not use that secretRef. Try again.",
+  file_delivery_unavailable:
+    'This Hub keeps no secret on its disk and has no folder in memory to hand this one over as a file. Ask again with request_secret and delivery: "secretRef".',
   not_a_file_request:
     'The user did not save this secret for shell use. Ask again with request_secret and delivery: "file".',
 } as const;

@@ -1,12 +1,25 @@
 # Secrets at rest and the master key
 
 The Hub keeps its secrets in `ServerSecretStore` (`apps/server/src/auth/ServerSecretStore.ts`): one
-file per name in `<stateDir>/secrets/<name>.bin`. Session signing keys, preview-profile HMAC keys,
-provider and source-control credentials from Settings (`settingsSecrets.ts`), the SSH key the Owner
-keeps «for updates» (`ssh-install-key-<id>`), `request_secret` answers and replay markers all live
-there. Since spec 5 («Vaults», ticket 01) every entry is encrypted with a **master key** that lives
-in a file of its own. Callers do not know: the store's API (`get`, `set`, `create`,
-`getOrCreateRandom`, `remove`) did not change.
+file per name in `<stateDir>/secrets`. Session signing keys, preview-profile HMAC keys, provider and
+source-control credentials from Settings (`settingsSecrets.ts`), the SSH key the Owner keeps «for
+updates» (`ssh-install-key-<id>`), `request_secret` answers and replay markers all live there. Since
+spec 5 («Vaults», ticket 01) every entry is encrypted with a **master key** that lives in a file of
+its own. Callers do not know: the store's API (`get`, `set`, `create`, `getOrCreateRandom`,
+`remove`) did not change.
+
+## Files
+
+- `<name>.sealed`: an entry sealed with the master key. `<name>.bin`: an entry in clear, from before
+  encryption (sealed at the next start) or on a joined machine that never was a Hub. Which is which
+  is told **by the name only**, never by the bytes: a random value that happens to start like a
+  sealed one is still read as written.
+- `master-key.check`: sealed by the key it checks, it records the key file the Hub last started
+  with (a command using another `T3CODE_MASTER_KEY_FILE` warns).
+- `master-key.backup`: sealed, when the Owner last confirmed a backup of this key. Neither file is
+  an entry, so no `set` of any name can write them.
+- Every write goes through `atomicFile.ts`: an owner-only `wx` temp file, fsync, rename (replace) or
+  link (create only), fsync of the folder. The key file uses the same helper.
 
 ## The sealed format
 
@@ -17,8 +30,8 @@ in a file of its own. Callers do not know: the store's API (`get`, `set`, `creat
 ```
 
 - **AES-256-GCM** under a subkey `HKDF-SHA256(master key, info = "t3code <purpose> v1")`: one subkey
-  per use (`server-secret` for entries, `key-check` for the check below; Vault values in the
-  database, ticket 02, get their own purpose).
+  per use (`server-secret` for entries, `key-check`, `backup-record`, `secret-file`; Vault values in
+  the database, ticket 02, get their own).
 - **A fresh random 96-bit nonce per seal.** Two writes of one value never share bytes. A Hub writes
   a few thousand entries per key, far below the 2³² seals per key where random nonces start to
   matter.
@@ -27,82 +40,115 @@ in a file of its own. Callers do not know: the store's API (`get`, `set`, `creat
 - **Key id:** the first 8 bytes of `HKDF(master key, "t3code master key id v1")`: a fingerprint that
   names the key without revealing it. It tells "sealed by another key" from "damaged", and lets a
   rotation stop and resume.
-- The magic starts with a NUL byte, which no text value does: a value stored in clear before
-  encryption is told from a sealed one. A future format byte is "unknown format", never "plain".
 
 ## The master key file
 
 - 32 random bytes, written as one line `t3-master-key-v1:<base64url>`: the same text is the
   backup.
 - Default `<stateDir>/master.key`; `T3CODE_MASTER_KEY_FILE` puts it elsewhere (off the disk that is
-  backed up). It is the only secret of the Hub kept in clear.
-- Created on first start with mode `0600` (exclusive create: a CLI and the server starting together
-  end with one key). On POSIX a key file that group or others may read stops the startup with
-  «run `chmod 600 <file>`». On Windows mode bits mean nothing: the file inherits the ACL of its
-  folder, which under the user's profile (the default state directory) is that user's alone; put
-  `T3CODE_MASTER_KEY_FILE` in a folder with the same ACL.
-- Never in the database, a log, a span, an error message or a process argument: its bytes sit in a
-  private field of `MasterKey` (inspecting or serialising one shows only its id), errors name files
-  and key ids only, and `t3 secrets key import` reads the key from a file or stdin, never argv.
-- Client file reads and git never serve it: `serverInternalPaths.ts` treats it and its
-  `.next`/`.previous`/`.replaced-*` siblings as internal, like the secrets folder.
+  backed up). It must be an absolute path (or start with `~`): a server and a CLI started from
+  different folders would otherwise read different files. It is the only secret of the Hub kept in
+  clear.
+- Created on first start with mode `0600` (exclusive create: two processes starting together end
+  with one key).
+- **Permissions**, checked on the open handle at every start (POSIX):
+  - owner-only (`0600` or tighter) passes;
+  - a file owned by root that group and others cannot write (`0440`/`0444`, a Kubernetes or Docker
+    secret mount) passes: an administrator placed it and decides who reads it, this process could
+    not tighten it anyway, and nobody but root can replace it;
+  - anything else stops the startup with «run `chmod 600 <file>`», unless
+    `T3CODE_MASTER_KEY_ALLOW_LOOSE_PERMISSIONS=1`, for file systems without real modes (drvfs under
+    WSL, some NFS mounts), which logs a warning at every start.
+  - On Windows mode bits mean nothing: the file inherits the ACL of its folder, which under the
+    user's profile (the default state directory) is that user's alone; put
+    `T3CODE_MASTER_KEY_FILE` in a folder with the same ACL.
+- Never in the database, a log, a span (not even a span's result), an error message or a process
+  argument: its bytes sit in a private field of `MasterKey` (inspecting or serialising one shows
+  only its id), errors name files and key ids only, the file reader that returns it has no span,
+  and `t3 secrets key import` reads the key from a file or stdin, never argv.
+- Client file reads and git never serve it: `serverInternalPaths.ts` treats exactly the key, its
+  `.next`, `.previous` and `.replaced-<id>` siblings and their temporary files as internal, like the
+  secrets folder; another file that merely shares the name's prefix stays readable. Stale temporary
+  key files (which hold a whole key) are removed at startup.
 
 ## Startup (`MasterKeyFile.openKeyring`)
 
-Every store a Hub process builds runs it before serving anything. In order:
+Two modes:
 
-1. **Read** `master.key`, `master.key.next`, `master.key.previous`, every `<name>.bin` and the key
-   check `secrets/master-key.check` (sealed by the key it checks).
+- **owner**: the server (it holds the server's ownership lock, `serverOwnership.ts`), or a command
+  that took that lock because no server runs. It may create the key, seal, re-seal and finish a
+  rotation.
+- **client**: a command beside a running server (`t3 pair`, `t3 auth`, `t3 secrets key export`…,
+  through `ServerSecretStore.layerClient`). It writes nothing. If the store needs the server's
+  startup (no key yet, entries in clear, a rotation to finish), it fails with «Start the Hub, or
+  stop it and run this again».
+
+In order:
+
+1. **Read** `master.key`, `master.key.next`, `master.key.previous`, the list of entries and the key
+   check.
 2. **No key:** if anything encrypted exists (a sealed entry, the key check, a `.next`/`.previous`
    key), stop: «The master key … is missing … restore it with `t3 secrets key import`». A new key is
-   never created over values another one sealed. Otherwise create the key.
-3. **Check before writing:** an entry sealed by a key the Hub does not have, or a key check that does
-   not open, stops the startup with the key ids involved. Nothing was written.
-4. **Seal what is in clear** (a store from before encryption): each entry is resealed into a
-   temporary file (fsync), then renamed over the old one. A crash leaves every entry either as it was
-   or sealed; the next start seals the rest. Running it twice rewrites nothing.
-5. **Finish a rotation** that stopped (below).
-6. Remove temporary files older than a minute (a write that died may have left one in clear).
+   never created over values another one sealed. Otherwise (owner) create the key.
+3. **Headers only:** each sealed entry's key id (13 bytes read). One sealed by a key the Hub does
+   not have, or a key check that does not open, stops the startup. Nothing was written.
+4. **Anything to write?** Entries in clear, entries under another key (a rotation), expired replay
+   markers. If not, the startup is done: a normal start reads headers only.
+5. **Authenticate before writing:** every live sealed entry is opened in full. A damaged one stops the
+   startup before anything is written.
+6. **Write:** expired replay markers (older than a day) are dropped, not re-sealed; each entry in
+   clear becomes `<name>.sealed` (atomic) and then its `.bin` goes; each entry under another key is
+   re-sealed in place. Every rewritten entry keeps its modification time, which replay-marker
+   pruning reads. A crash leaves every entry either as it was or done; the next start finishes.
+7. **Finish a rotation** that stopped (below), rewrite the key check when needed, remove stale
+   temporary files in the secrets folder and in the key's folder.
 
 After startup a value found in clear, sealed by an unknown key, or under the wrong name fails to read
-(`SecretStoreDecodeError`); the store never accepts a planted plain file as a secret.
+(`SecretStoreDecodeError`); the store never accepts a planted plain file as a secret, and never hands
+out sealed bytes as a value.
 
 ## Backup, import and rotation
 
-- **Backup:** Settings shows «Back up the master key» to the Owner until this key has a backup. The
-  Owner downloads it from Settings («Download master key backup», confirmed with the strong factor:
-  a passkey, or password and TOTP code, in the request) or runs `t3 secrets key export [--output
-  <file>]`. Both record the backup (an entry `master-key-backup`: key id and time; a rotation makes
-  the warning come back) and the audit action `secret.master_key.export` (`via`, `keyId`).
+- **Backup** (`MasterKeyBackup.ts`, the same for Settings and the CLI):
+  1. `export` records `secret.master_key.export` (`via`, `keyId`) in the audit log first; if it
+     cannot, the key is not handed out.
+  2. The key goes to the Owner: Settings («Download master key backup», after the strong factor in
+     the request: a passkey, or password and TOTP code) downloads it as a file; `t3 secrets key
+     export` writes it to a new owner-only file (`--output`, fsynced) or to stdout, and fails if the
+     write did not complete.
+  3. `confirm` records the backup (`master-key.backup`) only once the Owner shows they hold it: the
+     key's first 8 characters after `t3-master-key-v1:`. Settings asks the Owner to type them from
+     the saved file; the CLI confirms itself once the write succeeded. An interrupted or abandoned
+     download leaves the warning on. A rotation makes it come back.
 - **Import** (`t3 secrets key import <file>` or `-` for stdin), with the Hub stopped: the key must
   open the secrets here (the key check and every sealed entry), otherwise nothing changes. A key it
   replaces is kept as `master.key.replaced-<id>`, never discarded. Restoring on another server:
   copy the state directory, import the backup, start.
 - **Rotation** (`t3 secrets key rotate`), with the Hub stopped (it takes the server's ownership
-  lock): writes the new key as `master.key.next`, reseals every entry and the key check under it
-  (each an atomic replace), writes the old key to `master.key.previous`, then renames `.next` over
-  `master.key`. A crash at any step leaves both keys on disk; the next start (or the command again)
-  finishes it. The previous key opens values until the Owner deletes the file. Audit
-  `secret.master_key.rotate`.
+  lock): writes the new key as `master.key.next`, re-seals every entry and the key check under it
+  (each an atomic replace, after authenticating all of them), drops the old backup record, writes
+  the old key to `master.key.previous`, then renames `.next` over `master.key`. A crash at any step
+  leaves both keys on disk; the next start (or the command again) finishes it. The previous key
+  opens values until the Owner deletes the file. Audit `secret.master_key.rotate`.
 
 ## HTTP door
 
-`GET /api/vaults/master-key` (`vaults.masterKeyStatus`) and `POST /api/vaults/master-key/backup`
-(`vaults.masterKeyBackup`, body `{ reauth }`): the Owner only (`AccessPolicy` action
-`masterKey.backup`), the second with a strong factor in the request. Declared in `DoorRules.ts`. No
+`GET /api/vaults/master-key` (`vaults.masterKeyStatus`), `POST /api/vaults/master-key/backup`
+(`vaults.masterKeyBackup`, body `{ reauth }`) and `POST /api/vaults/master-key/backup/confirm`
+(`vaults.masterKeyBackupConfirm`, body `{ keyId, proof }`): the Owner only (`AccessPolicy` action
+`masterKey.backup`), the download with a strong factor in the request. Declared in `DoorRules.ts`. No
 WS RPC or MCP tool reaches the key.
 
 ## Joined machines
 
-A machine joined to a Hub (its `joined-hub.json` present) keeps its store in clear, and `t3 join`
-writes the credential with `ServerSecretStore.layerJoinedMachine`. The Hub writes a Sandbox's
-credential into the Sandbox's home, which a Podman Sandbox mounts read-only, and a key stored beside
-the credential would protect nothing. A machine that was a Hub before joining cannot read its old
-encrypted entries in joined mode.
+A machine joined to a Hub (its `joined-hub.json` present) that never was a Hub keeps its store in
+clear: the Hub writes a Sandbox's credential into the Sandbox's home, which a Podman Sandbox mounts
+read-only, and a key stored beside the credential would protect nothing. A machine that was a Hub
+(a master key, a key check or a sealed entry in its state directory) keeps its key when it joins
+(`t3 join --force`): what it sealed still opens and new values, the credential included, are sealed
+too. Without the key its sealed entries are an error, never bytes passed off as values.
 
 ## What is not covered here
 
-- `request_secret` answers of type `file` are written, by design, to `secrets/files/<id>` in clear for
-  the agent's own shell, owner-only and swept after 24 h.
 - Vault values in the database (ticket 02) use the same master key and their own purpose; their
   rotation and the database's key check come with them.

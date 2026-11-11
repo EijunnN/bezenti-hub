@@ -24,6 +24,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as SecretFilesDirectory from "./SecretFilesDirectory.ts";
 import * as SecretRequests from "./SecretRequests.ts";
 
 const threadId = ThreadId.make("thread-orchestrator");
@@ -42,6 +43,8 @@ const withService = <A, E>(
     readonly threadId?: ThreadId;
     readonly delivery?: "file";
     readonly directory?: string;
+    /** Where file answers go; by default `<directory>/files`, `memory` finds the real one. */
+    readonly filesIn?: "memory";
     readonly runStatus?: string;
     readonly removeFails?: boolean;
     readonly closedFirst?: boolean;
@@ -57,6 +60,11 @@ const withService = <A, E>(
     const layerDependencies = Layer.mergeAll(
       NodeCrypto.layer,
       NodeServices.layer,
+      options.directory === undefined || options.filesIn === "memory"
+        ? Layer.empty
+        : Layer.succeed(SecretFilesDirectory.SecretFilesDirectory, {
+            directory: `${options.directory}/files`,
+          }),
       Layer.succeed(
         ServerSecretStore.ServerSecretStore,
         ServerSecretStore.ServerSecretStore.of({
@@ -393,6 +401,48 @@ it.effect("a file request moves its value to an owner-only file, once", () =>
     yield* TestClock.setTime(Option.getOrThrow(mtime).getTime() + SECRET_FILE_TTL_MS + 1);
     yield* withService(() => Effect.void, { directory });
     assert.isFalse(yield* fs.exists(file));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("a file answer never touches the Hub's disk in clear, and old ones leave it", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const directory = yield* fs.makeTempDirectoryScoped({ prefix: "secret-files-test-" });
+    // Stands for the user's runtime folder in memory (owner-only, as systemd makes it).
+    const runtime = yield* fs.makeTempDirectoryScoped({ prefix: "secret-runtime-test-" });
+    yield* fs.chmod(runtime, 0o700);
+    // An answer an earlier version left in clear on the disk.
+    const legacyName = "0123456789abcdef0123456789abcdef";
+    yield* fs.makeDirectory(path.join(directory, "files"), { recursive: true });
+    yield* fs.writeFileString(path.join(directory, "files", legacyName), "legacy-answer-77");
+    const file = yield* withService(
+      ({ service }) =>
+        Effect.gen(function* () {
+          yield* service.answer({
+            threadId,
+            turnItemId,
+            answer: { type: "save", secret: "cf_token-on-disk-check" },
+          });
+          return yield* service.saveToFile({ threadId, turnItemId });
+        }),
+      { delivery: "file", directory, filesIn: "memory" },
+    ).pipe(Effect.provideService(HostProcess.Environment, { XDG_RUNTIME_DIR: runtime }));
+    assert.equal(yield* fs.readFileString(file), "cf_token-on-disk-check");
+    assert.isFalse(file.startsWith(directory), "the answer was written under the secrets folder");
+    const onDisk = (yield* fs.readDirectory(directory, { recursive: true })).map((name) =>
+      path.join(directory, name),
+    );
+    for (const entry of onDisk) {
+      if ((yield* fs.stat(entry)).type !== "File") continue;
+      const text = yield* fs.readFileString(entry);
+      assert.notInclude(text, "cf_token-on-disk-check", `${entry} holds the answer`);
+      assert.notInclude(text, "legacy-answer-77", `${entry} still holds an old answer`);
+    }
+    assert.equal(
+      yield* fs.readFileString(path.join(path.dirname(file), legacyName)),
+      "legacy-answer-77",
+    );
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 

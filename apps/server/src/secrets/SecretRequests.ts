@@ -1,6 +1,6 @@
 // Answers stay in the secret store behind one-use refs; orchestration records only request status.
 // Consuming tools keep values out of transcripts, projections, clients and model context.
-// A `file` request instead moves its value to an owner-only file for the agent's own shell.
+// A `file` request instead moves its value to an owner-only file in memory for the agent's shell.
 // A secret the user pasted in chat goes straight to such a file, with no card.
 import {
   CommandId,
@@ -27,6 +27,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as Metrics from "../observability/Metrics.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import { resolveSecretFilesDirectory } from "./SecretFilesDirectory.ts";
 
 const SECRET_REF_PREFIX = "secret-ref:";
 const storeName = (ref: SecretRef) => `secret-request-${ref.slice(SECRET_REF_PREFIX.length)}`;
@@ -74,8 +75,14 @@ const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const threadManagement = yield* ThreadManagementService.ThreadManagementService;
-  // Beside the store's own files so the same owner-only directory and cleanup rules apply.
-  const filesDir = store.directory === undefined ? undefined : path.join(store.directory, "files");
+  // In memory, never on the Hub's disk: the agent's shell reads the answer from there.
+  const filesDir =
+    store.directory === undefined
+      ? undefined
+      : Option.getOrUndefined(yield* resolveSecretFilesDirectory(store.directory));
+  const noFilesDir = new SecretRequestError({
+    reason: store.directory === undefined ? "store_failed" : "file_delivery_unavailable",
+  });
 
   const mac = yield* Mac.Mac;
   // Keyed by the salt's hex text, as refs saved by earlier versions were.
@@ -289,7 +296,7 @@ const make = Effect.gen(function* () {
     ) {
       return yield* new SecretRequestError({ reason: "not_a_file_request" });
     }
-    if (filesDir === undefined) return yield* new SecretRequestError({ reason: "store_failed" });
+    if (filesDir === undefined) return yield* noFilesDir;
     const ref = yield* refFor(input.threadId, item.id);
     const file = path.join(filesDir, ref.slice(SECRET_REF_PREFIX.length));
     return yield* Effect.gen(function* () {
@@ -313,7 +320,7 @@ const make = Effect.gen(function* () {
   const savePasted: SecretRequests["Service"]["savePasted"] = Effect.fn(
     "SecretRequests.savePasted",
   )(function* (input) {
-    if (filesDir === undefined) return yield* new SecretRequestError({ reason: "store_failed" });
+    if (filesDir === undefined) return yield* noFilesDir;
     const ref = yield* refFor(
       input.threadId,
       `pasted\u0000${input.requestNamespace}\u0000${input.requestKey}`,
@@ -366,6 +373,44 @@ const make = Effect.gen(function* () {
     Effect.catchCause((cause) => Effect.logWarning("Could not sweep expired secret files", cause)),
     Effect.withSpan("SecretRequests.sweepExpiredFiles"),
   );
+  // Answers that versions before encryption wrote to `secrets/files/` in clear: moved to the
+  // folder in memory while they last (or removed, where there is none), so none stays on disk.
+  const moveLegacyFiles = Effect.gen(function* () {
+    if (store.directory === undefined) return;
+    const legacyDir = path.join(store.directory, "files");
+    if (legacyDir === filesDir) return;
+    const names = yield* fileSystem.readDirectory(legacyDir).pipe(Effect.orElseSucceed(() => []));
+    const now = yield* Clock.currentTimeMillis;
+    let moved = 0;
+    for (const name of names) {
+      const file = path.join(legacyDir, name);
+      const { mtime } = yield* fileSystem.stat(file);
+      const live =
+        FILE_NAME_PATTERN.test(name) &&
+        !name.endsWith(".partial") &&
+        Option.exists(mtime, (time) => now - time.getTime() <= SECRET_REF_TTL_MS);
+      if (live && filesDir !== undefined) {
+        const target = path.join(filesDir, name);
+        if (!(yield* fileSystem.exists(target))) {
+          yield* writeSecretFile(filesDir, target, yield* fileSystem.readFileString(file));
+          yield* Option.match(mtime, {
+            onNone: () => Effect.void,
+            onSome: (time) => fileSystem.utimes(target, time, time),
+          });
+        }
+        moved += 1;
+      }
+      yield* fileSystem.remove(file, { recursive: true });
+    }
+    yield* fileSystem.remove(legacyDir).pipe(Effect.ignore);
+    yield* Effect.annotateCurrentSpan({ "secret_request.legacy_files_moved": moved });
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Effect.logWarning("Could not move secret files off the disk", cause),
+    ),
+    Effect.withSpan("SecretRequests.moveLegacyFiles"),
+  );
+  yield* moveLegacyFiles;
   const sweep = Effect.andThen(sweepExpired, sweepExpiredFiles);
   yield* sweep;
   yield* sweep.pipe(
