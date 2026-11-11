@@ -1,7 +1,9 @@
 import {
   AuthOrchestrationReadScope,
   CommandId,
+  type ProjectId,
   type ProjectMutation,
+  type SpaceId,
   EnvironmentAuthenticatedPrincipal,
   EnvironmentHttpApi,
   EnvironmentHttpConflictError,
@@ -47,6 +49,29 @@ const failProjectMutation = Effect.fn("environment.projects.failMutation")(funct
     return yield* failEnvironmentInvalidRequest("invalid_command");
   }
   return yield* failEnvironmentInternal("project_mutation_failed", cause);
+});
+
+/** A move, or its plan, is asked exactly as `projects.mutate`'s `project.move`: its scopes, its rule. */
+const authorizeAsMove = Effect.fn("environment.projects.authorizeAsMove")(function* (input: {
+  readonly projectId: ProjectId;
+  readonly spaceId: SpaceId;
+  readonly commandId?: CommandId | undefined;
+  readonly stopThreads?: boolean | undefined;
+}) {
+  const asMove: ProjectMutation = {
+    type: "project.move",
+    commandId: input.commandId ?? CommandId.make("project-move-plan"),
+    projectId: input.projectId,
+    spaceId: input.spaceId,
+  };
+  for (const scope of requiredScopesForProjectMutation(asMove)) {
+    yield* requireEnvironmentScope(scope);
+  }
+  const principal = yield* EnvironmentAuthenticatedPrincipal;
+  yield* authorizeSessionAsRpc(WS_METHODS.projectsMutate, asMove, principal).pipe(
+    Effect.catch(() => failEnvironmentInvalidRequest("invalid_command")),
+  );
+  return principal;
 });
 
 export const layer = HttpApiBuilder.group(
@@ -96,26 +121,24 @@ export const layer = HttpApiBuilder.group(
         }),
       )
       .handle(
+        "move",
+        Effect.fn("environment.projects.move")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const principal = yield* authorizeAsMove(args.payload);
+          const operation = projects.move(args.payload).pipe(CommandActor.actAsSession(principal));
+          return yield* startup.enqueueCommand(operation).pipe(Effect.catch(failProjectMutation));
+        }),
+      )
+      .handle(
         "movePlan",
         Effect.fn("environment.projects.movePlan")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          // Asked exactly as the move it plans: the same scopes, the same rule.
-          const asMove: ProjectMutation = {
-            type: "project.move",
-            commandId: CommandId.make("project-move-plan"),
-            projectId: args.payload.projectId,
-            spaceId: args.payload.spaceId,
-          };
-          for (const scope of requiredScopesForProjectMutation(asMove)) {
-            yield* requireEnvironmentScope(scope);
-          }
-          const principal = yield* EnvironmentAuthenticatedPrincipal;
-          yield* authorizeSessionAsRpc(WS_METHODS.projectsMutate, asMove, principal).pipe(
-            Effect.catch(() => failEnvironmentInvalidRequest("invalid_command")),
-          );
-          return yield* projects
+          const principal = yield* authorizeAsMove(args.payload);
+          // Once the Hub is ready, as for the move itself.
+          const operation = projects
             .movePlan(args.payload)
-            .pipe(CommandActor.actAsSession(principal), Effect.catch(failProjectMutation));
+            .pipe(CommandActor.actAsSession(principal));
+          return yield* startup.enqueueCommand(operation).pipe(Effect.catch(failProjectMutation));
         }),
       );
   }),

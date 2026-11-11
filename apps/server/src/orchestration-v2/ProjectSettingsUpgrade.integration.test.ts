@@ -28,7 +28,11 @@ import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
+import * as ProjectMoveHooks from "../project/ProjectMoveHooks.ts";
 import * as RuntimeLayer from "./runtimeLayer.ts";
+
+/** The orchestration with the Project move hooks it registers in (the server provides them). */
+const layerOrchestration = RuntimeLayer.layer.pipe(Layer.provide(ProjectMoveHooks.layer));
 
 const projectId = ProjectId.make("project:upgrade");
 const icon = { kind: "emoji", emoji: "🦊" } as const;
@@ -135,7 +139,7 @@ const layerRuntime = (dbPath: string) => {
     ),
   );
   return Layer.mergeAll(
-    RuntimeLayer.layer.pipe(Layer.provide(RuntimeLayer.layerProjectService)),
+    layerOrchestration.pipe(Layer.provide(RuntimeLayer.layerProjectService)),
     RuntimeLayer.layerProjectService,
   ).pipe(
     Layer.provide(

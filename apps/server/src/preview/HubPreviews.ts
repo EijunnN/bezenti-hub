@@ -159,6 +159,7 @@ export const randomToken = () => {
 /** A machine's dev servers as the Hub reaches them over its Environment channel. */
 const forwardedTarget = (
   forward: EnvironmentExecutor.EnvironmentWorkspaceForward,
+  threadId: ThreadId,
 ): PreviewProxyTarget => {
   // The machine dropped its socket: nothing waits for it to come back.
   const offline = (port: number) => new PreviewProxyError({ reason: "offline", port });
@@ -173,7 +174,7 @@ const forwardedTarget = (
       return old !== undefined
         ? Stream.fail(old)
         : forward
-            .stream("preview.proxyHttp", request)
+            .stream("preview.proxyHttp", request, { threadId })
             .pipe(
               Stream.catchTag("EnvironmentExecutorUnavailableError", () =>
                 Stream.fail(offline(request.port)),
@@ -185,7 +186,7 @@ const forwardedTarget = (
       return old !== undefined
         ? Stream.fail(old)
         : forward
-            .stream("preview.proxySocket", request)
+            .stream("preview.proxySocket", request, { threadId })
             .pipe(
               Stream.catchTag("EnvironmentExecutorUnavailableError", () =>
                 Stream.fail(offline(request.port)),
@@ -398,7 +399,11 @@ const makeWith = Effect.fn("HubPreviews.make")(function* (options: HubPreviewsOp
     const executor = yield* Effect.option(executors.get(environmentId));
     const forward = Option.flatMap(executor, (found) => found.workspace.forward);
     if (Option.isNone(forward)) return { _tag: "offline", name: usable.value.name };
-    return { _tag: "open", target: forwardedTarget(forward.value), name: usable.value.name };
+    return {
+      _tag: "open",
+      target: forwardedTarget(forward.value, address.threadId),
+      name: usable.value.name,
+    };
   });
 
   /** `check`, answered from the last few seconds unless a Space or Membership changed. */

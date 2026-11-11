@@ -157,6 +157,8 @@ export interface EnvironmentWorkspaceForward {
   readonly stream: <O extends RemoteExecutorWire.RemoteStreamOperation>(
     operation: O,
     input: Omit<RemoteExecutorWire.RemoteInput<O>, "subscriptionId">,
+    /** The Thread it serves: it ends once the Thread no longer runs on this machine. */
+    options?: { readonly threadId?: ThreadId },
   ) => Stream.Stream<
     RemoteExecutorWire.RemoteStreamItem<O>,
     RemoteExecutorWire.RemoteError<O> | EnvironmentExecutorUnavailableError

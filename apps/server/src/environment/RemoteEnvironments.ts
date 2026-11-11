@@ -58,10 +58,10 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as RuntimePolicy from "../orchestration-v2/RuntimePolicy.ts";
 import {
-  boundSpaceOf,
   SandboxSpaceMismatchError,
-  servesSpace,
+  SPACE_REFUSAL_MESSAGES,
   SpaceCheckUnavailableError,
+  spaceRefusalOf,
 } from "../sandboxes/sandboxSpace.ts";
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -351,10 +351,6 @@ const make = Effect.gen(function* () {
     // Fails closed: a Space the Hub could not read refuses the turn, retryably.
     const refuse = (cause: SpaceCheckUnavailableError) =>
       new ProviderAdapter.ProviderAdapterProtocolError({ driver, detail: cause.message, cause });
-    const sandboxSpace = yield* boundSpaceOf(link.environmentId).pipe(
-      Effect.provideService(SqlClient.SqlClient, sql),
-      Effect.mapError(refuse),
-    );
     const [row] = yield* sql<{ readonly spaceId: string | null }>`
       SELECT COALESCE(t.space_id, p.space_id,
         'personal:' || (SELECT user_id FROM users WHERE is_owner = 1)) AS "spaceId"
@@ -366,22 +362,19 @@ const make = Effect.gen(function* () {
         refuse(new SpaceCheckUnavailableError({ environmentId: link.environmentId, cause })),
       ),
     );
-    if (sandboxSpace === undefined) {
-      // A personal machine runs a Thread only while its owner may still work in the Thread's
-      // Space (`environment.use` is checked when placing; resumes and continuations have no
-      // actor): once they left it, or were disabled or removed, nothing new starts there.
-      const serves = yield* servesSpace(link.environmentId, row?.spaceId ?? null).pipe(
-        Effect.provideService(SqlClient.SqlClient, sql),
-        Effect.mapError(refuse),
-      );
-      if (serves) return;
+    // A personal machine runs a Thread only while its owner may still work in the Thread's Space
+    // (`environment.use` is checked when placing; resumes and continuations have no actor).
+    const refusal = yield* spaceRefusalOf(link.environmentId, row?.spaceId ?? null).pipe(
+      Effect.provideService(SqlClient.SqlClient, sql),
+      Effect.mapError(refuse),
+    );
+    if (refusal === undefined) return;
+    if (refusal !== "other-space") {
       return yield* new ProviderAdapter.ProviderAdapterProtocolError({
         driver,
-        detail:
-          "This Thread's machine belongs to someone no longer in its Space. Move it to another Environment.",
+        detail: SPACE_REFUSAL_MESSAGES[refusal],
       });
     }
-    if (row?.spaceId === sandboxSpace) return;
     const mismatch = new SandboxSpaceMismatchError({
       environmentId: link.environmentId,
       threadId,
@@ -909,7 +902,11 @@ const make = Effect.gen(function* () {
    * drops it fails as offline, and when nobody reads it any more the machine is told to stop.
    */
   const forwardStream = (link: Link) =>
-    ((operation: RemoteStreamOperation, input: object) =>
+    ((
+      operation: RemoteStreamOperation,
+      input: object,
+      options?: { readonly threadId?: ThreadId },
+    ) =>
       Stream.callback<unknown, unknown>((queue) =>
         Effect.gen(function* () {
           const channel = link.channel;
@@ -920,7 +917,7 @@ const make = Effect.gen(function* () {
             operation,
             channel,
             queue,
-            threadId: streamThreadOf(input),
+            threadId: options?.threadId ?? streamThreadOf(input),
           });
           yield* Effect.addFinalizer(() =>
             Effect.suspend(() => {

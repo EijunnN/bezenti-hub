@@ -46,36 +46,63 @@ export const boundSpaceOf = Effect.fn("boundSpaceOf")(function* (environmentId: 
   return spaceId === undefined ? undefined : SpaceId.make(spaceId);
 });
 
+/** Why a machine does not run Threads of a Space; each refusal says it in its own words. */
+export type SpaceRefusal =
+  | "other-space"
+  | "owner-left"
+  | "revoked"
+  | "undedicated"
+  | "unknown-machine";
+
+export const SPACE_REFUSAL_MESSAGES: Readonly<Record<SpaceRefusal, string>> = {
+  "other-space": "This Thread is no longer in its machine's Space. Move it to another Environment.",
+  "owner-left":
+    "This Thread's machine belongs to someone no longer in its Space. Move it to another Environment.",
+  revoked: "This Thread's machine was removed from the Hub. Move it to another Environment.",
+  undedicated:
+    "This Thread's machine is not dedicated to any Space now. Move it to another Environment.",
+  "unknown-machine": "The Hub does not know this Thread's machine. Move it to another Environment.",
+};
+
 /**
- * Whether the Environment runs Threads of `spaceId`: the Hub machine any; a Sandbox or dedicated
- * machine its own Space's; a personal machine while its owner is the Owner or an Admin or Member
- * there; a removed machine none. One rule for turns starting and Projects moving. Fails closed.
+ * Why the Environment does not run Threads of `spaceId`, or undefined when it does: the Hub
+ * machine runs any; a removed or unknown machine none; a Sandbox or dedicated machine its own
+ * Space's; a personal machine while its enabled owner is the Owner or in that Space (any Role).
  */
-export const servesSpace = Effect.fn("servesSpace")(function* (
+export const spaceRefusalOf = Effect.fn("spaceRefusalOf")(function* (
   environmentId: EnvironmentId,
   spaceId: string | null,
 ) {
-  if (environmentId === HUB_MACHINE_ENVIRONMENT_ID) return true;
-  const bound = yield* boundSpaceOf(environmentId);
-  if (bound !== undefined) return bound === spaceId;
+  if (environmentId === HUB_MACHINE_ENVIRONMENT_ID) return undefined;
   const sql = yield* SqlClient.SqlClient;
   const [row] = yield* sql<{
     readonly kind: string;
-    readonly mode: string | null;
+    readonly mode: string;
+    readonly spaceId: string | null;
     readonly revoked: number;
     readonly usable: number;
   }>`
-    SELECT e.kind AS kind, e.mode AS mode, e.revoked_at IS NOT NULL AS revoked,
+    SELECT e.kind AS kind, e.mode AS mode, e.space_id AS "spaceId",
+      e.revoked_at IS NOT NULL AS revoked,
       COALESCE(u.removed_at IS NULL AND u.disabled_at IS NULL AND (
         u.is_owner = 1
         OR ${spaceId} = 'personal:' || u.user_id
         OR EXISTS (SELECT 1 FROM space_memberships m
-          WHERE m.user_id = u.user_id AND m.space_id = ${spaceId} AND m.role <> 'guest')
+          WHERE m.user_id = u.user_id AND m.space_id = ${spaceId})
       ), 0) AS usable
     FROM environments e LEFT JOIN users u ON u.user_id = e.owner_user_id
     WHERE e.environment_id = ${environmentId}
   `.pipe(Effect.mapError((cause) => new SpaceCheckUnavailableError({ environmentId, cause })));
-  if (row === undefined || row.kind === "hub") return true;
-  if (row.revoked === 1 || row.mode === "dedicated") return false;
-  return row.mode !== "personal" || row.usable === 1;
+  if (row === undefined) return "unknown-machine" as const;
+  if (row.revoked === 1) return "revoked" as const;
+  if (row.kind === "hub") return undefined;
+  if (row.kind === "sandbox" || row.mode === "dedicated") {
+    if (row.spaceId === null) return "undedicated" as const;
+    return row.spaceId === spaceId ? undefined : ("other-space" as const);
+  }
+  return row.usable === 1 ? undefined : ("owner-left" as const);
 });
+
+/** Whether the Environment runs Threads of `spaceId` (`spaceRefusalOf` says why not). */
+export const servesSpace = (environmentId: EnvironmentId, spaceId: string | null) =>
+  Effect.map(spaceRefusalOf(environmentId, spaceId), (refusal) => refusal === undefined);

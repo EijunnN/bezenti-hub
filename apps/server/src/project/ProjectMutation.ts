@@ -53,12 +53,12 @@ export const projectMutationOperation = Effect.fn("projectMutationOperation")(fu
       });
 
     case "project.move":
-      return yield* projects.move({
+      return (yield* projects.move({
         commandId: mutation.commandId,
         projectId: mutation.projectId,
         spaceId: mutation.spaceId,
         ...(mutation.stopThreads === undefined ? {} : { stopThreads: mutation.stopThreads }),
-      });
+      })).project;
 
     case "project.delete":
       return yield* projects.delete({

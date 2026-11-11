@@ -249,6 +249,15 @@ export const ProjectMutation = Schema.Union([
 ]);
 export type ProjectMutation = typeof ProjectMutation.Type;
 
+/** A move as `project.move` asks it, for the endpoint that answers what it released. */
+export const ProjectMoveInput = Schema.Struct({
+  commandId: CommandId,
+  projectId: ProjectId,
+  spaceId: SpaceId,
+  stopThreads: Schema.optional(Schema.Boolean),
+});
+export type ProjectMoveInput = typeof ProjectMoveInput.Type;
+
 /** Which Project, and where it would go: asked before confirming a move. */
 export const ProjectMovePlanInput = Schema.Struct({
   projectId: ProjectId,
@@ -274,6 +283,13 @@ export const ProjectMovePlan = Schema.Struct({
   needsEnvironment: Schema.Array(ProjectMovePlanThread),
 });
 export type ProjectMovePlan = typeof ProjectMovePlan.Type;
+
+/** The Project once moved, and the Threads the move released (they need an environment now). */
+export const ProjectMoveResult = Schema.Struct({
+  project: Project,
+  released: Schema.Array(ProjectMovePlanThread),
+});
+export type ProjectMoveResult = typeof ProjectMoveResult.Type;
 
 export class ProjectMutationError extends Schema.TaggedError<ProjectMutationError>()(
   "ProjectMutationError",

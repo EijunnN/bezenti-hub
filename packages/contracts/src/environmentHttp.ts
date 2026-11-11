@@ -137,8 +137,10 @@ import {
 } from "./orchestrationV2.ts";
 import {
   Project,
+  ProjectMoveInput,
   ProjectMovePlan,
   ProjectMovePlanInput,
+  ProjectMoveResult,
   ProjectMutation,
   ProjectSnapshot,
 } from "./project.ts";
@@ -1335,6 +1337,15 @@ class EnvironmentProjectsHttpApi extends HttpApiGroup.make("projects")
       headers: OptionalBearerHeaders,
       payload: ProjectMutation,
       success: Project,
+      error: EnvironmentProjectMutationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    // The move itself, answering which Threads it released (`projects.mutate` answers the Project).
+    HttpApiEndpoint.post("move", "/api/projects/move", {
+      headers: OptionalBearerHeaders,
+      payload: ProjectMoveInput,
+      success: ProjectMoveResult,
       error: EnvironmentProjectMutationErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )

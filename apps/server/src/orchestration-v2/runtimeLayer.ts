@@ -471,6 +471,7 @@ const layerProjectMoveThreadsProvided = ProjectMoveThreads.layer.pipe(
     Layer.mergeAll(
       layerOrchestratorProvided,
       ProjectionStore.layer,
+      layerEventSink,
       layerEnvironmentExecutorsProvided,
       // Without it a released Thread's events, terminals and sessions there would go unchecked.
       layerRemoteEnvironmentsProvided,

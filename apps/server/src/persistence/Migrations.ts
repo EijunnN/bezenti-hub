@@ -108,6 +108,7 @@ import Migration0104 from "./Migrations/104_SandboxLimitDefaults.ts";
 import Migration0106 from "./Migrations/106_DedicatedMachines.ts";
 import Migration0107 from "./Migrations/107_DedicatedSandboxCredentials.ts";
 import Migration0108 from "./Migrations/108_SpaceSandboxLimits.ts";
+import Migration0109 from "./Migrations/109_ThreadEnvironmentReleases.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -218,6 +219,7 @@ const migrationEntries = [
   [106, "DedicatedMachines", Migration0106],
   [107, "DedicatedSandboxCredentials", Migration0107],
   [108, "SpaceSandboxLimits", Migration0108],
+  [109, "ThreadEnvironmentReleases", Migration0109],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

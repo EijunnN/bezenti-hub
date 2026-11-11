@@ -14,6 +14,7 @@ import {
   ThreadId,
   UserId,
 } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as TestClock from "effect/testing/TestClock";
 import { fetch as undiciFetch, WebSocket as UndiciWebSocket } from "undici";
@@ -100,6 +101,12 @@ const startDevServer = Effect.acquireRelease(
               headers: request.headers,
               body,
             });
+            // A response that never ends, as a dev server's event stream.
+            if (request.url === "/events") {
+              response.writeHead(200, { "content-type": "text/event-stream" });
+              response.write("data: hello" + String.fromCharCode(10, 10));
+              return;
+            }
             if (request.url === "/old") {
               response.writeHead(302, { location: "/new?from=old" });
               response.end();
@@ -742,6 +749,46 @@ describe("Hub con Environments: what a preview address never does", () => {
       const code = yield* Effect.promise(() => socket.closed).pipe(Effect.timeout("10 seconds"));
       assert.isNumber(code);
       assert.equal((yield* navigate(page, { ...NAVIGATION, cookie: hub.owner })).status, 404);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a long-lived preview response in the old Sandbox is cut when its Project moves", () =>
+    Effect.gen(function* () {
+      const { hub, owner, globex, threadId, ownerSession, previews } = yield* threadInSandbox();
+      const dev = yield* startDevServer;
+      const address = yield* previews.address({
+        userId: owner,
+        sessionId: ownerSession.sessionId,
+        threadId,
+        port: dev.port,
+      });
+      const firstChunk = yield* Deferred.make<void>();
+      const ended = yield* Deferred.make<void>();
+      const request = NodeHttp.get(
+        `${hub.server.url}${address.path}events`,
+        { headers: { ...NAVIGATION, cookie: hub.owner } },
+        (response) => {
+          response.on("data", () => Deferred.doneUnsafe(firstChunk, Effect.void));
+          response.on("end", () => Deferred.doneUnsafe(ended, Effect.void));
+          response.on("error", () => Deferred.doneUnsafe(ended, Effect.void));
+          response.on("close", () => Deferred.doneUnsafe(ended, Effect.void));
+        },
+      );
+      request.on("error", () => Deferred.doneUnsafe(ended, Effect.void));
+      yield* Effect.addFinalizer(() => Effect.sync(() => request.destroy()));
+      yield* Deferred.await(firstChunk);
+      const moved = yield* hub.server.request("/api/projects/mutate", {
+        cookie: hub.owner,
+        body: {
+          type: "project.move",
+          commandId: "move:acme-web:globex:events",
+          projectId: "project:acme-web",
+          spaceId: globex,
+        },
+      });
+      assert.equal(moved.status, 200, JSON.stringify(moved.body));
+      // The stream from the machine the Thread left ends; it never runs on.
+      yield* Deferred.await(ended);
     }).pipe(Effect.scoped),
   );
 

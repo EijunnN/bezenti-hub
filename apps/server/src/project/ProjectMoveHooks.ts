@@ -3,7 +3,7 @@
  * registered late (`ProjectMoveThreads`). Without it a running Thread still blocks the move. See
  * docs/internals/sandboxes.md, «Moving a Project to another Space».
  */
-import type { EnvironmentId, ProviderSessionId, ThreadId } from "@t3tools/contracts";
+import type { ThreadId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -19,16 +19,12 @@ export interface ProjectMoveWork {
     readonly reason: string;
   }) => Effect.Effect<void>;
   /**
-   * The Thread no longer runs on `environmentId` (its Project moved to a Space that machine does
-   * not serve): its sessions there end and lose their MCP credential, and its events, terminals
-   * and previews from there are refused from now on.
+   * Cuts each machine a move released one of these Threads from (`thread_environment_releases`):
+   * its sessions there are detached and lose their MCP credential, and its events, terminals and
+   * previews from there are refused. Idempotent: a release is deleted once done, so a rerun or the
+   * Hub's start finishes one cut short. `all` drains every recorded release.
    */
-  readonly threadReleased: (input: {
-    readonly threadId: ThreadId;
-    readonly environmentId: EnvironmentId;
-    /** Its sessions there, as they were before the move recorded them detached. */
-    readonly providerSessionIds: ReadonlyArray<ProviderSessionId>;
-  }) => Effect.Effect<void>;
+  readonly drainReleases: (threadIds: ReadonlyArray<ThreadId> | "all") => Effect.Effect<void>;
 }
 
 export interface ProjectMoveHooksShape {

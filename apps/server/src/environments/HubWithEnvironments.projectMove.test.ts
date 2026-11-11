@@ -28,7 +28,6 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import { makeProviderReplayGate } from "@t3tools/provider-testing/replayGate";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -321,9 +320,7 @@ describe("Hub con Environments: a Project moves to another Space", () => {
         // Acme's Sandbox reaches nothing of it any more: its repository, its MCP credential.
         assert.equal(yield* repositoryStatus(hub, projectId, acmeSandbox.credential), 403);
         // Its session there is let go (with its MCP credential), on the machine itself.
-        yield* acmeSandbox
-          .awaitRequest("provider.detach", requestsBefore)
-          .pipe(Effect.timeout(Duration.seconds(30)), Effect.orDie);
+        yield* acmeSandbox.awaitRequest("provider.detach", requestsBefore);
         // Nor does it take new work there.
         const refusedMessage = yield* dispatchAs(hub, owner, {
           ...message,
@@ -368,9 +365,13 @@ describe("Hub con Environments: a Project moves to another Space", () => {
         yield* addMember(hub.server, { id: linus, displayName: "Linus" });
         yield* joinOrganization(hub.server, acme, grace, "member");
         yield* joinOrganization(hub.server, globex, grace, "member");
+        // Linus is not in Globex: his machine does not serve it.
         yield* joinOrganization(hub.server, acme, linus, "member");
-        // Linus is only a Guest of Globex: he starts no work there.
-        yield* joinOrganization(hub.server, globex, linus, "guest");
+        // Gus is a Guest of both: his own machine still runs his Threads there.
+        const gus = UserId.make("guest-gus");
+        yield* addMember(hub.server, { id: gus, displayName: "Gus" });
+        yield* joinOrganization(hub.server, acme, gus, "guest");
+        yield* joinOrganization(hub.server, globex, gus, "guest");
         yield* hub.service(SpaceDirectory.SpaceDirectory).changed;
         const at = "2026-01-01T00:00:00.000Z";
         const machine = (
@@ -388,7 +389,13 @@ describe("Hub con Environments: a Project moves to another Space", () => {
           `;
         yield* machine("env-grace", "personal", grace, null);
         yield* machine("env-linus", "personal", linus, null);
+        yield* machine("env-gus", "personal", gus, null);
         yield* machine("env-acme-vps", "dedicated", null, acme);
+        // Dedicated to Globex, but removed from the Hub: it serves nothing.
+        yield* machine("env-removed-vps", "dedicated", null, globex);
+        yield* hub.server.sql`
+          UPDATE environments SET revoked_at = ${at} WHERE environment_id = 'env-removed-vps'
+        `;
         const projectId = ProjectId.make("project:acme-web");
         yield* seedProject(hub.server, {
           projectId,
@@ -405,7 +412,9 @@ describe("Hub con Environments: a Project moves to another Space", () => {
           sandbox: sandboxEnvironmentIdOf(acme),
           grace: "env-grace" as EnvironmentId,
           linus: "env-linus" as EnvironmentId,
+          gus: "env-gus" as EnvironmentId,
           dedicated: "env-acme-vps" as EnvironmentId,
+          removed: "env-removed-vps" as EnvironmentId,
         };
         const orchestrator = hub.service(Orchestrator.OrchestratorV2);
         for (const [name, environmentId] of Object.entries(threads)) {
@@ -437,10 +446,28 @@ describe("Hub con Environments: a Project moves to another Space", () => {
             ["sandbox", sandboxEnvironmentIdOf(acme)],
             ["linus", "env-linus"],
             ["dedicated", "env-acme-vps"],
+            ["removed", "env-removed-vps"],
           ],
         );
-        const moved = yield* moveProject(hub, projectId, globex);
+        // The move answers the Threads it actually released.
+        const moved = yield* hub.server
+          .request("/api/projects/move", {
+            cookie: hub.owner,
+            body: { commandId: "move:acme-web:globex", projectId, spaceId: globex },
+          })
+          .pipe(
+            Effect.map(
+              (response) =>
+                response as unknown as Answer<{
+                  readonly released: ReadonlyArray<{ readonly title: string }>;
+                }>,
+            ),
+          );
         assert.equal(moved.status, 200, JSON.stringify(moved.body));
+        assert.deepEqual(
+          moved.body.released.map((thread) => thread.title),
+          ["sandbox", "linus", "dedicated", "removed"],
+        );
         const where = Effect.forEach(Object.keys(threads), (name) =>
           threadOf(hub, ThreadId.make(`thread:${name}`)).pipe(
             Effect.map(({ thread }): ReadonlyArray<unknown> => [
@@ -455,7 +482,9 @@ describe("Hub con Environments: a Project moves to another Space", () => {
           ["sandbox", globex, null],
           ["grace", globex, "env-grace"],
           ["linus", globex, null],
+          ["gus", globex, "env-gus"],
           ["dedicated", globex, null],
+          ["removed", globex, null],
         ]);
         // Acme's Sandbox is no preference in Globex.
         const [project] = yield* hub.server.sql<{ readonly preferred: string | null }>`
@@ -472,7 +501,9 @@ describe("Hub con Environments: a Project moves to another Space", () => {
           ["sandbox", acme, null],
           ["grace", acme, "env-grace"],
           ["linus", acme, null],
+          ["gus", acme, "env-gus"],
           ["dedicated", acme, null],
+          ["removed", acme, null],
         ]);
         // A Project with no Threads moves too.
         const empty = ProjectId.make("project:empty");
@@ -585,18 +616,13 @@ describe("Hub con Environments: a Project moves to another Space", () => {
       request.on("error", (error) => Deferred.doneUnsafe(answered, Effect.succeed(String(error))));
       request.write("00");
       yield* Effect.addFinalizer(() => Effect.sync(() => request.destroy()));
-      // It is in flight: no answer yet.
-      // oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- Nothing marks that the Hub's route began reading a body; a move before that answers 503, also not 200.
-      yield* Effect.sleep(Duration.millis(500));
+      // It is in flight: the route holds the Project's access, and has not answered.
+      yield* hub.service(SpaceDirectory.SpaceDirectory).projectAccessHeld(projectId);
       assert.isTrue(Option.isNone(yield* Deferred.poll(answered)));
 
       assert.equal((yield* moveProject(hub, projectId, globex)).status, 200);
-      const outcome = yield* Deferred.await(answered).pipe(
-        Effect.timeout(Duration.seconds(10)),
-        Effect.option,
-      );
-      assert.isTrue(Option.isSome(outcome), "the request still runs after the move");
-      assert.notEqual(Option.getOrUndefined(outcome), 200);
+      // It ends (a hang here is the request still running on old access).
+      assert.notEqual(yield* Deferred.await(answered), 200);
       assert.equal(yield* repositoryStatus(hub, projectId, sandbox.credential), 403);
       assert.isDefined(HUB_MACHINE_ENVIRONMENT_ID);
     }).pipe(Effect.scoped),
@@ -667,15 +693,54 @@ describe("Hub con Environments: a Project moves to another Space", () => {
       yield* Deferred.await(attached);
       assert.equal((yield* moveProject(hub, projectId, globex)).status, 200);
       // Its stream there ends at once, and nothing can be typed into it any more.
-      const exit = yield* Fiber.join(ended).pipe(
-        Effect.timeout(Duration.seconds(10)),
-        Effect.orDie,
-      );
+      const exit = yield* Fiber.join(ended);
       assert.isTrue(exit._tag === "Failure" || exit._tag === "Success");
       const typed = yield* workspace
         .terminalWrite({ threadId, terminalId: "term-1", data: "pwd\r" }, owner)
         .pipe(Effect.flip);
       assert.isDefined(typed);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a release a move did not finish is finished by the next move of the Project", () =>
+    Effect.gen(function* () {
+      const loaded = yield* loadFixture("simple");
+      const hub = yield* makeHub({ sandboxAdapters: loaded.adapters });
+      const acme = yield* createOrganization(hub, "Acme");
+      const globex = yield* createOrganization(hub, "Globex");
+      const { threadId, projectId } = yield* runTurnOnSandbox(hub, loaded, acme);
+      const done = yield* awaitThread(
+        hub,
+        threadId,
+        (projection) =>
+          projection.runs.length > 0 && !projection.runs.some((run) => RUNNING.has(run.status)),
+      );
+      const sessionIds = done.providerSessions.map((session) => session.id);
+      assert.isNotEmpty(sessionIds);
+      const acmeSandbox = yield* hub.sandboxOf(acme);
+      // What a Hub that stopped right after the move's commit leaves: the Thread released and
+      // its release recorded, its machine not cut off yet.
+      yield* hub.server.sql`
+        UPDATE projection_projects SET space_id = ${globex} WHERE project_id = ${projectId}
+      `;
+      yield* hub.server.sql`
+        UPDATE orchestration_v2_projection_threads
+        SET space_id = ${globex}, active_environment_id = NULL WHERE thread_id = ${threadId}
+      `;
+      yield* hub.server.sql`
+        INSERT INTO thread_environment_releases (
+          thread_id, environment_id, provider_session_ids_json, released_at
+        ) VALUES (${threadId}, ${sandboxEnvironmentIdOf(acme)}, ${JSON.stringify(sessionIds)},
+          '2026-01-01T00:00:00.000Z')
+      `;
+      const requestsBefore = acmeSandbox.requests.length;
+      // Moving it again (nothing left to move) cuts that machine off, and the record goes.
+      assert.equal((yield* moveProject(hub, projectId, globex)).status, 200);
+      yield* acmeSandbox.awaitRequest("provider.detach", requestsBefore);
+      const left = yield* hub.server.sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count FROM thread_environment_releases
+      `;
+      assert.equal(left[0]?.count, 0);
     }).pipe(Effect.scoped),
   );
 });

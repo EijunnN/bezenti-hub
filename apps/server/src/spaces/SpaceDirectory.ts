@@ -422,24 +422,31 @@ export class SpaceDirectory extends Context.Service<
       readonly spaceId: SpaceId;
     }) => Effect.Effect<void, SpaceClaimError>;
     /**
-     * Runs `effect` with the Project marked moving: no Thread is created or started in it, and
-     * every access a machine holds on it (`holdProjectAccess`) is told to end.
+     * Runs `effect` with the Project marked moving: no Thread is created or started in it, and no
+     * machine takes new access to it (`holdProjectAccess`).
      */
     readonly whileProjectMoves: <A, E, R>(
       projectId: ProjectId,
       effect: Effect.Effect<A, E, R>,
     ) => Effect.Effect<A, E, R>;
-    /** How many moves of the Project started; read before checking a machine's access. */
+    /** How many moves of the Project went ahead; read before checking a machine's access. */
     readonly projectMoveEpoch: (projectId: ProjectId) => Effect.Effect<number>;
     /**
+     * The move goes ahead (its checks passed): every access a machine holds on the Project ends
+     * now, and none checked before this registers after it.
+     */
+    readonly projectAccessEnds: (projectId: ProjectId) => Effect.Effect<void>;
+    /**
      * A machine's request on the Project, authorized at move count `epoch`, for the scope's life:
-     * None while it moves or once a move started since (checked anew on retry); else an effect
-     * that completes when a move starts, so the request ends there.
+     * None while it moves or once a move went ahead since (checked anew on retry); else an effect
+     * that completes when one goes ahead, so the request ends there.
      */
     readonly holdProjectAccess: (
       projectId: ProjectId,
       epoch: number,
     ) => Effect.Effect<Option.Option<Effect.Effect<void>>, never, Scope.Scope>;
+    /** Completes once a machine holds access to the Project (tests wait on it, never a clock). */
+    readonly projectAccessHeld: (projectId: ProjectId) => Effect.Effect<void>;
     /**
      * After a Project and its Threads moved: the Users who see either Space reload what their
      * open connections show (the origin's lose it, the destination's gain it).
@@ -1635,19 +1642,13 @@ const make = Effect.gen(function* () {
   const moving = new Map<string, number>();
   // What machines are doing in each Project now (a git request): a move ends it at once.
   const accessHolds = new Map<string, Set<Deferred.Deferred<void>>>();
-  // Moves started per Project, so an access checked before one started is never held after.
+  // Moves that went ahead per Project, so an access checked before one is never held after it.
   const moveStarts = new Map<string, number>();
+  // Who waits for a machine to hold access to a Project (`projectAccessHeld`).
+  const heldWaiters = new Map<string, Array<Deferred.Deferred<void>>>();
   const whileProjectMoves = <A, E, R>(projectId: ProjectId, effect: Effect.Effect<A, E, R>) =>
     Effect.acquireUseRelease(
-      Effect.suspend(() => {
-        moving.set(projectId, (moving.get(projectId) ?? 0) + 1);
-        moveStarts.set(projectId, (moveStarts.get(projectId) ?? 0) + 1);
-        return Effect.forEach(
-          [...(accessHolds.get(projectId) ?? [])],
-          (moved) => Deferred.succeed(moved, undefined),
-          { discard: true },
-        );
-      }),
+      Effect.sync(() => void moving.set(projectId, (moving.get(projectId) ?? 0) + 1)),
       () => effect,
       () =>
         Effect.sync(() => {
@@ -1660,28 +1661,59 @@ const make = Effect.gen(function* () {
   const projectMoveEpoch = (projectId: ProjectId) =>
     Effect.sync(() => moveStarts.get(projectId) ?? 0);
 
+  const projectAccessEnds = Effect.fn("SpaceDirectory.projectAccessEnds")(function* (
+    projectId: ProjectId,
+  ) {
+    // In one step with the holds it ends: a hold checked before can no longer register after.
+    const ended = yield* Effect.sync(() => {
+      moveStarts.set(projectId, (moveStarts.get(projectId) ?? 0) + 1);
+      return [...(accessHolds.get(projectId) ?? [])];
+    });
+    yield* Effect.forEach(ended, (moved) => Deferred.succeed(moved, undefined), { discard: true });
+  });
+
   const holdProjectAccess = Effect.fn("SpaceDirectory.holdProjectAccess")(function* (
     projectId: ProjectId,
     epoch: number,
   ) {
-    if (moving.has(projectId) || (moveStarts.get(projectId) ?? 0) !== epoch) {
-      return Option.none<Effect.Effect<void>>();
-    }
     const moved = yield* Deferred.make<void>();
-    yield* Effect.acquireRelease(
+    // Checked and registered in one synchronous step, so no move can start in between.
+    const held = yield* Effect.acquireRelease(
       Effect.sync(() => {
+        if (moving.has(projectId) || (moveStarts.get(projectId) ?? 0) !== epoch) {
+          return { held: false, waiters: [] as Array<Deferred.Deferred<void>> };
+        }
         const holds = accessHolds.get(projectId) ?? new Set();
         holds.add(moved);
         accessHolds.set(projectId, holds);
+        const waiters = heldWaiters.get(projectId) ?? [];
+        heldWaiters.delete(projectId);
+        return { held: true, waiters };
       }),
-      () =>
+      ({ held }) =>
         Effect.sync(() => {
+          if (!held) return;
           const holds = accessHolds.get(projectId);
           holds?.delete(moved);
           if (holds?.size === 0) accessHolds.delete(projectId);
         }),
     );
-    return Option.some(Deferred.await(moved));
+    yield* Effect.forEach(held.waiters, (waiter) => Deferred.succeed(waiter, undefined), {
+      discard: true,
+    });
+    return held.held ? Option.some(Deferred.await(moved)) : Option.none<Effect.Effect<void>>();
+  });
+
+  const projectAccessHeld = Effect.fn("SpaceDirectory.projectAccessHeld")(function* (
+    projectId: ProjectId,
+  ) {
+    const waiter = yield* Deferred.make<void>();
+    const already = yield* Effect.sync(() => {
+      if ((accessHolds.get(projectId)?.size ?? 0) > 0) return true;
+      heldWaiters.set(projectId, [...(heldWaiters.get(projectId) ?? []), waiter]);
+      return false;
+    });
+    if (!already) yield* Deferred.await(waiter);
   });
 
   const spaceState = Effect.fn("SpaceDirectory.spaceState")(function* (item: ItemRef) {
@@ -1755,6 +1787,8 @@ const make = Effect.gen(function* () {
     whileProjectMoves,
     holdProjectAccess,
     projectMoveEpoch,
+    projectAccessEnds,
+    projectAccessHeld,
     spaceOf,
     spaceById,
     spacesById,

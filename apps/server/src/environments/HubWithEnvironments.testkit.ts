@@ -1037,6 +1037,16 @@ export const connectProtocolEnvironment = Effect.fn("HubWithEnvironments.connect
     },
   ) {
     const remote = hub.service(RemoteEnvironments.RemoteEnvironments);
+    // Registered as the Owner's machine, as `t3 join` would: the Hub runs nothing on one it
+    // does not know.
+    yield* hub.server.sql`
+      INSERT OR IGNORE INTO environments (
+        environment_id, name, kind, mode, owner_user_id, credential_hash, credential_issued_at,
+        registered_at
+      ) SELECT ${input.environmentId}, 'Protocol', 'external', 'personal', user_id,
+        ${`hash-${input.environmentId}`}, '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z'
+      FROM users WHERE is_owner = 1
+    `.pipe(Effect.orDie);
     const frames = yield* Queue.unbounded<Record<string, unknown>>();
     let receive: (frame: unknown) => Effect.Effect<boolean> = () => Effect.succeed(false);
     let previewSubscription: string | undefined;
