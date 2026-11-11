@@ -129,26 +129,40 @@ const REDACTED = "[redacted]";
 const PRIVATE_KEY_MARKER = /-----(?:BEGIN|END) [A-Z0-9 ]*PRIVATE KEY-----/u;
 /**
  * Any run of this many characters of a secret is redacted wherever it shows, so a piece of it (cut
- * by a chunk, a line or a column) goes too. A secret shorter than this goes when whole.
+ * by a chunk, a line or a column) goes too.
  */
-const SECRET_WINDOW = 12;
+export const SECRET_WINDOW = 12;
+/** A passphrase shorter than this is not scrubbed: it would redact common text, and is weak. */
+const MIN_PASSPHRASE_SCRUBBED = 4;
+
+export interface Scrubber {
+  /** The line with every piece of a secret redacted. */
+  readonly scrub: (line: string) => string;
+  /**
+   * Which characters of `text` belong to a secret (1), with `carried` the coverage of its first
+   * characters known from text before it. For a line cut before its end (`redact` its head).
+   */
+  readonly mask: (text: string, carried?: Uint8Array) => Uint8Array;
+  /** `text` with each run of covered characters as one `[redacted]`. */
+  readonly redact: (text: string, mask: Uint8Array) => string;
+}
 
 /**
- * Removes from a line of the machine's output anything of the run's secrets: any piece of at least
- * 12 characters of the private key's body, its passphrase or the run's grant, a PEM marker of any
- * key, and a shorter passphrase whole. The key never reaches the machine; this is in case it is
- * there anyway, or something echoes it.
+ * Removes from the machine's output anything of the run's secrets, in one pass over the text as it
+ * came: any piece of at least 12 characters of the private key's body, its passphrase or the run's
+ * grant, a passphrase of 4 to 11 characters whole, and a line with a PEM private-key marker. The
+ * key never reaches the machine; this is in case it is there anyway, or something echoes it.
  */
 export const makeScrubber = (secrets: {
   readonly privateKey?: string | undefined;
   readonly passphrase?: string | undefined;
   readonly grant?: string | undefined;
-}) => {
+}): Scrubber => {
   const windows = new Set<string>();
-  const whole = new Set<string>();
+  const whole: Array<string> = [];
   const add = (secret: string) => {
     if (secret.length < SECRET_WINDOW) {
-      if (secret.length > 0) whole.add(secret);
+      if (secret.length >= MIN_PASSPHRASE_SCRUBBED) whole.push(secret);
       return;
     }
     for (let index = 0; index + SECRET_WINDOW <= secret.length; index++) {
@@ -161,23 +175,31 @@ export const makeScrubber = (secrets: {
   }
   if (secrets.passphrase !== undefined) add(secrets.passphrase);
   if (secrets.grant !== undefined) add(secrets.grant);
-  const ordered = [...whole].toSorted((a, b) => b.length - a.length);
-  return (line: string): string => {
-    if (PRIVATE_KEY_MARKER.test(line)) return REDACTED;
-    const covered = new Uint8Array(line.length);
-    for (let index = 0; index + SECRET_WINDOW <= line.length; index++) {
-      if (windows.has(line.slice(index, index + SECRET_WINDOW))) {
+  const mask = (text: string, carried?: Uint8Array) => {
+    const covered = new Uint8Array(text.length);
+    if (carried !== undefined) covered.set(carried.subarray(0, text.length));
+    for (let index = 0; index + SECRET_WINDOW <= text.length; index++) {
+      if (windows.has(text.slice(index, index + SECRET_WINDOW))) {
         covered.fill(1, index, index + SECRET_WINDOW);
       }
     }
+    for (const fragment of whole) {
+      for (let at = text.indexOf(fragment); at !== -1; at = text.indexOf(fragment, at + 1)) {
+        covered.fill(1, at, at + fragment.length);
+      }
+    }
+    return covered;
+  };
+  const redact = (text: string, covered: Uint8Array) => {
+    if (PRIVATE_KEY_MARKER.test(text)) return REDACTED;
     let scrubbed = "";
-    for (let index = 0; index < line.length; index++) {
-      if (covered[index] === 0) scrubbed += line[index];
+    for (let index = 0; index < text.length; index++) {
+      if (covered[index] === 0) scrubbed += text[index];
       else if (index === 0 || covered[index - 1] === 0) scrubbed += REDACTED;
     }
-    for (const fragment of ordered) scrubbed = scrubbed.replaceAll(fragment, REDACTED);
     return scrubbed;
   };
+  return { scrub: (line) => redact(line, mask(line)), mask, redact };
 };
 
 /** The first line of each step's script names it, so a reader of the machine's logs knows. */
@@ -256,56 +278,97 @@ fi
 printf 'Rootless Podman is ready.\\n'
 `;
 
-/** A step's exit code when another step (of an earlier run) still runs on the machine. */
+/** A step's exit code when another step holds the machine; busy only with `STEP_BUSY_MARKER`. */
 export const STEP_BUSY_EXIT = 75;
+/** What only the step wrapper prints when another step holds the machine's step lock. */
+export const STEP_BUSY_MARKER = "its T3 Code step lock is held";
+
+const STEP_LOCK = '"$HOME/.t3/ssh-install/step.lock"';
 
 /**
- * Runs a step in a process group of its own (`setsid`, its id in `~/.t3/ssh-install/step.pid`),
- * stdin passed on. Until it ends or `stopStepScript` stops it, a later step (of «Try again» too)
- * refuses with `STEP_BUSY_EXIT`: a step whose SSH channel is gone goes on there.
+ * Runs a step in a process group of its own (`setsid`) that holds `~/.t3/ssh-install/step.lock`
+ * (`flock`) for its life, with its group id and `token` written in it; stdin passed on. A later
+ * step (of «Try again» too) refuses while it is held. The check step leaves no directory it made.
  */
-export const stepCommand = (script: string): string =>
+export const stepCommand = (
+  script: string,
+  options: { readonly token: string; readonly step: SshInstallStepId },
+): string =>
   `# T3 Code: add a machine over SSH, its step in a process group of its own
+for tool in setsid flock; do
+  command -v "$tool" >/dev/null 2>&1 || { printf '%s (util-linux) is missing on the machine.\\n' "$tool" >&2; exit 1; }
+done
 dir="$HOME/.t3/ssh-install"
-mkdir -p "$dir" && chmod 700 "$dir" || exit 1
-pidfile="$dir/step.pid"
-if [ -s "$pidfile" ]; then
-  group="$(cat "$pidfile")"
-  if kill -0 "-$group" 2>/dev/null; then
-    printf 'Another installation is still running on this machine (process group %s). Wait for it to end, or stop it there with: kill -- -%s\\n' "$group" "$group" >&2
-    exit ${STEP_BUSY_EXIT}
-  fi
+made=
+if [ ! -d "$dir" ]; then
+  mkdir -p "$dir" || exit 1
+  made=1
 fi
-if ! command -v setsid >/dev/null 2>&1; then
-  printf 'setsid (util-linux) is missing on the machine.\\n' >&2
-  exit 1
-fi
+chmod 700 "$dir" || exit 1
 exec 3<&0
-setsid sh -c 'printf "%s\\n" "$$" > "$1"; exec sh -c "$2"' t3-step "$pidfile" ${shellQuote(script)} <&3 3<&- &
+setsid sh -c '
+lock="$1"
+exec 9<>"$lock" || exit 1
+if ! flock -n 9; then
+  printf "Another installation is still running on this machine (${STEP_BUSY_MARKER}, process group %s). Wait for it to end, or stop it there with: kill -- -%s\\n" "$(cut -d " " -f 1 "$lock")" "$(cut -d " " -f 1 "$lock")" >&2
+  exit ${STEP_BUSY_EXIT}
+fi
+printf "%s %s\\n" "$$" "$2" > "$lock"
+if [ -e "$lock.cancel.$2" ]; then
+  rm -f "$lock.cancel.$2"
+  printf "Cancelled before it began.\\n" >&2
+  exit 130
+fi
+sh -c "$3" 9>&-
+' t3-step "$dir/step.lock" ${shellQuote(options.token)} ${shellQuote(script)} <&3 3<&- &
 child=$!
 exec 3<&-
 wait "$child"
 code=$?
-rm -f "$pidfile"
-exit "$code"
+${options.step === "check" ? 'if [ -n "$made" ]; then rm -rf "$dir"; fi\n' : ""}exit "$code"
 `;
 
-/** Stops the step still running on the machine, its whole process group. */
-export const stopStepScript = (): string =>
+/**
+ * Stops the step of `token`, its whole process group, and only when the lock proves it is that
+ * step's: held, with that token. A step that has not taken the lock yet finds a cancel marker for
+ * its token and does not begin; the stop waits a moment for one taking it meanwhile.
+ */
+export const stopStepScript = (token: string): string =>
   `# T3 Code: add a machine over SSH (stop)
-pidfile="$HOME/.t3/ssh-install/step.pid"
-[ -s "$pidfile" ] || exit 0
-group="$(cat "$pidfile")"
-if kill -TERM "-$group" 2>/dev/null; then
-  i=0
-  while [ "$i" -lt 20 ] && kill -0 "-$group" 2>/dev/null; do
-    sleep 0.25
-    i=$((i + 1))
-  done
-  kill -KILL "-$group" 2>/dev/null
-  printf 'Stopped what the step was still doing on the machine.\\n'
-fi
-rm -f "$pidfile"
+lock=${STEP_LOCK}
+token=${shellQuote(token)}
+[ -d "$HOME/.t3/ssh-install" ] || exit 0
+command -v flock >/dev/null 2>&1 || exit 0
+held_by_step() {
+  [ -e "$lock" ] || return 1
+  (
+    exec 9<"$lock" || exit 1
+    if flock -n 9; then exit 1; fi
+    set -- $(cat "$lock")
+    [ "\${2:-}" = "$token" ] || exit 1
+    case "\${1:-}" in '' | *[!0-9]*) exit 1 ;; esac
+    printf '%s\\n' "$1"
+  )
+}
+: > "$lock.cancel.$token"
+group=
+i=0
+while [ "$i" -lt 12 ]; do
+  group="$(held_by_step)" && break
+  group=
+  sleep 0.25
+  i=$((i + 1))
+done
+[ -n "$group" ] || exit 0
+rm -f "$lock.cancel.$token"
+kill -TERM "-$group" 2>/dev/null
+i=0
+while [ "$i" -lt 20 ] && kill -0 "-$group" 2>/dev/null; do
+  sleep 0.25
+  i=$((i + 1))
+done
+kill -KILL "-$group" 2>/dev/null
+printf 'Stopped what the step was still doing on the machine.\\n'
 exit 0
 `;
 

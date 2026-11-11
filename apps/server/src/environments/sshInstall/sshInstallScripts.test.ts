@@ -19,6 +19,9 @@ import {
   registerScript,
   shellQuote,
   sshUsernameRefusal,
+  SECRET_WINDOW,
+  STEP_BUSY_EXIT,
+  STEP_BUSY_MARKER,
   stepCommand,
   stopStepScript,
 } from "./sshInstallScripts.ts";
@@ -148,7 +151,7 @@ describe("SSH install scripts", () => {
 
   it("scrub the key, its passphrase and the grant out of the machine's output", () => {
     const pair = SshUtils.generateKeyPairSync("ed25519");
-    const scrub = makeScrubber({
+    const { scrub } = makeScrubber({
       privateKey: pair.private,
       passphrase: "correct horse",
       grant: "grant-0123456789abcdef",
@@ -204,47 +207,78 @@ describe("SSH install scripts", () => {
   );
 
   it.skipIf(HostProcess.Platform.defaultValue() !== "linux")(
-    "run each step in a process group of its own that a second step waits on and stop ends",
+    "run each step under a lock of its own process group, which only that step's stop ends",
     async () => {
       const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-ssh-step-"));
       const env = { HOME: home, PATH: "/usr/bin:/bin" };
-      const run = (script: string, input = "") =>
-        NodeChildProcess.spawnSync("sh", ["-c", stepCommand(script)], {
-          env,
-          input,
-          encoding: "utf8",
-        });
+      const dir = NodePath.join(home, ".t3", "ssh-install");
+      const lock = NodePath.join(dir, "step.lock");
+      const sh = (command: string, input = "") =>
+        NodeChildProcess.spawnSync("sh", ["-c", command], { env, input, encoding: "utf8" });
+      const run = (script: string, token: string, input = "") =>
+        sh(stepCommand(script, { token, step: "install" }), input);
+      const waitUntil = (done: () => boolean) => {
+        for (let i = 0; i < 200 && !done(); i++) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+        }
+      };
       try {
+        // The check step leaves no directory it made; later steps make it.
+        expect(sh(stepCommand("echo checked", { token: "c", step: "check" })).stdout).toBe(
+          "checked\n",
+        );
+        expect(NodeFS.existsSync(dir)).toBe(false);
         // Its standard input reaches the step, and its exit code comes back.
-        const echoed = run("cat; exit 3", "the runner");
+        const echoed = run("cat; exit 3", "a", "the runner");
         expect(echoed.stdout).toBe("the runner");
         expect(echoed.status).toBe(3);
-        // A step still running (its SSH channel gone) holds the machine.
+
+        // A step still running (its SSH channel gone) holds the lock.
         const long = NodeChildProcess.spawn(
           "sh",
-          ["-c", stepCommand("sleep 60 & sleep 60; echo never")],
+          [
+            "-c",
+            stepCommand("sleep 60 & sleep 60; echo never", { token: "long", step: "install" }),
+          ],
           { env, stdio: "ignore" },
         );
         const exited = new Promise<void>((resolve) => long.on("exit", () => resolve()));
-        const pidfile = NodePath.join(home, ".t3", "ssh-install", "step.pid");
-        for (let i = 0; i < 100 && !NodeFS.existsSync(pidfile); i++) {
-          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-        }
-        const group = NodeFS.readFileSync(pidfile, "utf8").trim();
-        const second = run("echo second");
-        expect(second.status).toBe(75);
-        expect(second.stderr).toContain("Another installation is still running");
+        waitUntil(
+          () => NodeFS.existsSync(lock) && NodeFS.readFileSync(lock, "utf8").includes("long"),
+        );
+        const group = NodeFS.readFileSync(lock, "utf8").split(" ")[0]!;
+        const second = run("echo second", "b");
+        expect(second.status).toBe(STEP_BUSY_EXIT);
+        expect(second.stderr).toContain(STEP_BUSY_MARKER);
         expect(second.stdout).not.toContain("second");
-        // Stopping ends the whole group, its children too.
-        const stopped = NodeChildProcess.spawnSync("sh", ["-c", stopStepScript()], {
-          env,
-          encoding: "utf8",
-        });
-        expect(stopped.status).toBe(0);
+        // Another step's stop leaves it alone; its own stop ends the whole group.
+        expect(sh(stopStepScript("someone-else")).stdout).toBe("");
+        expect(sh(`kill -0 -${group}`).status).toBe(0);
+        expect(sh(stopStepScript("long")).status).toBe(0);
         await exited;
-        const alive = NodeChildProcess.spawnSync("sh", ["-c", `kill -0 -${group}`]);
-        expect(alive.status).not.toBe(0);
-        expect(run("echo again").stdout).toBe("again\n");
+        expect(sh(`kill -0 -${group}`).status).not.toBe(0);
+
+        // A lock its holder left (it died): the next step takes it, nothing stale stops it.
+        expect(run("echo again", "c").stdout).toBe("again\n");
+
+        // A lock file naming a live group it does not hold: no stop kills that group.
+        const bystander = NodeChildProcess.spawn("setsid", ["sleep", "60"], { stdio: "ignore" });
+        const bystanderExited = new Promise<void>((resolve) =>
+          bystander.on("exit", () => resolve()),
+        );
+        waitUntil(() => sh(`kill -0 -${bystander.pid}`).status === 0);
+        NodeFS.writeFileSync(lock, `${bystander.pid} stale\n`);
+        sh(stopStepScript("stale"));
+        expect(sh(`kill -0 -${bystander.pid}`).status).toBe(0);
+        bystander.kill("SIGKILL");
+        await bystanderExited;
+
+        // A stop that comes before its step takes the lock: the step does not begin.
+        sh(stopStepScript("early"));
+        const early = run("echo began", "early");
+        expect(early.stdout).not.toContain("began");
+        expect(early.status).toBe(130);
+        expect(run("echo later", "later").stdout).toBe("later\n");
       } finally {
         NodeFS.rmSync(home, { recursive: true, force: true });
       }
@@ -284,10 +318,36 @@ describe("SSH install scripts", () => {
     expect(forbiddenSshAddress("not-an-ip", hubHost)).toBe("not an IP address");
   });
 
+  it("scrub in one pass: a short passphrase never breaks a redaction, a tiny one is left", () => {
+    const pair = SshUtils.generateKeyPairSync("ed25519");
+    const body = pair.private
+      .split("\n")
+      .filter((line) => line !== "" && !line.startsWith("-"))
+      .join("");
+    // The passphrase is also inside the marker text a window pass leaves: replacing it afterwards
+    // would cut into `[redacted]`.
+    const { scrub } = makeScrubber({ privateKey: pair.private, passphrase: "dact" });
+    expect(scrub(`${body.slice(0, 20)} then dact`)).toBe("[redacted] then [redacted]");
+    expect(makeScrubber({ passphrase: "ab" }).scrub("tab and cab")).toBe("tab and cab");
+  });
+
+  it("carry a cut line's coverage, so no piece of a secret escapes at the cut", () => {
+    const grant = "Gq3ZyX0vWk2LmN8pRt5UaB7cDe9FgHiJ4kLmNoPqRsT";
+    const scrubber = makeScrubber({ grant });
+    const text = `xx${grant.slice(0, 30)}`;
+    const cut = text.length - (SECRET_WINDOW - 1);
+    const mask = scrubber.mask(text);
+    const head = scrubber.redact(text.slice(0, cut), mask.subarray(0, cut));
+    const tail = `${text.slice(cut)}${grant.slice(30, 33)} after`;
+    const rest = scrubber.redact(tail, scrubber.mask(tail, mask.subarray(cut)));
+    expect(head).toBe("xx[redacted]");
+    expect(rest).toBe("[redacted] after");
+  });
+
   it("scrub any long piece of the key or the grant, not only whole lines", () => {
     const pair = SshUtils.generateKeyPairSync("ed25519");
     const grant = "Gq3ZyX0vWk2LmN8pRt5UaB7cDe9FgHiJ4kLmNoPqRsT";
-    const scrub = makeScrubber({ privateKey: pair.private, grant });
+    const { scrub } = makeScrubber({ privateKey: pair.private, grant });
     const body = pair.private
       .split("\n")
       .filter((line) => line !== "" && !line.startsWith("-"))

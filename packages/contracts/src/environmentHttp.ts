@@ -1136,7 +1136,12 @@ class EnvironmentHubEnvironmentsHttpApi extends HttpApiGroup.make("environments"
       headers: OptionalBearerHeaders,
       payload: RemoveHubEnvironmentRequest,
       success: HubEnvironmentList,
-      error: [...EnvironmentHubEnvironmentErrors, EnvironmentResourceNotFoundError],
+      // Conflict: removed, but its kept SSH key or host record could not be deleted (it says so).
+      error: [
+        ...EnvironmentHubEnvironmentErrors,
+        EnvironmentResourceNotFoundError,
+        EnvironmentHttpConflictError,
+      ],
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   // The Owner makes a machine personal or dedicates it to an Organization (environment.mode.change).

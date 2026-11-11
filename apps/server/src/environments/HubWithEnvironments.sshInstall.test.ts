@@ -39,6 +39,7 @@ import * as EnvironmentRegistry from "./EnvironmentRegistry.ts";
 import { listEnvironments } from "./environments.testkit.ts";
 import { type Hub, makeHub } from "./HubWithEnvironments.testkit.ts";
 import * as SshInstall from "./sshInstall/SshInstall.ts";
+import { STEP_BUSY_MARKER } from "./sshInstall/sshInstallScripts.ts";
 import {
   makeTestMachine,
   type StepHandler,
@@ -982,5 +983,118 @@ describe("Hub con Environments: add a machine over SSH", () => {
       const shown = JSON.stringify(done);
       assert.notInclude(shown, keyLine.slice(0, 15));
     }).pipe(Effect.scoped),
+  );
+
+  it.live("cancelled between two steps, undoes on the machine what it registered there", () =>
+    Effect.gen(function* () {
+      const between = yield* Deferred.make<void>();
+      const hub = yield* makeHub({
+        sshInstallPolicy: {
+          ...POLICY,
+          // Holds the run just after `register` succeeded, before `service` begins.
+          afterStep: (_runId, step) =>
+            step === "register"
+              ? Deferred.succeed(between, undefined).pipe(Effect.andThen(Effect.never))
+              : Effect.void,
+        },
+      });
+      const { acme } = yield* acmeWithPeople(hub);
+      const service = hub.service(SshInstall.SshInstall);
+      const ownerId = yield* ownerIdOf(hub);
+      const machine = yield* makeTestMachine();
+      machine.setHandler(healthyMachine(hub).handler);
+      const started = yield* service.start(ownerId, decodeStartRequest(startBody(machine, acme)));
+      yield* service.confirm(ownerId, {
+        runId: started.runId,
+        fingerprint: started.hostKey?.fingerprint ?? "",
+      });
+      yield* Deferred.await(between);
+      yield* service.cancel(ownerId, started.runId);
+      const done = yield* service.awaitFinished(started.runId);
+      assert.equal(done.state, "cancelled", JSON.stringify(done));
+      assert.deepEqual(
+        done.steps.map((step) => step.state),
+        ["succeeded", "succeeded", "succeeded", "cancelled"],
+      );
+      // The machine left the Hub on its side too, and the Owner is told what stays there.
+      assert.include(
+        machine.steps.map((step) => step.step),
+        "undo",
+      );
+      const output = done.steps[3]?.output ?? [];
+      assert.include(output, "The Hub removed the machine it had registered.");
+      assert.isTrue(output.some((line) => line.startsWith("Left on the machine:")));
+      const listed = yield* listEnvironments(hub.server, hub.owner);
+      assert.deepEqual(
+        listed.filter((environment) => environment.name === "Acme VPS"),
+        [],
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("takes a step as busy only from the wrapper's own refusal, which leaves nothing", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub({ sshInstallPolicy: POLICY });
+      const { acme } = yield* acmeWithPeople(hub);
+      const cases = [
+        {
+          // What only the step wrapper prints when another step holds the machine.
+          text: `Another installation is still running on this machine (${STEP_BUSY_MARKER}).\n`,
+          error: /Another installation is still running/u,
+          leftover: false,
+        },
+        // The install itself exiting 75 is a failed install like any other.
+        {
+          text: "curl: something\n",
+          error: /Install T3 Code failed \(exit code 75\)/u,
+          leftover: true,
+        },
+      ];
+      for (const testCase of cases) {
+        const machine = yield* makeTestMachine();
+        machine.setHandler(
+          healthyMachine(hub, { install: (request) => written(request, testCase.text, 75) })
+            .handler,
+        );
+        const done = yield* installOver(hub, machine, acme);
+        assert.equal(done.state, "failed");
+        assert.match(done.error ?? "", testCase.error);
+        assert.equal(
+          (done.steps[1]?.output ?? []).some((line) => line.startsWith("Left on the machine:")),
+          testCase.leftover,
+          JSON.stringify(done.steps[1]),
+        );
+      }
+    }).pipe(Effect.scoped),
+  );
+
+  it.live.skipIf(process.getuid?.() === 0)(
+    "tells the Owner when a removed machine's kept key could not be deleted",
+    () =>
+      Effect.gen(function* () {
+        const hub = yield* makeHub({ sshInstallPolicy: POLICY });
+        const { acme } = yield* acmeWithPeople(hub);
+        const machine = yield* makeTestMachine();
+        machine.setHandler(healthyMachine(hub).handler);
+        const done = yield* installOver(hub, machine, acme, { keepForUpdates: true });
+        assert.equal(done.state, "succeeded", JSON.stringify(done));
+        // Its kept key cannot be deleted now.
+        const secretsDir = hub.service(ServerConfig.ServerConfig).secretsDir;
+        NodeFS.chmodSync(secretsDir, 0o500);
+        const removed = yield* hub.server
+          .request("/api/environments/remove", {
+            cookie: hub.owner,
+            body: { environmentId: done.environmentId },
+          })
+          .pipe(Effect.ensuring(Effect.sync(() => NodeFS.chmodSync(secretsDir, 0o700))));
+        assert.equal(removed.status, 409, JSON.stringify(removed.body));
+        assert.include(JSON.stringify(removed.body), "could not delete its kept SSH key");
+        // The machine itself is removed all the same.
+        const listed = yield* listEnvironments(hub.server, hub.owner);
+        assert.deepEqual(
+          listed.filter((environment) => environment.name === "Acme VPS"),
+          [],
+        );
+      }).pipe(Effect.scoped),
   );
 });

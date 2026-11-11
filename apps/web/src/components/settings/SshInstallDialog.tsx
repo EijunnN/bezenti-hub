@@ -89,6 +89,8 @@ export function SshInstallDialog(props: {
   const [pending, setPending] = useState(false);
   // Closed while the Hub was still reading the host key: that run is cancelled once it answers.
   const closedRef = useRef(false);
+  // While its confirm is on its way, the run is as good as running.
+  const [confirming, setConfirming] = useState(false);
   const running = run?.state === "running";
   const runId = run?.runId;
 
@@ -164,7 +166,7 @@ export function SshInstallDialog(props: {
   // Closing ends a run that has not finished: none waits on its host key, or goes on unseen.
   const close = () => {
     if (
-      running &&
+      (running || confirming) &&
       !window.confirm("Closing cancels the installation and undoes what it did. Close anyway?")
     ) {
       return;
@@ -371,12 +373,13 @@ export function SshInstallDialog(props: {
               </Button>
               <Button
                 disabled={pending || run.hostKey === null}
-                onClick={() =>
+                onClick={() => {
+                  setConfirming(true);
                   void act(
                     () => confirmSshInstall(run.runId, run.hostKey?.fingerprint ?? ""),
                     "The installation did not start.",
-                  )
-                }
+                  ).finally(() => setConfirming(false));
+                }}
               >
                 Trust this key and install
               </Button>

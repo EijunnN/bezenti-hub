@@ -150,11 +150,21 @@ const handlers = HttpApiBuilder.group(
           const environments = yield* registry
             .remove({ actorUserId, environmentId: args.payload.environmentId })
             .pipe(
+              // A machine installed over SSH: its kept key goes with it, or the Owner hears why not.
+              Effect.andThen(sshInstall.forget(args.payload.environmentId)),
               Effect.andThen(registry.list(actorUserId)),
               Effect.catchTags({
                 EnvironmentAccessDeniedError: failForbidden,
                 EnvironmentNotFoundError: () => failEnvironmentNotFound("environment_not_found"),
                 EnvironmentStorageError: failStorage,
+                SshInstallForgetError: (error) =>
+                  Effect.logWarning("SSH install: could not forget a removed machine's key", {
+                    cause: error.cause,
+                  }).pipe(
+                    Effect.andThen(
+                      Effect.fail(new EnvironmentHttpConflictError({ message: error.message })),
+                    ),
+                  ),
               }),
             );
           return { environments, sandboxesUnavailable: registry.sandboxesUnavailable };
