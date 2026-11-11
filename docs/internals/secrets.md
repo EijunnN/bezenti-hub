@@ -148,6 +148,17 @@ read-only, and a key stored beside the credential would protect nothing. A machi
 (`t3 join --force`): what it sealed still opens and new values, the credential included, are sealed
 too. Without the key its sealed entries are an error, never bytes passed off as values.
 
+## request_secret file answers
+
+A `file` answer is for the agent's own shell, which reads it by path, so it cannot be sealed. It
+never touches the Hub's disk: `SecretFilesDirectory.ts` puts it in an owner-only folder in memory,
+`$XDG_RUNTIME_DIR/t3code-secret-files-<hash>` or else `/dev/shm/t3code-secret-files-<hash>` (one per
+state directory; a folder of that name owned by someone else, or open to others, is never used).
+Answers that earlier versions left in clear in `secrets/files/` move there at startup while they
+last, and the folder goes. Where there is no folder in memory (macOS, Windows), `file` delivery is
+refused (`file_delivery_unavailable`) and a `secretRef` still works. Memory pages can still reach
+swap; an encrypted swap closes that.
+
 ## What is not covered here
 
 - Vault values in the database (ticket 02) use the same master key and their own purpose; their

@@ -402,7 +402,8 @@ const make = Effect.gen(function* () {
       }
       yield* fileSystem.remove(file, { recursive: true });
     }
-    yield* fileSystem.remove(legacyDir).pipe(Effect.ignore);
+    // Every file in it was handled above; the folder goes with them.
+    yield* fileSystem.remove(legacyDir, { recursive: true }).pipe(Effect.ignore);
     yield* Effect.annotateCurrentSpan({ "secret_request.legacy_files_moved": moved });
   }).pipe(
     Effect.catchCause((cause) =>

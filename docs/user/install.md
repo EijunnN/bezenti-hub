@@ -341,7 +341,9 @@ in its own file, `master.key` in the Hub's state folder. A copy of the disk or
 of a backup without that file reveals none of them, and without it they are
 lost and everyone signs in again. Until you back it up, **Settings → Access**
 warns «Back up the master key»: **Download master key backup** asks for your
-passkey (or password and code) and saves it. From the Hub's shell:
+passkey (or password and code) and saves it, then asks you to type the first 8
+characters of the key from the saved file; the warning clears only then. From
+the Hub's shell:
 
 - `t3 secrets key export --output <file>` writes it to a new owner-only file;
 - `t3 secrets key import <file>` (Hub stopped) restores it, for example on a new
@@ -351,8 +353,12 @@ passkey (or password and code) and saves it. From the Hub's shell:
   keeps the old one as `master.key.previous` until you delete it.
 
 To keep the key off the disk you back up, set `T3CODE_MASTER_KEY_FILE` to its
-path. A Hub started with a missing or different key refuses to start and says
-why; it never makes a new key over encrypted secrets.
+absolute path. The key must be readable by you alone (`chmod 600`); a read-only
+secret mount owned by root is accepted too, and on a file system without
+permissions (WSL's `/mnt/c`, some NFS) set
+`T3CODE_MASTER_KEY_ALLOW_LOOSE_PERMISSIONS=1`, which warns at every start. A Hub
+started with a missing or different key refuses to start and says why; it never
+makes a new key over encrypted secrets.
 
 ### Invite people
 
