@@ -114,6 +114,7 @@ import {
 } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 import { AdvancedSettings } from "./AdvancedSettings";
+import { ServerBrowserAllProfilesSetting } from "./ServerBrowserAllProfilesSetting";
 import { useSettingsScope } from "./SettingsScopeContext";
 import { BrowserImportWizard, type WizardTarget } from "./BrowserImportWizard";
 import type { ImportOutcome } from "./browserImportWizard.logic";
@@ -1587,6 +1588,8 @@ export function BrowserSettingsPanel() {
         </SettingsUnavailableGroup>
         {/* Not desktop-only: web clients search from server-run browser tabs too. */}
         <BrowserSearchEngineSetting />
+        {/* The Owner's: every User's server browser profiles at once. */}
+        <ServerBrowserAllProfilesSetting />
         <AdvancedSettings
           targetIds={[
             searchableSetting("browser-default-viewport").id,
