@@ -99,10 +99,16 @@ export const AUDIT_DETAIL_KEYS = {
   "cliSession.issue": ["sessionId", "label", "scopes"],
   "secret.reveal": ["vault"],
   "secret.edit": ["vault"],
-  /** `mode` personal or dedicated (with its `spaceId`), `via` join (or, later, ssh). */
-  "environment.register": ["kind", "os", "mode", "spaceId", "via"],
+  /**
+   * `mode` personal or dedicated (with its `spaceId`), `via` join or ssh (with the `host` the Hub
+   * installed it on, never its key).
+   */
+  "environment.register": ["kind", "os", "mode", "spaceId", "via", "host"],
   "environment.rename": ["from", "to"],
-  /** `settings` from the Hub, `leave` from the machine, `userTurnedOff` with its owner. */
+  /**
+   * `settings` from the Hub, `leave` from the machine, `userTurnedOff` with its owner, `ssh` when
+   * an SSH install that registered it failed or was cancelled afterwards.
+   */
   "environment.remove": ["via"],
   /** Modes (`personal`, `dedicated`) and Spaces (null for personal) before and after. */
   "environment.mode.change": ["from", "to", "fromSpaceId", "toSpaceId"],

@@ -19,6 +19,10 @@ const ENVIRONMENTS = own(
 const SPACES = own("SpaceDirectory/AccessPolicy for the session's User (Owner, Admin, Member)");
 const INVITATIONS = own("an Invitation token, or an Admin of its Organization");
 const OWNER = own("the Installation's Owner only, plus the access scopes");
+/** Remote code execution on another host with the Hub's grant: never anyone but the Owner. */
+const SSH_INSTALL = own(
+  "SshInstall: EnvironmentRegistry.authorizeDedicate (the Owner only) on every call, the progress included; no WS or MCP door",
+);
 const WEBHOOK = own("the task's secret token in the path; runs as the task's creator");
 const THREAD_READ = own(
   "SpaceVisibility.visibleThreadIds like getThreadProjection: hidden answers thread_not_found",
@@ -63,6 +67,9 @@ export const HTTP_ENDPOINT_RULES: Readonly<Record<string, DoorRule>> = {
   "environments.denyJoin": ENVIRONMENTS,
   "environments.joinRequest": own("public: a machine asks to join; nothing is granted"),
   "environments.joinStatus": own("the joining machine's own request code"),
+  "environments.grantJoin": own(
+    "a one-use grant the Hub issued to its own SSH install run (SshInstall): only while that run registers, for that run's Space and name; HTTPS or loopback only",
+  ),
   "environments.leave": own("the Environment credential of the machine that leaves"),
   "environments.list": ENVIRONMENTS,
   "environments.overview": OWNER,
@@ -73,6 +80,10 @@ export const HTTP_ENDPOINT_RULES: Readonly<Record<string, DoorRule>> = {
   "environments.sandboxes": ENVIRONMENTS,
   "environments.self": own("the Environment credential of the machine that asks"),
   "environments.start": ENVIRONMENTS,
+  "environments.sshInstallCancel": SSH_INSTALL,
+  "environments.sshInstallConfirm": SSH_INSTALL,
+  "environments.sshInstallStart": SSH_INSTALL,
+  "environments.sshInstallStatus": SSH_INSTALL,
   "environments.startJoin": ENVIRONMENTS,
   "installationUsers.list": OWNER,
   "installationUsers.setPermission": OWNER,

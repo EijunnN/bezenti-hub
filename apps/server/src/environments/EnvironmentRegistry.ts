@@ -391,6 +391,8 @@ export class EnvironmentRegistry extends Context.Service<
     readonly remove: (input: {
       readonly actorUserId: UserId;
       readonly environmentId: EnvironmentId;
+      /** `ssh`: an SSH install undoing the machine it registered; `settings` otherwise. */
+      readonly via?: "settings" | "ssh";
     }) => Effect.Effect<
       void,
       EnvironmentNotFoundError | EnvironmentAccessDeniedError | EnvironmentStorageError
@@ -414,7 +416,16 @@ export class EnvironmentRegistry extends Context.Service<
       readonly credentialHash: string;
       /** Dedicated to this Organization instead (the Owner only). */
       readonly dedicatedSpaceId?: SpaceId | undefined;
+      /** How it came: `t3 join` (the default), or the Hub's SSH install, on `host`. */
+      readonly via?: { readonly _tag: "join" } | { readonly _tag: "ssh"; readonly host: string };
     }) => Effect.Effect<EnvironmentId, EnvironmentAccessDeniedError | EnvironmentStorageError>;
+    /**
+     * Whether a registered machine's server has reached the Hub with its credential: asked how it
+     * is used (`/api/environments/self`, a dedicated machine's first call) or connected.
+     */
+    readonly hasReachedHub: (
+      environmentId: EnvironmentId,
+    ) => Effect.Effect<boolean, EnvironmentStorageError>;
     /**
      * The Organizations the User may dedicate a machine to: every one not archived, for the
      * Owner; refused for anyone else.
@@ -939,7 +950,7 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
   const revoke = Effect.fn("EnvironmentRegistry.revoke")(function* (input: {
     readonly row: EnvironmentRow;
     readonly actor: AuditLog.AuditActor;
-    readonly via: "settings" | "leave" | "userTurnedOff";
+    readonly via: "settings" | "leave" | "userTurnedOff" | "ssh";
   }) {
     yield* sql`
         UPDATE environments SET revoked_at = ${yield* nowIso}
@@ -959,12 +970,12 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
   });
 
   const remove: EnvironmentRegistry["Service"]["remove"] = Effect.fn("EnvironmentRegistry.remove")(
-    function* ({ actorUserId, environmentId }) {
+    function* ({ actorUserId, environmentId, via = "settings" }) {
       yield* sql
         .withTransaction(
           Effect.gen(function* () {
             const row = yield* authorize(actorUserId, environmentId, "environment.remove");
-            yield* revoke({ row, actor: AuditLog.userActor(actorUserId), via: "settings" });
+            yield* revoke({ row, actor: AuditLog.userActor(actorUserId), via });
           }),
         )
         .pipe(Effect.catchTags({ SqlError: (cause) => Effect.fail(storageError(cause)) }));
@@ -1028,7 +1039,16 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
 
   const register: EnvironmentRegistry["Service"]["register"] = Effect.fn(
     "EnvironmentRegistry.register",
-  )(function* ({ approvedBy, name, os, hostname, credentialHash, dedicatedSpaceId }) {
+  )(function* ({
+    approvedBy,
+    name,
+    os,
+    hostname,
+    credentialHash,
+    dedicatedSpaceId,
+    via = { _tag: "join" },
+  }) {
+    const sshHost = via._tag === "ssh" ? via.host : undefined;
     const environmentId = EnvironmentId.make(yield* random.uuidV4());
     yield* sql
       .withTransaction(
@@ -1062,7 +1082,8 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
                 kind: "external",
                 os,
                 mode,
-                via: "join",
+                via: via._tag,
+                ...(sshHost === undefined ? {} : { host: sshHost }),
                 ...(dedicatedSpaceId === undefined ? {} : { spaceId: dedicatedSpaceId }),
               },
             })
@@ -1942,8 +1963,23 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
     };
   });
 
+  const hasReachedHub: EnvironmentRegistry["Service"]["hasReachedHub"] = Effect.fn(
+    "EnvironmentRegistry.hasReachedHub",
+  )(function* (environmentId) {
+    if (yield* connections.isConnected(environmentId)) return true;
+    const [row] = yield* sql<{ readonly reached: number }>`
+      SELECT (e.last_seen_at IS NOT NULL OR EXISTS (
+        SELECT 1 FROM dedicated_sandbox_credentials d WHERE d.environment_id = e.environment_id
+      )) AS reached
+      FROM environments e
+      WHERE e.environment_id = ${environmentId} AND e.revoked_at IS NULL
+    `.pipe(Effect.mapError(storageError));
+    return row?.reached === 1;
+  });
+
   return EnvironmentRegistry.of({
     hubId,
+    hasReachedHub,
     hubRunsAgents,
     sandboxesUnavailable,
     sandboxesTurnedOff,

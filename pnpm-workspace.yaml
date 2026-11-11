@@ -13,6 +13,8 @@ allowBuilds:
   browser-tabs-lock: false
   bufferutil: false
   core-js: false
+  # ssh2's optional native crypto binding and cpu-features: ssh2 falls back to pure JS (SSH install).
+  cpu-features: false
   # No install script since Electron 44; ensure:electron runs install.js.
   # Keep the key: pnpm fails installs that still record a removed `true`.
   electron: false
@@ -23,6 +25,7 @@ allowBuilds:
   objc-js: false
   "react-native-enriched-markdown@file:apps/mobile/deps/react-native-enriched-markdown-1.2.0-t3.16-29ddd424.tgz": true
   sharp: true
+  ssh2: false
   utf-8-validate: false
   workerd: false
 

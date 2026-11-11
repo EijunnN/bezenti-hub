@@ -315,6 +315,7 @@ const runJoin = (
     readonly owner: Option.Option<string>;
     readonly confirmOnStdin: boolean;
     readonly dedicated: Option.Option<string>;
+    readonly grantOnStdin: boolean;
   },
 ) =>
   runWithSecrets(flags, (config) =>
@@ -323,6 +324,9 @@ const runJoin = (
         try: () => assertEnvironmentHubUrl(flags.url),
         catch: (cause) => userError(cause instanceof Error ? cause.message : String(cause)),
       });
+      if (flags.grantOnStdin && Option.isNone(flags.dedicated)) {
+        return yield* userError("--grant-on-stdin registers a dedicated machine: add --dedicated.");
+      }
       if (Option.isSome(flags.dedicated)) yield* requirePodmanForDedicated();
       const joined = yield* readJoinedHubState(config.joinedHubPath).pipe(Effect.result);
       if (joined._tag === "Success" && Option.isSome(joined.success)) {
@@ -361,10 +365,29 @@ const runJoin = (
         hubId,
         base64UrlEncode(yield* random.randomBytes(32)),
       );
-      const codeVerifier = base64UrlEncode(yield* random.randomBytes(32));
-      const state = base64UrlEncode(yield* random.randomBytes(16));
       const hostname = NodeOS.hostname() || "machine";
       const platform = yield* HostProcess.Platform;
+      if (flags.grantOnStdin) {
+        // The Hub's SSH install: its one-use grant, on standard input (never an argument).
+        const grant = (yield* readLine).trim();
+        if (grant === "") return yield* userError("No grant came on standard input.");
+        const answer = yield* callHub(new URL("/api/environments/join/grant", hubUrl), {
+          body: { grant, credentialHash: yield* sha256(credential), os: platform, hostname },
+        });
+        const granted = answer.status === 200 ? decodeStatus(answer.body) : Option.none();
+        if (
+          Option.isNone(granted) ||
+          granted.value.status !== "approved" ||
+          granted.value.dedicatedSpace?.id !== Option.getOrUndefined(flags.dedicated)
+        ) {
+          return yield* userError(
+            `The Hub did not register the machine with that grant (HTTP ${answer.status}).`,
+          );
+        }
+        return yield* saveJoin(config, hubUrl, credential, granted.value);
+      }
+      const codeVerifier = base64UrlEncode(yield* random.randomBytes(32));
+      const state = base64UrlEncode(yield* random.randomBytes(16));
       const listener = yield* listenForReturn(state);
       const started = yield* callHub(new URL("/api/environments/join/start", hubUrl), {
         body: {
@@ -431,32 +454,42 @@ const runJoin = (
             : "Nobody approved the machine in time. Run `t3 join` again.",
         );
       }
-      const secrets = yield* ServerSecretStore.ServerSecretStore;
-      // A dedicated machine's credential is only for its Sandbox: the host's own server, as a
-      // personal one, never finds it.
-      yield* secrets.set(
-        decision.dedicatedSpace === undefined
-          ? ENVIRONMENT_CREDENTIAL_SECRET
-          : DEDICATED_CREDENTIAL_SECRET,
-        new TextEncoder().encode(credential),
-      );
-      yield* writeJoinedHubState(config.joinedHubPath, {
-        hubUrl: hubUrl.origin,
-        hubEnvironmentId: decision.hubEnvironmentId,
-        environmentId: decision.environmentId,
-        name: decision.name,
-        joinedAt: DateTime.formatIso(yield* DateTime.now),
-        ...(decision.dedicatedSpace === undefined
-          ? {}
-          : { mode: "dedicated", spaceId: decision.dedicatedSpace.id }),
-      });
-      yield* Console.log(
-        decision.dedicatedSpace === undefined
-          ? `Joined ${hubUrl.origin} as ${decision.name}. Start (or restart) this machine's server with \`t3 serve\` to connect; \`t3 status\` shows the connection.`
-          : `Joined ${hubUrl.origin} as ${decision.name}, dedicated to ${decision.dedicatedSpace.name}. Start (or restart) this machine's server with \`t3 serve\`: it runs that Space's work in a Sandbox container, which connects to the Hub; \`t3 status\` shows it.`,
-      );
+      yield* saveJoin(config, hubUrl, credential, decision);
     }).pipe(Effect.scoped),
   );
+
+/** Keeps the credential and the Hub's answer here: this machine is joined. */
+const saveJoin = Effect.fn("cli.join.saveJoin")(function* (
+  config: ServerConfig.ServerConfig["Service"],
+  hubUrl: URL,
+  credential: string,
+  decision: Extract<EnvironmentJoinStatus, { readonly status: "approved" }>,
+) {
+  const secrets = yield* ServerSecretStore.ServerSecretStore;
+  // A dedicated machine's credential is only for its Sandbox: the host's own server, as a
+  // personal one, never finds it.
+  yield* secrets.set(
+    decision.dedicatedSpace === undefined
+      ? ENVIRONMENT_CREDENTIAL_SECRET
+      : DEDICATED_CREDENTIAL_SECRET,
+    new TextEncoder().encode(credential),
+  );
+  yield* writeJoinedHubState(config.joinedHubPath, {
+    hubUrl: hubUrl.origin,
+    hubEnvironmentId: decision.hubEnvironmentId,
+    environmentId: decision.environmentId,
+    name: decision.name,
+    joinedAt: DateTime.formatIso(yield* DateTime.now),
+    ...(decision.dedicatedSpace === undefined
+      ? {}
+      : { mode: "dedicated", spaceId: decision.dedicatedSpace.id }),
+  });
+  yield* Console.log(
+    decision.dedicatedSpace === undefined
+      ? `Joined ${hubUrl.origin} as ${decision.name}. Start (or restart) this machine's server with \`t3 serve\` to connect; \`t3 status\` shows the connection.`
+      : `Joined ${hubUrl.origin} as ${decision.name}, dedicated to ${decision.dedicatedSpace.name}. Start (or restart) this machine's server with \`t3 serve\`: it runs that Space's work in a Sandbox container, which connects to the Hub; \`t3 status\` shows it.`,
+  );
+});
 
 const runLeave = (flags: CliAuthLocationFlags) =>
   runWithSecrets(flags, (config) =>
@@ -537,6 +570,12 @@ export const joinCommand = Command.make("join", {
       "Ask to dedicate this machine to an Organization (its name or id), for all its Members, instead of joining it as your own. Only the Owner approves it; it needs rootless Podman, since its work runs in a Sandbox container.",
     ),
     Flag.optional,
+  ),
+  grantOnStdin: Flag.Boolean("grant-on-stdin").pipe(
+    Flag.withDescription(
+      "Register with a one-use grant read from standard input, with no approval page (the Hub's «Add a machine over SSH» runs this). Needs --dedicated.",
+    ),
+    Flag.withDefault(false),
   ),
   confirmOnStdin: Flag.Boolean("confirm-on-stdin").pipe(
     Flag.withDescription(

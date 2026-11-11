@@ -34,6 +34,7 @@ import * as EnvironmentGitRoute from "../environments/gitRoute.ts";
 import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as HubEnvironmentsHttp from "../environments/http.ts";
+import * as SshInstall from "../environments/sshInstall/SshInstall.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as HubPreviewRoute from "../preview/hubPreviewRoute.ts";
 import type { PreviewOriginPattern } from "../preview/PreviewOrigin.ts";
@@ -190,6 +191,7 @@ const makeLayerServices = (
   sandboxRuntime?: TestSandboxRuntime,
   { hubRunsAgents = true, ...registryOptions }: TestRegistryOptions = {},
   sandboxImageBuilder?: SandboxImage.SandboxImageBuilder["Service"],
+  sshInstallPolicy?: SshInstall.SshInstallPolicy["Service"],
 ) =>
   // Archive and delete reach Projects and Thread reads; no Thread in these tests runs.
   OrganizationLifecycle.layer.pipe(
@@ -203,10 +205,20 @@ const makeLayerServices = (
           InstallationUserService.layer,
           SpaceVisibility.layer,
           AuditLog.layer,
-          // The Hub machine runs Threads here unless a test says otherwise (the dev setting).
-          sandboxRuntime === undefined
-            ? EnvironmentRegistry.layerWith(registryOptions)
-            : EnvironmentRegistry.layerWithSandboxes(sandboxRuntime),
+          // The Hub machine runs Threads here unless a test says otherwise (the dev setting). The
+          // Owner's SSH installs register machines with it, by the test's policy if it has one.
+          SshInstall.layer.pipe(
+            Layer.provideMerge(
+              sandboxRuntime === undefined
+                ? EnvironmentRegistry.layerWith(registryOptions)
+                : EnvironmentRegistry.layerWithSandboxes(sandboxRuntime),
+            ),
+            Layer.provide(
+              sshInstallPolicy === undefined
+                ? Layer.empty
+                : Layer.succeed(SshInstall.SshInstallPolicy, sshInstallPolicy),
+            ),
+          ),
           // Without a builder of its own, the image builds nothing: there is no Podman to ask.
           SandboxImage.layer.pipe(
             Layer.provide(
@@ -278,6 +290,8 @@ export const serveAuthHttpWith = Effect.fn(function* (
     readonly registry?: TestRegistryOptions;
     /** Builds and reads the Sandbox image instead of Podman. */
     readonly sandboxImageBuilder?: SandboxImage.SandboxImageBuilder["Service"];
+    /** How the Owner's SSH installs run (timeouts, the T3 they install). */
+    readonly sshInstallPolicy?: SshInstall.SshInstallPolicy["Service"];
   } = {},
 ) {
   const base = yield* Layer.build(
@@ -289,6 +303,7 @@ export const serveAuthHttpWith = Effect.fn(function* (
       config.sandboxRuntime,
       config.registry,
       config.sandboxImageBuilder,
+      config.sshInstallPolicy,
     ),
   );
   const services = config.extend === undefined ? base : yield* config.extend(base);

@@ -89,6 +89,7 @@ import type { Authenticator, HubServices, Server } from "../auth/UserAuth.testki
 import * as EnvironmentAgent from "./EnvironmentAgent.ts";
 import { joinMachine, hubWithOwner } from "./environments.testkit.ts";
 import { connectOnce } from "./JoinedHub.ts";
+import type * as SshInstall from "./sshInstall/SshInstall.ts";
 
 const HOST_RESOURCES = {
   sampledAt: 0,
@@ -696,6 +697,8 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     readonly previewOrigin?: PreviewOriginPattern;
     /** The Hub's published address (`T3CODE_PUBLIC_URL`). */
     readonly publicUrl?: URL;
+    /** How the Owner's SSH installs run (timeouts, the T3 they install). */
+    readonly sshInstallPolicy?: SshInstall.SshInstallPolicy["Service"];
   } = {},
 ) {
   const sandboxRoot = yield* FileSystem.FileSystem.pipe(
@@ -738,6 +741,9 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     ...(options.sandboxImageBuilder === undefined
       ? {}
       : { sandboxImageBuilder: options.sandboxImageBuilder }),
+    ...(options.sshInstallPolicy === undefined
+      ? {}
+      : { sshInstallPolicy: options.sshInstallPolicy }),
   });
   sandboxes.setHubUrl(server.url);
   /**

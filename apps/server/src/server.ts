@@ -190,6 +190,7 @@ import * as EnvironmentConnectRoute from "./environments/connectRoute.ts";
 import * as EnvironmentGitRoute from "./environments/gitRoute.ts";
 import * as EnvironmentRegistry from "./environments/EnvironmentRegistry.ts";
 import * as HubEnvironmentsHttp from "./environments/http.ts";
+import * as SshInstall from "./environments/sshInstall/SshInstall.ts";
 import * as DedicatedHost from "./environments/DedicatedHost.ts";
 import * as SandboxImage from "./sandboxes/SandboxImage.ts";
 import * as SandboxImageHttp from "./sandboxes/http.ts";
@@ -489,8 +490,9 @@ const layerAuth = Layer.mergeAll(
   AuditLog.layer,
   // The Sandboxes' base image: built on this Hub, one build at a time.
   SandboxImage.layer,
-  // Sandboxes only with a runtime that runs them (`T3CODE_SANDBOX_RUNTIME`, or rootless Podman).
-  EnvironmentRegistry.layerFromConfig,
+  // Sandboxes only with a runtime that runs them (`T3CODE_SANDBOX_RUNTIME`, or rootless Podman);
+  // the Owner's SSH installs register machines with it.
+  SshInstall.layer.pipe(Layer.provideMerge(EnvironmentRegistry.layerFromConfig)),
 ).pipe(
   Layer.provideMerge(EnvironmentAuth.layer.pipe(Layer.provideMerge(SpaceDirectory.layer))),
   Layer.provideMerge(layerPersistence),

@@ -152,6 +152,13 @@ import {
   UpdateSandboxImageResult,
 } from "./sandboxImage.ts";
 import {
+  EnvironmentJoinGrantRequest,
+  SshInstallConfirmRequest,
+  SshInstallRun,
+  SshInstallRunRef,
+  SshInstallStartRequest,
+} from "./sshInstall.ts";
+import {
   PullRequestDiffInput,
   PullRequestDiffResult,
   PullRequestOperationError,
@@ -325,6 +332,7 @@ export const EnvironmentResourceNotFoundReason = Schema.Literals([
   "user_not_found",
   "environment_not_found",
   "join_request_not_found",
+  "ssh_install_run_not_found",
 ]);
 export type EnvironmentResourceNotFoundReason = typeof EnvironmentResourceNotFoundReason.Type;
 
@@ -1087,6 +1095,15 @@ const EnvironmentHubEnvironmentErrors = [
   EnvironmentInternalError,
 ] as const;
 
+const EnvironmentSshInstallErrors = [
+  ...EnvironmentHubEnvironmentErrors,
+  // A host, user or Hub address it refuses, or a key it cannot read; `message` says which.
+  EnvironmentHttpBadRequestError,
+  // A run to that host is under way, or the run is past the step asked for.
+  EnvironmentHttpConflictError,
+  EnvironmentResourceNotFoundError,
+] as const;
+
 // The machines registered with this Hub. Each joins with `t3 join`: the Owner approves its request
 // on «Register this machine» with a strong factor. The credential, made on the machine and known
 // to the Hub only as a hash, opens nothing but `/api/environment/connect` and `leave`.
@@ -1250,6 +1267,48 @@ class EnvironmentHubEnvironmentsHttpApi extends HttpApiGroup.make("environments"
       success: EnvironmentLeaveResult,
       error: EnvironmentTokenExchangeErrors,
     }),
+  )
+  // `t3 join --grant-on-stdin`, which the Hub runs over SSH: its run's one-use grant registers it.
+  .add(
+    HttpApiEndpoint.post("grantJoin", "/api/environments/join/grant", {
+      payload: EnvironmentJoinGrantRequest,
+      success: EnvironmentJoinStatus,
+      error: EnvironmentTokenExchangeErrors,
+    }),
+  )
+  // «Add a machine over SSH»: the Owner only. A run reads the host key first and goes on once the
+  // Owner confirms it; its steps run on the Hub, followed by asking for the run.
+  .add(
+    HttpApiEndpoint.post("sshInstallStart", "/api/environments/ssh/start", {
+      headers: OptionalBearerHeaders,
+      payload: SshInstallStartRequest,
+      success: SshInstallRun,
+      error: EnvironmentSshInstallErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("sshInstallConfirm", "/api/environments/ssh/confirm", {
+      headers: OptionalBearerHeaders,
+      payload: SshInstallConfirmRequest,
+      success: SshInstallRun,
+      error: EnvironmentSshInstallErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("sshInstallCancel", "/api/environments/ssh/cancel", {
+      headers: OptionalBearerHeaders,
+      payload: SshInstallRunRef,
+      success: SshInstallRun,
+      error: EnvironmentSshInstallErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("sshInstallStatus", "/api/environments/ssh/status", {
+      headers: OptionalBearerHeaders,
+      payload: SshInstallRunRef,
+      success: SshInstallRun,
+      error: EnvironmentSshInstallErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
 const EnvironmentInvitationManageErrors = [

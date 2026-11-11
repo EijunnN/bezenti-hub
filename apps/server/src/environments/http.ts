@@ -1,10 +1,15 @@
 import {
+  AuthAccessReadScope,
   AuthAccessWriteScope,
   type AuthEnvironmentScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpConflictError,
   EnvironmentHttpForbiddenError,
+  type EnvironmentInternalError,
   EnvironmentModeChangeRefusedError,
+  type EnvironmentResourceNotFoundError,
   EnvironmentRateLimitedError,
   EnvironmentSandboxLimitsInvalidError,
 } from "@t3tools/contracts";
@@ -27,6 +32,7 @@ import {
 } from "../auth/http.ts";
 import * as EnvironmentJoin from "./EnvironmentJoin.ts";
 import * as EnvironmentRegistry from "./EnvironmentRegistry.ts";
+import * as SshInstall from "./sshInstall/SshInstall.ts";
 
 const requireUser = Effect.fn("Environments.requireUser")(function* (scope: AuthEnvironmentScope) {
   const principal = yield* requireEnvironmentScope(scope);
@@ -52,12 +58,43 @@ const failForbidden = (error: { readonly message: string }) =>
   Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message }));
 const failStorage = (cause: unknown) => failEnvironmentInternal("environments_failed", cause);
 
+/** How an SSH install's refusals answer: every door of it is the Owner's alone (SshInstall). */
+const sshInstallFailure = (
+  error:
+    | EnvironmentRegistry.EnvironmentAccessDeniedError
+    | EnvironmentRegistry.EnvironmentStorageError
+    | SshInstall.SshInstallRefusedError
+    | SshInstall.SshInstallConflictError
+    | SshInstall.SshInstallRunNotFoundError,
+): Effect.Effect<
+  never,
+  | EnvironmentHttpForbiddenError
+  | EnvironmentInternalError
+  | EnvironmentHttpBadRequestError
+  | EnvironmentHttpConflictError
+  | EnvironmentResourceNotFoundError
+> => {
+  switch (error._tag) {
+    case "EnvironmentAccessDeniedError":
+      return failForbidden(error);
+    case "EnvironmentStorageError":
+      return failStorage(error);
+    case "SshInstallRefusedError":
+      return Effect.fail(new EnvironmentHttpBadRequestError({ message: error.message }));
+    case "SshInstallConflictError":
+      return Effect.fail(new EnvironmentHttpConflictError({ message: error.message }));
+    case "SshInstallRunNotFoundError":
+      return failEnvironmentNotFound("ssh_install_run_not_found");
+  }
+};
+
 const handlers = HttpApiBuilder.group(
   EnvironmentHttpApi,
   "environments",
   Effect.fnUntraced(function* (handlers) {
     const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
     const join = yield* EnvironmentJoin.EnvironmentJoin;
+    const sshInstall = yield* SshInstall.SshInstall;
     return handlers
       .handle(
         "list",
@@ -348,6 +385,64 @@ const handlers = HttpApiBuilder.group(
             .pipe(Effect.catchTags({ EnvironmentStorageError: failStorage }));
           if (!removed) return yield* failEnvironmentAuthInvalid("invalid_credential");
           return { removed };
+        }),
+      )
+      .handle(
+        "grantJoin",
+        Effect.fn("environment.environments.grantJoin")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          if (!isSecureEnvironmentTransport(request)) {
+            return yield* failEnvironmentInvalidRequest("insecure_transport");
+          }
+          return yield* sshInstall.redeemGrant(args.payload).pipe(
+            Effect.catchTags({
+              SshInstallInvalidGrantError: () => failEnvironmentAuthInvalid("invalid_credential"),
+              // The Owner who started the run lost the right since: as an invalid grant.
+              EnvironmentAccessDeniedError: () => failEnvironmentAuthInvalid("invalid_credential"),
+              EnvironmentStorageError: failStorage,
+            }),
+          );
+        }),
+      )
+      .handle(
+        "sshInstallStart",
+        Effect.fn("environment.environments.sshInstallStart")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const actorUserId = yield* requireUser(AuthAccessWriteScope);
+          return yield* sshInstall
+            .start(actorUserId, args.payload)
+            .pipe(Effect.catch(sshInstallFailure));
+        }),
+      )
+      .handle(
+        "sshInstallConfirm",
+        Effect.fn("environment.environments.sshInstallConfirm")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const actorUserId = yield* requireUser(AuthAccessWriteScope);
+          return yield* sshInstall
+            .confirm(actorUserId, args.payload)
+            .pipe(Effect.catch(sshInstallFailure));
+        }),
+      )
+      .handle(
+        "sshInstallCancel",
+        Effect.fn("environment.environments.sshInstallCancel")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const actorUserId = yield* requireUser(AuthAccessWriteScope);
+          return yield* sshInstall
+            .cancel(actorUserId, args.payload.runId)
+            .pipe(Effect.catch(sshInstallFailure));
+        }),
+      )
+      .handle(
+        "sshInstallStatus",
+        Effect.fn("environment.environments.sshInstallStatus")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const actorUserId = yield* requireUser(AuthAccessReadScope);
+          return yield* sshInstall
+            .status(actorUserId, args.payload.runId)
+            .pipe(Effect.catch(sshInstallFailure));
         }),
       );
   }),
