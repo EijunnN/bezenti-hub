@@ -83,6 +83,15 @@ export const HubEnvironmentSummary = Schema.Struct({
 });
 export type HubEnvironmentSummary = typeof HubEnvironmentSummary.Type;
 
+/**
+ * Whether a list of machines shows it: every machine, and a Space's Sandbox once it has run (the
+ * Hub also lists one not made yet, as a choice in the composer). Web Settings and the Owner's
+ * overview both use this.
+ */
+export const isListedMachine = (
+  environment: Pick<HubEnvironmentSummary, "kind" | "lastSeenAt">,
+): boolean => environment.kind !== "sandbox" || environment.lastSeenAt !== null;
+
 type PlacementCandidate = Pick<HubEnvironmentSummary, "id" | "kind" | "status" | "providers"> & {
   readonly usable: boolean;
 };

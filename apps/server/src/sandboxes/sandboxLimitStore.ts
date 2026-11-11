@@ -64,11 +64,29 @@ export const readSpaceLimits = Effect.fn("sandboxLimitStore.readSpaceLimits")(fu
   return effectiveLimits(yield* readDefaultLimits, yield* readSpaceOverrides(spaceId));
 });
 
-/** The Space's own values and what its Sandbox starts with, as Settings shows a Space's row. */
-export const readSpaceLimitsWithOwn = Effect.fn("sandboxLimitStore.readSpaceLimitsWithOwn")(
-  function* (spaceId: SpaceId) {
-    const own = yield* readSpaceOverrides(spaceId);
-    return { own, effective: effectiveLimits(yield* readDefaultLimits, own) };
+/**
+ * Each Space's own values and what its Sandbox starts with, as Settings shows their rows: the
+ * defaults read once, every Space's own in one query.
+ */
+export const readSpacesLimitsWithOwn = Effect.fn("sandboxLimitStore.readSpacesLimitsWithOwn")(
+  function* (spaceIds: ReadonlyArray<SpaceId>) {
+    const result = new Map<
+      SpaceId,
+      { readonly own: SandboxLimits; readonly effective: SandboxLimits }
+    >();
+    if (spaceIds.length === 0) return result;
+    const sql = yield* SqlClient.SqlClient;
+    const defaults = yield* readDefaultLimits;
+    const rows = yield* sql<SandboxLimits & { readonly spaceId: SpaceId }>`
+      SELECT space_id AS "spaceId", ${sql.literal(COLUMNS)} FROM space_sandbox_limits
+      WHERE space_id IN ${sql.in(spaceIds)}
+    `;
+    const owns = new Map(rows.map(({ spaceId, ...own }) => [spaceId, own]));
+    for (const spaceId of spaceIds) {
+      const own = owns.get(spaceId) ?? NO_LIMITS;
+      result.set(spaceId, { own, effective: effectiveLimits(defaults, own) });
+    }
+    return result;
   },
 );
 

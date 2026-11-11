@@ -39,6 +39,12 @@ export function ThreadEnvironmentNotice(props: {
   const [retryError, setRetryError] = useState<string | null>(null);
   const move = props.thread.move?.status === "running" ? props.thread.move : null;
   const state = props.runsOn?.state ?? null;
+  // A failed «Try again» belongs to the state it was for: it goes once the notice changes.
+  const [errorFor, setErrorFor] = useState(state);
+  if (errorFor !== state) {
+    setErrorFor(state);
+    setRetryError(null);
+  }
   if (move === null && state === null) return null;
   const openMove = () =>
     navigation.navigate("ThreadMove", {

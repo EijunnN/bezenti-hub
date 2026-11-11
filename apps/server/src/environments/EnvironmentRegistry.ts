@@ -13,6 +13,7 @@ import {
   type EnvironmentHeartbeatFrame,
   type EnvironmentHelloFrame,
   HUB_MACHINE_ENVIRONMENT_ID,
+  isListedMachine,
   type EnvironmentSelfResult,
   type HubDedicatedSpaceLimits,
   type HubEnvironmentDedicatedSpace,
@@ -60,13 +61,13 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import type * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
 import * as Sandboxes from "../sandboxes/Sandboxes.ts";
 import * as SandboxRuntimeFromConfig from "../sandboxes/sandboxRuntimeFromConfig.ts";
-import { hostCapacity } from "../sandboxes/sandboxLimits.ts";
+import { hostCapacity, NO_LIMITS } from "../sandboxes/sandboxLimits.ts";
 import {
   changeLimits,
   deleteSpaceLimits,
   readDefaultLimits,
   readSpaceLimits,
-  readSpaceLimitsWithOwn,
+  readSpacesLimitsWithOwn,
   SandboxLimitsInvalidError,
   type SandboxNotFoundError,
 } from "../sandboxes/sandboxLimitStore.ts";
@@ -763,80 +764,84 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
       Effect.provideService(SpaceDirectory.SpaceDirectory, spaces),
     );
 
-  const list: EnvironmentRegistry["Service"]["list"] = Effect.fn("EnvironmentRegistry.list")(
-    function* (viewer) {
-      const principal = yield* principalOf(viewer);
-      if (principal.inactive === true) {
-        return yield* new EnvironmentAccessDeniedError({ reason: "user-inactive" });
-      }
-      const rows = yield* selectRows([sql`revoked_at IS NULL`]).pipe(Effect.mapError(storageError));
-      // Each Space by the name this viewer knows it by (another User's Personal space included).
-      const viewed = (yield* spaces.view(viewer).pipe(Effect.mapError(storageError))).spaces;
-      const spaceNames = new Map<string, string>(viewed.map((space) => [space.id, space.name]));
-      // One read for every Sandbox's Space and every Space that may get one.
-      const spaceResources = yield* spaces
-        .spacesById([
-          ...rows.flatMap((row) =>
-            isSpaceBound(row) && row.spaceId !== null ? [SpaceId.make(row.spaceId)] : [],
-          ),
-          ...viewed.map((space) => space.id),
-        ])
-        .pipe(Effect.mapError(storageError));
-      const spaceOf = (spaceId: string | null) =>
-        spaceId === null ? undefined : spaceResources.get(SpaceId.make(spaceId))?.resource;
-      const summaries: Array<HubEnvironmentSummary> = [];
-      for (const row of rows) {
-        // A Hub machine that runs no Threads is nowhere to run one: it is not offered.
-        if (row.kind === "hub" && !hubRunsAgents) continue;
-        // Nor a Sandbox made by a runtime this Hub no longer runs.
-        if (row.kind === "sandbox" && Option.isNone(sandboxes)) continue;
-        const resource = environmentResource(
+  /** The list, with the Space names the viewer knows, which the Owner's overview reuses. */
+  const listWithSpaceNames = Effect.fn("EnvironmentRegistry.listWithSpaceNames")(function* (
+    viewer: UserId,
+  ) {
+    const principal = yield* principalOf(viewer);
+    if (principal.inactive === true) {
+      return yield* new EnvironmentAccessDeniedError({ reason: "user-inactive" });
+    }
+    const rows = yield* selectRows([sql`revoked_at IS NULL`]).pipe(Effect.mapError(storageError));
+    // Each Space by the name this viewer knows it by (another User's Personal space included).
+    const viewed = (yield* spaces.view(viewer).pipe(Effect.mapError(storageError))).spaces;
+    const spaceNames = new Map<string, string>(viewed.map((space) => [space.id, space.name]));
+    // One read for every Sandbox's Space and every Space that may get one.
+    const spaceResources = yield* spaces
+      .spacesById([
+        ...rows.flatMap((row) =>
+          isSpaceBound(row) && row.spaceId !== null ? [SpaceId.make(row.spaceId)] : [],
+        ),
+        ...viewed.map((space) => space.id),
+      ])
+      .pipe(Effect.mapError(storageError));
+    const spaceOf = (spaceId: string | null) =>
+      spaceId === null ? undefined : spaceResources.get(SpaceId.make(spaceId))?.resource;
+    const summaries: Array<HubEnvironmentSummary> = [];
+    for (const row of rows) {
+      // A Hub machine that runs no Threads is nowhere to run one: it is not offered.
+      if (row.kind === "hub" && !hubRunsAgents) continue;
+      // Nor a Sandbox made by a runtime this Hub no longer runs.
+      if (row.kind === "sandbox" && Option.isNone(sandboxes)) continue;
+      const resource = environmentResource(
+        row,
+        isSpaceBound(row) ? spaceOf(row.spaceId) : undefined,
+      );
+      if (!AccessPolicy.isAllowed(decide(principal, "environment.view", resource))) continue;
+      const spaceName =
+        row.kind === "sandbox" && row.spaceId !== null ? spaceNames.get(row.spaceId) : undefined;
+      summaries.push(
+        yield* summaryOf(
           row,
-          isSpaceBound(row) ? spaceOf(row.spaceId) : undefined,
-        );
-        if (!AccessPolicy.isAllowed(decide(principal, "environment.view", resource))) continue;
-        const spaceName =
-          row.kind === "sandbox" && row.spaceId !== null ? spaceNames.get(row.spaceId) : undefined;
-        summaries.push(
-          yield* summaryOf(
-            row,
-            principal.isOwner,
-            spaceName === undefined ? undefined : sandboxEnvironmentName(spaceName),
-          ),
-        );
-      }
-      const made = new Set(rows.flatMap((row) => (row.kind === "sandbox" ? [row.spaceId] : [])));
-      // Without a runtime that can run them, Sandboxes not made yet are not offered.
-      if (Option.isNone(sandboxes)) return summaries;
-      const now = yield* nowIso;
-      for (const space of viewed) {
-        if (made.has(space.id)) continue;
-        const resource = environmentResource(
-          { kind: "sandbox", mode: "sandbox", ownerUserId: null, spaceId: space.id },
-          spaceOf(space.id),
-          space.id,
-        );
-        if (!AccessPolicy.isAllowed(decide(principal, "environment.use", resource))) continue;
-        summaries.push({
-          id: sandboxEnvironmentIdOf(space.id),
-          name: sandboxEnvironmentName(space.name),
-          kind: "sandbox",
-          mode: "sandbox",
-          ownerUserId: null,
-          spaceId: space.id,
-          status: "stopped",
-          registeredAt: now,
-          lastSeenAt: null,
-          os: null,
-          hostname: null,
-          providers: [],
-          resources: null,
-          runningThreadCount: 0,
-        });
-      }
-      return summaries;
-    },
-  );
+          principal.isOwner,
+          spaceName === undefined ? undefined : sandboxEnvironmentName(spaceName),
+        ),
+      );
+    }
+    const made = new Set(rows.flatMap((row) => (row.kind === "sandbox" ? [row.spaceId] : [])));
+    // Without a runtime that can run them, Sandboxes not made yet are not offered.
+    if (Option.isNone(sandboxes)) return { summaries, spaceNames };
+    const now = yield* nowIso;
+    for (const space of viewed) {
+      if (made.has(space.id)) continue;
+      const resource = environmentResource(
+        { kind: "sandbox", mode: "sandbox", ownerUserId: null, spaceId: space.id },
+        spaceOf(space.id),
+        space.id,
+      );
+      if (!AccessPolicy.isAllowed(decide(principal, "environment.use", resource))) continue;
+      summaries.push({
+        id: sandboxEnvironmentIdOf(space.id),
+        name: sandboxEnvironmentName(space.name),
+        kind: "sandbox",
+        mode: "sandbox",
+        ownerUserId: null,
+        spaceId: space.id,
+        status: "stopped",
+        registeredAt: now,
+        lastSeenAt: null,
+        os: null,
+        hostname: null,
+        providers: [],
+        resources: null,
+        runningThreadCount: 0,
+      });
+    }
+    return { summaries, spaceNames };
+  });
+
+  const list: EnvironmentRegistry["Service"]["list"] = (viewer) =>
+    listWithSpaceNames(viewer).pipe(Effect.map(({ summaries }) => summaries));
 
   const overview: EnvironmentRegistry["Service"]["overview"] = Effect.fn(
     "EnvironmentRegistry.overview",
@@ -848,29 +853,21 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
     if (!principal.isOwner) {
       return yield* new EnvironmentAccessDeniedError({ reason: "owner-only" });
     }
-    // A Space's Sandbox that was never made is only a choice in the composer, not a machine.
-    const made = new Set(
-      (yield* selectRows([sql`kind = 'sandbox'`, sql`revoked_at IS NULL`]).pipe(
-        Effect.mapError(storageError),
-      )).map((row) => row.environmentId),
-    );
-    const environments = (yield* list(viewer)).filter(
-      (environment) => environment.kind !== "sandbox" || made.has(environment.id),
-    );
-    const spaceNames = new Map<string, string>(
-      (yield* spaces.view(viewer).pipe(Effect.mapError(storageError))).spaces.map((space) => [
-        space.id,
-        space.name,
-      ]),
-    );
+    const listed = yield* listWithSpaceNames(viewer);
+    const spaceNames = listed.spaceNames;
+    // The same rule as web Settings: a Sandbox counts as a machine once it has run.
+    const environments = listed.summaries.filter(isListedMachine);
+    // Owners' names only when a personal machine is listed.
     const userNames = new Map<string, string>(
-      (yield* spaces.listUsers(viewer).pipe(
-        Effect.catchTags({
-          SpaceAccessDeniedError: () =>
-            Effect.fail(new EnvironmentAccessDeniedError({ reason: "owner-only" })),
-          SpaceDirectoryStorageError: (cause) => Effect.fail(storageError(cause)),
-        }),
-      )).map((user) => [user.id, user.displayName]),
+      environments.some((environment) => environment.ownerUserId !== null)
+        ? (yield* spaces.listUsers(viewer).pipe(
+            Effect.catchTags({
+              SpaceAccessDeniedError: () =>
+                Effect.fail(new EnvironmentAccessDeniedError({ reason: "owner-only" })),
+              SpaceDirectoryStorageError: (cause) => Effect.fail(storageError(cause)),
+            }),
+          )).map((user) => [user.id, user.displayName])
+        : [],
     );
     return {
       environments: environments.map((environment) => ({
@@ -1732,28 +1729,28 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
         space.name,
       ]),
     );
-    const result: Array<HubDedicatedSpaceLimits> = [];
-    for (const [spaceId, machines] of bySpace) {
-      const limits = yield* withLimitStore(readSpaceLimitsWithOwn(spaceId)).pipe(
-        Effect.mapError(storageError),
-      );
-      const summaries: Array<HubDedicatedSpaceLimits["machines"][number]> = [];
-      for (const row of machines) {
-        const summary = yield* summaryOf(row, true);
-        summaries.push({
-          environmentId: summary.id,
-          name: summary.name,
-          status: summary.status,
-        });
-      }
-      result.push({
-        spaceId,
-        spaceName: names.get(spaceId) ?? null,
-        machines: summaries,
-        ...limits,
-      });
-    }
-    return result;
+    const limits = yield* withLimitStore(readSpacesLimitsWithOwn([...bySpace.keys()])).pipe(
+      Effect.mapError(storageError),
+    );
+    return yield* Effect.forEach(
+      [...bySpace],
+      ([spaceId, machines]) =>
+        Effect.forEach(machines, (row) => summaryOf(row, true), { concurrency: "unbounded" }).pipe(
+          Effect.map((summaries): HubDedicatedSpaceLimits => ({
+            spaceId,
+            spaceName: names.get(spaceId) ?? null,
+            machines: summaries.map((summary) => ({
+              environmentId: summary.id,
+              name: summary.name,
+              status: summary.status,
+            })),
+            // Every Space asked for is in the answer.
+            own: limits.get(spaceId)?.own ?? NO_LIMITS,
+            effective: limits.get(spaceId)?.effective ?? NO_LIMITS,
+          })),
+        ),
+      { concurrency: "unbounded" },
+    );
   });
 
   const sandboxList = Effect.fn("EnvironmentRegistry.sandboxList")(function* (viewer: UserId) {

@@ -78,6 +78,18 @@ describe("the Owner's list of machines on mobile", () => {
         }),
       ),
     ).toMatchObject({ mode: "Personal machine", details: "Offline · Grace's personal machine" });
+    // The Owner's own machine, as web says it.
+    expect(
+      hubMachineRow(
+        entry({
+          id: EnvironmentId.make("env-owner-laptop"),
+          name: "Ada's laptop",
+          ownerUserId: UserId.make("user-ada"),
+          ownerName: "Ada",
+        }),
+        "user-ada",
+      ).details,
+    ).toBe("Online · Your personal machine");
 
     expect(
       hubMachineRow(

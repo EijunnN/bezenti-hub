@@ -350,8 +350,8 @@ dedicated machine has a limits row («<Space> · dedicated», **Limits**); the c
 there: it is the Hub's own check, for its own Sandboxes.
 
 **Every machine for the Owner** (`GET /api/environments/overview`, DoorRules `OWNER`): the
-Owner's list with each machine's mode, Space and owner by name, status and start error; Sandboxes
-never made are left out. Anyone else gets 403. Mobile's read-only «Machines on this Hub» reads it.
+Owner's list with each machine's mode, Space and owner by name, status and start error; a Sandbox is listed once it has run
+(`isListedMachine` in contracts, the rule web Settings uses too). Anyone else gets 403. Mobile's read-only «Machines on this Hub» reads it.
 
 ## Base image
 

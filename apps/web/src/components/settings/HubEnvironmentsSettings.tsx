@@ -2,7 +2,7 @@ import {
   environmentUseDescription,
   shownEnvironmentStatus,
 } from "@t3tools/client-runtime/environment/hub-environments";
-import type { HubEnvironmentSummary, SpaceId } from "@t3tools/contracts";
+import { type HubEnvironmentSummary, isListedMachine, type SpaceId } from "@t3tools/contracts";
 import { useEffect, useState } from "react";
 
 import { usePrimarySessionState } from "../../environments/primary";
@@ -122,8 +122,9 @@ export function HubEnvironmentsSettings() {
   const organizations = (spaces ?? []).filter(
     (space) => space.kind === "organization" && space.archived !== true,
   );
+  // A Space by name, or null when this viewer has none for it; callers say what to show instead.
   const spaceName = (spaceId: string | null | undefined) =>
-    spaces?.find((space) => space.id === spaceId)?.name ?? "a Space";
+    spaces?.find((space) => space.id === spaceId)?.name ?? null;
   // A dedicated machine leaving its Space loses that Space's work files on it.
   const leavesSpace = (change: {
     readonly environment: HubEnvironmentSummary;
@@ -173,7 +174,7 @@ export function HubEnvironmentsSettings() {
       {environments === null && error === null ? <SettingsRow title="Loading…" /> : null}
       {(environments ?? [])
         // A Space's Sandbox is listed once it has run; until then it is only a choice in the composer.
-        .filter((environment) => environment.kind !== "sandbox" || environment.lastSeenAt !== null)
+        .filter(isListedMachine)
         .map((environment) => {
           return (
             <SettingsRow
@@ -187,11 +188,7 @@ export function HubEnvironmentsSettings() {
                   />
                 </span>
               }
-              description={describe(
-                environment,
-                { userId, isOwner },
-                (spaceId) => spaces?.find((space) => space.id === spaceId)?.name ?? null,
-              )}
+              description={describe(environment, { userId, isOwner }, spaceName)}
               control={
                 manages(environment) && environment.kind !== "sandbox" ? (
                   <div className="flex gap-1">
@@ -352,7 +349,7 @@ export function HubEnvironmentsSettings() {
                 </select>
                 {leavesSpace(changingMode) ? (
                   <p className="mt-2 text-sm text-warning-foreground">
-                    {`Work files on ${changingMode.environment.name} for ${spaceName(changingMode.environment.spaceId)} will be deleted: its Sandbox's home goes, so no other Space or owner ever sees them.`}
+                    {`Work files on ${changingMode.environment.name} for ${spaceName(changingMode.environment.spaceId) ?? "a Space"} will be deleted: its Sandbox's home goes, so no other Space or owner ever sees them.`}
                   </p>
                 ) : null}
                 {modeError !== null ? (

@@ -12,12 +12,17 @@ import type { HubEnvironmentOverviewEntry } from "@t3tools/contracts";
  * or owner («Dedicated to Acme», «Sandbox of Acme», «Grace's personal machine»), its system and
  * its running Threads; the same words and status as web's Settings → Environments.
  */
-export function hubMachineRow(environment: HubEnvironmentOverviewEntry) {
+export function hubMachineRow(
+  environment: HubEnvironmentOverviewEntry,
+  /** The Owner reading the list: their own machine is «Your personal machine». */
+  viewerUserId?: string,
+) {
   const status = shownEnvironmentStatus(environment);
   const statusLabel = environmentStatusLabel(status, environment.kind);
   const use = environmentUseDescription(environment, {
     spaceName: environment.spaceName,
     ownerName: environment.ownerName,
+    viewerUserId,
   });
   const running =
     environment.runningThreadCount === 0

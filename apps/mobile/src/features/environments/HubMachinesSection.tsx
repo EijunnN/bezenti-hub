@@ -3,7 +3,11 @@ import { View } from "react-native";
 import { AppText as Text } from "../../components/ui/AppText";
 import { Button } from "../../components/ui/Button";
 import { ListSection } from "../../components/ui/ListSection";
-import { useHubEnvironmentOverview } from "../../state/hubEnvironmentOverview";
+import {
+  refreshHubEnvironmentOverview,
+  useHubEnvironmentOverview,
+  useHubEnvironmentOverviewStatus,
+} from "../../state/hubEnvironmentOverview";
 import { useSpaceSelections } from "../../state/spaces";
 import { useHubConnection } from "../../state/use-remote-environment-registry";
 import { EnvironmentStatusDot } from "./EnvironmentStatusDot";
@@ -17,32 +21,36 @@ import { hubMachineRow } from "./hubMachineRow";
 export function HubMachinesSection() {
   const hub = useHubConnection();
   const selections = useSpaceSelections();
-  const isOwner = hub !== null && selections.get(hub.environmentId)?.view?.isOwner === true;
-  if (!isOwner || hub === null) return null;
-  return <HubMachinesList connection={hub} />;
+  const view = hub === null ? undefined : selections.get(hub.environmentId)?.view;
+  if (view?.isOwner !== true) return null;
+  return <HubMachinesList viewerUserId={view.userId} />;
 }
 
-function HubMachinesList(props: {
-  readonly connection: NonNullable<ReturnType<typeof useHubConnection>>;
-}) {
-  const { environments, failed, refresh } = useHubEnvironmentOverview(props.connection);
+function HubMachinesList(props: { readonly viewerUserId: string }) {
+  const environments = useHubEnvironmentOverview();
+  const status = useHubEnvironmentOverviewStatus();
   return (
     <ListSection title="Machines on this Hub">
-      {failed ? (
+      {status === "error" ? (
         <View accessibilityRole="alert" className="flex-row items-center gap-3 px-4 py-3">
           <Text className="flex-1 text-sm text-danger-foreground">
             Could not load this Hub's machines.
           </Text>
-          <Button label="Try again" size="compact" tone="secondary" onPress={refresh} />
+          <Button
+            label="Try again"
+            size="compact"
+            tone="secondary"
+            onPress={refreshHubEnvironmentOverview}
+          />
         </View>
       ) : null}
-      {environments === null ? (
-        failed ? null : (
+      {environments.length === 0 ? (
+        status === "loading" ? (
           <Text className="px-4 py-3 text-sm text-foreground-muted">Loading machines…</Text>
-        )
+        ) : null
       ) : (
         environments.map((environment) => {
-          const row = hubMachineRow(environment);
+          const row = hubMachineRow(environment, props.viewerUserId);
           return (
             <View
               key={environment.id}

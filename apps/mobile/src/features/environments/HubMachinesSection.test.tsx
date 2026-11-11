@@ -7,8 +7,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 const { mocks } = vi.hoisted(() => ({
   mocks: {
     isOwner: false,
-    overview: vi.fn(),
-    environments: [] as ReadonlyArray<HubEnvironmentOverviewEntry>,
+    connection: null as null | {
+      readonly environmentId: string;
+      readonly httpBaseUrl: string;
+      readonly bearerToken: string | null;
+    },
+    runPromise: vi.fn(),
   },
 }));
 
@@ -20,6 +24,7 @@ vi.mock("react-native", () => ({
     children?: ReactNode;
     accessibilityLabel?: string;
   }) => <div aria-label={accessibilityLabel}>{children}</div>,
+  AppState: { currentState: "active", addEventListener: () => ({ remove: () => {} }) },
 }));
 vi.mock("../../components/ui/AppText", () => ({
   AppText: ({ children }: { children?: ReactNode }) => <span>{children}</span>,
@@ -30,73 +35,80 @@ vi.mock("../../components/ui/ListSection", () => ({
   ),
 }));
 vi.mock("../../components/ui/Button", () => ({
-  Button: ({ label }: { label: string }) => <button>{label}</button>,
+  Button: ({ label, onPress }: { label: string; onPress: () => void }) => (
+    <button onClick={onPress}>{label}</button>
+  ),
 }));
 vi.mock("./EnvironmentStatusDot", () => ({
   EnvironmentStatusDot: ({ status }: { status: string }) => <i data-status={status} />,
 }));
 vi.mock("../../state/use-remote-environment-registry", () => ({
-  useHubConnection: () => ({
-    environmentId: "hub",
-    httpBaseUrl: "http://hub.test",
-    bearerToken: "token",
-  }),
+  hubConnectionAtom: {},
+  useHubConnection: () => mocks.connection,
+}));
+vi.mock("../../state/atom-registry", () => ({
+  appAtomRegistry: { get: () => mocks.connection },
+}));
+vi.mock("../../lib/runtime", () => ({
+  runtime: { runPromise: (effect: unknown) => mocks.runPromise(effect) },
 }));
 vi.mock("../../state/spaces", () => ({
   useSpaceSelections: () => new Map([["hub", { view: { isOwner: mocks.isOwner } }]]),
-}));
-vi.mock("../../state/hubEnvironmentOverview", () => ({
-  useHubEnvironmentOverview: (connection: unknown) => {
-    mocks.overview(connection);
-    return { environments: mocks.environments, failed: false, refresh: () => {} };
-  },
 }));
 
 import { HubMachinesSection } from "./HubMachinesSection";
 
 const acme = SpaceId.make("space-acme");
 
+const ENVIRONMENTS: ReadonlyArray<HubEnvironmentOverviewEntry> = [
+  {
+    id: EnvironmentId.make("sandbox:space-acme"),
+    name: "Acme Sandbox",
+    kind: "sandbox",
+    mode: "sandbox",
+    spaceId: acme,
+    spaceName: "Acme",
+    ownerUserId: null,
+    ownerName: null,
+    status: "failed",
+    startError: "Podman is not installed",
+    os: null,
+    lastSeenAt: null,
+    runningThreadCount: 0,
+  },
+  {
+    id: EnvironmentId.make("env-vps"),
+    name: "Acme VPS",
+    kind: "external",
+    mode: "dedicated",
+    spaceId: acme,
+    spaceName: "Acme",
+    ownerUserId: null,
+    ownerName: null,
+    status: "online",
+    startError: null,
+    os: "linux",
+    lastSeenAt: null,
+    runningThreadCount: 1,
+  },
+];
+
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
+
+const render = async () => {
+  await act(async () => root?.render(<HubMachinesSection />));
+  await act(async () => {});
+};
 
 beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
-  mocks.overview.mockClear();
-  mocks.environments = [
-    {
-      id: EnvironmentId.make("sandbox:space-acme"),
-      name: "Acme Sandbox",
-      kind: "sandbox",
-      mode: "sandbox",
-      spaceId: acme,
-      spaceName: "Acme",
-      ownerUserId: null,
-      ownerName: null,
-      status: "failed",
-      startError: "Podman is not installed",
-      os: null,
-      lastSeenAt: null,
-      runningThreadCount: 0,
-    },
-    {
-      id: EnvironmentId.make("env-vps"),
-      name: "Acme VPS",
-      kind: "external",
-      mode: "dedicated",
-      spaceId: acme,
-      spaceName: "Acme",
-      ownerUserId: null,
-      ownerName: null,
-      status: "online",
-      startError: null,
-      os: "linux",
-      lastSeenAt: null,
-      runningThreadCount: 1,
-    },
-  ];
+  mocks.runPromise.mockReset();
+  mocks.runPromise.mockImplementation(() => Promise.resolve({ environments: ENVIRONMENTS }));
+  mocks.connection = { environmentId: "hub", httpBaseUrl: "http://hub.test", bearerToken: "token" };
 });
 
 afterEach(() => {
@@ -107,14 +119,11 @@ afterEach(() => {
 });
 
 describe("HubMachinesSection", () => {
-  it("shows the Owner every machine with its mode, Space and state, to read only", () => {
+  it("shows the Owner every machine with its mode, Space and state, to read only", async () => {
     mocks.isOwner = true;
-    act(() => root?.render(<HubMachinesSection />));
-    expect(mocks.overview).toHaveBeenCalledWith(
-      expect.objectContaining({ httpBaseUrl: "http://hub.test", bearerToken: "token" }),
-    );
-    const section = container?.querySelector('section[aria-label="Machines on this Hub"]');
-    expect(section).not.toBeNull();
+    await render();
+    expect(mocks.runPromise).toHaveBeenCalled();
+    expect(container?.querySelector('section[aria-label="Machines on this Hub"]')).not.toBeNull();
     expect(
       container?.querySelector('[aria-label="Acme Sandbox, Failed to start · Sandbox of Acme"]'),
     ).not.toBeNull();
@@ -130,10 +139,21 @@ describe("HubMachinesSection", () => {
     expect(container?.querySelectorAll("button")).toHaveLength(0);
   });
 
-  it("shows nothing to anyone else, and never asks the Owner-only endpoint", () => {
+  it("says it could not load, with «Try again», when there is no session to read with", async () => {
+    mocks.isOwner = true;
+    mocks.connection = { environmentId: "hub", httpBaseUrl: "http://hub.test", bearerToken: null };
+    await render();
+    expect(container?.textContent).toContain("Could not load this Hub's machines.");
+    expect(container?.textContent).not.toContain("Loading machines…");
+    expect([...(container?.querySelectorAll("button") ?? [])].map((b) => b.textContent)).toEqual([
+      "Try again",
+    ]);
+  });
+
+  it("shows nothing to anyone else, and never asks the Owner-only endpoint", async () => {
     mocks.isOwner = false;
-    act(() => root?.render(<HubMachinesSection />));
+    await render();
     expect(container?.innerHTML).toBe("");
-    expect(mocks.overview).not.toHaveBeenCalled();
+    expect(mocks.runPromise).not.toHaveBeenCalled();
   });
 });

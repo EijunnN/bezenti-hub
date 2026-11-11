@@ -48,7 +48,6 @@ import { EnvironmentStatusDot } from "../EnvironmentStatusDot";
 import {
   type ActiveEnvironmentView,
   type ThreadEnvironmentState,
-  ENVIRONMENT_STATUS_LABELS,
   activeEnvironmentStatusLabel,
   NEEDS_ENVIRONMENT_LABEL,
   PAUSED_OFFLINE_LABEL,
@@ -475,7 +474,7 @@ export const ChatHeader = memo(function ChatHeader({
                 {activeEnvironment.name}
                 {activeEnvironment.status === "online"
                   ? null
-                  : ` · ${ENVIRONMENT_STATUS_LABELS[activeEnvironment.status]}`}
+                  : ` · ${activeEnvironmentStatusLabel(activeEnvironment)}`}
               </TooltipTrigger>
               <TooltipPopup side="top">
                 Runs on {activeEnvironment.name} · {activeEnvironmentStatusLabel(activeEnvironment)}
@@ -499,9 +498,9 @@ export const ChatHeader = memo(function ChatHeader({
               </TooltipTrigger>
               <TooltipPopup side="top">
                 {activeEnvironment.name} is{" "}
-                {ENVIRONMENT_STATUS_LABELS[activeEnvironment.status].toLowerCase()}. The turn goes
-                on when it comes back; messages you send are queued until then, or until you move
-                the Thread.
+                {activeEnvironmentStatusLabel(activeEnvironment).toLowerCase()}. The turn goes on
+                when it comes back; messages you send are queued until then, or until you move the
+                Thread.
               </TooltipPopup>
             </Tooltip>
           ) : null}

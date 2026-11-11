@@ -128,6 +128,27 @@ describe("makeHubEnvironmentsPoller", () => {
     expect(poller.snapshot()).toEqual([]);
     unsubscribe();
   });
+
+  it("keeps the answer of the latest read when an older one arrives after it", async () => {
+    const resolvers: Array<(list: HubEnvironmentList) => void> = [];
+    const fetch = vi.fn(
+      () =>
+        new Promise<HubEnvironmentList>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    const poller = makeHubEnvironmentsPoller({ fetch });
+    const unsubscribe = poller.subscribe(() => undefined);
+    // «Try again» while the first read is still out.
+    poller.refresh();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    resolvers[1]?.({ environments: [hub, laptop] });
+    await flush();
+    resolvers[0]?.({ environments: [hub] });
+    await flush();
+    expect(poller.snapshot()).toEqual([hub, laptop]);
+    unsubscribe();
+  });
 });
 
 describe("pausing the poll", () => {

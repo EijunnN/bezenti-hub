@@ -6,7 +6,6 @@ import {
   type HubEnvironmentStatus,
   type EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
-  type HubEnvironmentList,
   type HubEnvironmentSummary,
   NO_ENVIRONMENT_ADVICE,
   type OrchestrationV2ThreadMove,
@@ -80,9 +79,17 @@ const HUB_ENVIRONMENTS_STARTING_REFRESH_MS = 1000;
 /** «loading» until the first answer, «error» while the last read failed. */
 export type HubEnvironmentsStatus = "loading" | "ready" | "error";
 
-export interface HubEnvironmentsPoller {
+/** What a poller reads: a list of machines with their status (the Hub's list, the Owner's overview). */
+interface PolledEnvironmentList<E> {
+  readonly environments: ReadonlyArray<E>;
+  readonly sandboxesUnavailable?: string | null | undefined;
+}
+
+export interface HubEnvironmentsPoller<
+  E extends { readonly status: HubEnvironmentStatus } = HubEnvironmentSummary,
+> {
   readonly subscribe: (listener: () => void) => () => void;
-  readonly snapshot: () => ReadonlyArray<HubEnvironmentSummary>;
+  readonly snapshot: () => ReadonlyArray<E>;
   /** Why the Hub runs no Sandboxes, from the last list; null while it runs them or until known. */
   readonly sandboxesUnavailable: () => string | null;
   readonly status: () => HubEnvironmentsStatus;
@@ -95,20 +102,24 @@ export interface HubEnvironmentsPoller {
 }
 
 /**
- * One list for every view that shows where Threads run, read while any of them is subscribed and
- * the app is active: every `intervalMs` while machines joined the Hub, every `idleIntervalMs`
- * while the Hub machine is alone. A failed read keeps the last list and reports «error». An
- * unchanged answer does not notify, since every Thread row reads the list.
+ * One list for every view that shows machines, read while subscribed and the app is active:
+ * every `intervalMs` with machines joined, `idleIntervalMs` with the Hub machine alone. A failed
+ * read keeps the last list («error»); an unchanged answer does not notify; only the latest read's
+ * answer counts.
  */
-export function makeHubEnvironmentsPoller(options: {
-  readonly fetch: () => Promise<HubEnvironmentList>;
+export function makeHubEnvironmentsPoller<
+  E extends { readonly status: HubEnvironmentStatus } = HubEnvironmentSummary,
+>(options: {
+  readonly fetch: () => Promise<PolledEnvironmentList<E>>;
   readonly intervalMs?: number;
   readonly idleIntervalMs?: number;
-}): HubEnvironmentsPoller {
-  let environments: ReadonlyArray<HubEnvironmentSummary> = [];
+}): HubEnvironmentsPoller<E> {
+  let environments: ReadonlyArray<E> = [];
   let sandboxesUnavailable: string | null = null;
   let status: HubEnvironmentsStatus = "loading";
   let generation = 0;
+  // Each read's number; only the latest one's answer is kept.
+  let requested = 0;
   let active = true;
   const listeners = new Set<() => void>();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -136,12 +147,15 @@ export function makeHubEnvironmentsPoller(options: {
 
   function refresh() {
     stop();
+    requested += 1;
+    const id = requested;
     const pending = options.fetch();
     // Read after starting: a fetch that resets for a new session keeps its own answer.
     const started = generation;
+    const current = () => started === generation && id === requested;
     void pending.then(
       (list) => {
-        if (started !== generation) return;
+        if (!current()) return;
         const unavailable = list.sandboxesUnavailable ?? null;
         const changed =
           status !== "ready" ||
@@ -154,7 +168,7 @@ export function makeHubEnvironmentsPoller(options: {
         if (changed) notify();
       },
       () => {
-        if (started !== generation) return;
+        if (!current()) return;
         const changed = status !== "error";
         status = "error";
         schedule();
