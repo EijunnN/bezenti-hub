@@ -200,17 +200,39 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
   // A joined machine that was a Hub keeps its key: what that Hub sealed opens, and new values are
   // sealed too. One that never was keeps the credential its Hub writes in clear.
   const encrypted = !joinedMachine || (yield* MasterKeyFile.holdsEncryptedSecrets());
-  const openAsClient = Effect.scoped(
-    Effect.gen(function* () {
-      // Loaded here: the ownership module reaches much of the server, which reaches this store.
-      const [ServerOwnership, ProcessRunner] = yield* Effect.promise(() =>
-        Promise.all([import("../serverOwnership.ts"), import("../processRunner.ts")]),
-      );
-      const owned = yield* ServerOwnership.acquireServerOwnership(
-        serverConfig.serverRuntimeStatePath,
-      ).pipe(Effect.provide(ProcessRunner.layer), Effect.option);
-      return yield* MasterKeyFile.openKeyring(Option.isSome(owned) ? "owner" : "client");
-    }),
+  /**
+   * A command beside the Hub reads without the lock. Only when the store needs the Hub's startup
+   * and no server is running (its runtime record names no live process) does it take the lock,
+   * briefly, to do that startup itself; a Hub starting meanwhile wins the lock instead.
+   */
+  const openAsClient = MasterKeyFile.openKeyring("client").pipe(
+    Effect.catchIf(
+      (error) => error.reason === "needs-hub",
+      (needsHub) =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            // Loaded here: these modules reach much of the server, which reaches this store.
+            const [ServerOwnership, ProcessRunner, RuntimeState] = yield* Effect.promise(() =>
+              Promise.all([
+                import("../serverOwnership.ts"),
+                import("../processRunner.ts"),
+                import("../serverRuntimeState.ts"),
+              ]),
+            );
+            const record = yield* RuntimeState.readPersistedServerRuntimeState(
+              serverConfig.serverRuntimeStatePath,
+            ).pipe(Effect.orElseSucceed(() => Option.none()));
+            if (Option.exists(record, (state) => RuntimeState.isProcessAlive(state.pid))) {
+              return yield* needsHub;
+            }
+            const owned = yield* ServerOwnership.acquireServerOwnership(
+              serverConfig.serverRuntimeStatePath,
+            ).pipe(Effect.provide(ProcessRunner.layer), Effect.option);
+            if (Option.isNone(owned)) return yield* needsHub;
+            return yield* MasterKeyFile.openKeyring("owner");
+          }),
+        ),
+    ),
   );
   // Beside a running server whose store needs its startup, a command still runs; only what reads
   // or writes a secret fails, saying so.

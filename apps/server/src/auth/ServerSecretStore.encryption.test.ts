@@ -30,6 +30,7 @@ import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ServerOwnership from "../serverOwnership.ts";
 import * as MasterKeyFile from "./MasterKeyFile.ts";
+import * as SecretCipher from "./SecretCipher.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 
 const platform = Layer.mergeAll(NodeServices.layer, PlatformNodeCrypto.layer);
@@ -597,6 +598,62 @@ it.layer(platform)("ServerSecretStore encryption", (it) => {
         const kept = NodeFS.statSync(entryFileOf(baseDir, "dpop-proof-new"));
         assert.approximately(kept.mtimeMs, hourAgo * 1000, 2000);
       }),
+    );
+  });
+
+  describe("final review", () => {
+    it.effect("a root-owned key passes only when others cannot read it", () =>
+      Effect.sync(() => {
+        assert.isTrue(MasterKeyFile.keyFilePermissionsAcceptable(0o600, 1000));
+        assert.isTrue(MasterKeyFile.keyFilePermissionsAcceptable(0o440, 0));
+        assert.isTrue(MasterKeyFile.keyFilePermissionsAcceptable(0o400, 0));
+        assert.isFalse(MasterKeyFile.keyFilePermissionsAcceptable(0o444, 0));
+        assert.isFalse(MasterKeyFile.keyFilePermissionsAcceptable(0o404, 0));
+        assert.isFalse(MasterKeyFile.keyFilePermissionsAcceptable(0o460, 0));
+        assert.isFalse(MasterKeyFile.keyFilePermissionsAcceptable(0o440, 1000));
+      }),
+    );
+
+    it.effect("an entry the first encrypting build sealed into a .bin is not sealed twice", () =>
+      Effect.gen(function* () {
+        const baseDir = newBaseDir();
+        yield* readAll(baseDir, []);
+        const keyring = Option.getOrThrow(
+          yield* Effect.map(ServerSecretStore.MasterKeyring, (ring) => ring.keyring).pipe(
+            Effect.provide(storeAt(baseDir)),
+          ),
+        );
+        NodeFS.writeFileSync(
+          NodePath.join(secretsDirOf(baseDir), "old-sealed.bin"),
+          SecretCipher.seal(keyring.current, "server-secret", "old-sealed", encoder.encode(SECRET)),
+        );
+        const [value] = yield* readAll(baseDir, ["old-sealed"]);
+        assert.equal(Option.getOrThrow(value!), SECRET);
+      }),
+    );
+
+    it.effect("a command beside a running Hub ignores its replay markers", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const baseDir = newBaseDir();
+          yield* withStore(baseDir, (store) => store.set("a", encoder.encode(SECRET)));
+          // A marker the Hub has not pruned yet (in clear, and long expired).
+          seedPlaintext(baseDir, { "dpop-proof-stale": "1" });
+          NodeFS.utimesSync(NodePath.join(secretsDirOf(baseDir), "dpop-proof-stale.bin"), 1, 1);
+          // The Hub runs: it holds the server's ownership lock.
+          yield* ServerOwnership.acquireServerOwnership(
+            NodePath.join(stateDirOf(baseDir), "server-runtime.json"),
+          ).pipe(Effect.provide(ProcessRunner.layer));
+          const value = yield* Effect.flatMap(ServerSecretStore.ServerSecretStore, (store) =>
+            store.get("a"),
+          ).pipe(
+            Effect.provide(
+              ServerSecretStore.layerClient.pipe(Layer.provideMerge(configAt(baseDir))),
+            ),
+          );
+          assert.equal(decoder.decode(Option.getOrThrow(value)), SECRET);
+        }),
+      ),
     );
   });
 

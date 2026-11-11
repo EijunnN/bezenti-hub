@@ -1,4 +1,7 @@
-import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+// @effect-diagnostics nodeBuiltinImport:off - the test computes the folder name as the Hub does.
+import * as NodeCrypto from "node:crypto";
+
+import * as PlatformNodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -62,7 +65,7 @@ const withService = <A, E>(
     let failedRecords = options.failedRecords ?? 0;
     const requestThreadId = options.threadId ?? threadId;
     const layerDependencies = Layer.mergeAll(
-      NodeCrypto.layer,
+      PlatformNodeCrypto.layer,
       NodeServices.layer,
       options.keyring === undefined
         ? Layer.empty
@@ -168,7 +171,7 @@ const realKeyring = Effect.gen(function* () {
     Effect.provide(
       ServerSecretStore.layer.pipe(
         Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
-        Layer.provideMerge(NodeCrypto.layer),
+        Layer.provideMerge(PlatformNodeCrypto.layer),
       ),
     ),
   );
@@ -493,6 +496,92 @@ it.effect("a file answer is sealed at rest and in clear only in memory, and come
     // The sealed copy, not a new answer: a command holding the path never reads another value.
     assert.equal(yield* fs.readFileString(again), "cf_token-on-disk-check");
     assert.isFalse(yield* fs.exists(path.join(path.dirname(file), "stale")));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("a planted symlink where the folder in memory goes is never used", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const secretsDir = yield* fs.makeTempDirectoryScoped({ prefix: "secret-files-test-" });
+    const runtime = yield* fs.makeTempDirectoryScoped({ prefix: "secret-runtime-test-" });
+    const elsewhere = yield* fs.makeTempDirectoryScoped({ prefix: "secret-elsewhere-test-" });
+    yield* fs.chmod(runtime, 0o700);
+    yield* fs.chmod(elsewhere, 0o700);
+    const name = `t3code-secret-files-${NodeCrypto.createHash("sha256").update(secretsDir).digest("hex").slice(0, 16)}`;
+    yield* fs.symlink(elsewhere, path.join(runtime, name));
+    const resolved = yield* SecretFilesDirectory.resolveSecretFilesDirectory(secretsDir).pipe(
+      Effect.provideService(HostProcess.Environment, {
+        XDG_RUNTIME_DIR: runtime,
+        T3CODE_SHM_DIR: path.join(runtime, "no-shm"),
+      }),
+    );
+    const found = Option.getOrUndefined(resolved) as unknown;
+    const directory =
+      typeof found === "string" ? found : (found as { directory?: string } | undefined)?.directory;
+    assert.notEqual(directory, path.join(runtime, name), "the planted symlink was used");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("without a folder in memory a pasted secret still reaches the agent, from disk", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const directory = yield* fs.makeTempDirectoryScoped({ prefix: "secret-files-test-" });
+    const keyring = yield* realKeyring;
+    const noMemory = Effect.provideService(HostProcess.Environment, {
+      T3CODE_SHM_DIR: path.join(directory, "no-shm"),
+    });
+    const options = { directory, filesIn: "memory" as const, keyring };
+    const paste = withService(
+      ({ service }) =>
+        service.savePasted({
+          threadId,
+          requestNamespace: "session-a",
+          requestKey: "key-1",
+          value: "pasted-on-desktop-31",
+        }),
+      options,
+    ).pipe(noMemory);
+    const file = yield* paste;
+    assert.equal(yield* fs.readFileString(file), "pasted-on-desktop-31");
+    if ((yield* HostProcess.Platform) !== "win32") {
+      assert.equal((yield* fs.stat(file)).mode & 0o777, 0o600);
+      assert.equal((yield* fs.stat(path.dirname(file))).mode & 0o777, 0o700);
+    }
+    // The next start removes the copy in clear; the answer comes back from its sealed copy.
+    yield* withService(() => Effect.void, options).pipe(noMemory);
+    assert.isFalse(yield* fs.exists(file));
+    const again = yield* paste;
+    assert.equal(again, file);
+    assert.equal(yield* fs.readFileString(again), "pasted-on-desktop-31");
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("one bad old answer never stops the others from being sealed", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const directory = yield* fs.makeTempDirectoryScoped({ prefix: "secret-files-test-" });
+    const runtime = yield* fs.makeTempDirectoryScoped({ prefix: "secret-runtime-test-" });
+    yield* fs.chmod(runtime, 0o700);
+    const keyring = yield* realKeyring;
+    const files = path.join(directory, "files");
+    yield* fs.makeDirectory(files, { recursive: true });
+    // Sorted first: a dangling symlink, then a live answer left in clear.
+    yield* fs.symlink(
+      path.join(directory, "gone"),
+      path.join(files, "00000000000000000000000000000000"),
+    );
+    yield* fs.writeFileString(
+      path.join(files, "0123456789abcdef0123456789abcdef"),
+      "old-answer-91",
+    );
+    yield* withService(() => Effect.void, { directory, filesIn: "memory", keyring }).pipe(
+      Effect.provideService(HostProcess.Environment, { XDG_RUNTIME_DIR: runtime }),
+    );
+    const names = (yield* fs.readDirectory(files)).toSorted();
+    assert.deepEqual(names, ["0123456789abcdef0123456789abcdef.sealed"]);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 

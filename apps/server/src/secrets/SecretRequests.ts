@@ -79,11 +79,18 @@ const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const threadManagement = yield* ThreadManagementService.ThreadManagementService;
-  // In memory, never on the Hub's disk: the agent's shell reads the answer from there.
-  const filesDir =
+  // Where the agent's shell reads an answer: in memory, else (macOS, Windows) on the disk.
+  const filesFolder =
     store.directory === undefined
       ? undefined
       : Option.getOrUndefined(yield* resolveSecretFilesDirectory(store.directory));
+  const filesDir = filesFolder?.directory;
+  if (filesFolder !== undefined && !filesFolder.inMemory) {
+    yield* Effect.logWarning(
+      "request_secret file answers are written to the disk on this platform (no folder in memory); each is removed when it expires and at every start.",
+      { directory: filesFolder.directory },
+    );
+  }
   const noFilesDir = new SecretRequestError({
     reason: store.directory === undefined ? "store_failed" : "file_delivery_unavailable",
   });
@@ -470,29 +477,56 @@ const make = Effect.gen(function* () {
     Effect.withSpan("SecretRequests.sweepExpiredFiles"),
   );
 
-  // At startup the folder in memory keeps no stale plaintext: half-written files, and answers
-  // whose sealed copy is gone, are removed; the others come back from their sealed copy.
-  const cleanFilesInMemory = Effect.gen(function* () {
+  // At startup no stale plaintext stays where the agent reads answers: on the disk, none at all
+  // (each comes back from its sealed copy on demand); in memory, half-written files and answers
+  // whose sealed copy is gone.
+  const cleanFilesAtStart = Effect.gen(function* () {
     if (filesDir === undefined || filesDir === sealedDir) return;
     if (!(yield* fileSystem.exists(filesDir))) return;
     let removed = 0;
     for (const name of yield* fileSystem.readDirectory(filesDir)) {
-      const orphan =
+      const stale =
+        filesFolder?.inMemory !== true ||
         name.endsWith(".partial") ||
         sealedDir === undefined ||
         !(yield* fileSystem.exists(sealedFileOf(sealedDir, name)));
-      if (!orphan) continue;
+      if (!stale) continue;
       yield* fileSystem.remove(path.join(filesDir, name), { recursive: true });
       removed += 1;
     }
     yield* Effect.annotateCurrentSpan({ "secret_request.stale_files_removed": removed });
   }).pipe(
     Effect.catchCause((cause) => Effect.logWarning("Could not clean the secret files", cause)),
-    Effect.withSpan("SecretRequests.cleanFilesInMemory"),
+    Effect.withSpan("SecretRequests.cleanFilesAtStart"),
   );
 
-  // Answers that versions before encryption wrote to `secrets/files/` in clear: sealed in place
-  // (keeping their age) while they last, so none stays on the disk in clear.
+  // Answers that versions before encryption wrote to `secrets/files/` in clear: each sealed in
+  // place (keeping its age) while it lasts, then its clear copy goes. One that cannot be read (a
+  // dangling symlink, no permission) is logged and removed; it never stops the others.
+  const sealLegacyFile = Effect.fn("SecretRequests.sealLegacyFile")(function* (
+    dir: string,
+    name: string,
+    now: number,
+  ) {
+    const file = path.join(dir, name);
+    const { mtime } = yield* fileSystem.stat(file);
+    const live =
+      !name.endsWith(".partial") &&
+      Option.exists(mtime, (time) => now - time.getTime() <= SECRET_REF_TTL_MS);
+    if (live) {
+      const value = yield* fileSystem.readFileString(file);
+      if (Option.isSome(keyring)) {
+        yield* keepSealed(
+          name,
+          value,
+          Option.getOrUndefined(Option.map(mtime, (time) => ({ atime: time, mtime: time }))),
+        );
+      } else if (filesDir !== undefined && filesDir !== dir) {
+        yield* writeSecretFile(filesDir, path.join(filesDir, name), value);
+      }
+    }
+    return live;
+  });
   const sealLegacyFiles = Effect.gen(function* () {
     if (sealedDir === undefined || sealedDir === filesDir) return;
     const names = yield* fileSystem.readDirectory(sealedDir).pipe(Effect.orElseSucceed(() => []));
@@ -500,30 +534,31 @@ const make = Effect.gen(function* () {
     let sealed = 0;
     for (const name of names) {
       if (!FILE_NAME_PATTERN.test(name)) continue;
-      const file = path.join(sealedDir, name);
-      const { mtime } = yield* fileSystem.stat(file);
-      const live =
-        !name.endsWith(".partial") &&
-        Option.exists(mtime, (time) => now - time.getTime() <= SECRET_REF_TTL_MS);
-      if (live && Option.isSome(keyring)) {
-        yield* keepSealed(
-          name,
-          yield* fileSystem.readFileString(file),
-          Option.getOrUndefined(Option.map(mtime, (time) => ({ atime: time, mtime: time }))),
+      const kept = yield* sealLegacyFile(sealedDir, name, now).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Could not seal a secret file left in clear; removing it", {
+            file: name,
+            cause,
+          }).pipe(Effect.as(false)),
+        ),
+      );
+      if (kept) sealed += 1;
+      // Sealed or not, the clear copy never stays.
+      yield* fileSystem
+        .remove(path.join(sealedDir, name), { recursive: true })
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Could not remove a secret file left in clear", {
+              file: name,
+              cause,
+            }),
+          ),
         );
-        sealed += 1;
-      }
-      yield* fileSystem.remove(file, { recursive: true });
     }
     yield* Effect.annotateCurrentSpan({ "secret_request.legacy_files_sealed": sealed });
-  }).pipe(
-    Effect.catchCause((cause) =>
-      Effect.logWarning("Could not seal the secret files left in clear", cause),
-    ),
-    Effect.withSpan("SecretRequests.sealLegacyFiles"),
-  );
+  }).pipe(Effect.withSpan("SecretRequests.sealLegacyFiles"));
   yield* sealLegacyFiles;
-  yield* cleanFilesInMemory;
+  yield* cleanFilesAtStart;
   const sweep = Effect.andThen(sweepExpired, sweepExpiredFiles);
   yield* sweep;
   yield* sweep.pipe(

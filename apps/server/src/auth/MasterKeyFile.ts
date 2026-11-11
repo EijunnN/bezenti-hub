@@ -75,7 +75,7 @@ const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&
  * The key file's own names in its folder: the key, `.next`, `.previous`, `.replaced-<id>`, and
  * the temporary files their writes leave. Nothing else that merely shares the prefix.
  */
-export const keyFileNamePattern = (keyName: string) =>
+const keyFileNamePattern = (keyName: string) =>
   new RegExp(
     `^${escapeRegExp(keyName)}(\\.next|\\.previous|\\.replaced-[0-9a-f]+)?(${TEMP_FILE.source.slice(0, -1)})?$`,
   );
@@ -95,6 +95,10 @@ const allowLoosePermissions = Effect.gen(function* () {
  * mount an administrator placed). Anything else needs T3CODE_MASTER_KEY_ALLOW_LOOSE_PERMISSIONS=1,
  * which warns at every start. Why: docs/internals/secrets.md.
  */
+/** The POSIX rule on the key file's mode and owner; see `checkPermissions`. */
+export const keyFilePermissionsAcceptable = (mode: number, uid: number | undefined) =>
+  (mode & 0o077) === 0 || (uid === 0 && (mode & 0o027) === 0);
+
 const checkPermissions = Effect.fn("MasterKeyFile.checkPermissions")(function* (
   file: string,
   info: FileSystem.File.Info,
@@ -102,8 +106,7 @@ const checkPermissions = Effect.fn("MasterKeyFile.checkPermissions")(function* (
   // On Windows mode bits mean nothing: the file inherits its folder's ACL (the user's profile).
   if ((yield* HostProcess.Platform) === "win32") return;
   const mode = info.mode & 0o777;
-  if ((mode & 0o077) === 0) return;
-  if (Option.contains(info.uid, 0) && (mode & 0o022) === 0) return;
+  if (keyFilePermissionsAcceptable(mode, Option.getOrUndefined(info.uid))) return;
   if (yield* allowLoosePermissions) {
     yield* Effect.logWarning(
       "The master key can be read by other users of this machine; T3CODE_MASTER_KEY_ALLOW_LOOSE_PERMISSIONS lets the Hub start anyway.",
@@ -294,11 +297,44 @@ export const openKeyring = Effect.fn("MasterKeyFile.openKeyring")(function* (
   const target = Option.getOrElse(next, () => current);
   const markerCutoff = (yield* Clock.currentTimeMillis) - Duration.toMillis(REPLAY_MARKER_MAX_AGE);
 
+  if (mode === "client") {
+    // Beside a running Hub: names only (no entry is read), replay markers ignored (they are the
+    // Hub's to prune); the key check tells a wrong key.
+    if (Option.isSome(check)) {
+      const opened = SecretCipher.open(keys, "key-check", KEY_CHECK_FILE, check.value.bytes);
+      const checked = opened._tag === "opened" ? checkedKeyFile(opened.plaintext) : Option.none();
+      if (Option.isNone(checked)) {
+        return yield* fail(
+          "wrong-key",
+          `The master key ${keyFile} (id ${current.id}) does not open the key check ${checkFile}: it is not the key the Hub's secrets were encrypted with. ${RESTORE_HINT}`,
+        );
+      }
+      if (checked.value !== keyFile) {
+        yield* Effect.logWarning(
+          `The Hub last started with the master key at ${checked.value}; this uses ${keyFile}. Check T3CODE_MASTER_KEY_FILE.`,
+        );
+      }
+    }
+    const inClear = [...plain.keys()].filter((name) => !isReplayMarker(name)).length;
+    if (inClear > 0 || Option.isSome(next)) {
+      return yield* fail(
+        "needs-hub",
+        `The Hub's secrets in ${secretsDir} need its startup (${inClear} in clear${Option.isSome(next) ? ", a rotation to finish" : ""}). Start the Hub, or stop it and run this again.`,
+      );
+    }
+    return { current, keys: [current, ...Option.toArray(previous)], keyFile } satisfies Keyring;
+  }
+
   // Headers only: which key sealed each entry. Checked before anything is written.
   const sealedUnder = new Map<string, string>();
+  // Removed while this ran (a replay marker pruned): nothing to do for them.
+  const vanished = new Set<string>();
   for (const entry of sealed.values()) {
     const head = yield* readEntry(entry.file, SecretCipher.HEADER_BYTES);
-    if (Option.isNone(head)) continue;
+    if (Option.isNone(head)) {
+      vanished.add(entry.file);
+      continue;
+    }
     const header = SecretCipher.parseHeader(head.value.bytes);
     if (header._tag !== "sealed") {
       return yield* fail(
@@ -345,24 +381,13 @@ export const openKeyring = Effect.fn("MasterKeyFile.openKeyring")(function* (
   }
   const toSeal = [...plain.values()].filter((entry) => !expired.has(entry.file));
   const toReseal = [...sealed.values()].filter(
-    (entry) => !expired.has(entry.file) && sealedUnder.get(entry.name) !== target.id,
+    (entry) =>
+      !expired.has(entry.file) &&
+      !vanished.has(entry.file) &&
+      sealedUnder.get(entry.name) !== target.id,
   );
   const pending =
     toSeal.length > 0 || toReseal.length > 0 || expired.size > 0 || Option.isSome(next);
-
-  if (mode === "client") {
-    if (pending) {
-      return yield* fail(
-        "needs-hub",
-        `The Hub's secrets in ${secretsDir} need its startup (${toSeal.length} in clear, ${toReseal.length} to re-encrypt${Option.isSome(next) ? ", a rotation to finish" : ""}). Start the Hub, or stop it and run this again.`,
-      );
-    }
-    return {
-      current,
-      keys: [current, ...Option.toArray(previous)],
-      keyFile,
-    } satisfies Keyring;
-  }
 
   if (pending) {
     // Authenticate every live entry before writing anything: a damaged one stops here.
@@ -387,9 +412,20 @@ export const openKeyring = Effect.fn("MasterKeyFile.openKeyring")(function* (
       if (twin === undefined || expired.has(twin.file)) {
         const stored = yield* readEntry(entry.file);
         if (Option.isNone(stored)) continue;
+        // The first encrypting build kept sealed values in `.bin`: one that opens (its tag
+        // verifies under its name and purpose) is already sealed, never sealed a second time.
+        const already = SecretCipher.open(keys, "server-secret", entry.name, stored.value.bytes);
+        const sealedPath = path.join(secretsDir, `${entry.name}${SEALED_EXTENSION}`);
+        const header = SecretCipher.parseHeader(stored.value.bytes);
+        if (already._tag === "opened" && header._tag === "sealed" && header.keyId === target.id) {
+          yield* fs.rename(entry.file, sealedPath).pipe(Effect.catch(io(`rename ${entry.file}`)));
+          written += 1;
+          continue;
+        }
+        const plaintext = already._tag === "opened" ? already.plaintext : stored.value.bytes;
         yield* writeAtomically(
-          path.join(secretsDir, `${entry.name}${SEALED_EXTENSION}`),
-          SecretCipher.seal(target, "server-secret", entry.name, stored.value.bytes),
+          sealedPath,
+          SecretCipher.seal(target, "server-secret", entry.name, plaintext),
           timesOf(stored.value.info),
         ).pipe(Effect.catch(io(`encrypt ${entry.file}`)));
         written += 1;

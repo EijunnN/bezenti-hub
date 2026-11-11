@@ -297,16 +297,25 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
       }),
     );
 
-    it.effect("still reads a file that only shares the master key's name prefix", () =>
+    it.effect("hides every sibling of the master key in its folder, and only those", () =>
       Effect.gen(function* () {
         const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
         const config = yield* ServerConfig.ServerConfig;
-        yield* writeTextFile(config.stateDir, "master.key.notes.md", "notes");
-        const read = yield* workspaceFileSystem.readFile({
+        const hidden = ["master.key~", "master.key.notes.md", ".master.key.swp", "master.key.bak"];
+        for (const name of [...hidden, "master.keyring.txt"]) {
+          yield* writeTextFile(config.stateDir, name, "x");
+        }
+        for (const name of hidden) {
+          const error = yield* workspaceFileSystem
+            .readFile({ cwd: config.stateDir, relativePath: name })
+            .pipe(Effect.flip);
+          expect(error).toBeInstanceOf(WorkspacePaths.WorkspacePathOutsideRootError);
+        }
+        const other = yield* workspaceFileSystem.readFile({
           cwd: config.stateDir,
-          relativePath: "master.key.notes.md",
+          relativePath: "master.keyring.txt",
         });
-        expect(read.contents).toBe("notes");
+        expect(other.contents).toBe("x");
       }),
     );
 
