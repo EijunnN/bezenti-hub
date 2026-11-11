@@ -909,11 +909,13 @@ no `ssh` binary: the key is never written to a file or put in an argument), in
   only the run's grant, over HTTPS or loopback.
 - **Input.** Host (a DNS name or an IP), port, user (a plain login name, never `root`: the work
   runs in rootless Podman), a private key with its passphrase (`RedactedFromValue` in the
-  contract) or the SSH agent of the Hub's process (`SSH_AUTH_SOCK`), the Organization, the
-  machine's name and the Hub's address as the machine reaches it (`https://`, or `http://` on
+  contract) or the SSH agent of the Hub's process (`SSH_AUTH_SOCK`, read once into
+  `SshInstallPolicy`), the Organization, the machine's name (by default its IP address or its host
+  name's first label, at most 64 characters) and the Hub's address as the machine reaches it (`https://`, or `http://` on
   loopback, as `t3 join`). The key is parsed before anything connects, with fixed messages.
-- **Where it connects.** The host is resolved once and the address pinned for the whole run (no
-  DNS rebinding between steps). Refused: link-local addresses (169.254.0.0/16, fe80::/10, where
+- **Where it connects.** The host is resolved once (within 10 seconds) and the address pinned for
+  the whole run (no DNS rebinding between steps). Every address is judged by its bytes, however it
+  is written (`0:0:0:0:0:0:0:1`, `::ffff:7f00:1`, `::ffff:127.0.0.1`, an IPv6 zone…). Refused: link-local addresses (169.254.0.0/16, fe80::/10, where
   cloud metadata lives), unspecified, multicast and broadcast ones, also as IPv4-mapped IPv6, and
   **the Hub's own machine**: loopback (127.0.0.0/8, `::1`) and every address of its own interfaces.
   A Space on the Hub's machine has its Sandbox already, and the Hub's own user would `t3 join` from
@@ -924,7 +926,10 @@ no `ssh` binary: the key is never written to a file or put in an argument), in
   (`forbiddenSshAddress`, one rule).
 - **Host key, trust on first use.** `start` connects, reads the host key and turns it down before
   any sign-in (no credential is offered), and the run waits in `awaiting-host-key` with
-  `SHA256:…` as `ssh-keygen -lf` prints it, for 10 minutes. `confirm` must send that same
+  `SHA256:…` as `ssh-keygen -lf` prints it, for 10 minutes; then it ends as cancelled, every step
+  not run. Whatever stops `start` before the key is shown (an error, an interrupt) ends the run
+  too, so nothing holds that address or the key. Closing the dialog cancels a run that has not
+  finished, also one whose start answers after the close. `confirm` must send that same
   fingerprint; every later connection of the run accepts only it (a machine that changes its key
   between the two is refused before sign-in). On success the key is stored with the machine
   (`environment_ssh_hosts`, migration 110: host, port, user, algorithm, fingerprint, whether the
@@ -937,10 +942,17 @@ no `ssh` binary: the key is never written to a file or put in an argument), in
   address, or to another Hub), so two runs never register one machine twice.
 - **The steps**, each a POSIX script run with `sh -c` (whatever the login shell), every value from
   the Owner single-quoted ([sshInstallScripts](../../apps/server/src/environments/sshInstall/sshInstallScripts.ts));
-  host and user never reach a shell:
-  1. _Check the system and Podman_: Linux, not root, rootless Podman (`podman info`). Missing, it
-     installs it with passwordless sudo (`apt-get`, `dnf`, `yum`, `zypper`); without one it stops
-     with what to install (exit codes 10-14 name the check).
+  host and user never reach a shell. Each runs in a **process group of its own** there
+  (`stepCommand`: `setsid`, its group id in `~/.t3/ssh-install/step.pid`): a step that times out
+  or is cancelled is stopped there, its whole group (`stopStepScript`, over a new channel of the
+  same connection), and while a step of any run still runs there (its connection lost), a new one
+  refuses to start (exit code 75, saying how to stop it), so «Try again» never races the old one.
+  1. _Check the system and Podman_: Linux, not root; with a systemd user manager, lingering (its
+     service is a user unit, which would stop at logout): turned on with `loginctl enable-linger`
+     (or with passwordless sudo) when allowed, otherwise it stops at once with the command to run as
+     root. Then rootless Podman (`podman info`). Missing, it installs it with passwordless sudo
+     (`apt-get`, `dnf`, `yum`, `zypper`); without one it stops with what to install (exit codes
+     10-15 name the check). Nothing is installed before these checks pass.
   2. _Install T3 Code_: the runner of `@t3tools/ssh` (`buildRemoteT3RunnerScript`) for the Hub's
      own version, sent on standard input to `~/.t3/ssh-install/t3`: the release archive from
      `T3CODE_RELEASE_BASE_URL`, checked against `SHA256SUMS`, or in development a checkout's entry
@@ -961,19 +973,27 @@ no `ssh` binary: the key is never written to a file or put in an argument), in
   again in its transaction). The audit entry is `environment.register` with `mode: "dedicated"`,
   `spaceId`, `via: "ssh"` and `host`.
 - **Failures and cancel.** A step that exits non-zero, times out or loses the connection stops the
-  run there; the later steps never run. **Cancel** interrupts the run the same way. Either way the
+  run there; the later steps never run. **Cancel** interrupts the run the same way, at any moment:
+  it is recorded first, so a run whose steps have not begun stops before the first, and a run ends
+  once (a later cancel or answer does not change how it ended). Either way the
   grant is dropped, a machine it registered is removed (`environment.remove` with `via: "ssh"`,
   its credential revoked), and, if the run registered it and the connection is up, the machine
   runs an undo (`t3 service uninstall` or killing the background `t3 serve`, then `t3 leave`); if the
   connection is gone the step's output says to run `t3 leave` there. A grant redeemed while the
-  run is ending removes what it registered at once.
+  run is ending removes what it registered at once. The Hub does **not** remove T3 Code from the
+  machine: from the install step on, the failed step's output ends with what is left there
+  (`~/.t3/ssh-install`, and the Sandbox image if its build began) and the commands that remove it.
+  «Try again» uses them, and a machine joined some other way may too.
 - **The key and its secrets.** The key and passphrase live in the run's memory until it ends (or
   its host key is not confirmed in 10 minutes) and are dropped then. They never reach the machine,
-  and every line of its output, and the run's error, pass a scrubber that removes any line of the
-  key, a PEM private-key marker, the passphrase and the grant. Errors from ssh2 become fixed
+  and every line of its output, and the run's error, pass a scrubber that removes any piece of 12
+  characters or more of the key's body, the passphrase or the grant (wherever it shows, so a piece
+  cut by a chunk or a column goes too), a PEM private-key marker, and a shorter passphrase whole. A
+  line is scrubbed whole and only then cut to its length. Errors from ssh2 become fixed
   messages (socket codes kept). Its spans and logs carry neither: a test reads them, and every
-  file under the Hub's home, for the key and passphrase. With «Keep the key for updates» the key (and passphrase) go to the
+  file under the Hub's home, for the key and passphrase. The key goes from memory when the run
+  ends, and so does the host key timer that held it. With «Keep the key for updates» the key (and passphrase) go to the
   Hub's secret store as `ssh-install-key-<environment id>`; removing the machine deletes that
-  secret and its host record. Nothing uses a kept key yet: a later «update over SSH» would.
+  secret and its host record (`SshInstall.forgotten` says when). Nothing uses a kept key yet: a later «update over SSH» would.
 - **Progress.** Each step keeps its last 300 lines (2,000 characters each); the dialog asks for
   the run every second while it runs. The Hub keeps the 20 newest finished runs in memory only.

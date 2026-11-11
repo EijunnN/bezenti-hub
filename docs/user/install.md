@@ -647,17 +647,21 @@ organization to dedicate it to, its name, and the Hub's address as that machine 
 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` prints on the machine, then **Trust this key
 and install**. Each step shows its output as it runs:
 
-1. **Check the system and Podman.** The machine must run Linux. If Podman is missing and the user
-   can use `sudo` without a password, the Hub installs it; otherwise it stops and says what to
-   install.
+1. **Check the system and Podman.** The machine must run Linux. With systemd, the user needs
+   lingering (so the service runs while nobody is logged in): the Hub turns it on if it may,
+   otherwise it stops and says what to run as root (`loginctl enable-linger <user>`). If Podman is
+   missing and the user can use `sudo` without a password, the Hub installs it; otherwise it stops
+   and says what to install. Nothing is installed before these checks pass.
 2. **Install T3 Code**, this Hub's version (from your release source, `T3CODE_RELEASE_BASE_URL`),
    and build the Sandbox image there.
 3. **Register the machine**, dedicated to the organization, with a one-time grant: nothing to
    approve.
 4. **Start its service** (`t3 service install`), and wait until it reaches the Hub.
 
-If a step fails, or you press **Cancel installation**, the run stops there, shows that step's
-output, and leaves no machine registered; fix the cause and **Try again**. The key is used for that
+If a step fails, or you press **Cancel installation** (closing the dialog cancels too), the run
+stops there, stops what that step was still doing on the machine, shows that step's output, and
+leaves no machine registered; fix the cause and **Try again**. What was already installed there
+stays (the output says what, and how to remove it). The key is used for that
 run only and forgotten, unless you tick **Keep the key for updates**: then the Hub keeps it in its
 secret store until you remove the machine. A machine already installed is not installed again
 (remove it first), and a later run to that address that shows another host key is refused. The
