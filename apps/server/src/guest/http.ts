@@ -156,6 +156,12 @@ const redeemRoute = HttpRouter.add(
   "POST",
   `${GUEST_ROUTE_PREFIX}/redeem`,
   Effect.gen(function* () {
+    // A page on a preview's own origin never puts a guest session in this browser.
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const config = yield* Effect.serviceOption(ServerConfig.ServerConfig);
+    if (crossesFromPreviewOrigin(Option.getOrUndefined(config)?.previewOrigin, request.headers)) {
+      return yield* badRequest;
+    }
     const body = yield* readJson.pipe(Effect.flatMap(decodeRedeem), Effect.option);
     if (body._tag === "None") return yield* badRequest;
     const guestShares = yield* GuestShareService;

@@ -177,3 +177,49 @@ describe("over HTTPS the Hub's session cookie is one no other host can set", () 
       }),
   );
 });
+
+describe("a page on a preview's own origin cannot sign a browser in to the Hub", () => {
+  it.effect(
+    "no door sets the Hub's session cookie for it (login CSRF), and it signs nobody out",
+    () =>
+      Effect.gen(function* () {
+        const { server, owner } = yield* hubWithOwner({ previewOrigin: PREVIEWS });
+        // An attacker's own pairing link, redeemed by a script on the preview page in the
+        // victim's browser: the browser would hold the attacker's session for the Hub.
+        const pairing = yield* server.request("/api/auth/pairing-token", {
+          body: {},
+          cookie: owner,
+        });
+        assert.equal(pairing.status, 200);
+        const redeemed = yield* server.request("/api/auth/browser-session", {
+          body: { credential: pairing.body.credential },
+          headers: { origin: PREVIEW_PAGE, "sec-fetch-site": "same-site" },
+        });
+        assert.deepEqual(
+          redeemed.setCookies.filter((cookie) => cookie.includes("t3_session")),
+          [],
+        );
+        // Nor does it sign the browser out of the Hub.
+        const out = yield* server.request("/api/auth/sign-out", {
+          body: {},
+          cookie: owner,
+          headers: { origin: PREVIEW_PAGE, "sec-fetch-site": "same-site" },
+        });
+        assert.deepEqual(
+          out.setCookies.filter((cookie) => cookie.includes("t3_session")),
+          [],
+        );
+        assert.equal((yield* server.request("/api/spaces", { cookie: owner })).status, 200);
+        // From the Hub's own page such a link signs in.
+        const another = yield* server.request("/api/auth/pairing-token", {
+          body: {},
+          cookie: owner,
+        });
+        const own = yield* server.request("/api/auth/browser-session", {
+          body: { credential: another.body.credential },
+        });
+        assert.equal(own.status, 200);
+        assert.isDefined(own.setCookie);
+      }),
+  );
+});

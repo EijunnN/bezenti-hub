@@ -26,6 +26,7 @@ import { parseOAuthScope } from "@t3tools/shared/oauthScope";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
@@ -40,6 +41,8 @@ import * as SessionStore from "./SessionStore.ts";
 import * as UserDirectory from "./UserDirectory.ts";
 import { deriveAuthClientMetadata, sessionCookieNameFor } from "./utils.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
+import * as ServerConfig from "../config.ts";
+import { crossesFromPreviewOrigin } from "../preview/PreviewOrigin.ts";
 import { requestUrl } from "../requestUrl.ts";
 
 const CREDENTIAL_RESPONSE_HEADERS = {
@@ -225,6 +228,16 @@ const sessionCookieAttributes = HttpServerRequest.HttpServerRequest.pipe(
 );
 
 /**
+ * Every door that sets or clears the Hub's session cookie asks this: never for a page on a
+ * preview's own origin, which could sign the browser in as someone else (login CSRF) or out.
+ */
+const fromPreviewOrigin = Effect.gen(function* () {
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  const config = yield* Effect.serviceOption(ServerConfig.ServerConfig);
+  return crossesFromPreviewOrigin(Option.getOrUndefined(config)?.previewOrigin, request.headers);
+});
+
+/**
  * The session cookie under the name this request's transport takes (`__Host-` over HTTPS, see
  * `sessionCookieNameFor`). Over HTTPS the bare-named one is expired with it, so a session from
  * before the prefix moves to it on its next check instead of signing out.
@@ -235,7 +248,8 @@ const sessionCookie = (
   token: string,
   expiresAt: DateTime.DateTime,
 ) =>
-  Effect.map(sessionCookieAttributes, (attributes) => {
+  Effect.map(Effect.all([sessionCookieAttributes, fromPreviewOrigin]), ([attributes, refused]) => {
+    if (refused) return Result.succeed(cookies);
     const set = Cookies.set(
       cookies,
       sessionCookieNameFor(cookieName, attributes.secure === true),
@@ -255,14 +269,18 @@ export const appendSessionCookie = (
 
 /** Signing out clears both names a session cookie may be under. */
 const expireSessionCookies = (cookieNames: ReadonlyArray<string>) =>
-  Effect.flatMap(sessionCookieAttributes, (attributes) =>
-    Effect.forEach(
-      attributes.secure === true
-        ? cookieNames.flatMap((name) => [name, sessionCookieNameFor(name, true)])
-        : cookieNames,
-      (cookieName) => appendCookies(Cookies.expireCookie(Cookies.empty, cookieName, attributes)),
-      { discard: true },
-    ),
+  Effect.flatMap(
+    Effect.all([sessionCookieAttributes, fromPreviewOrigin]),
+    ([attributes, refused]) =>
+      Effect.forEach(
+        refused
+          ? []
+          : attributes.secure === true
+            ? cookieNames.flatMap((name) => [name, sessionCookieNameFor(name, true)])
+            : cookieNames,
+        (cookieName) => appendCookies(Cookies.expireCookie(Cookies.empty, cookieName, attributes)),
+        { discard: true },
+      ),
   );
 
 const userSignInFailures = {
@@ -643,9 +661,12 @@ export const layer = HttpApiBuilder.group(
                 ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")))
               : selectedCookie;
 
-            yield* HttpEffect.appendPreResponseHandler((_request, response) =>
-              Effect.succeed(HttpServerResponse.mergeCookies(response, sessionCookies)),
-            );
+            // The dev token's cookie too: never set for a page on a preview's own origin.
+            if (!(yield* fromPreviewOrigin)) {
+              yield* HttpEffect.appendPreResponseHandler((_request, response) =>
+                Effect.succeed(HttpServerResponse.mergeCookies(response, sessionCookies)),
+              );
+            }
             yield* appendCredentialResponseHeaders;
             return result.response;
           },

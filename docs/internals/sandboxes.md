@@ -592,8 +592,7 @@ any joined machine.
   (`fetch()`, module scripts) send no cookie from an opaque origin, so they are refused. Classic
   subresources (`<script src>`, `<img>`, `<link>`), forms and WebSockets work. The preview cookie
   needs a secure context (HTTPS, or `localhost`). A wildcard subdomain per preview
-  (`<token>.preview.<host>`) would lift all of this; it needs wildcard DNS and TLS on the public URL,
-  so it is left for later.
+  lifts all of this: see [Previews on their own origin](#previews-on-their-own-origin).
 - **Proxies:** the route sits behind the same client admission as every other one
   (`T3CODE_TRUSTED_PROXIES` decides which forwarded addresses and schemes count) and needs nothing
   of the public URL beyond the absolute `url`.
@@ -612,6 +611,82 @@ any joined machine.
   answering 503; a start that fails answers 503 with why. Each request served is use (`touch`), and
   an open preview WebSocket holds the Sandbox (`hold`) until it closes, so it does not stop while
   the page is live. Nothing read-only starts it.
+
+## Previews on their own origin
+
+With `T3CODE_PREVIEW_ORIGIN` set to a wildcard origin, `https://*.<zone>` (spec 3 ticket 15), each
+preview address is served at an origin of its own, `https://<id>.<zone>`, where the page runs as
+itself: its cookies, `localStorage`, `fetch()`, ES modules and Vite's HMR socket work, with no
+sandbox and no base path. Without the setting nothing changes: the sandboxed path above, and a
+startup line saying so. Parsing and matching live in
+[PreviewOrigin](../../apps/server/src/preview/PreviewOrigin.ts); the relay in
+[the route](../../apps/server/src/preview/hubPreviewRoute.ts).
+
+- **The setting.** `https://` (plain `http://` only under `localhost`, which browsers treat as a
+  secure context), a zone of at least two labels, an optional port. The Hub's own host
+  (`T3CODE_PUBLIC_URL`, the bind host) must not fall inside the zone, or the server refuses to
+  start. It needs wildcard DNS and a wildcard certificate, and a proxy that keeps `Host` (or sends
+  `X-Forwarded-Host` from a trusted proxy). Recommended: a registrable domain apart from the Hub's
+  (previews at `*.example-preview.net` for a Hub at `hub.example.com`), so the browser treats them
+  as cross-site and the Hub's `SameSite=Lax` cookie never travels with their requests. A zone under
+  the Hub's own domain works, guarded by the rules below.
+- **One origin per address.** An address (`HubPreviews.address`: User, session, Thread, Active
+  environment, port) gets `originId`, 256 random bits in lower-case base32 (a 52-letter DNS label),
+  never reused and never shared between Users, Spaces or sessions. Its path on the Hub,
+  `/preview/<token>/`, stays the stable link the clients open (contract unchanged).
+- **The handoff.** On the Hub's origin the path relays nothing any more. A top-level navigation
+  carrying its User's Hub session (`resolve`, the ticket 07 rule) answers `303` to
+  `https://<id>.<zone>/__t3_preview/handoff?code=…&path=…` with `Referrer-Policy: no-referrer`;
+  anything else is `404` (signed out: `401`). The code is 256 random bits, lasts 60 seconds, is
+  spent on its first presentation and counts only on its own origin. Spending it sets
+  `__Host-t3_preview=<the address's pass>; Path=/; HttpOnly; Secure; SameSite=Lax` (host-only, so
+  no other preview or the Hub receives it, and no sibling can shadow it) and answers `303` to the
+  path, which must be local (`/…`, never `//…`).
+- **Every request on the origin** (`resolveOrigin`) needs that cookie, then runs the same check
+  as ticket 07 with the same 2-second cache and Space revision; WebSockets and SSE go through the
+  same check, and a live socket closes on `whileAllowed` as before. The Hub's own session never
+  counts there (it is host-only and never sent; if a client sends it anyway it is ignored): no
+  cookie or a wrong one is `401` «Open this preview from T3 Code», a refusal `404`. Revocation is
+  the address's: its session ending (sign-out, revoking, removing or disabling the User), the
+  Thread moving, losing the Thread or the Space, or the address expiring (an hour unused) ends the
+  origin at once; a dev server that stops answers `502`.
+- **What crosses.** The dev server still sees `Host: localhost:<port>` and `Origin:
+  http://localhost:<port>`, never the Hub's credentials or client addresses. The page's own cookies
+  pass both ways, minus `__Host-t3_preview`, `t3_preview` and anything named like a Hub session.
+  The dev server's `Set-Cookie` loses any `Domain` (host-only, so no cookie reaches the Hub's
+  domain or a sibling preview), and one naming the preview's cookie is dropped. Its own
+  `Content-Security-Policy`, `Referrer-Policy`, `Clear-Site-Data` and service workers stand;
+  `Strict-Transport-Security`, `Public-Key-Pins` and `Alt-Svc` are dropped. A redirect to the dev
+  server itself lands on the preview's origin.
+- **Nothing in the zone reaches the Hub.** `previewOriginLayer`, a global middleware inside client
+  admission (so a trusted proxy's forwarded host counts) and outside every other middleware and
+  route, takes every request whose host is under the zone: exactly `<id>.<zone>` on the pattern's
+  scheme and port is that preview; any other host there (a made-up id, a deeper name, another
+  port) answers `404`. So the Hub's API, sign-in, `/ws`, MCP, static files, CORS preflights and
+  the server browser's `/api/preview-stream` are never served on a preview's host (Host header
+  confusion), and a wildcard cannot match the Hub's own host.
+- **The Hub's cookie doors.** A subdomain of the Hub's own domain is same-site, so `SameSite`
+  does not keep the Hub's cookie from its requests. `crossesFromPreviewOrigin` is the one rule:
+  a request whose `Origin` or `Referer` is in the zone, or a same-site request that names no
+  origin and is not a top-level document navigation (an `<img>`, `<script>`, `<iframe>`), carries
+  no Hub session. EnvironmentAuth applies it before its origin check, so every door that
+  authenticates through it (the HTTP API, `/ws`, OTLP, the device hub, the preview stream) refuses
+  such a cookie; the guest routes and the preview route call it themselves. Nor does any door set or
+  clear a session cookie for such a request (`auth/http.ts`, the guest redeem): a page there could
+  otherwise sign the browser in as someone else (login CSRF) or out. `DoorRules`
+  (`AMBIENT_COOKIE_RULES`) names, for every raw route, middleware and the HTTP API, whether it takes
+  a cookie and how a preview origin is refused, and its test fails on an undeclared door or a
+  module that reads a cookie without the rule. The Environment socket, git routes and MCP take no
+  cookie. With the setting on, the Hub's HTML is served with `frame-ancestors 'self'`, so a
+  preview cannot frame the Hub with its session.
+- **Cookie tossing.** A preview page can set a cookie with `Domain=<the Hub's domain>` for the
+  Hub. Over HTTPS the Hub's session cookie is `__Host-<name>`, which browsers accept only from the
+  Hub's own host, `Secure`, on `/`, without `Domain`; see
+  [environment-auth](environment-auth.md#the-session-cookie). With the setting on, an HTTPS
+  request's bare-named session cookie no longer counts, so a tossed one signs nobody in.
+- **Plain HTTP under `localhost`** (`http://*.localhost:<port>`) is for development: browsers
+  treat it as secure, so `__Host-` cookies work, but the Hub's own cookie over plain HTTP keeps its
+  bare name.
 
 ## Dedicated machines
 

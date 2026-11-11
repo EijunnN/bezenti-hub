@@ -130,8 +130,6 @@ describe("no door takes the Hub's cookies from a preview's own origin", () => {
       "preview/hubPreviewRoute.ts",
     ]);
     for (const { file, text } of readers) {
-      // auth/http.ts reads the credential only behind EnvironmentAuth's own check.
-      if (file === "auth/http.ts") continue;
       expect(text, file).toMatch(/crossesFromPreviewOrigin\(/);
     }
     const cookieDoors = Object.entries(AMBIENT_COOKIE_RULES).filter(([door]) =>
@@ -139,10 +137,8 @@ describe("no door takes the Hub's cookies from a preview's own origin", () => {
         door.startsWith(prefix),
       ),
     );
-    expect(
-      cookieDoors
-        .filter(([door, rule]) => !("refused" in rule) && !door.includes("/redeem"))
-        .map(([door]) => door),
-    ).toEqual([]);
+    expect(cookieDoors.filter(([, rule]) => !("refused" in rule)).map(([door]) => door)).toEqual(
+      [],
+    );
   });
 });

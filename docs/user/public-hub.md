@@ -94,6 +94,36 @@ network and your tailnet; from a public address it takes HTTPS. Once
 forwards a request without naming the client counts as a public client. Session
 cookies sent over HTTPS are marked `Secure`.
 
+## Previews on a domain of their own
+
+A dev server started in a Thread opens through the Hub with **Open preview**. Without more
+settings it opens at `/preview/<code>/` on the Hub's own address, sandboxed so the page cannot
+use your Hub session; dev servers that load modules or call `fetch()` (Vite, Next.js and the like)
+do not work there. Give previews a domain of their own and each one gets its own address, where
+they work as on your machine:
+
+```sh
+T3CODE_PREVIEW_ORIGIN=https://*.preview.example.net
+```
+
+- **DNS:** a wildcard record, `*.preview.example.net`, pointing at the Hub's machine.
+- **Certificate:** a wildcard certificate for `*.preview.example.net` (Caddy gets one with a DNS
+  challenge; see its `tls` directive), and the proxy forwarding those names to T3 Code with their
+  `Host` header kept (or `X-Forwarded-Host` from a trusted proxy).
+- **Prefer a separate domain** (`example.net` for a Hub at `hub.example.com`). A preview on a
+  subdomain of the Hub's own domain (`*.preview.hub.example.com`) works too, and T3 Code guards
+  the Hub from it, but pages on the same domain are "same-site" to the browser, so a separate
+  domain is one less thing to rely on.
+
+Each preview gets a random name of its own, never shared between people or Organizations. Opening
+one signs that browser in to it with a one-time link and a cookie for that preview only; your Hub
+session never reaches it, and nothing at those addresses reaches the Hub. With the setting on, the
+Hub's session cookie over HTTPS is named `__Host-…`: a browser that last used the Hub before the
+upgrade signs in once more.
+
+For trying it on one machine, `T3CODE_PREVIEW_ORIGIN=http://*.localhost:3773` (with the Hub's
+port) works without DNS or certificates: browsers send `*.localhost` to this machine.
+
 ## If something does not work
 
 - **Passkey sign-in says to open the Installation's own address.** The page's

@@ -94,6 +94,23 @@ assumes the old passkeys are lost or stolen, so in one transaction it spends the
 link, replaces every passkey with the new one, revokes the Owner's sessions and
 issues a new one.
 
+### The session cookie
+
+A browser session is an `HttpOnly`, `SameSite=Lax` cookie on `/`, host-only (no `Domain`), named
+per server (`t3_session_<hash>`, see [utils](../../apps/server/src/auth/utils.ts)). Over HTTPS it
+is `__Host-t3_session_<hash>` and `Secure`: a browser takes a `__Host-` cookie only from the host
+itself, so no other host, a preview's own origin under the Hub's domain included, can set or
+shadow it (cookie tossing). Every response that sets it over HTTPS also expires the bare-named
+one, so a session from before moves to the prefix on its next check (`/api/auth/session`, which
+re-sends the cookie anyway) rather than signing out; sign-out expires both names. Plain HTTP (the
+desktop app's loopback server, a LAN or dev Hub) cannot hold a `__Host-` cookie and keeps the bare
+name. `selectRequestCredential` reads the `__Host-` cookie first. With previews on their own origin
+(`T3CODE_PREVIEW_ORIGIN`) an HTTPS request's bare-named (and legacy `t3_session`) cookie no longer
+counts at all, since a preview could have set it for the Hub's domain: a browser that never
+checked in since the upgrade signs in once more. A cookie, of either name, is also ignored on any
+request `crossesFromPreviewOrigin` (see
+[Sandboxes: previews on their own origin](sandboxes.md#previews-on-their-own-origin)).
+
 ### App sign-in
 
 The desktop and mobile apps sign in to a Hub through the system browser

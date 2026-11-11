@@ -273,7 +273,9 @@ const GUEST_COOKIE = refused(
 const ENVIRONMENT_CREDENTIAL = none("the Environment credential in Authorization; no cookie");
 
 export const AMBIENT_COOKIE_RULES: Readonly<Record<string, AmbientCookieRule>> = {
-  HttpApi: BY_ENVIRONMENT_AUTH,
+  HttpApi: refused(
+    "EnvironmentAuth reads a session cookie past isBrowserOriginAllowed; auth/http.ts sets or clears one only off a preview origin",
+  ),
   "auth/clientAdmission.ts: middleware": none("reads no credential"),
   "device/DeviceHubProxy.ts: * `${DeviceService.DEVICE_HUB_ROUTE_PREFIX}/*`": BY_ENVIRONMENT_AUTH,
   'environments/JoinedHub.ts: GET "/health"': none("public, on a joined machine"),
@@ -289,7 +291,9 @@ export const AMBIENT_COOKIE_RULES: Readonly<Record<string, AmbientCookieRule>> =
   "guest/http.ts: GET `${GUEST_ROUTE_PREFIX}/session`": GUEST_COOKIE,
   "guest/http.ts: GET `${GUEST_ROUTE_PREFIX}/stream`": GUEST_COOKIE,
   "guest/http.ts: POST `${GUEST_ROUTE_PREFIX}/messages`": GUEST_COOKIE,
-  "guest/http.ts: POST `${GUEST_ROUTE_PREFIX}/redeem`": none("spends a guest link's token"),
+  "guest/http.ts: POST `${GUEST_ROUTE_PREFIX}/redeem`": refused(
+    "spends a guest link's token; sets no guest cookie for a preview origin",
+  ),
   'http.ts: GET "*"': none(
     "public static files; HTML is not framed by a preview (frame-ancestors)",
   ),
