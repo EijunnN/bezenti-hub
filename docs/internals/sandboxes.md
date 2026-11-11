@@ -943,10 +943,18 @@ no `ssh` binary: the key is never written to a file or put in an argument), in
 - **The steps**, each a POSIX script run with `sh -c` (whatever the login shell), every value from
   the Owner single-quoted ([sshInstallScripts](../../apps/server/src/environments/sshInstall/sshInstallScripts.ts));
   host and user never reach a shell. Each runs in a **process group of its own** there
-  (`stepCommand`: `setsid`, its group id in `~/.t3/ssh-install/step.pid`): a step that times out
-  or is cancelled is stopped there, its whole group (`stopStepScript`, over a new channel of the
-  same connection), and while a step of any run still runs there (its connection lost), a new one
-  refuses to start (exit code 75, saying how to stop it), so «Try again» never races the old one.
+  (`stepCommand`: `setsid`, needing `setsid` and `flock` from util-linux), whose leader holds
+  `~/.t3/ssh-install/step.lock` (`flock`, released by the kernel when it ends, so never stale) for
+  the step's life and writes its group id and the step's random token in it; the step itself
+  runs without the lock's descriptor, so a `t3 serve` it leaves behind does not hold it. While it
+  is held, a new step (of any run, «Try again» too) refuses with the wrapper's own message ("its
+  T3 Code step lock is held") and exit code 75: only both together mean busy, and a busy step did
+  nothing there. A step that times out or is cancelled is stopped over a new channel of the same
+  connection (`stopStepScript` with its token): it kills the group only when the lock is held and
+  names that token, so never another step's or a group a stale file names; and it leaves a cancel
+  marker for its token, so a step it reaches before the step took the lock does not begin (exit
+  130), waiting up to 3 seconds for one taking it meanwhile. The check step makes
+  `~/.t3/ssh-install` only for the lock and removes it again if it made it.
   1. _Check the system and Podman_: Linux, not root; with a systemd user manager, lingering (its
      service is a user unit, which would stop at logout): turned on with `loginctl enable-linger`
      (or with passwordless sudo) when allowed, otherwise it stops at once with the command to run as
@@ -986,14 +994,23 @@ no `ssh` binary: the key is never written to a file or put in an argument), in
   «Try again» uses them, and a machine joined some other way may too.
 - **The key and its secrets.** The key and passphrase live in the run's memory until it ends (or
   its host key is not confirmed in 10 minutes) and are dropped then. They never reach the machine,
-  and every line of its output, and the run's error, pass a scrubber that removes any piece of 12
-  characters or more of the key's body, the passphrase or the grant (wherever it shows, so a piece
-  cut by a chunk or a column goes too), a PEM private-key marker, and a shorter passphrase whole. A
-  line is scrubbed whole and only then cut to its length. Errors from ssh2 become fixed
+  and every line of its output, and the run's error, pass a scrubber that removes, in one pass
+  over the text as it came (the ranges first, then each run of them as one `[redacted]`), any
+  piece of 12 characters or more of the key's body, the passphrase or the grant (wherever it
+  shows, so a piece cut by a chunk or a column goes too), a passphrase of 4 to 11 characters
+  whole, and a line with a PEM private-key marker. A passphrase under 4 characters is not
+  scrubbed (it would redact common text; it is weak anyway). A line is scrubbed whole and only then
+  cut to its length; a line longer than 8,000 characters without its end is shown without its
+  last 11, which wait for what follows with what was found secret of them, so no piece of a secret
+  escapes at that cut either. Errors from ssh2 become fixed
   messages (socket codes kept). Its spans and logs carry neither: a test reads them, and every
   file under the Hub's home, for the key and passphrase. The key goes from memory when the run
   ends, and so does the host key timer that held it. With «Keep the key for updates» the key (and passphrase) go to the
   Hub's secret store as `ssh-install-key-<environment id>`; removing the machine deletes that
-  secret and its host record (`SshInstall.forgotten` says when). Nothing uses a kept key yet: a later «update over SSH» would.
+  secret and its host record (`SshInstall.forget`, and `SshInstall.forgotten` once done). Removing
+  it from Settings waits for that: if it fails the machine is removed all the same, and the answer
+  (409) says its kept key or host record could not be deleted; every Hub start tries again for
+  removed machines. A leftover host record never blocks a later install: only a machine not
+  removed counts as installed. Nothing uses a kept key yet: a later «update over SSH» would.
 - **Progress.** Each step keeps its last 300 lines (2,000 characters each); the dialog asks for
   the run every second while it runs. The Hub keeps the 20 newest finished runs in memory only.
