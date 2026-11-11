@@ -712,6 +712,39 @@ describe("Hub con Environments: what a preview address never does", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.live("a Project moving to another Space ends its Thread's previews in the old Sandbox", () =>
+    Effect.gen(function* () {
+      const { hub, owner, globex, threadId, ownerSession, previews } = yield* threadInSandbox();
+      const dev = yield* startDevServer;
+      const address = yield* previews.address({
+        userId: owner,
+        sessionId: ownerSession.sessionId,
+        threadId,
+        port: dev.port,
+      });
+      const page = `${hub.server.url}${address.path}`;
+      assert.equal((yield* navigate(page, { ...NAVIGATION, cookie: hub.owner })).status, 200);
+      const socket = yield* openSocket(
+        `${hub.server.url.replace(/^http/, "ws")}${address.path}hmr`,
+        hub.owner,
+      );
+      const moved = yield* hub.server.request("/api/projects/mutate", {
+        cookie: hub.owner,
+        body: {
+          type: "project.move",
+          commandId: "move:acme-web:globex",
+          projectId: "project:acme-web",
+          spaceId: globex,
+        },
+      });
+      assert.equal(moved.status, 200, JSON.stringify(moved.body));
+      // The live socket closes, and the address opens nothing any more.
+      const code = yield* Effect.promise(() => socket.closed).pipe(Effect.timeout("10 seconds"));
+      assert.isNumber(code);
+      assert.equal((yield* navigate(page, { ...NAVIGATION, cookie: hub.owner })).status, 404);
+    }).pipe(Effect.scoped),
+  );
+
   it.live("a session of the Owner's without a User is the Owner's", () =>
     Effect.gen(function* () {
       const { hub, threadId, ownerSession, previews } = yield* threadInSandbox();

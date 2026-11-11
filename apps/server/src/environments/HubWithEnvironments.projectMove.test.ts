@@ -3,6 +3,7 @@
  * «Hub con Environments», spec 3 ticket 12: a Project moving to another Space stops its Threads,
  * releases those its machine does not serve, and the old Space's machines lose it at once.
  */
+import * as NodeFSP from "node:fs/promises";
 import * as NodeHttp from "node:http";
 
 import { assert, describe, it } from "@effect/vitest";
@@ -26,6 +27,7 @@ import type * as McpProviderSessions from "@t3tools/provider-core/server/McpProv
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { makeProviderReplayGate } from "@t3tools/provider-testing/replayGate";
 import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -49,6 +51,10 @@ import {
 } from "../orchestration-v2/testkit/ProviderReplayFixtures.ts";
 import { materializeReplayTranscriptRuntimeInstructions } from "../orchestration-v2/testkit/ReplayRuntimeInstructions.ts";
 import * as Sandboxes from "../sandboxes/Sandboxes.ts";
+import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
+import * as ProjectCheckouts from "../environment/ProjectCheckouts.ts";
+import * as ThreadWorkspace from "../environment/ThreadWorkspace.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import { memberWithPasskey } from "./environments.testkit.ts";
 import { makeHub, seedProject, type Hub } from "./HubWithEnvironments.testkit.ts";
@@ -593,6 +599,83 @@ describe("Hub con Environments: a Project moves to another Space", () => {
       assert.notEqual(Option.getOrUndefined(outcome), 200);
       assert.equal(yield* repositoryStatus(hub, projectId, sandbox.credential), 403);
       assert.isDefined(HUB_MACHINE_ENVIRONMENT_ID);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a terminal open on the old Space's Sandbox ends when the Project moves", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("claudeAgent");
+      const hub = yield* makeHub({ sandboxAdapters: idleAdapters(instanceId) });
+      const acme = yield* createOrganization(hub, "Acme");
+      const globex = yield* createOrganization(hub, "Globex");
+      const projectId = ProjectId.make("project:acme-web");
+      const { workspaceRoot: hubCheckout } = yield* seedProject(hub.server, {
+        projectId,
+        title: "Acme web",
+        defaultModelSelection: null,
+        spaceId: acme,
+      });
+      yield* startSandbox(hub, acme);
+      const threadId = ThreadId.make("thread:acme-terminal");
+      yield* hub
+        .service(Orchestrator.OrchestratorV2)
+        .dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:acme-terminal"),
+          threadId,
+          projectId,
+          spaceId: acme,
+          title: "Terminal",
+          modelSelection: { instanceId, model: "claude-sonnet-4-6" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeEnvironmentId: sandboxEnvironmentIdOf(acme),
+        })
+        .pipe(Effect.orDie);
+      const executor = yield* hub
+        .service(EnvironmentExecutor.EnvironmentExecutorRegistry)
+        .get(sandboxEnvironmentIdOf(acme))
+        .pipe(Effect.orDie);
+      const checkout = Option.getOrThrow(yield* executor.workspace.paths.checkout(projectId));
+      yield* Effect.promise(() => NodeFSP.mkdir(checkout, { recursive: true }));
+      const workspace = (yield* ThreadWorkspace.make.pipe(
+        Effect.provide(Layer.mergeAll(ProjectionStore.layer, ProjectCheckouts.layer)),
+        Effect.provideContext(hub.server.services as never),
+      )) as ThreadWorkspace.ThreadWorkspace["Service"];
+      const owner = { userId: yield* ownerIdOf(hub) };
+      yield* workspace
+        .terminalOpen(
+          { threadId, terminalId: "term-1", cwd: hubCheckout, cols: 80, rows: 24 },
+          owner,
+        )
+        .pipe(Effect.orDie);
+      const attached = yield* Deferred.make<void>();
+      const ended = yield* workspace
+        .terminalAttach({ threadId, terminalId: "term-1" }, "viewer-1", owner)
+        .pipe(
+          Stream.tap((event) =>
+            event.type === "snapshot" ? Deferred.succeed(attached, undefined) : Effect.void,
+          ),
+          Stream.runDrain,
+          Effect.exit,
+          Effect.forkScoped,
+        );
+      yield* Deferred.await(attached);
+      assert.equal((yield* moveProject(hub, projectId, globex)).status, 200);
+      // Its stream there ends at once, and nothing can be typed into it any more.
+      const exit = yield* Fiber.join(ended).pipe(
+        Effect.timeout(Duration.seconds(10)),
+        Effect.orDie,
+      );
+      assert.isTrue(exit._tag === "Failure" || exit._tag === "Success");
+      const typed = yield* workspace
+        .terminalWrite({ threadId, terminalId: "term-1", data: "pwd\r" }, owner)
+        .pipe(Effect.flip);
+      assert.isDefined(typed);
     }).pipe(Effect.scoped),
   );
 });

@@ -472,6 +472,8 @@ const layerProjectMoveThreadsProvided = ProjectMoveThreads.layer.pipe(
       layerOrchestratorProvided,
       ProjectionStore.layer,
       layerEnvironmentExecutorsProvided,
+      // Without it a released Thread's events, terminals and sessions there would go unchecked.
+      layerRemoteEnvironmentsProvided,
       layerProviderSessionManagerProvided,
     ),
   ),
