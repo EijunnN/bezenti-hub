@@ -787,14 +787,17 @@ MCP `preview_*` tools) keeps persistent profiles: cookies, site storage, sign-in
 User and per Space, so one User's sign-in in a preview never reaches another User's preview of the
 same app, nor the same User's preview in another Space.
 
-- **One rule, every door.** A tab's profile is decided once, when the tab is set up, from its
-  Thread (`PreviewProfiles.ownerOfThread`): the Thread's effective owner (its own, else its root's,
-  else the Owner's: the User `claimWork` lets work it) in the Thread's Space (`spaceOf`). Every door
-  reaches tabs through their Thread (WS `preview.open` through `PreviewManager`, popups, the MCP
-  tools through `PreviewAutomationBroker`, `/api/preview-stream` attaching to a tab), so all use
-  it. A Thread with no row (a draft) gets a throwaway context of its own, as incognito tabs and an
-  agent's tabs without a named profile always do; `ServerBrowserContexts.contextFor` refuses to
-  open a persistent profile without an owner.
+- **One rule, every door.** A tab's profile is decided once, when the tab is set up
+  (`PreviewProfiles.ownerFor`), and kept on the tab: in the Thread's Space (`spaceOf`), the profile
+  of the person who opened it (WS `preview.open`, which `PreviewManager.openerOf` remembers), so
+  the Owner or anyone else working another User's Thread browses as themselves and their sign-ins
+  stay in their own profile; an agent's tab (MCP `preview_open`) uses the Thread's effective owner's
+  (its own, else its root's, else the Owner's: the User `claimWork` lets work it), looked up once
+  per open; a popup its opener tab's. `/api/preview-stream` attaches to tabs already set up. A
+  Thread with no row (a draft) gets a throwaway context of its own, as incognito tabs and an agent's
+  tabs without a named profile always do; `ServerBrowserContexts.contextFor` refuses to open a
+  persistent profile without an owner. The tab's profile User also gives its catalog and recording
+  frame rate.
 - **Folders.** `<state>/server-browser/user-profiles/<user>/<space>/<profile>/`, each name the first
   128 bits of HMAC-SHA256 under a key in the Installation's secret store (`preview-profile-names`),
   with the level in the hashed text. Names neither collide (also on case-insensitive disks) nor
@@ -803,14 +806,22 @@ same app, nor the same User's preview in another Space.
   they have it, never another User's. Clearing every User's profiles is a separate RPC,
   `preview.clearAllProfiles`, the Owner's alone (an Installation RPC). `preview.reportProfiles`
   records the catalog (names, default, recording frame rate) of the reporting client's own User;
-  a tab and an agent's `preview_open`/`preview_status` use the catalog of the Thread's User.
+  a tab uses its profile User's catalog; an agent's `preview_open`/`preview_status` the Thread
+  owner's, or on a draft the User the agent acts as (`actingUserId`, from its credential).
 - **Leaving.** On a Membership or status change (`SpaceDirectory.subscribeMembershipChanges`,
   `subscribeUserStatusChanges`), and at startup and hourly, a User's Space folders go when they no
   longer see that Space, or are removed (a disabled User keeps theirs), and so does any folder named
-  under another key or not saying whose it is. Open contexts close first.
-- **Bounds.** Chromium's HTTP cache is capped at 64 MB per profile (`--disk-cache-size`). Hourly, a
-  closed profile nobody opened for 30 days goes, and one over 512 MB loses its caches, then
-  everything if that is not enough.
+  under another key or not saying whose it is. Open contexts close first, and on such a change
+  every open tab whose profile its User may no longer use closes, throwaway ones too. Once there
+  is an Owner, the profiles of no User (from before) go at startup. Folder work runs in one queue
+  (`ServerBrowserContexts`): a profile's Space folder gets its `owner.json` (written whole) before
+  the profile folder exists, and the reconcile reads and removes in one step, so it never takes a
+  profile that is opening.
+- **Bounds.** Chromium's HTTP cache is capped at 64 MB per profile (`--disk-cache-size`). Hourly
+  (first an hour after startup), a closed profile nobody opened for 30 days goes, and one over
+  512 MB loses its caches, then everything if that is not enough. Sizes are read outside the folder
+  queue, so opening a profile never waits on them; each deletion takes the queue briefly, only for
+  a profile still closed then.
 - **Before.** Every User shared `server-browser/profiles/<profile id>/`; whose its sign-ins were
   cannot be told, so it is deleted at startup. Users sign in again in their own profiles.
 

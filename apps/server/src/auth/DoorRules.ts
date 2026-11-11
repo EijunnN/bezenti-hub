@@ -165,8 +165,8 @@ export const RAW_ROUTE_RULES: Readonly<Record<string, DoorRule>> = {
   ),
   "http.ts: POST `${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/*`": rpc(WS_METHODS.attachmentsCreateUploadUrl),
   'mcp/McpHttpServer.ts: * "/mcp"': own("an MCP credential; each tool by MCP_TOOL_RULES"),
-  // The server browser's tabs, whatever the door, use the profiles of their Thread's User in its
-  // Space (PreviewProfiles.ownerOfThread, decided once per tab in ServerBrowser): see PREVIEW.
+  // The server browser's tabs, whatever the door, use one profile decided once per tab in the
+  // Thread's Space (PreviewProfiles.ownerFor): its opener's, an agent's tab the Thread owner's.
   "preview/ServerBrowserStream.ts: GET `${PREVIEW_STREAM_ROUTE_PREFIX}/*`": rpc(
     WS_METHODS.previewOpen,
   ),
@@ -188,7 +188,7 @@ const OWN_THREAD = own(
 );
 const VISIBLE_THREAD = own("visibleShells: a Thread the caller cannot see is missing");
 const PREVIEW = own(
-  "the calling agent's own Thread's tabs (requireThreadMcpCapability(preview)), as previewOpen; their browser profiles are the Thread's User's in its Space (PreviewProfiles), never another User's",
+  "the calling agent's own Thread's tabs (requireThreadMcpCapability(preview)), as previewOpen; their browser profile is the Thread owner's in its Space (PreviewProfiles.ownerFor), a person's tab the opener's",
 );
 const DEVICE = own(
   "the calling agent's own Thread's devices (requireThreadMcpCapability(device)), as deviceOpen",
