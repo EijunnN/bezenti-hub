@@ -333,6 +333,27 @@ Agents act with the permissions of the person whose thread they run in. Guest
 links are never made from a Personal space. Everything else here, the Owner can do
 everywhere.
 
+### Back up the master key
+
+Every secret the Hub stores (sign-in keys, provider and source-control
+credentials, the SSH key kept for updates) is encrypted with a master key kept
+in its own file, `master.key` in the Hub's state folder. A copy of the disk or
+of a backup without that file reveals none of them, and without it they are
+lost and everyone signs in again. Until you back it up, **Settings → Access**
+warns «Back up the master key»: **Download master key backup** asks for your
+passkey (or password and code) and saves it. From the Hub's shell:
+
+- `t3 secrets key export --output <file>` writes it to a new owner-only file;
+- `t3 secrets key import <file>` (Hub stopped) restores it, for example on a new
+  server after copying the state folder; a key that does not open the secrets
+  there is refused;
+- `t3 secrets key rotate` (Hub stopped) re-encrypts everything with a new key and
+  keeps the old one as `master.key.previous` until you delete it.
+
+To keep the key off the disk you back up, set `T3CODE_MASTER_KEY_FILE` to its
+path. A Hub started with a missing or different key refuses to start and says
+why; it never makes a new key over encrypted secrets.
+
 ### Invite people
 
 To add someone to an organization, switch to it in the Space selector, choose

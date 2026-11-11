@@ -796,6 +796,13 @@ back to the reusable credential. OAuth exchanges create ordinary local bearer
 or DPoP children with normal expiry and revocation. The reusable cookie expires
 after 30 days.
 
+### Secrets at rest
+
+Everything `ServerSecretStore` keeps (session signing keys among them) is encrypted with the
+master key; only the Owner sees its status or downloads its backup (`masterKey.backup` in
+`AccessPolicy`, with a strong factor in the request; HTTP only). See
+[secrets.md](secrets.md).
+
 ## Folders on the Hub's disk
 
 Projects are not filesystem sandboxes, but on a Hub with Members the Hub's disk is not one
