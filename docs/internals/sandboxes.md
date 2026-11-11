@@ -542,46 +542,56 @@ Spec 1's `project.move` (the Project and every Thread in it) adds what Sandboxes
 ([ProjectService](../../apps/server/src/project/ProjectService.ts) `move`/`movePlan`,
 [ProjectMoveThreads](../../apps/server/src/orchestration-v2/ProjectMoveThreads.ts)).
 
-- **One rule:** `servesSpace(environment, space)`
-  ([sandboxSpace](../../apps/server/src/sandboxes/sandboxSpace.ts)): the Hub machine serves every
-  Space; a Sandbox or dedicated machine only its own; a personal machine while its owner, enabled,
-  is the Owner or an Admin or Member of that Space (a Guest starts no work); a removed machine
-  none. The executor's check before a turn uses it too.
-- **The plan first.** `POST /api/projects/move-plan {projectId, spaceId}` (DoorRules: the rule of
-  `projects.mutate`, checked as the move is: `project.move` on both Spaces, a hidden Project like a
-  missing one) answers `running` (Threads the move stops) and `needsEnvironment` (Threads whose
-  Active environment does not serve the destination). The web's «Move to…» shows it in a dialog.
+- **One rule:** `spaceRefusalOf(environment, space)` / `servesSpace`
+  ([sandboxSpace](../../apps/server/src/sandboxes/sandboxSpace.ts)). The Hub machine serves every
+  Space. A removed machine (`revoked`), or one the Hub has no row for (`unknown-machine`), none. A
+  Sandbox or dedicated machine only its own Space (`other-space`); a dedicated machine between
+  dedications, none (`undedicated`). A personal machine while its owner, enabled, is the Owner or
+  in that Space with any Role, Guests included (`owner-left`). The executor's check before a turn
+  uses it, with one message per refusal.
+- **The plan first.** `POST /api/projects/move-plan {projectId, spaceId}` answers `running`
+  (Threads the move stops) and `needsEnvironment` (Threads whose Active environment does not serve
+  the destination). `POST /api/projects/move` moves and answers `{ project, released }`, the
+  Threads it actually released. Both (DoorRules) follow the rule of `projects.mutate`, checked as
+  the move is (`project.move` on both Spaces; a hidden Project answers like a missing one), and run
+  once the Hub is ready, as `projects.mutate` does.
 - **Stopping.** A running Thread (an unfinished run, an open request, a background command or
   delegated task, or a move between machines not switched yet) refuses the move with 409 unless
   `stopThreads: true`, which the dialog sends once the mover saw them. Then, with the Project marked
   moving (nothing new starts), each such Thread's move is cancelled and its turn stopped
-  (`thread.stop` on a reachable machine, else its sessions end on the Hub); after 15 seconds
-  whatever still runs is ended on the Hub as Force stop does. Each is checked again under its
-  lock; one still running refuses the move with nothing moved, and it can be tried again. Without
-  the orchestration (a Project service alone) it refuses as before. `ProjectMoveHooks` is one per
-  server (provided in `server.ts`), so the Project service reaches the orchestration built on it.
-- **Releasing.** In the commit that gives a Thread the new Space, a Thread whose machine does not
-  serve it gets `activeEnvironmentId: null` («needs an environment») and its live provider
-  sessions are recorded detached. Then, outside its lock, the machine is cut off: its events,
-  attachment reads, terminals and preview streams for the Thread are decided anew
-  (`RemoteEnvironments.threadMoved` ends the Thread's open workspace streams on any machine it no
-  longer runs on), its MCP credential is revoked, and its sessions there are detached
-  (`provider.detach`) and dropped. A rerun releases a Thread already in the Space whose machine
-  does not serve it (a move cut short, or one made before this). Threads on the Hub machine, or on
-  a machine that serves the destination, stay. A preferred Environment that does not serve the
-  destination is cleared.
+  (`thread.stop` on a reachable machine; one that is away, or a Thread with no Environment, ends
+  on the Hub at once). The wait follows the Threads' events; after 15 seconds whatever still runs
+  ends on the Hub as Force stop does. Each is checked again under its lock; one still running
+  refuses the move with nothing moved, and it can be tried again. `ProjectMoveHooks` is one per
+  server (provided in `server.ts`) and a declared requirement of the orchestration, so the Project
+  service always reaches it; without one (a Project service alone) a running Thread refuses.
+- **Releasing, durably.** In the transaction that gives a Thread the new Space, a Thread whose
+  machine does not serve it gets `activeEnvironmentId: null` («needs an environment»), its live
+  sessions are recorded detached, and a row in `thread_environment_releases` (migration 109) names
+  the machine and every session the Thread had there. `drainReleases` then cuts that machine off,
+  out of the Thread's lock: its events, attachment reads, terminals and preview streams for the
+  Thread are decided anew (`RemoteEnvironments.threadMoved` ends each workspace stream, preview
+  relays included, tagged with a Thread no longer on that machine), its MCP credential is revoked,
+  and its sessions there are detached (`provider.detach`) and dropped; only then is the row
+  deleted. Each move drains its Project's Threads' rows, and the Hub drains every row as it starts,
+  so a release cut short is finished. Threads on the Hub machine, or on a machine that serves the
+  destination, stay. A preferred Environment that does not serve the destination is cleared.
 - **The Hub repository.** The git route checks the Project's Space on every request, so the old
   Space's Sandbox and dedicated machines get 403 for the Project, its `refs/t3/project/` copy and
-  its Threads' refs. A request in flight when a move starts ends at once
-  (`SpaceDirectory.holdProjectAccess`: a fetch or push mid-stream fails, never completes short);
-  while the Project moves, or when a move started after the request was checked, the route answers
-  503, and the machine is checked anew when it retries.
+  its Threads' refs. Each request holds the Project's access (`SpaceDirectory.holdProjectAccess`,
+  checked against the move count and registered in one synchronous step). Once a move's checks
+  passed and it goes ahead (`projectAccessEnds`: never for a refused move or a rerun that changes
+  nothing), every held request ends (a fetch or push mid-stream fails, never completes short);
+  while the Project moves, or after a move went ahead since the request was checked, the route
+  answers 503 and the machine is checked anew when it retries.
 - **Previews** end with the Thread leaving the machine (checked on every request; live sockets on
-  the access change the move publishes). **MCP:** besides the revocation, a credential scoped to
-  the old Space (`spaceLimit`) neither sees nor acts on a Thread now in another Space.
-- **Afterwards** the dialog offers «Move all to <destination> Sandbox», which sends spec 2's
-  `thread.move` (stopping a running turn) for each released Thread, as the mover; one the mover may
-  not move is listed with why. Moving the Project back gives no machine back by itself.
+  the access change the move publishes; a response in flight by the stream cut). **MCP:** besides
+  the revocation, a credential scoped to the old Space (`spaceLimit`) neither sees nor acts on a
+  Thread now in another Space.
+- **Afterwards** the dialog offers «Move all to <destination> Sandbox» for the Threads the move
+  released, sending spec 2's `thread.move` (stopping a running turn) as the mover; one the mover may
+  not move is listed with why. A 409 (a Thread started since the plan) shows the plan again, to
+  confirm with «Stop Threads and move». Moving the Project back gives no machine back by itself.
 - **Not undone:** what the old machine already has on disk (its checkout of the Project) stays in
   its home; it can no longer fetch, push or run anything for the Project.
 
