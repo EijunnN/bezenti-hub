@@ -27,44 +27,51 @@ import * as ServerSecretStore from "./ServerSecretStore.ts";
 import { layerTestPeer } from "./clientConnection.testkit.ts";
 import * as AuthHttp from "./http.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import { parsePreviewOrigin, type PreviewOriginPattern } from "../preview/PreviewOrigin.ts";
 
 const DEV_TOKEN = "reusable-dev-auth-token-that-is-long-enough";
 class AuthTestApi extends HttpApi.make("environment").add(EnvironmentHttpApi.groups.auth) {}
 
-const layerConfig = Layer.effect(
-  ServerConfig.ServerConfig,
-  Effect.gen(function* () {
-    const config = yield* ServerConfig.ServerConfig;
-    return {
-      ...config,
-      mode: "web",
-      devUrl: new URL("http://127.0.0.1:5173"),
-      devAuthToken: Redacted.make(DEV_TOKEN),
-    } satisfies ServerConfig.ServerConfig["Service"];
-  }),
-).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-auth-http-test-" })));
+const layerConfigWith = (previewOrigin?: PreviewOriginPattern) =>
+  Layer.effect(
+    ServerConfig.ServerConfig,
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      return {
+        ...config,
+        mode: "web",
+        devUrl: new URL("http://127.0.0.1:5173"),
+        devAuthToken: Redacted.make(DEV_TOKEN),
+        ...(previewOrigin === undefined ? {} : { previewOrigin }),
+      } satisfies ServerConfig.ServerConfig["Service"];
+    }),
+  ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-auth-http-test-" })));
 
-const layerEnvironmentAuth = EnvironmentAuth.layer.pipe(
-  Layer.provide(ManagedPolicy.layerTest()),
-  Layer.provide(SqlitePersistence.layerMemory),
-  Layer.provide(ServerSecretStore.layer),
-  Layer.provide(ServerEnvironment.layerIdentity),
-  Layer.provide(layerConfig),
-);
-const layerRoutes = HttpApiBuilder.layer(AuthTestApi).pipe(
-  Layer.provide(AuthHttp.layer),
-  Layer.provide(AuthHttp.layerAuthenticatedAuth),
-  Layer.provide(layerTestPeer),
-  Layer.provideMerge(layerEnvironmentAuth),
-  Layer.provide(layerConfig),
-  Layer.provideMerge(
-    HttpPlatform.layer.pipe(
-      Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
-      Layer.provideMerge(Etag.layerWeak),
+const layerRoutesWith = (layerConfig: ReturnType<typeof layerConfigWith>) => {
+  const layerEnvironmentAuth = EnvironmentAuth.layer.pipe(
+    Layer.provide(ManagedPolicy.layerTest()),
+    Layer.provide(SqlitePersistence.layerMemory),
+    Layer.provide(ServerSecretStore.layer),
+    Layer.provide(ServerEnvironment.layerIdentity),
+    Layer.provide(layerConfig),
+  );
+  const layerRoutes = HttpApiBuilder.layer(AuthTestApi).pipe(
+    Layer.provide(AuthHttp.layer),
+    Layer.provide(AuthHttp.layerAuthenticatedAuth),
+    Layer.provide(layerTestPeer),
+    Layer.provideMerge(layerEnvironmentAuth),
+    Layer.provide(layerConfig),
+    Layer.provideMerge(
+      HttpPlatform.layer.pipe(
+        Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+        Layer.provideMerge(Etag.layerWeak),
+      ),
     ),
-  ),
-  Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
-);
+    Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+  );
+  return layerRoutes;
+};
+const layerRoutes = layerRoutesWith(layerConfigWith());
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const postJson = (path: string, body: unknown, headers?: Readonly<Record<string, string>>) =>
@@ -166,4 +173,65 @@ it.effect("sets the selected browser session cookies through the HTTP route", ()
         Effect.promise(() => Promise.all([environmentA.dispose(), environmentB.dispose()])),
     );
   }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
+
+it.effect(
+  "with previews on their own origin, the dev token's cookie is `__Host-` over HTTPS like the session's, and a bare one counts for nothing",
+  () =>
+    Effect.gen(function* () {
+      const parsed = parsePreviewOrigin("https://*.preview.example.test");
+      if (parsed._tag !== "Success") return yield* Effect.die(parsed);
+      const random = yield* SecureRandom.SecureRandom;
+      const unusedSecretStore = ServerSecretStore.ServerSecretStore.of({
+        get: () => Effect.succeedNone,
+        set: () => Effect.void,
+        create: () => Effect.void,
+        getOrCreateRandom: () => Effect.die("Not used by these routes."),
+        remove: () => Effect.void,
+      });
+      const requestContext = Context.make(SecureRandom.SecureRandom, random).pipe(
+        Context.add(ServerSecretStore.ServerSecretStore, unusedSecretStore),
+      );
+      const https = { "x-forwarded-proto": "https", "x-forwarded-for": "127.0.0.1" };
+      return yield* Effect.acquireUseRelease(
+        Effect.sync(() =>
+          HttpRouter.toWebHandler(layerRoutesWith(layerConfigWith(parsed.success)), {
+            disableLogger: true,
+          }),
+        ),
+        (environment) =>
+          Effect.tryPromise(async () => {
+            const signedIn = await environment.handler(
+              postJson("/api/auth/browser-session", { credential: DEV_TOKEN }, https),
+              requestContext,
+            );
+            expect(signedIn.status).toBe(200);
+            const cookies = signedIn.headers.getSetCookie();
+            const devCookie = cookies.find((cookie) => cookie.startsWith("__Host-t3_dev_session_"));
+            expect(devCookie).toMatch(/; Secure/i);
+            expect(devCookie).toMatch(/; Path=\//i);
+            // The session cookie it replaces goes under both names it may be under.
+            expect(cookies).toContainEqual(expect.stringMatching(/^t3_session_[^=]*=;.*Max-Age=0/));
+            expect(cookies).toContainEqual(
+              expect.stringMatching(/^__Host-t3_session_[^=]*=;.*Max-Age=0/),
+            );
+            const name = devCookie!.slice("__Host-".length, devCookie!.indexOf("="));
+            const check = (cookie: string) =>
+              environment
+                .handler(
+                  new Request("http://127.0.0.1/api/auth/session", {
+                    headers: { cookie, ...https },
+                  }),
+                  requestContext,
+                )
+                .then((response) => response.json());
+            expect(await check(`__Host-${name}=${DEV_TOKEN}`)).toMatchObject({
+              authenticated: true,
+            });
+            // What a preview subdomain could set for the Hub's domain: the bare name.
+            expect(await check(`${name}=${DEV_TOKEN}`)).toMatchObject({ authenticated: false });
+          }),
+        (environment) => Effect.promise(() => environment.dispose()),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );

@@ -268,7 +268,7 @@ const BY_ENVIRONMENT_AUTH = refused(
   "EnvironmentAuth.authenticateRequest: a cookie counts only past isBrowserOriginAllowed",
 );
 const GUEST_COOKIE = refused(
-  "guest/http.ts guestSessionCookie: no guest cookie from a preview origin",
+  "guestSessionCookie (readHubCookie): `__Host-`, none from a preview page, no planted bare one",
 );
 const ENVIRONMENT_CREDENTIAL = none("the Environment credential in Authorization; no cookie");
 
@@ -306,7 +306,7 @@ export const AMBIENT_COOKIE_RULES: Readonly<Record<string, AmbientCookieRule>> =
   "preview/ServerBrowserStream.ts: POST `${PREVIEW_STREAM_ROUTE_PREFIX}/upload`":
     BY_ENVIRONMENT_AUTH,
   "preview/hubPreviewRoute.ts: * `${HUB_PREVIEW_ROUTE_PREFIX}/*`": refused(
-    "its own crossesFromPreviewOrigin before reading the Hub session",
+    "the Hub session through selectRequestCredential (readHubCookie), never from a preview page",
   ),
   "preview/hubPreviewRoute.ts: middleware": none(
     "a preview's own host: only that preview's host-only cookie, never a Hub cookie",

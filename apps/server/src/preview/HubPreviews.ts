@@ -69,8 +69,8 @@ export interface PreviewAddress {
 
 /** How long a handoff into a preview's own origin may wait to be spent; once only. */
 const PREVIEW_HANDOFF_TTL_MS = 60_000;
-/** Handoffs not yet spent, across every User: past this the oldest go. */
-const MAX_PENDING_HANDOFFS = 1_024;
+/** Handoffs a User holds unspent: past this their own oldest go, never another User's. */
+export const MAX_HANDOFFS_PER_USER = 16;
 
 /** Who a request says it is: its Hub session's User, and the preview cookie it carries. */
 export interface PreviewCredentials {
@@ -286,8 +286,27 @@ const makeWith = Effect.fn("HubPreviews.make")(function* (options: HubPreviewsOp
   const addresses = new Map<string, PreviewAddress>();
   const byKey = new Map<string, string>();
   const byOrigin = new Map<string, string>();
-  // Handoff codes into a preview's own origin, by code: the address's token and when it lapses.
-  const handoffs = new Map<string, { readonly token: string; readonly expiresAtMillis: number }>();
+  // Handoff codes into a preview's own origin, by code; indexed by address and by User (oldest
+  // first), so dropping an address's or capping a User's never scans everyone's.
+  interface Handoff {
+    readonly token: string;
+    readonly principal: string;
+    readonly expiresAtMillis: number;
+  }
+  const handoffs = new Map<string, Handoff>();
+  const handoffsByToken = new Map<string, Set<string>>();
+  const handoffsByPrincipal = new Map<string, Set<string>>();
+  const dropHandoff = (code: string) => {
+    const pending = handoffs.get(code);
+    if (pending === undefined) return;
+    handoffs.delete(code);
+    handoffsByToken.get(pending.token)?.delete(code);
+    if (handoffsByToken.get(pending.token)?.size === 0) handoffsByToken.delete(pending.token);
+    handoffsByPrincipal.get(pending.principal)?.delete(code);
+    if (handoffsByPrincipal.get(pending.principal)?.size === 0) {
+      handoffsByPrincipal.delete(pending.principal);
+    }
+  };
   const keyOf = (
     address: Omit<PreviewAddress, "token" | "pass" | "originId" | "expiresAtMillis">,
   ) =>
@@ -310,9 +329,7 @@ const makeWith = Effect.fn("HubPreviews.make")(function* (options: HubPreviewsOp
     byOrigin.delete(address.originId);
     const key = keyOf(address);
     if (byKey.get(key) === token) byKey.delete(key);
-    for (const [code, handoff] of handoffs) {
-      if (handoff.token === token) handoffs.delete(code);
-    }
+    for (const code of handoffsByToken.get(token) ?? []) dropHandoff(code);
   };
   const touch = (address: PreviewAddress, now: number) => {
     address.expiresAtMillis = now + PREVIEW_ADDRESS_IDLE_TTL_MS;
@@ -507,13 +524,28 @@ const makeWith = Effect.fn("HubPreviews.make")(function* (options: HubPreviewsOp
   const handoff: HubPreviews["Service"]["handoff"] = Effect.fn("HubPreviews.handoff")(
     function* (address) {
       const now = yield* Clock.currentTimeMillis;
-      for (const [code, pending] of handoffs) {
-        if (pending.expiresAtMillis <= now || handoffs.size >= MAX_PENDING_HANDOFFS) {
-          handoffs.delete(code);
-        }
+      const principal = String(address.principal ?? "");
+      const theirs = handoffsByPrincipal.get(principal) ?? new Set<string>();
+      // This User's own lapsed ones go, then their oldest past the cap; nobody else's.
+      for (const code of theirs) {
+        const pending = handoffs.get(code);
+        if (pending === undefined || pending.expiresAtMillis <= now) dropHandoff(code);
+      }
+      for (const code of theirs) {
+        if (theirs.size < MAX_HANDOFFS_PER_USER) break;
+        dropHandoff(code);
       }
       const code = randomToken();
-      handoffs.set(code, { token: address.token, expiresAtMillis: now + PREVIEW_HANDOFF_TTL_MS });
+      handoffs.set(code, {
+        token: address.token,
+        principal,
+        expiresAtMillis: now + PREVIEW_HANDOFF_TTL_MS,
+      });
+      handoffsByToken.set(
+        address.token,
+        (handoffsByToken.get(address.token) ?? new Set()).add(code),
+      );
+      handoffsByPrincipal.set(principal, theirs.add(code));
       return code;
     },
   );
@@ -523,7 +555,7 @@ const makeWith = Effect.fn("HubPreviews.make")(function* (options: HubPreviewsOp
   )(function* (originId, code) {
     const pending = handoffs.get(code);
     // Spent on its first presentation, whatever comes of it.
-    handoffs.delete(code);
+    dropHandoff(code);
     if (pending === undefined || pending.expiresAtMillis <= (yield* Clock.currentTimeMillis)) {
       return Option.none();
     }

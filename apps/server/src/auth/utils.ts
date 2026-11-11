@@ -15,6 +15,8 @@ import { normalizeClientAddress } from "./clientConnection.ts";
 import * as Base64Url from "effect/encoding/Base64Url";
 import * as Result from "effect/Result";
 
+import type { PreviewOriginPattern } from "../preview/PreviewOrigin.ts";
+
 const SESSION_COOKIE_NAME = "t3_session";
 
 /** Cookies span ports; use separate names for servers sharing a hostname. */
@@ -71,11 +73,8 @@ export const sessionCookieNameFor = (name: string, secure: boolean): string =>
 export interface SessionCookieNames {
   readonly cookieName: string;
   readonly legacyCookieName: string | undefined;
-  /**
-   * With previews on their own origin, an HTTPS request counts only the `__Host-` cookie: a bare
-   * one may have been set by a preview subdomain for the Hub's domain.
-   */
-  readonly hostCookieRequired: boolean;
+  /** Previews on their own origin: see `readHubCookie` for what that changes in reading. */
+  readonly previewOrigin: PreviewOriginPattern | undefined;
 }
 
 /**

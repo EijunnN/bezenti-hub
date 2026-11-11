@@ -24,6 +24,7 @@ import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
 
 import * as ServerConfig from "../config.ts";
+import type { PreviewOriginPattern } from "../preview/PreviewOrigin.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as AuthSessions from "../persistence/AuthSessions.ts";
 import * as Users from "../persistence/Users.ts";
@@ -376,8 +377,8 @@ export class SessionStore extends Context.Service<
   {
     readonly cookieName: string;
     readonly legacyCookieName: string | undefined;
-    /** Previews have origins of their own: over HTTPS only the `__Host-` cookie counts. */
-    readonly hostCookieRequired: boolean;
+    /** Previews on their own origin (`T3CODE_PREVIEW_ORIGIN`), which changes how cookies are read. */
+    readonly previewOrigin: PreviewOriginPattern | undefined;
     readonly issue: (input?: {
       /** A fixed lifetime; without one a browser session lasts 30 days from its last use. */
       readonly ttl?: Duration.Duration;
@@ -1232,7 +1233,7 @@ const make = Effect.gen(function* () {
   return SessionStore.of({
     cookieName,
     legacyCookieName,
-    hostCookieRequired: serverConfig.previewOrigin !== undefined,
+    previewOrigin: serverConfig.previewOrigin,
     issue,
     verify,
     issueWebSocketToken,

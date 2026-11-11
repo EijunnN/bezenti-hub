@@ -117,20 +117,21 @@ describe("no door takes the Hub's cookies from a preview's own origin", () => {
     }).toEqual({ undeclared: [], stale: [] });
   });
 
-  it("applies crossesFromPreviewOrigin wherever a cookie is read off a request", () => {
-    // Every module that reads a cookie or the session credential itself: each must refuse one
-    // a preview origin's page sent, and its doors must say so.
-    const readers = files.filter(
-      ({ text }) => /\.cookies\[/.test(text) || /\bselectRequestCredential\(request/.test(text),
+  it("reads every Hub cookie through readHubCookie, and sets none for a preview origin", () => {
+    // A cookie is read off a request in one place (readHubCookie: none from a preview page, no
+    // bare one a preview could plant); the preview route reads only its own preview cookies.
+    const direct = files.flatMap(({ file, text }) =>
+      Array.from(text.matchAll(/\.cookies\[([^\]]+)\]/g), (match) => `${file}: ${match[1]}`),
     );
-    expect(readers.map(({ file }) => file).toSorted()).toEqual([
-      "auth/EnvironmentAuth.ts",
-      "auth/http.ts",
-      "guest/http.ts",
-      "preview/hubPreviewRoute.ts",
+    expect(direct.toSorted()).toEqual([
+      "preview/PreviewOrigin.ts: `${HOST_PREFIX}${name}`",
+      "preview/PreviewOrigin.ts: name",
+      "preview/hubPreviewRoute.ts: PREVIEW_COOKIE_NAME",
+      "preview/hubPreviewRoute.ts: PREVIEW_ORIGIN_COOKIE_NAME",
     ]);
-    for (const { file, text } of readers) {
-      expect(text, file).toMatch(/crossesFromPreviewOrigin\(/);
+    // Every module that sets or clears a Hub cookie asks whether the request is a preview's.
+    for (const file of ["auth/http.ts", "guest/http.ts"]) {
+      expect(files.find((entry) => entry.file === file)?.text, file).toMatch(/fromPreviewOrigin/);
     }
     const cookieDoors = Object.entries(AMBIENT_COOKIE_RULES).filter(([door]) =>
       ["guest/http.ts: ", "preview/hubPreviewRoute.ts: *"].some((prefix) =>

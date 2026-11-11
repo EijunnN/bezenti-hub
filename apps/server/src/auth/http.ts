@@ -26,7 +26,6 @@ import { parseOAuthScope } from "@t3tools/shared/oauthScope";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
@@ -41,8 +40,7 @@ import * as SessionStore from "./SessionStore.ts";
 import * as UserDirectory from "./UserDirectory.ts";
 import { deriveAuthClientMetadata, sessionCookieNameFor } from "./utils.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
-import * as ServerConfig from "../config.ts";
-import { crossesFromPreviewOrigin } from "../preview/PreviewOrigin.ts";
+import { fromPreviewOrigin } from "../preview/PreviewOrigin.ts";
 import { requestUrl } from "../requestUrl.ts";
 
 const CREDENTIAL_RESPONSE_HEADERS = {
@@ -226,16 +224,6 @@ const sessionCookieAttributes = HttpServerRequest.HttpServerRequest.pipe(
     secure: request.protocol === "https",
   })),
 );
-
-/**
- * Every door that sets or clears the Hub's session cookie asks this: never for a page on a
- * preview's own origin, which could sign the browser in as someone else (login CSRF) or out.
- */
-const fromPreviewOrigin = Effect.gen(function* () {
-  const request = yield* HttpServerRequest.HttpServerRequest;
-  const config = yield* Effect.serviceOption(ServerConfig.ServerConfig);
-  return crossesFromPreviewOrigin(Option.getOrUndefined(config)?.previewOrigin, request.headers);
-});
 
 /**
  * The session cookie under the name this request's transport takes (`__Host-` over HTTPS, see
@@ -627,6 +615,10 @@ export const layer = HttpApiBuilder.group(
           function* (args) {
             yield* annotateEnvironmentRequest(args.endpoint.name);
             const request = yield* HttpServerRequest.HttpServerRequest;
+            // A page on a preview's own origin redeems nothing: no session is issued for it,
+            // and the browser's own is neither read nor replaced (login CSRF).
+            if (yield* fromPreviewOrigin)
+              return yield* failEnvironmentInvalidRequest("invalid_origin");
             const previousCredential = EnvironmentAuth.selectRequestCredential(request, sessions);
             const result = yield* serverAuth.createBrowserSession(
               args.payload.credential,
@@ -637,36 +629,33 @@ export const layer = HttpApiBuilder.group(
                 : undefined,
             );
             const attributes = yield* sessionCookieAttributes;
-            // The reusable dev token keeps its own cookie; a session gets the Hub's (`__Host-`).
+            // The reusable dev token keeps its own cookie name; both get `__Host-` over HTTPS.
             const selectedCookie = yield* Effect.fromResult(
-              result.cookieName === undefined
-                ? yield* sessionCookie(
-                    Cookies.empty,
-                    sessions.cookieName,
-                    result.sessionToken,
-                    result.response.expiresAt,
-                  )
-                : Cookies.set(Cookies.empty, result.cookieName, result.sessionToken, {
-                    ...attributes,
-                    expires: DateTime.toDate(result.response.expiresAt),
-                  }),
+              yield* sessionCookie(
+                Cookies.empty,
+                result.cookieName ?? sessions.cookieName,
+                result.sessionToken,
+                result.response.expiresAt,
+              ),
             ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")));
+            // The dev token's cookie replaces the session one, under either name it may have.
+            const normalNames = attributes.secure
+              ? [sessions.cookieName, sessionCookieNameFor(sessions.cookieName, true)]
+              : [sessions.cookieName];
             const sessionCookies = result.expireNormalCookie
               ? yield* Effect.fromResult(
-                  Cookies.expireCookie(
-                    selectedCookie,
-                    sessionCookieNameFor(sessions.cookieName, attributes.secure === true),
-                    attributes,
+                  normalNames.reduce(
+                    (cookies, name) =>
+                      Result.flatMap(cookies, (next) =>
+                        Cookies.expireCookie(next, name, attributes),
+                      ),
+                    Result.succeed(selectedCookie) as ReturnType<typeof Cookies.expireCookie>,
                   ),
                 ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")))
               : selectedCookie;
-
-            // The dev token's cookie too: never set for a page on a preview's own origin.
-            if (!(yield* fromPreviewOrigin)) {
-              yield* HttpEffect.appendPreResponseHandler((_request, response) =>
-                Effect.succeed(HttpServerResponse.mergeCookies(response, sessionCookies)),
-              );
-            }
+            yield* HttpEffect.appendPreResponseHandler((_request, response) =>
+              Effect.succeed(HttpServerResponse.mergeCookies(response, sessionCookies)),
+            );
             yield* appendCredentialResponseHeaders;
             return result.response;
           },

@@ -3,7 +3,12 @@
  * each preview address at `https://<id>.<zone>`. Every host under the zone belongs to previews: the
  * Hub never answers there, nor takes its cookies from a page there. See docs/internals/sandboxes.md.
  */
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Result from "effect/Result";
+import { HttpServerRequest } from "effect/http";
+
+import * as ServerConfig from "../config.ts";
 
 export interface PreviewOriginPattern {
   readonly protocol: "https:" | "http:";
@@ -121,19 +126,45 @@ const headerInZone = (pattern: PreviewOriginPattern, value: string | undefined) 
 };
 
 /**
- * Whether a request may come from a page on a preview origin: `Origin` or `Referer` in the zone, or a
- * same-site embed naming no origin (`<img>`, `<script>`, `<iframe>`), which carries SameSite=Lax
- * cookies. Not a top-level navigation. The one rule for every door that takes a Hub cookie.
+ * Whether a request came from a page on a preview origin: its `Origin` or `Referer` is in the zone.
+ * The one rule for every door that takes a Hub cookie. A same-site embed that names neither (an
+ * `<img>` with `referrerpolicy="no-referrer"`) is not caught: such a GET changes nothing on the Hub
+ * and its answer is unreadable from there, and the Hub's pages refuse frames (`frame-ancestors`).
  */
 export const crossesFromPreviewOrigin = (
   pattern: PreviewOriginPattern | undefined,
   headers: Readonly<Record<string, string | undefined>>,
-): boolean => {
-  if (pattern === undefined) return false;
-  if (headerInZone(pattern, headers.origin) || headerInZone(pattern, headers.referer)) return true;
-  return (
-    headers["sec-fetch-site"] === "same-site" &&
-    headers.origin === undefined &&
-    !(headers["sec-fetch-mode"] === "navigate" && headers["sec-fetch-dest"] === "document")
-  );
+): boolean =>
+  pattern !== undefined &&
+  (headerInZone(pattern, headers.origin) || headerInZone(pattern, headers.referer));
+
+const HOST_PREFIX = "__Host-";
+
+/**
+ * A Hub cookie (session, legacy, dev token, guest) as a request carries it, read in one place:
+ * `__Host-<name>` first, which only the Hub's own host can set; the bare name only where no preview
+ * could have set it (previews off, or plain HTTP); nothing for a page on a preview's own origin.
+ */
+export const readHubCookie = (
+  request: HttpServerRequest.HttpServerRequest,
+  name: string,
+  pattern: PreviewOriginPattern | undefined,
+): string | undefined => {
+  if (crossesFromPreviewOrigin(pattern, request.headers)) return undefined;
+  const hostOnly = request.cookies[`${HOST_PREFIX}${name}`];
+  if (hostOnly) return hostOnly;
+  if (pattern !== undefined && request.protocol === "https") return undefined;
+  return request.cookies[name] || undefined;
 };
+
+/** `T3CODE_PREVIEW_ORIGIN` as this server runs with it (none without a server config). */
+export const previewOriginSetting = Effect.map(
+  Effect.serviceOption(ServerConfig.ServerConfig),
+  (config) => Option.getOrUndefined(config)?.previewOrigin,
+);
+
+/** `crossesFromPreviewOrigin` for the request being served. */
+export const fromPreviewOrigin = Effect.gen(function* () {
+  const request = yield* HttpServerRequest.HttpServerRequest;
+  return crossesFromPreviewOrigin(yield* previewOriginSetting, request.headers);
+});

@@ -29,12 +29,7 @@ import type {
   PreviewProxySocketItem,
   PreviewProxyTarget,
 } from "./PreviewProxy.ts";
-import {
-  crossesFromPreviewOrigin,
-  type PreviewOriginPattern,
-  previewHostOf,
-  previewOriginOf,
-} from "./PreviewOrigin.ts";
+import { type PreviewOriginPattern, previewHostOf, previewOriginOf } from "./PreviewOrigin.ts";
 
 /** The largest request body relayed: it travels in one frame of the Environment channel. */
 const PREVIEW_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
@@ -96,14 +91,12 @@ const DROPPED_RESPONSE_HEADERS = new Set([
   "strict-transport-security",
   "public-key-pins",
   "alt-svc",
+  // Browsers apply `"cookies"` to the whole registrable domain: the Hub's session, other previews.
+  "clear-site-data",
 ]);
 
 /** Also dropped on the Hub's origin: what would set or clear state there. */
-const DROPPED_ON_HUB_ORIGIN = new Set([
-  "clear-site-data",
-  "service-worker-allowed",
-  "referrer-policy",
-]);
+const DROPPED_ON_HUB_ORIGIN = new Set(["service-worker-allowed", "referrer-policy"]);
 
 class PreviewRequestTooLargeError extends Schema.TaggedError<PreviewRequestTooLargeError>()(
   "PreviewRequestTooLargeError",
@@ -175,6 +168,8 @@ const PREVIEW_ORIGIN_COOKIE_NAME = "__Host-t3_preview";
 interface RelayPolicy {
   /** The page's cookies the dev server sees, if any. */
   readonly forwardCookies: (header: string | undefined) => string | undefined;
+  /** The page's own `Authorization` (on its own origin it is the page's, never the Hub's). */
+  readonly forwardAuthorization: boolean;
   readonly responseHeaders: (
     headers: PreviewProxyHeaders,
     port: number,
@@ -193,7 +188,13 @@ const requestHeaders = (
   const kept: Array<readonly [string, string]> = [];
   for (const [name, value] of Object.entries(headers)) {
     const lower = name.toLowerCase();
-    if (value === undefined || DROPPED_REQUEST_HEADERS.has(lower)) continue;
+    if (value === undefined) continue;
+    if (
+      DROPPED_REQUEST_HEADERS.has(lower) &&
+      !(lower === "authorization" && policy.forwardAuthorization)
+    ) {
+      continue;
+    }
     if (lower.startsWith("x-forwarded-") || lower.startsWith("x-t3-")) continue;
     // The dev server sees itself as the origin (Vite checks it on its HMR socket).
     kept.push([lower, lower === "origin" ? `http://localhost:${port}` : value]);
@@ -243,6 +244,7 @@ const relayedHeaders = (
 /** On the Hub's origin: sandboxed, stateless, and the address never leaves in a Referer. */
 const hubOriginPolicy = (prefix: string): RelayPolicy => ({
   forwardCookies: () => undefined,
+  forwardAuthorization: false,
   responseHeaders: (headers, port) => {
     const { kept, contentType, policy } = relayedHeaders(headers, DROPPED_ON_HUB_ORIGIN, (value) =>
       rewriteLocation(value, prefix, port),
@@ -257,11 +259,12 @@ const hubOriginPolicy = (prefix: string): RelayPolicy => ({
 
 const cookieNameOf = (pair: string) => pair.slice(0, Math.max(pair.indexOf("="), 0)).trim();
 
-/** Neither the preview's own cookie nor anything named like a Hub session goes to a dev server. */
-const isReservedCookie = (name: string) =>
-  name === PREVIEW_ORIGIN_COOKIE_NAME ||
-  name === PREVIEW_COOKIE_NAME ||
-  /^(__Host-)?t3_(dev_)?session/.test(name);
+/**
+ * The preview's own cookie is the only one kept from the dev server, both ways. The Hub's are
+ * host-only and never reach a preview host, so a page's `t3_session…` (T3 Code previewing itself)
+ * is its own.
+ */
+const isReservedCookie = (name: string) => name === PREVIEW_ORIGIN_COOKIE_NAME;
 
 /**
  * The dev server's cookies, host-only: a `Domain` would reach the Hub's domain or a sibling
@@ -286,6 +289,7 @@ const hostOnlyCookies = (setCookies: ReadonlyArray<string>): Cookies.Cookies => 
 
 /** On the preview's own origin: the page's cookies and state are its own. */
 const ownOriginPolicy = (origin: string): RelayPolicy => ({
+  forwardAuthorization: true,
   forwardCookies: (header) => {
     if (header === undefined) return undefined;
     const kept = header
@@ -555,11 +559,9 @@ const makeHandler = Effect.fnUntraced(function* (
   if (UNRELAYED_METHODS.has(request.method.toUpperCase())) {
     return plain(501, "This method is not relayed to the dev server.");
   }
-  // The Hub session this request carries, if any: it must be the address's own User's. Never
-  // from a page on a preview's own origin, which must not use the Hub's cookies.
-  const credential = crossesFromPreviewOrigin(previewOrigin, request.headers)
-    ? undefined
-    : EnvironmentAuth.selectRequestCredential(request, sessions);
+  // The Hub session this request carries, if any: it must be the address's own User's. Read as
+  // every Hub cookie is (`readHubCookie`): never from a page on a preview's own origin.
+  const credential = EnvironmentAuth.selectRequestCredential(request, sessions);
   const hubUser: Option.Option<UserId | undefined> =
     credential === undefined || !EnvironmentAuth.isBrowserCookieCredential(credential.source)
       ? Option.none()

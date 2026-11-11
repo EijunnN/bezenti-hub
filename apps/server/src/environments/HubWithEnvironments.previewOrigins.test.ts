@@ -15,6 +15,7 @@ import {
   UserId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
@@ -122,6 +123,8 @@ const startDevServer = Effect.acquireRelease(
             response.writeHead(200, {
               "content-type": "text/html; charset=utf-8",
               "content-security-policy": "default-src 'self'",
+              // On a browser this would clear every cookie of the registrable domain: the Hub's too.
+              "clear-site-data": '"cookies"',
               "set-cookie": [
                 "app=1; Path=/",
                 `wide=1; Path=/; Domain=${ZONE}`,
@@ -435,7 +438,13 @@ describe("Hub con Environments: previews on their own origin", () => {
         // The page runs as itself: the dev server's own policy, no sandbox; its cookies are its
         // own, host-only; the Hub's session and the preview's cookie never reach the dev server.
         const page = yield* request(hub, host, "/docs/index.html?tab=1", {
-          headers: { ...NAVIGATION, cookie: `${preview}; app=1; ${hub.owner}` },
+          headers: {
+            ...NAVIGATION,
+            // The page's own: a cookie named like T3 Code's (T3 Code previewing itself) and an
+            // Authorization header (on its own origin it is the page's, never the Hub's).
+            cookie: `${preview}; app=1; t3_session_app=own`,
+            authorization: "Bearer page-token",
+          },
         });
         assert.equal(page.status, 200);
         assert.include(page.text, "GET /docs/index.html?tab=1");
@@ -446,7 +455,10 @@ describe("Hub con Environments: previews on their own origin", () => {
         assert.isFalse(page.setCookie.some((cookie) => /Domain=/i.test(cookie)));
         assert.isFalse(page.setCookie.some((cookie) => cookie.startsWith("__Host-t3_preview=")));
         const reached = dev.seen.at(-1)!;
-        assert.equal(reached.headers.cookie, "app=1");
+        assert.equal(reached.headers.cookie, "app=1; t3_session_app=own");
+        assert.equal(reached.headers.authorization, "Bearer page-token");
+        // A dev server never clears the Hub's session or other previews' cookies.
+        assert.isUndefined(page.headers["clear-site-data"]);
         assert.equal(reached.headers.host, `localhost:${dev.port}`);
 
         // What Vite serves the page: root-absolute module URLs and fetch() calls, with cookies,
@@ -707,5 +719,37 @@ describe("Hub con Environments: previews on their own origin", () => {
         );
         assert.equal(dev.seen.length, asked);
       }).pipe(Effect.scoped),
+  );
+
+  it.live("one User's pending handoffs never push out another User's", () =>
+    Effect.gen(function* () {
+      const { hub, owner, threadId, ownerSession, previews } = yield* threadInSandbox();
+      const dev = yield* startDevServer;
+      const address = yield* previews.address({
+        userId: owner,
+        sessionId: ownerSession.sessionId,
+        threadId,
+        port: dev.port,
+      });
+      const { host } = yield* openOnOwnOrigin(hub, hub.owner, address.path);
+      const id = host.split(".")[0]!;
+      const resolved = yield* previews.resolve(address.path.split("/")[2]!, {
+        hubUser: Option.some(owner),
+        pass: Option.none(),
+      });
+      assert.equal(resolved._tag, "open");
+      if (resolved._tag !== "open") return;
+      // Another User's code, then far more of the Owner's than any one User may hold.
+      const theirs = yield* previews.handoff({
+        ...resolved.address,
+        principal: UserId.make("someone-else"),
+      });
+      const first = yield* previews.handoff(resolved.address);
+      for (let index = 0; index < 1_100; index++) yield* previews.handoff(resolved.address);
+      // The Owner's oldest went; the other User's is still good.
+      assert.isTrue(Option.isNone(yield* previews.redeemHandoff(id, first)));
+      assert.isTrue(Option.isSome(yield* previews.redeemHandoff(id, theirs)));
+      assert.isAtLeast(HubPreviews.MAX_HANDOFFS_PER_USER, 1);
+    }).pipe(Effect.scoped),
   );
 });

@@ -64,12 +64,12 @@ import * as UserDirectory from "./UserDirectory.ts";
 import { REUSABLE_DEV_SESSION_EXPIRES_AT, resolveReusableDevAuth } from "./ReusableDevAuth.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
 import { OwnerPresence } from "./OwnerPresence.ts";
+import { type AuthRequestMetadata, type SessionCookieNames } from "./utils.ts";
 import {
-  type AuthRequestMetadata,
-  type SessionCookieNames,
-  sessionCookieNameFor,
-} from "./utils.ts";
-import { crossesFromPreviewOrigin, type PreviewOriginPattern } from "../preview/PreviewOrigin.ts";
+  crossesFromPreviewOrigin,
+  type PreviewOriginPattern,
+  readHubCookie,
+} from "../preview/PreviewOrigin.ts";
 import { headerList, isLoopbackClientAddress, isPrivateClientAddress } from "./clientConnection.ts";
 import * as AuditLog from "../audit/AuditLog.ts";
 import { DESKTOP_RENDERER_ORIGINS } from "../httpCors.ts";
@@ -852,20 +852,15 @@ function parseDpopToken(request: HttpServerRequest.HttpServerRequest): string | 
 
 /**
  * The credential a request carries: the browser session cookie (`__Host-` first, see
- * `sessionCookieNameFor`), else a bearer or DPoP token, else the legacy cookie. With previews on
- * their own origin an HTTPS request's bare-named cookies do not count: a preview subdomain could
- * have set them for the Hub's domain.
+ * `sessionCookieNameFor`), else a bearer or DPoP token, else the legacy cookie. Cookies are read
+ * by `readHubCookie`: none from a page on a preview's own origin, and no bare-named one a preview
+ * could have set for the Hub's domain.
  */
 export function selectRequestCredential(
   request: HttpServerRequest.HttpServerRequest,
   names: SessionCookieNames,
 ) {
-  const hostCookie = request.cookies[sessionCookieNameFor(names.cookieName, true)];
-  if (hostCookie) {
-    return { token: hostCookie, source: "cookie" } as const;
-  }
-  const bareCookiesCount = !(names.hostCookieRequired && request.protocol === "https");
-  const cookieToken = bareCookiesCount ? request.cookies[names.cookieName] : undefined;
+  const cookieToken = readHubCookie(request, names.cookieName, names.previewOrigin);
   if (cookieToken) {
     return { token: cookieToken, source: "cookie" } as const;
   }
@@ -880,10 +875,9 @@ export function selectRequestCredential(
     return { token: dpopToken, source: "dpop" } as const;
   }
 
-  const legacyToken =
-    bareCookiesCount && names.legacyCookieName
-      ? request.cookies[names.legacyCookieName]
-      : undefined;
+  const legacyToken = names.legacyCookieName
+    ? readHubCookie(request, names.legacyCookieName, names.previewOrigin)
+    : undefined;
   if (legacyToken !== undefined) {
     return { token: legacyToken, source: "legacy-cookie" } as const;
   }
@@ -1030,7 +1024,9 @@ export const make = Effect.gen(function* () {
   const resolveRequestCredential = (request: HttpServerRequest.HttpServerRequest) => {
     const selectedCredential = selectRequestCredential(request, sessions);
     const hasAuthorization = request.headers.authorization !== undefined;
-    const devCookieToken = devAuth ? request.cookies[devAuth.cookieName] : undefined;
+    const devCookieToken = devAuth
+      ? readHubCookie(request, devAuth.cookieName, config.previewOrigin)
+      : undefined;
     return (
       selectedCredential ??
       (!hasAuthorization && devCookieToken !== undefined
@@ -1919,6 +1915,12 @@ export const make = Effect.gen(function* () {
     user: AuthUser,
     requestMetadata: AuthRequestMetadata,
   ) {
+    // A page on a preview's own origin signs nobody in, and replaces no session (login CSRF).
+    if (crossesFromPreviewOrigin(config.previewOrigin, request.headers)) {
+      return yield* new ServerAuthInvalidCredentialError({
+        diagnostic: "No one signs in from a preview's own origin.",
+      });
+    }
     yield* requireSecureTransport(requestMetadata);
     if (
       !ManagedLimits.allowsRemoteClients(managedPolicy) &&

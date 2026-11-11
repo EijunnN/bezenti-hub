@@ -1,5 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Result from "effect/Result";
+import { HttpServerRequest } from "effect/http";
 
 import {
   crossesFromPreviewOrigin,
@@ -8,6 +9,7 @@ import {
   parsePreviewOrigin,
   previewHostOf,
   previewOriginOf,
+  readHubCookie,
 } from "./PreviewOrigin.ts";
 
 const parse = (value: string, hub?: Parameters<typeof parsePreviewOrigin>[1]) => {
@@ -101,24 +103,16 @@ describe("a host under the preview zone", () => {
     assert.isTrue(inPreviewZone(pattern, "x.preview.example.com."));
   });
 
-  it("marks a request that came from a preview page, by Origin, Referer or a same-site embed", () => {
+  it("marks a request that came from a preview page by its Origin or Referer, nothing else", () => {
     const page = `https://${id}.preview.example.com`;
     assert.isTrue(crossesFromPreviewOrigin(pattern, { origin: page }));
     assert.isTrue(crossesFromPreviewOrigin(pattern, { referer: `${page}/src/main.ts` }));
-    assert.isTrue(crossesFromPreviewOrigin(pattern, { "sec-fetch-site": "same-site" }));
-    assert.isTrue(
-      crossesFromPreviewOrigin(pattern, {
-        "sec-fetch-site": "same-site",
-        "sec-fetch-mode": "navigate",
-        "sec-fetch-dest": "iframe",
-      }),
-    );
-    // A top-level link from anywhere, the Hub's own pages, and other sites' requests are not.
+    // A same-site caller that names neither (the dev web app's `<img>`), the Hub's own pages, a
+    // top-level link, and other sites' requests are not.
     assert.isFalse(
       crossesFromPreviewOrigin(pattern, {
         "sec-fetch-site": "same-site",
-        "sec-fetch-mode": "navigate",
-        "sec-fetch-dest": "document",
+        "sec-fetch-dest": "image",
       }),
     );
     assert.isFalse(
@@ -131,5 +125,40 @@ describe("a host under the preview zone", () => {
     assert.isFalse(crossesFromPreviewOrigin(pattern, {}));
     // Without previews on their own origin, nothing is.
     assert.isFalse(crossesFromPreviewOrigin(undefined, { origin: page, referer: page }));
+  });
+
+  it("reads every Hub cookie in one way: `__Host-` first, a bare one only where none could be planted", () => {
+    const page = `https://${id}.preview.example.com`;
+    const request = (
+      cookies: Record<string, string>,
+      protocol: "http" | "https",
+      headers: Record<string, string> = {},
+    ) =>
+      HttpServerRequest.fromWeb(
+        new Request(`${protocol}://hub.example.com/api/x`, {
+          headers: {
+            cookie: Object.entries(cookies)
+              .map(([name, value]) => `${name}=${value}`)
+              .join("; "),
+            ...headers,
+          },
+        }),
+      ).modify({ protocol });
+    const both = { "__Host-t3_guest_s": "hub", t3_guest_s: "tossed" };
+    assert.equal(readHubCookie(request(both, "https"), "t3_guest_s", pattern), "hub");
+    // Previews on, HTTPS: a bare cookie may be a preview's, for the Hub's domain.
+    assert.isUndefined(
+      readHubCookie(request({ t3_guest_s: "tossed" }, "https"), "t3_guest_s", pattern),
+    );
+    // Plain HTTP holds no `__Host-` cookie; previews off, nothing could plant one.
+    assert.equal(readHubCookie(request({ t3_guest_s: "x" }, "http"), "t3_guest_s", pattern), "x");
+    assert.equal(
+      readHubCookie(request({ t3_guest_s: "x" }, "https"), "t3_guest_s", undefined),
+      "x",
+    );
+    // From a page on a preview's own origin, none at all.
+    assert.isUndefined(
+      readHubCookie(request(both, "https", { origin: page }), "t3_guest_s", pattern),
+    );
   });
 });

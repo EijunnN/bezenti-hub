@@ -48,24 +48,19 @@ describe("a page on a preview's own origin is never signed in to the Hub", () =>
         headers: { referer: `${PREVIEW_PAGE}/src/main.ts` },
       });
       assert.equal(referred.status, 401);
-      // Neither: an `<img>`, a `<script>` or an `<iframe>` with `referrerpolicy="no-referrer"`,
-      // which a same-site page sends with the Hub's SameSite=Lax cookie.
-      for (const [mode, dest] of [
-        ["no-cors", "image"],
-        ["no-cors", "script"],
-        ["navigate", "iframe"],
-      ] as const) {
-        const embedded = yield* server.request("/api/spaces", {
-          cookie: owner,
-          omitOrigin: true,
-          headers: {
-            "sec-fetch-site": "same-site",
-            "sec-fetch-mode": mode,
-            "sec-fetch-dest": dest,
-          },
-        });
-        assert.equal(embedded.status, 401, `${mode} ${dest}`);
-      }
+      // A same-site image naming neither Origin nor a preview Referer (the dev web app on another
+      // port loading one from the Hub) is the Hub's own caller: it keeps its session.
+      const image = yield* server.request("/api/spaces", {
+        cookie: owner,
+        omitOrigin: true,
+        headers: {
+          "sec-fetch-site": "same-site",
+          "sec-fetch-mode": "no-cors",
+          "sec-fetch-dest": "image",
+          referer: "http://localhost:5173/",
+        },
+      });
+      assert.equal(image.status, 200);
       // The session check says signed out too, and sends no cookie back.
       const session = yield* server.request("/api/auth/session", {
         cookie: owner,
@@ -191,14 +186,46 @@ describe("a page on a preview's own origin cannot sign a browser in to the Hub",
           cookie: owner,
         });
         assert.equal(pairing.status, 200);
+        // The victim's own session cookie travels with it (same-site): it must be neither replaced
+        // nor revoked, and the link must not be spent.
         const redeemed = yield* server.request("/api/auth/browser-session", {
           body: { credential: pairing.body.credential },
+          cookie: owner,
           headers: { origin: PREVIEW_PAGE, "sec-fetch-site": "same-site" },
         });
+        assert.equal(redeemed.status, 400);
         assert.deepEqual(
           redeemed.setCookies.filter((cookie) => cookie.includes("t3_session")),
           [],
         );
+        assert.equal((yield* server.request("/api/spaces", { cookie: owner })).status, 200);
+        // Signing in by password from there, with the victim's cookie: refused before anything.
+        const invitation = yield* server.request("/api/spaces/organizations", {
+          body: { name: "Acme" },
+          cookie: owner,
+        });
+        const invite = yield* server.request(`/api/spaces/${invitation.body.id}/invitations`, {
+          body: { role: "member" },
+          cookie: owner,
+        });
+        const accepted = yield* server.request("/api/invitations/accept", {
+          body: {
+            token: invite.body.token,
+            method: "password",
+            displayName: "Mallory",
+            loginName: "mallory",
+            password: "correct horse battery",
+          },
+        });
+        assert.equal(accepted.status, 200);
+        const password = yield* server.request("/api/auth/password/sign-in", {
+          body: { loginName: "mallory", password: "correct horse battery" },
+          cookie: owner,
+          headers: { origin: PREVIEW_PAGE, "sec-fetch-site": "same-site" },
+        });
+        assert.notEqual(password.status, 200);
+        assert.isUndefined(password.setCookie);
+        assert.equal((yield* server.request("/api/spaces", { cookie: owner })).status, 200);
         // Nor does it sign the browser out of the Hub.
         const out = yield* server.request("/api/auth/sign-out", {
           body: {},
@@ -210,13 +237,9 @@ describe("a page on a preview's own origin cannot sign a browser in to the Hub",
           [],
         );
         assert.equal((yield* server.request("/api/spaces", { cookie: owner })).status, 200);
-        // From the Hub's own page such a link signs in.
-        const another = yield* server.request("/api/auth/pairing-token", {
-          body: {},
-          cookie: owner,
-        });
+        // From the Hub's own page the same, unspent link signs in.
         const own = yield* server.request("/api/auth/browser-session", {
-          body: { credential: another.body.credential },
+          body: { credential: pairing.body.credential },
         });
         assert.equal(own.status, 200);
         assert.isDefined(own.setCookie);

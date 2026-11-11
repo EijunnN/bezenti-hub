@@ -32,32 +32,38 @@ it.effect("keeps a JSON file a guest attaches as a file, not a form field", () =
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
-it.effect("takes no guest cookie from a page on a preview's own origin", () =>
-  Effect.gen(function* () {
-    const parsed = parsePreviewOrigin("https://*.preview.example.test");
-    assert.isTrue(Result.isSuccess(parsed));
-    const previewOrigin = Result.isSuccess(parsed) ? parsed.success : undefined;
-    const cookie = `${guestSessionCookieName("share-1")}=guest-token`;
-    const read = (headers: Record<string, string>, withPreviews = true) =>
-      guestSessionCookie(
-        HttpServerRequest.fromWeb(
-          new Request("https://hub.example.test/api/guest/messages?share=share-1", {
-            method: "POST",
-            headers: { cookie, ...headers },
-          }),
-        ),
-        "share-1",
-      ).pipe(
-        Effect.provideService(ServerConfig.ServerConfig, {
-          previewOrigin: withPreviews ? previewOrigin : undefined,
-        } as unknown as ServerConfig.ServerConfig["Service"]),
-      );
-    assert.equal(yield* read({ origin: "https://hub.example.test" }), "guest-token");
-    const page = "https://abc.preview.example.test";
-    assert.equal(yield* read({ origin: page }), "");
-    assert.equal(yield* read({ referer: `${page}/` }), "");
-    assert.equal(yield* read({ "sec-fetch-site": "same-site", "sec-fetch-mode": "no-cors" }), "");
-    // Without previews on their own origin, as before.
-    assert.equal(yield* read({ origin: page }, false), "guest-token");
-  }),
+it.effect(
+  "reads the guest cookie as `__Host-`: none from a preview page, no bare one a preview could plant",
+  () =>
+    Effect.gen(function* () {
+      const parsed = parsePreviewOrigin("https://*.preview.example.test");
+      assert.isTrue(Result.isSuccess(parsed));
+      const previewOrigin = Result.isSuccess(parsed) ? parsed.success : undefined;
+      const name = guestSessionCookieName("share-1");
+      const read = (cookie: string, headers: Record<string, string>, withPreviews = true) =>
+        guestSessionCookie(
+          HttpServerRequest.fromWeb(
+            new Request("https://hub.example.test/api/guest/messages?share=share-1", {
+              method: "POST",
+              headers: { cookie, ...headers },
+            }),
+          ).modify({ protocol: "https" }),
+          "share-1",
+        ).pipe(
+          Effect.provideService(ServerConfig.ServerConfig, {
+            previewOrigin: withPreviews ? previewOrigin : undefined,
+          } as unknown as ServerConfig.ServerConfig["Service"]),
+        );
+      const own = { origin: "https://hub.example.test" };
+      const hostOnly = `__Host-${name}=guest-token`;
+      assert.equal(yield* read(hostOnly, own), "guest-token");
+      // What a preview subdomain can set for the Hub's domain: a bare-named guest cookie.
+      assert.equal(yield* read(`${name}=attacker-guest`, own), "");
+      // A preview page's own requests carry none at all.
+      const page = "https://abc.preview.example.test";
+      assert.equal(yield* read(hostOnly, { origin: page }), "");
+      assert.equal(yield* read(hostOnly, { referer: `${page}/` }), "");
+      // Without previews on their own origin, a guest from before keeps their bare cookie.
+      assert.equal(yield* read(`${name}=guest-token`, own, false), "guest-token");
+    }),
 );
