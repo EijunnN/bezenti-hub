@@ -34,15 +34,34 @@ export const restoreOrganization = (client: EnvironmentHttpClient, spaceId: Spac
 export const deleteOrganization = (client: EnvironmentHttpClient, spaceId: SpaceId) =>
   client.spaces.deleteOrganization({ headers: {}, params: { spaceId } });
 
-/** Moves a Project with all its Threads to another Space; refused while one of them runs. */
+/**
+ * Moves a Project with all its Threads to another Space. A running Thread refuses it unless
+ * `stopThreads`, which the mover confirms after seeing `projectMovePlan`.
+ */
 export const moveProject = (
   client: EnvironmentHttpClient,
   input: {
     readonly commandId: CommandId;
     readonly projectId: ProjectId;
     readonly spaceId: SpaceId;
+    readonly stopThreads?: boolean;
   },
 ) => client.projects.mutate({ headers: {}, payload: { type: "project.move", ...input } });
+
+/** What moving the Project to `spaceId` would do: Threads it stops, and those left without a machine. */
+export const projectMovePlan = (
+  client: EnvironmentHttpClient,
+  input: { readonly projectId: ProjectId; readonly spaceId: SpaceId },
+) => client.projects.movePlan({ headers: {}, payload: input });
+
+/** The destination Space's Sandbox in the Hub's Environments list, when it offers one. */
+export function destinationSandbox<
+  E extends { readonly id: string; readonly kind: string; readonly spaceId?: string | null },
+>(environments: ReadonlyArray<E>, spaceId: SpaceId): E | undefined {
+  return environments.find(
+    (environment) => environment.kind === "sandbox" && environment.spaceId === spaceId,
+  );
+}
 
 /**
  * The Spaces a Project in `from` may move to, from the server's answers per Space. A Project

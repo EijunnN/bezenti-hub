@@ -6,16 +6,14 @@ import { mapAtomCommandResult, settlePromise } from "@t3tools/client-runtime/sta
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { planProjectRemoval } from "@t3tools/client-runtime/state/projects";
 import {
-  CommandId,
   type EnvironmentId,
+  type ProjectId,
   type SidebarProjectGroupingMode,
   type SpaceId,
+  type SpaceSummary,
 } from "@t3tools/contracts";
-import {
-  moveProject,
-  projectMoveDestinations,
-} from "@t3tools/client-runtime/spaces/space-directory";
-import * as Effect from "effect/Effect";
+import { projectMoveDestinations } from "@t3tools/client-runtime/spaces/space-directory";
+import { loadProjectMovePlan, type PlannedMove, ProjectMoveDialog } from "./ProjectMoveDialog";
 import {
   checkProjectAccess,
   reportProjectFailure,
@@ -27,10 +25,6 @@ import { InfoIcon, Trash2Icon } from "lucide-react";
 import { lazy, Suspense, useRef, useState, type ReactNode } from "react";
 
 import { useComposerDraftStore } from "../../composerDraftStore";
-import { PrimaryEnvironmentHttpClient } from "../../environments/primary/httpClient";
-import { errorMessageOf } from "../../lib/errorMessage";
-import { runPrimaryHttp } from "../../lib/runtime";
-import { randomUUID } from "../../lib/utils";
 import { useCurrentSpace } from "../../state/currentSpace";
 import { releaseProjectDraftUploads } from "../../lib/composerDraftUploads";
 import { persistClientSettingsUpdate, useClientSettings } from "../../hooks/useSettings";
@@ -172,63 +166,55 @@ function ProjectSpaceSettings({ group }: { group: SidebarProjectSnapshot }) {
   const view = useCurrentSpace((state) =>
     state.environmentId === primaryEnvironmentId ? state.view : null,
   );
-  const [moving, setMoving] = useState(false);
+  // The move under way: its dialog says what changes first, and stays while the Project moves.
+  const [moving, setMoving] = useState<{
+    readonly projectId: ProjectId;
+    readonly projectTitle: string;
+    readonly destination: SpaceSummary;
+    readonly planned: PlannedMove;
+  } | null>(null);
   const primaryMembers = group.memberProjects.filter(
     (member) => member.environmentId === primaryEnvironmentId,
   );
   const project = primaryMembers.length === 1 ? primaryMembers[0] : undefined;
-  if (view === null || project === undefined) return null;
+  const dialog =
+    moving === null || primaryEnvironmentId === null ? null : (
+      <ProjectMoveDialog
+        {...moving}
+        primaryEnvironmentId={primaryEnvironmentId}
+        onClose={() => setMoving(null)}
+      />
+    );
+  if (view === null || project === undefined) return dialog;
   const destinations = projectMoveDestinations(view, project.spaceId);
-  if (destinations.length === 0) return null;
+  if (destinations.length === 0) return dialog;
   const originId = project.spaceId ?? view.personalSpaceId;
   const originName = view.spaces.find((space) => space.id === originId)?.name ?? "its Space";
-
-  const moveTo = async (spaceId: SpaceId) => {
-    const destination = destinations.find((space) => space.id === spaceId);
-    if (destination === undefined) return;
-    const api = readLocalApi();
-    const message = `Move "${project.title}" to ${destination.name}?
-Its Threads go with it. Who can see it changes to ${destination.name}'s people, and it uses ${destination.name}'s vaults and AI accounts from now on.`;
-    const confirmed = api
-      ? await settlePromise(() => api.dialogs.confirm(message))
-      : { _tag: "Success" as const, value: window.confirm(message) };
-    if (confirmed._tag === "Failure" || !confirmed.value) return;
-    setMoving(true);
-    try {
-      await runPrimaryHttp(
-        PrimaryEnvironmentHttpClient.pipe(
-          Effect.flatMap((client) =>
-            moveProject(client, {
-              commandId: CommandId.make(`project-move:${randomUUID()}`),
-              projectId: project.id,
-              spaceId,
-            }),
-          ),
-        ),
-      );
-      toastManager.add({ type: "success", title: `Moved to ${destination.name}` });
-    } catch (cause) {
-      toastManager.add({
-        type: "error",
-        title: "Could not move the project",
-        description: errorMessageOf(cause, "Try again."),
-      });
-    }
-    setMoving(false);
-  };
 
   return (
     <SettingsSection title="Space">
       <SettingsRow
         title="Move to another Space"
-        description={`In ${originName}. Its Threads move with it; stop running ones first.`}
+        description={`In ${originName}. Its Threads move with it; running ones stop.`}
         control={
           <select
             aria-label="Move to…"
             className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm sm:w-64"
-            disabled={moving}
+            disabled={moving !== null}
             value=""
-            onChange={(event) => void moveTo(event.currentTarget.value as SpaceId)}
+            onChange={(event) => {
+              const destination = destinations.find(
+                (space) => space.id === (event.currentTarget.value as SpaceId),
+              );
+              if (destination === undefined) return;
+              const opened = { projectId: project.id, projectTitle: project.title, destination };
+              setMoving({ ...opened, planned: { status: "planning" } });
+              void loadProjectMovePlan(project.id, destination.id).then((planned) =>
+                setMoving((current) =>
+                  current?.destination.id === destination.id ? { ...opened, planned } : current,
+                ),
+              );
+            }}
           >
             <option value="" disabled>
               Move to…
@@ -241,6 +227,7 @@ Its Threads go with it. Who can see it changes to ${destination.name}'s people, 
           </select>
         }
       />
+      {dialog}
     </SettingsSection>
   );
 }
