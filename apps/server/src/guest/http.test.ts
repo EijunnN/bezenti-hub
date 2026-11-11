@@ -93,8 +93,17 @@ it.effect("takes a guest's POST only from the Hub's own page, and a redemption o
     const own = { origin: "https://hub.example.test" };
     assert.isTrue(yield* allowed(own, false));
     assert.isTrue(yield* allowed({ ...own, "content-type": "application/json" }, true));
+    // The Hub at another of its addresses, behind a proxy that rewrites Host: the browser says
+    // same-origin.
+    assert.isTrue(
+      yield* allowed({ origin: "http://127.0.0.1:6049", "sec-fetch-site": "same-origin" }, false),
+    );
+    assert.isFalse(
+      yield* allowed({ origin: "http://127.0.0.1:6049", "sec-fetch-site": "same-site" }, false),
+    );
     // A `no-cors` post from any page (`Origin: null`), one naming no Origin, another site's.
     assert.isFalse(yield* allowed({ origin: "null" }, false));
+    assert.isFalse(yield* allowed({ origin: "null", "sec-fetch-site": "same-origin" }, false));
     assert.isFalse(yield* allowed({}, false));
     assert.isFalse(yield* allowed({ origin: "https://abc.preview.example.test" }, false));
     // A redemption as `text/plain`, the content type a `no-cors` request may carry.

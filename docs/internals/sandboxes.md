@@ -685,8 +685,9 @@ startup line saying so. Parsing and matching live in
   one. A preview page signs nobody in: every sign-in (`startUserBrowserSession`: password, TOTP,
   recovery code, passkey, reset, Owner registration, Invitations) and pairing redemption refuse it
   before issuing anything, and no door sets or clears a Hub or guest cookie for it (login CSRF,
-  forced sign-out). A guest's POSTs (redeem, messages) also need the Hub's own exact Origin (its
-  request origin, `T3CODE_PUBLIC_URL` or the dev web origin), and a redemption a JSON body, which no
+  forced sign-out). A guest's POSTs (redeem, messages) also need the Hub's own Origin, judged as
+  EnvironmentAuth judges a cookie's (the browser's `Sec-Fetch-Site: same-origin`, or the exact
+  request origin, `T3CODE_PUBLIC_URL` or the dev web origin; never `null` or none), and a redemption a JSON body, which no
   `no-cors` request can carry. Not caught: a same-site embed naming neither header (an `<img>` with
   `referrerpolicy="no-referrer"`): such a GET changes nothing on the Hub and its answer is unreadable
   there, while the dev web app's legitimate same-site images keep working. With the setting on, the

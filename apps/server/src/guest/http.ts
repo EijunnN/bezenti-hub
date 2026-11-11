@@ -127,7 +127,13 @@ export const guestPostAllowed = Effect.fn("guestPostAllowed")(function* (
       config?.publicUrl?.origin,
       config?.devUrl?.origin,
     ].filter((value): value is string => value !== undefined);
-    if (origin === undefined || !hubOrigins.includes(origin)) return false;
+    // As EnvironmentAuth judges a cookie's origin: the browser's own `Sec-Fetch-Site: same-origin`
+    // (the Hub reached at another of its addresses, or behind a proxy that rewrites `Host`), or the
+    // Hub's own exact Origin. Never `null`, and never no Origin.
+    if (origin === undefined || origin === "null") return false;
+    if (request.headers["sec-fetch-site"] !== "same-origin" && !hubOrigins.includes(origin)) {
+      return false;
+    }
     const contentType = (request.headers["content-type"] ?? "").split(";")[0]?.trim().toLowerCase();
     return !options.json || contentType === "application/json";
   }
