@@ -107,7 +107,8 @@ describe("SSH install scripts", () => {
     expect(machineNameRefusal("Acme\nVPS")).toBeDefined();
   });
 
-  it("never open SSH to link-local, unspecified or multicast addresses; loopback and private are the Owner's", () => {
+  it("never open SSH to link-local, unspecified or multicast addresses, nor to the Hub's own machine", () => {
+    const hubHost = { ownAddresses: ["192.168.1.5", "fe80::5%eth0", "2001:db8::5"] };
     for (const address of [
       "169.254.169.254",
       "::ffff:169.254.169.254",
@@ -118,10 +119,19 @@ describe("SSH install scripts", () => {
       "255.255.255.255",
       "ff02::1",
     ]) {
-      expect(forbiddenSshAddress(address), address).toBeDefined();
+      expect(forbiddenSshAddress(address, hubHost), address).toBeDefined();
+      expect(forbiddenSshAddress(address, undefined), address).toBeDefined();
     }
-    for (const address of ["127.0.0.1", "::1", "10.1.2.3", "192.168.1.10", "203.0.113.7"]) {
-      expect(forbiddenSshAddress(address), address).toBeUndefined();
+    for (const address of ["127.0.0.1", "127.9.9.9", "::1", "::ffff:127.0.0.1", "192.168.1.5"]) {
+      expect(forbiddenSshAddress(address, hubHost), address).toBe("the Hub's own machine");
+    }
+    expect(forbiddenSshAddress("2001:DB8::5", hubHost)).toBe("the Hub's own machine");
+    for (const address of ["10.1.2.3", "192.168.1.10", "203.0.113.7", "2001:db8::6"]) {
+      expect(forbiddenSshAddress(address, hubHost), address).toBeUndefined();
+    }
+    // Development and tests only: the Hub's own machine is allowed.
+    for (const address of ["127.0.0.1", "::1", "192.168.1.5"]) {
+      expect(forbiddenSshAddress(address, undefined), address).toBeUndefined();
     }
   });
 

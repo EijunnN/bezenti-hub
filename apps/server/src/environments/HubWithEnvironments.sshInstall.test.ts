@@ -1,5 +1,6 @@
-// @effect-diagnostics nodeBuiltinImport:off -- checks the kept key's file is gone.
+// @effect-diagnostics nodeBuiltinImport:off -- reads the Hub's files and its machine's addresses.
 import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 /**
@@ -9,13 +10,23 @@ import * as NodePath from "node:path";
  * one-use grant as `t3 join --grant-on-stdin` does and its service asks the Hub how it is used.
  */
 import { assert, describe, expect, it } from "@effect/vitest";
-import { type EnvironmentId, type SshInstallRun, type SpaceId, UserId } from "@t3tools/contracts";
+import {
+  type EnvironmentId,
+  type SshInstallRun,
+  SshInstallStartRequest,
+  type SpaceId,
+  UserId,
+} from "@t3tools/contracts";
 import { formatEnvironmentCredential } from "@t3tools/shared/environmentJoin";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Tracer from "effect/Tracer";
 
 import { addMember, joinOrganization } from "../auth/UserAuth.testkit.ts";
 import * as ServerConfig from "../config.ts";
@@ -45,6 +56,8 @@ const POLICY: SshInstall.SshInstallPolicy["Service"] = {
   reachPollMs: 25,
   hostKeyTtlMs: 120_000,
   grantTtlMs: 60_000,
+  // Its SSH servers listen on this machine's loopback.
+  allowHubHost: true,
 };
 
 const sha256 = (value: string) =>
@@ -167,6 +180,8 @@ const startBody = (
   ...overrides,
 });
 
+const decodeStartRequest = Schema.decodeUnknownSync(SshInstallStartRequest);
+
 const runOf = (body: unknown) => body as unknown as SshInstallRun;
 
 /** Starts a run as the Owner and confirms the host key it shows; the run once it has ended. */
@@ -200,6 +215,12 @@ const auditOf = Effect.fn(function* (hub: Hub, environmentId: string) {
 
 const keyFragments = (privateKey: string) =>
   privateKey.split("\n").filter((line) => line.length >= 16 && !line.startsWith("-----"));
+
+/** The text of every file under `directory` (its database, logs, anything written). */
+const filesUnder = (directory: string): ReadonlyArray<string> =>
+  NodeFS.readdirSync(directory, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => NodeFS.readFileSync(NodePath.join(entry.parentPath, entry.name), "latin1"));
 
 describe("Hub con Environments: add a machine over SSH", () => {
   it.live(
@@ -379,11 +400,16 @@ describe("Hub con Environments: add a machine over SSH", () => {
           undone: false,
         },
         {
-          name: "a registration the machine never made",
-          overrides: () => ({ register: () => Effect.succeed(1) }),
+          // Joined already (to this Hub or another): what is there is not this run's to undo.
+          name: "a machine that refuses to join",
+          overrides: () => ({
+            register: (request) =>
+              written(request, "This machine is already joined to https://other.example.\n", 1),
+          }),
           failedAt: "register",
           error: /Register the machine failed/u,
-          undone: true,
+          output: "This machine is already joined to https://other.example.",
+          undone: false,
         },
         {
           name: "a lost connection",
@@ -551,6 +577,129 @@ describe("Hub con Environments: add a machine over SSH", () => {
       assert.include(refused.error ?? "", first.fingerprint);
       assert.notInclude(impostor.authentications, "publickey");
       assert.deepEqual(impostor.steps, []);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("refuses a machine it installed already, before signing in", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub({ sshInstallPolicy: POLICY });
+      const { acme } = yield* acmeWithPeople(hub);
+      const machine = yield* makeTestMachine();
+      machine.setHandler(healthyMachine(hub).handler);
+      const installed = yield* installOver(hub, machine, acme);
+      assert.equal(installed.state, "succeeded", JSON.stringify(installed));
+      const signIns = machine.authentications.length;
+
+      const again = yield* hub.server.request("/api/environments/ssh/start", {
+        cookie: hub.owner,
+        body: startBody(machine, acme, { name: "Acme VPS 2" }),
+      });
+      assert.equal(again.status, 200, JSON.stringify(again.body));
+      const refused = runOf(again.body);
+      assert.equal(refused.state, "failed", JSON.stringify(refused));
+      assert.match(refused.error ?? "", /already installed as Acme VPS/u);
+      // Nothing signed in or ran there: the machine that is there stays as it is.
+      assert.equal(machine.authentications.slice(signIns).includes("publickey"), false);
+      assert.deepEqual(
+        machine.steps.map((step) => step.step),
+        ["check", "install", "register", "service"],
+      );
+      const listed = yield* listEnvironments(hub.server, hub.owner);
+      assert.deepEqual(
+        listed.filter((environment) => environment.name.startsWith("Acme VPS")).map((e) => e.id),
+        [installed.environmentId],
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("never puts the key or passphrase in its spans, logs or the Hub's files", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub({ sshInstallPolicy: POLICY });
+      const { acme } = yield* acmeWithPeople(hub);
+      const passphrase = "tracer horse battery";
+      const machine = yield* makeTestMachine({ passphrase });
+      // A machine that echoes them, and a step that fails: errors are recorded too.
+      machine.setHandler(
+        healthyMachine(hub, {
+          check: (request) =>
+            written(request, `${machine.privateKey}\npassphrase: ${passphrase}\n`, 0),
+          service: (request) => written(request, `${passphrase}\n`, 3),
+        }).handler,
+      );
+      const recorded: Array<string> = [];
+      const tracer = Tracer.make({
+        span(options) {
+          const span = new Tracer.NativeSpan(options);
+          const end = span.end.bind(span);
+          span.end = (endTime, exit) => {
+            end(endTime, exit);
+            recorded.push(
+              JSON.stringify({ name: span.name, attributes: [...span.attributes.entries()] }),
+              Exit.isFailure(exit) ? Cause.pretty(exit.cause) : "",
+            );
+          };
+          const event = span.event.bind(span);
+          span.event = (name, startTime, attributes) => {
+            event(name, startTime, attributes);
+            recorded.push(JSON.stringify({ event: name, attributes }));
+          };
+          return span;
+        },
+      });
+      const logger = Logger.make((entry) => {
+        recorded.push(
+          JSON.stringify(entry.message),
+          Cause.pretty(entry.cause),
+          JSON.stringify([...entry.annotations.entries()]),
+        );
+      });
+      const service = hub.service(SshInstall.SshInstall);
+      const ownerId = yield* ownerIdOf(hub);
+      const done = yield* Effect.gen(function* () {
+        const started = yield* service.start(ownerId, decodeStartRequest(startBody(machine, acme)));
+        yield* service.confirm(ownerId, {
+          runId: started.runId,
+          fingerprint: started.hostKey?.fingerprint ?? "",
+        });
+        return yield* service.awaitFinished(started.runId);
+      }).pipe(
+        Effect.withTracer(tracer),
+        Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+      );
+      assert.equal(done.state, "failed", JSON.stringify(done));
+      assert.isAbove(recorded.length, 10);
+      const everything = [
+        recorded.join("\n"),
+        JSON.stringify(done),
+        // Its database, logs and any file it wrote: nothing of the key was kept.
+        ...filesUnder(hub.service(ServerConfig.ServerConfig).baseDir),
+      ];
+      for (const text of everything) {
+        for (const fragment of keyFragments(machine.privateKey)) assert.notInclude(text, fragment);
+        assert.notInclude(text, passphrase);
+      }
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("never opens SSH to the Hub's own machine, unless set up for development", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub({ sshInstallPolicy: { ...POLICY, allowHubHost: false } });
+      const { acme } = yield* acmeWithPeople(hub);
+      const machine = yield* makeTestMachine();
+      const own = Object.values(NodeOS.networkInterfaces())
+        .flatMap((entries) => entries ?? [])
+        .map((entry) => entry.address)
+        .filter((address) => !address.startsWith("fe80"));
+      for (const host of ["127.0.0.1", "localhost", "127.1.2.3", "::1", ...own]) {
+        const refused = yield* hub.server.request("/api/environments/ssh/start", {
+          cookie: hub.owner,
+          body: startBody(machine, acme, { host }),
+        });
+        assert.equal(refused.status, 400, `${host}: ${JSON.stringify(refused.body)}`);
+        assert.include(JSON.stringify(refused.body), "the Hub's own machine", host);
+      }
+      assert.deepEqual(machine.authentications, []);
+      assert.deepEqual(machine.steps, []);
     }).pipe(Effect.scoped),
   );
 

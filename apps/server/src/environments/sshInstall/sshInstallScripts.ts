@@ -41,32 +41,41 @@ export const machineNameRefusal = (name: string): string | undefined =>
 
 const ipv4Bytes = (address: string) => address.split(".").map((part) => Number(part));
 
+/** Lowercase, without an IPv6 zone, and an IPv4 address written as IPv6 as IPv4. */
+const plainAddress = (address: string) => {
+  const lower = address.toLowerCase().replace(/%.*$/u, "");
+  return /^::ffff:(\d+\.\d+\.\d+\.\d+)$/u.exec(lower)?.[1] ?? lower;
+};
+
 /**
- * Where the Hub never opens SSH (docs/internals/sandboxes.md, «Installing over SSH»): link-local
- * addresses (cloud metadata services live there), unspecified, multicast and broadcast ones. The
- * Owner's own loopback and private networks are allowed: they are where a Hub's machines and its
- * tests are. Undefined when the address may be used.
+ * Where the Hub never opens SSH (docs/internals/sandboxes.md, «Installing over SSH»): link-local,
+ * unspecified, multicast and broadcast addresses, and the Hub's own machine (loopback, or one of
+ * `hubHost.ownAddresses`) unless `hubHost` is undefined (development only). Undefined when allowed.
  */
-export const forbiddenSshAddress = (address: string): string | undefined => {
-  let ip = address.toLowerCase();
-  // An IPv4 address written as IPv6 is judged as IPv4.
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/u.exec(ip);
-  if (mapped?.[1] !== undefined) ip = mapped[1];
+export const forbiddenSshAddress = (
+  address: string,
+  hubHost: { readonly ownAddresses: ReadonlyArray<string> } | undefined,
+): string | undefined => {
+  const ip = plainAddress(address);
   const family = NodeNet.isIP(ip);
   if (family === 4) {
     const [a, b] = ipv4Bytes(ip);
     if (a === 169 && b === 254) return "a link-local address";
     if (a === 0) return "an unspecified address";
     if (a !== undefined && a >= 224) return "a multicast or reserved address";
-    return undefined;
-  }
-  if (family === 6) {
+    if (hubHost !== undefined && a === 127) return "the Hub's own machine";
+  } else if (family === 6) {
     if (ip === "::") return "an unspecified address";
     if (/^fe[89ab]/u.test(ip)) return "a link-local address";
     if (ip.startsWith("ff")) return "a multicast address";
-    return undefined;
+    if (hubHost !== undefined && ip === "::1") return "the Hub's own machine";
+  } else {
+    return "not an IP address";
   }
-  return "not an IP address";
+  if (hubHost?.ownAddresses.some((own) => plainAddress(own) === ip)) {
+    return "the Hub's own machine";
+  }
+  return undefined;
 };
 
 /** `SHA256:<base64 without padding>` of the key's wire blob, as `ssh-keygen -lf` prints it. */

@@ -1,10 +1,11 @@
-// @effect-diagnostics nodeBuiltinImport:off -- resolves the machine's address once, to pin it.
+// @effect-diagnostics nodeBuiltinImport:off -- pins the machine's address; reads the Hub's own.
 /**
  * «Add a machine over SSH»: after the Owner confirms the host key, the Hub runs four steps there
  * and keeps their output; a failure or cancel stops there and undoes the grant and registration.
  * See docs/internals/sandboxes.md, «Installing over SSH».
  */
 import * as NodeDnsPromises from "node:dns/promises";
+import * as NodeOS from "node:os";
 
 import {
   type EnvironmentId,
@@ -78,6 +79,11 @@ export class SshInstallPolicy extends Context.Service<
     readonly hostKeyTtlMs: number;
     /** How long the registration grant lives. */
     readonly grantTtlMs: number;
+    /**
+     * Whether the Hub may install onto its own machine (loopback, its own addresses): development
+     * and tests only (`T3CODE_SSH_INSTALL_ALLOW_HUB_HOST=1`), as their SSH servers are there.
+     */
+    readonly allowHubHost: boolean;
   }
 >()("t3/environments/sshInstall/SshInstall/SshInstallPolicy") {}
 
@@ -102,6 +108,7 @@ const policyFromConfig = Effect.gen(function* () {
   const releaseBaseUrl = yield* optionalSetting("T3CODE_RELEASE_BASE_URL");
   // Development: the machine runs T3 from a checkout at this path (with its own Node).
   const nodeScriptPath = yield* optionalSetting("T3CODE_SSH_INSTALL_NODE_SCRIPT");
+  const allowHubHost = (yield* optionalSetting("T3CODE_SSH_INSTALL_ALLOW_HUB_HOST")) === "1";
   return SshInstallPolicy.of({
     runner: {
       archiveVersion: packageJson.version,
@@ -115,6 +122,7 @@ const policyFromConfig = Effect.gen(function* () {
     reachPollMs: 1_000,
     hostKeyTtlMs: 10 * MINUTE,
     grantTtlMs: 5 * MINUTE,
+    allowHubHost,
   });
 });
 
@@ -385,8 +393,15 @@ const make = Effect.gen(function* () {
         try: () => NodeDnsPromises.lookup(host, { all: true, verbatim: true }),
         catch: () => new SshInstallRefusedError({ message: `${host} does not resolve.` }),
       });
+      const hubHost = policy.allowHubHost
+        ? undefined
+        : {
+            ownAddresses: Object.values(NodeOS.networkInterfaces()).flatMap((entries) =>
+              (entries ?? []).map((entry) => entry.address),
+            ),
+          };
       for (const { address } of addresses) {
-        const forbidden = forbiddenSshAddress(address);
+        const forbidden = forbiddenSshAddress(address, hubHost);
         if (forbidden !== undefined) {
           return yield* refuse(`${host} is ${forbidden}; the Hub does not open SSH there.`);
         }
@@ -471,6 +486,13 @@ const make = Effect.gen(function* () {
         );
       }
       run.hostKey = { algorithm, fingerprint, known: stored !== undefined };
+      // That machine is joined already: a second registration would only fail there, and undoing
+      // it must not touch the machine that is.
+      if (stored !== undefined) {
+        return yield* failEarly(
+          `${host}:${input.port} is already installed as ${stored.name}. To install it again, remove ${stored.name} first.`,
+        );
+      }
       // Not confirmed in time: the key goes.
       yield* Effect.sleep(policy.hostKeyTtlMs).pipe(
         Effect.andThen(
@@ -524,10 +546,9 @@ const make = Effect.gen(function* () {
         );
       run.environmentId = null;
     }
-    const reachedRegister = run.steps.some(
-      (entry) => (entry.id === "register" || entry.id === "service") && entry.state !== "pending",
-    );
-    if (!reachedRegister || step === undefined) return;
+    // Only what this run registered is undone there: a machine that refused to join (joined
+    // already, to this Hub or another) keeps what it has.
+    if (registered === null || step === undefined) return;
     if (session === undefined) {
       say(run, step, "The machine could not be reached to undo it there; run `t3 leave` on it.");
       return;
