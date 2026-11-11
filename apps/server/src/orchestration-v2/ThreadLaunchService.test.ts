@@ -202,6 +202,7 @@ function makeHarness(options: HarnessOptions = {}) {
       update: () => Effect.die("unused"),
       delete: () => Effect.die("unused"),
       move: () => Effect.die("unused"),
+      movePlan: () => Effect.die("unused"),
       deleteSpaceContent: () => Effect.die("unused"),
       listPage: () => Effect.die("unused"),
       getById: (id) =>

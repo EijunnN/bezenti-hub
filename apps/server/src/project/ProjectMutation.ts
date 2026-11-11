@@ -57,6 +57,7 @@ export const projectMutationOperation = Effect.fn("projectMutationOperation")(fu
         commandId: mutation.commandId,
         projectId: mutation.projectId,
         spaceId: mutation.spaceId,
+        ...(mutation.stopThreads === undefined ? {} : { stopThreads: mutation.stopThreads }),
       });
 
     case "project.delete":

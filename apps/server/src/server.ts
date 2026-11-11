@@ -66,6 +66,7 @@ import * as ProjectSettingsOverrideSweep from "./provider/ProjectSettingsOverrid
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as McpHttpServer from "./mcp/McpHttpServer.ts";
 import * as McpSessionRegistry from "./mcp/McpSessionRegistry.ts";
+import * as ProjectMoveHooks from "./project/ProjectMoveHooks.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
@@ -976,6 +977,8 @@ const layerMakeServer = Layer.unwrap(
       Layer.provideMerge(layerHttpServer),
       // One cell: EnvironmentAuth turns it on, the listener above reads it per connection.
       Layer.provideMerge(OwnerPresence.layer),
+      // One per server: the Project service moves a Project, the orchestration stops its Threads.
+      Layer.provideMerge(ProjectMoveHooks.layer),
       // Guest and MCP thread links get their address from T3CODE_PUBLIC_URL.
       Layer.provideMerge(PublicHubUrl.layer),
       Layer.provide(layerApplicationObservability),

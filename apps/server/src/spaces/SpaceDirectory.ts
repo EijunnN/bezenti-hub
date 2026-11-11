@@ -17,6 +17,7 @@ import {
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -420,11 +421,25 @@ export class SpaceDirectory extends Context.Service<
       readonly actor: UserId;
       readonly spaceId: SpaceId;
     }) => Effect.Effect<void, SpaceClaimError>;
-    /** Runs `effect` with the Project marked moving: no Thread is created or started in it. */
+    /**
+     * Runs `effect` with the Project marked moving: no Thread is created or started in it, and
+     * every access a machine holds on it (`holdProjectAccess`) is told to end.
+     */
     readonly whileProjectMoves: <A, E, R>(
       projectId: ProjectId,
       effect: Effect.Effect<A, E, R>,
     ) => Effect.Effect<A, E, R>;
+    /** How many moves of the Project started; read before checking a machine's access. */
+    readonly projectMoveEpoch: (projectId: ProjectId) => Effect.Effect<number>;
+    /**
+     * A machine's request on the Project, authorized at move count `epoch`, for the scope's life:
+     * None while it moves or once a move started since (checked anew on retry); else an effect
+     * that completes when a move starts, so the request ends there.
+     */
+    readonly holdProjectAccess: (
+      projectId: ProjectId,
+      epoch: number,
+    ) => Effect.Effect<Option.Option<Effect.Effect<void>>, never, Scope.Scope>;
     /**
      * After a Project and its Threads moved: the Users who see either Space reload what their
      * open connections show (the origin's lose it, the destination's gain it).
@@ -1618,9 +1633,21 @@ const make = Effect.gen(function* () {
 
   // Projects being moved, so nothing starts in them until every Thread has followed.
   const moving = new Map<string, number>();
+  // What machines are doing in each Project now (a git request): a move ends it at once.
+  const accessHolds = new Map<string, Set<Deferred.Deferred<void>>>();
+  // Moves started per Project, so an access checked before one started is never held after.
+  const moveStarts = new Map<string, number>();
   const whileProjectMoves = <A, E, R>(projectId: ProjectId, effect: Effect.Effect<A, E, R>) =>
     Effect.acquireUseRelease(
-      Effect.sync(() => void moving.set(projectId, (moving.get(projectId) ?? 0) + 1)),
+      Effect.suspend(() => {
+        moving.set(projectId, (moving.get(projectId) ?? 0) + 1);
+        moveStarts.set(projectId, (moveStarts.get(projectId) ?? 0) + 1);
+        return Effect.forEach(
+          [...(accessHolds.get(projectId) ?? [])],
+          (moved) => Deferred.succeed(moved, undefined),
+          { discard: true },
+        );
+      }),
       () => effect,
       () =>
         Effect.sync(() => {
@@ -1629,6 +1656,33 @@ const make = Effect.gen(function* () {
           else moving.set(projectId, left);
         }),
     );
+
+  const projectMoveEpoch = (projectId: ProjectId) =>
+    Effect.sync(() => moveStarts.get(projectId) ?? 0);
+
+  const holdProjectAccess = Effect.fn("SpaceDirectory.holdProjectAccess")(function* (
+    projectId: ProjectId,
+    epoch: number,
+  ) {
+    if (moving.has(projectId) || (moveStarts.get(projectId) ?? 0) !== epoch) {
+      return Option.none<Effect.Effect<void>>();
+    }
+    const moved = yield* Deferred.make<void>();
+    yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        const holds = accessHolds.get(projectId) ?? new Set();
+        holds.add(moved);
+        accessHolds.set(projectId, holds);
+      }),
+      () =>
+        Effect.sync(() => {
+          const holds = accessHolds.get(projectId);
+          holds?.delete(moved);
+          if (holds?.size === 0) accessHolds.delete(projectId);
+        }),
+    );
+    return Option.some(Deferred.await(moved));
+  });
 
   const spaceState = Effect.fn("SpaceDirectory.spaceState")(function* (item: ItemRef) {
     const row = yield* findItem(item);
@@ -1699,6 +1753,8 @@ const make = Effect.gen(function* () {
     authorizeProjectMove,
     projectMoved,
     whileProjectMoves,
+    holdProjectAccess,
+    projectMoveEpoch,
     spaceOf,
     spaceById,
     spacesById,

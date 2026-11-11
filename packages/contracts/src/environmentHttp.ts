@@ -135,7 +135,13 @@ import {
   OrchestrationV2ThreadHistoryPage,
   OrchestrationV2ThreadTranscript,
 } from "./orchestrationV2.ts";
-import { Project, ProjectMutation, ProjectSnapshot } from "./project.ts";
+import {
+  Project,
+  ProjectMovePlan,
+  ProjectMovePlanInput,
+  ProjectMutation,
+  ProjectSnapshot,
+} from "./project.ts";
 import {
   SandboxImageStatus,
   SandboxImageStatusQuery,
@@ -1329,6 +1335,15 @@ class EnvironmentProjectsHttpApi extends HttpApiGroup.make("projects")
       headers: OptionalBearerHeaders,
       payload: ProjectMutation,
       success: Project,
+      error: EnvironmentProjectMutationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    // What a move would do to the Project's Threads, asked before confirming it.
+    HttpApiEndpoint.post("movePlan", "/api/projects/move-plan", {
+      headers: OptionalBearerHeaders,
+      payload: ProjectMovePlanInput,
+      success: ProjectMovePlan,
       error: EnvironmentProjectMutationErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}

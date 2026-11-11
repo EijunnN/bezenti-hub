@@ -60,6 +60,7 @@ import * as RuntimePolicy from "../orchestration-v2/RuntimePolicy.ts";
 import {
   boundSpaceOf,
   SandboxSpaceMismatchError,
+  servesSpace,
   SpaceCheckUnavailableError,
 } from "../sandboxes/sandboxSpace.ts";
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
@@ -150,7 +151,17 @@ interface WorkspaceStream {
   readonly operation: RemoteStreamOperation;
   readonly channel: ExecutorChannel;
   readonly queue: Queue.Queue<unknown, unknown>;
+  /** The Thread it is for (a terminal's, a preview's), when its input names one. */
+  readonly threadId: ThreadId | undefined;
 }
+
+/** The Thread a forwarded stream's input names: its own `threadId`, or its nested input's. */
+const streamThreadOf = (input: object): ThreadId | undefined => {
+  const own = (input as { readonly threadId?: unknown }).threadId;
+  if (typeof own === "string") return own as ThreadId;
+  const nested = (input as { readonly input?: { readonly threadId?: unknown } }).input?.threadId;
+  return typeof nested === "string" ? (nested as ThreadId) : undefined;
+};
 
 export interface RemoteConnection {
   /** Handles a request, response or event frame; false for any other frame. */
@@ -328,10 +339,9 @@ const make = Effect.gen(function* () {
   const previewEvents = yield* PubSub.unbounded<PreviewEvent>();
 
   /**
-   * A Sandbox, and a machine dedicated to a Space, runs only its own Space's Threads: one whose
-   * Project moved to another Space since it was placed (or a machine dedicated elsewhere since)
-   * starts nothing new there (spec 3, until ticket 12 moves such Threads). A personal machine
-   * runs only while its owner is in the Thread's Space.
+   * A machine runs only Threads of a Space it serves (`servesSpace`). A Project's move releases
+   * its Threads from machines that do not serve the new Space; this is the last guard (a machine
+   * rededicated since, an owner who left, a move cut short).
    */
   const requireSandboxSpace = Effect.fn("RemoteEnvironments.requireSandboxSpace")(function* (
     link: Link,
@@ -360,21 +370,11 @@ const make = Effect.gen(function* () {
       // A personal machine runs a Thread only while its owner may still work in the Thread's
       // Space (`environment.use` is checked when placing; resumes and continuations have no
       // actor): once they left it, or were disabled or removed, nothing new starts there.
-      const [personal] = yield* sql<{ readonly usable: number }>`
-        SELECT (u.removed_at IS NULL AND u.disabled_at IS NULL AND (
-          u.is_owner = 1
-          OR ${row?.spaceId ?? null} = 'personal:' || u.user_id
-          OR EXISTS (SELECT 1 FROM space_memberships m
-            WHERE m.user_id = u.user_id AND m.space_id = ${row?.spaceId ?? null})
-        )) AS usable
-        FROM environments e JOIN users u ON u.user_id = e.owner_user_id
-        WHERE e.environment_id = ${link.environmentId} AND e.mode = 'personal'
-      `.pipe(
-        Effect.mapError((cause) =>
-          refuse(new SpaceCheckUnavailableError({ environmentId: link.environmentId, cause })),
-        ),
+      const serves = yield* servesSpace(link.environmentId, row?.spaceId ?? null).pipe(
+        Effect.provideService(SqlClient.SqlClient, sql),
+        Effect.mapError(refuse),
       );
-      if (personal === undefined || personal.usable === 1) return;
+      if (serves) return;
       return yield* new ProviderAdapter.ProviderAdapterProtocolError({
         driver,
         detail:
@@ -916,7 +916,12 @@ const make = Effect.gen(function* () {
           if (channel === undefined) return yield* Queue.fail(queue, offline(link));
           streamCount += 1;
           const subscriptionId = `${operation}:${streamCount}`;
-          link.streams.set(subscriptionId, { operation, channel, queue });
+          link.streams.set(subscriptionId, {
+            operation,
+            channel,
+            queue,
+            threadId: streamThreadOf(input),
+          });
           yield* Effect.addFinalizer(() =>
             Effect.suspend(() => {
               if (link.streams.get(subscriptionId)?.queue !== queue) return Effect.void;
@@ -1664,9 +1669,23 @@ const make = Effect.gen(function* () {
     ),
     previewEvents: Stream.fromPubSub(previewEvents),
     threadMoved: Effect.fn("RemoteEnvironments.threadMoved")(function* (threadId) {
-      yield* Effect.sync(() => {
-        for (const link of links.values()) link.activeByThread.delete(threadId);
-      });
+      for (const link of links.values()) {
+        link.activeByThread.delete(threadId);
+        const open = [...link.streams.entries()].filter(
+          ([, stream]) => stream.threadId === threadId,
+        );
+        if (open.length === 0) continue;
+        // Its terminals and previews there end once it no longer runs there (read anew).
+        const active = yield* activeFor(link, threadId);
+        if (Option.isSome(active) && active.value === link.environmentId) continue;
+        for (const [subscriptionId, stream] of open) {
+          link.streams.delete(subscriptionId);
+          yield* stream.channel
+            .event(ENVIRONMENT_EXECUTOR_FRAME_METHODS.workspaceStreamCancel, { subscriptionId })
+            .pipe(Effect.ignore);
+          yield* Queue.fail(stream.queue, offline(link));
+        }
+      }
     }),
   });
 });

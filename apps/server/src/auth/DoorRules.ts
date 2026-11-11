@@ -98,6 +98,7 @@ export const HTTP_ENDPOINT_RULES: Readonly<Record<string, DoorRule>> = {
   "orchestration.threadHistoryPage": THREAD_READ,
   "orchestration.threadSnapshot": THREAD_READ,
   "orchestration.threadTranscript": THREAD_READ,
+  "projects.movePlan": rpc(WS_METHODS.projectsMutate),
   "projects.mutate": rpc(WS_METHODS.projectsMutate),
   "projects.snapshot": own("ProjectService.snapshotFor(visibility): only visible Projects"),
   "pullRequests.diff": rpc(WS_METHODS.pullRequestsDiffFileContents),

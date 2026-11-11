@@ -269,6 +269,8 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
   const key = resolved.success;
   if (Option.isNone(key)) return HttpServerResponse.text("Not Found", { status: 404 });
   const { projectId } = key.value;
+  // Read before any check: a move of the Project that starts after it ends this request.
+  const moveEpoch = yield* deps.spaces.projectMoveEpoch(projectId);
   const project = yield* deps.projects.get(projectId).pipe(Effect.orElseSucceed(Option.none));
   if (Option.isNone(project)) return HttpServerResponse.text("Not Found", { status: 404 });
   // A machine works for its owner only, in Spaces where they may start Threads; a Sandbox only in
@@ -362,6 +364,23 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
 
   // The child lives until the response body is sent, or the request fails before it starts.
   const scope = yield* Scope.make();
+  // While the Project moves to another Space the machine is checked anew, once it settles; a
+  // move that starts mid-request ends it (fetch, push, checkout copy alike), since what was
+  // allowed may not be in the new Space.
+  const held = yield* deps.spaces
+    .holdProjectAccess(projectId, moveEpoch)
+    .pipe(Effect.provideService(Scope.Scope, scope));
+  if (Option.isNone(held)) {
+    yield* Scope.close(scope, Exit.void);
+    return HttpServerResponse.text("The Project is moving to another Space. Try again.", {
+      status: 503,
+    });
+  }
+  const projectMoved = held.value.pipe(
+    Effect.andThen(
+      Effect.fail(new HubRepositoryHttpError({ detail: "The Project moved to another Space." })),
+    ),
+  );
   return yield* Effect.gen(function* () {
     let received = 0;
     let limit = deps.maxRequestBytes;
@@ -466,6 +485,8 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
         orElse: () =>
           Stream.fail(new HubRepositoryHttpError({ detail: "The Hub repository timed out." })),
       }),
+      // Broken, never cut short as if complete: the machine sees the request fail.
+      Stream.interruptWhen(projectMoved),
       Stream.ensuring(Scope.close(scope, Exit.void)),
     );
     const { "content-type": responseType, ...headers } = head.headers;
@@ -475,6 +496,7 @@ const makeHandler = Effect.fnUntraced(function* (deps: {
       ...(responseType === undefined ? {} : { contentType: responseType }),
     });
   }).pipe(
+    (respond) => Effect.raceFirst(respond, projectMoved),
     Effect.provideService(Scope.Scope, scope),
     Effect.onError(() => Scope.close(scope, Exit.void)),
     Effect.timeout(REQUEST_TIMEOUT),

@@ -72,6 +72,7 @@ import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as ProjectHttp from "../project/http.ts";
+import * as ProjectMoveHooks from "../project/ProjectMoveHooks.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
@@ -232,6 +233,8 @@ const makeLayerServices = (
     ),
     Layer.provide(ManagedPolicy.layerTest()),
     Layer.provideMerge(OwnerPresence.layer),
+    // As the server: the Project service and the orchestration built over these share it.
+    Layer.provideMerge(ProjectMoveHooks.layer),
     Layer.provideMerge(SqlitePersistence.layerMemory),
     Layer.provideMerge(ServerSecretStore.layer),
     Layer.provideMerge(ServerEnvironment.layerIdentity),

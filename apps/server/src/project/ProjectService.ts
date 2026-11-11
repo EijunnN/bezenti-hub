@@ -9,6 +9,8 @@ import {
   type SpaceId,
   type ThreadId,
   type UserId,
+  type EnvironmentId,
+  type OrchestrationV2DomainEvent,
   HUB_MACHINE_ENVIRONMENT_ID,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
@@ -55,6 +57,8 @@ import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as CommandActor from "../auth/CommandActor.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import type * as AuditLog from "../audit/AuditLog.ts";
+import { servesSpace } from "../sandboxes/sandboxSpace.ts";
+import * as ProjectMoveHooks from "./ProjectMoveHooks.ts";
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
   readonly commandId: CommandId;
@@ -87,6 +91,29 @@ export interface ProjectMoveInput {
   readonly commandId: CommandId;
   readonly projectId: ProjectId;
   readonly spaceId: SpaceId;
+  /**
+   * Stop the Project's running Threads first, as the mover confirmed after seeing them
+   * (`movePlan`). Without it a running Thread refuses the move.
+   */
+  readonly stopThreads?: boolean;
+}
+
+/** One of the Project's Threads, as `movePlan` names it. */
+export interface ProjectMovePlanThread {
+  readonly threadId: ThreadId;
+  readonly title: string;
+  /** Its Active environment now; null when it already needs one. */
+  readonly environmentId: EnvironmentId | null;
+}
+
+/** What moving the Project to `spaceId` would do to its Threads, for the mover to confirm. */
+export interface ProjectMovePlan {
+  readonly projectId: ProjectId;
+  readonly spaceId: SpaceId;
+  /** Running now: the move stops them. */
+  readonly running: ReadonlyArray<ProjectMovePlanThread>;
+  /** On a machine that does not serve `spaceId`: they need an environment after the move. */
+  readonly needsEnvironment: ReadonlyArray<ProjectMovePlanThread>;
 }
 
 /** A Project is moved only once none of its Threads runs. */
@@ -184,6 +211,14 @@ export class ProjectService extends Context.Service<
      */
     readonly move: (input: ProjectMoveInput) => Effect.Effect<Project, ProjectServiceError>;
     /**
+     * What `move` would do, checked as `move` is (`project.move` on both Spaces): which Threads it
+     * stops and which then need an environment (`servesSpace`).
+     */
+    readonly movePlan: (input: {
+      readonly projectId: ProjectId;
+      readonly spaceId: SpaceId;
+    }) => Effect.Effect<ProjectMovePlan, ProjectServiceError>;
+    /**
      * Permanently deletes every Project and Thread of a Space through their own delete paths, as
      * deleting an archived Organization does. Retry-safe: a rerun deletes what is left.
      */
@@ -241,6 +276,7 @@ export const make = Effect.gen(function* () {
   const config = yield* Effect.serviceOption(ServerConfig.ServerConfig);
   const path = yield* Path.Path;
   const directories = { path, fileSystem: yield* Effect.serviceOption(FileSystem.FileSystem) };
+  const moveHooks = yield* Effect.serviceOption(ProjectMoveHooks.ProjectMoveHooks);
   const projectLocks = yield* KeyedLock.make<ProjectId>();
   const rootClaims = yield* KeyedLock.make<string>();
   const workspaceLocks = yield* KeyedLock.make<string>();
@@ -809,29 +845,71 @@ export const make = Effect.gen(function* () {
       );
 
   /**
+   * The machine a Thread leaves when its Project's Space becomes `spaceId`: its Active
+   * environment, unless that machine serves `spaceId` (`servesSpace`: the Hub machine, a machine
+   * of that Space, its owner's machine while they work there). Undefined when it stays, or has
+   * none already.
+   */
+  const machineLeft = Effect.fn("ProjectService.machineLeft")(function* (
+    environmentId: EnvironmentId | null | undefined,
+    spaceId: SpaceId,
+    projectId: ProjectId,
+  ) {
+    if (environmentId === undefined || environmentId === null) return undefined;
+    const serves = yield* servesSpace(environmentId, spaceId).pipe(
+      Effect.provideService(SqlClient.SqlClient, sql),
+      Effect.mapError(
+        (cause) => new ProjectOperationError({ operation: "check-environment", projectId, cause }),
+      ),
+    );
+    return serves ? undefined : environmentId;
+  });
+
+  /** What moving its Project to `spaceId` does to one Thread; undefined for one not in it. */
+  const threadMovePlan = Effect.fn("ProjectService.threadMovePlan")(function* (
+    threadId: ThreadId,
+    projectId: ProjectId,
+    spaceId: SpaceId,
+  ) {
+    const records = yield* threadWork(threadId, projectId);
+    const thread = records.thread;
+    if (thread.deletedAt !== null || thread.projectId !== projectId) return undefined;
+    const releasedFrom = yield* machineLeft(thread.activeEnvironmentId, spaceId, projectId);
+    return {
+      records,
+      thread,
+      releasedFrom,
+      // A Thread already in the Space whose machine does not serve it (moved before Sandboxes,
+      // or a move cut short) is still released.
+      changes: thread.spaceId !== spaceId || releasedFrom !== undefined,
+      // A move between machines under way counts: it could land on the machine being left.
+      running: threadHasLiveWork(records) || thread.move?.status === "running",
+    };
+  });
+
+  /**
    * Gives one Thread the Project's new Space, checked as a move out of the Thread's own Space
-   * (a stray Thread stamped elsewhere is not the mover's to take unless they run that Space).
+   * (a stray Thread stamped elsewhere is not the mover's to take unless they run that Space). In
+   * the same commit a Thread whose machine does not serve the new Space leaves it: it needs an
+   * environment («needs an environment»), and its sessions there are detached.
    */
   const moveThread = Effect.fn("ProjectService.moveThread")(function* (
     input: ProjectMoveInput,
     threadId: ThreadId,
     actor: UserId | undefined,
   ) {
-    const records = yield* threadWork(threadId, input.projectId);
-    const thread = records.thread;
-    if (
-      thread.deletedAt !== null ||
-      thread.projectId !== input.projectId ||
-      thread.spaceId === input.spaceId
-    ) {
-      return false;
+    const unchanged = { changed: false, releasedFrom: undefined, providerSessionIds: [] } as const;
+    const plan = yield* threadMovePlan(threadId, input.projectId, input.spaceId);
+    if (plan === undefined || !plan.changes) return unchanged;
+    const { thread, releasedFrom } = plan;
+    if (thread.spaceId !== input.spaceId) {
+      yield* spaces.authorizeProjectMove({
+        actor,
+        item: { kind: "thread", id: threadId },
+        spaceId: input.spaceId,
+      });
     }
-    yield* spaces.authorizeProjectMove({
-      actor,
-      item: { kind: "thread", id: threadId },
-      spaceId: input.spaceId,
-    });
-    if (threadHasLiveWork(records)) {
+    if (plan.running) {
       return yield* new ProjectMoveBlockedError({
         projectId: input.projectId,
         threadTitles: [thread.title],
@@ -840,6 +918,37 @@ export const make = Effect.gen(function* () {
     const commandId = CommandId.make(`${input.commandId}:move-thread:${threadId}`);
     const now = yield* DateTime.now;
     const id = yield* idAllocator.allocate.event({ threadId, commandId });
+    const detached: Array<OrchestrationV2DomainEvent> = [];
+    if (releasedFrom !== undefined) {
+      const { providerSessions } = yield* threadProjections
+        .getThreadRecords(threadId, ["providerSessions"], { turnItemTypes: [] })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProjectOperationError({
+                operation: "list-threads",
+                projectId: input.projectId,
+                cause,
+              }),
+          ),
+        );
+      for (const session of providerSessions) {
+        if (session.status === "stopped" || session.status === "error") continue;
+        detached.push({
+          id: yield* idAllocator.allocate.event({ threadId, commandId }),
+          type: "provider-session.detached",
+          threadId,
+          driver: session.driver,
+          providerInstanceId: session.providerInstanceId,
+          occurredAt: now,
+          payload: {
+            providerSessionId: session.id,
+            detachedAt: now,
+            reason: "The Thread's Project moved to a Space its machine does not serve.",
+          },
+        });
+      }
+    }
     const committed = yield* eventSink.commitCommand({
       commandId,
       commandType: "thread.space.move",
@@ -852,16 +961,77 @@ export const make = Effect.gen(function* () {
           threadId,
           providerInstanceId: thread.providerInstanceId,
           occurredAt: now,
-          payload: { ...thread, spaceId: input.spaceId, updatedAt: now },
+          payload: {
+            ...thread,
+            spaceId: input.spaceId,
+            updatedAt: now,
+            ...(releasedFrom === undefined ? {} : { activeEnvironmentId: null }),
+          },
         },
+        ...detached,
       ],
       effects: [],
     });
     if (committed.receipt.status === "rejected") {
       return yield* Effect.fail(committed.receipt.error ?? "The Thread move was rejected.");
     }
-    return true;
+    return {
+      changed: true,
+      releasedFrom,
+      providerSessionIds: detached.flatMap((event) =>
+        event.type === "provider-session.detached" ? [event.payload.providerSessionId] : [],
+      ),
+    } as const;
   });
+
+  /** The Project's Threads that `spaceId` changes and that run now, read under each one's lock. */
+  const runningThreads = Effect.fn("ProjectService.runningThreads")(function* (
+    projectId: ProjectId,
+    spaceId: SpaceId,
+  ) {
+    const running: Array<{ readonly threadId: ThreadId; readonly title: string }> = [];
+    for (const thread of yield* listProjectThreads(projectId)) {
+      const plan = yield* threadCommands.withLock(
+        thread.threadId,
+        threadMovePlan(thread.threadId, projectId, spaceId),
+      );
+      if (plan !== undefined && plan.changes && plan.running) {
+        running.push({ threadId: thread.threadId, title: plan.thread.title });
+      }
+    }
+    return running;
+  });
+
+  const movePlan: ProjectService["Service"]["movePlan"] = Effect.fn("ProjectService.movePlan")(
+    function* (input) {
+      const { projectId } = input;
+      const existing = yield* readRow(projectId);
+      if (Option.isNone(existing)) return yield* new ProjectNotFoundError({ projectId });
+      const actor = Option.getOrUndefined(yield* spaces.actingUser);
+      const route = yield* spaces.authorizeProjectMove({
+        actor,
+        item: { kind: "project", id: projectId },
+        spaceId: input.spaceId,
+      });
+      const running: Array<ProjectMovePlanThread> = [];
+      const needsEnvironment: Array<ProjectMovePlanThread> = [];
+      for (const listed of yield* listProjectThreads(projectId)) {
+        const plan = yield* threadMovePlan(listed.threadId, projectId, route.to);
+        if (plan === undefined || !plan.changes) continue;
+        const entry: ProjectMovePlanThread = {
+          threadId: listed.threadId,
+          title: plan.thread.title,
+          environmentId:
+            plan.thread.activeEnvironmentId === undefined
+              ? HUB_MACHINE_ENVIRONMENT_ID
+              : plan.thread.activeEnvironmentId,
+        };
+        if (plan.running) running.push(entry);
+        if (plan.releasedFrom !== undefined) needsEnvironment.push(entry);
+      }
+      return { projectId, spaceId: route.to, running, needsEnvironment };
+    },
+  );
 
   const move: ProjectService["Service"]["move"] = Effect.fn("ProjectService.move")(
     function* (input) {
@@ -875,34 +1045,51 @@ export const make = Effect.gen(function* () {
         spaceId: input.spaceId,
       });
       const moved = yield* Ref.make(false);
+      const work = Option.isSome(moveHooks) ? yield* moveHooks.value.current : undefined;
       // While it moves nothing is created or started in it, and each Thread is checked idle under
       // its own lock, so a dispatch that passed before the mark has already created its run.
       const relocate = Effect.gen(function* () {
+        // Its running Threads stop first, when the mover said so (they saw them in the plan).
+        const running = yield* runningThreads(projectId, route.to);
+        if (running.length > 0) {
+          if (input.stopThreads !== true || work === undefined) {
+            return yield* new ProjectMoveBlockedError({
+              projectId,
+              threadTitles: running.map((thread) => thread.title),
+            });
+          }
+          yield* work.stopThreads({
+            threadIds: running.map((thread) => thread.threadId),
+            reason: "Stopped to move its Project to another Space.",
+          });
+          const still = yield* runningThreads(projectId, route.to);
+          if (still.length > 0) {
+            return yield* new ProjectMoveBlockedError({
+              projectId,
+              threadTitles: still.map((thread) => thread.title),
+            });
+          }
+        }
         if (route.from !== route.to) {
-          const running: Array<string> = [];
-          for (const thread of yield* listProjectThreads(projectId)) {
-            const live = yield* threadCommands.withLock(
-              thread.threadId,
-              threadWork(thread.threadId, projectId),
-            );
-            if (threadHasLiveWork(live)) running.push(thread.title);
-          }
-          if (running.length > 0) {
-            return yield* new ProjectMoveBlockedError({ projectId, threadTitles: running });
-          }
-          // Spec 3 (Sandboxes) moves the Project's workspace to the destination's Sandbox here.
+          // A preferred machine that does not serve the new Space is no preference there.
+          const preferred = yield* machineLeft(
+            existing.value.preferredEnvironmentId,
+            route.to,
+            projectId,
+          );
           yield* commit({
             type: "project.meta.update",
             commandId: input.commandId,
             projectId,
             spaceId: route.to,
+            ...(preferred === undefined ? {} : { preferredEnvironmentId: null }),
           });
           yield* Ref.set(moved, true);
         }
         // Listed after the Project moved, so none created before it is left behind; legacy
         // Threads with no Space of their own follow too. A rerun finishes a move cut short.
         for (const thread of yield* listProjectThreads(projectId)) {
-          const changed = yield* threadCommands
+          const result = yield* threadCommands
             .withLock(
               thread.threadId,
               moveThread({ ...input, spaceId: route.to }, thread.threadId, actor),
@@ -921,7 +1108,15 @@ export const make = Effect.gen(function* () {
                   : new ProjectOperationError({ operation: "move-thread", projectId, cause }),
               ),
             );
-          if (changed) yield* Ref.set(moved, true);
+          if (result.changed) yield* Ref.set(moved, true);
+          // Out of the Thread's lock: ending its sessions there goes through it.
+          if (result.releasedFrom !== undefined && work !== undefined) {
+            yield* work.threadReleased({
+              threadId: thread.threadId,
+              environmentId: result.releasedFrom,
+              providerSessionIds: result.providerSessionIds,
+            });
+          }
         }
       });
       yield* spaces.whileProjectMoves(projectId, relocate).pipe(
@@ -1062,6 +1257,7 @@ export const make = Effect.gen(function* () {
     update,
     delete: deleteProject,
     move,
+    movePlan,
     deleteSpaceContent,
     getById,
     getByWorkspaceRoot,

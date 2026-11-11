@@ -59,6 +59,7 @@ import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ThreadMoveService from "./ThreadMoveService.ts";
 import * as EnvironmentReturnService from "./EnvironmentReturnService.ts";
+import * as ProjectMoveThreads from "./ProjectMoveThreads.ts";
 import * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import * as ThreadForkService from "./ThreadForkService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
@@ -464,8 +465,21 @@ const layerEnvironmentReturnsProvided = EnvironmentReturnService.layer.pipe(
   ),
 );
 
+// A Project moving to another Space stops its Threads and cuts released ones off their machine.
+const layerProjectMoveThreadsProvided = ProjectMoveThreads.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      layerOrchestratorProvided,
+      ProjectionStore.layer,
+      layerEnvironmentExecutorsProvided,
+      layerProviderSessionManagerProvided,
+    ),
+  ),
+);
+
 export const layer = Layer.mergeAll(
   layerEnvironmentReturnsProvided,
+  layerProjectMoveThreadsProvided,
   layerEnvironmentExecutorsProvided,
   layerRemoteEnvironmentsProvided,
   layerCheckpointUploadsProvided,

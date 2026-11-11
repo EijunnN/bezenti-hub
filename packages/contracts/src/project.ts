@@ -234,17 +234,46 @@ export const ProjectMutation = Schema.Union([
     force: Schema.optional(Schema.Boolean),
   }),
   /**
-   * Moves the Project and all its Threads to another Space. Refused while any of its Threads is
-   * running; in the destination it uses that Space's vaults and AI accounts.
+   * Moves the Project and all its Threads to another Space; in the destination it uses that
+   * Space's vaults and AI accounts. A running Thread refuses it unless `stopThreads` (the mover saw
+   * them in `ProjectMovePlan`), which stops them first. A Thread whose machine does not serve the
+   * destination needs an environment afterwards.
    */
   Schema.Struct({
     type: Schema.Literal("project.move"),
     commandId: CommandId,
     projectId: ProjectId,
     spaceId: SpaceId,
+    stopThreads: Schema.optional(Schema.Boolean),
   }),
 ]);
 export type ProjectMutation = typeof ProjectMutation.Type;
+
+/** Which Project, and where it would go: asked before confirming a move. */
+export const ProjectMovePlanInput = Schema.Struct({
+  projectId: ProjectId,
+  spaceId: SpaceId,
+});
+export type ProjectMovePlanInput = typeof ProjectMovePlanInput.Type;
+
+export const ProjectMovePlanThread = Schema.Struct({
+  threadId: ThreadId,
+  title: Schema.String,
+  /** Its Active environment now; null when it already needs one. */
+  environmentId: Schema.NullOr(EnvironmentId),
+});
+export type ProjectMovePlanThread = typeof ProjectMovePlanThread.Type;
+
+/** What moving the Project to `spaceId` does to its Threads. */
+export const ProjectMovePlan = Schema.Struct({
+  projectId: ProjectId,
+  spaceId: SpaceId,
+  /** Running now: the move stops them. */
+  running: Schema.Array(ProjectMovePlanThread),
+  /** On a machine that does not serve `spaceId`: they need an environment after the move. */
+  needsEnvironment: Schema.Array(ProjectMovePlanThread),
+});
+export type ProjectMovePlan = typeof ProjectMovePlan.Type;
 
 export class ProjectMutationError extends Schema.TaggedError<ProjectMutationError>()(
   "ProjectMutationError",

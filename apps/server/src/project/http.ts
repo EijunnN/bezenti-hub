@@ -1,5 +1,7 @@
 import {
   AuthOrchestrationReadScope,
+  CommandId,
+  type ProjectMutation,
   EnvironmentAuthenticatedPrincipal,
   EnvironmentHttpApi,
   EnvironmentHttpConflictError,
@@ -91,6 +93,29 @@ export const layer = HttpApiBuilder.group(
             principal.userId,
           ).pipe(CommandActor.actAsSession(principal));
           return yield* startup.enqueueCommand(operation).pipe(Effect.catch(failProjectMutation));
+        }),
+      )
+      .handle(
+        "movePlan",
+        Effect.fn("environment.projects.movePlan")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          // Asked exactly as the move it plans: the same scopes, the same rule.
+          const asMove: ProjectMutation = {
+            type: "project.move",
+            commandId: CommandId.make("project-move-plan"),
+            projectId: args.payload.projectId,
+            spaceId: args.payload.spaceId,
+          };
+          for (const scope of requiredScopesForProjectMutation(asMove)) {
+            yield* requireEnvironmentScope(scope);
+          }
+          const principal = yield* EnvironmentAuthenticatedPrincipal;
+          yield* authorizeSessionAsRpc(WS_METHODS.projectsMutate, asMove, principal).pipe(
+            Effect.catch(() => failEnvironmentInvalidRequest("invalid_command")),
+          );
+          return yield* projects
+            .movePlan(args.payload)
+            .pipe(CommandActor.actAsSession(principal), Effect.catch(failProjectMutation));
         }),
       );
   }),
