@@ -16,7 +16,9 @@ import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
 import * as CliError from "effect/cli/CliError";
 
 import * as AuditLog from "../audit/AuditLog.ts";
+import * as MasterKeyBackup from "../auth/MasterKeyBackup.ts";
 import * as MasterKeyFile from "../auth/MasterKeyFile.ts";
+import { backupProofOf } from "../auth/SecretCipher.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -42,9 +44,12 @@ const hubConfig = Effect.fn("cli.secrets.hubConfig")(function* (
 
 const keyError = (error: MasterKeyFile.MasterKeyError) => userError(error.message);
 
-/** Recorded like the Hub records it; a log it cannot write never undoes what was done. */
-const audit = (config: ServerConfig.ServerConfig["Service"], entry: AuditLog.AuditRecord) =>
-  Effect.flatMap(AuditLog.AuditLog, (log) => log.record(entry)).pipe(
+/** Recorded like the Hub records it; a log it cannot write never undoes the rotation done. */
+const auditRotation = Effect.fn("cli.secrets.auditRotation")(function* (
+  config: ServerConfig.ServerConfig["Service"],
+  entry: AuditLog.AuditRecord,
+) {
+  yield* Effect.flatMap(AuditLog.AuditLog, (log) => log.record(entry)).pipe(
     Effect.provide(
       AuditLog.layer.pipe(
         Layer.provideMerge(SqlitePersistence.layerConfig),
@@ -55,10 +60,13 @@ const audit = (config: ServerConfig.ServerConfig["Service"], entry: AuditLog.Aud
       Effect.logWarning("Could not record it in the audit log", { cause }),
     ),
   );
+});
 
 /** An unreachable server may still be running: never rewrite keys behind it. */
-const requireHubStopped = (config: ServerConfig.ServerConfig["Service"]) =>
-  ServerOwnership.acquireServerOwnership(config.serverRuntimeStatePath).pipe(
+const requireHubStopped = Effect.fn("cli.secrets.requireHubStopped")(function* (
+  config: ServerConfig.ServerConfig["Service"],
+) {
+  yield* ServerOwnership.acquireServerOwnership(config.serverRuntimeStatePath).pipe(
     Effect.provide(ProcessRunner.layer),
     Effect.mapError(() =>
       userError(
@@ -66,6 +74,39 @@ const requireHubStopped = (config: ServerConfig.ServerConfig["Service"]) =>
       ),
     ),
   );
+});
+
+/** Resolves once stdout took every byte; a closed pipe fails rather than counting as a backup. */
+const writeStdout = (text: string) =>
+  Effect.callback<void, CliError.UserError>((resume) => {
+    process.stdout.write(text, (error) =>
+      resume(
+        error === undefined || error === null
+          ? Effect.void
+          : Effect.fail(userError("Could not write the key to stdout; it is not backed up.")),
+      ),
+    );
+  });
+
+const writeNewFile = Effect.fn("cli.secrets.writeNewFile")(function* (file: string, text: string) {
+  yield* Effect.try({
+    try: () => {
+      const fd = NodeFS.openSync(file, "wx", 0o600);
+      try {
+        NodeFS.writeFileSync(fd, text);
+        NodeFS.fsyncSync(fd);
+      } finally {
+        NodeFS.closeSync(fd);
+      }
+    },
+    catch: (cause) =>
+      userError(
+        (cause as NodeJS.ErrnoException).code === "EEXIST"
+          ? `${file} already exists; choose a new file.`
+          : `Could not write ${file}; the key is not backed up.`,
+      ),
+  });
+});
 
 const outputFlag = Flag.String("output").pipe(
   Flag.withDescription(
@@ -82,37 +123,31 @@ const exportCommand = Command.make("export", { ...authLocationFlags, output: out
     Effect.fn("cli.secrets.key.export")(function* (flags) {
       const config = yield* hubConfig(flags);
       return yield* Effect.gen(function* () {
-        const backup = yield* ServerSecretStore.MasterKeyBackup;
-        const key = yield* backup.readKey.pipe(Effect.mapError(keyError));
+        const backup = yield* MasterKeyBackup.MasterKeyBackup;
+        // Audited before it leaves; recorded as a backup only once it was written whole.
+        const exported = yield* backup.export({ actor: AuditLog.cliActor, via: "cli" });
+        const text = Redacted.value(exported.key);
         if (Option.isSome(flags.output)) {
-          const file = flags.output.value;
-          yield* Effect.try({
-            try: () => NodeFS.writeFileSync(file, Redacted.value(key), { flag: "wx", mode: 0o600 }),
-            catch: (cause) =>
-              userError(
-                (cause as NodeJS.ErrnoException).code === "EEXIST"
-                  ? `${file} already exists; choose a new file.`
-                  : `Could not write ${file}.`,
-              ),
-          });
+          yield* writeNewFile(flags.output.value, text);
         } else {
-          yield* Effect.sync(() => process.stdout.write(Redacted.value(key)));
+          yield* writeStdout(text);
         }
-        const status = yield* backup
-          .recordBackup(DateTime.formatIso(yield* DateTime.now))
-          .pipe(Effect.mapError(keyError));
-        yield* audit(config, {
-          actor: AuditLog.cliActor,
-          action: "secret.master_key.export",
-          target: { kind: "secret", id: "master-key", name: "Master key" },
-          detail: { via: "cli", keyId: status.keyId },
+        const status = yield* backup.confirm({
+          keyId: exported.keyId,
+          proof: Redacted.make(backupProofOf(text)),
+          at: DateTime.formatIso(yield* DateTime.now),
         });
         yield* Console.error(
           `Backed up master key ${status.keyId}${Option.isSome(flags.output) ? ` to ${flags.output.value}` : ""}. Anyone with it can read this Hub's secrets from a copy of its disk.`,
         );
       }).pipe(
         Effect.provide(
-          ServerSecretStore.layer.pipe(Layer.provideMerge(ServerConfig.layer(config))),
+          MasterKeyBackup.layer.pipe(
+            Layer.provideMerge(AuditLog.layer),
+            Layer.provideMerge(SqlitePersistence.layerConfig),
+            Layer.provideMerge(ServerSecretStore.layerClient),
+            Layer.provideMerge(ServerConfig.layer(config)),
+          ),
         ),
         Effect.catchTags({ MasterKeyError: (error) => Effect.fail(keyError(error)) }),
       );
@@ -161,7 +196,7 @@ const rotateCommand = Command.make("rotate", { ...authLocationFlags }).pipe(
         Effect.provide(ServerConfig.layer(config)),
         Effect.mapError(keyError),
       );
-      yield* audit(config, {
+      yield* auditRotation(config, {
         actor: AuditLog.cliActor,
         action: "secret.master_key.rotate",
         target: { kind: "secret", id: "master-key", name: "Master key" },

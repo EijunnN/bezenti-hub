@@ -17,3 +17,10 @@ export async function downloadMasterKeyBackup(stepUp: StepUp): Promise<MasterKey
   }
   return request((client) => client.vaults.masterKeyBackup({ headers: {}, payload: { reauth } }));
 }
+
+/** The Owner saved the backup: the key's first characters, which only its holder knows. */
+export function confirmMasterKeyBackup(keyId: string, proof: string): Promise<MasterKeyStatus> {
+  return request((client) =>
+    client.vaults.masterKeyBackupConfirm({ headers: {}, payload: { keyId, proof } }),
+  );
+}

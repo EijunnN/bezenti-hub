@@ -1,14 +1,17 @@
 /**
- * Settings → Vaults over HTTP. The master key's status and its backup: the Owner alone
- * (`masterKey.backup` in AccessPolicy), the backup also with a strong factor in the request and
- * audited before the key leaves. See docs/internals/secrets.md.
+ * Settings → Vaults over HTTP. The master key's status, its download and the confirmation that
+ * the Owner saved it: the Owner alone (`masterKey.backup` in AccessPolicy); the download also
+ * needs a strong factor in the request. The rules of a backup are MasterKeyBackup's, shared with
+ * `t3 secrets key export`. See docs/internals/secrets.md.
  */
 import {
   AuthAccessReadScope,
   AuthAccessWriteScope,
   type AuthEnvironmentScope,
   EnvironmentHttpApi,
+  EnvironmentHttpConflictError,
   EnvironmentHttpForbiddenError,
+  type EnvironmentInternalError,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -24,8 +27,8 @@ import {
   failEnvironmentInternal,
   requireEnvironmentScope,
 } from "../auth/http.ts";
+import * as MasterKeyBackup from "../auth/MasterKeyBackup.ts";
 import type * as MasterKeyFile from "../auth/MasterKeyFile.ts";
-import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as UserDirectory from "../auth/UserDirectory.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 
@@ -37,11 +40,17 @@ export const layer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const spaces = yield* SpaceDirectory.SpaceDirectory;
     const users = yield* UserDirectory.UserDirectory;
-    const backup = yield* ServerSecretStore.MasterKeyBackup;
-    const audit = yield* AuditLog.AuditLog;
+    const backup = yield* MasterKeyBackup.MasterKeyBackup;
 
     const failKey = (error: MasterKeyFile.MasterKeyError) =>
       failEnvironmentInternal("master_key_failed", error);
+    /** A wrong proof is the Owner's to correct; anything else is the Hub's. */
+    const failConfirm = (
+      error: MasterKeyFile.MasterKeyError,
+    ): Effect.Effect<never, EnvironmentHttpConflictError | EnvironmentInternalError> =>
+      error.reason === "proof"
+        ? Effect.fail(new EnvironmentHttpConflictError({ message: error.message }))
+        : failKey(error);
 
     /** A signed-in User whom AccessPolicy lets back up the master key: the Owner. */
     const requireOwner = Effect.fn("environment.vaults.requireOwner")(function* (
@@ -83,20 +92,24 @@ export const layer = HttpApiBuilder.group(
               args.payload.reauth,
             ),
           );
-          const key = yield* backup.readKey.pipe(Effect.catch(failKey));
-          const status = yield* backup
-            .recordBackup(DateTime.formatIso(yield* DateTime.now))
+          const exported = yield* backup
+            .export({ actor: AuditLog.userActor(owner.userId), via: "settings" })
             .pipe(Effect.catch(failKey));
-          // Recorded before the key leaves: no backup goes out unaudited.
-          yield* audit
-            .record({
-              actor: AuditLog.userActor(owner.userId),
-              action: "secret.master_key.export",
-              target: { kind: "secret", id: "master-key", name: "Master key" },
-              detail: { via: "settings", keyId: status.keyId },
+          return { key: Redacted.value(exported.key), keyId: exported.keyId };
+        }),
+      )
+      .handle(
+        "masterKeyBackupConfirm",
+        Effect.fn("environment.vaults.masterKeyBackupConfirm")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireOwner(AuthAccessWriteScope);
+          return yield* backup
+            .confirm({
+              keyId: args.payload.keyId,
+              proof: Redacted.make(args.payload.proof),
+              at: DateTime.formatIso(yield* DateTime.now),
             })
-            .pipe(Effect.catch((cause) => failEnvironmentInternal("master_key_failed", cause)));
-          return { key: Redacted.value(key), status };
+            .pipe(Effect.catch(failConfirm));
         }),
       );
   }),

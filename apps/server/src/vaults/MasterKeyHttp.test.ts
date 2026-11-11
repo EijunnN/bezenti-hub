@@ -15,6 +15,7 @@ import * as References from "effect/References";
 import * as Tracer from "effect/Tracer";
 
 import { masterKeyPath } from "../auth/MasterKeyFile.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import {
   addMember,
   bootstrapOwner,
@@ -27,6 +28,7 @@ import * as ServerConfig from "../config.ts";
 
 const STATUS = "/api/vaults/master-key";
 const BACKUP = "/api/vaults/master-key/backup";
+const CONFIRM = "/api/vaults/master-key/backup/confirm";
 /** A proof no one could pass: the refusal must come before it is ever checked. */
 const BOGUS_REAUTH = { reauth: { method: "password", password: "nope", totpCode: "000000" } };
 
@@ -97,6 +99,33 @@ it.effect("nobody but the Owner downloads the backup, whatever proof they send",
   }),
 );
 
+it.effect("nobody but the Owner confirms a backup", () =>
+  Effect.gen(function* () {
+    const { server, owner, others, keyFile } = yield* hub;
+    const keyText = NodeFS.readFileSync(keyFile, "utf8");
+    const { keyId } = (yield* server.request(STATUS, { cookie: owner })).body as { keyId: string };
+    const body = { keyId, proof: keyText.trim().split(":")[1]!.slice(0, 8) };
+    for (const [who, cookie] of Object.entries(others)) {
+      const refused = yield* server.request(CONFIRM, { cookie, body });
+      assert.equal(refused.status, 403, `${who} confirmed a backup`);
+    }
+    assert.equal((yield* server.request(STATUS, { cookie: owner })).body.backedUpAt, null);
+  }),
+);
+
+it.effect("a secret stored under the backup record's name does not clear the warning", () =>
+  Effect.gen(function* () {
+    const { server, owner } = yield* hub;
+    const { keyId } = (yield* server.request(STATUS, { cookie: owner })).body as { keyId: string };
+    const store = Context.get(server.services, ServerSecretStore.ServerSecretStore);
+    yield* store.set(
+      "master-key-backup",
+      new TextEncoder().encode(JSON.stringify({ keyId, backedUpAt: "2026-01-01T00:00:00.000Z" })),
+    );
+    assert.equal((yield* server.request(STATUS, { cookie: owner })).body.backedUpAt, null);
+  }),
+);
+
 it.effect("the Owner without a strong factor in the request gets nothing", () =>
   Effect.gen(function* () {
     const { server, owner } = yield* hub;
@@ -142,9 +171,23 @@ it.effect(
       assert.equal(backup.status, 200);
       const keyText = NodeFS.readFileSync(keyFile, "utf8");
       assert.equal(backup.body.key, keyText);
-      const status = backup.body.status as { backedUpAt: string | null; keyId: string };
+      const keyId = backup.body.keyId as string;
+      // Handed out is not backed up: the warning stays until the Owner shows they hold it.
+      const handedOut = yield* server.request(STATUS, { cookie: owner });
+      assert.equal(handedOut.body.backedUpAt, null);
+      const wrong = yield* server.request(CONFIRM, {
+        cookie: owner,
+        body: { keyId, proof: "AAAAAAAA" },
+      });
+      assert.notEqual(wrong.status, 200);
+      assert.equal((yield* server.request(STATUS, { cookie: owner })).body.backedUpAt, null);
+      const confirmed = yield* server.request(CONFIRM, {
+        cookie: owner,
+        body: { keyId, proof: keyText.trim().split(":")[1]!.slice(0, 8) },
+      });
+      assert.equal(confirmed.status, 200);
+      const status = confirmed.body as { backedUpAt: string | null; keyId: string };
       assert.isString(status.backedUpAt);
-
       const after = yield* server.request(STATUS, { cookie: owner });
       assert.equal(after.body.backedUpAt, status.backedUpAt);
 
@@ -156,7 +199,7 @@ it.effect(
       `;
       assert.isDefined(entry);
       assert.equal(entry!.actor_source, "user");
-      assert.deepEqual(JSON.parse(entry!.detail_json), { via: "settings", keyId: status.keyId });
+      assert.deepEqual(JSON.parse(entry!.detail_json), { via: "settings", keyId });
 
       const secret = keyText.trim().split(":")[1]!;
       const recorded = [

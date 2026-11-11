@@ -79,7 +79,12 @@ import {
   SpaceSummary,
 } from "./spaces.ts";
 import { AuditLogPage, AuditLogQuery } from "./audit.ts";
-import { MasterKeyBackupRequest, MasterKeyBackupResult, MasterKeyStatus } from "./vaults.ts";
+import {
+  MasterKeyBackupConfirmRequest,
+  MasterKeyBackupRequest,
+  MasterKeyBackupResult,
+  MasterKeyStatus,
+} from "./vaults.ts";
 import {
   ChangeHubEnvironmentModeRequest,
   EnvironmentJoinApproveRequest,
@@ -1528,6 +1533,14 @@ class EnvironmentVaultsHttpApi extends HttpApiGroup.make("vaults")
       payload: MasterKeyBackupRequest,
       success: MasterKeyBackupResult,
       error: [...EnvironmentVaultsErrors, EnvironmentRateLimitedError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("masterKeyBackupConfirm", "/api/vaults/master-key/backup/confirm", {
+      headers: OptionalBearerHeaders,
+      payload: MasterKeyBackupConfirmRequest,
+      success: MasterKeyStatus,
+      error: [...EnvironmentVaultsErrors, EnvironmentHttpConflictError],
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 

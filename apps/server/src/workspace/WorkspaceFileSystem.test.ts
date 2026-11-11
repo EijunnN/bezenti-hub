@@ -297,6 +297,19 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
       }),
     );
 
+    it.effect("still reads a file that only shares the master key's name prefix", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const config = yield* ServerConfig.ServerConfig;
+        yield* writeTextFile(config.stateDir, "master.key.notes.md", "notes");
+        const read = yield* workspaceFileSystem.readFile({
+          cwd: config.stateDir,
+          relativePath: "master.key.notes.md",
+        });
+        expect(read.contents).toBe("notes");
+      }),
+    );
+
     it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       "rejects a FIFO without blocking on open",
       () =>

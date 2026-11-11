@@ -196,6 +196,7 @@ import * as DedicatedHost from "./environments/DedicatedHost.ts";
 import * as SandboxImage from "./sandboxes/SandboxImage.ts";
 import * as SandboxImageHttp from "./sandboxes/http.ts";
 import * as VaultsHttp from "./vaults/http.ts";
+import * as MasterKeyBackup from "./auth/MasterKeyBackup.ts";
 import * as JoinedHub from "./environments/JoinedHub.ts";
 import type { JoinedHubState } from "./environments/joinedHubState.ts";
 import * as NetService from "@t3tools/shared/Net";
@@ -744,7 +745,7 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provide(AuditHttp.layer),
       Layer.provide(HubEnvironmentsHttp.layer),
       Layer.provide(SandboxImageHttp.layer),
-      Layer.provide(VaultsHttp.layer),
+      Layer.provide(VaultsHttp.layer.pipe(Layer.provide(MasterKeyBackup.layer))),
       Layer.provide(ServerHttp.layerServerEnvironmentHttpApi),
       Layer.provide(WebhookRoute.layer),
       Layer.provide(AuthHttp.layerAuthenticatedAuth),

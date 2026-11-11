@@ -9,26 +9,16 @@ import * as Schedule from "effect/Schedule";
 
 import * as ServerConfig from "../config.ts";
 import { forkParked } from "../serverActivation.ts";
-import { DPOP_REPLAY_MARKER_PREFIX } from "./dpop.ts";
+import { isReplayMarker, REPLAY_MARKER_MAX_AGE } from "./replayMarkerNames.ts";
 
-const REPLAY_MARKER_PREFIXES = [DPOP_REPLAY_MARKER_PREFIX];
-
-/**
- * A marker only matters while its proof can pass the time check (about 10 minutes
- * for DPoP). After that, the time check rejects a replay by
- * itself.
- */
-export const REPLAY_MARKER_MAX_AGE = Duration.days(1);
-
-/** Prunes only <marker prefix>*.bin, excluding other secrets and temporary files. */
+/** Prunes only the markers' entries (`.sealed`, or `.bin` on a joined machine), nothing else. */
 export const pruneExpiredReplayMarkers = Effect.fn("replayMarkers.pruneExpired")(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const { secretsDir } = yield* ServerConfig.ServerConfig;
   const cutoff = (yield* Clock.currentTimeMillis) - Duration.toMillis(REPLAY_MARKER_MAX_AGE);
   const markers = (yield* fileSystem.readDirectory(secretsDir)).filter(
-    (name) =>
-      name.endsWith(".bin") && REPLAY_MARKER_PREFIXES.some((prefix) => name.startsWith(prefix)),
+    (name) => (name.endsWith(".bin") || name.endsWith(".sealed")) && isReplayMarker(name),
   );
   const [removed, failures] = yield* Effect.partition(markers, (name) => {
     const markerPath = path.join(secretsDir, name);

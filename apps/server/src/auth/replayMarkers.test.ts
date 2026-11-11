@@ -10,7 +10,8 @@ import * as Path from "effect/Path";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerConfig from "../config.ts";
-import { pruneExpiredReplayMarkers, REPLAY_MARKER_MAX_AGE } from "./replayMarkers.ts";
+import { REPLAY_MARKER_MAX_AGE } from "./replayMarkerNames.ts";
+import { pruneExpiredReplayMarkers } from "./replayMarkers.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 
 const REAL_SECRET_NAMES = [
@@ -37,7 +38,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("replayMarkers", 
       const writeAged = (name: string, age: Duration.Duration) =>
         secretStore
           .create(name, Uint8Array.from([1]))
-          .pipe(Effect.andThen(setAge(`${name}.bin`, age)));
+          .pipe(Effect.andThen(setAge(`${name}.sealed`, age)));
 
       const justExpired = Duration.sum(REPLAY_MARKER_MAX_AGE, Duration.seconds(1));
       const expiredMarkers = ["dpop-proof-old"];
@@ -55,8 +56,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("replayMarkers", 
       assert.deepStrictEqual(
         remaining.toSorted(),
         [
-          ...REAL_SECRET_NAMES.map((name) => `${name}.bin`),
-          "dpop-proof-at-max-age.bin",
+          ...REAL_SECRET_NAMES.map((name) => `${name}.sealed`),
+          "dpop-proof-at-max-age.sealed",
           pendingSetFile,
           // The master key's check, sealed by the key the store opened with.
           "master-key.check",

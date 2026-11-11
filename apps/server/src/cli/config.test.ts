@@ -258,6 +258,44 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     }),
   );
 
+  it.effect("takes T3CODE_MASTER_KEY_FILE only as an absolute path", () =>
+    Effect.gen(function* () {
+      const baseDir = yield* FileSystem.FileSystem.pipe(
+        Effect.flatMap((fs) => fs.makeTempDirectoryScoped({ prefix: "t3-cli-master-key-" })),
+      );
+      const flags = {
+        mode: Option.some("web" as const),
+        port: Option.some(8788),
+        host: Option.none<string>(),
+        baseDir: Option.some(baseDir),
+        cwd: Option.none<string>(),
+        devUrl: Option.none<URL>(),
+        noBrowser: Option.none<boolean>(),
+        bootstrapFd: Option.none<number>(),
+        autoBootstrapProjectFromCwd: Option.none<boolean>(),
+        logWebSocketEvents: Option.none<boolean>(),
+        tailscaleServeEnabled: Option.none<boolean>(),
+        tailscaleServePort: Option.none<number>(),
+        lan: Option.none<boolean>(),
+      };
+      const withKeyFile = (file: string) =>
+        resolveServerConfig(flags, Option.none()).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              ConfigProvider.layer(
+                ConfigProvider.fromEnv({ env: { T3CODE_MASTER_KEY_FILE: file } }),
+              ),
+              NetService.layer,
+            ),
+          ),
+        );
+      const absolute = yield* withKeyFile(`${baseDir}/keys/hub.key`);
+      expect(absolute.masterKeyFile).toBe(`${baseDir}/keys/hub.key`);
+      const relative = yield* Effect.exit(withKeyFile("keys/hub.key"));
+      expect(relative._tag).toBe("Failure");
+    }),
+  );
+
   it.effect("does not expose an invalid reusable auth token", () =>
     Effect.gen(function* () {
       const secret = "short-secret";

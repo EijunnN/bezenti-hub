@@ -4,14 +4,16 @@
  * key does at startup, the one-time encryption of plaintext stores, rotation and import.
  */
 // @effect-diagnostics nodeBuiltinImport:off - the tests read the store's files as a copy would.
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as PlatformNodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -21,13 +23,16 @@ import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
 import * as Redacted from "effect/Redacted";
 import * as References from "effect/References";
+import * as TestClock from "effect/testing/TestClock";
 import * as Tracer from "effect/Tracer";
 
 import * as ServerConfig from "../config.ts";
+import * as ProcessRunner from "../processRunner.ts";
+import * as ServerOwnership from "../serverOwnership.ts";
 import * as MasterKeyFile from "./MasterKeyFile.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 
-const platform = Layer.mergeAll(NodeServices.layer, NodeCrypto.layer);
+const platform = Layer.mergeAll(NodeServices.layer, PlatformNodeCrypto.layer);
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
@@ -69,6 +74,15 @@ const seedPlaintext = (baseDir: string, entries: Record<string, string>) => {
       mode: 0o600,
     });
   }
+};
+
+/** Where the store keeps `name`, whatever its file's extension. */
+const entryFileOf = (baseDir: string, name: string) => {
+  const found = NodeFS.readdirSync(secretsDirOf(baseDir)).find(
+    (file) => file.startsWith(`${name}.`) && !file.endsWith(".tmp"),
+  );
+  assert.isDefined(found, `no file for ${name}`);
+  return NodePath.join(secretsDirOf(baseDir), found!);
 };
 
 const readAll = (baseDir: string, names: ReadonlyArray<string>) =>
@@ -135,8 +149,8 @@ it.layer(platform)("ServerSecretStore encryption", (it) => {
           Effect.gen(function* () {
             yield* store.set("owner-token", encoder.encode(SECRET));
             NodeFS.copyFileSync(
-              NodePath.join(secretsDirOf(baseDir), "owner-token.bin"),
-              NodePath.join(secretsDirOf(baseDir), "guest-token.bin"),
+              entryFileOf(baseDir, "owner-token"),
+              entryFileOf(baseDir, "owner-token").replace("owner-token", "guest-token"),
             );
             const moved = yield* Effect.exit(store.get("guest-token"));
             assert.isTrue(Exit.isFailure(moved), "a renamed entry opened");
@@ -151,9 +165,9 @@ it.layer(platform)("ServerSecretStore encryption", (it) => {
         yield* withStore(baseDir, (store) =>
           Effect.gen(function* () {
             yield* store.set("a", encoder.encode(SECRET));
-            const first = NodeFS.readFileSync(NodePath.join(secretsDirOf(baseDir), "a.bin"));
+            const first = NodeFS.readFileSync(entryFileOf(baseDir, "a"));
             yield* store.set("a", encoder.encode(SECRET));
-            const second = NodeFS.readFileSync(NodePath.join(secretsDirOf(baseDir), "a.bin"));
+            const second = NodeFS.readFileSync(entryFileOf(baseDir, "a"));
             assert.notDeepEqual(first, second);
           }),
         );
@@ -308,24 +322,24 @@ it.layer(platform)("ServerSecretStore encryption", (it) => {
     it.effect("makes an earlier backup no backup of the new key", () =>
       Effect.gen(function* () {
         const baseDir = newBaseDir();
-        const backedUp = yield* Effect.flatMap(ServerSecretStore.MasterKeyBackup, (backup) =>
-          backup.recordBackup("2026-11-11T00:00:00.000Z"),
-        ).pipe(Effect.provide(storeAt(baseDir)));
-        assert.equal(backedUp.backedUpAt, "2026-11-11T00:00:00.000Z");
+        const backupRecord = (write: boolean) =>
+          Effect.gen(function* () {
+            const { keyring } = yield* ServerSecretStore.MasterKeyring;
+            const current = Option.getOrThrow(keyring);
+            if (write) yield* MasterKeyFile.writeBackupRecord(current, "2026-11-11T00:00:00.000Z");
+            return yield* MasterKeyFile.readBackupRecord(current);
+          }).pipe(Effect.provide(storeAt(baseDir)));
+        assert.equal(Option.getOrNull(yield* backupRecord(true)), "2026-11-11T00:00:00.000Z");
         yield* MasterKeyFile.rotate().pipe(Effect.provide(configAt(baseDir)));
-        const after = yield* Effect.flatMap(
-          ServerSecretStore.MasterKeyBackup,
-          (backup) => backup.status,
-        ).pipe(Effect.provide(storeAt(baseDir)));
-        assert.equal(after.backedUpAt, null);
+        assert.isTrue(Option.isNone(yield* backupRecord(false)));
       }),
     );
   });
 
   describe("import", () => {
     const exportedFrom = (baseDir: string) =>
-      Effect.flatMap(ServerSecretStore.MasterKeyBackup, (backup) => backup.readKey).pipe(
-        Effect.provide(storeAt(baseDir)),
+      readAll(baseDir, []).pipe(
+        Effect.map(() => Redacted.make(NodeFS.readFileSync(keyFileOf(baseDir), "utf8"))),
       );
 
     it.effect("opens the same secrets in another state directory", () =>
@@ -468,6 +482,122 @@ it.layer(platform)("ServerSecretStore encryption", (it) => {
         Effect.provideService(References.MinimumLogLevel, "All"),
       );
     });
+  });
+
+  describe("review findings", () => {
+    it.effect(
+      "a joined machine that was a Hub opens what it sealed, never hands out sealed bytes",
+      () =>
+        Effect.gen(function* () {
+          const baseDir = newBaseDir();
+          yield* withStore(baseDir, (store) => store.set("provider-token", encoder.encode(SECRET)));
+          NodeFS.writeFileSync(NodePath.join(stateDirOf(baseDir), "joined-hub.json"), "{}");
+          const [value] = yield* readAll(baseDir, ["provider-token"]);
+          assert.equal(Option.getOrThrow(value!), SECRET);
+          // Without the key, the sealed entry is an error, never bytes passed off as the value.
+          NodeFS.rmSync(keyFileOf(baseDir));
+          const read = yield* Effect.exit(readAll(baseDir, ["provider-token"]));
+          assert.isTrue(Exit.isFailure(read), "a sealed value came back unopened");
+        }),
+    );
+
+    it.effect("a damaged entry stops the startup before anything in clear is sealed", () =>
+      Effect.gen(function* () {
+        const baseDir = newBaseDir();
+        yield* withStore(baseDir, (store) => store.set("b", encoder.encode(SECRET)));
+        const damaged = NodeFS.readFileSync(entryFileOf(baseDir, "b"));
+        damaged[damaged.length - 20] = (damaged[damaged.length - 20] ?? 0) ^ 0xff;
+        NodeFS.writeFileSync(entryFileOf(baseDir, "b"), damaged);
+        seedPlaintext(baseDir, { a: "VALUE-A" });
+        const exit = yield* Effect.exit(readAll(baseDir, ["a"]));
+        assert.isTrue(Exit.isFailure(exit), "the startup went on past a damaged entry");
+        const aFiles = NodeFS.readdirSync(secretsDirOf(baseDir)).filter((f) => f.startsWith("a."));
+        assert.deepEqual(aFiles, ["a.bin"]);
+        assert.equal(NodeFS.readFileSync(entryFileOf(baseDir, "a"), "utf8"), "VALUE-A");
+      }),
+    );
+
+    it.effect("a value in clear that starts like a sealed one is read as written", () =>
+      Effect.gen(function* () {
+        const baseDir = newBaseDir();
+        const value = Buffer.concat([
+          Buffer.from([0x00, 0x54, 0x33, 0x53, 0x01]),
+          NodeCrypto.randomBytes(40),
+        ]);
+        NodeFS.mkdirSync(secretsDirOf(baseDir), { recursive: true, mode: 0o700 });
+        NodeFS.writeFileSync(NodePath.join(secretsDirOf(baseDir), "random-key.bin"), value);
+        const read = yield* withStore(baseDir, (store) => store.get("random-key"));
+        assert.deepEqual(Array.from(Option.getOrThrow(read)), Array.from(value));
+      }),
+    );
+
+    it.effect("a client beside a running Hub writes nothing", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const baseDir = newBaseDir();
+          yield* withStore(baseDir, (store) => store.set("a", encoder.encode(SECRET)));
+          seedPlaintext(baseDir, { legacy: "LEGACY" });
+          const fresh = newBaseDir();
+          for (const dir of [baseDir, fresh]) {
+            NodeFS.mkdirSync(stateDirOf(dir), { recursive: true });
+            // The Hub runs: it holds the server's ownership lock.
+            yield* ServerOwnership.acquireServerOwnership(
+              NodePath.join(stateDirOf(dir), "server-runtime.json"),
+            ).pipe(Effect.provide(ProcessRunner.layer));
+          }
+          const before = filesUnder(secretsDirOf(baseDir));
+          const client = (dir: string) =>
+            Effect.exit(
+              Effect.flatMap(ServerSecretStore.ServerSecretStore, (store) => store.get("a")).pipe(
+                Effect.provide(
+                  ServerSecretStore.layerClient.pipe(Layer.provideMerge(configAt(dir))),
+                ),
+              ),
+            );
+          yield* client(baseDir);
+          assert.deepEqual(filesUnder(secretsDirOf(baseDir)), before);
+          yield* client(fresh);
+          assert.isFalse(NodeFS.existsSync(keyFileOf(fresh)), "a client created a master key");
+        }),
+      ),
+    );
+
+    it.effect("T3CODE_MASTER_KEY_ALLOW_LOOSE_PERMISSIONS=1 opens a key others may read", () =>
+      Effect.gen(function* () {
+        if ((yield* HostProcess.Platform) === "win32") return;
+        const baseDir = newBaseDir();
+        yield* withStore(baseDir, (store) => store.set("a", encoder.encode(SECRET)));
+        NodeFS.chmodSync(keyFileOf(baseDir), 0o644);
+        const [value] = yield* readAll(baseDir, ["a"]).pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({ env: { T3CODE_MASTER_KEY_ALLOW_LOOSE_PERMISSIONS: "1" } }),
+            ),
+          ),
+        );
+        assert.equal(Option.getOrThrow(value!), SECRET);
+      }),
+    );
+
+    it.effect("drops expired replay markers and keeps the others' age when sealing", () =>
+      Effect.gen(function* () {
+        const baseDir = newBaseDir();
+        seedPlaintext(baseDir, { "dpop-proof-old": "1", "dpop-proof-new": "1" });
+        const plainFile = (name: string) => NodePath.join(secretsDirOf(baseDir), `${name}.bin`);
+        // Seconds, from the file system's own clock.
+        const now = NodeFS.statSync(plainFile("dpop-proof-new")).mtimeMs / 1000;
+        const twoDaysAgo = now - 2 * 24 * 60 * 60;
+        const hourAgo = now - 60 * 60;
+        NodeFS.utimesSync(plainFile("dpop-proof-old"), twoDaysAgo, twoDaysAgo);
+        NodeFS.utimesSync(plainFile("dpop-proof-new"), hourAgo, hourAgo);
+        yield* TestClock.setTime(now * 1000);
+        yield* readAll(baseDir, []);
+        const names = NodeFS.readdirSync(secretsDirOf(baseDir));
+        assert.isFalse(names.some((name) => name.startsWith("dpop-proof-old")));
+        const kept = NodeFS.statSync(entryFileOf(baseDir, "dpop-proof-new"));
+        assert.approximately(kept.mtimeMs, hourAgo * 1000, 2000);
+      }),
+    );
   });
 
   describe("a joined machine", () => {

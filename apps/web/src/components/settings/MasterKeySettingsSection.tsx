@@ -3,14 +3,19 @@ import { useEffect, useState } from "react";
 
 import { usePrimarySessionState } from "../../environments/primary";
 import {
+  confirmMasterKeyBackup,
   downloadMasterKeyBackup,
   fetchMasterKeyStatus,
 } from "../../environments/primary/masterKey";
 import { fetchAccount } from "../../environments/primary/userAccounts";
 import { errorMessageOf } from "../../lib/errorMessage";
 import { Button } from "../ui/button";
+import { Input } from "../ui/input";
 import { emptyStepUp, StepUpFields, toStepUp } from "./AccountSettingsSection";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
+
+/** How long the browser keeps the download's URL: long enough for it to start saving. */
+const DOWNLOAD_URL_LIFETIME_MS = 60_000;
 
 /** Hands the backup to the browser as a file; the key is in no other place on this page. */
 function saveAsFile(text: string, keyId: string) {
@@ -19,19 +24,28 @@ function saveAsFile(text: string, keyId: string) {
   link.href = url;
   link.download = `t3-master-key-${keyId}.txt`;
   link.click();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), DOWNLOAD_URL_LIFETIME_MS);
 }
+
+type Stage =
+  | { readonly _tag: "idle" }
+  | {
+      readonly _tag: "step-up";
+      readonly account: AuthAccount;
+      readonly stepUp: ReturnType<typeof emptyStepUp>;
+    }
+  /** Downloaded; a backup only once the Owner types the start of the key from the saved file. */
+  | { readonly _tag: "confirm"; readonly keyId: string; readonly proof: string };
 
 /**
  * The Owner's master key: every secret the Hub stores is encrypted with it. Warns until this key
- * has a backup and downloads one after the strong factor (docs/internals/secrets.md).
+ * has a backup the Owner confirmed holding (docs/internals/secrets.md).
  */
 export function MasterKeySettingsSection() {
   const session = usePrimarySessionState();
   const isOwner = session.data?.authenticated === true && session.data.isOwner === true;
   const [status, setStatus] = useState<MasterKeyStatus | null>(null);
-  const [account, setAccount] = useState<AuthAccount | null>(null);
-  const [stepUp, setStepUp] = useState<ReturnType<typeof emptyStepUp> | null>(null);
+  const [stage, setStage] = useState<Stage>({ _tag: "idle" });
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -54,32 +68,36 @@ export function MasterKeySettingsSection() {
 
   if (!isOwner || (status === null && error === null)) return null;
 
-  const begin = async () => {
-    setError(null);
-    try {
-      const loaded = account ?? (await fetchAccount());
-      setAccount(loaded);
-      setStepUp(emptyStepUp(loaded));
-    } catch (cause) {
-      setError(errorMessageOf(cause));
-    }
-  };
-
-  const confirm = async () => {
-    if (account === null || stepUp === null) return;
+  const run = async (action: () => Promise<void>) => {
     setPending(true);
     setError(null);
     try {
-      const result = await downloadMasterKeyBackup(toStepUp(account, stepUp));
-      saveAsFile(result.key, result.status.keyId);
-      setStatus(result.status);
-      setStepUp(null);
+      await action();
     } catch (cause) {
       setError(errorMessageOf(cause));
     } finally {
       setPending(false);
     }
   };
+
+  const begin = () =>
+    run(async () => {
+      const account = await fetchAccount();
+      setStage({ _tag: "step-up", account, stepUp: emptyStepUp(account) });
+    });
+
+  const download = (account: AuthAccount, stepUp: ReturnType<typeof emptyStepUp>) =>
+    run(async () => {
+      const result = await downloadMasterKeyBackup(toStepUp(account, stepUp));
+      saveAsFile(result.key, result.keyId);
+      setStage({ _tag: "confirm", keyId: result.keyId, proof: "" });
+    });
+
+  const confirm = (keyId: string, proof: string) =>
+    run(async () => {
+      setStatus(await confirmMasterKeyBackup(keyId, proof.trim()));
+      setStage({ _tag: "idle" });
+    });
 
   const backedUp = status?.backedUpAt ?? null;
   return (
@@ -99,8 +117,9 @@ export function MasterKeySettingsSection() {
           )
         }
         control={
-          stepUp === null ? (
+          stage._tag === "idle" ? (
             <Button
+              disabled={pending}
               size="xs"
               variant={backedUp === null ? "default" : "outline"}
               onClick={() => void begin()}
@@ -110,21 +129,68 @@ export function MasterKeySettingsSection() {
           ) : null
         }
       />
-      {account !== null && stepUp !== null ? (
+      {stage._tag === "step-up" ? (
         <form
           className="mt-3 flex max-w-sm flex-col gap-2 px-4 pb-4"
           onSubmit={(event) => {
             event.preventDefault();
-            void confirm();
+            void download(stage.account, stage.stepUp);
           }}
         >
-          <StepUpFields account={account} disabled={pending} value={stepUp} onChange={setStepUp} />
+          <StepUpFields
+            account={stage.account}
+            disabled={pending}
+            value={stage.stepUp}
+            onChange={(stepUp) => setStage({ ...stage, stepUp })}
+          />
           <div className="flex gap-2">
             <Button disabled={pending} size="sm" type="submit">
               {pending ? "Downloading…" : "Download"}
             </Button>
-            <Button disabled={pending} size="sm" variant="ghost" onClick={() => setStepUp(null)}>
+            <Button
+              disabled={pending}
+              size="sm"
+              variant="ghost"
+              onClick={() => setStage({ _tag: "idle" })}
+            >
               Cancel
+            </Button>
+          </div>
+        </form>
+      ) : null}
+      {stage._tag === "confirm" ? (
+        <form
+          className="mt-3 flex max-w-sm flex-col gap-2 px-4 pb-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void confirm(stage.keyId, stage.proof);
+          }}
+        >
+          <label className="text-xs font-medium" htmlFor="master-key-proof">
+            To confirm you saved it, open the file and type the first 8 characters after{" "}
+            <code>t3-master-key-v1:</code>
+          </label>
+          <Input
+            id="master-key-proof"
+            autoComplete="off"
+            disabled={pending}
+            nativeInput
+            maxLength={8}
+            onChange={(event) => setStage({ ...stage, proof: event.currentTarget.value })}
+            spellCheck={false}
+            value={stage.proof}
+          />
+          <div className="flex gap-2">
+            <Button disabled={pending || stage.proof.trim().length !== 8} size="sm" type="submit">
+              Confirm backup
+            </Button>
+            <Button
+              disabled={pending}
+              size="sm"
+              variant="ghost"
+              onClick={() => setStage({ _tag: "idle" })}
+            >
+              Not now
             </Button>
           </div>
         </form>

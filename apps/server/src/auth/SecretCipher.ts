@@ -1,8 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off - AES-256-GCM, HKDF and the CSPRNG come from node:crypto.
 /**
  * The master key and the sealed format of every encrypted value (AES-256-GCM, an HKDF subkey per
- * purpose, a random nonce per seal, header + purpose + name as associated data). Pure; the format
- * and its reasons are in docs/internals/secrets.md.
+ * purpose, a random nonce per seal, header + purpose + name as associated data). Pure; which files
+ * are sealed is told by their name, never by their bytes. See docs/internals/secrets.md.
  */
 import * as NodeCrypto from "node:crypto";
 
@@ -10,17 +10,28 @@ const MASTER_KEY_BYTES = 32;
 const KEY_ID_BYTES = 8;
 const NONCE_BYTES = 12;
 const TAG_BYTES = 16;
-/** Starts with NUL: no text value starts so, which tells a sealed value from a stored plain one. */
 const MAGIC = Buffer.from([0x00, 0x54, 0x33, 0x53]);
 const FORMAT_V1 = 0x01;
-const HEADER_BYTES = MAGIC.length + 1 + KEY_ID_BYTES;
+/** Magic, format and key id: all a startup reads of an entry it does not rewrite. */
+export const HEADER_BYTES = MAGIC.length + 1 + KEY_ID_BYTES;
 const KEY_TEXT_PREFIX = "t3-master-key-v1:";
+/** How many characters of the key an Owner types back to show they saved the backup. */
+const PROOF_LENGTH = 8;
 
 /** What a sealed value is for: each gets its own subkey. */
-export type SealPurpose = "server-secret" | "key-check";
+export type SealPurpose = "server-secret" | "key-check" | "backup-record" | "secret-file";
 
 const hkdf = (key: Buffer, info: string, length: number) =>
   Buffer.from(NodeCrypto.hkdfSync("sha256", key, Buffer.alloc(0), info, length));
+
+/** The key characters of a backup's text (after `t3-master-key-v1:`), or undefined. */
+const encodedPart = (text: string) => {
+  const trimmed = text.trim();
+  return trimmed.startsWith(KEY_TEXT_PREFIX) ? trimmed.slice(KEY_TEXT_PREFIX.length) : undefined;
+};
+
+/** The first characters of a backup's key, which the Owner types back to confirm it. */
+export const backupProofOf = (text: string) => (encodedPart(text) ?? "").slice(0, PROOF_LENGTH);
 
 /**
  * A master key. Its bytes stay in a private field: logging, inspecting or serialising one shows
@@ -45,10 +56,8 @@ export class MasterKey {
 
   /** The key file's and the backup's text, or undefined when `text` is not one. */
   static parse(text: string): MasterKey | undefined {
-    const trimmed = text.trim();
-    if (!trimmed.startsWith(KEY_TEXT_PREFIX)) return undefined;
-    const encoded = trimmed.slice(KEY_TEXT_PREFIX.length);
-    if (!/^[A-Za-z0-9_-]{43}$/.test(encoded)) return undefined;
+    const encoded = encodedPart(text);
+    if (encoded === undefined || !/^[A-Za-z0-9_-]{43}$/.test(encoded)) return undefined;
     const bytes = Buffer.from(encoded, "base64url");
     return bytes.length === MASTER_KEY_BYTES ? new MasterKey(bytes) : undefined;
   }
@@ -56,6 +65,13 @@ export class MasterKey {
   /** The text written to the key file and handed out as a backup: the key itself. */
   exportText(): string {
     return `${KEY_TEXT_PREFIX}${this.#bytes.toString("base64url")}\n`;
+  }
+
+  /** Whether `proof` is this key's first characters, compared in constant time. */
+  matchesProof(proof: string): boolean {
+    const expected = Buffer.from(backupProofOf(this.exportText()));
+    const given = Buffer.from(proof);
+    return given.length === expected.length && NodeCrypto.timingSafeEqual(given, expected);
   }
 
   subkey(purpose: SealPurpose): Buffer {
@@ -99,19 +115,18 @@ export const seal = (
   return new Uint8Array(Buffer.concat([header, nonce, ciphertext, cipher.getAuthTag()]));
 };
 
-/** What a stored value is: in clear (from before encryption), sealed by a key, or unreadable. */
-export type StoredForm =
-  | { readonly _tag: "plain" }
+/** The header of a value stored as sealed: the key that sealed it, or a format not known here. */
+export type SealedHeader =
   | { readonly _tag: "sealed"; readonly keyId: string }
-  /** Starts like a sealed value but of a format this version does not know: never plain. */
   | { readonly _tag: "unknown-format" };
 
-export const classify = (stored: Uint8Array): StoredForm => {
+export const parseHeader = (stored: Uint8Array): SealedHeader => {
   const bytes = Buffer.from(stored.buffer, stored.byteOffset, stored.byteLength);
-  if (bytes.length < MAGIC.length || !bytes.subarray(0, MAGIC.length).equals(MAGIC)) {
-    return { _tag: "plain" };
-  }
-  if (bytes[MAGIC.length] !== FORMAT_V1 || bytes.length < HEADER_BYTES + NONCE_BYTES + TAG_BYTES) {
+  if (
+    bytes.length < HEADER_BYTES ||
+    !bytes.subarray(0, MAGIC.length).equals(MAGIC) ||
+    bytes[MAGIC.length] !== FORMAT_V1
+  ) {
     return { _tag: "unknown-format" };
   }
   return {
@@ -122,8 +137,8 @@ export const classify = (stored: Uint8Array): StoredForm => {
 
 export type OpenResult =
   | { readonly _tag: "opened"; readonly plaintext: Uint8Array }
-  /** Not sealed: a value in clear, or a format this version does not know. */
-  | { readonly _tag: "not-sealed" }
+  /** Not a sealed value of a format this version knows. */
+  | { readonly _tag: "unknown-format" }
   /** Sealed by a key not among those given. */
   | { readonly _tag: "unknown-key"; readonly keyId: string }
   /** The key matches but the value does not open: altered, or stored under another name. */
@@ -135,12 +150,12 @@ export const open = (
   name: string,
   stored: Uint8Array,
 ): OpenResult => {
-  const form = classify(stored);
-  if (form._tag !== "sealed") return { _tag: "not-sealed" };
-  const key = keys.find((candidate) => candidate.id === form.keyId);
-  if (key === undefined) return { _tag: "unknown-key", keyId: form.keyId };
+  const header = parseHeader(stored);
+  if (header._tag !== "sealed") return header;
+  const key = keys.find((candidate) => candidate.id === header.keyId);
+  if (key === undefined) return { _tag: "unknown-key", keyId: header.keyId };
   const bytes = Buffer.from(stored.buffer, stored.byteOffset, stored.byteLength);
-  const header = bytes.subarray(0, HEADER_BYTES);
+  if (bytes.length < HEADER_BYTES + NONCE_BYTES + TAG_BYTES) return { _tag: "rejected" };
   const nonce = bytes.subarray(HEADER_BYTES, HEADER_BYTES + NONCE_BYTES);
   const tag = bytes.subarray(bytes.length - TAG_BYTES);
   const ciphertext = bytes.subarray(HEADER_BYTES + NONCE_BYTES, bytes.length - TAG_BYTES);
@@ -148,7 +163,7 @@ export const open = (
     const decipher = NodeCrypto.createDecipheriv("aes-256-gcm", key.subkey(purpose), nonce, {
       authTagLength: TAG_BYTES,
     });
-    decipher.setAAD(associatedData(header, purpose, name));
+    decipher.setAAD(associatedData(bytes.subarray(0, HEADER_BYTES), purpose, name));
     decipher.setAuthTag(tag);
     const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     return { _tag: "opened", plaintext: new Uint8Array(plaintext) };

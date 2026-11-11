@@ -32,7 +32,7 @@ const SECRET_REF_PREFIX = "secret-ref:";
 const storeName = (ref: SecretRef) => `secret-request-${ref.slice(SECRET_REF_PREFIX.length)}`;
 const REF_PATTERN = /^secret-ref:[0-9a-f]{32}$/;
 const SECRET_REF_TTL_MS = 24 * 60 * 60 * 1000;
-const STORE_NAME_PATTERN = /^(secret-request-[0-9a-f]{32})\.bin$/;
+const STORE_NAME_PATTERN = /^(secret-request-[0-9a-f]{32})\.(bin|sealed)$/;
 const FILE_NAME_PATTERN = /^[0-9a-f]{32}(\.partial)?$/;
 
 const StoredSecret = Schema.fromJsonString(

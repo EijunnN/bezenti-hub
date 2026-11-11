@@ -386,7 +386,17 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     mode === "web" && devUrl !== undefined ? yield* DevAuthTokenConfig : undefined;
   const trustedProxies = yield* TrustedProxiesConfig;
   const publicUrl = yield* PublicUrlConfig;
-  const masterKeyFile = yield* MasterKeyFileConfig;
+  const masterKeyFileSetting = yield* MasterKeyFileConfig;
+  const masterKeyFile =
+    masterKeyFileSetting === undefined
+      ? undefined
+      : yield* expandHomePath(masterKeyFileSetting.trim());
+  // Relative to what? The server's cwd and a CLI's differ: only an absolute path names one file.
+  if (masterKeyFile !== undefined && !path.isAbsolute(masterKeyFile)) {
+    return yield* Effect.fail(
+      invalidConfig("T3CODE_MASTER_KEY_FILE must be an absolute path (or start with ~)."),
+    );
+  }
   const explicitBaseDir = resolveOptionPrecedence(
     normalizedFlags.baseDir,
     Option.fromUndefinedOr(env.t3Home),
@@ -609,9 +619,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     tailscaleServeEnabled: tailscaleServeEnabled && joinedHub === undefined,
     tailscaleServePort,
     ...(joinedHub === undefined ? {} : { joinedHub }),
-    ...(masterKeyFile === undefined
-      ? {}
-      : { masterKeyFile: path.resolve(yield* expandHomePath(masterKeyFile.trim())) }),
+    ...(masterKeyFile === undefined ? {} : { masterKeyFile: path.normalize(masterKeyFile) }),
   };
 
   return config;

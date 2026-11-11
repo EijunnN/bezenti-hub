@@ -6,13 +6,14 @@ import * as Path from "effect/Path";
 
 import * as ServerConfig from "../config.ts";
 import { isWithinRoot } from "../workspace/KnownWorkspaces.ts";
-import { masterKeyPath } from "./MasterKeyFile.ts";
+import { keyFileNamePattern, masterKeyPath } from "./MasterKeyFile.ts";
 
 /** Builds a check for the server's own state files, which client file reads do not serve. */
 export const makeIsServerInternalPath = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const path = yield* Path.Path;
   const keyFile = yield* masterKeyPath();
+  const keyNames = keyFileNamePattern(path.basename(keyFile));
   // Native realpath returns the on-disk letter case.
   const realPath = (value: string) =>
     Effect.promise(() => NodeFSP.realpath(value).catch(() => path.resolve(value)));
@@ -26,12 +27,10 @@ export const makeIsServerInternalPath = Effect.gen(function* () {
       ],
       { concurrency: "unbounded" },
     );
-    const keyName = path.basename(keyFile);
-    const name = path.basename(file);
     return (
       isWithinRoot(path, file, secretsDir) ||
-      // The master key and its `.next`, `.previous` and `.replaced-*` siblings.
-      (path.dirname(file) === keyDir && (name === keyName || name.startsWith(`${keyName}.`))) ||
+      // The master key, its `.next`, `.previous`, `.replaced-*` siblings and their temp files.
+      (path.dirname(file) === keyDir && keyNames.test(path.basename(file))) ||
       (path.dirname(file) === stateDir && path.basename(file).includes(".sqlite")) ||
       // macOS does not resolve `/dev/fd/N` to the open file's path.
       isWithinRoot(path, file, "/dev/fd")

@@ -2460,7 +2460,8 @@ export const layer = Layer.effect(EnvironmentAuth, make).pipe(
   Layer.provideMerge(EnvironmentAuthPolicy.layer),
 );
 
-const layerStorage = Layer.mergeAll(ServerSecretStore.layer, SqlitePersistence.layerConfig);
+// Commands beside the Hub (`t3 ...`): the store opens read-only while a Hub runs.
+const layerStorage = Layer.mergeAll(ServerSecretStore.layerClient, SqlitePersistence.layerConfig);
 
 export const layerRuntime = layer.pipe(
   Layer.provideMerge(ManagedPolicy.layer),
