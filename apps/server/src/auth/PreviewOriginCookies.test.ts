@@ -199,6 +199,14 @@ describe("a page on a preview's own origin cannot sign a browser in to the Hub",
           [],
         );
         assert.equal((yield* server.request("/api/spaces", { cookie: owner })).status, 200);
+        // The same from a `no-cors` fetch with `referrerPolicy: "no-referrer"`: `Origin: null`, no Referer.
+        const opaque = yield* server.request("/api/auth/browser-session", {
+          body: { credential: pairing.body.credential },
+          cookie: owner,
+          headers: { origin: "null", "sec-fetch-site": "same-site", "sec-fetch-mode": "no-cors" },
+        });
+        assert.equal(opaque.status, 400);
+        assert.equal((yield* server.request("/api/spaces", { cookie: owner })).status, 200);
         // Signing in by password from there, with the victim's cookie: refused before anything.
         const invitation = yield* server.request("/api/spaces/organizations", {
           body: { name: "Acme" },

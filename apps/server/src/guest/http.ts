@@ -23,6 +23,7 @@ import * as ByteSize from "effect/ByteSize";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { HttpRouter, HttpServerRequest, HttpServerResponse, Multipart } from "effect/http";
@@ -31,11 +32,14 @@ import * as HttpIncomingMessage from "effect/http/HttpIncomingMessage";
 import { htmlRenderFileName } from "@t3tools/shared/htmlRender";
 
 import { assetFileResponse, downloadContentDisposition } from "../http.ts";
+import * as ServerConfig from "../config.ts";
 import {
+  crossesFromPreviewOrigin,
   fromPreviewOrigin,
   previewOriginSetting,
   readHubCookie,
 } from "../preview/PreviewOrigin.ts";
+import { requestUrl } from "../requestUrl.ts";
 import type { GuestUpload } from "./guestAttachments.ts";
 import { GuestShareAccessError, GuestShareService } from "./GuestShareService.ts";
 
@@ -84,17 +88,76 @@ const badRequest = HttpServerResponse.json(
 );
 
 /**
- * The guest session cookie for `shareId`, read as every Hub cookie is (`readHubCookie`): never
- * from a page on a preview's own origin, nor a bare-named one a preview could have planted.
+ * The guest session cookie for `shareId` (`readHubCookie`): never from a page on a preview's own
+ * origin. The bare-named one a guest from before holds still counts (the session check moves it to
+ * `__Host-`): one a preview planted could only carry a token the Hub itself gave some guest.
  */
 export const guestSessionCookie = (
   request: HttpServerRequest.HttpServerRequest,
   shareId: string | null,
 ) =>
   Effect.map(previewOriginSetting, (previewOrigin) =>
-    shareId === null
+    shareId === null || crossesFromPreviewOrigin(previewOrigin, request.headers)
       ? ""
-      : (readHubCookie(request, guestSessionCookieName(shareId), previewOrigin) ?? ""),
+      : (readHubCookie(request, guestSessionCookieName(shareId), undefined) ?? ""),
+  );
+
+/**
+ * A guest's POST (redeem, message) only from the Hub's own page: its exact Origin (never `null`,
+ * which a `no-cors` post from any page sends), never a preview's; a redemption only as JSON, which
+ * no `no-cors` request can send. The guest cookie is `SameSite=Strict`, but a preview is same-site.
+ */
+export const guestPostAllowed = Effect.fn("guestPostAllowed")(function* (
+  request: HttpServerRequest.HttpServerRequest,
+  options: { readonly json: boolean },
+) {
+  {
+    if (
+      yield* fromPreviewOrigin.pipe(
+        Effect.provideService(HttpServerRequest.HttpServerRequest, request),
+      )
+    ) {
+      return false;
+    }
+    const config = Option.getOrUndefined(yield* Effect.serviceOption(ServerConfig.ServerConfig));
+    const origin = request.headers.origin;
+    const own = Option.map(requestUrl(request), (url) => url.origin);
+    const hubOrigins = [
+      Option.getOrUndefined(own),
+      config?.publicUrl?.origin,
+      config?.devUrl?.origin,
+    ].filter((value): value is string => value !== undefined);
+    if (origin === undefined || !hubOrigins.includes(origin)) return false;
+    const contentType = (request.headers["content-type"] ?? "").split(";")[0]?.trim().toLowerCase();
+    return !options.json || contentType === "application/json";
+  }
+});
+
+/**
+ * The guest cookie for `shareId` on a response: `__Host-` (so on `/`), which no other host, a
+ * preview subdomain included, can set or shadow; the bare one from before is expired with it.
+ */
+const withGuestCookie = (
+  response: HttpServerResponse.HttpServerResponse,
+  shareId: string,
+  token: string,
+) =>
+  response.pipe(
+    HttpServerResponse.setCookie(`__Host-${guestSessionCookieName(shareId)}`, token, {
+      httpOnly: true,
+      secure: true,
+      sameSite: "strict",
+      path: "/",
+      maxAge: Duration.millis(GUEST_SHARE_TTL_MS),
+    }),
+    Effect.flatMap(
+      HttpServerResponse.expireCookie(guestSessionCookieName(shareId), {
+        httpOnly: true,
+        secure: true,
+        sameSite: "strict",
+        path: GUEST_ROUTE_PREFIX,
+      }),
+    ),
   );
 
 const requestedShareId = (request: HttpServerRequest.HttpServerRequest) =>
@@ -157,31 +220,19 @@ const redeemRoute = HttpRouter.add(
   "POST",
   `${GUEST_ROUTE_PREFIX}/redeem`,
   Effect.gen(function* () {
-    // A page on a preview's own origin never puts a guest session in this browser.
-    if (yield* fromPreviewOrigin) return yield* badRequest;
+    // Only the Hub's own page redeems (never a preview's): a guest session in this browser.
+    if (!(yield* guestPostAllowed(yield* HttpServerRequest.HttpServerRequest, { json: true }))) {
+      return yield* badRequest;
+    }
     const body = yield* readJson.pipe(Effect.flatMap(decodeRedeem), Effect.option);
     if (body._tag === "None") return yield* badRequest;
     const guestShares = yield* GuestShareService;
     return yield* guestShares.redeem(body.value).pipe(
       Effect.flatMap(({ token, shareId }) =>
-        // `__Host-` (so on `/`): no other host, a preview subdomain included, can set or shadow it.
-        // The bare one from before is expired with it.
-        HttpServerResponse.empty({ status: 204, headers: NO_STORE }).pipe(
-          HttpServerResponse.setCookie(`__Host-${guestSessionCookieName(shareId)}`, token, {
-            httpOnly: true,
-            secure: true,
-            sameSite: "strict",
-            path: "/",
-            maxAge: Duration.millis(GUEST_SHARE_TTL_MS),
-          }),
-          Effect.flatMap(
-            HttpServerResponse.expireCookie(guestSessionCookieName(shareId), {
-              httpOnly: true,
-              secure: true,
-              sameSite: "strict",
-              path: GUEST_ROUTE_PREFIX,
-            }),
-          ),
+        withGuestCookie(
+          HttpServerResponse.empty({ status: 204, headers: NO_STORE }),
+          shareId,
+          token,
         ),
       ),
       Effect.catchTags({ GuestShareAccessError: errorResponse }),
@@ -240,6 +291,9 @@ const submitRoute = HttpRouter.add(
   `${GUEST_ROUTE_PREFIX}/messages`,
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest;
+    if (!(yield* guestPostAllowed(request, { json: false }))) {
+      return yield* errorResponse(new GuestShareAccessError({ reason: "invalid" }));
+    }
     const guestShares = yield* GuestShareService;
     // The session is checked before the body is read, so only a guest can make the server parse
     // and store up to 10 MB.
@@ -275,12 +329,20 @@ const sessionRoute = HttpRouter.add(
   `${GUEST_ROUTE_PREFIX}/session`,
   Effect.gen(function* () {
     const guestShares = yield* GuestShareService;
-    return yield* guestShares
-      .check(yield* sessionToken)
-      .pipe(
-        Effect.as(HttpServerResponse.empty({ status: 204, headers: NO_STORE })),
-        Effect.catchTags({ GuestShareAccessError: errorResponse }),
-      );
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const shareId = requestedShareId(request);
+    const token = yield* sessionToken;
+    // Each check re-sends the cookie as `__Host-`, so a guest from before moves over.
+    return yield* guestShares.check(token).pipe(
+      Effect.flatMap(() =>
+        withGuestCookie(
+          HttpServerResponse.empty({ status: 204, headers: NO_STORE }),
+          shareId ?? "",
+          token,
+        ),
+      ),
+      Effect.catchTags({ GuestShareAccessError: errorResponse }),
+    );
   }),
 );
 

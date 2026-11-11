@@ -107,6 +107,14 @@ describe("a host under the preview zone", () => {
     const page = `https://${id}.preview.example.com`;
     assert.isTrue(crossesFromPreviewOrigin(pattern, { origin: page }));
     assert.isTrue(crossesFromPreviewOrigin(pattern, { referer: `${page}/src/main.ts` }));
+    // `Origin: null` from another site or a sibling (a `no-cors` fetch with `no-referrer`): no
+    // way to tell it from a preview page, so it is one.
+    assert.isTrue(
+      crossesFromPreviewOrigin(pattern, { origin: "null", "sec-fetch-site": "same-site" }),
+    );
+    assert.isTrue(
+      crossesFromPreviewOrigin(pattern, { origin: "null", "sec-fetch-site": "cross-site" }),
+    );
     // A same-site caller that names neither (the dev web app's `<img>`), the Hub's own pages, a
     // top-level link, and other sites' requests are not.
     assert.isFalse(

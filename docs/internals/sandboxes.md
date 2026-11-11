@@ -654,7 +654,9 @@ startup line saying so. Parsing and matching live in
   http://localhost:<port>`, never the Hub's credentials or client addresses. On its own origin the
   page's own cookies (`t3_session…` ones included: the Hub's are host-only and never reach a
   preview host, so these are a previewed app's, T3 Code's own among them) and its own
-  `Authorization` pass both ways, minus `__Host-t3_preview` alone. The dev server's `Set-Cookie`
+  `Authorization` pass both ways, minus `__Host-t3_preview` alone and an `Authorization` whose scheme
+  a browser attaches by itself (`Basic`, `Digest`, `Negotiate`, `NTLM`: HTTP auth, proxy or SSO
+  credentials for other services, which the dev server, running repo code, must not see). The dev server's `Set-Cookie`
   loses any `Domain` (host-only, so no cookie reaches the Hub's domain or a sibling preview), and
   one naming the preview's cookie is dropped. Its own `Content-Security-Policy`, `Referrer-Policy`
   and service workers stand. `Clear-Site-Data` is dropped on every origin (browsers apply
@@ -672,7 +674,9 @@ startup line saying so. Parsing and matching live in
   confusion), and a wildcard cannot match the Hub's own host.
 - **The Hub's cookie doors.** A subdomain of the Hub's own domain is same-site, so `SameSite`
   does not keep the Hub's cookie from its requests. `crossesFromPreviewOrigin` is the one rule: a
-  request whose `Origin` or `Referer` is in the zone came from a preview page. Every Hub cookie
+  request whose `Origin` or `Referer` is in the zone came from a preview page, and so does one that
+  hides both (`Origin: null` with `Sec-Fetch-Site: same-site` or `cross-site`, as a `no-cors` fetch
+  with `referrerPolicy: "no-referrer"` sends). Every Hub cookie
   (session, legacy, dev token, guest) is read in one place, `readHubCookie`: none for such a
   request, `__Host-<name>` first, and a bare name only where no preview could have planted it
   (previews off, or plain HTTP). So EnvironmentAuth (the HTTP API, `/ws`, OTLP, the device hub, the
@@ -681,7 +685,9 @@ startup line saying so. Parsing and matching live in
   one. A preview page signs nobody in: every sign-in (`startUserBrowserSession`: password, TOTP,
   recovery code, passkey, reset, Owner registration, Invitations) and pairing redemption refuse it
   before issuing anything, and no door sets or clears a Hub or guest cookie for it (login CSRF,
-  forced sign-out). Not caught: a same-site embed naming neither header (an `<img>` with
+  forced sign-out). A guest's POSTs (redeem, messages) also need the Hub's own exact Origin (its
+  request origin, `T3CODE_PUBLIC_URL` or the dev web origin), and a redemption a JSON body, which no
+  `no-cors` request can carry. Not caught: a same-site embed naming neither header (an `<img>` with
   `referrerpolicy="no-referrer"`): such a GET changes nothing on the Hub and its answer is unreadable
   there, while the dev web app's legitimate same-site images keep working. With the setting on, the
   Hub's HTML is served with `frame-ancestors 'self'`, so a preview cannot frame it. `DoorRules`
@@ -692,7 +698,9 @@ startup line saying so. Parsing and matching live in
   take no cookie.
 - **Cookie tossing.** A preview page can set a cookie with `Domain=<the Hub's domain>` for the
   Hub. Over HTTPS the Hub's session and dev-token cookies are `__Host-<name>`, and guest cookies
-  always are (on `/`, so they can be): browsers accept those only from the Hub's own host,
+  always are (on `/`, so they can be; a guest's bare cookie from before still counts off a preview
+  page and moves to `__Host-` on the next session check, since a planted one could only carry a
+  token the Hub gave some guest): browsers accept those only from the Hub's own host,
   `Secure`, on `/`, without `Domain`; see
   [environment-auth](environment-auth.md#the-session-cookie). Each sets alongside an expiry of its
   bare name, so sessions and guests from before move over. With the setting on, an HTTPS request's

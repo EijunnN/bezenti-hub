@@ -457,6 +457,18 @@ describe("Hub con Environments: previews on their own origin", () => {
         const reached = dev.seen.at(-1)!;
         assert.equal(reached.headers.cookie, "app=1; t3_session_app=own");
         assert.equal(reached.headers.authorization, "Bearer page-token");
+        // What a browser attaches by itself (HTTP auth, SSO) never reaches the dev server.
+        for (const ambient of [
+          "Basic dXNlcjpwYXNz",
+          "Negotiate YIIB",
+          "NTLM TlRMTVNT",
+          'Digest username="u"',
+        ]) {
+          yield* request(hub, host, "/docs/", {
+            headers: { cookie: preview, authorization: ambient },
+          });
+          assert.isUndefined(dev.seen.at(-1)!.headers.authorization, ambient);
+        }
         // A dev server never clears the Hub's session or other previews' cookies.
         assert.isUndefined(page.headers["clear-site-data"]);
         assert.equal(reached.headers.host, `localhost:${dev.port}`);

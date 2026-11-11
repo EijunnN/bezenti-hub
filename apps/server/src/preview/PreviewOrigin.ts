@@ -126,17 +126,19 @@ const headerInZone = (pattern: PreviewOriginPattern, value: string | undefined) 
 };
 
 /**
- * Whether a request came from a page on a preview origin: its `Origin` or `Referer` is in the zone.
- * The one rule for every door that takes a Hub cookie. A same-site embed that names neither (an
- * `<img>` with `referrerpolicy="no-referrer"`) is not caught: such a GET changes nothing on the Hub
- * and its answer is unreadable from there, and the Hub's pages refuse frames (`frame-ancestors`).
+ * Whether a request may come from a page on a preview origin: its `Origin` or `Referer` is in the
+ * zone, or it hides both (`Origin: null` from another site, as a `no-cors` fetch with no referrer
+ * sends). A same-site GET embed naming neither changes nothing and is unreadable; frames are refused.
  */
 export const crossesFromPreviewOrigin = (
   pattern: PreviewOriginPattern | undefined,
   headers: Readonly<Record<string, string | undefined>>,
 ): boolean =>
   pattern !== undefined &&
-  (headerInZone(pattern, headers.origin) || headerInZone(pattern, headers.referer));
+  (headerInZone(pattern, headers.origin) ||
+    headerInZone(pattern, headers.referer) ||
+    (headers.origin === "null" &&
+      (headers["sec-fetch-site"] === "same-site" || headers["sec-fetch-site"] === "cross-site")));
 
 const HOST_PREFIX = "__Host-";
 

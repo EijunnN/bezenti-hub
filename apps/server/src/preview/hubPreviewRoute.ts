@@ -180,6 +180,13 @@ interface RelayPolicy {
   };
 }
 
+/**
+ * Schemes a browser attaches by itself (HTTP auth, proxy or SSO: Kerberos, NTLM), never the page:
+ * they could carry the User's credentials for other services to the dev server, which runs repo
+ * code. A page's own `Bearer` and other schemes pass.
+ */
+const BROWSER_AMBIENT_AUTH_SCHEME = /^\s*(basic|digest|negotiate|ntlm)\b/i;
+
 const requestHeaders = (
   headers: Readonly<Record<string, string | undefined>>,
   port: number,
@@ -191,7 +198,11 @@ const requestHeaders = (
     if (value === undefined) continue;
     if (
       DROPPED_REQUEST_HEADERS.has(lower) &&
-      !(lower === "authorization" && policy.forwardAuthorization)
+      !(
+        lower === "authorization" &&
+        policy.forwardAuthorization &&
+        !BROWSER_AMBIENT_AUTH_SCHEME.test(value)
+      )
     ) {
       continue;
     }

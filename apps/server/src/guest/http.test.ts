@@ -8,7 +8,7 @@ import * as Result from "effect/Result";
 
 import * as ServerConfig from "../config.ts";
 import { parsePreviewOrigin } from "../preview/PreviewOrigin.ts";
-import { guestSessionCookie, readSubmission } from "./http.ts";
+import { guestPostAllowed, guestSessionCookie, readSubmission } from "./http.ts";
 
 it.effect("keeps a JSON file a guest attaches as a file, not a form field", () =>
   Effect.gen(function* () {
@@ -33,7 +33,7 @@ it.effect("keeps a JSON file a guest attaches as a file, not a form field", () =
 );
 
 it.effect(
-  "reads the guest cookie as `__Host-`: none from a preview page, no bare one a preview could plant",
+  "reads the guest cookie, `__Host-` first: none from a preview page, the bare one from before",
   () =>
     Effect.gen(function* () {
       const parsed = parsePreviewOrigin("https://*.preview.example.test");
@@ -57,8 +57,13 @@ it.effect(
       const own = { origin: "https://hub.example.test" };
       const hostOnly = `__Host-${name}=guest-token`;
       assert.equal(yield* read(hostOnly, own), "guest-token");
-      // What a preview subdomain can set for the Hub's domain: a bare-named guest cookie.
-      assert.equal(yield* read(`${name}=attacker-guest`, own), "");
+      // A guest from before, with the bare-named cookie, stays in (the session check moves it to
+      // `__Host-`); one a preview planted could only carry a token the Hub gave some guest.
+      assert.equal(yield* read(`${name}=guest-token`, own), "guest-token");
+      assert.equal(
+        yield* read(`${name}=guest-token`, { origin: "null", "sec-fetch-site": "same-site" }),
+        "",
+      );
       // A preview page's own requests carry none at all.
       const page = "https://abc.preview.example.test";
       assert.equal(yield* read(hostOnly, { origin: page }), "");
@@ -66,4 +71,33 @@ it.effect(
       // Without previews on their own origin, a guest from before keeps their bare cookie.
       assert.equal(yield* read(`${name}=guest-token`, own, false), "guest-token");
     }),
+);
+
+it.effect("takes a guest's POST only from the Hub's own page, and a redemption only as JSON", () =>
+  Effect.gen(function* () {
+    const allowed = (headers: Record<string, string>, json: boolean) =>
+      guestPostAllowed(
+        HttpServerRequest.fromWeb(
+          new Request("https://hub.example.test/api/guest/messages?share=share-1", {
+            method: "POST",
+            headers: { host: "hub.example.test", ...headers },
+          }),
+        ).modify({ protocol: "https" }),
+        { json },
+      ).pipe(
+        Effect.provideService(ServerConfig.ServerConfig, {
+          publicUrl: new URL("https://hub.example.test"),
+          devUrl: undefined,
+        } as unknown as ServerConfig.ServerConfig["Service"]),
+      );
+    const own = { origin: "https://hub.example.test" };
+    assert.isTrue(yield* allowed(own, false));
+    assert.isTrue(yield* allowed({ ...own, "content-type": "application/json" }, true));
+    // A `no-cors` post from any page (`Origin: null`), one naming no Origin, another site's.
+    assert.isFalse(yield* allowed({ origin: "null" }, false));
+    assert.isFalse(yield* allowed({}, false));
+    assert.isFalse(yield* allowed({ origin: "https://abc.preview.example.test" }, false));
+    // A redemption as `text/plain`, the content type a `no-cors` request may carry.
+    assert.isFalse(yield* allowed({ ...own, "content-type": "text/plain" }, true));
+  }),
 );
