@@ -10,6 +10,7 @@ import {
   type ProjectId,
   type ProjectMovePlan,
   type ProjectMovePlanThread,
+  type ProjectMoveResult,
   type SpaceId,
   type SpaceSummary,
 } from "@t3tools/contracts";
@@ -53,6 +54,16 @@ export type PlannedMove =
   | { readonly status: "planning" }
   | { readonly status: "ready"; readonly plan: ProjectMovePlan }
   | { readonly status: "failed"; readonly message: string };
+
+/** The Hub refused the move because a Thread runs (409). */
+const isConflict = (cause: unknown): boolean => {
+  const tagOf = (value: unknown) =>
+    typeof value === "object" && value !== null && "_tag" in value ? value._tag : undefined;
+  return (
+    tagOf(cause) === "EnvironmentHttpConflictError" ||
+    tagOf((cause as { readonly cause?: unknown } | null)?.cause) === "EnvironmentHttpConflictError"
+  );
+};
 
 /** Asks the Hub what moving the Project to `spaceId` would do, never failing. */
 export const loadProjectMovePlan = (projectId: ProjectId, spaceId: SpaceId): Promise<PlannedMove> =>
@@ -106,29 +117,41 @@ export function ProjectMoveDialog({
 
   const confirm = async (plan: ProjectMovePlan) => {
     setStep({ status: "moving", plan });
+    let released: ProjectMoveResult["released"];
     try {
-      await runPrimaryHttp(
-        PrimaryEnvironmentHttpClient.pipe(
-          Effect.flatMap((client) =>
-            moveProject(client, {
-              commandId: CommandId.make(`project-move:${randomUUID()}`),
-              projectId,
-              spaceId: destination.id,
-              stopThreads: plan.running.length > 0,
-            }),
+      released = (
+        await runPrimaryHttp(
+          PrimaryEnvironmentHttpClient.pipe(
+            Effect.flatMap((client) =>
+              moveProject(client, {
+                commandId: CommandId.make(`project-move:${randomUUID()}`),
+                projectId,
+                spaceId: destination.id,
+                stopThreads: plan.running.length > 0,
+              }),
+            ),
           ),
-        ),
-      );
+        )
+      ).released;
     } catch (cause) {
+      // A Thread started running since the plan: show the plan as it is now, to confirm again.
+      if (isConflict(cause)) {
+        const fresh = await loadProjectMovePlan(projectId, destination.id);
+        if (fresh.status === "ready") {
+          setStep({ status: "confirm", plan: fresh.plan });
+          return;
+        }
+      }
       setStep({ status: "failed", plan, message: errorMessageOf(cause, "Try again.") });
       return;
     }
     toastManager.add({ type: "success", title: `Moved to ${destination.name}` });
-    if (plan.needsEnvironment.length === 0) {
+    if (released.length === 0) {
       onClose();
       return;
     }
-    setStep({ status: "moved", plan });
+    // What the move actually released, not what the plan expected.
+    setStep({ status: "moved", plan: { ...plan, running: [], needsEnvironment: released } });
   };
 
   const moveAll = async (plan: ProjectMovePlan) => {

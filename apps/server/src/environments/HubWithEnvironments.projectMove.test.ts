@@ -270,6 +270,37 @@ const awaitThread = Effect.fn(function* (
   return Option.getOrThrow(reached);
 });
 
+/**
+ * A push from a machine whose ref updates have not all arrived, so the Hub waits for the rest;
+ * resolves with its answer (status or error), returned once the route holds the Project's access.
+ */
+const pushInFlight = Effect.fn(function* (hub: Hub, projectId: ProjectId, credential: string) {
+  const url = new URL(
+    `${HubRepository.hubRepositoryUrl(hub.server.url, { projectId })}/git-receive-pack`,
+  );
+  const answered = yield* Deferred.make<number | string>();
+  const request = NodeHttp.request(url, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${credential}`,
+      "content-type": "application/x-git-receive-pack-request",
+      "transfer-encoding": "chunked",
+    },
+  });
+  request.on("response", (response) => {
+    response.resume();
+    response.on("end", () =>
+      Deferred.doneUnsafe(answered, Effect.succeed(response.statusCode ?? 0)),
+    );
+    response.on("error", (error) => Deferred.doneUnsafe(answered, Effect.succeed(String(error))));
+  });
+  request.on("error", (error) => Deferred.doneUnsafe(answered, Effect.succeed(String(error))));
+  request.write("00");
+  yield* Effect.addFinalizer(() => Effect.sync(() => request.destroy()));
+  yield* hub.service(SpaceDirectory.SpaceDirectory).projectAccessHeld(projectId);
+  return answered;
+});
+
 const RUNNING = new Set(["preparing", "starting", "running", "waiting"]);
 
 describe("Hub con Environments: a Project moves to another Space", () => {
@@ -301,9 +332,12 @@ describe("Hub con Environments: a Project moves to another Space", () => {
         };
         assert.deepEqual(plan.body.running, [entry]);
         assert.deepEqual(plan.body.needsEnvironment, [entry]);
-        // Not confirmed: a running Thread refuses it, and nothing moved.
+        // Not confirmed: a running Thread refuses it, nothing moved, and what Acme's Sandbox was
+        // doing in the repository goes on.
+        const inFlight = yield* pushInFlight(hub, projectId, acmeSandbox.credential);
         const refused = yield* moveProject(hub, projectId, globex);
         assert.equal(refused.status, 409, JSON.stringify(refused.body));
+        assert.isTrue(Option.isNone(yield* Deferred.poll(inFlight)));
         assert.equal(
           (yield* threadOf(hub, threadId)).thread.activeEnvironmentId,
           sandboxEnvironmentIdOf(acme),
@@ -312,6 +346,8 @@ describe("Hub con Environments: a Project moves to another Space", () => {
         const moved = yield* moveProject(hub, projectId, globex, { stopThreads: true });
         assert.equal(moved.status, 200, JSON.stringify(moved.body));
         assert.equal(moved.body.spaceId, globex);
+        // Once it went ahead, that request ends.
+        assert.notEqual(yield* Deferred.await(inFlight), 200);
         const after = yield* threadOf(hub, threadId);
         assert.equal(after.thread.spaceId, globex);
         // «Needs an environment»: its machine does not serve Globex.
@@ -591,31 +627,7 @@ describe("Hub con Environments: a Project moves to another Space", () => {
       });
       yield* startSandbox(hub, acme);
       const sandbox = yield* hub.sandboxOf(acme);
-      // A push whose ref updates have not all arrived: the Hub waits for the rest.
-      const url = new URL(
-        `${HubRepository.hubRepositoryUrl(hub.server.url, { projectId })}/git-receive-pack`,
-      );
-      const answered = yield* Deferred.make<number | string>();
-      const request = NodeHttp.request(url, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${sandbox.credential}`,
-          "content-type": "application/x-git-receive-pack-request",
-          "transfer-encoding": "chunked",
-        },
-      });
-      request.on("response", (response) => {
-        response.resume();
-        response.on("end", () =>
-          Deferred.doneUnsafe(answered, Effect.succeed(response.statusCode ?? 0)),
-        );
-        response.on("error", (error) =>
-          Deferred.doneUnsafe(answered, Effect.succeed(String(error))),
-        );
-      });
-      request.on("error", (error) => Deferred.doneUnsafe(answered, Effect.succeed(String(error))));
-      request.write("00");
-      yield* Effect.addFinalizer(() => Effect.sync(() => request.destroy()));
+      const answered = yield* pushInFlight(hub, projectId, sandbox.credential);
       // It is in flight: the route holds the Project's access, and has not answered.
       yield* hub.service(SpaceDirectory.SpaceDirectory).projectAccessHeld(projectId);
       assert.isTrue(Option.isNone(yield* Deferred.poll(answered)));

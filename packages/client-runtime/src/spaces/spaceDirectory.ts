@@ -35,8 +35,8 @@ export const deleteOrganization = (client: EnvironmentHttpClient, spaceId: Space
   client.spaces.deleteOrganization({ headers: {}, params: { spaceId } });
 
 /**
- * Moves a Project with all its Threads to another Space. A running Thread refuses it unless
- * `stopThreads`, which the mover confirms after seeing `projectMovePlan`.
+ * Moves a Project with all its Threads to another Space, answering the Threads it released. A
+ * running Thread refuses it (409) unless `stopThreads`, confirmed after `projectMovePlan`.
  */
 export const moveProject = (
   client: EnvironmentHttpClient,
@@ -46,7 +46,7 @@ export const moveProject = (
     readonly spaceId: SpaceId;
     readonly stopThreads?: boolean;
   },
-) => client.projects.mutate({ headers: {}, payload: { type: "project.move", ...input } });
+) => client.projects.move({ headers: {}, payload: input });
 
 /** What moving the Project to `spaceId` would do: Threads it stops, and those left without a machine. */
 export const projectMovePlan = (
