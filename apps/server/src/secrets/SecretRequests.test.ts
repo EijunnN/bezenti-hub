@@ -22,7 +22,9 @@ import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 
+import type * as MasterKeyFile from "../auth/MasterKeyFile.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as ServerConfig from "../config.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SecretFilesDirectory from "./SecretFilesDirectory.ts";
 import * as SecretRequests from "./SecretRequests.ts";
@@ -45,6 +47,8 @@ const withService = <A, E>(
     readonly directory?: string;
     /** Where file answers go; by default `<directory>/files`, `memory` finds the real one. */
     readonly filesIn?: "memory";
+    /** A store's master key: answers are then kept sealed at rest. */
+    readonly keyring?: MasterKeyFile.Keyring;
     readonly runStatus?: string;
     readonly removeFails?: boolean;
     readonly closedFirst?: boolean;
@@ -60,6 +64,12 @@ const withService = <A, E>(
     const layerDependencies = Layer.mergeAll(
       NodeCrypto.layer,
       NodeServices.layer,
+      options.keyring === undefined
+        ? Layer.empty
+        : Layer.succeed(ServerSecretStore.MasterKeyring, {
+            keyring: Option.some(options.keyring),
+            unavailable: Option.none(),
+          }),
       options.directory === undefined || options.filesIn === "memory"
         ? Layer.empty
         : Layer.succeed(SecretFilesDirectory.SecretFilesDirectory, {
@@ -147,6 +157,22 @@ const withService = <A, E>(
       return yield* body({ service, stored, dispatched });
     }).pipe(Effect.provide(SecretRequests.layer.pipe(Layer.provide(layerDependencies))));
   });
+
+/** A real master key, from a store of its own. */
+const realKeyring = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "secret-files-key-" });
+  return yield* Effect.flatMap(ServerSecretStore.MasterKeyring, ({ keyring }) =>
+    Effect.succeed(Option.getOrThrow(keyring)),
+  ).pipe(
+    Effect.provide(
+      ServerSecretStore.layer.pipe(
+        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
+        Layer.provideMerge(NodeCrypto.layer),
+      ),
+    ),
+  );
+});
 
 const valuesOf = (stored: Map<string, Uint8Array>) =>
   Array.from(stored.entries())
@@ -404,7 +430,7 @@ it.effect("a file request moves its value to an owner-only file, once", () =>
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
-it.effect("a file answer never touches the Hub's disk in clear, and old ones leave it", () =>
+it.effect("a file answer is sealed at rest and in clear only in memory, and comes back", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -412,10 +438,13 @@ it.effect("a file answer never touches the Hub's disk in clear, and old ones lea
     // Stands for the user's runtime folder in memory (owner-only, as systemd makes it).
     const runtime = yield* fs.makeTempDirectoryScoped({ prefix: "secret-runtime-test-" });
     yield* fs.chmod(runtime, 0o700);
+    const keyring = yield* realKeyring;
     // An answer an earlier version left in clear on the disk.
     const legacyName = "0123456789abcdef0123456789abcdef";
     yield* fs.makeDirectory(path.join(directory, "files"), { recursive: true });
     yield* fs.writeFileString(path.join(directory, "files", legacyName), "legacy-answer-77");
+    const options = { delivery: "file" as const, directory, filesIn: "memory" as const, keyring };
+    const inMemory = Effect.provideService(HostProcess.Environment, { XDG_RUNTIME_DIR: runtime });
     const file = yield* withService(
       ({ service }) =>
         Effect.gen(function* () {
@@ -426,10 +455,14 @@ it.effect("a file answer never touches the Hub's disk in clear, and old ones lea
           });
           return yield* service.saveToFile({ threadId, turnItemId });
         }),
-      { delivery: "file", directory, filesIn: "memory" },
-    ).pipe(Effect.provideService(HostProcess.Environment, { XDG_RUNTIME_DIR: runtime }));
+      options,
+    ).pipe(inMemory);
     assert.equal(yield* fs.readFileString(file), "cf_token-on-disk-check");
     assert.isFalse(file.startsWith(directory), "the answer was written under the secrets folder");
+    const id = path.basename(file);
+    for (const sealed of [id, legacyName]) {
+      assert.isTrue(yield* fs.exists(path.join(directory, "files", `${sealed}.sealed`)));
+    }
     const onDisk = (yield* fs.readDirectory(directory, { recursive: true })).map((name) =>
       path.join(directory, name),
     );
@@ -439,10 +472,27 @@ it.effect("a file answer never touches the Hub's disk in clear, and old ones lea
       assert.notInclude(text, "cf_token-on-disk-check", `${entry} holds the answer`);
       assert.notInclude(text, "legacy-answer-77", `${entry} still holds an old answer`);
     }
-    assert.equal(
-      yield* fs.readFileString(path.join(path.dirname(file), legacyName)),
-      "legacy-answer-77",
-    );
+    // A restart empties memory, and leaves a stale file there: the next start removes the
+    // orphan, and a retry brings the answer back from its sealed copy.
+    yield* fs.remove(file);
+    yield* fs.writeFileString(path.join(runtime, path.basename(path.dirname(file)), "stale"), "x");
+    const again = yield* withService(
+      ({ service }) =>
+        Effect.gen(function* () {
+          // The Thread still records the answer as saved (this test double starts over).
+          yield* service.answer({
+            threadId,
+            turnItemId,
+            answer: { type: "save", secret: "other" },
+          });
+          return yield* service.saveToFile({ threadId, turnItemId });
+        }),
+      options,
+    ).pipe(inMemory);
+    assert.equal(again, file);
+    // The sealed copy, not a new answer: a command holding the path never reads another value.
+    assert.equal(yield* fs.readFileString(again), "cf_token-on-disk-check");
+    assert.isFalse(yield* fs.exists(path.join(path.dirname(file), "stale")));
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 

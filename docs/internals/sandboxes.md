@@ -207,6 +207,10 @@ While off, the Hub machine runs nothing, whatever asks:
   elsewhere) releases nothing, which could not be undone; those Threads wait, offline, and can be
   moved meanwhile.
 
+`request_secret` with `delivery: "file"` hands the agent a path on the Hub machine (a folder in
+memory there, see [secrets.md](secrets.md)): it applies only when the Hub machine runs the agent.
+An agent in a Sandbox or on a joined machine cannot read that path; it uses a `secretRef`.
+
 ## Limits
 
 Each Sandbox has CPU, memory, PIDs and disk limits

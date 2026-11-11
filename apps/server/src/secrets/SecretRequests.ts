@@ -27,6 +27,9 @@ import * as Semaphore from "effect/Semaphore";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as Metrics from "../observability/Metrics.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import { writeAtomically } from "../auth/atomicFile.ts";
+import { SEALED_EXTENSION } from "../auth/MasterKeyFile.ts";
+import * as SecretCipher from "../auth/SecretCipher.ts";
 import { resolveSecretFilesDirectory } from "./SecretFilesDirectory.ts";
 
 const SECRET_REF_PREFIX = "secret-ref:";
@@ -35,6 +38,7 @@ const REF_PATTERN = /^secret-ref:[0-9a-f]{32}$/;
 const SECRET_REF_TTL_MS = 24 * 60 * 60 * 1000;
 const STORE_NAME_PATTERN = /^(secret-request-[0-9a-f]{32})\.(bin|sealed)$/;
 const FILE_NAME_PATTERN = /^[0-9a-f]{32}(\.partial)?$/;
+const SEALED_FILE_PATTERN = /^[0-9a-f]{32}\.sealed$/;
 
 const StoredSecret = Schema.fromJsonString(
   Schema.Struct({ projectId: Schema.String, value: Schema.String, savedAt: Schema.Number }),
@@ -278,6 +282,76 @@ const make = Effect.gen(function* () {
     );
   };
 
+  // The copy at rest, sealed under its own purpose beside the store: it outlives a restart (the
+  // folder in memory does not) and is never on the disk in clear. None on a store without a key.
+  const keyring = Option.flatMap(
+    yield* Effect.serviceOption(ServerSecretStore.MasterKeyring),
+    (opened) => opened.keyring,
+  );
+  const sealedDir = store.directory === undefined ? undefined : path.join(store.directory, "files");
+  const sealedFileOf = (dir: string, id: string) => path.join(dir, `${id}${SEALED_EXTENSION}`);
+  const withFiles = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem | Path.Path>) =>
+    effect.pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+    );
+
+  const keepSealed = Effect.fn("SecretRequests.keepSealed")(
+    function* (id: string, value: string, times?: { readonly atime: Date; readonly mtime: Date }) {
+      if (Option.isNone(keyring) || sealedDir === undefined) return;
+      yield* fileSystem.makeDirectory(sealedDir, { recursive: true, mode: 0o700 });
+      yield* fileSystem.chmod(sealedDir, 0o700);
+      yield* withFiles(
+        writeAtomically(
+          sealedFileOf(sealedDir, id),
+          SecretCipher.seal(
+            keyring.value.current,
+            "secret-file",
+            id,
+            new TextEncoder().encode(value),
+          ),
+          times,
+        ),
+      );
+    },
+    Effect.mapError((cause) => new SecretRequestError({ reason: "store_failed", cause })),
+  );
+
+  const readSealed = Effect.fn("SecretRequests.readSealed")(function* (id: string) {
+    if (Option.isNone(keyring) || sealedDir === undefined) return Option.none<string>();
+    const stored = yield* fileSystem.readFile(sealedFileOf(sealedDir, id)).pipe(
+      Effect.asSome,
+      Effect.catchReason("PlatformError", "NotFound", () => Effect.succeedNone),
+      Effect.mapError((cause) => new SecretRequestError({ reason: "read_failed", cause })),
+    );
+    if (Option.isNone(stored)) return Option.none<string>();
+    const opened = SecretCipher.open(keyring.value.keys, "secret-file", id, stored.value);
+    if (opened._tag !== "opened") {
+      return yield* new SecretRequestError({ reason: "read_failed", cause: opened._tag });
+    }
+    return Option.some(new TextDecoder().decode(opened.plaintext));
+  });
+
+  /** The file the agent reads: kept sealed at rest, written in clear only to the folder in memory. */
+  const deliver = Effect.fn("SecretRequests.deliver")(function* (
+    dir: string,
+    id: string,
+    value: Effect.Effect<string, SecretRequestError>,
+  ) {
+    const file = path.join(dir, id);
+    if (yield* fileSystem.exists(file).pipe(Effect.orElseSucceed(() => false))) return file;
+    const kept = yield* readSealed(id);
+    if (Option.isSome(kept)) {
+      // After a restart the folder in memory is empty: the sealed copy brings the same value back.
+      yield* writeSecretFile(dir, file, kept.value);
+      return file;
+    }
+    const fresh = yield* value;
+    yield* keepSealed(id, fresh);
+    yield* writeSecretFile(dir, file, fresh);
+    return file;
+  });
+
   const saveToFile: SecretRequests["Service"]["saveToFile"] = Effect.fn(
     "SecretRequests.saveToFile",
   )(function* (input) {
@@ -298,22 +372,19 @@ const make = Effect.gen(function* () {
     }
     if (filesDir === undefined) return yield* noFilesDir;
     const ref = yield* refFor(input.threadId, item.id);
-    const file = path.join(filesDir, ref.slice(SECRET_REF_PREFIX.length));
     return yield* Effect.gen(function* () {
-      // One use: the file counts as delivered only once the stored copy is gone. A retry with the
-      // same clientRequestId gets the file the first call wrote and finishes that removal.
-      const removeStored = removeLogged(storeName(ref)).pipe(
-        Effect.flatMap((removed) =>
-          removed ? Effect.succeed(file) : new SecretRequestError({ reason: "consume_failed" }),
-        ),
+      // The stored value goes only after the file is complete, so a failed write can retry. One
+      // use: the file counts as delivered only once the stored copy is gone; a retry with the
+      // same clientRequestId gets the same file and finishes that removal.
+      const file = yield* deliver(
+        filesDir,
+        ref.slice(SECRET_REF_PREFIX.length),
+        readRef({ ref, projectId: records.thread.projectId }),
       );
-      if (yield* fileSystem.exists(file).pipe(Effect.orElseSucceed(() => false))) {
-        return yield* removeStored;
+      if (!(yield* removeLogged(storeName(ref)))) {
+        return yield* new SecretRequestError({ reason: "consume_failed" });
       }
-      // The stored value goes only after the file is complete, so a failed write can retry.
-      const value = yield* readRef({ ref, projectId: records.thread.projectId });
-      yield* writeSecretFile(filesDir, file, value);
-      return yield* removeStored;
+      return file;
     }).pipe(consumeLock.withPermits(1));
   });
 
@@ -325,14 +396,13 @@ const make = Effect.gen(function* () {
       input.threadId,
       `pasted\u0000${input.requestNamespace}\u0000${input.requestKey}`,
     );
-    const file = path.join(filesDir, ref.slice(SECRET_REF_PREFIX.length));
     // A retry with the same clientRequestId gets the file the first call wrote, unchanged, so a
     // command already holding that path never reads another value.
-    return yield* Effect.gen(function* () {
-      if (yield* fileSystem.exists(file).pipe(Effect.orElseSucceed(() => false))) return file;
-      yield* writeSecretFile(filesDir, file, input.value);
-      return file;
-    }).pipe(consumeLock.withPermits(1));
+    return yield* deliver(
+      filesDir,
+      ref.slice(SECRET_REF_PREFIX.length),
+      Effect.succeed(input.value),
+    ).pipe(consumeLock.withPermits(1));
   });
 
   const sweepExpired = Effect.gen(function* () {
@@ -356,62 +426,104 @@ const make = Effect.gen(function* () {
     Effect.catchCause((cause) => Effect.logWarning("Could not sweep expired secret refs", cause)),
     Effect.withSpan("SecretRequests.sweepExpired"),
   );
+  /** Answers past their TTL go: the sealed copies and the files in memory. */
   const sweepExpiredFiles = Effect.gen(function* () {
-    if (filesDir === undefined || !(yield* fileSystem.exists(filesDir))) return;
     const now = yield* Clock.currentTimeMillis;
+    const expired = (file: string) =>
+      fileSystem
+        .stat(file)
+        .pipe(
+          Effect.map(({ mtime }) =>
+            Option.exists(mtime, (time) => now - time.getTime() > SECRET_REF_TTL_MS),
+          ),
+        );
     let removed = 0;
-    for (const name of yield* fileSystem.readDirectory(filesDir)) {
-      if (!FILE_NAME_PATTERN.test(name)) continue;
-      const file = path.join(filesDir, name);
-      const { mtime } = yield* fileSystem.stat(file);
-      if (Option.exists(mtime, (time) => now - time.getTime() <= SECRET_REF_TTL_MS)) continue;
-      yield* fileSystem.remove(file);
-      removed += 1;
+    if (sealedDir !== undefined && sealedDir !== filesDir) {
+      const sealedNames = yield* fileSystem
+        .readDirectory(sealedDir)
+        .pipe(Effect.orElseSucceed(() => []));
+      for (const name of sealedNames) {
+        if (!SEALED_FILE_PATTERN.test(name)) continue;
+        const file = path.join(sealedDir, name);
+        if (!(yield* expired(file))) continue;
+        yield* fileSystem.remove(file);
+        if (filesDir !== undefined) {
+          yield* fileSystem.remove(path.join(filesDir, name.slice(0, -SEALED_EXTENSION.length)), {
+            force: true,
+          });
+        }
+        removed += 1;
+      }
+    }
+    if (filesDir !== undefined && (yield* fileSystem.exists(filesDir))) {
+      for (const name of yield* fileSystem.readDirectory(filesDir)) {
+        if (!FILE_NAME_PATTERN.test(name)) continue;
+        const file = path.join(filesDir, name);
+        if (!(yield* expired(file))) continue;
+        yield* fileSystem.remove(file);
+        removed += 1;
+      }
     }
     yield* Effect.annotateCurrentSpan({ "secret_request.expired_files_removed": removed });
   }).pipe(
     Effect.catchCause((cause) => Effect.logWarning("Could not sweep expired secret files", cause)),
     Effect.withSpan("SecretRequests.sweepExpiredFiles"),
   );
-  // Answers that versions before encryption wrote to `secrets/files/` in clear: moved to the
-  // folder in memory while they last (or removed, where there is none), so none stays on disk.
-  const moveLegacyFiles = Effect.gen(function* () {
-    if (store.directory === undefined) return;
-    const legacyDir = path.join(store.directory, "files");
-    if (legacyDir === filesDir) return;
-    const names = yield* fileSystem.readDirectory(legacyDir).pipe(Effect.orElseSucceed(() => []));
+
+  // At startup the folder in memory keeps no stale plaintext: half-written files, and answers
+  // whose sealed copy is gone, are removed; the others come back from their sealed copy.
+  const cleanFilesInMemory = Effect.gen(function* () {
+    if (filesDir === undefined || filesDir === sealedDir) return;
+    if (!(yield* fileSystem.exists(filesDir))) return;
+    let removed = 0;
+    for (const name of yield* fileSystem.readDirectory(filesDir)) {
+      const orphan =
+        name.endsWith(".partial") ||
+        sealedDir === undefined ||
+        !(yield* fileSystem.exists(sealedFileOf(sealedDir, name)));
+      if (!orphan) continue;
+      yield* fileSystem.remove(path.join(filesDir, name), { recursive: true });
+      removed += 1;
+    }
+    yield* Effect.annotateCurrentSpan({ "secret_request.stale_files_removed": removed });
+  }).pipe(
+    Effect.catchCause((cause) => Effect.logWarning("Could not clean the secret files", cause)),
+    Effect.withSpan("SecretRequests.cleanFilesInMemory"),
+  );
+
+  // Answers that versions before encryption wrote to `secrets/files/` in clear: sealed in place
+  // (keeping their age) while they last, so none stays on the disk in clear.
+  const sealLegacyFiles = Effect.gen(function* () {
+    if (sealedDir === undefined || sealedDir === filesDir) return;
+    const names = yield* fileSystem.readDirectory(sealedDir).pipe(Effect.orElseSucceed(() => []));
     const now = yield* Clock.currentTimeMillis;
-    let moved = 0;
+    let sealed = 0;
     for (const name of names) {
-      const file = path.join(legacyDir, name);
+      if (!FILE_NAME_PATTERN.test(name)) continue;
+      const file = path.join(sealedDir, name);
       const { mtime } = yield* fileSystem.stat(file);
       const live =
-        FILE_NAME_PATTERN.test(name) &&
         !name.endsWith(".partial") &&
         Option.exists(mtime, (time) => now - time.getTime() <= SECRET_REF_TTL_MS);
-      if (live && filesDir !== undefined) {
-        const target = path.join(filesDir, name);
-        if (!(yield* fileSystem.exists(target))) {
-          yield* writeSecretFile(filesDir, target, yield* fileSystem.readFileString(file));
-          yield* Option.match(mtime, {
-            onNone: () => Effect.void,
-            onSome: (time) => fileSystem.utimes(target, time, time),
-          });
-        }
-        moved += 1;
+      if (live && Option.isSome(keyring)) {
+        yield* keepSealed(
+          name,
+          yield* fileSystem.readFileString(file),
+          Option.getOrUndefined(Option.map(mtime, (time) => ({ atime: time, mtime: time }))),
+        );
+        sealed += 1;
       }
       yield* fileSystem.remove(file, { recursive: true });
     }
-    // Every file in it was handled above; the folder goes with them.
-    yield* fileSystem.remove(legacyDir, { recursive: true }).pipe(Effect.ignore);
-    yield* Effect.annotateCurrentSpan({ "secret_request.legacy_files_moved": moved });
+    yield* Effect.annotateCurrentSpan({ "secret_request.legacy_files_sealed": sealed });
   }).pipe(
     Effect.catchCause((cause) =>
-      Effect.logWarning("Could not move secret files off the disk", cause),
+      Effect.logWarning("Could not seal the secret files left in clear", cause),
     ),
-    Effect.withSpan("SecretRequests.moveLegacyFiles"),
+    Effect.withSpan("SecretRequests.sealLegacyFiles"),
   );
-  yield* moveLegacyFiles;
+  yield* sealLegacyFiles;
+  yield* cleanFilesInMemory;
   const sweep = Effect.andThen(sweepExpired, sweepExpiredFiles);
   yield* sweep;
   yield* sweep.pipe(

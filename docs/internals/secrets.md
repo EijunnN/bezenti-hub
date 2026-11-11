@@ -150,14 +150,28 @@ too. Without the key its sealed entries are an error, never bytes passed off as 
 
 ## request_secret file answers
 
-A `file` answer is for the agent's own shell, which reads it by path, so it cannot be sealed. It
-never touches the Hub's disk: `SecretFilesDirectory.ts` puts it in an owner-only folder in memory,
-`$XDG_RUNTIME_DIR/t3code-secret-files-<hash>` or else `/dev/shm/t3code-secret-files-<hash>` (one per
-state directory; a folder of that name owned by someone else, or open to others, is never used).
-Answers that earlier versions left in clear in `secrets/files/` move there at startup while they
-last, and the folder goes. Where there is no folder in memory (macOS, Windows), `file` delivery is
-refused (`file_delivery_unavailable`) and a `secretRef` still works. Memory pages can still reach
-swap; an encrypted swap closes that.
+A `file` answer is for the agent's own shell, which reads it by path. Two copies, neither in clear
+on the Hub's disk:
+
+- **At rest:** `secrets/files/<id>.sealed`, sealed under its own purpose (`secret-file`, the id as
+  associated data). It outlives a restart and goes with the TTL sweep (24 h).
+- **For the agent:** the plaintext, only in an owner-only folder in memory
+  (`SecretFilesDirectory.ts`): `$XDG_RUNTIME_DIR/t3code-secret-files-<hash>`, else
+  `/dev/shm/t3code-secret-files-<hash>`, one per state directory; a folder of that name owned by
+  someone else, or open to others, is never used. A request for an answer whose file is missing
+  there (after a restart) writes it again from the sealed copy, so a command holding the path never
+  reads another value. At startup the folder loses half-written files and answers whose sealed copy
+  is gone; the sweep removes expired ones.
+- Answers that earlier versions left in clear in `secrets/files/<id>` are sealed in place at startup
+  (keeping their age), and the clear copy goes.
+- Where there is no folder in memory (macOS, Windows), `file` delivery is refused
+  (`file_delivery_unavailable`) and a `secretRef` still works. Memory pages can still reach swap; an
+  encrypted swap closes that.
+- Nothing logs an answer: logs and spans name the request and the count of files, never a value,
+  so a path is never logged together with what it holds.
+- The path only means something to a shell on the Hub machine: `file` delivery applies only when the
+  Hub machine runs agents (development, `T3CODE_HUB_RUNS_AGENTS`); a Thread in a Sandbox or on a
+  joined machine cannot read a path on the Hub.
 
 ## What is not covered here
 
