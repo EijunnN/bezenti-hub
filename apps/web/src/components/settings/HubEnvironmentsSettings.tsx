@@ -27,6 +27,7 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
+import { SshInstallDialog } from "./SshInstallDialog";
 
 // The list's status is computed on the Hub from heartbeats; polling keeps it current while open.
 const REFRESH_MS = 5_000;
@@ -118,6 +119,7 @@ export function HubEnvironmentsSettings() {
   }>();
   const [modeError, setModeError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [addingOverSsh, setAddingOverSsh] = useState(false);
   const spaces = useCurrentSpace((state) => state.view?.spaces);
   const organizations = (spaces ?? []).filter(
     (space) => space.kind === "organization" && space.archived !== true,
@@ -239,6 +241,29 @@ export function HubEnvironmentsSettings() {
         title="Add a machine"
         description="Run `t3 join <this Hub's address>` on it, then approve it here in the browser. For a machine all of an Organization uses, run `t3 join --dedicated <Organization> <this Hub's address>` and approve it as the Owner."
       />
+      {isOwner ? (
+        <SettingsRow
+          title="Add a machine over SSH"
+          description="Give the Hub a Linux machine's SSH address and key: it installs T3 Code there and dedicates it to an Organization, showing each step."
+          control={
+            <Button size="xs" variant="outline" onClick={() => setAddingOverSsh(true)}>
+              Add over SSH
+            </Button>
+          }
+        />
+      ) : null}
+      {addingOverSsh ? (
+        <SshInstallDialog
+          organizations={organizations}
+          onClose={() => setAddingOverSsh(false)}
+          onInstalled={() =>
+            void fetchHubEnvironments().then(
+              (list) => setEnvironments(list.environments),
+              () => undefined,
+            )
+          }
+        />
+      ) : null}
       {error ? <SettingsRow title="Something went wrong" description={error} /> : null}
       {renaming !== undefined ? (
         <Dialog open onOpenChange={(open) => (open ? undefined : setRenaming(undefined))}>

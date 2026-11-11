@@ -1,0 +1,475 @@
+import type { SpaceId, SshInstallRun, SshInstallStep } from "@t3tools/contracts";
+import { useEffect, useEffectEvent, useState } from "react";
+
+import {
+  cancelSshInstall,
+  confirmSshInstall,
+  fetchSshInstall,
+  startSshInstall,
+} from "../../environments/primary/sshInstall";
+import { errorMessageOf } from "../../lib/errorMessage";
+import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
+import {
+  Dialog,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+} from "../ui/dialog";
+import { Input } from "../ui/input";
+import { Spinner } from "../ui/spinner";
+import { Textarea } from "../ui/textarea";
+
+// The steps report their output as they go.
+const RUNNING_REFRESH_MS = 1_000;
+
+const STEP_STATE_LABELS: Record<SshInstallStep["state"], string> = {
+  pending: "Waiting",
+  running: "Running",
+  succeeded: "Done",
+  failed: "Failed",
+  cancelled: "Not run",
+};
+
+const STEP_STATE_TONES: Record<SshInstallStep["state"], string> = {
+  pending: "text-muted-foreground",
+  running: "text-foreground",
+  succeeded: "text-success-foreground",
+  failed: "text-destructive-foreground",
+  cancelled: "text-muted-foreground",
+};
+
+interface FormState {
+  host: string;
+  port: string;
+  username: string;
+  authKind: "key" | "agent";
+  privateKey: string;
+  passphrase: string;
+  spaceId: string;
+  name: string;
+  hubUrl: string;
+  keepForUpdates: boolean;
+}
+
+const fieldClass = "text-xs font-medium";
+
+/**
+ * Settings → Environments, for the Owner: «Add a machine over SSH». The Hub connects from its own
+ * process, shows the host key to confirm, then runs each step with its output here. The key goes
+ * only into the request that starts the run, and is forgotten here once the run starts.
+ */
+export function SshInstallDialog(props: {
+  readonly organizations: ReadonlyArray<{ readonly id: SpaceId; readonly name: string }>;
+  readonly onClose: () => void;
+  /** A machine was added: the list should show it. */
+  readonly onInstalled: () => void;
+}) {
+  const [form, setForm] = useState<FormState>(() => ({
+    host: "",
+    port: "22",
+    username: "",
+    authKind: "key",
+    privateKey: "",
+    passphrase: "",
+    spaceId: props.organizations[0]?.id ?? "",
+    name: "",
+    hubUrl: window.location.origin,
+    keepForUpdates: false,
+  }));
+  const [run, setRun] = useState<SshInstallRun | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const running = run?.state === "running";
+  const runId = run?.runId;
+
+  const finished = useEffectEvent((next: SshInstallRun) => {
+    if (next.state === "succeeded") props.onInstalled();
+  });
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- polls the Hub for the run's steps and output while it runs.
+  useEffect(() => {
+    if (runId === undefined || !running) return;
+    let current = true;
+    const timer = window.setInterval(() => {
+      void fetchSshInstall(runId).then(
+        (next) => {
+          if (!current) return;
+          setRun(next);
+          if (next.state !== "running") finished(next);
+        },
+        (cause: unknown) => {
+          if (current) setError(errorMessageOf(cause, "Could not follow the installation."));
+        },
+      );
+    }, RUNNING_REFRESH_MS);
+    return () => {
+      current = false;
+      window.clearInterval(timer);
+    };
+  }, [runId, running]);
+
+  const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
+    setForm((current) => ({ ...current, [key]: value }));
+
+  const act = async (action: () => Promise<SshInstallRun>, fallback: string) => {
+    setPending(true);
+    setError(null);
+    try {
+      const next = await action();
+      setRun(next);
+      return next;
+    } catch (cause) {
+      setError(errorMessageOf(cause, fallback));
+      return null;
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const connect = async () => {
+    const started = await act(
+      () =>
+        startSshInstall({
+          host: form.host.trim(),
+          port: Number(form.port),
+          username: form.username.trim(),
+          auth:
+            form.authKind === "agent"
+              ? { kind: "agent" }
+              : { kind: "key", privateKey: form.privateKey, passphrase: form.passphrase },
+          spaceId: form.spaceId as SpaceId,
+          name: form.name.trim() || form.host.trim(),
+          hubUrl: form.hubUrl.trim(),
+          keepForUpdates: form.keepForUpdates,
+        }),
+      "The Hub could not reach the machine.",
+    );
+    // The Hub holds it for the run now; nothing here keeps it.
+    if (started !== null) setForm((current) => ({ ...current, privateKey: "", passphrase: "" }));
+  };
+
+  const close = () => {
+    // A run under way goes on; only Cancel stops it.
+    if (running && !window.confirm("The installation goes on on the Hub. Close this anyway?")) {
+      return;
+    }
+    props.onClose();
+  };
+
+  const canConnect =
+    form.host.trim() !== "" &&
+    form.username.trim() !== "" &&
+    /^\d+$/u.test(form.port) &&
+    form.spaceId !== "" &&
+    (form.authKind === "agent" || form.privateKey.trim() !== "");
+
+  return (
+    <Dialog open onOpenChange={(open) => (open ? undefined : close())}>
+      <DialogPopup className="sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>Add a machine over SSH</DialogTitle>
+          <DialogDescription>
+            The Hub signs in to the machine, checks it and installs Podman if it can, installs this
+            Hub's version of T3 Code, registers the machine for one Organization and starts its
+            service. The key is used for this run only unless you keep it.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogPanel>
+          {run === null ? (
+            <form
+              className="grid gap-3"
+              id="ssh-install-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (canConnect && !pending) void connect();
+              }}
+            >
+              <div className="grid grid-cols-[1fr_6rem] gap-2">
+                <div>
+                  <label className={fieldClass} htmlFor="ssh-install-host">
+                    Host
+                  </label>
+                  <Input
+                    id="ssh-install-host"
+                    nativeInput
+                    placeholder="vps.example.com"
+                    value={form.host}
+                    onChange={(event) => set("host", event.currentTarget.value)}
+                  />
+                </div>
+                <div>
+                  <label className={fieldClass} htmlFor="ssh-install-port">
+                    Port
+                  </label>
+                  <Input
+                    id="ssh-install-port"
+                    inputMode="numeric"
+                    nativeInput
+                    value={form.port}
+                    onChange={(event) => set("port", event.currentTarget.value)}
+                  />
+                </div>
+              </div>
+              <div>
+                <label className={fieldClass} htmlFor="ssh-install-user">
+                  User
+                </label>
+                <Input
+                  autoComplete="off"
+                  id="ssh-install-user"
+                  nativeInput
+                  placeholder="deploy (not root)"
+                  value={form.username}
+                  onChange={(event) => set("username", event.currentTarget.value)}
+                />
+              </div>
+              <div>
+                <label className={fieldClass} htmlFor="ssh-install-auth">
+                  Sign in with
+                </label>
+                <select
+                  className="mt-1 h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                  id="ssh-install-auth"
+                  value={form.authKind}
+                  onChange={(event) =>
+                    set("authKind", event.currentTarget.value === "agent" ? "agent" : "key")
+                  }
+                >
+                  <option value="key">A private key</option>
+                  <option value="agent">The Hub's SSH agent</option>
+                </select>
+              </div>
+              {form.authKind === "key" ? (
+                <>
+                  <div>
+                    <label className={fieldClass} htmlFor="ssh-install-key">
+                      Private key
+                    </label>
+                    <Textarea
+                      autoComplete="off"
+                      id="ssh-install-key"
+                      placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                      rows={5}
+                      spellCheck={false}
+                      value={form.privateKey}
+                      onChange={(event) => set("privateKey", event.currentTarget.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className={fieldClass} htmlFor="ssh-install-passphrase">
+                      Passphrase (if the key has one)
+                    </label>
+                    <Input
+                      autoComplete="off"
+                      id="ssh-install-passphrase"
+                      nativeInput
+                      type="password"
+                      value={form.passphrase}
+                      onChange={(event) => set("passphrase", event.currentTarget.value)}
+                    />
+                  </div>
+                  <label className="flex items-center gap-2 text-sm">
+                    <Checkbox
+                      aria-label="Keep the key for updates"
+                      checked={form.keepForUpdates}
+                      onCheckedChange={(checked) => set("keepForUpdates", checked === true)}
+                    />
+                    Keep the key for updates (in the Hub's secret store)
+                  </label>
+                </>
+              ) : null}
+              <div>
+                <label className={fieldClass} htmlFor="ssh-install-space">
+                  Dedicated to
+                </label>
+                <select
+                  className="mt-1 h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                  id="ssh-install-space"
+                  value={form.spaceId}
+                  onChange={(event) => set("spaceId", event.currentTarget.value)}
+                >
+                  {props.organizations.length === 0 ? (
+                    <option value="">Create an Organization first</option>
+                  ) : null}
+                  {props.organizations.map((space) => (
+                    <option key={space.id} value={space.id}>
+                      {`Everyone in ${space.name}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className={fieldClass} htmlFor="ssh-install-name">
+                    Name
+                  </label>
+                  <Input
+                    id="ssh-install-name"
+                    maxLength={64}
+                    nativeInput
+                    placeholder={form.host || "Acme VPS"}
+                    value={form.name}
+                    onChange={(event) => set("name", event.currentTarget.value)}
+                  />
+                </div>
+                <div>
+                  <label className={fieldClass} htmlFor="ssh-install-hub">
+                    Hub address, as the machine reaches it
+                  </label>
+                  <Input
+                    id="ssh-install-hub"
+                    nativeInput
+                    value={form.hubUrl}
+                    onChange={(event) => set("hubUrl", event.currentTarget.value)}
+                  />
+                </div>
+              </div>
+            </form>
+          ) : (
+            <RunView run={run} />
+          )}
+          {error !== null ? (
+            <p className="mt-3 text-sm text-destructive-foreground" role="alert">
+              {error}
+            </p>
+          ) : null}
+        </DialogPanel>
+        <DialogFooter>
+          {run === null ? (
+            <>
+              <Button type="button" variant="ghost" onClick={close}>
+                Cancel
+              </Button>
+              <Button disabled={!canConnect || pending} form="ssh-install-form" type="submit">
+                {pending ? "Connecting…" : "Connect"}
+              </Button>
+            </>
+          ) : run.state === "awaiting-host-key" ? (
+            <>
+              <Button
+                disabled={pending}
+                type="button"
+                variant="ghost"
+                onClick={() =>
+                  void act(() => cancelSshInstall(run.runId), "Could not cancel.").then(close)
+                }
+              >
+                Cancel
+              </Button>
+              <Button
+                disabled={pending || run.hostKey === null}
+                onClick={() =>
+                  void act(
+                    () => confirmSshInstall(run.runId, run.hostKey?.fingerprint ?? ""),
+                    "The installation did not start.",
+                  )
+                }
+              >
+                Trust this key and install
+              </Button>
+            </>
+          ) : running ? (
+            <Button
+              disabled={pending}
+              variant="destructive-outline"
+              onClick={() => void act(() => cancelSshInstall(run.runId), "Could not cancel.")}
+            >
+              {pending ? "Cancelling…" : "Cancel installation"}
+            </Button>
+          ) : (
+            <>
+              {run.state !== "succeeded" ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => {
+                    setRun(null);
+                    setError(null);
+                  }}
+                >
+                  Try again
+                </Button>
+              ) : null}
+              <Button onClick={props.onClose}>Close</Button>
+            </>
+          )}
+        </DialogFooter>
+      </DialogPopup>
+    </Dialog>
+  );
+}
+
+function RunView(props: { readonly run: SshInstallRun }) {
+  const { run } = props;
+  const target = `${run.username}@${run.host}:${run.port}`;
+  if (run.state === "awaiting-host-key" && run.hostKey !== null) {
+    return (
+      <div className="grid gap-2 text-sm">
+        <p>
+          {run.hostKey.known
+            ? `${target} shows the host key stored when it was installed:`
+            : `${target} shows this host key. Check it is the machine's before you trust it:`}
+        </p>
+        <p
+          aria-label="Host key fingerprint"
+          className="rounded-md bg-muted/50 p-2 font-mono text-xs break-all"
+        >
+          {`${run.hostKey.algorithm} ${run.hostKey.fingerprint}`}
+        </p>
+        <p className="text-muted-foreground">
+          On the machine, `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` prints its fingerprint.
+          A key that changes later is refused.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="grid gap-3 text-sm">
+      <p>
+        {run.state === "succeeded"
+          ? `${run.name} is dedicated to ${run.spaceName} and online.`
+          : run.state === "running"
+            ? `Installing ${run.name} on ${target} for ${run.spaceName}…`
+            : run.state === "cancelled"
+              ? `The installation on ${target} was cancelled.`
+              : `The installation on ${target} stopped.`}
+        {run.state === "succeeded" && run.keyKept ? " Its key is kept for updates." : ""}
+      </p>
+      {run.error !== null ? (
+        <p className="text-destructive-foreground" role="alert">
+          {run.error}
+        </p>
+      ) : null}
+      <ol className="grid gap-2">
+        {run.steps.map((step, index) => (
+          <li key={step.id} aria-label={`Step ${index + 1}: ${step.title}`}>
+            <div className="flex items-center gap-2">
+              {step.state === "running" ? <Spinner size="sm" /> : null}
+              <span className="font-medium">{`${index + 1}. ${step.title}`}</span>
+              <span className={`text-xs ${STEP_STATE_TONES[step.state]}`}>
+                {STEP_STATE_LABELS[step.state]}
+              </span>
+            </div>
+            {step.output.length > 0 ? (
+              <pre
+                aria-label={`Output of ${step.title}`}
+                className="mt-1 max-h-40 overflow-auto rounded-md bg-muted/50 p-2 font-mono text-2xs leading-4 whitespace-pre-wrap"
+                role="log"
+                // The newest lines are the ones to follow while it runs.
+                ref={(node) => {
+                  if (node !== null) node.scrollTop = node.scrollHeight;
+                }}
+              >
+                {step.output.join("\n")}
+              </pre>
+            ) : null}
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
