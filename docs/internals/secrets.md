@@ -53,9 +53,10 @@ its own. Callers do not know: the store's API (`get`, `set`, `create`, `getOrCre
   with one key).
 - **Permissions**, checked on the open handle at every start (POSIX):
   - owner-only (`0600` or tighter) passes;
-  - a file owned by root that group and others cannot write (`0440`/`0444`, a Kubernetes or Docker
-    secret mount) passes: an administrator placed it and decides who reads it, this process could
-    not tighten it anyway, and nobody but root can replace it;
+  - a file owned by root that others cannot read and group cannot write (`0440`/`0400`, a
+    Kubernetes or Docker secret mount shared with the Hub's group) passes: an administrator placed
+    it and decides which group reads it, and nobody but root can replace it. `0444`/`0404` (readable
+    by everyone) is refused like any other loose mode;
   - anything else stops the startup with «run `chmod 600 <file>`», unless
     `T3CODE_MASTER_KEY_ALLOW_LOOSE_PERMISSIONS=1`, for file systems without real modes (drvfs under
     WSL, some NFS mounts), which logs a warning at every start.
@@ -66,10 +67,11 @@ its own. Callers do not know: the store's API (`get`, `set`, `create`, `getOrCre
   argument: its bytes sit in a private field of `MasterKey` (inspecting or serialising one shows
   only its id), errors name files and key ids only, the file reader that returns it has no span,
   and `t3 secrets key import` reads the key from a file or stdin, never argv.
-- Client file reads and git never serve it: `serverInternalPaths.ts` treats exactly the key, its
-  `.next`, `.previous` and `.replaced-<id>` siblings and their temporary files as internal, like the
-  secrets folder; another file that merely shares the name's prefix stays readable. Stale temporary
-  key files (which hold a whole key) are removed at startup.
+- Client file reads and git never serve it: in the key's own folder, `serverInternalPaths.ts` hides
+  the key and every name the key could have become: anything starting with `<key name>.` or
+  `<key name>~` (`.next`, `.previous`, `.replaced-<id>`, temp files, backups) and any `.swp` file.
+  In other folders nothing is hidden for it. Stale temporary key files (which hold a whole key) are
+  removed at startup.
 
 ## Startup (`MasterKeyFile.openKeyring`)
 
@@ -79,9 +81,12 @@ Two modes:
   that took that lock because no server runs. It may create the key, seal, re-seal and finish a
   rotation.
 - **client**: a command beside a running server (`t3 pair`, `t3 auth`, `t3 secrets key export`…,
-  through `ServerSecretStore.layerClient`). It writes nothing. If the store needs the server's
-  startup (no key yet, entries in clear, a rotation to finish), it fails with «Start the Hub, or
-  stop it and run this again».
+  through `ServerSecretStore.layerClient`). It lists names only (no entry is read; the key check
+  tells a wrong key), ignores replay markers (the Hub prunes them) and writes nothing. Only if the
+  store needs a startup (no key yet, entries in clear, a rotation to finish) and no server runs
+  (its runtime record names no live process) does it take the ownership lock, briefly, to run that
+  startup itself; a Hub starting meanwhile wins the lock. Otherwise only what touches a secret
+  fails, with «Start the Hub, or stop it and run this again».
 
 In order:
 
@@ -97,7 +102,9 @@ In order:
 5. **Authenticate before writing:** every live sealed entry is opened in full. A damaged one stops the
    startup before anything is written.
 6. **Write:** expired replay markers (older than a day) are dropped, not re-sealed; each entry in
-   clear becomes `<name>.sealed` (atomic) and then its `.bin` goes; each entry under another key is
+   clear becomes `<name>.sealed` (atomic) and then its `.bin` goes (a `.bin` that already opens as
+   a value sealed under the current key, as the branch's first encrypting build wrote them, is
+   renamed, never sealed twice); entries removed while the startup ran are skipped; each entry under another key is
    re-sealed in place. Every rewritten entry keeps its modification time, which replay-marker
    pruning reads. A crash leaves every entry either as it was or done; the next start finishes.
 7. **Finish a rotation** that stopped (below), rewrite the key check when needed, remove stale
@@ -150,28 +157,29 @@ too. Without the key its sealed entries are an error, never bytes passed off as 
 
 ## request_secret file answers
 
-A `file` answer is for the agent's own shell, which reads it by path. Two copies, neither in clear
-on the Hub's disk:
+A `file` answer is for the agent's own shell, which reads it by path.
 
-- **At rest:** `secrets/files/<id>.sealed`, sealed under its own purpose (`secret-file`, the id as
-  associated data). It outlives a restart and goes with the TTL sweep (24 h).
-- **For the agent:** the plaintext, only in an owner-only folder in memory
-  (`SecretFilesDirectory.ts`): `$XDG_RUNTIME_DIR/t3code-secret-files-<hash>`, else
-  `/dev/shm/t3code-secret-files-<hash>`, one per state directory; a folder of that name owned by
-  someone else, or open to others, is never used. A request for an answer whose file is missing
-  there (after a restart) writes it again from the sealed copy, so a command holding the path never
-  reads another value. At startup the folder loses half-written files and answers whose sealed copy
-  is gone; the sweep removes expired ones.
-- Answers that earlier versions left in clear in `secrets/files/<id>` are sealed in place at startup
-  (keeping their age), and the clear copy goes.
-- Where there is no folder in memory (macOS, Windows), `file` delivery is refused
-  (`file_delivery_unavailable`) and a `secretRef` still works. Memory pages can still reach swap; an
-  encrypted swap closes that.
+- **At rest, the source of truth:** `secrets/files/<id>.sealed`, sealed under its own purpose
+  (`secret-file`, the id as associated data), for the whole TTL (24 h). A reboot or a logout loses
+  nothing: a request whose file is missing writes it again from the sealed copy, so a command
+  holding the path never reads another value.
+- **For the agent, in memory where possible:** `SecretFilesDirectory.ts` picks
+  `$XDG_RUNTIME_DIR/t3code-secret-files-<hash>`, else `/dev/shm/t3code-secret-files-<hash>` (one per
+  state directory). It is created with `mkdir` and checked with `lstat`: a symlink, or a folder
+  someone else made, is never used.
+- **Without a folder in memory** (macOS and Windows desktop: a single-user local Hub), the answer
+  goes to `secrets/delivered/` on the disk, folder `0700`, file `0600`. Each start empties it, the
+  sweep removes expired files, and the Hub logs one warning per start that file answers touch the
+  disk on this platform. Pasting a secret in chat keeps working there.
+- At startup the folder in memory loses half-written files and answers whose sealed copy is gone.
+- Answers that earlier versions left in clear in `secrets/files/<id>` are sealed in place one by
+  one (keeping their age); one that cannot be read (a dangling symlink, no permission) is logged
+  and removed, and never stops the others. No clear copy stays.
 - Nothing logs an answer: logs and spans name the request and the count of files, never a value,
   so a path is never logged together with what it holds.
 - The path only means something to a shell on the Hub machine: `file` delivery applies only when the
-  Hub machine runs agents (development, `T3CODE_HUB_RUNS_AGENTS`); a Thread in a Sandbox or on a
-  joined machine cannot read a path on the Hub.
+  Hub machine runs agents (development, `T3CODE_HUB_RUNS_AGENTS`, and the desktop app); a Thread in
+  a Sandbox or on a joined machine cannot read a path on the Hub.
 
 ## What is not covered here
 

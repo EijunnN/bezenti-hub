@@ -202,7 +202,7 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
   const encrypted = !joinedMachine || (yield* MasterKeyFile.holdsEncryptedSecrets());
   /**
    * A command beside the Hub reads without the lock. Only when the store needs the Hub's startup
-   * and no server is running (its runtime record names no live process) does it take the lock,
+   * and no server is running (no runtime record of a lock holder with a live pid) does it take the lock,
    * briefly, to do that startup itself; a Hub starting meanwhile wins the lock instead.
    */
   const openAsClient = MasterKeyFile.openKeyring("client").pipe(
@@ -222,7 +222,12 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
             const record = yield* RuntimeState.readPersistedServerRuntimeState(
               serverConfig.serverRuntimeStatePath,
             ).pipe(Effect.orElseSucceed(() => Option.none()));
-            if (Option.exists(record, (state) => RuntimeState.isProcessAlive(state.pid))) {
+            // A server that holds the lock records its owner id; with a live pid, it runs.
+            const running = Option.exists(
+              record,
+              (state) => state.ownerId !== undefined && RuntimeState.isProcessAlive(state.pid),
+            );
+            if (running) {
               return yield* needsHub;
             }
             const owned = yield* ServerOwnership.acquireServerOwnership(

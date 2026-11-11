@@ -354,7 +354,7 @@ the Hub's shell:
 
 To keep the key off the disk you back up, set `T3CODE_MASTER_KEY_FILE` to its
 absolute path. The key must be readable by you alone (`chmod 600`); a read-only
-secret mount owned by root is accepted too, and on a file system without
+secret mount owned by root that others cannot read (`0440`) is accepted too, and on a file system without
 permissions (WSL's `/mnt/c`, some NFS) set
 `T3CODE_MASTER_KEY_ALLOW_LOOSE_PERMISSIONS=1`, which warns at every start. A Hub
 started with a missing or different key refuses to start and says why; it never

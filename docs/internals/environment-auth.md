@@ -801,7 +801,8 @@ after 30 days.
 Everything `ServerSecretStore` keeps (session signing keys among them) is encrypted with the
 master key; only the Owner sees its status or downloads its backup (`masterKey.backup` in
 `AccessPolicy`, with a strong factor in the request; HTTP only). `request_secret` answers of type
-`file` are sealed at rest and in clear only in a folder in memory; that delivery applies only when
+`file` are sealed at rest and in clear only in a folder in memory (on the disk, emptied at every
+start, where there is none); that delivery applies only when
 the Hub machine runs agents, since a Sandbox or a joined machine cannot read a path on the Hub. See
 [secrets.md](secrets.md).
 
