@@ -651,6 +651,9 @@ describe("Hub con Environments: add a machine over SSH", () => {
         { hubUrl: "http://hub.example.com" },
         { auth: { kind: "key", privateKey: "not a key" } },
         { spaceId: "no-such-space" },
+        // Refused by the schema itself: the answer must not echo the key either.
+        { port: 0 },
+        { port: "22; touch /tmp/x" },
       ];
       for (const overrides of refusals) {
         const refused = yield* hub.server.request("/api/environments/ssh/start", {
@@ -662,6 +665,9 @@ describe("Hub con Environments: add a machine over SSH", () => {
           400,
           `${JSON.stringify(overrides)}: ${JSON.stringify(refused.body)}`,
         );
+        for (const fragment of keyFragments(machine.privateKey)) {
+          assert.notInclude(JSON.stringify(refused.body), fragment);
+        }
       }
       // A grant only crosses HTTPS or this machine's loopback.
       const remote = yield* hub.server.request("/api/environments/join/grant", {

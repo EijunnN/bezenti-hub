@@ -199,6 +199,13 @@ lost answer gets the same machine, never a second one. A browser on the machine 
 port (as app sign-in does), only as a nudge to ask now. The PKCE store is shared
 with app sign-in ([pkceGrants](../../apps/server/src/auth/pkceGrants.ts)).
 
+The Owner can also add a dedicated machine over SSH from the Hub
+([Installing over SSH](./sandboxes.md#installing-over-ssh)): there is no approval page, and the
+Hub runs `t3 join --grant-on-stdin` on the machine with a one-use grant of that run. The machine
+still makes its credential itself and sends only its hash; `POST /api/environments/join/grant`
+(HTTPS or loopback, no session) registers it for the run's Space and name, approved by the Owner
+who started the run, once.
+
 The credential is not a session: `SessionStore` never sees it, so only
 `/api/environment/connect` and `/api/environments/leave` accept it, as with
 guest tokens. The Hub keeps its hash and who approved it when. The Hub's id in

@@ -636,6 +636,34 @@ server with `t3 serve`, which then runs that work in a Sandbox container. If
 the organization is deleted, the Owner can still rename or remove the machine,
 and it runs nothing.
 
+### Add a machine over SSH
+
+Instead of running `t3 join` on a server yourself, the Owner can let the Hub do it. In
+**Settings → Environments**, **Add over SSH** asks for the machine's host, port and user (not
+`root`), a private key (with its passphrase, if it has one) or the Hub's own SSH agent, the
+organization to dedicate it to, its name, and the Hub's address as that machine reaches it.
+
+**Connect** shows the machine's host key: compare it with what
+`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` prints on the machine, then **Trust this key
+and install**. Each step shows its output as it runs:
+
+1. **Check the system and Podman.** The machine must run Linux. If Podman is missing and the user
+   can use `sudo` without a password, the Hub installs it; otherwise it stops and says what to
+   install.
+2. **Install T3 Code**, this Hub's version (from your release source, `T3CODE_RELEASE_BASE_URL`),
+   and build the Sandbox image there.
+3. **Register the machine**, dedicated to the organization, with a one-time grant: nothing to
+   approve.
+4. **Start its service** (`t3 service install`), and wait until it reaches the Hub.
+
+If a step fails, or you press **Cancel installation**, the run stops there, shows that step's
+output, and leaves no machine registered; fix the cause and **Try again**. The key is used for that
+run only and forgotten, unless you tick **Keep the key for updates**: then the Hub keeps it in its
+secret store until you remove the machine. Every later run to that address must show the same host
+key; a different one is refused. The registration is in the audit log as `environment.register`,
+via `ssh`, with the host and never the key. The Hub never connects to link-local addresses (such
+as a cloud's metadata service at 169.254.169.254).
+
 ### Move a Thread to another machine
 
 To go on with a Thread elsewhere, open its menu (its title in the header, or

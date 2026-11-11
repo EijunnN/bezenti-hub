@@ -172,11 +172,12 @@ if ! command -v podman >/dev/null 2>&1; then
   fi || { printf 'Installing Podman failed.\\n' >&2; exit 13; }
 fi
 podman --version || exit 14
-rootless="$(podman info --format '{{.Host.Security.Rootless}}' 2>&1)" || {
-  printf 'podman info failed: %s\\n' "$rootless" >&2
+# Only its answer: Podman warns on standard error (a mount that is not shared, …), shown as is.
+rootless="$(podman info --format '{{.Host.Security.Rootless}}')" || {
+  printf 'podman info failed.\\n' >&2
   exit 14
 }
-if [ "$rootless" != true ]; then
+if [ "$(printf '%s' "$rootless" | tail -n 1)" != true ]; then
   printf 'Podman does not run rootless for %s.\\n' "$(id -un)" >&2
   exit 14
 fi

@@ -5,9 +5,11 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { describe, expect, it } from "@effect/vitest";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import ssh2 from "ssh2";
 
 import {
+  checkScript,
   forbiddenSshAddress,
   hostKeyAlgorithm,
   hostKeyFingerprint,
@@ -40,7 +42,38 @@ const runWithFakeT3 = (script: string) => {
   }
 };
 
+/** Runs the check step with a `podman` that answers as given (and warns on standard error). */
+const runCheckWithPodman = (rootless: string) => {
+  const bin = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-ssh-check-"));
+  try {
+    NodeFS.writeFileSync(
+      NodePath.join(bin, "podman"),
+      `#!/bin/sh\ncase "$1" in\n  --version) echo "podman version 3.4.4" ;;\n  info) echo 'level=warning msg="/ is not a shared mount"' >&2; echo ${rootless} ;;\nesac\n`,
+    );
+    NodeFS.chmodSync(NodePath.join(bin, "podman"), 0o755);
+    const result = NodeChildProcess.spawnSync("sh", ["-c", checkScript()], {
+      env: { HOME: bin, PATH: `${bin}:/usr/bin:/bin` },
+      encoding: "utf8",
+    });
+    return { code: result.status, output: `${result.stdout}${result.stderr}` };
+  } finally {
+    NodeFS.rmSync(bin, { recursive: true, force: true });
+  }
+};
+
 describe("SSH install scripts", () => {
+  it.skipIf(HostProcess.Platform.defaultValue() !== "linux" || process.getuid?.() === 0)(
+    "check: rootless Podman passes even when podman warns on standard error",
+    () => {
+      const ready = runCheckWithPodman("true");
+      expect(ready.output).toContain("Rootless Podman is ready.");
+      expect(ready.output).toContain("is not a shared mount");
+      expect(ready.code).toBe(0);
+      const rootful = runCheckWithPodman("false");
+      expect(rootful.code).toBe(14);
+    },
+  );
+
   it("pass a hostile name, Space and Hub address to `t3 join` as single arguments", () => {
     const name = `Acme'; touch "$HOME/pwned"; echo '$(id) \`id\` \\ "quoted"`;
     const spaceId = "space-1'$(touch $HOME/pwned)'";

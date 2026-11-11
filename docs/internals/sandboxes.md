@@ -800,7 +800,7 @@ the machine its server runs no work itself but one Sandbox for the Space it serv
   dedicated to Acme. Register it for Acme? [y/N]`. A machine takes only the mode it asked for
   (`joinModeRefusal`): a `--dedicated` join approved as personal, or a plain join approved as
   dedicated, registers nothing. The audit entry is `environment.register` with `mode`, `spaceId`
-  and `via: "join"`.
+  and `via: "join"` (or `"ssh"`, see [Installing over SSH](#installing-over-ssh)).
 - **Who.** The policy decides on its Space, as for a Sandbox (`decideSpaceBound` in
   [AccessPolicy](../../apps/server/src/auth/AccessPolicy.ts)): seen by whoever sees the Space (the
   Owner sees every one), used by its Admins and Members (not Guests) for that Space's Threads only
@@ -893,3 +893,80 @@ joined server, but connects nothing of its own:
   Sandboxes.
 - **Versions.** Upgrade the Hub and its dedicated machines together: neither side keeps
   compatibility with an older other (a host that gets no Sandbox credential from `/self` waits).
+
+## Installing over SSH
+
+The Owner adds a dedicated machine from Settings → Environments, **Add over SSH** (spec 3 ticket
+10), instead of running `t3 join` on it. [SshInstall](../../apps/server/src/environments/sshInstall/SshInstall.ts)
+runs it from the Hub's own process with [ssh2](https://github.com/mscdex/ssh2) (pure JavaScript,
+no `ssh` binary: the key is never written to a file or put in an argument), in
+[SshClient](../../apps/server/src/environments/sshInstall/SshClient.ts).
+
+- **Who.** Every door is the Owner's alone: `SshInstall` asks `authorizeDedicate`
+  (`environment.dedicate`, as dedicating a machine on «Register this machine») on start, confirm,
+  cancel and the progress (`POST /api/environments/ssh/{start,confirm,cancel,status}`). There is
+  no WS or MCP door. The machine's own call, `POST /api/environments/join/grant`, takes no session:
+  only the run's grant, over HTTPS or loopback.
+- **Input.** Host (a DNS name or an IP), port, user (a plain login name, never `root`: the work
+  runs in rootless Podman), a private key with its passphrase (`RedactedFromValue` in the
+  contract) or the SSH agent of the Hub's process (`SSH_AUTH_SOCK`), the Organization, the
+  machine's name and the Hub's address as the machine reaches it (`https://`, or `http://` on
+  loopback, as `t3 join`). The key is parsed before anything connects, with fixed messages.
+- **Where it connects.** The host is resolved once and the address pinned for the whole run (no
+  DNS rebinding between steps). Refused: link-local addresses (169.254.0.0/16, fe80::/10, where
+  cloud metadata lives), unspecified, multicast and broadcast ones, also as IPv4-mapped IPv6.
+  Allowed: loopback and private networks, which is where an Owner's own machines (and the tests'
+  SSH servers) are; the Owner is trusted, the check stops a request from aiming the Hub at
+  metadata services.
+- **Host key, trust on first use.** `start` connects, reads the host key and turns it down before
+  any sign-in (no credential is offered), and the run waits in `awaiting-host-key` with
+  `SHA256:…` as `ssh-keygen -lf` prints it, for 10 minutes. `confirm` must send that same
+  fingerprint; every later connection of the run accepts only it (a machine that changes its key
+  between the two is refused before sign-in). On success the key is stored with the machine
+  (`environment_ssh_hosts`, migration 110: host, port, user, algorithm, fingerprint, whether the
+  key was kept); a later run to that address that shows another key fails at once, naming both,
+  until that machine is removed.
+- **One run per machine.** A second run to the same host or resolved address and port while one
+  waits or runs is refused with 409. Each run has its own grant, and `t3 join` on the machine
+  refuses a machine already joined, so two runs never register one machine twice.
+- **The steps**, each a POSIX script run with `sh -c` (whatever the login shell), every value from
+  the Owner single-quoted ([sshInstallScripts](../../apps/server/src/environments/sshInstall/sshInstallScripts.ts));
+  host and user never reach a shell:
+  1. _Check the system and Podman_: Linux, not root, rootless Podman (`podman info`). Missing, it
+     installs it with passwordless sudo (`apt-get`, `dnf`, `yum`, `zypper`); without one it stops
+     with what to install (exit codes 10-14 name the check).
+  2. _Install T3 Code_: the runner of `@t3tools/ssh` (`buildRemoteT3RunnerScript`) for the Hub's
+     own version, sent on standard input to `~/.t3/ssh-install/t3`: the release archive from
+     `T3CODE_RELEASE_BASE_URL`, checked against `SHA256SUMS`, or in development a checkout's entry
+     on the machine (`T3CODE_SSH_INSTALL_NODE_SCRIPT`). Then the Sandbox image
+     (`t3 sandbox image build`) unless it is there, or the machine runs its work as a process
+     (`T3CODE_SANDBOX_RUNTIME=process`, development only).
+  3. _Register the machine_: `t3 join --dedicated <Space id> --name <name> --grant-on-stdin <Hub>`.
+     The machine makes its credential as for any join; the grant comes on standard input.
+  4. _Start its service_: `t3 service install` with a systemd user manager; without one (a
+     container, a minimal VM) `t3 serve` under `nohup`, which says it will not survive a reboot.
+     The step ends once the machine reached the Hub with its credential (`hasReachedHub`: asked
+     `/self` or connected), within 2 minutes.
+- **The grant.** 32 random bytes, made as step 3 starts and kept only as its SHA-256, for 5
+  minutes, spent on first use whatever happens next, valid only while that run is registering and
+  has registered nothing. Redeeming it registers the machine for the run's Space and name (never
+  what the machine asks), approved by the Owner who started the run, through
+  `EnvironmentRegistry.register` (which asks `environment.register` and `environment.dedicate`
+  again in its transaction). The audit entry is `environment.register` with `mode: "dedicated"`,
+  `spaceId`, `via: "ssh"` and `host`.
+- **Failures and cancel.** A step that exits non-zero, times out or loses the connection stops the
+  run there; the later steps never run. **Cancel** interrupts the run the same way. Either way the
+  grant is dropped, a machine it registered is removed (`environment.remove` with `via: "ssh"`,
+  its credential revoked), and, if step 3 had started and the connection is up, the machine runs
+  an undo (`t3 service uninstall` or killing the background `t3 serve`, then `t3 leave`); if the
+  connection is gone the step's output says to run `t3 leave` there. A grant redeemed while the
+  run is ending removes what it registered at once.
+- **The key and its secrets.** The key and passphrase live in the run's memory until it ends (or
+  its host key is not confirmed in 10 minutes) and are dropped then. They never reach the machine,
+  and every line of its output, and the run's error, pass a scrubber that removes any line of the
+  key, a PEM private-key marker, the passphrase and the grant. Errors from ssh2 become fixed
+  messages (socket codes kept). With «Keep the key for updates» the key (and passphrase) go to the
+  Hub's secret store as `ssh-install-key-<environment id>`; removing the machine deletes that
+  secret and its host record. Nothing uses a kept key yet: a later «update over SSH» would.
+- **Progress.** Each step keeps its last 300 lines (2,000 characters each); the dialog asks for
+  the run every second while it runs. The Hub keeps the 20 newest finished runs in memory only.
