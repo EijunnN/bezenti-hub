@@ -461,6 +461,7 @@ export const WS_METHODS = {
   previewClose: "preview.close",
   previewList: "preview.list",
   previewClearProfile: "preview.clearProfile",
+  previewClearAllProfiles: "preview.clearAllProfiles",
   previewReportProfiles: "preview.reportProfiles",
   previewReportStatus: "preview.reportStatus",
   previewStopLocalServer: "preview.stopLocalServer",
@@ -1534,6 +1535,11 @@ const WsPreviewClearProfileRpc = Rpc.make(WS_METHODS.previewClearProfile, {
   error: Schema.Union([PreviewClearProfileError, EnvironmentAuthorizationError]),
 });
 
+/** Every User's browser profiles on this environment: the Owner's alone. */
+const WsPreviewClearAllProfilesRpc = Rpc.make(WS_METHODS.previewClearAllProfiles, {
+  error: Schema.Union([PreviewClearProfileError, EnvironmentAuthorizationError]),
+});
+
 const WsPreviewReportProfilesRpc = Rpc.make(WS_METHODS.previewReportProfiles, {
   payload: PreviewReportProfilesInput,
   error: EnvironmentAuthorizationError,
@@ -2072,6 +2078,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsPreviewCloseRpc,
   WsPreviewListRpc,
   WsPreviewClearProfileRpc,
+  WsPreviewClearAllProfilesRpc,
   WsPreviewReportProfilesRpc,
   WsPreviewReportStatusRpc,
   WsSubscribePreviewEventsRpc,

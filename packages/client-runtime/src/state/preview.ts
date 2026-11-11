@@ -67,6 +67,11 @@ export function createPreviewEnvironmentAtoms<R, E>(
       label: "environment-data:preview:clear-profile",
       tag: WS_METHODS.previewClearProfile,
     }),
+    /** Every User's browser profiles on the environment; only its Owner may. */
+    clearAllProfiles: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:preview:clear-all-profiles",
+      tag: WS_METHODS.previewClearAllProfiles,
+    }),
     reportProfiles: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:preview:report-profiles",
       tag: WS_METHODS.previewReportProfiles,

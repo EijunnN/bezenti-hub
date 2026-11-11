@@ -39,6 +39,8 @@ import * as Manager from "./Manager.ts";
 import * as PreviewAgentActivity from "./PreviewAgentActivity.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
+import * as PreviewProfilesTestkit from "./PreviewProfiles.testkit.ts";
+import { testFolders } from "./PreviewProfiles.testkit.ts";
 
 vi.mock("./ServerBrowserContexts.ts", () => ({
   presentAsChrome: async () => {},
@@ -47,8 +49,11 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     constructor(options: { onContextClose?: (context: BrowserContext) => void }) {
       this.onClose = options.onContextClose;
     }
-    async contextFor(profileId: string, isolationKey?: string) {
-      contextRequests.push({ profileId, isolated: isolationKey !== undefined });
+    async contextFor(place: { profileFolder: string } | null, isolationKey?: string) {
+      contextRequests.push({
+        profileId: place === null ? null : (profileIdOfFolder.get(place.profileFolder) ?? "?"),
+        isolated: isolationKey !== undefined,
+      });
       if (contextFailure) throw contextFailure;
       await contextGate?.promise;
       const context = makeContext(this.onClose);
@@ -64,6 +69,10 @@ vi.mock("./ServerBrowserContexts.ts", () => ({
     async scratchPage() {
       return makeEncoderPage() as unknown as Page;
     }
+    async owners() {
+      return [];
+    }
+    async sweep() {}
     async connectDesktopPage(endpoint: string) {
       const context = makeContext(undefined, desktopPageUrl);
       context.page.viewportSize.mockReturnValue(null);
@@ -298,7 +307,15 @@ function makeEncoderPage() {
 
 const contexts: ReturnType<typeof makeContext>[] = [];
 const encoderStreams: Array<{ frameRate: number | undefined; bitsPerSecond: number }> = [];
-const contextRequests: Array<{ profileId: string; isolated: boolean }> = [];
+const contextRequests: Array<{ profileId: string | null; isolated: boolean }> = [];
+// The mock gets folder names; these are the ids the tests use.
+const profileIdOfFolder = new Map(
+  ["default", "incognito", "profile-work", "profile-shared"].map(
+    (id) => [testFolders.profileFolder(id), id] as const,
+  ),
+);
+/** Whose every Thread here is: one User in one Space. */
+const PROFILE_USER = "browser-test-user";
 let contextGate: PromiseWithResolvers<void> | null = null;
 let pageCopy = "";
 let keyCopy = "";
@@ -390,6 +407,7 @@ const dependencies = Layer.mergeAll(
     turn: (threadId, active) => Effect.sync(() => desktopTurns.emit("turn", threadId, active)),
   }),
   PreviewAgentActivity.layer,
+  PreviewProfilesTestkit.layerTest(() => ({ userId: PROFILE_USER, spaceId: "browser-test-space" })),
 ).pipe(
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-server-browser-" })),
   Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
@@ -715,7 +733,7 @@ it.live.each([
     Effect.scoped(
       Effect.gen(function* () {
         const { browser, broker, tabId } = yield* ready;
-        const reportProfiles = yield* browser.profileReporter;
+        const reportProfiles = yield* browser.profileReporter(PROFILE_USER);
         for (const recordingFrameRate of reports) {
           yield* reportProfiles({
             profiles: [],
@@ -1483,7 +1501,7 @@ it.live.each(["save failed", "oversized"])(
     ).pipe(Effect.provide(layer)),
 );
 
-it.live("a restarted server removes the previous run's downloads and keeps its profiles", () =>
+it.live("a restarted server removes the previous run's downloads and the old shared profiles", () =>
   Effect.scoped(
     Effect.gen(function* () {
       const { stateDir } = yield* ServerConfig.ServerConfig;
@@ -1499,7 +1517,8 @@ it.live("a restarted server removes the previous run's downloads and keeps its p
       yield* Layer.build(ServerBrowser.layer);
 
       expect(yield* fs.exists(previousTab)).toBe(false);
-      expect(yield* fs.readFileString(path.join(profile, "Preferences"))).toBe("{}");
+      // Every User shared that one; whose its sign-ins were cannot be told.
+      expect(yield* fs.exists(profile)).toBe(false);
     }),
   ).pipe(Effect.provide(dependencies)),
 );
@@ -2069,7 +2088,7 @@ it.live(
         const broker = yield* Broker.PreviewAutomationBroker;
         const manager = yield* Manager.PreviewManager;
         yield* Effect.yieldNow;
-        const reportProfiles = yield* browser.profileReporter;
+        const reportProfiles = yield* browser.profileReporter(PROFILE_USER);
         yield* reportProfiles({
           profiles: [{ id: "profile-work", name: "Work", kind: "persistent" }],
           defaultProfileId: "profile-work",
@@ -2129,11 +2148,11 @@ it.live("profiles reported by one client survive another client's report", () =>
           operation: "open",
           input: { reuseExistingTab: false, show: false, profileId: work.id },
         });
-      const reportFromA = yield* browser.profileReporter;
+      const reportFromA = yield* browser.profileReporter(PROFILE_USER);
       const clientB = yield* Scope.make();
-      const reportFromB = yield* browser.profileReporter.pipe(
-        Effect.provideService(Scope.Scope, clientB),
-      );
+      const reportFromB = yield* browser
+        .profileReporter(PROFILE_USER)
+        .pipe(Effect.provideService(Scope.Scope, clientB));
       yield* reportFromA({ profiles: [work, shared], defaultProfileId: work.id });
       yield* reportFromB({ profiles: [shared], defaultProfileId: shared.id });
       expect(yield* openWork()).toMatchObject({

@@ -573,6 +573,8 @@ export class SpaceDirectory extends Context.Service<
      * tells each User's open connections, which close so their client reloads what it may see.
      */
     readonly membershipsChanged: (userIds: ReadonlyArray<UserId>) => Effect.Effect<void>;
+    /** Subscribes now; each User whose Memberships changed, as `membershipsChanged` names them. */
+    readonly subscribeMembershipChanges: Effect.Effect<Stream.Stream<UserId>, never, Scope.Scope>;
     /** Subscribes now; the returned effect completes at the User's next Membership change. */
     readonly nextMembershipChange: (
       userId: UserId,
@@ -1814,6 +1816,9 @@ const make = Effect.gen(function* () {
       yield* PubSub.publish(userStatusChanges, change);
     }),
     subscribeUserStatusChanges: PubSub.subscribe(userStatusChanges).pipe(
+      Effect.map(Stream.fromSubscription),
+    ),
+    subscribeMembershipChanges: PubSub.subscribe(membershipChanges).pipe(
       Effect.map(Stream.fromSubscription),
     ),
     isActive,

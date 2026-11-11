@@ -10,6 +10,7 @@ import {
   INCOGNITO_BROWSER_PROFILE_ID,
   resolveBrowserProfiles,
   type BrowserProfile,
+  type BrowserRecordingFrameRate,
   type PreviewReportProfilesInput,
   PREVIEW_AUTOMATION_SERVER_OPERATIONS,
   PreviewViewportSetting as PreviewViewportSettingSchema,
@@ -50,6 +51,7 @@ import { resolvePreviewViewport } from "@t3tools/shared/previewViewport";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import { constVoid } from "effect/Function";
@@ -80,6 +82,7 @@ import * as PreviewAutomationBroker from "../mcp/PreviewAutomationBroker.ts";
 import * as DesktopBrowserChannel from "./DesktopBrowserChannel.ts";
 import * as PreviewAgentActivity from "./PreviewAgentActivity.ts";
 import * as PreviewManager from "./Manager.ts";
+import * as PreviewProfiles from "./PreviewProfiles.ts";
 import * as ServerBrowserPage from "./ServerBrowserPage.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
@@ -244,9 +247,18 @@ export class ServerBrowser extends Context.Service<
       readonly downloadId: string;
     }) => Effect.Effect<Option.Option<{ readonly path: string; readonly fileName: string }>>;
 
-    readonly clearProfile: (profileId: string) => Effect.Effect<void, PreviewClearProfileError>;
+    /** Clears the caller's own profile `profileId` in every Space they have it; no one else's. */
+    readonly clearProfile: (input: {
+      readonly userId: string;
+      readonly profileId: string;
+    }) => Effect.Effect<void, PreviewClearProfileError>;
+    /** Clears every User's profiles: the Owner's explicit action, never a default. */
+    readonly clearAllProfiles: Effect.Effect<void, PreviewClearProfileError>;
 
-    readonly profileReporter: Effect.Effect<ProfileReporter, never, Scope.Scope>;
+    /** A client's reporter, for the profiles of its own User only. */
+    readonly profileReporter: (
+      userId: string,
+    ) => Effect.Effect<ProfileReporter, never, Scope.Scope>;
   }
 >()("t3/preview/ServerBrowser") {}
 
@@ -300,6 +312,8 @@ interface ServerTab {
 
   readonly desktop: { readonly close: () => Promise<void> } | null;
   readonly profileId: string | undefined;
+  /** Whose profiles this tab's Thread uses (`PreviewProfiles`); null when nobody's can be told. */
+  readonly profileUser: string | null;
   readonly openerTabId: string | undefined;
 
   readonly downloads: Array<ServerDownload>;
@@ -355,6 +369,12 @@ const AGENT_TAB_LIMIT = 8;
 const SERVER_TAB_LIMIT = 32;
 const AGENT_TAB_IDLE_MS = 30 * 60 * 1000;
 const IDLE_SWEEP_INTERVAL = "1 minute";
+/** How often profiles are checked against their Users' access and their limits. */
+const PROFILE_SWEEP_INTERVAL = "1 hour";
+/** A profile nobody opened for this long goes. */
+const PROFILE_MAX_IDLE_MS = 30 * 24 * 60 * 60 * 1000;
+/** A closed profile over this loses its caches, then everything if that is not enough. */
+const PROFILE_MAX_BYTES = 512 * 1024 * 1024;
 
 const DOWNLOAD_LIMIT = 20;
 const ABORTED_NAVIGATION_DOWNLOAD_WAIT_MS = 5_000;
@@ -476,6 +496,7 @@ const make = Effect.gen(function* () {
     config.baseDir,
   ]);
   const agentScope = yield* AgentScope;
+  const profiles = yield* PreviewProfiles.PreviewProfiles;
   const launchersDir = NodePath.join(config.stateDir, "server-browser", "launchers");
 
   const tabs = new Map<string, ServerTab>();
@@ -491,7 +512,7 @@ const make = Effect.gen(function* () {
   let viewerResizeOrder = 0;
 
   const contexts = new ServerBrowserContexts({
-    profilesDir: NodePath.join(config.stateDir, "server-browser", "profiles"),
+    profilesDir: NodePath.join(config.stateDir, "server-browser", "user-profiles"),
     executable: () => runPromise(previewBrowser.executable),
     // An agent scope keeps Chrome out of the server's memory protection and OOM score.
     launcher: async (executable) => {
@@ -814,16 +835,24 @@ const make = Effect.gen(function* () {
           .pipe(Effect.ignore),
       );
     }
+    // Whose profile this tab uses, by the rule every door goes by. Unknown: a throwaway context.
+    const owner =
+      desktop === null
+        ? Option.getOrNull(await runPromise(profiles.ownerOfThread(snapshot.threadId)))
+        : null;
     const isolatedContext =
       adopted === undefined &&
       desktop === null &&
-      ((snapshot.automationOwner !== undefined && snapshot.profileId === undefined) ||
+      (owner === null ||
+        (snapshot.automationOwner !== undefined && snapshot.profileId === undefined) ||
         snapshot.profileId === INCOGNITO_BROWSER_PROFILE_ID);
     const context =
       adopted?.page.context() ??
       desktop?.page.context() ??
       (await contexts.contextFor(
-        snapshot.profileId ?? "default",
+        owner === null
+          ? null
+          : profiles.place(owner, snapshot.profileId ?? DEFAULT_BROWSER_PROFILE_ID),
         isolatedContext ? tabKey(snapshot.threadId, snapshot.tabId) : undefined,
       ));
     if (isolatedContext) opened.push(() => context.close());
@@ -866,6 +895,7 @@ const make = Effect.gen(function* () {
       isolatedContext,
       desktop: desktop === null ? null : { close: desktop.close },
       profileId: snapshot.profileId,
+      profileUser: owner?.userId ?? null,
       openerTabId: adopted?.openerTabId,
       downloads: [],
       fileChooser: null,
@@ -1037,6 +1067,18 @@ const make = Effect.gen(function* () {
   yield* Effect.tryPromise(() => NodeFSP.rm(downloadsRoot, { recursive: true, force: true })).pipe(
     Effect.catch((cause) =>
       Effect.logWarning("server preview could not clear earlier downloads", { cause }),
+    ),
+  );
+  // Before profiles were per User, every User shared `profiles/`; whose its sign-ins were cannot
+  // be told, so it goes.
+  yield* Effect.tryPromise(() =>
+    NodeFSP.rm(NodePath.join(config.stateDir, "server-browser", "profiles"), {
+      recursive: true,
+      force: true,
+    }),
+  ).pipe(
+    Effect.catch((cause) =>
+      Effect.logWarning("server preview could not remove the old shared profiles", { cause }),
     ),
   );
   // Tab ids are opaque server strings; hashing keeps them out of the path.
@@ -1494,79 +1536,96 @@ const make = Effect.gen(function* () {
         ? ("agent" as const)
         : ("unclaimed" as const);
 
-  const reportsByClient = new Map<number, PreviewReportProfilesInput>();
+  const reportsByClient = new Map<
+    number,
+    { readonly userId: string; readonly report: PreviewReportProfilesInput }
+  >();
   let nextClient = 0;
-  let reportedProfiles: {
-    readonly profiles: ReadonlyArray<BrowserProfile>;
-    readonly defaultProfileId: string;
-  } | null = null;
-  // Agent recordings encode here, so they need the client's Browser recording frame rate. The
-  // last report outlives the client, which lets agents record while no client is connected.
-  let recordingFrameRate = DEFAULT_BROWSER_RECORDING_FRAME_RATE;
+  // Each User's own catalog: the union of what their connected clients report. The last one
+  // outlives the clients, so agents keep using it while none is connected.
+  const reportedProfiles = new Map<
+    string,
+    { readonly profiles: ReadonlyArray<BrowserProfile>; readonly defaultProfileId: string }
+  >();
+  // Agent recordings encode at the frame rate their tab's User set; the last report outlives
+  // the client, which lets agents record while no client is connected.
+  const recordingFrameRates = new Map<string, BrowserRecordingFrameRate>();
+  const recordingFrameRateOf = (tab: ServerTab) =>
+    (tab.profileUser === null ? undefined : recordingFrameRates.get(tab.profileUser)) ??
+    DEFAULT_BROWSER_RECORDING_FRAME_RATE;
 
-  // Each client reports only the profiles in its own settings, so the catalog is
-  // their union while they stay connected. The last catalog stays usable after
-  // every client disconnects, as a single report did before.
-  const rebuildReportedProfiles = () => {
+  const rebuildReportedProfiles = (userId: string) => {
     const byId = new Map<string, BrowserProfile>();
     let latest: PreviewReportProfilesInput | undefined;
-    for (const report of reportsByClient.values()) {
-      for (const profile of report.profiles) byId.set(profile.id, profile);
-      latest = report;
+    for (const client of reportsByClient.values()) {
+      if (client.userId !== userId) continue;
+      for (const profile of client.report.profiles) byId.set(profile.id, profile);
+      latest = client.report;
     }
     if (latest === undefined) return;
-    const profiles = resolveBrowserProfiles([...byId.values()]);
-    reportedProfiles = {
-      profiles,
+    const resolved = resolveBrowserProfiles([...byId.values()]);
+    reportedProfiles.set(userId, {
+      profiles: resolved,
       defaultProfileId:
-        findBrowserProfile(profiles, latest.defaultProfileId)?.id ?? DEFAULT_BROWSER_PROFILE_ID,
-    };
+        findBrowserProfile(resolved, latest.defaultProfileId)?.id ?? DEFAULT_BROWSER_PROFILE_ID,
+    });
   };
 
-  const profileReporter: ServerBrowser["Service"]["profileReporter"] = Effect.acquireRelease(
-    Effect.sync(() => nextClient++),
-    (client) =>
-      Effect.sync(() => {
-        reportsByClient.delete(client);
-        rebuildReportedProfiles();
-      }),
-  ).pipe(
-    Effect.map(
-      (client): ProfileReporter =>
-        (input) =>
-          Effect.sync(() => {
-            if (input.recordingFrameRate !== undefined)
-              recordingFrameRate = input.recordingFrameRate;
-            reportsByClient.delete(client);
-            reportsByClient.set(client, input);
-            rebuildReportedProfiles();
-          }),
-    ),
-  );
+  const profileReporter: ServerBrowser["Service"]["profileReporter"] = (userId) =>
+    Effect.acquireRelease(
+      Effect.sync(() => nextClient++),
+      (client) =>
+        Effect.sync(() => {
+          reportsByClient.delete(client);
+          rebuildReportedProfiles(userId);
+        }),
+    ).pipe(
+      Effect.map(
+        (client): ProfileReporter =>
+          (input) =>
+            Effect.sync(() => {
+              if (input.recordingFrameRate !== undefined)
+                recordingFrameRates.set(userId, input.recordingFrameRate);
+              reportsByClient.delete(client);
+              reportsByClient.set(client, { userId, report: input });
+              rebuildReportedProfiles(userId);
+            }),
+      ),
+    );
 
-  const profileStatus = () => {
-    const profiles = reportedProfiles?.profiles ?? BUILT_IN_BROWSER_PROFILES;
+  /** The catalog of `userId`'s own profiles; the built-in ones when they reported none. */
+  const profileStatus = (userId: string | null) => {
+    const reported = userId === null ? undefined : reportedProfiles.get(userId);
+    const known = reported?.profiles ?? BUILT_IN_BROWSER_PROFILES;
     return {
-      profiles: profiles.map((profile) => ({
+      profiles: known.map((profile) => ({
         id: profile.id,
         name: profile.name,
         ...(profile.kind === "incognito" ? { incognito: true } : {}),
       })),
-      ...(reportedProfiles ? { defaultProfileId: reportedProfiles.defaultProfileId } : {}),
+      ...(reported ? { defaultProfileId: reported.defaultProfileId } : {}),
     };
   };
 
-  const resolveOpenProfile = (requested: string | undefined): string | undefined => {
-    if (requested === undefined) return reportedProfiles?.defaultProfileId;
-    const profiles = reportedProfiles?.profiles ?? BUILT_IN_BROWSER_PROFILES;
+  /** The User whose profiles a Thread's tabs use, or null. */
+  const threadProfileUser = async (threadId: string) =>
+    Option.getOrNull(await runPromise(profiles.ownerOfThread(threadId)))?.userId ?? null;
+
+  const resolveOpenProfile = (
+    requested: string | undefined,
+    userId: string | null,
+  ): string | undefined => {
+    const reported = userId === null ? undefined : reportedProfiles.get(userId);
+    if (requested === undefined) return reported?.defaultProfileId;
+    const known = reported?.profiles ?? BUILT_IN_BROWSER_PROFILES;
     const wanted = requested.toLowerCase();
     const match =
-      findBrowserProfile(profiles, requested) ??
-      profiles.find((profile) => profile.name.toLowerCase() === wanted);
+      findBrowserProfile(known, requested) ??
+      known.find((profile) => profile.name.toLowerCase() === wanted);
     if (match) return match.id;
     throw new ServerBrowserPage.ServerBrowserOperationError(
       "PreviewAutomationUnknownProfileError",
-      `No browser profile is named "${requested}". Use one of: ${profiles
+      `No browser profile is named "${requested}". Use one of: ${known
         .map((profile) => `${profile.name} (id ${profile.id})`)
         .join(", ")}.`,
     );
@@ -1575,6 +1634,8 @@ const make = Effect.gen(function* () {
   const statusWithTitle = async (
     tab: ServerTab | undefined,
     agentSessionId?: string,
+    /** With no tab, the Thread whose User's catalog it reports. */
+    threadId?: string,
   ): Promise<PreviewAutomationStatus> => {
     if (!tab) {
       return {
@@ -1584,7 +1645,7 @@ const make = Effect.gen(function* () {
         url: null,
         title: null,
         loading: false,
-        ...profileStatus(),
+        ...profileStatus(threadId === undefined ? null : await threadProfileUser(threadId)),
       };
     }
     const url = ServerBrowserPage.withoutDataPayload(tab.page.url());
@@ -1621,7 +1682,7 @@ const make = Effect.gen(function* () {
           visible: candidate.viewers.size > 0,
           ...(candidate.profileId === undefined ? {} : { profileId: candidate.profileId }),
         })),
-      ...profileStatus(),
+      ...profileStatus(tab.profileUser),
       downloads: tab.downloads.map(({ fileName, path, sizeBytes, url, completedAt }) => ({
         fileName,
         path,
@@ -1695,7 +1756,7 @@ const make = Effect.gen(function* () {
       const encoder = await contexts.scratchPage();
       let session: CDPSession | null = null;
       try {
-        await encoder.evaluate(ServerBrowserPage.recordingEncoderScript(recordingFrameRate));
+        await encoder.evaluate(ServerBrowserPage.recordingEncoderScript(recordingFrameRateOf(tab)));
         // Seed idle pages before returning so an immediate stop has a frame to encode.
         const firstFrame = await ServerBrowserPage.captureViewport(tab.cdp, {
           format: "jpeg",
@@ -1946,6 +2007,7 @@ const make = Effect.gen(function* () {
             ? latestThreadTab(request.threadId, request.agentSessionId)
             : tabs.get(tabKey(request.threadId, request.tabId)),
           request.agentSessionId,
+          request.threadId,
         );
       case "open": {
         if (!request.agentSessionId)
@@ -1998,7 +2060,9 @@ const make = Effect.gen(function* () {
             ? found
             : undefined;
         const navigationTimeout = Math.min(request.timeoutMs, NAVIGATION_TIMEOUT_MS);
-        const profileId = existing ? undefined : resolveOpenProfile(open.profileId);
+        const profileId = existing
+          ? undefined
+          : resolveOpenProfile(open.profileId, await threadProfileUser(request.threadId));
         if (!existing) closeIdleAgentTabs();
         const tab =
           existing ??
@@ -2786,15 +2850,72 @@ const make = Effect.gen(function* () {
     }),
   );
 
-  const clearProfile = (profileId: string) =>
-    Effect.tryPromise({
-      try: () => contexts.clearProfile(profileId),
-      catch: (cause) => new PreviewClearProfileError({ profileId, cause }),
-    });
+  /**
+   * Removes the profiles of a User (all when omitted) in Spaces they no longer keep them in: a
+   * removed User, a Space they left, a folder named under another key, or one that does not say.
+   */
+  const reconcileProfiles = Effect.fn("ServerBrowser.reconcileProfiles")(function* (
+    userId?: string,
+  ) {
+    const found = yield* Effect.tryPromise(() => contexts.owners());
+    for (const entry of found) {
+      if (userId !== undefined && entry.userFolder !== profiles.userFolder(userId)) continue;
+      const place = entry.owner === null ? null : profiles.place(entry.owner, "");
+      const kept =
+        entry.owner !== null &&
+        place?.userFolder === entry.userFolder &&
+        place.spaceFolder === entry.spaceFolder &&
+        (yield* profiles.keeps(entry.owner));
+      if (!kept) {
+        yield* Effect.tryPromise(() =>
+          contexts.removeProfiles(entry.userFolder, entry.spaceFolder),
+        );
+      }
+    }
+  });
+  const sweepProfiles = Clock.currentTimeMillis.pipe(
+    Effect.flatMap((now) =>
+      Effect.tryPromise(() =>
+        contexts.sweep({ now, maxIdleMs: PROFILE_MAX_IDLE_MS, maxBytes: PROFILE_MAX_BYTES }),
+      ),
+    ),
+  );
+  yield* (yield* profiles.accessChanges).pipe(
+    Stream.runForEach((userId) =>
+      reconcileProfiles(userId).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("server preview could not remove a User's profiles", { cause }),
+        ),
+      ),
+    ),
+    Effect.forkScoped,
+  );
+  yield* reconcileProfiles().pipe(
+    Effect.andThen(sweepProfiles),
+    Effect.catch((cause) =>
+      Effect.logWarning("server preview could not bound its profiles", { cause }),
+    ),
+    Effect.repeat(Schedule.spaced(PROFILE_SWEEP_INTERVAL)),
+    Effect.forkScoped,
+  );
+
+  const clearProfile: ServerBrowser["Service"]["clearProfile"] = ({ userId, profileId }) =>
+    profileId === INCOGNITO_BROWSER_PROFILE_ID
+      ? Effect.void
+      : Effect.tryPromise({
+          try: () =>
+            contexts.clearProfile(profiles.userFolder(userId), profiles.profileFolder(profileId)),
+          catch: (cause) => new PreviewClearProfileError({ profileId, cause }),
+        });
+  const clearAllProfiles = Effect.tryPromise({
+    try: () => contexts.clearAll(),
+    catch: (cause) => new PreviewClearProfileError({ profileId: "*", cause }),
+  });
 
   return ServerBrowser.of({
     attachViewer,
     clearProfile,
+    clearAllProfiles,
     profileReporter,
     openDownload,
     answerFileChooser,

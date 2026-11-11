@@ -175,6 +175,7 @@ import * as ServerSettings from "./serverSettings.ts";
 import { invalidateSettingsSecrets } from "./sourceControl/sourceControlHostSecrets.ts";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
+import * as PreviewProfiles from "./preview/PreviewProfiles.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as HubPreviews from "./preview/HubPreviews.ts";
 import * as DeviceService from "./device/DeviceService.ts";
@@ -3222,7 +3223,13 @@ export const layerWsRpc = (
                 ),
               ),
             ),
-        [WS_METHODS.previewClearProfile]: (input) => serverBrowser.clearProfile(input.profileId),
+        // Only the caller's own profiles; every User's is the Owner's separate action.
+        [WS_METHODS.previewClearProfile]: (input) =>
+          serverBrowser.clearProfile({
+            userId: PreviewProfiles.profileUserOf(principal.userId),
+            profileId: input.profileId,
+          }),
+        [WS_METHODS.previewClearAllProfiles]: () => serverBrowser.clearAllProfiles,
         [WS_METHODS.previewReportProfiles]: (input) => reportProfiles(input),
         [WS_METHODS.previewReportStatus]: (input) =>
           threadWorkspace.previewReportStatus(input, workspaceCaller),
@@ -3575,7 +3582,10 @@ export const layer = Layer.unwrap(
         // Subscribed before the connection reads what it may see, so no Membership change between
         // the two is missed.
         const ends = yield* connectionEnds(session);
-        const reportProfiles = yield* serverBrowser.profileReporter;
+        // A client reports its own User's profiles, never another's.
+        const reportProfiles = yield* serverBrowser.profileReporter(
+          PreviewProfiles.profileUserOf(session.userId),
+        );
         const rpcWebSocketHttpEffect = yield* Effect.gen(function* () {
           const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
           yield* RpcServer.make(ServerWsRpcGroup, WS_RPC_SERVER_OPTIONS).pipe(

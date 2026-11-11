@@ -61,6 +61,8 @@ export const INSTALLATION_RPC_METHODS = [
   WS_METHODS.chatGptReconnectProfile,
   WS_METHODS.chatGptImportProfile,
   WS_METHODS.chatGptHandoffSubscribe,
+  // Every User's preview browser profiles; each User clears only their own (`previewClearProfile`).
+  WS_METHODS.previewClearAllProfiles,
   WS_METHODS.providerInstallStart,
   WS_METHODS.providerInstallCancel,
   WS_METHODS.providerInstallSubscribe,

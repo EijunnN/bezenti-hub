@@ -63,7 +63,10 @@ const SERVER_CONFIG = {
 const SOURCE_CONTROL_ACCOUNT = {
   unscoped: "the Hub's source-control tools and account, which cloning and publishing read",
 };
-const PREVIEW_PROFILES = { unscoped: "this client's own preview browser profiles" };
+const PREVIEW_PROFILES = {
+  unscoped:
+    "the caller's own preview browser profiles: ServerBrowser keys them by User (PreviewProfiles)",
+};
 const INSTALLATION_ACCESS = Object.fromEntries(
   INSTALLATION_RPC_METHODS.map((method) => [method, "installation"]),
 ) as Readonly<Record<InstallationRpcMethod, "installation">>;

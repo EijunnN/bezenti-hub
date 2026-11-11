@@ -72,6 +72,7 @@ import * as DeviceService from "./device/DeviceService.ts";
 import * as DeviceHubProxy from "./device/DeviceHubProxy.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
+import * as PreviewProfiles from "./preview/PreviewProfiles.ts";
 import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as PreviewAgentActivity from "./preview/PreviewAgentActivity.ts";
 import * as DesktopBrowserChannel from "./preview/DesktopBrowserChannel.ts";
@@ -772,7 +773,14 @@ const layerMakeRoutes = Layer.mergeAll(
   // The same activity instance RunExecutionService reports to, by layer memoization.
   Layer.provide(
     ServerBrowser.layer.pipe(
-      Layer.provide(Layer.merge(DesktopBrowserChannel.layer, PreviewAgentActivity.layer)),
+      Layer.provide(
+        Layer.mergeAll(
+          DesktopBrowserChannel.layer,
+          PreviewAgentActivity.layer,
+          // Whose each tab's profile is: the one rule for every door to the server browser.
+          PreviewProfiles.layer,
+        ),
+      ),
     ),
   ),
   Layer.provide(PreviewBrowser.layer),
