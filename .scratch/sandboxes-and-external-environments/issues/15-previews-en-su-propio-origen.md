@@ -4,10 +4,21 @@
 
 **Blocked by:** 07.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Ajuste de la Installation para el dominio de previews (p. ej. `T3CODE_PREVIEW_ORIGIN` con comodín), documentado con DNS wildcard y certificado; sin él, se mantiene el modo actual con su aviso.
-- [ ] Un subdominio por preview (no compartido entre Users ni Spaces), con la misma autorización por petición del ticket 07 y una cookie propia del origen del preview.
-- [ ] La cookie de sesión del Hub nunca llega al origen del preview; red-first.
-- [ ] Un servidor Vite con HMR funciona en el preview.
-- [ ] Prueba real con un proyecto Vite en un Sandbox.
+- [x] Ajuste de la Installation para el dominio de previews (p. ej. `T3CODE_PREVIEW_ORIGIN` con comodín), documentado con DNS wildcard y certificado; sin él, se mantiene el modo actual con su aviso.
+- [x] Un subdominio por preview (no compartido entre Users ni Spaces), con la misma autorización por petición del ticket 07 y una cookie propia del origen del preview.
+- [x] La cookie de sesión del Hub nunca llega al origen del preview; red-first.
+- [x] Un servidor Vite con HMR funciona en el preview.
+- [x] Prueba real con un proyecto Vite en un Sandbox.
+
+**Hecho** (impl/sbx-15):
+
+- **Ajuste:** `T3CODE_PREVIEW_ORIGIN=https://*.<zona>` (puerto opcional; `http://` solo bajo `localhost`, que el navegador trata como seguro; zona de al menos dos etiquetas). Si el host del Hub (`T3CODE_PUBLIC_URL` o el host de escucha) cae dentro de la zona, el servidor no arranca. Sin el ajuste no cambia nada: `/preview/<token>/` con CSP `sandbox` y una línea de log al arrancar que lo explica. Documentado en `docs/user/public-hub.md` (DNS comodín, certificado comodín, proxy que conserve `Host`) y `docs/internals/sandboxes.md#previews-on-their-own-origin`. Recomendación: un dominio registrable aparte del del Hub; un subdominio del Hub también funciona con las defensas de abajo.
+- **Un origen por preview:** cada dirección (User, sesión, Thread, Environment, puerto) tiene `originId`, 256 bits aleatorios en base32 (etiqueta DNS de 52 letras), nunca reutilizado ni compartido. El enlace estable sigue siendo `/preview/<token>/` en el Hub (contrato sin cambios): una navegación con la sesión del Hub de su User responde 303 a `https://<id>.<zona>/__t3_preview/handoff?code=…&path=…`; el código dura 60 s, se gasta al primer uso y solo vale en su origen; al gastarlo se pone `__Host-t3_preview` (host-only, HttpOnly, Secure, SameSite=Lax, Path=/). En el origen del Hub ya no se relaya nada en este modo.
+- **Cada petición** en el origen exige esa cookie y pasa la misma comprobación del 07 (caché de 2 s + revisión de Spaces); WebSockets (HMR) y SSE igual, y un socket abierto se cierra al perder el acceso. La sesión del Hub nunca cuenta allí. Revocación: fin de la sesión (sign-out, revocar, quitar o desactivar al User), mover el Thread, perder Thread o Space, o caducar la dirección.
+- **Nada bajo la zona llega al Hub:** `previewOriginLayer`, middleware global dentro de la admisión de clientes y fuera de todo lo demás: `<id>.<zona>` exacto es ese preview; cualquier otro host de la zona da 404 (API, `/ws`, MCP, estáticos, CORS, `/api/preview-stream`).
+- **Cookies del Hub:** sobre HTTPS la cookie de sesión es `__Host-t3_session_<hash>`; cada respuesta que la pone caduca la de nombre sin prefijo, así que las sesiones existentes migran en su siguiente `/api/auth/session` en vez de cerrarse. Con el ajuste activo, una cookie sin prefijo sobre HTTPS deja de contar (podría haberla lanzado un preview: cookie tossing); quien no haya pasado por el Hub desde la actualización inicia sesión una vez. HTTP plano (desktop, LAN, dev) mantiene el nombre sin prefijo.
+- **Regla única para las puertas con cookie:** `crossesFromPreviewOrigin` (Origin o Referer en la zona, o petición same-site sin Origin que no sea navegación de documento). EnvironmentAuth la aplica antes de su chequeo de origen (HttpApi, `/ws`, OTLP, device hub, preview-stream); las rutas guest y la de preview la llaman ellas mismas; ningún endpoint pone ni borra la cookie de sesión (ni la de guest) para esa petición (login CSRF). HTML del Hub con `frame-ancestors 'self'`. `DoorRules.AMBIENT_COOKIE_RULES` declara cada puerta (también los middlewares globales, ahora descubiertos por el test) y el test falla si un módulo lee una cookie sin la regla.
+- **Lo que cruza:** el dev server sigue viendo `Host`/`Origin` `localhost:<puerto>`; las cookies propias de la página pasan en ambos sentidos salvo las reservadas; los `Set-Cookie` del dev server pierden `Domain`; se descartan HSTS, HPKP y Alt-Svc.
+- **Pruebas:** `PreviewOrigin.test.ts`, `PreviewOriginCookies.test.ts`, `guest/http.test.ts`, `DoorRules.test.ts`, `HubWithEnvironments.previewOrigins.test.ts` (rojo primero). Prueba real con Vite 6.4.6 en el Sandbox de Acme y `http://*.localhost:14815`: módulos, `fetch()` y HMR funcionan; otro User recibe 401/404; ni `document.cookie` ni las peticiones del preview llevan la sesión del Hub.
