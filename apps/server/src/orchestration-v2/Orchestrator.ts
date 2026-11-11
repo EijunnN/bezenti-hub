@@ -1,4 +1,5 @@
 import type {
+  EnvironmentId,
   GuestShareId,
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -1105,9 +1106,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const environmentCapabilities = Option.isSome(providedCapabilities)
     ? providedCapabilities.value
     : yield* EnvironmentExecutor.makeLocalCapabilityCache(providerAdapters);
-  const capabilitiesFor = (threadId: ThreadId, providerInstanceId: ProviderInstanceId) =>
+  const capabilitiesFor = (
+    threadId: ThreadId,
+    providerInstanceId: ProviderInstanceId,
+    environmentId?: EnvironmentId,
+  ) =>
     environmentCapabilities
-      .forThread({ threadId, providerInstanceId })
+      .forThread({ threadId, providerInstanceId, environmentId })
       .pipe(Effect.map((entry) => entry.capabilities));
   const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
   const providerSessions = yield* ProviderSessionManagerV2;
@@ -1184,8 +1189,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const providerSessionIdFor = (input: {
     readonly providerInstanceId: ProviderInstanceId;
     readonly threadId: ThreadId;
+    readonly environmentId?: EnvironmentId | undefined;
   }) =>
-    capabilitiesFor(input.threadId, input.providerInstanceId).pipe(
+    capabilitiesFor(input.threadId, input.providerInstanceId, input.environmentId).pipe(
       Effect.flatMap((capabilities) =>
         capabilities.sessions.supportsMultipleProviderThreadsPerSession
           ? Effect.succeed(
@@ -1364,6 +1370,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     (effect, threadId) =>
       effect.pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause }))),
   );
+
+  /**
+   * The Environment of a Thread this command creates (a delegated task's child), as its creation
+   * names it, or undefined for a Thread created earlier. Such a Thread has no projected row for
+   * the Active environment resolver to read until the command commits.
+   */
+  const environmentOfThreadCreatedIn = Effect.fnUntraced(function* (
+    threadId: ThreadId,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const created = (yield* Ref.get(events)).find(
+      (event): event is Extract<OrchestrationV2DomainEvent, { readonly type: "thread.created" }> =>
+        event.type === "thread.created" && event.threadId === threadId,
+    );
+    if (created === undefined) return undefined;
+    const environmentId = created.payload.activeEnvironmentId;
+    // As the projection stores it: absent is the Hub machine, null is no Environment.
+    if (environmentId === undefined) return HUB_MACHINE_ENVIRONMENT_ID;
+    return environmentId === null ? EnvironmentExecutor.NO_ENVIRONMENT_ID : environmentId;
+  });
 
   const getProjectionWithPendingEvents =
     /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
@@ -5698,6 +5724,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) {
     let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
+    const createdEnvironmentId = yield* environmentOfThreadCreatedIn(command.threadId, events);
     if (command.manualContinuationOfRunId !== undefined) {
       const source = projection.runs.find((run) => run.id === command.manualContinuationOfRunId);
       const limited = latestRootProviderFailure(source ?? null, projection.turnItems);
@@ -6246,9 +6273,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             );
       const queuedCapabilities =
         selectedProviderSession?.capabilities ??
-        (yield* capabilitiesFor(command.threadId, modelSelection.instanceId).pipe(
-          mapDispatchError(command),
-        ));
+        (yield* capabilitiesFor(
+          command.threadId,
+          modelSelection.instanceId,
+          createdEnvironmentId,
+        ).pipe(mapDispatchError(command)));
       yield* mapDispatchError(command)(
         commandPolicy.ensureQueuedMessages({
           commandId: command.commandId,
@@ -6264,10 +6293,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         .pipe(Effect.result);
       const machineAway =
         queuedAdapter._tag === "Failure" && targetProviderThread !== undefined
-          ? yield* runtimePolicy.resolve({ thread: projection.thread, modelSelection }).pipe(
-              Effect.as(false),
-              Effect.catch((error) => Effect.succeed(isEnvironmentAwayError(error))),
-            )
+          ? yield* runtimePolicy
+              .resolve({
+                thread: projection.thread,
+                modelSelection,
+                environmentId: createdEnvironmentId,
+              })
+              .pipe(
+                Effect.as(false),
+                Effect.catch((error) => Effect.succeed(isEnvironmentAwayError(error))),
+              )
           : false;
       const queuedDriver =
         queuedAdapter._tag === "Success"
@@ -6300,38 +6335,44 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const checkpointScope =
         queueBehindRun.status === "preparing" || worktreeMissingRun !== undefined
           ? null
-          : yield* runtimePolicy.resolve({ thread: projection.thread, modelSelection }).pipe(
-              Effect.asSome,
-              // Its machine is away (a paused turn): the scope is made when the run starts.
-              Effect.catchIf(
-                (error) => isEnvironmentAwayError(error),
-                () => Effect.succeedNone,
-              ),
-              Effect.flatMap((resolved) =>
-                Option.isNone(resolved)
-                  ? Effect.succeed(null)
-                  : checkpointService.prepareRootRunScope({
-                      threadId: command.threadId,
-                      runId,
-                      rootNodeId,
-                      providerThreadId: queuedProviderThread.id,
-                      cwd:
-                        resolved.value.cwd ??
-                        selectedProviderSession?.cwd ??
-                        projection.thread.worktreePath ??
-                        process.cwd(),
-                      createdAt: now,
+          : yield* runtimePolicy
+              .resolve({
+                thread: projection.thread,
+                modelSelection,
+                environmentId: createdEnvironmentId,
+              })
+              .pipe(
+                Effect.asSome,
+                // Its machine is away (a paused turn): the scope is made when the run starts.
+                Effect.catchIf(
+                  (error) => isEnvironmentAwayError(error),
+                  () => Effect.succeedNone,
+                ),
+                Effect.flatMap((resolved) =>
+                  Option.isNone(resolved)
+                    ? Effect.succeed(null)
+                    : checkpointService.prepareRootRunScope({
+                        threadId: command.threadId,
+                        runId,
+                        rootNodeId,
+                        providerThreadId: queuedProviderThread.id,
+                        cwd:
+                          resolved.value.cwd ??
+                          selectedProviderSession?.cwd ??
+                          projection.thread.worktreePath ??
+                          process.cwd(),
+                        createdAt: now,
+                      }),
+                ),
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestratorDispatchError({
+                      commandId: command.commandId,
+                      commandType: command.type,
+                      cause,
                     }),
-              ),
-              Effect.mapError(
-                (cause) =>
-                  new OrchestratorDispatchError({
-                    commandId: command.commandId,
-                    commandType: command.type,
-                    cause,
-                  }),
-              ),
-            );
+                ),
+              );
       const queueIsHeld = projection.runs.some(
         (candidate) => candidate.status === "queued" && candidate.queueHeld === true,
       );
@@ -6639,6 +6680,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           providerSessionIdFor({
             providerInstanceId: modelSelection.instanceId,
             threadId: command.threadId,
+            environmentId: createdEnvironmentId,
           }),
         ));
       const providerThreadId =
@@ -6701,6 +6743,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               .resolve({
                 thread: projection.thread,
                 modelSelection,
+                environmentId: createdEnvironmentId,
               })
               .pipe(
                 mapDispatchError(command),
@@ -7031,13 +7074,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         providerSessionIdFor({
           providerInstanceId: modelSelection.instanceId,
           threadId: command.threadId,
+          environmentId: createdEnvironmentId,
         }),
       ));
     const existingProviderSession = projection.providerSessions.find(
       (candidate) => candidate.id === providerSessionId,
     );
     const resolvedRuntimePolicy = yield* runtimePolicy
-      .resolve({ thread: projection.thread, modelSelection })
+      .resolve({
+        thread: projection.thread,
+        modelSelection,
+        environmentId: createdEnvironmentId,
+      })
       .pipe(
         Effect.mapError(
           (cause) =>
@@ -7049,7 +7097,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ),
       );
 
-    const capabilities = yield* capabilitiesFor(command.threadId, modelSelection.instanceId).pipe(
+    const capabilities = yield* capabilitiesFor(
+      command.threadId,
+      modelSelection.instanceId,
+      createdEnvironmentId,
+    ).pipe(
       Effect.mapError(
         (cause) =>
           new OrchestratorProviderAdapterError({

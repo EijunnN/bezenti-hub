@@ -317,10 +317,14 @@ export interface EnvironmentCapabilityCacheShape {
     EnvironmentProviderCapabilitySnapshot,
     EnvironmentCapabilitiesUnavailableError
   >;
-  /** The provider as the Thread's Active environment's executor reports it. */
+  /**
+   * The provider as the Thread's Active environment's executor reports it. A Thread created by
+   * the command being decided has no projected row yet: the caller names its Environment.
+   */
   readonly forThread: (input: {
     readonly threadId: ThreadId;
     readonly providerInstanceId: ProviderInstanceId;
+    readonly environmentId?: EnvironmentId | undefined;
   }) => Effect.Effect<EnvironmentProviderCapabilitySnapshot, EnvironmentCapabilityReadError>;
 }
 
@@ -368,7 +372,8 @@ const makeCapabilityCache = Effect.fn("EnvironmentExecutor.makeCapabilityCache")
       },
     ),
     forThread: Effect.fn("EnvironmentCapabilityCache.forThread")(function* (input) {
-      return yield* read(yield* resolveThread(input.threadId), input.providerInstanceId);
+      const environmentId = input.environmentId ?? (yield* resolveThread(input.threadId));
+      return yield* read(environmentId, input.providerInstanceId);
     }),
   });
 });
@@ -1012,9 +1017,11 @@ export const layerRuntimePolicy: Layer.Layer<
             providerInstanceId: input.modelSelection.instanceId,
             cause,
           });
-        const executor = yield* registry
-          .forThread(input.thread.id)
-          .pipe(Effect.mapError(resolveError));
+        const executor = yield* (
+          input.environmentId === undefined
+            ? registry.forThread(input.thread.id)
+            : registry.get(input.environmentId)
+        ).pipe(Effect.mapError(resolveError));
         const worktreePath = yield* worktreeOn(registry, checkouts, executor, input.thread).pipe(
           Effect.mapError(resolveError),
         );

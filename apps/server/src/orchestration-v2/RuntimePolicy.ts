@@ -1,4 +1,5 @@
 import {
+  type EnvironmentId,
   isRuntimeModeAbove,
   managedRuntimeModeCeilingMessage,
   ModelSelection,
@@ -71,6 +72,8 @@ export interface RuntimePolicyV2Shape {
   readonly resolve: (input: {
     readonly thread: OrchestrationV2AppThread;
     readonly modelSelection: ModelSelection;
+    /** For a Thread created by the command being decided, not projected yet: its Environment. */
+    readonly environmentId?: EnvironmentId | undefined;
   }) => Effect.Effect<ProviderAdapter.ProviderAdapterV2RuntimePolicy, RuntimePolicyV2Error>;
 }
 
