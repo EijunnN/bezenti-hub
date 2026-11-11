@@ -17,6 +17,19 @@ export interface SshInstallForm {
   readonly keepForUpdates: boolean;
 }
 
+/** A machine's name is at most this long (`HubEnvironmentName`). */
+const MACHINE_NAME_MAX = 64;
+
+/**
+ * The name a machine gets when the Owner gives none: its IP address, or the first label of its
+ * host name (`vps-1` of `vps-1.example.com`), never longer than a machine's name may be.
+ */
+export function defaultMachineName(host: string): string {
+  const trimmed = host.trim().replace(/^\[(.*)\]$/u, "$1");
+  const isIp = /^[\d.]+$/u.test(trimmed) || trimmed.includes(":");
+  return (isIp ? trimmed : (trimmed.split(".")[0] ?? "")).slice(0, MACHINE_NAME_MAX);
+}
+
 /** The Hub reads the machine's host key; the run waits for the Owner to confirm it. */
 export function startSshInstall(form: SshInstallForm): Promise<SshInstallRun> {
   return request((client) =>

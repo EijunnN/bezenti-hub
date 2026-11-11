@@ -1,9 +1,10 @@
 import type { SpaceId, SshInstallRun, SshInstallStep } from "@t3tools/contracts";
-import { useEffect, useEffectEvent, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import {
   cancelSshInstall,
   confirmSshInstall,
+  defaultMachineName,
   fetchSshInstall,
   startSshInstall,
 } from "../../environments/primary/sshInstall";
@@ -57,6 +58,9 @@ interface FormState {
 
 const fieldClass = "text-xs font-medium";
 
+const isFinished = (run: SshInstallRun) =>
+  run.state !== "awaiting-host-key" && run.state !== "running";
+
 /**
  * Settings → Environments, for the Owner: «Add a machine over SSH». The Hub connects from its own
  * process, shows the host key to confirm, then runs each step with its output here. The key goes
@@ -83,6 +87,8 @@ export function SshInstallDialog(props: {
   const [run, setRun] = useState<SshInstallRun | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  // Closed while the Hub was still reading the host key: that run is cancelled once it answers.
+  const closedRef = useRef(false);
   const running = run?.state === "running";
   const runId = run?.runId;
 
@@ -142,7 +148,7 @@ export function SshInstallDialog(props: {
               ? { kind: "agent" }
               : { kind: "key", privateKey: form.privateKey, passphrase: form.passphrase },
           spaceId: form.spaceId as SpaceId,
-          name: form.name.trim() || form.host.trim(),
+          name: form.name.trim() || defaultMachineName(form.host),
           hubUrl: form.hubUrl.trim(),
           keepForUpdates: form.keepForUpdates,
         }),
@@ -150,12 +156,22 @@ export function SshInstallDialog(props: {
     );
     // The Hub holds it for the run now; nothing here keeps it.
     if (started !== null) setForm((current) => ({ ...current, privateKey: "", passphrase: "" }));
+    if (started !== null && closedRef.current && !isFinished(started)) {
+      void cancelSshInstall(started.runId).catch(() => undefined);
+    }
   };
 
+  // Closing ends a run that has not finished: none waits on its host key, or goes on unseen.
   const close = () => {
-    // A run under way goes on; only Cancel stops it.
-    if (running && !window.confirm("The installation goes on on the Hub. Close this anyway?")) {
+    if (
+      running &&
+      !window.confirm("Closing cancels the installation and undoes what it did. Close anyway?")
+    ) {
       return;
+    }
+    closedRef.current = true;
+    if (run !== null && !isFinished(run)) {
+      void cancelSshInstall(run.runId).catch(() => undefined);
     }
     props.onClose();
   };
@@ -311,7 +327,7 @@ export function SshInstallDialog(props: {
                     id="ssh-install-name"
                     maxLength={64}
                     nativeInput
-                    placeholder={form.host || "Acme VPS"}
+                    placeholder={defaultMachineName(form.host) || "Acme VPS"}
                     value={form.name}
                     onChange={(event) => set("name", event.currentTarget.value)}
                   />
@@ -350,14 +366,7 @@ export function SshInstallDialog(props: {
             </>
           ) : run.state === "awaiting-host-key" ? (
             <>
-              <Button
-                disabled={pending}
-                type="button"
-                variant="ghost"
-                onClick={() =>
-                  void act(() => cancelSshInstall(run.runId), "Could not cancel.").then(close)
-                }
-              >
+              <Button disabled={pending} type="button" variant="ghost" onClick={close}>
                 Cancel
               </Button>
               <Button
