@@ -28,7 +28,9 @@ import {
   SERVICE_LAUNCHER_CONTEXT_ENV,
   SERVICE_LAUNCHER_PROTOCOL,
 } from "../cloud/serviceProtocol.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServiceLauncherClient from "../cloud/serviceLauncherClient.ts";
+import * as ServerConfig from "../config.ts";
 import {
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
@@ -161,6 +163,14 @@ describe("t3 pair", () => {
           );
 
           const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-pair-ipv6-test-"));
+          // The Hub started once before: its secret store and master key exist.
+          yield* Effect.flatMap(ServerSecretStore.ServerSecretStore, () => Effect.void).pipe(
+            Effect.provide(
+              ServerSecretStore.layer.pipe(
+                Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
+              ),
+            ),
+          );
           yield* persistServerRuntimeState({
             path: NodePath.join(baseDir, "userdata", "server-runtime.json"),
             state: yield* makePersistedServerRuntimeState({

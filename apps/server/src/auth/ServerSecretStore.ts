@@ -12,11 +12,10 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Predicate from "effect/Predicate";
 import * as PlatformError from "effect/PlatformError";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
-import * as ProcessRunner from "../processRunner.ts";
-import * as ServerOwnership from "../serverOwnership.ts";
 import { createExclusively, writeAtomically } from "./atomicFile.ts";
 import * as MasterKeyFile from "./MasterKeyFile.ts";
 import * as SecretCipher from "./SecretCipher.ts";
@@ -163,7 +162,11 @@ export class ServerSecretStore extends Context.Service<
 /** The master key the store opened with; none on a joined machine. */
 export class MasterKeyring extends Context.Service<
   MasterKeyring,
-  { readonly keyring: Option.Option<MasterKeyFile.Keyring> }
+  {
+    readonly keyring: Option.Option<MasterKeyFile.Keyring>;
+    /** Why a command beside a running server could not open it (the server's startup is due). */
+    readonly unavailable: Option.Option<MasterKeyFile.MasterKeyError>;
+  }
 >()("t3/auth/ServerSecretStore/MasterKeyring") {}
 
 /**
@@ -199,17 +202,31 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
   const encrypted = !joinedMachine || (yield* MasterKeyFile.holdsEncryptedSecrets());
   const openAsClient = Effect.scoped(
     Effect.gen(function* () {
+      // Loaded here: the ownership module reaches much of the server, which reaches this store.
+      const [ServerOwnership, ProcessRunner] = yield* Effect.promise(() =>
+        Promise.all([import("../serverOwnership.ts"), import("../processRunner.ts")]),
+      );
       const owned = yield* ServerOwnership.acquireServerOwnership(
         serverConfig.serverRuntimeStatePath,
       ).pipe(Effect.provide(ProcessRunner.layer), Effect.option);
       return yield* MasterKeyFile.openKeyring(Option.isSome(owned) ? "owner" : "client");
     }),
   );
-  const keyring = !encrypted
+  // Beside a running server whose store needs its startup, a command still runs; only what reads
+  // or writes a secret fails, saying so.
+  const opened = !encrypted
     ? undefined
     : mode === "owner"
-      ? yield* MasterKeyFile.openKeyring("owner")
-      : yield* openAsClient;
+      ? yield* MasterKeyFile.openKeyring("owner").pipe(Effect.map(Result.succeed))
+      : yield* openAsClient.pipe(
+          Effect.map(Result.succeed),
+          Effect.catchIf(
+            (error) => error.reason === "needs-hub",
+            (error) => Effect.succeed(Result.fail(error)),
+          ),
+        );
+  const keyring = opened !== undefined && Result.isSuccess(opened) ? opened.success : undefined;
+  const unavailable = opened !== undefined && Result.isFailure(opened) ? opened.failure : undefined;
 
   const sealedPath = (name: string) =>
     path.join(serverConfig.secretsDir, `${name}${MasterKeyFile.SEALED_EXTENSION}`);
@@ -271,8 +288,17 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
     return yield* readOptional(name, plainPath(name));
   });
 
+  /** Every operation fails, saying why, while the store could not be opened beside a server. */
+  const whenOpen = <A, E>(
+    name: string,
+    effect: Effect.Effect<A, E>,
+  ): Effect.Effect<A, E | SecretStoreReadError> =>
+    unavailable === undefined
+      ? effect
+      : Effect.fail(new SecretStoreReadError({ resource: `secret ${name}`, cause: unavailable }));
+
   const get: ServerSecretStore["Service"]["get"] = (name) =>
-    (keyring === undefined ? getPlain(name) : getSealed(keyring, name)).pipe(
+    whenOpen(name, keyring === undefined ? getPlain(name) : getSealed(keyring, name)).pipe(
       Effect.withSpan("ServerSecretStore.get"),
     );
 
@@ -288,7 +314,7 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
     );
 
   const set: ServerSecretStore["Service"]["set"] = (name, value) =>
-    withFiles(writeAtomically(entryPath(name), sealFor(name, value))).pipe(
+    whenOpen(name, withFiles(writeAtomically(entryPath(name), sealFor(name, value)))).pipe(
       Effect.mapError(
         (cause) => new SecretStorePersistError({ resource: `secret ${name}`, cause }),
       ),
@@ -298,7 +324,7 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
   // `link` publishes the fully written temp file under the final name, or fails with
   // AlreadyExists, so a concurrent reader never observes a partially written secret.
   const create: ServerSecretStore["Service"]["create"] = (name, value) =>
-    withFiles(createExclusively(entryPath(name), sealFor(name, value))).pipe(
+    whenOpen(name, withFiles(createExclusively(entryPath(name), sealFor(name, value)))).pipe(
       Effect.mapError(
         (cause) => new SecretStorePersistError({ resource: `secret ${name}`, cause }),
       ),
@@ -359,7 +385,7 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
       );
 
   const remove: ServerSecretStore["Service"]["remove"] = (name) =>
-    removeFile(name, sealedPath(name)).pipe(
+    whenOpen(name, removeFile(name, sealedPath(name))).pipe(
       Effect.andThen(removeFile(name, plainPath(name))),
       Effect.withSpan("ServerSecretStore.remove"),
     );
@@ -375,7 +401,13 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
       remove,
     }),
   ).pipe(
-    Context.add(MasterKeyring, MasterKeyring.of({ keyring: Option.fromUndefinedOr(keyring) })),
+    Context.add(
+      MasterKeyring,
+      MasterKeyring.of({
+        keyring: Option.fromUndefinedOr(keyring),
+        unavailable: Option.fromUndefinedOr(unavailable),
+      }),
+    ),
   );
 });
 

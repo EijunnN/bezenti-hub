@@ -50,14 +50,16 @@ const notEncrypted = new MasterKeyFile.MasterKeyError({
 });
 
 const make = Effect.gen(function* () {
-  const { keyring } = yield* ServerSecretStore.MasterKeyring;
+  const { keyring, unavailable } = yield* ServerSecretStore.MasterKeyring;
   const audit = yield* AuditLog.AuditLog;
   // The record lives beside the entries: read and written with the store's own file system.
   const context = yield* Effect.context<
     ServerConfig.ServerConfig | Path.Path | FileSystem.FileSystem
   >();
 
-  const requireKeyring = Effect.fromOption(keyring).pipe(Effect.mapError(() => notEncrypted));
+  const requireKeyring = Effect.fromOption(keyring).pipe(
+    Effect.mapError(() => Option.getOrElse(unavailable, () => notEncrypted)),
+  );
 
   const statusOf = (current: MasterKeyFile.Keyring) =>
     MasterKeyFile.readBackupRecord(current).pipe(
