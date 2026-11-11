@@ -36,6 +36,7 @@ import { searchableSetting } from "./settingsSearch";
 import { EnvironmentIconMenu } from "./EnvironmentIconPicker";
 import { AccountSettingsSection } from "./AccountSettingsSection";
 import { AuditLogSettingsSection } from "./AuditLogSettingsSection";
+import { MasterKeySettingsSection } from "./MasterKeySettingsSection";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { HubEnvironmentsSettings } from "./HubEnvironmentsSettings";
 import { HubSandboxesSettings } from "./HubSandboxesSettings";
@@ -1381,6 +1382,7 @@ export function ConnectionsSettings({ view }: { readonly view: "environments" | 
   if (showsAccess) {
     return (
       <SettingsPageContainer>
+        <MasterKeySettingsSection />
         <AccountSettingsSection />
         <AuditLogSettingsSection />
         {primarySettings}

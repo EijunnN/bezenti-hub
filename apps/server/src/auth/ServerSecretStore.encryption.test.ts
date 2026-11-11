@@ -16,10 +16,15 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
+import * as Redacted from "effect/Redacted";
+import * as References from "effect/References";
+import * as Tracer from "effect/Tracer";
 
 import * as ServerConfig from "../config.ts";
+import * as MasterKeyFile from "./MasterKeyFile.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 
 const platform = Layer.mergeAll(NodeServices.layer, NodeCrypto.layer);
@@ -252,6 +257,217 @@ it.layer(platform)("ServerSecretStore encryption", (it) => {
         }
       }),
     );
+  });
+
+  describe("rotation", () => {
+    const keyIdsOf = (baseDir: string) =>
+      filesUnder(secretsDirOf(baseDir)).map(({ bytes }) => bytes.subarray(5, 13).toString("hex"));
+
+    it.effect("reseals every entry with a new key and keeps the old one as .previous", () =>
+      Effect.gen(function* () {
+        const baseDir = newBaseDir();
+        seedPlaintext(baseDir, { one: "VALUE-ONE", two: "VALUE-TWO" });
+        yield* readAll(baseDir, ["one"]);
+        const oldKey = NodeFS.readFileSync(keyFileOf(baseDir), "utf8");
+        const rotated = yield* MasterKeyFile.rotate().pipe(Effect.provide(configAt(baseDir)));
+        assert.notEqual(rotated.keyId, rotated.previousKeyId);
+        assert.equal(NodeFS.readFileSync(`${keyFileOf(baseDir)}.previous`, "utf8"), oldKey);
+        assert.notEqual(NodeFS.readFileSync(keyFileOf(baseDir), "utf8"), oldKey);
+        assert.isFalse(NodeFS.existsSync(`${keyFileOf(baseDir)}.next`));
+        assert.deepEqual([...new Set(keyIdsOf(baseDir))], [rotated.keyId]);
+        const values = yield* readAll(baseDir, ["one", "two"]);
+        assert.deepEqual(values.map(Option.getOrThrow), ["VALUE-ONE", "VALUE-TWO"]);
+      }),
+    );
+
+    it.effect("stopped half-way, keeps both keys and the next start finishes it", () =>
+      Effect.gen(function* () {
+        const baseDir = newBaseDir();
+        seedPlaintext(baseDir, { one: "VALUE-ONE", two: "VALUE-TWO", three: "VALUE-THREE" });
+        yield* readAll(baseDir, ["one"]);
+        const oldKey = NodeFS.readFileSync(keyFileOf(baseDir), "utf8");
+        // The `.next` key is written (rename 1), then one entry resealed (rename 2): stop there.
+        const crashed = yield* Effect.exit(
+          MasterKeyFile.rotate().pipe(
+            Effect.provide(configAt(baseDir)),
+            Effect.provide(layerRenameFailsFrom(3)),
+          ),
+        );
+        assert.isTrue(Exit.isFailure(crashed));
+        assert.isTrue(NodeFS.existsSync(`${keyFileOf(baseDir)}.next`));
+        assert.equal(NodeFS.readFileSync(keyFileOf(baseDir), "utf8"), oldKey);
+        assert.equal(new Set(keyIdsOf(baseDir)).size, 2, "expected entries under both keys");
+        const values = yield* readAll(baseDir, ["one", "two", "three"]);
+        assert.deepEqual(values.map(Option.getOrThrow), ["VALUE-ONE", "VALUE-TWO", "VALUE-THREE"]);
+        assert.isFalse(NodeFS.existsSync(`${keyFileOf(baseDir)}.next`));
+        assert.equal(NodeFS.readFileSync(`${keyFileOf(baseDir)}.previous`, "utf8"), oldKey);
+        assert.equal(new Set(keyIdsOf(baseDir)).size, 1);
+      }),
+    );
+
+    it.effect("makes an earlier backup no backup of the new key", () =>
+      Effect.gen(function* () {
+        const baseDir = newBaseDir();
+        const backedUp = yield* Effect.flatMap(ServerSecretStore.MasterKeyBackup, (backup) =>
+          backup.recordBackup("2026-11-11T00:00:00.000Z"),
+        ).pipe(Effect.provide(storeAt(baseDir)));
+        assert.equal(backedUp.backedUpAt, "2026-11-11T00:00:00.000Z");
+        yield* MasterKeyFile.rotate().pipe(Effect.provide(configAt(baseDir)));
+        const after = yield* Effect.flatMap(
+          ServerSecretStore.MasterKeyBackup,
+          (backup) => backup.status,
+        ).pipe(Effect.provide(storeAt(baseDir)));
+        assert.equal(after.backedUpAt, null);
+      }),
+    );
+  });
+
+  describe("import", () => {
+    const exportedFrom = (baseDir: string) =>
+      Effect.flatMap(ServerSecretStore.MasterKeyBackup, (backup) => backup.readKey).pipe(
+        Effect.provide(storeAt(baseDir)),
+      );
+
+    it.effect("opens the same secrets in another state directory", () =>
+      Effect.gen(function* () {
+        const source = newBaseDir();
+        yield* withStore(source, (store) => store.set("owner-token", encoder.encode(SECRET)));
+        const key = yield* exportedFrom(source);
+        const target = newBaseDir();
+        NodeFS.cpSync(secretsDirOf(source), secretsDirOf(target), { recursive: true });
+        const imported = yield* MasterKeyFile.importKey(key).pipe(Effect.provide(configAt(target)));
+        assert.isFalse(imported.replaced);
+        const [value] = yield* readAll(target, ["owner-token"]);
+        assert.equal(Option.getOrThrow(value!), SECRET);
+      }),
+    );
+
+    it.effect("of a key that does not open the secrets here changes nothing", () =>
+      Effect.gen(function* () {
+        const baseDir = newBaseDir();
+        yield* withStore(baseDir, (store) => store.set("a", encoder.encode(SECRET)));
+        const other = newBaseDir();
+        yield* withStore(other, (store) => store.set("b", encoder.encode("x")));
+        const before = NodeFS.readFileSync(keyFileOf(baseDir));
+        const otherKey = yield* exportedFrom(other);
+        const exit = yield* Effect.exit(
+          MasterKeyFile.importKey(otherKey).pipe(Effect.provide(configAt(baseDir))),
+        );
+        assert.isTrue(Exit.isFailure(exit));
+        assert.deepEqual(NodeFS.readFileSync(keyFileOf(baseDir)), before);
+        const [value] = yield* readAll(baseDir, ["a"]);
+        assert.equal(Option.getOrThrow(value!), SECRET);
+      }),
+    );
+
+    it.effect("over a wrong key keeps the replaced one beside it", () =>
+      Effect.gen(function* () {
+        const baseDir = newBaseDir();
+        yield* withStore(baseDir, (store) => store.set("a", encoder.encode(SECRET)));
+        const good = yield* exportedFrom(baseDir);
+        const other = newBaseDir();
+        yield* withStore(other, (store) => store.set("b", encoder.encode("x")));
+        const wrong = NodeFS.readFileSync(keyFileOf(other), "utf8");
+        NodeFS.writeFileSync(keyFileOf(baseDir), wrong, { mode: 0o600 });
+        const imported = yield* MasterKeyFile.importKey(good).pipe(
+          Effect.provide(configAt(baseDir)),
+        );
+        assert.isTrue(imported.replaced);
+        const kept = NodeFS.readdirSync(stateDirOf(baseDir)).filter((name) =>
+          name.startsWith("master.key.replaced-"),
+        );
+        assert.equal(kept.length, 1);
+        assert.equal(
+          NodeFS.readFileSync(NodePath.join(stateDirOf(baseDir), kept[0]!), "utf8"),
+          wrong,
+        );
+        const [value] = yield* readAll(baseDir, ["a"]);
+        assert.equal(Option.getOrThrow(value!), SECRET);
+      }),
+    );
+
+    it.effect("of text that is not a key is refused", () =>
+      Effect.gen(function* () {
+        const baseDir = newBaseDir();
+        const exit = yield* Effect.exit(
+          MasterKeyFile.importKey(Redacted.make("not a key")).pipe(
+            Effect.provide(configAt(baseDir)),
+          ),
+        );
+        assert.isTrue(Exit.isFailure(exit));
+        assert.isFalse(NodeFS.existsSync(keyFileOf(baseDir)));
+      }),
+    );
+  });
+
+  describe("T3CODE_MASTER_KEY_FILE", () => {
+    it.effect("puts the key where it says, outside the state directory", () =>
+      Effect.gen(function* () {
+        const baseDir = newBaseDir();
+        const elsewhere = NodePath.join(newBaseDir(), "keys", "hub.key");
+        const config = Layer.effect(
+          ServerConfig.ServerConfig,
+          Effect.map(ServerConfig.ServerConfig, (base) => ({ ...base, masterKeyFile: elsewhere })),
+        ).pipe(Layer.provide(configAt(baseDir)));
+        yield* Effect.flatMap(ServerSecretStore.ServerSecretStore, (store) =>
+          store.set("a", encoder.encode(SECRET)),
+        ).pipe(Effect.provide(ServerSecretStore.layer.pipe(Layer.provideMerge(config))));
+        assert.isTrue(NodeFS.existsSync(elsewhere));
+        assert.isFalse(NodeFS.existsSync(keyFileOf(baseDir)));
+      }),
+    );
+  });
+
+  describe("logs, spans and errors", () => {
+    it.effect("never hold the key, whatever the store does or refuses", () => {
+      const recorded: Array<string> = [];
+      const tracer = Tracer.make({
+        span: (options) => {
+          const span = new Tracer.NativeSpan(options);
+          const end = span.end.bind(span);
+          span.end = (endTime, exit) => {
+            recorded.push(span.name, ...Array.from(span.attributes.values(), String), String(exit));
+            end(endTime, exit);
+          };
+          return span;
+        },
+      });
+      const logger = Logger.make((options) => {
+        recorded.push(
+          String(options.message),
+          String(options.cause),
+          JSON.stringify(options.fiber.getRef(References.CurrentLogAnnotations)),
+        );
+      });
+      return Effect.gen(function* () {
+        const baseDir = newBaseDir();
+        seedPlaintext(baseDir, { legacy: "LEGACY" });
+        yield* readAll(baseDir, ["legacy"]);
+        const keyOf = () => NodeFS.readFileSync(keyFileOf(baseDir), "utf8").trim().split(":")[1]!;
+        const firstKey = keyOf();
+        yield* MasterKeyFile.rotate().pipe(Effect.provide(configAt(baseDir)));
+        const rotatedKey = keyOf();
+        // A refusal: another key.
+        const other = newBaseDir();
+        yield* readAll(other, []);
+        NodeFS.copyFileSync(keyFileOf(other), keyFileOf(baseDir));
+        const refused = yield* Effect.exit(readAll(baseDir, ["legacy"]));
+        assert.isTrue(Exit.isFailure(refused));
+        recorded.push(String(Exit.isFailure(refused) ? refused.cause : ""));
+        assert.isAbove(recorded.length, 3);
+        for (const secret of [firstKey, rotatedKey]) {
+          const hex = Buffer.from(secret, "base64url").toString("hex");
+          assert.isFalse(
+            recorded.some((value) => value.includes(secret) || value.includes(hex)),
+            "the master key reached a log, a span or an error",
+          );
+        }
+      }).pipe(
+        Effect.withTracer(tracer),
+        Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+        Effect.provideService(References.MinimumLogLevel, "All"),
+      );
+    });
   });
 
   describe("a joined machine", () => {
