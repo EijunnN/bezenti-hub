@@ -139,6 +139,9 @@ on its own in-process executor. Constraints that span both halves:
 - The hello names the sessions the machine still runs: the Hub ends the ones it lost and tells it
   to drop the ones the Hub no longer has (`provider.retired`, as after a Hub restart). A session's
   end is spooled in its event order, so it is reported even if it happened while offline.
+- A stopping Hub (`ProviderSessionManager.shutdown`, which raises `hubStopping` on the executor
+  registry first) sends `provider.detach` only to machines connected then; it does not wait for
+  one that is away, which drops the session through `provider.retired` when it next connects.
 - The Hub acknowledges an event only once it has delivered or refused it. If the Thread cannot be
   read, it delivers nothing more for that session until the machine resends after a reconnect.
 - Machine work for a Thread whose Environment is away waits without holding back the Hub's own
