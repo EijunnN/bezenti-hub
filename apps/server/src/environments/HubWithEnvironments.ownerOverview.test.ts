@@ -90,6 +90,13 @@ describe("Hub con Environments: the Owner's overview of every machine", () => {
       assert.equal(sandbox.name, "Acme Sandbox");
       assert.equal(sandbox.spaceName, "Acme");
       assert.equal(sandbox.status, "online");
+      // Only Sandboxes that were made: the Owner's Personal space has none yet.
+      assert.deepEqual(
+        overview.environments
+          .filter((environment) => environment.kind === "sandbox")
+          .map((e) => e.id),
+        [sandboxEnvironmentIdOf(acme)],
+      );
 
       // Nobody else gets it, an Admin of the Space included.
       for (const role of ["admin", "member", "guest"] as const) {

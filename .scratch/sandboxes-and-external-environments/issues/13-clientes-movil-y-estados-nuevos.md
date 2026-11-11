@@ -4,10 +4,19 @@
 
 **Blocked by:** 05, 09.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Fuente compartida de Environments en client-runtime con los estados y modos nuevos; web, desktop y móvil la usan.
-- [ ] Móvil: nombres y estados en listas y Thread; lista de solo lectura para el Owner con modo, Space y estado.
-- [ ] Typecheck y tests de mobile y client-runtime en verde; prueba real en web de las mismas pantallas.
+- [x] Fuente compartida de Environments en client-runtime con los estados y modos nuevos; web, desktop y móvil la usan.
+- [x] Móvil: nombres y estados en listas y Thread; lista de solo lectura para el Owner con modo, Space y estado.
+- [x] Typecheck y tests de mobile y client-runtime en verde; prueba real en web de las mismas pantallas.
 
 **Follow-up from 05 (limits):** Settings → Environments «Sandboxes» lists only Hub Sandboxes, so a Space whose only Sandbox is a dedicated machine has no row for its limits. Show one (the Space's own values and the effective limits, from `POST …/sandboxes/limits` `changed` or the list) and let the Owner edit them there; the API already takes the dedicated machine's `environmentId`.
+
+**Hecho** (impl/sbx-13):
+
+- **Fuente compartida** (`client-runtime/environment/hubEnvironments.ts`): `environmentStatusLabel` (un Sandbox `online` dice «Running»; si no, Online, Reconnecting, Offline, Stopped, Starting, «Failed to start» en todas partes: la sección «Sandboxes» decía «Failed»), `ENVIRONMENT_STATUS_TONES` (verde online; ámbar reconnecting y starting, que late; rojo failed; gris offline y stopped), `shownEnvironmentStatus` (el Hub machine siempre online), `environmentUseOf`/`ENVIRONMENT_USE_LABELS` (Hub machine, Sandbox, Dedicated machine, Personal machine) y `environmentUseDescription` («Runs the Hub», «Sandbox of Acme», «Dedicated to Acme», «Your personal machine», «Grace's personal machine»). Web (Settings → Environments, «Sandboxes», imagen, cabecera del Thread, diálogo de mover; desktop usa la web) y móvil dejan sus mapas propios. Decisión: en móvil «offline» era rojo y pasa a gris, como en web.
+- **Móvil:** filas y cabecera del Thread con nombre y estado (`threadEnvironmentText`); el aviso del Thread explica «Starting the Sandbox…», «The Sandbox could not start: <por qué>» con «Try again» (`POST /api/environments/start`, `startRemoteHubEnvironment`) y «Needs an environment» con «Move». El móvil no llama a `project.move` (no tiene diálogo de mover Projects), así que no hay 409 que manejar; un Thread liberado por un move aparece «Needs an environment».
+- **Lista del Owner en móvil** (solo lectura): «Machines on this Hub» lee `GET /api/environments/overview`, nuevo, solo Owner (DoorRules `OWNER`; Admin, Member y Guest reciben 403, test rojo primero en `HubWithEnvironments.ownerOverview.test.ts`), con modo, Space y dueño por nombre, estado y error de arranque; deja fuera los Sandboxes nunca creados. Solo se monta para el Owner y sondea cada 5 s en primer plano.
+- **Seguimiento del 05:** `GET …/sandboxes` lleva para el Owner `dedicatedSpaces` (cada Space con máquinas dedicadas y sin Sandbox del Hub listado, con valores propios y efectivos); web muestra la fila «<Space> · dedicated» con el estado de cada máquina y **Limits**, que cambia los del Space vía una de sus máquinas. El disco figura «not enforced» (es comprobación del Hub). Un Hub sin runtime de Sandboxes lee ahora los defaults guardados, no los de fábrica.
+- **Pruebas:** server `ownerOverview` (2), `sandboxLimits` (15), `dedicated` (7), `DoorRules` (4); client-runtime `hubEnvironments` (17); móvil `threadEnvironmentText` (8), `hubMachineRow` (2), `HubMachinesSection` (2, react); web `useHubEnvironments` y `ChatHeader.browser`. Typecheck de server (solo los 2 errores previos de `DeviceHubProxy*.test.ts`), client-runtime, web, móvil y desktop; fmt, lint y knip:check limpios.
+- **Prueba real** (`makita-livepass-s3-13`, runtime process): PASS 17/17. Sandbox starting (servidor en SIGSTOP), failed (SIGKILL) con «Try again», running y stopped, en cabecera, fila y Settings; máquina dedicada a Globex con su fila de límites cambiada a 8 GiB; overview 200 para el Owner y 403 para un Member; Thread con «Needs an environment» tras mover el Project. El móvil no se puede renderizar aquí (sin react-native-web ni Expo web): cubierto con tests de componente.

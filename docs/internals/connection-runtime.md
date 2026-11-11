@@ -20,9 +20,14 @@ environment and does not change when a Thread moves. Thread routes are
 `/$threadId`, resolved on the Hub connection; the older
 `/$environmentId/$threadId` and `/threads/$environmentId/$threadId` links redirect
 there. The Active environment's name and live status (online, reconnecting,
-offline) come from the Hub's Environments list, polled every five seconds while a
+offline, and for a Sandbox stopped, starting or failed) come from the Hub's Environments list, polled every five seconds while a
 view shows it ([hub environments](../../packages/client-runtime/src/environment/hubEnvironments.ts),
-shared by web and mobile with the move dialog's wording and steps).
+shared by web and mobile with the move dialog's wording and steps). The same module holds what
+every client shows for a machine: `environmentStatusLabel` («Running» for a Sandbox online, else
+Online, Reconnecting, Offline, Stopped, Starting, Failed to start), `ENVIRONMENT_STATUS_TONES`
+(green online; amber reconnecting or starting, which pulses; red failed; grey offline or stopped)
+and `environmentUseDescription` (Runs the Hub, Sandbox of <Space>, Dedicated to <Space>, Your /
+<User>'s personal machine), so web, desktop and mobile say and colour them alike.
 
 ## Mobile holds one connection too
 

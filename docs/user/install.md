@@ -450,12 +450,15 @@ window keeps the app, and this computer's Environment, running; quit the app to
 stop it. **Leave** removes this computer from the Hub.
 
 In **Settings → Environments**, **Machines on this Hub** lists every machine
-with its status (online, reconnecting or offline), when it was last seen, its
+with its status (online, reconnecting or offline; a Sandbox is running, stopped,
+starting or failed to start), how it is used (Sandbox of a Space, dedicated to a
+Space, or someone's personal machine), when it was last seen, its
 providers and their versions, and its free CPU, memory and disk. **Rename**
 changes its name; **Remove** disconnects it at once and its credential stops
 working, so a lost machine loses access immediately. The Hub machine itself is
 always listed and cannot be removed. Joining, renaming and removing are recorded
-in the audit log.
+in the audit log. On mobile, the Owner sees the same list, read-only, under
+**Settings → Environments**, with each machine's use, Space and status.
 
 ### Run Threads on a joined machine
 
@@ -545,7 +548,9 @@ Each Sandbox has CPU, memory, process and disk limits: the Owner sets the
 defaults (2 CPUs, 4 GiB of memory, 4096 processes, 20 GiB of disk to begin with)
 and a Space's own in **Settings → Environments → Sandboxes**, which also shows
 each Sandbox's status, uptime, use and image, and lets the Owner start, stop
-and restart it; a Space's Admins see their Sandbox there too. CPU, memory and
+and restart it; a Space's Admins see their Sandbox there too. A Space whose
+Sandbox runs only on a dedicated machine has a row there too, where the Owner
+changes its limits. CPU, memory and
 process limits apply on the Sandbox's next start, and Podman enforces them only
 when the Hub runs in a systemd user session (with `dbus-user-session`
 installed): otherwise Settings shows **Limits not enforced on this host** and

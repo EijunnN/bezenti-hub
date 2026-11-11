@@ -848,7 +848,15 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
     if (!principal.isOwner) {
       return yield* new EnvironmentAccessDeniedError({ reason: "owner-only" });
     }
-    const environments = yield* list(viewer);
+    // A Space's Sandbox that was never made is only a choice in the composer, not a machine.
+    const made = new Set(
+      (yield* selectRows([sql`kind = 'sandbox'`, sql`revoked_at IS NULL`]).pipe(
+        Effect.mapError(storageError),
+      )).map((row) => row.environmentId),
+    );
+    const environments = (yield* list(viewer)).filter(
+      (environment) => environment.kind !== "sandbox" || made.has(environment.id),
+    );
     const spaceNames = new Map<string, string>(
       (yield* spaces.view(viewer).pipe(Effect.mapError(storageError))).spaces.map((space) => [
         space.id,

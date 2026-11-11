@@ -343,6 +343,16 @@ Sandbox is refused until it is restored. Audit: `sandbox.start`/`sandbox.stop` w
 `settings` (with `hold`), `restart`, `disk-full` or `host-disk-low`, and `sandbox.limits.change` with scope (`defaults` or `space`) and
 the new values.
 
+For the Owner the list also carries `dedicatedSpaces`: each Space with machines dedicated to it
+and no Hub Sandbox listed, with its own and effective limits, so a Space whose only Sandbox is a
+dedicated machine has a limits row («<Space> · dedicated», **Limits**); the change goes through
+`POST …/sandboxes/limits` with one of its machines' `environmentId`. Disk is marked not enforced
+there: it is the Hub's own check, for its own Sandboxes.
+
+**Every machine for the Owner** (`GET /api/environments/overview`, DoorRules `OWNER`): the
+Owner's list with each machine's mode, Space and owner by name, status and start error; Sandboxes
+never made are left out. Anyone else gets 403. Mobile's read-only «Machines on this Hub» reads it.
+
 ## Base image
 
 Every Sandbox runs one image, [the Containerfile](../../apps/server/sandbox-image/Containerfile):
