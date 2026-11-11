@@ -31,6 +31,16 @@ import type { ProfileOwner } from "./PreviewProfiles.ts";
 import { layerTest, testFolders } from "./PreviewProfiles.testkit.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
 
+/** The cookie each request marked `?by=` sent the app, as it arrives. */
+const seen = new Map<string, PromiseWithResolvers<string>>();
+const arrival = (by: string) => {
+  const existing = seen.get(by);
+  if (existing) return existing;
+  const created = Promise.withResolvers<string>();
+  seen.set(by, created);
+  return created;
+};
+
 /** An app with a sign-in: `/login` sets its session cookie; every page shows the cookie it got. */
 const startApp = Effect.acquireRelease(
   Effect.promise(
@@ -38,7 +48,11 @@ const startApp = Effect.acquireRelease(
       new Promise<{ readonly origin: string; readonly server: NodeHttp.Server }>((resolve) => {
         const server = NodeHttp.createServer((request, response) => {
           const headers: Record<string, string> = { "content-type": "text/html; charset=utf-8" };
-          const login = /^\/login\?as=(\w+)$/.exec(request.url ?? "");
+          const requested = new URL(request.url ?? "/", "http://app");
+          const by = requested.searchParams.get("by");
+          if (by !== null) arrival(by).resolve(request.headers.cookie ?? "");
+          const as = requested.pathname === "/login" ? requested.searchParams.get("as") : null;
+          const login = as === null ? null : [as, as];
           if (login) headers["set-cookie"] = `session=${login[1]}; Path=/; Max-Age=3600`;
           response.writeHead(200, headers);
           response.end(`<title>app</title><p>${request.headers.cookie ?? "signed out"}</p>`);
@@ -60,8 +74,9 @@ const startApp = Effect.acquireRelease(
 );
 
 const environmentId = EnvironmentId.make("profiles-test-environment");
-const scopeOf = (threadId: string) => ({
+const scopeOf = (threadId: string, userId?: string) => ({
   environmentId,
+  ...(userId === undefined ? {} : { userId: userId as never }),
   thread: {
     threadId: ThreadId.make(threadId),
     providerSessionId: `agent-${threadId}`,
@@ -97,6 +112,8 @@ const accessChanges = Stream.callback<string>((queue) =>
     (onChange) => Effect.sync(() => access.off("change", onChange)),
   ),
 );
+/** How often each Thread's owner was looked up. */
+const lookups = new Map<string, number>();
 /** Settles when Bob's profiles are next checked. */
 let bobChecked = Promise.withResolvers<void>();
 
@@ -122,14 +139,20 @@ const dependencies = Layer.mergeAll(
     turn: () => Effect.void,
   }),
   PreviewAgentActivity.layer,
-  layerTest((threadId) => THREADS[threadId], {
-    keeps: (owner) =>
-      Effect.sync(() => {
-        if (owner.userId === "bob") bobChecked.resolve();
-        return !left.has(`${owner.userId}/${owner.spaceId}`);
-      }),
-    accessChanges: Effect.succeed(accessChanges),
-  }),
+  layerTest(
+    (threadId) => {
+      lookups.set(threadId, (lookups.get(threadId) ?? 0) + 1);
+      return THREADS[threadId];
+    },
+    {
+      keeps: (owner) =>
+        Effect.sync(() => {
+          if (owner.userId === "bob") bobChecked.resolve();
+          return !left.has(`${owner.userId}/${owner.spaceId}`);
+        }),
+      accessChanges: Effect.succeed(accessChanges),
+    },
+  ),
 ).pipe(
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-browser-profiles-" })),
   Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
@@ -243,5 +266,118 @@ it.live("a User who leaves a Space loses their profiles there, and only there", 
     expect(yield* visit("aliceInAcme", `${app.origin}/`)).toBe("|null");
     expect(yield* visit("aliceInGlobex", `${app.origin}/`)).toBe("session=alice2|null");
     expect(yield* visit("bobInAcme", `${app.origin}/`)).toBe("session=bob|null");
+  }).pipe(Effect.ensuring(Effect.sync(() => left.clear())), Effect.scoped, Effect.provide(layer)),
+);
+
+/** A human opens a server tab of `threadId` at `url` (as WS `preview.open` does) and waits for it. */
+const humanVisit = Effect.fn(function* (openedBy: string, threadId: string, url: string) {
+  const manager = yield* Manager.PreviewManager;
+  const by = new URL(url).searchParams.get("by")!;
+  const snapshot = yield* manager.open({
+    threadId: ThreadId.make(threadId),
+    url,
+    runtime: "server",
+    openedBy,
+  });
+  const cookie = yield* Effect.promise(() => arrival(by).promise);
+  yield* manager.close({ threadId: ThreadId.make(threadId), tabId: snapshot.tabId });
+  return cookie;
+});
+
+it.live(
+  "a human browses another User's Thread in their own profile: not signed in as its owner, and their sign-in stays theirs",
+  () =>
+    Effect.gen(function* () {
+      const app = yield* startApp;
+      const browser = yield* ServerBrowser.ServerBrowser;
+      yield* Effect.yieldNow;
+      // Alice signs in on her own Thread.
+      yield* humanVisit("alice", "aliceInAcme", `${app.origin}/login?as=alice&by=a1`);
+      expect(yield* humanVisit("alice", "aliceInAcme", `${app.origin}/?by=a2`)).toBe(
+        "session=alice",
+      );
+      // The Owner (who may work Alice's Thread) previews it: not signed in as Alice.
+      expect(yield* humanVisit("owner", "aliceInAcme", `${app.origin}/?by=o1`)).toBe("");
+      // The Owner signs in there: Alice is still herself, and the sign-in is the Owner's.
+      yield* humanVisit("owner", "aliceInAcme", `${app.origin}/login?as=owner&by=o2`);
+      expect(yield* humanVisit("alice", "aliceInAcme", `${app.origin}/?by=a3`)).toBe(
+        "session=alice",
+      );
+      expect(yield* humanVisit("owner", "bobInAcme", `${app.origin}/?by=o3`)).toBe("session=owner");
+      // The Owner's own Clear reaches it, and leaves Alice's alone.
+      yield* browser.clearProfile({ userId: "owner", profileId: "default" });
+      expect(yield* humanVisit("owner", "aliceInAcme", `${app.origin}/?by=o4`)).toBe("");
+      expect(yield* humanVisit("alice", "aliceInAcme", `${app.origin}/?by=a4`)).toBe(
+        "session=alice",
+      );
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+);
+
+it.live("an agent on a draft names a profile from its own User's catalog", () =>
+  Effect.gen(function* () {
+    const app = yield* startApp;
+    const browser = yield* ServerBrowser.ServerBrowser;
+    yield* Effect.yieldNow;
+    const report = yield* browser.profileReporter("alice");
+    yield* report({
+      profiles: [{ id: "profile-work", name: "Work", kind: "persistent" }],
+      defaultProfileId: "default",
+    });
+    const broker = yield* Broker.PreviewAutomationBroker;
+    const opened = yield* broker.invoke<PreviewAutomationStatus>({
+      scope: scopeOf("draft", "alice"),
+      operation: "open",
+      input: { reuseExistingTab: false, show: false, profileId: "Work", url: `${app.origin}/` },
+    });
+    expect(opened.profiles?.map((profile) => profile.name)).toContain("Work");
+  }).pipe(Effect.scoped, Effect.provide(layer)),
+);
+
+it.live("a Thread's owner is looked up once per open, and not on every status read", () =>
+  Effect.gen(function* () {
+    const app = yield* startApp;
+    yield* ServerBrowser.ServerBrowser;
+    yield* Effect.yieldNow;
+    const broker = yield* Broker.PreviewAutomationBroker;
+    const scope = scopeOf("bobInAcme");
+    lookups.clear();
+    const opened = yield* broker.invoke<PreviewAutomationStatus>({
+      scope,
+      operation: "open",
+      input: { reuseExistingTab: false, show: false, profileId: "default", url: `${app.origin}/` },
+    });
+    expect(lookups.get("bobInAcme")).toBe(1);
+    yield* broker.invoke({ scope, operation: "close", input: { tabId: opened.tabId! } });
+    lookups.clear();
+    for (let read = 0; read < 3; read++) {
+      yield* broker.invoke({ scope, operation: "status", input: {} });
+    }
+    expect(lookups.get("bobInAcme") ?? 0).toBeLessThanOrEqual(1);
+  }).pipe(Effect.scoped, Effect.provide(layer)),
+);
+
+it.live("an open tab closes when its User leaves the Space, a throwaway one too", () =>
+  Effect.gen(function* () {
+    const app = yield* startApp;
+    yield* ServerBrowser.ServerBrowser;
+    yield* Effect.yieldNow;
+    const broker = yield* Broker.PreviewAutomationBroker;
+    const manager = yield* Manager.PreviewManager;
+    // An agent's tab with no named profile: a throwaway context, still Alice's in Acme.
+    const opened = yield* broker.invoke<PreviewAutomationStatus>({
+      scope: scopeOf("aliceInAcme"),
+      operation: "open",
+      input: { reuseExistingTab: false, show: false, url: `${app.origin}/` },
+    });
+    const events = yield* manager.subscribeEvents;
+    left.add("alice/acme");
+    access.emit("change", "alice");
+    const closed = yield* Stream.fromSubscription(events).pipe(
+      Stream.filter((event) => event.type === "closed" && event.tabId === opened.tabId),
+      Stream.take(1),
+      Stream.runCollect,
+      Effect.timeoutOption("20 seconds"),
+    );
+    expect(closed._tag).toBe("Some");
   }).pipe(Effect.ensuring(Effect.sync(() => left.clear())), Effect.scoped, Effect.provide(layer)),
 );

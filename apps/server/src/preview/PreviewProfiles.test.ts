@@ -216,3 +216,10 @@ it.effect(
       }
     }).pipe(Effect.scoped),
 );
+
+it.effect("profiles of no User (before there was an Owner) are not kept once an Owner exists", () =>
+  Effect.gen(function* () {
+    const { acme, profiles } = yield* hub;
+    assert.isFalse(yield* profiles.keeps({ userId: "", spaceId: acme }));
+  }).pipe(Effect.scoped),
+);

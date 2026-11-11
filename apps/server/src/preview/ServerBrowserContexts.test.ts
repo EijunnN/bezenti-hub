@@ -13,6 +13,10 @@ const launches = vi.hoisted(() => ({
   writeFile: vi.fn().mockResolvedValue(undefined),
   utimes: vi.fn().mockResolvedValue(undefined),
   readdir: vi.fn().mockResolvedValue([]),
+  readFile: vi.fn().mockRejectedValue(new Error("ENOENT")),
+  rename: vi.fn().mockResolvedValue(undefined),
+  stat: vi.fn().mockRejectedValue(new Error("ENOENT")),
+  lstat: vi.fn().mockRejectedValue(new Error("ENOENT")),
 }));
 vi.spyOn(chromium, "launch").mockImplementation(launches.launch);
 vi.spyOn(chromium, "launchPersistentContext").mockImplementation(launches.persistent);
@@ -22,6 +26,10 @@ vi.mock("node:fs/promises", () => ({
   writeFile: launches.writeFile,
   utimes: launches.utimes,
   readdir: launches.readdir,
+  readFile: launches.readFile,
+  rename: launches.rename,
+  stat: launches.stat,
+  lstat: launches.lstat,
 }));
 
 const USER = "1".repeat(32);
@@ -98,6 +106,10 @@ beforeEach(() => {
   launches.writeFile.mockClear();
   launches.utimes.mockClear();
   launches.readdir.mockReset().mockResolvedValue([]);
+  launches.readFile.mockReset().mockRejectedValue(new Error("ENOENT"));
+  launches.rename.mockReset().mockResolvedValue(undefined);
+  launches.stat.mockReset().mockRejectedValue(new Error("ENOENT"));
+  launches.lstat.mockReset().mockRejectedValue(new Error("ENOENT"));
 });
 
 describe("ServerBrowserContexts", () => {
@@ -356,5 +368,38 @@ describe("ServerBrowserContexts", () => {
     await pool.close();
     expect(browser.close).toHaveBeenCalledTimes(1);
     expect(browser.contexts[0]?.close).toHaveBeenCalled();
+  });
+});
+
+describe("ServerBrowserContexts while a profile opens", () => {
+  it("never takes a profile that is opening for one whose owner is unknown", async () => {
+    const human = makeContext();
+    launches.persistent.mockResolvedValue(human as unknown as BrowserContext);
+    // Its folders exist, but its owner is not written yet.
+    const ownerWritten = Promise.withResolvers<void>();
+    launches.writeFile.mockImplementationOnce(() => ownerWritten.promise);
+    launches.rename.mockImplementationOnce(() => ownerWritten.promise);
+    launches.readdir.mockImplementation(async (directory: string) =>
+      directory === "/test/profiles"
+        ? [folderEntry(USER)]
+        : directory === `/test/profiles/${USER}`
+          ? [folderEntry(SPACE)]
+          : [],
+    );
+    const pool = new ServerBrowserContexts(options());
+    const opening = pool.contextFor(place("work/team"));
+    await vi.waitFor(() => expect(launches.mkdir).toHaveBeenCalled());
+    // What the reconcile does: folders that do not say whose they are go.
+    const reconciling = (async () => {
+      for (const entry of await pool.owners()) {
+        if (entry.owner === null) await pool.removeProfiles(entry.userFolder, entry.spaceFolder);
+      }
+    })();
+    ownerWritten.resolve();
+    await reconciling;
+    await opening;
+    expect(human.close).not.toHaveBeenCalled();
+    expect(launches.rm).not.toHaveBeenCalled();
+    await pool.close();
   });
 });
