@@ -408,6 +408,12 @@ describe("Hub con Environments: a Project moves to another Space", () => {
         yield* addMember(hub.server, { id: gus, displayName: "Gus" });
         yield* joinOrganization(hub.server, acme, gus, "guest");
         yield* joinOrganization(hub.server, globex, gus, "guest");
+        // Dana was a Member of both and ran Grace's Thread on her laptop; she is a Guest of Globex
+        // now, so her machine serves her own Threads there, never Grace's.
+        const dana = UserId.make("demoted-dana");
+        yield* addMember(hub.server, { id: dana, displayName: "Dana" });
+        yield* joinOrganization(hub.server, acme, dana, "member");
+        yield* joinOrganization(hub.server, globex, dana, "guest");
         yield* hub.service(SpaceDirectory.SpaceDirectory).changed;
         const at = "2026-01-01T00:00:00.000Z";
         const machine = (
@@ -426,6 +432,7 @@ describe("Hub con Environments: a Project moves to another Space", () => {
         yield* machine("env-grace", "personal", grace, null);
         yield* machine("env-linus", "personal", linus, null);
         yield* machine("env-gus", "personal", gus, null);
+        yield* machine("env-dana", "personal", dana, null);
         yield* machine("env-acme-vps", "dedicated", null, acme);
         // Dedicated to Globex, but removed from the Hub: it serves nothing.
         yield* machine("env-removed-vps", "dedicated", null, globex);
@@ -449,6 +456,7 @@ describe("Hub con Environments: a Project moves to another Space", () => {
           grace: "env-grace" as EnvironmentId,
           linus: "env-linus" as EnvironmentId,
           gus: "env-gus" as EnvironmentId,
+          demoted: "env-dana" as EnvironmentId,
           dedicated: "env-acme-vps" as EnvironmentId,
           removed: "env-removed-vps" as EnvironmentId,
         };
@@ -470,6 +478,12 @@ describe("Hub con Environments: a Project moves to another Space", () => {
               branch: null,
               worktreePath: null,
               ...(environmentId === undefined ? {} : { activeEnvironmentId: environmentId }),
+              // Gus's Thread is his; the one on Dana's laptop is Grace's.
+              ...(name === "gus"
+                ? { ownerUserId: gus }
+                : name === "demoted"
+                  ? { ownerUserId: grace }
+                  : {}),
             })
             .pipe(Effect.orDie);
         }
@@ -481,6 +495,7 @@ describe("Hub con Environments: a Project moves to another Space", () => {
           [
             ["sandbox", sandboxEnvironmentIdOf(acme)],
             ["linus", "env-linus"],
+            ["demoted", "env-dana"],
             ["dedicated", "env-acme-vps"],
             ["removed", "env-removed-vps"],
           ],
@@ -502,7 +517,7 @@ describe("Hub con Environments: a Project moves to another Space", () => {
         assert.equal(moved.status, 200, JSON.stringify(moved.body));
         assert.deepEqual(
           moved.body.released.map((thread) => thread.title),
-          ["sandbox", "linus", "dedicated", "removed"],
+          ["sandbox", "linus", "demoted", "dedicated", "removed"],
         );
         const where = Effect.forEach(Object.keys(threads), (name) =>
           threadOf(hub, ThreadId.make(`thread:${name}`)).pipe(
@@ -519,6 +534,7 @@ describe("Hub con Environments: a Project moves to another Space", () => {
           ["grace", globex, "env-grace"],
           ["linus", globex, null],
           ["gus", globex, "env-gus"],
+          ["demoted", globex, null],
           ["dedicated", globex, null],
           ["removed", globex, null],
         ]);
@@ -538,6 +554,7 @@ describe("Hub con Environments: a Project moves to another Space", () => {
           ["grace", acme, "env-grace"],
           ["linus", acme, null],
           ["gus", acme, "env-gus"],
+          ["demoted", acme, null],
           ["dedicated", acme, null],
           ["removed", acme, null],
         ]);

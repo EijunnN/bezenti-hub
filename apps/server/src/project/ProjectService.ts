@@ -868,19 +868,23 @@ export const make = Effect.gen(function* () {
     spaceId: SpaceId,
     projectId: ProjectId,
     cache: ServesCache,
+    /** The Thread on it: a Guest's machine serves only that Guest's Threads. */
+    thread?: { readonly id: ThreadId; readonly ownerUserId?: UserId | null | undefined },
   ) {
     if (environmentId === undefined || environmentId === null) return undefined;
-    const known = cache.get(environmentId);
+    // Per machine and Thread owner: the answer depends on nothing else.
+    const key = `${environmentId} ${thread?.ownerUserId ?? (thread === undefined ? "" : `thread:${thread.id}`)}`;
+    const known = cache.get(key);
     const serves =
       known ??
-      (yield* servesSpace(environmentId, spaceId).pipe(
+      (yield* servesSpace(environmentId, spaceId, thread?.id).pipe(
         Effect.provideService(SqlClient.SqlClient, sql),
         Effect.mapError(
           (cause) =>
             new ProjectOperationError({ operation: "check-environment", projectId, cause }),
         ),
       ));
-    cache.set(environmentId, serves);
+    cache.set(key, serves);
     return serves ? undefined : environmentId;
   });
 
@@ -894,7 +898,13 @@ export const make = Effect.gen(function* () {
     const records = yield* threadMoveWork(threadId, projectId);
     const thread = records.thread;
     if (thread.deletedAt !== null || thread.projectId !== projectId) return undefined;
-    const releasedFrom = yield* machineLeft(thread.activeEnvironmentId, spaceId, projectId, cache);
+    const releasedFrom = yield* machineLeft(
+      thread.activeEnvironmentId,
+      spaceId,
+      projectId,
+      cache,
+      thread,
+    );
     return {
       records,
       thread,

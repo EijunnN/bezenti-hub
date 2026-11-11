@@ -65,13 +65,15 @@ export const SPACE_REFUSAL_MESSAGES: Readonly<Record<SpaceRefusal, string>> = {
 };
 
 /**
- * Why the Environment does not run Threads of `spaceId`, or undefined when it does: the Hub
- * machine runs any; a removed or unknown machine none; a Sandbox or dedicated machine its own
- * Space's; a personal machine while its enabled owner is the Owner or in that Space (any Role).
+ * Why the Environment does not run the Thread `threadId` (of Space `spaceId`), or undefined when
+ * it does: the Hub machine runs any; a removed or unknown machine none; a Sandbox or dedicated
+ * machine its own Space's; a personal machine while its enabled owner is the Owner or an Admin or
+ * Member there, or a Guest there and the Thread is theirs (its own owner, else its root's).
  */
 export const spaceRefusalOf = Effect.fn("spaceRefusalOf")(function* (
   environmentId: EnvironmentId,
   spaceId: string | null,
+  threadId: string | undefined,
 ) {
   if (environmentId === HUB_MACHINE_ENVIRONMENT_ID) return undefined;
   const sql = yield* SqlClient.SqlClient;
@@ -88,7 +90,15 @@ export const spaceRefusalOf = Effect.fn("spaceRefusalOf")(function* (
         u.is_owner = 1
         OR ${spaceId} = 'personal:' || u.user_id
         OR EXISTS (SELECT 1 FROM space_memberships m
-          WHERE m.user_id = u.user_id AND m.space_id = ${spaceId})
+          WHERE m.user_id = u.user_id AND m.space_id = ${spaceId} AND m.role <> 'guest')
+        OR (EXISTS (SELECT 1 FROM space_memberships m
+            WHERE m.user_id = u.user_id AND m.space_id = ${spaceId} AND m.role = 'guest')
+          AND u.user_id = (
+            SELECT COALESCE(t.owner_user_id, root.owner_user_id)
+            FROM orchestration_v2_projection_threads t
+            LEFT JOIN orchestration_v2_projection_threads root
+              ON root.thread_id = json_extract(t.payload_json, '$.lineage.rootThreadId')
+            WHERE t.thread_id = ${threadId ?? null}))
       ), 0) AS usable
     FROM environments e LEFT JOIN users u ON u.user_id = e.owner_user_id
     WHERE e.environment_id = ${environmentId}
@@ -103,6 +113,10 @@ export const spaceRefusalOf = Effect.fn("spaceRefusalOf")(function* (
   return row.usable === 1 ? undefined : ("owner-left" as const);
 });
 
-/** Whether the Environment runs Threads of `spaceId` (`spaceRefusalOf` says why not). */
-export const servesSpace = (environmentId: EnvironmentId, spaceId: string | null) =>
-  Effect.map(spaceRefusalOf(environmentId, spaceId), (refusal) => refusal === undefined);
+/** Whether the Environment runs the Thread in `spaceId` (`spaceRefusalOf` says why not). */
+export const servesSpace = (
+  environmentId: EnvironmentId,
+  spaceId: string | null,
+  threadId: string | undefined,
+) =>
+  Effect.map(spaceRefusalOf(environmentId, spaceId, threadId), (refusal) => refusal === undefined);

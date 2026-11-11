@@ -364,7 +364,7 @@ const make = Effect.gen(function* () {
     );
     // A personal machine runs a Thread only while its owner may still work in the Thread's Space
     // (`environment.use` is checked when placing; resumes and continuations have no actor).
-    const refusal = yield* spaceRefusalOf(link.environmentId, row?.spaceId ?? null).pipe(
+    const refusal = yield* spaceRefusalOf(link.environmentId, row?.spaceId ?? null, threadId).pipe(
       Effect.provideService(SqlClient.SqlClient, sql),
       Effect.mapError(refuse),
     );
