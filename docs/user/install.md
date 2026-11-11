@@ -659,10 +659,12 @@ and install**. Each step shows its output as it runs:
 If a step fails, or you press **Cancel installation**, the run stops there, shows that step's
 output, and leaves no machine registered; fix the cause and **Try again**. The key is used for that
 run only and forgotten, unless you tick **Keep the key for updates**: then the Hub keeps it in its
-secret store until you remove the machine. Every later run to that address must show the same host
-key; a different one is refused. The registration is in the audit log as `environment.register`,
-via `ssh`, with the host and never the key. The Hub never connects to link-local addresses (such
-as a cloud's metadata service at 169.254.169.254).
+secret store until you remove the machine. A machine already installed is not installed again
+(remove it first), and a later run to that address that shows another host key is refused. The
+registration is in the audit log as `environment.register`, via `ssh`, with the host and never the
+key. The Hub never connects to link-local addresses (such as a cloud's metadata service at
+169.254.169.254), nor to its own machine (`localhost` or any of its addresses): an organization
+there has its Sandbox already.
 
 ### Move a Thread to another machine
 

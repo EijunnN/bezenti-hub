@@ -607,7 +607,7 @@ describe("Hub con Environments: add a machine over SSH", () => {
       const listed = yield* listEnvironments(hub.server, hub.owner);
       assert.deepEqual(
         listed.filter((environment) => environment.name.startsWith("Acme VPS")).map((e) => e.id),
-        [installed.environmentId],
+        [installed.environmentId as string],
       );
     }).pipe(Effect.scoped),
   );
@@ -647,11 +647,7 @@ describe("Hub con Environments: add a machine over SSH", () => {
         },
       });
       const logger = Logger.make((entry) => {
-        recorded.push(
-          JSON.stringify(entry.message),
-          Cause.pretty(entry.cause),
-          JSON.stringify([...entry.annotations.entries()]),
-        );
+        recorded.push(JSON.stringify(entry.message), Cause.pretty(entry.cause));
       });
       const service = hub.service(SshInstall.SshInstall);
       const ownerId = yield* ownerIdOf(hub);

@@ -914,10 +914,14 @@ no `ssh` binary: the key is never written to a file or put in an argument), in
   loopback, as `t3 join`). The key is parsed before anything connects, with fixed messages.
 - **Where it connects.** The host is resolved once and the address pinned for the whole run (no
   DNS rebinding between steps). Refused: link-local addresses (169.254.0.0/16, fe80::/10, where
-  cloud metadata lives), unspecified, multicast and broadcast ones, also as IPv4-mapped IPv6.
-  Allowed: loopback and private networks, which is where an Owner's own machines (and the tests'
-  SSH servers) are; the Owner is trusted, the check stops a request from aiming the Hub at
-  metadata services.
+  cloud metadata lives), unspecified, multicast and broadcast ones, also as IPv4-mapped IPv6, and
+  **the Hub's own machine**: loopback (127.0.0.0/8, `::1`) and every address of its own interfaces.
+  A Space on the Hub's machine has its Sandbox already, and the Hub's own user would `t3 join` from
+  the Hub's own home. `T3CODE_SSH_INSTALL_ALLOW_HUB_HOST=1` allows it, for development and the
+  tests only (their SSH servers and containers are on the Hub's machine). Private networks and
+  public addresses are allowed: an Owner's machines are there; the Owner is trusted, the checks
+  stop a request from aiming the Hub at metadata services or at itself
+  (`forbiddenSshAddress`, one rule).
 - **Host key, trust on first use.** `start` connects, reads the host key and turns it down before
   any sign-in (no credential is offered), and the run waits in `awaiting-host-key` with
   `SHA256:…` as `ssh-keygen -lf` prints it, for 10 minutes. `confirm` must send that same
@@ -925,10 +929,12 @@ no `ssh` binary: the key is never written to a file or put in an argument), in
   between the two is refused before sign-in). On success the key is stored with the machine
   (`environment_ssh_hosts`, migration 110: host, port, user, algorithm, fingerprint, whether the
   key was kept); a later run to that address that shows another key fails at once, naming both,
-  until that machine is removed.
+  and one that shows the same key fails as **already installed**: both before any sign-in, until
+  that machine is removed.
 - **One run per machine.** A second run to the same host or resolved address and port while one
-  waits or runs is refused with 409. Each run has its own grant, and `t3 join` on the machine
-  refuses a machine already joined, so two runs never register one machine twice.
+  waits or runs is refused with 409; one installed already is refused as above. Each run has its
+  own grant, and `t3 join` on the machine refuses a machine already joined (by another name or
+  address, or to another Hub), so two runs never register one machine twice.
 - **The steps**, each a POSIX script run with `sh -c` (whatever the login shell), every value from
   the Owner single-quoted ([sshInstallScripts](../../apps/server/src/environments/sshInstall/sshInstallScripts.ts));
   host and user never reach a shell:
@@ -957,15 +963,16 @@ no `ssh` binary: the key is never written to a file or put in an argument), in
 - **Failures and cancel.** A step that exits non-zero, times out or loses the connection stops the
   run there; the later steps never run. **Cancel** interrupts the run the same way. Either way the
   grant is dropped, a machine it registered is removed (`environment.remove` with `via: "ssh"`,
-  its credential revoked), and, if step 3 had started and the connection is up, the machine runs
-  an undo (`t3 service uninstall` or killing the background `t3 serve`, then `t3 leave`); if the
+  its credential revoked), and, if the run registered it and the connection is up, the machine
+  runs an undo (`t3 service uninstall` or killing the background `t3 serve`, then `t3 leave`); if the
   connection is gone the step's output says to run `t3 leave` there. A grant redeemed while the
   run is ending removes what it registered at once.
 - **The key and its secrets.** The key and passphrase live in the run's memory until it ends (or
   its host key is not confirmed in 10 minutes) and are dropped then. They never reach the machine,
   and every line of its output, and the run's error, pass a scrubber that removes any line of the
   key, a PEM private-key marker, the passphrase and the grant. Errors from ssh2 become fixed
-  messages (socket codes kept). With «Keep the key for updates» the key (and passphrase) go to the
+  messages (socket codes kept). Its spans and logs carry neither: a test reads them, and every
+  file under the Hub's home, for the key and passphrase. With «Keep the key for updates» the key (and passphrase) go to the
   Hub's secret store as `ssh-install-key-<environment id>`; removing the machine deletes that
   secret and its host record. Nothing uses a kept key yet: a later «update over SSH» would.
 - **Progress.** Each step keeps its last 300 lines (2,000 characters each); the dialog asks for

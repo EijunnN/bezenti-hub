@@ -104,6 +104,26 @@ describe("every door of the Hub declares its rule", () => {
     ].flatMap((rule) => ("rpc" in rule ? [rule.rpc] : []));
     expect(twins.filter((method) => spaceAccessForRpcMethod(method) === undefined)).toEqual([]);
   });
+
+  it("reaches the Owner's SSH install only through its HTTP endpoints: no WS or MCP door", () => {
+    const users = files
+      .filter(({ text }) => /sshInstall\/SshInstall\.ts"/u.test(text))
+      .map(({ file }) => file);
+    // server.ts builds its layer; environments/http.ts is its one door.
+    expect(users.toSorted()).toEqual(["environments/http.ts", "server.ts"]);
+    const doors = Object.keys(HTTP_ENDPOINT_RULES).filter((name) => /ssh/iu.test(name));
+    expect(doors.toSorted()).toEqual([
+      "environments.sshInstallCancel",
+      "environments.sshInstallConfirm",
+      "environments.sshInstallStart",
+      "environments.sshInstallStatus",
+    ]);
+    expect(
+      [...Object.keys(MCP_TOOL_RULES), ...Object.keys(RAW_ROUTE_RULES)].filter((name) =>
+        /ssh/iu.test(name),
+      ),
+    ).toEqual([]);
+  });
 });
 
 describe("no door takes the Hub's cookies from a preview's own origin", () => {

@@ -47,7 +47,21 @@ export interface TestMachine {
 const stepOf = (command: string) =>
   /add a machine over SSH \((\w+)\)/u.exec(command)?.[1] ?? "unknown";
 
-const newHostKey = () => SshUtils.generateKeyPairSync("ed25519").private;
+/** About one in a hundred keys ssh2 makes, its own parser refuses: made again until it reads. */
+const newKey = (options: { readonly passphrase?: string } = {}): string => {
+  for (;;) {
+    const pair = SshUtils.generateKeyPairSync(
+      "ed25519",
+      options.passphrase === undefined
+        ? {}
+        : { passphrase: options.passphrase, cipher: "aes256-ctr", rounds: 4 },
+    );
+    if (!(SshUtils.parseKey(pair.private, options.passphrase) instanceof Error)) {
+      return pair.private;
+    }
+  }
+};
+const newHostKey = () => newKey();
 
 /** One machine; `hostKey` and `port` to stand in for the same machine with another key. */
 export const makeTestMachine = (
@@ -72,18 +86,12 @@ export const makeTestMachine = (
           const hostPublic = (Array.isArray(parsedHost) ? parsedHost[0] : parsedHost)!;
           const client =
             options.clientKey ??
-            (() => {
-              const pair = SshUtils.generateKeyPairSync(
-                "ed25519",
-                options.passphrase === undefined
-                  ? {}
-                  : { passphrase: options.passphrase, cipher: "aes256-ctr", rounds: 4 },
-              );
-              return {
-                privateKey: pair.private,
-                ...(options.passphrase === undefined ? {} : { passphrase: options.passphrase }),
-              };
-            })();
+            (options.passphrase === undefined
+              ? { privateKey: newKey() }
+              : {
+                  privateKey: newKey({ passphrase: options.passphrase }),
+                  passphrase: options.passphrase,
+                });
           const parsedClient = SshUtils.parseKey(client.privateKey, client.passphrase);
           if (parsedClient instanceof Error) throw parsedClient;
           const clientPublic = (Array.isArray(parsedClient) ? parsedClient[0] : parsedClient)!;
