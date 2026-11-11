@@ -14,7 +14,9 @@ import {
   type EnvironmentHelloFrame,
   HUB_MACHINE_ENVIRONMENT_ID,
   type EnvironmentSelfResult,
+  type HubDedicatedSpaceLimits,
   type HubEnvironmentDedicatedSpace,
+  type HubEnvironmentOverview,
   type HubEnvironmentSummary,
   canStartThreadOn,
   NO_ENVIRONMENT_ADVICE,
@@ -58,11 +60,13 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import type * as SandboxRuntime from "../sandboxes/SandboxRuntime.ts";
 import * as Sandboxes from "../sandboxes/Sandboxes.ts";
 import * as SandboxRuntimeFromConfig from "../sandboxes/sandboxRuntimeFromConfig.ts";
-import { BUILT_IN_DEFAULT_LIMITS, hostCapacity } from "../sandboxes/sandboxLimits.ts";
+import { hostCapacity } from "../sandboxes/sandboxLimits.ts";
 import {
   changeLimits,
   deleteSpaceLimits,
+  readDefaultLimits,
   readSpaceLimits,
+  readSpaceLimitsWithOwn,
   SandboxLimitsInvalidError,
   type SandboxNotFoundError,
 } from "../sandboxes/sandboxLimitStore.ts";
@@ -362,6 +366,16 @@ export class EnvironmentRegistry extends Context.Service<
       viewer: UserId,
     ) => Effect.Effect<
       ReadonlyArray<HubEnvironmentSummary>,
+      EnvironmentAccessDeniedError | EnvironmentStorageError
+    >;
+    /**
+     * Every machine the Owner sees, with its Space and owner by name: the Owner's read-only list
+     * on mobile. Refused to anyone else.
+     */
+    readonly overview: (
+      viewer: UserId,
+    ) => Effect.Effect<
+      HubEnvironmentOverview,
       EnvironmentAccessDeniedError | EnvironmentStorageError
     >;
     readonly rename: (input: {
@@ -823,6 +837,55 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
       return summaries;
     },
   );
+
+  const overview: EnvironmentRegistry["Service"]["overview"] = Effect.fn(
+    "EnvironmentRegistry.overview",
+  )(function* (viewer) {
+    const principal = yield* principalOf(viewer);
+    if (principal.inactive === true) {
+      return yield* new EnvironmentAccessDeniedError({ reason: "user-inactive" });
+    }
+    if (!principal.isOwner) {
+      return yield* new EnvironmentAccessDeniedError({ reason: "owner-only" });
+    }
+    const environments = yield* list(viewer);
+    const spaceNames = new Map<string, string>(
+      (yield* spaces.view(viewer).pipe(Effect.mapError(storageError))).spaces.map((space) => [
+        space.id,
+        space.name,
+      ]),
+    );
+    const userNames = new Map<string, string>(
+      (yield* spaces.listUsers(viewer).pipe(
+        Effect.catchTags({
+          SpaceAccessDeniedError: () =>
+            Effect.fail(new EnvironmentAccessDeniedError({ reason: "owner-only" })),
+          SpaceDirectoryStorageError: (cause) => Effect.fail(storageError(cause)),
+        }),
+      )).map((user) => [user.id, user.displayName]),
+    );
+    return {
+      environments: environments.map((environment) => ({
+        id: environment.id,
+        name: environment.name,
+        kind: environment.kind,
+        mode: environment.mode,
+        spaceId: environment.spaceId ?? null,
+        spaceName:
+          environment.spaceId == null ? null : (spaceNames.get(environment.spaceId) ?? null),
+        ownerUserId: environment.ownerUserId,
+        ownerName:
+          environment.ownerUserId === null
+            ? null
+            : (userNames.get(environment.ownerUserId) ?? null),
+        status: environment.status,
+        startError: environment.startError ?? null,
+        os: environment.os,
+        lastSeenAt: environment.lastSeenAt,
+        runningThreadCount: environment.runningThreadCount,
+      })),
+    };
+  });
 
   /** A live row the User may see and act on; a hidden one answers like a missing one. */
   const authorize = Effect.fn("EnvironmentRegistry.authorize")(function* (
@@ -1635,6 +1698,56 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
     return allowed;
   }, Effect.mapError(storageError));
 
+  /**
+   * For the Owner's «Sandboxes»: each Space with machines dedicated to it whose Sandbox the Hub
+   * does not list (`listed`), with its own limits and the ones its Sandboxes start with.
+   */
+  const dedicatedSpaceLimits = Effect.fn("EnvironmentRegistry.dedicatedSpaceLimits")(function* (
+    viewer: UserId,
+    listed: ReadonlySet<string>,
+  ) {
+    const rows = yield* selectRows([
+      sql`kind = 'external'`,
+      sql`mode = 'dedicated'`,
+      sql`revoked_at IS NULL`,
+    ]).pipe(Effect.mapError(storageError));
+    const bySpace = new Map<SpaceId, Array<EnvironmentRow>>();
+    for (const row of rows) {
+      if (row.spaceId === null || listed.has(row.spaceId)) continue;
+      const spaceId = SpaceId.make(row.spaceId);
+      bySpace.set(spaceId, [...(bySpace.get(spaceId) ?? []), row]);
+    }
+    if (bySpace.size === 0) return [];
+    const names = new Map<string, string>(
+      (yield* spaces.view(viewer).pipe(Effect.mapError(storageError))).spaces.map((space) => [
+        space.id,
+        space.name,
+      ]),
+    );
+    const result: Array<HubDedicatedSpaceLimits> = [];
+    for (const [spaceId, machines] of bySpace) {
+      const limits = yield* withLimitStore(readSpaceLimitsWithOwn(spaceId)).pipe(
+        Effect.mapError(storageError),
+      );
+      const summaries: Array<HubDedicatedSpaceLimits["machines"][number]> = [];
+      for (const row of machines) {
+        const summary = yield* summaryOf(row, true);
+        summaries.push({
+          environmentId: summary.id,
+          name: summary.name,
+          status: summary.status,
+        });
+      }
+      result.push({
+        spaceId,
+        spaceName: names.get(spaceId) ?? null,
+        machines: summaries,
+        ...limits,
+      });
+    }
+    return result;
+  });
+
   const sandboxList = Effect.fn("EnvironmentRegistry.sandboxList")(function* (viewer: UserId) {
     const principal = yield* principalOf(viewer);
     if (principal.inactive === true) {
@@ -1642,7 +1755,8 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
     }
     if (Option.isNone(sandboxes)) {
       return {
-        defaults: BUILT_IN_DEFAULT_LIMITS,
+        // A Hub with only dedicated machines still keeps the defaults they start with.
+        defaults: yield* withLimitStore(readDefaultLimits).pipe(Effect.mapError(storageError)),
         enforcement: {
           cpus: false,
           memory: false,
@@ -1652,6 +1766,9 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
         },
         sandboxes: [],
         manageable: principal.isOwner,
+        ...(principal.isOwner
+          ? { dedicatedSpaces: yield* dedicatedSpaceLimits(viewer, new Set()) }
+          : {}),
       } satisfies HubSandboxList;
     }
     const allowed = yield* inspectableSandboxes(principal, viewer);
@@ -1686,6 +1803,14 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
       enforcement: overview.enforcement,
       sandboxes: details,
       manageable: principal.isOwner,
+      ...(principal.isOwner
+        ? {
+            dedicatedSpaces: yield* dedicatedSpaceLimits(
+              viewer,
+              new Set(details.map((detail) => detail.spaceId)),
+            ),
+          }
+        : {}),
     } satisfies HubSandboxList;
   });
 
@@ -1825,6 +1950,7 @@ const make = Effect.fn("EnvironmentRegistry.make")(function* (options: RegistryO
     chooseForThread,
     usableBy,
     list,
+    overview,
     rename,
     remove,
     authorizeRegister,

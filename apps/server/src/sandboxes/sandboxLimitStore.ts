@@ -64,6 +64,14 @@ export const readSpaceLimits = Effect.fn("sandboxLimitStore.readSpaceLimits")(fu
   return effectiveLimits(yield* readDefaultLimits, yield* readSpaceOverrides(spaceId));
 });
 
+/** The Space's own values and what its Sandbox starts with, as Settings shows a Space's row. */
+export const readSpaceLimitsWithOwn = Effect.fn("sandboxLimitStore.readSpaceLimitsWithOwn")(
+  function* (spaceId: SpaceId) {
+    const own = yield* readSpaceOverrides(spaceId);
+    return { own, effective: effectiveLimits(yield* readDefaultLimits, own) };
+  },
+);
+
 /** Whether the Space has a machine of its own, which may be bigger than the Hub's. */
 const hasDedicatedMachine = Effect.fn("sandboxLimitStore.hasDedicatedMachine")(function* (
   spaceId: SpaceId,

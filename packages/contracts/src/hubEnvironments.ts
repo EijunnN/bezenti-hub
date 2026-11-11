@@ -274,6 +274,28 @@ export const HubSandboxDetail = Schema.Struct({
 });
 export type HubSandboxDetail = typeof HubSandboxDetail.Type;
 
+/**
+ * A Space whose Sandbox runs only on machines dedicated to it (the Hub runs none for it): its row
+ * for limits in «Sandboxes». The Owner changes them through any of its machines.
+ */
+export const HubDedicatedSpaceLimits = Schema.Struct({
+  spaceId: SpaceId,
+  /** As the Owner knows the Space; null when the Owner has no name for it. */
+  spaceName: Schema.NullOr(Schema.String),
+  machines: Schema.Array(
+    Schema.Struct({
+      environmentId: EnvironmentId,
+      name: HubEnvironmentName,
+      status: HubEnvironmentStatus,
+    }),
+  ),
+  /** The Space's own values; null where it takes the default. */
+  own: SandboxLimits,
+  /** What its Sandboxes start with: its own over the Installation's defaults. */
+  effective: SandboxLimits,
+});
+export type HubDedicatedSpaceLimits = typeof HubDedicatedSpaceLimits.Type;
+
 export const HubSandboxList = Schema.Struct({
   /** The Installation's default limits; the Owner changes them. */
   defaults: SandboxLimits,
@@ -281,6 +303,11 @@ export const HubSandboxList = Schema.Struct({
   sandboxes: Schema.Array(HubSandboxDetail),
   /** Whether the viewer is the Owner, who changes the defaults. */
   manageable: Schema.Boolean,
+  /**
+   * For the Owner: each Space with dedicated machines and no Hub Sandbox listed, with its limits.
+   * Absent from older Hubs and for other Users.
+   */
+  dedicatedSpaces: Schema.optionalKey(Schema.Array(HubDedicatedSpaceLimits)),
   /**
    * After a change of limits: what was changed, the defaults (`spaceId` null) or a Space's own
    * values, with the limits that Space's Sandboxes (on the Hub or a dedicated machine) start with.
@@ -294,6 +321,33 @@ export const HubSandboxList = Schema.Struct({
   ),
 });
 export type HubSandboxList = typeof HubSandboxList.Type;
+
+/** One machine as the Owner's read-only overview names it: mode, Space or owner, and status. */
+export const HubEnvironmentOverviewEntry = Schema.Struct({
+  id: EnvironmentId,
+  name: HubEnvironmentName,
+  kind: HubEnvironmentKind,
+  mode: HubEnvironmentMode,
+  /** A Sandbox's or dedicated machine's Space. */
+  spaceId: Schema.NullOr(SpaceId),
+  /** That Space as the Owner knows it; null when there is none or it has no name for them. */
+  spaceName: Schema.NullOr(Schema.String),
+  /** A personal machine's User. */
+  ownerUserId: Schema.NullOr(UserId),
+  ownerName: Schema.NullOr(Schema.String),
+  status: HubEnvironmentStatus,
+  startError: Schema.NullOr(Schema.String),
+  os: Schema.NullOr(TrimmedNonEmptyString),
+  lastSeenAt: Schema.NullOr(IsoDateTime),
+  runningThreadCount: NonNegativeInt,
+});
+export type HubEnvironmentOverviewEntry = typeof HubEnvironmentOverviewEntry.Type;
+
+/** Every machine on the Hub, for the Owner only (mobile's read-only list); others get 403. */
+export const HubEnvironmentOverview = Schema.Struct({
+  environments: Schema.Array(HubEnvironmentOverviewEntry),
+});
+export type HubEnvironmentOverview = typeof HubEnvironmentOverview.Type;
 
 /** The Owner starts, stops or restarts a Sandbox by hand. Answers at once for a start. */
 export const HubSandboxActionRequest = Schema.Struct({

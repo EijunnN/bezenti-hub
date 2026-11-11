@@ -74,6 +74,19 @@ const handlers = HttpApiBuilder.group(
         }),
       )
       .handle(
+        "overview",
+        Effect.fn("environment.environments.overview")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const viewer = yield* requireUser(AuthOrchestrationReadScope);
+          return yield* registry.overview(viewer).pipe(
+            Effect.catchTags({
+              EnvironmentAccessDeniedError: failForbidden,
+              EnvironmentStorageError: failStorage,
+            }),
+          );
+        }),
+      )
+      .handle(
         "rename",
         Effect.fn("environment.environments.rename")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);

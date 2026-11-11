@@ -65,6 +65,7 @@ export const HTTP_ENDPOINT_RULES: Readonly<Record<string, DoorRule>> = {
   "environments.joinStatus": own("the joining machine's own request code"),
   "environments.leave": own("the Environment credential of the machine that leaves"),
   "environments.list": ENVIRONMENTS,
+  "environments.overview": OWNER,
   "environments.remove": ENVIRONMENTS,
   "environments.rename": ENVIRONMENTS,
   "environments.sandboxAction": ENVIRONMENTS,

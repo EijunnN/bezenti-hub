@@ -93,6 +93,7 @@ import {
   EnvironmentLeaveResult,
   EnvironmentSelfResult,
   HubEnvironmentList,
+  HubEnvironmentOverview,
   HubEnvironmentSummary,
   HubSandboxActionRequest,
   HubSandboxDetail,
@@ -1094,6 +1095,14 @@ class EnvironmentHubEnvironmentsHttpApi extends HttpApiGroup.make("environments"
     HttpApiEndpoint.get("list", "/api/environments", {
       headers: OptionalBearerHeaders,
       success: HubEnvironmentList,
+      error: EnvironmentHubEnvironmentErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    // Every machine with its mode, Space or owner and status, for the Owner only (mobile's list).
+    HttpApiEndpoint.get("overview", "/api/environments/overview", {
+      headers: OptionalBearerHeaders,
+      success: HubEnvironmentOverview,
       error: EnvironmentHubEnvironmentErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
