@@ -50,6 +50,16 @@ const fixture = (
       );
     }),
   );
+  // The proxy reads only the sessions, and of the host's readiness its id, hub origin and `upstream`.
+  const devices: Partial<DeviceService.DeviceService["Service"]> = {
+    state: Effect.succeed({ sessions: member?.sessions ?? [] } as never),
+    currentReadiness: () =>
+      Effect.succeed({
+        hostId: LOCAL_DEVICE_HOST_ID,
+        hub: { origin: "http://hub.test" },
+        ...(upstream ? { upstream } : {}),
+      } as DeviceService.DeviceReadiness),
+  };
   const { handler, dispose } = HttpRouter.toWebHandler(
     DeviceHubProxy.layer.pipe(
       Layer.provideMerge(
@@ -66,15 +76,10 @@ const fixture = (
         } as unknown as EnvironmentAuth.EnvironmentAuth["Service"]),
       ),
       Layer.provideMerge(
-        Layer.succeed(DeviceService.DeviceService, {
-          state: Effect.succeed({ sessions: member?.sessions ?? [] } as never),
-          currentReadiness: () =>
-            Effect.succeed({
-              hostId: LOCAL_DEVICE_HOST_ID,
-              hub: { origin: "http://hub.test" },
-              ...(upstream ? { upstream } : {}),
-            }),
-        } as DeviceService.DeviceService["Service"]),
+        Layer.succeed(
+          DeviceService.DeviceService,
+          devices as DeviceService.DeviceService["Service"],
+        ),
       ),
       Layer.provideMerge(Layer.succeed(HttpClient.HttpClient, client)),
       Layer.provideMerge(

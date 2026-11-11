@@ -39,6 +39,15 @@ it.effect("preserves binary input and admission frames through the real socket p
       socket.send(Uint8Array.of(0x83));
       socket.on("message", (data, binary) => socket.send(data, { binary }));
     });
+    // The proxy reads only the sessions, and of the host's readiness its id and hub origin.
+    const devices: Partial<DeviceService.DeviceService["Service"]> = {
+      state: Effect.succeed({ sessions: [] } as never),
+      currentReadiness: () =>
+        Effect.succeed({
+          hostId: LOCAL_DEVICE_HOST_ID,
+          hub: { origin: `http://127.0.0.1:${address.port}` },
+        } as DeviceService.DeviceReadiness),
+    };
     const services = yield* Layer.build(
       HttpRouter.serve(DeviceHubProxy.layer, { disableListenLog: true }).pipe(
         Layer.provideMerge(NodeHttpServer.layerTest),
@@ -54,14 +63,10 @@ it.effect("preserves binary input and admission frames through the real socket p
           } as unknown as EnvironmentAuth.EnvironmentAuth["Service"]),
         ),
         Layer.provide(
-          Layer.succeed(DeviceService.DeviceService, {
-            state: Effect.succeed({ sessions: [] } as never),
-            currentReadiness: () =>
-              Effect.succeed({
-                hostId: LOCAL_DEVICE_HOST_ID,
-                hub: { origin: `http://127.0.0.1:${address.port}` },
-              }),
-          } as DeviceService.DeviceService["Service"]),
+          Layer.succeed(
+            DeviceService.DeviceService,
+            devices as DeviceService.DeviceService["Service"],
+          ),
         ),
         Layer.provideMerge(layerSeesEverything),
       ),
