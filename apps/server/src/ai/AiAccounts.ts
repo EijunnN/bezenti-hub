@@ -865,6 +865,8 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
       Option.isSome(listed) &&
       modtimesOf(listed.value) === seenModtimes &&
       pendingLogin === undefined &&
+      // A file that is not the Hub's own (a sign-in's) is looked at until it goes.
+      listed.value.every((entry) => parseTokenFileName(entry.name) !== undefined) &&
       at - lastFullPass < TOKEN_FULL_PASS_MS
     ) {
       return;
@@ -1292,6 +1294,12 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
       .pipe(
         Effect.timeoutOption(Duration.seconds(10)),
         Effect.map(Option.getOrElse(() => [])),
+        // A credential list it cannot read (field names changed in a newer CLIProxyAPI) is said.
+        Effect.tapError((error) =>
+          Effect.logWarning("AiAccounts: could not read the subscriptions' quota windows", {
+            reason: error.detail,
+          }),
+        ),
         Effect.orElseSucceed(() => []),
       );
     const byName = new Map(read.map((account) => [account.id, account.usageLimits] as const));

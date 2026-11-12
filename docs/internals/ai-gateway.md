@@ -168,22 +168,40 @@ keys; `type: subscription`. Pure parts in `ai/subscriptionLogin.ts`.
   `scope` (`POST /oauth/callback`). Completion is refused (`expired`) from another session, after
   10 minutes, after the gateway restarted, or once done; refused pastes reach nothing.
 - **Capture:** once CLIProxyAPI reports `ok` (`GET /oauth/status`), the Hub takes the one new
-  token file it did not hold before the sign-in started (`GET /credentials`,
-  `/credentials/download`), seals it under a new token id in its own store
+  token file of that provider it did not hold before the sign-in started (`GET /credentials`,
+  `/credentials/download`): none, several, or a token whose `type` is not that provider's is
+  refused and the files go. It is sealed under a new token id in its own store
   (`ServerSecretStore.AiAccountTokenStore`: `secrets/ai-account-tokens/tok-<id>.sealed`, purpose
-  `ai-account-oauth-token`, covered by key rotation), writes the account (or, «Sign in again», the
-  new token id, retiring the old one), hands it back as `acct-<account>-<token id>.json` with
-  `prefix: acct-<account>` (`POST /credentials?name=`) and deletes the file CLIProxyAPI named.
-  Vertex: `POST /oauth/import?provider=vertex`, then the same capture.
+  `ai-account-oauth-token`, covered by key rotation) and the file CLIProxyAPI named is deleted. A
+  **new** account starts **disabled**, with «Signed in as <email>», until the Owner checks it and
+  turns it on; only then does its token go to the gateway as `acct-<account>-<token id>.json` with
+  `prefix: acct-<account>` (`POST /credentials?name=`). **«Sign in again»** compares the new
+  identity with the sealed one: if it differs, the new token is held and the call answers
+  `identity-mismatch` until the Owner confirms («Use the new account», `confirmIdentity`); then it
+  replaces the token under the account's allowances, retiring the old one. Vertex: `POST
+  /oauth/import?provider=vertex`, then the same capture (its identity is the service account).
 - **Reconcile** (`reconcileTokens`, under the same lock as API keys, at every gateway start before
-  it counts as running, after every change, and every minute): for each enabled subscription the
-  newest copy wins, wherever it is. A copy in CLIProxyAPI newer than the sealed one (a refresh,
-  which may rotate the refresh token) is sealed again; an older one (a stale file a restart left in
-  memory) is replaced by the sealed one; a file of an account deleted, disabled or signed in again,
-  and any token file no sign-in in progress explains, is deleted. "Newer" compares the times a token
-  carries (`expired`, `last_refresh`, `timestamp`…); a sealed copy is never replaced by an older
-  one, so a restart mid-refresh keeps the newest refresh token (the file is still in the memory
-  folder, which survives a Hub restart, not a reboot).
+  it counts as running and after every change; one account failing leaves the others, and never
+  fails the API keys): for each subscription the newest copy wins, wherever it is. A copy in
+  CLIProxyAPI newer than the sealed one (a refresh, which may rotate the refresh token) is sealed
+  again, also just before the file of a disabled or deleted account goes; an older one (a stale
+  file a restart left in memory) is replaced by the sealed one. "Newer": the first of
+  `last_refresh`, then the access expiry (`expired`…), then `timestamp` that both copies carry and
+  that differs; with none, a different copy is CLIProxyAPI's (it is the only writer). Files of
+  accounts deleted, disabled or signed in again go, and so does every file that is not the Hub's
+  own (`acct-…-tok-….json`), except the new file of the sign-in in progress (its provider's, not
+  there when it started, on that gateway, within its 10 minutes). The Hub lists the gateway's
+  token files every 10 s and reads tokens back when one changed (and every 5 minutes, and while a
+  sign-in is open), and once more when the Hub stops (a finalizer), so a refresh is lost only if
+  the machine dies within those 10 s.
+- **Gateway not running** (off, crashed, restarting) and **before every launch**
+  (`AiGateway.setBeforeLaunch`): the Hub reads and removes the memory folder's files directly. A
+  newer copy of an account's current token is sealed first; every file that is not an enabled
+  account's current token goes, so a deleted or disabled account's token is never left in clear
+  and the next CLIProxyAPI never loads it; no sign-in survives its gateway.
+- **Unprefixed tokens:** the Hub is CLIProxyAPI's only client and always asks for
+  `acct-<id>/<model>`, so a sign-in's own file (no prefix) is never asked for; it lives only until
+  it is captured or its sign-in ends, and then goes.
 - **Status:** from CLIProxyAPI's credential list: `requires_sign_in` → «Needs sign-in again»,
   `quota_blocked` → «Quota exhausted», `error`/`unavailable` → error (its message, quoted values
   and token shapes removed), else working. The Owner also sees «Signed in as» and, for Claude and
@@ -197,7 +215,9 @@ keys; `type: subscription`. Pure parts in `ai/subscriptionLogin.ts`.
 - **Delete, disable, «Sign in again»:** the token id is retired (`ai_account_retired_credentials`);
   the file leaves CLIProxyAPI by the next reconcile, and the sealed token leaves the store only
   after a change the gateway accepted without it (ticket 02's guarantee). The provider's own
-  refresh token is not revoked at the provider (CLIProxyAPI has no call for it).
+  refresh token is **not revoked at the provider**: CLIProxyAPI has no call for it, so a token
+  copied before the delete keeps working at the provider until the Owner revokes the app there
+  (Google, Anthropic or OpenAI account settings).
 - **Doors:** WS only, in `INSTALLATION_RPC_METHODS` (the Owner's alone, `settings:write`):
   `aiAccounts.login.start`, `aiAccounts.login.complete`, `aiAccounts.importVertex`;
   `DoorRules.AI_ACCOUNT_SIGN_IN_RULES`. No raw route or HTTP endpoint takes a provider's callback.
@@ -207,7 +227,15 @@ keys; `type: subscription`. Pure parts in `ai/subscriptionLogin.ts`.
 - **Known limits:** one sign-in at a time per Hub. Two Hub processes over one state folder are not
   supported: the "never older" rule is checked under an in-process lock. ToS risk accepted (ADR
   0005): the form warns on every subscription and, for Antigravity, notes CLIProxyAPI's
-  obfuscation (hardened in v8.0.65).
+  obfuscation (hardened in v8.0.65). **Memory is not a vault:** `/dev/shm` and `$XDG_RUNTIME_DIR`
+  are tmpfs, whose pages the kernel may write to swap; a Hub whose swap is not encrypted can leave
+  a token on the swap device. Use encrypted swap (or none) on a Hub with subscriptions.
+- **Management calls in spans:** the Hub's HTTP spans to CLIProxyAPI carry no query value (a
+  sign-in state, a credential name: all redacted), and a refused Vertex import says only its HTTP
+  status, never CLIProxyAPI's words, which could quote the key.
+- **No callback listener:** CLIProxyAPI 8.0.67 opens no port of its own for an OAuth callback
+  (checked with `ss -ltnp` during a redirect sign-in in the live pass): the address the provider
+  returns to does not open, and the Owner pastes it.
 
 ## Known exception to «no upstream services»
 

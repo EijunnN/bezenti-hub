@@ -444,6 +444,8 @@ function SignInFlow(props: {
   readonly onDone: () => Promise<void>;
 }) {
   const [started, setStarted] = useState<AiAccountLoginStartResult | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [mismatch, setMismatch] = useState(false);
   const [landed, setLanded] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -461,25 +463,35 @@ function SignInFlow(props: {
       .catch((cause: unknown) => setError(errorMessageOf(cause, "Could not start the sign-in.")))
       .finally(() => setPending(false));
   };
-  const finish = () => {
+  const finish = (confirmIdentity?: boolean) => {
     if (started === null) return;
     setPending(true);
     setError(null);
+    setNotice(null);
+    setMismatch(false);
     void settle(
       props.commands.loginComplete({
         environmentId: props.environmentId,
         input: {
           loginId: started.loginId,
           ...(started.flow === "redirect" ? { redirectUrl: Redacted.make(landed.trim()) } : {}),
+          ...(confirmIdentity === true ? { confirmIdentity } : {}),
         },
       }),
     )
-      .then(async () => {
+      .then(async (account) => {
         setStarted(null);
         setLanded("");
+        // A new subscription waits, off, until the Owner checks who it signed in as.
+        if (account.disabled) setNotice(account.statusMessage);
         await props.onDone();
       })
-      .catch((cause: unknown) => setError(errorMessageOf(cause, "Could not finish the sign-in.")))
+      .catch((cause: unknown) => {
+        const message = errorMessageOf(cause, "Could not finish the sign-in.");
+        // «Sign in again» as another account: the Owner says whether to use it.
+        setMismatch(/Confirm to use it/u.test(message));
+        setError(message);
+      })
       .finally(() => setPending(false));
   };
   return (
@@ -512,7 +524,7 @@ function SignInFlow(props: {
             <code aria-label="Sign-in code">{started.userCode}</code>, then come back.
           </span>
           <div>
-            <Button size="sm" type="button" disabled={pending} onClick={finish}>
+            <Button size="sm" type="button" disabled={pending} onClick={() => finish()}>
               I have signed in
             </Button>
           </div>
@@ -554,6 +566,24 @@ function SignInFlow(props: {
       {error === null ? null : (
         <span className="text-xs text-destructive" role="alert">
           {error}
+        </span>
+      )}
+      {mismatch ? (
+        <div>
+          <Button
+            size="sm"
+            variant="destructive"
+            type="button"
+            disabled={pending}
+            onClick={() => finish(true)}
+          >
+            Use the new account
+          </Button>
+        </div>
+      ) : null}
+      {notice === null ? null : (
+        <span className="text-xs" role="status">
+          {notice}
         </span>
       )}
     </div>
