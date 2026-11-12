@@ -2,8 +2,8 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 // Vaults (spec 5 ticket 02): named sets of secrets, each under an environment-variable name. Only
-// metadata lives here: a value is a sealed entry of the Hub's secret store (`vault-value-<entry
-// id>`, its own purpose), never a column. `space_id` is not a foreign key: an Organization's
+// metadata lives here: a value is a sealed entry of the store's own folder for them
+// (`secrets/vault-values/<value id>.sealed`, its own purpose), never a column. `space_id` is not a foreign key: an Organization's
 // deletion removes its Vaults itself (ticket 07).
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -36,12 +36,15 @@ export default Effect.gen(function* () {
       description TEXT,
       kind TEXT NOT NULL CHECK (kind IN ('own', 'copy', 'link')),
       linked_entry_id TEXT,
+      -- The store entry holding the value (VaultValueStore); a replace writes a new one.
+      value_id TEXT,
       unmasked INTEGER NOT NULL DEFAULT 0,
       version INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       updated_by TEXT,
-      CHECK ((kind = 'link') = (linked_entry_id IS NOT NULL))
+      CHECK ((kind = 'link') = (linked_entry_id IS NOT NULL)),
+      CHECK ((kind = 'link') = (value_id IS NULL))
     )
   `;
   yield* sql`CREATE UNIQUE INDEX vault_entries_name_idx ON vault_entries (vault_id, name)`;

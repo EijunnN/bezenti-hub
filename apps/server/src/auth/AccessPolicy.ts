@@ -193,7 +193,9 @@ export type Action =
   /** Create, rename, describe, archive and delete a Vault: the Owner. */
   | "vault.manage"
   /** Read a secret's value: the Owner (the door also asks for a strong factor). */
-  | "vault.reveal";
+  | "vault.reveal"
+  /** Set a secret whose name changes how tools run (`secretNameRisk`): the Owner, confirmed. */
+  | "vault.dangerousName";
 
 /** Actions that read or manage rather than add something to the Space. */
 const NON_CREATING: ReadonlySet<Action> = new Set([
@@ -527,6 +529,7 @@ const VAULT_ACTIONS: ReadonlySet<Action> = new Set([
   "vault.edit",
   "vault.manage",
   "vault.reveal",
+  "vault.dangerousName",
 ]);
 
 /**
@@ -536,7 +539,7 @@ const VAULT_ACTIONS: ReadonlySet<Action> = new Set([
  */
 const decideVault = (principal: Principal, action: Action, vault: VaultResource): Decision => {
   if (principal.isOwner) return allow;
-  if (action === "vault.manage" || action === "vault.reveal") return deny("owner-only");
+  if (action !== "vault.view" && action !== "vault.edit") return deny("owner-only");
   const space = vault.space;
   if (vault.isMain || space === null) return deny("owner-only");
   if (space.kind !== "organization") return deny("wrong-resource");

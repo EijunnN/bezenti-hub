@@ -295,29 +295,36 @@ it.layer(platform)("ServerSecretStore encryption", (it) => {
       }),
     );
 
-    it.effect("re-encrypts a Vault's values too, under their own purpose", () =>
+    it.effect("re-encrypts a Vault's values too, in their own folder and purpose", () =>
       Effect.gen(function* () {
         const baseDir = newBaseDir();
-        const vaultValue = `${SecretCipher.VAULT_VALUE_ENTRY_PREFIX}secret-1`;
-        seedPlaintext(baseDir, { [vaultValue]: "VALUE-VAULT", hub: "VALUE-HUB" });
-        yield* readAll(baseDir, [vaultValue]);
-        const before = NodeFS.readFileSync(entryFileOf(baseDir, vaultValue));
+        seedPlaintext(baseDir, { hub: "VALUE-HUB" });
+        const vaultValues = Effect.flatMap(ServerSecretStore.VaultValueStore, (values) =>
+          values.set("value-1", encoder.encode("VALUE-VAULT")),
+        );
+        yield* vaultValues.pipe(Effect.provide(storeAt(baseDir)));
+        const file = NodePath.join(secretsDirOf(baseDir), "vault-values", "value-1.sealed");
+        const before = NodeFS.readFileSync(file);
+        assert.isFalse(before.includes(Buffer.from("VALUE-VAULT")));
         const rotated = yield* MasterKeyFile.rotate().pipe(Effect.provide(configAt(baseDir)));
-        const after = NodeFS.readFileSync(entryFileOf(baseDir, vaultValue));
+        const after = NodeFS.readFileSync(file);
         assert.equal(after.subarray(5, 13).toString("hex"), rotated.keyId);
-        assert.isFalse(after.equals(before));
         const key = SecretCipher.MasterKey.parse(NodeFS.readFileSync(keyFileOf(baseDir), "utf8"));
+        assert.equal(SecretCipher.open([key!], "vault-value", "value-1", after)._tag, "opened");
         assert.equal(
-          SecretCipher.open([key!], "vault-value", vaultValue, after)._tag,
-          "opened",
-          "sealed with the Vault values' own purpose",
-        );
-        assert.equal(
-          SecretCipher.open([key!], "server-secret", vaultValue, after)._tag,
+          SecretCipher.open([key!], "server-secret", "value-1", after)._tag,
           "rejected",
+          "a Vault value opens only under its own purpose",
         );
-        const values = yield* readAll(baseDir, [vaultValue, "hub"]);
-        assert.deepEqual(values.map(Option.getOrThrow), ["VALUE-VAULT", "VALUE-HUB"]);
+        const read = yield* Effect.flatMap(ServerSecretStore.VaultValueStore, (values) =>
+          values.get("value-1"),
+        ).pipe(Effect.provide(storeAt(baseDir)));
+        assert.equal(decoder.decode(Option.getOrThrow(read)), "VALUE-VAULT");
+        // The store's own names never reach that folder.
+        const refused = yield* Effect.flip(
+          withStore(baseDir, (store) => store.get("vault-values/value-1")),
+        );
+        assert.equal(refused._tag, "SecretStoreDecodeError");
       }),
     );
 

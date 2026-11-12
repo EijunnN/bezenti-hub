@@ -1,13 +1,13 @@
 /**
- * Vaults. Metadata in the database; each value a sealed store entry (`vault-value-<entry id>`).
- * Rights are AccessPolicy's `vault.*` via SpaceDirectory.authorizeResource. Only `reveal` returns
- * a value; everything is audited without one. See docs/internals/secrets.md.
+ * Vaults. Metadata in the database; each value a sealed entry of `VaultValueStore`, replaced by a
+ * new one per write. Rights are AccessPolicy's `vault.*` via SpaceDirectory.authorizer. Only
+ * `reveal` returns a value; everything is audited without one. See docs/internals/secrets.md.
  */
 import {
   MAIN_VAULT_ID,
   SECRET_MASK_MIN_LENGTH,
   SECRET_VALUE_MAX_BYTES,
-  secretNameProblem,
+  secretNameRisk,
   type SpaceId,
   type UserId,
   type VaultBrokenLink,
@@ -36,7 +36,6 @@ import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
@@ -45,13 +44,9 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import * as AuditLog from "../audit/AuditLog.ts";
 import type * as AccessPolicy from "../auth/AccessPolicy.ts";
-import * as SecretCipher from "../auth/SecretCipher.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as VaultKeyCheck from "./VaultKeyCheck.ts";
-
-/** The store entry that holds an `own` or `copy` entry's value. */
-const valueEntryName = (entryId: string) => `${SecretCipher.VAULT_VALUE_ENTRY_PREFIX}${entryId}`;
 
 const MAIN_VAULT_NAME = "Main vault";
 
@@ -126,6 +121,7 @@ interface EntryRow {
   readonly description: string | null;
   readonly kind: VaultEntryKind;
   readonly linkedEntryId: string | null;
+  readonly valueId: string | null;
   readonly unmasked: number;
   readonly version: number;
   readonly updatedAt: string;
@@ -133,6 +129,7 @@ interface EntryRow {
   /** A link's original, when it still exists in the Main vault. */
   readonly linkedName: string | null;
   readonly linkedUnmasked: number | null;
+  readonly linkedValueId: string | null;
 }
 
 const VAULT_COLUMNS = `
@@ -145,9 +142,9 @@ const VAULT_COLUMNS = `
 const ENTRY_COLUMNS = `
   e.entry_id AS "entryId", e.vault_id AS "vaultId", e.name AS "name",
   e.description AS "description", e.kind AS "kind", e.linked_entry_id AS "linkedEntryId",
-  e.unmasked AS "unmasked", e.version AS "version", e.updated_at AS "updatedAt",
-  e.updated_by AS "updatedBy",
-  o.name AS "linkedName", o.unmasked AS "linkedUnmasked"
+  e.value_id AS "valueId", e.unmasked AS "unmasked", e.version AS "version",
+  e.updated_at AS "updatedAt", e.updated_by AS "updatedBy",
+  o.name AS "linkedName", o.unmasked AS "linkedUnmasked", o.value_id AS "linkedValueId"
 `;
 
 /** UTF-8 text without NUL, not empty, at most SECRET_VALUE_MAX_BYTES. Says why, never what. */
@@ -162,28 +159,98 @@ const valueProblem = (value: string): string | undefined => {
 
 const isShort = (value: string) => [...value].length < SECRET_MASK_MIN_LENGTH;
 
-const checkName = (name: string) => {
-  const problem = secretNameProblem(name);
-  if (problem === "invalid") {
-    return fail(
-      "invalid-name",
-      `${JSON.stringify(name.slice(0, 40))} is not an environment variable name: use capital letters, digits and _ (not starting with a digit), at most 128.`,
-    );
-  }
-  if (problem === "reserved") {
-    return fail(
-      "reserved-name",
-      `${name} is reserved: the Hub sets it, or it would change how the agent's tools run.`,
-    );
-  }
-  return Effect.void;
+type Can = (action: AccessPolicy.Action, resource: AccessPolicy.Resource) => boolean;
+type Spaces = ReadonlyMap<
+  SpaceId,
+  { readonly resource: AccessPolicy.SpaceResource; readonly name: string }
+>;
+
+const mainResource: AccessPolicy.VaultResource = { kind: "vault", isMain: true, space: null };
+
+/** A Vault of a deleted Organization is the Owner's alone, like the Owner's own. */
+const resourceOf = (row: VaultRow, spaces: Spaces): AccessPolicy.VaultResource => ({
+  kind: "vault",
+  isMain: row.isMain === 1,
+  space: row.spaceId === null ? null : (spaces.get(row.spaceId as SpaceId)?.resource ?? null),
+});
+
+const summaryOf = (row: VaultRow, spaces: Spaces, can: Can): VaultSummary => {
+  const resource = resourceOf(row, spaces);
+  return {
+    id: VaultId.make(row.vaultId),
+    name: row.name,
+    description: row.description,
+    spaceId: row.spaceId as SpaceId | null,
+    spaceName: row.spaceId === null ? null : (spaces.get(row.spaceId as SpaceId)?.name ?? null),
+    isMain: row.isMain === 1,
+    archived: row.archivedAt !== null,
+    entryCount: row.entryCount,
+    canEdit: row.archivedAt === null && can("vault.edit", resource),
+    canManage: can("vault.manage", resource),
+    canReveal: can("vault.reveal", resource),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 };
+
+/**
+ * A secret's name and what it is. A link's original is the Main vault's: whoever does not see the
+ * Main vault learns nothing of it (whether it is short, or gone) beyond the link's own row; its
+ * editors learn that it broke.
+ */
+const entryOf = (row: EntryRow, seesMain: boolean, canEdit: boolean): VaultEntry => {
+  const isLink = row.kind === "link";
+  const broken = isLink && row.linkedName === null;
+  return {
+    id: VaultEntryId.make(row.entryId),
+    vaultId: VaultId.make(row.vaultId),
+    name: row.name,
+    description: row.description,
+    kind: row.kind,
+    broken: broken && (seesMain || canEdit),
+    linkedFrom:
+      seesMain && isLink && row.linkedEntryId !== null && !broken
+        ? { entryId: VaultEntryId.make(row.linkedEntryId), name: row.linkedName ?? "" }
+        : null,
+    unmasked: isLink ? seesMain && row.linkedUnmasked === 1 : row.unmasked === 1,
+    version: row.version,
+    updatedAt: row.updatedAt,
+    updatedBy: row.updatedBy as UserId | null,
+  };
+};
+
+const UNAVAILABLE = new VaultError({
+  reason: "unavailable",
+  message: "Vaults live on the Hub; this machine keeps none.",
+});
+
+const refuse = Effect.fn("Vaults.unavailable")(function* (_input: unknown) {
+  return yield* UNAVAILABLE;
+});
+
+/** A joined machine: no Vaults, nothing written. */
+const unavailable = Vaults.of({
+  list: Effect.fail(UNAVAILABLE),
+  create: refuse,
+  update: refuse,
+  remove: refuse,
+  listEntries: refuse,
+  putEntry: refuse,
+  deleteEntry: refuse,
+  linkEntry: refuse,
+  copyEntry: refuse,
+  authorizeReveal: refuse,
+  reveal: refuse,
+});
+
+const invalidName = (name: string) =>
+  `${JSON.stringify(name.slice(0, 40))} is not an environment variable name: use capital letters, digits and _ (not starting with a digit), at most 128.`;
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const spaces = yield* SpaceDirectory.SpaceDirectory;
   const audit = yield* AuditLog.AuditLog;
-  const store = yield* ServerSecretStore.ServerSecretStore;
+  const values = yield* ServerSecretStore.VaultValueStore;
   const random = yield* SecureRandom.SecureRandom;
 
   /** Logs what failed (never a value: none reaches these causes) and answers generically. */
@@ -191,6 +258,9 @@ const make = Effect.gen(function* () {
     Effect.logError(`Vaults: could not ${what}`, { cause }).pipe(
       Effect.andThen(fail("storage", `Could not ${what}. Try again.`)),
     );
+  /** Inside a transaction: a VaultError is the answer, anything else is storage's. */
+  const orStorage = (what: string) => (error: unknown) =>
+    isVaultError(error) ? Effect.fail(error) : storage(what)(error);
 
   const now = Effect.map(DateTime.now, DateTime.formatIso);
   const newId = (prefix: string) =>
@@ -211,70 +281,27 @@ const make = Effect.gen(function* () {
     ),
   );
 
+  /** The acting User and what they may do, decided once per request. */
+  const caller = Effect.gen(function* () {
+    const userId = yield* actor;
+    const can = yield* spaces
+      .authorizer(userId)
+      .pipe(Effect.catch(storage("check what you may do")));
+    return { userId, can };
+  });
+
+  const spacesOf = (rows: ReadonlyArray<VaultRow>) =>
+    spaces
+      .spacesById([
+        ...new Set(rows.flatMap((row) => (row.spaceId === null ? [] : [row.spaceId as SpaceId]))),
+      ])
+      .pipe(Effect.catch(storage("read the Vaults' Organizations")));
+
   const findVault = (vaultId: string) =>
     sql<VaultRow>`SELECT ${sql.literal(VAULT_COLUMNS)} FROM vaults v WHERE v.vault_id = ${vaultId}`.pipe(
       Effect.map((rows) => Option.fromNullishOr(rows[0])),
       Effect.catch(storage("read the Vault")),
     );
-
-  /** A Vault of a deleted Organization is the Owner's alone, like the Owner's own. */
-  const resourceOf = Effect.fn("Vaults.resourceOf")(function* (row: VaultRow) {
-    const space =
-      row.spaceId === null
-        ? Option.none()
-        : yield* spaces
-            .spaceById(row.spaceId as SpaceId)
-            .pipe(Effect.catch(storage("read the Vault's Organization")));
-    return {
-      kind: "vault",
-      isMain: row.isMain === 1,
-      space: Option.match(space, { onNone: () => null, onSome: (found) => found.resource }),
-    } satisfies AccessPolicy.VaultResource;
-  });
-
-  const mainResource: AccessPolicy.VaultResource = { kind: "vault", isMain: true, space: null };
-
-  const allowed = (userId: UserId, action: AccessPolicy.Action, resource: AccessPolicy.Resource) =>
-    spaces.authorizeResource(userId, action, resource).pipe(
-      Effect.as(true),
-      Effect.catchTags({
-        SpaceAccessDeniedError: () => Effect.succeed(false),
-        SpaceDirectoryStorageError: storage("check what you may do"),
-      }),
-    );
-
-  const summaryOf = Effect.fn("Vaults.summaryOf")(function* (
-    userId: UserId,
-    row: VaultRow,
-    spaceName: string | null,
-  ) {
-    const resource = yield* resourceOf(row);
-    return {
-      id: VaultId.make(row.vaultId),
-      name: row.name,
-      description: row.description,
-      spaceId: row.spaceId as SpaceId | null,
-      spaceName,
-      isMain: row.isMain === 1,
-      archived: row.archivedAt !== null,
-      entryCount: row.entryCount,
-      canEdit: row.archivedAt === null && (yield* allowed(userId, "vault.edit", resource)),
-      canManage: yield* allowed(userId, "vault.manage", resource),
-      canReveal: yield* allowed(userId, "vault.reveal", resource),
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt,
-    } satisfies VaultSummary;
-  });
-
-  const spaceNameOf = (spaceId: string | null) =>
-    spaceId === null
-      ? Effect.succeed(null)
-      : spaces
-          .spaceById(spaceId as SpaceId)
-          .pipe(
-            Effect.map(Option.match({ onNone: () => null, onSome: (found) => found.name })),
-            Effect.catch(storage("read the Vault's Organization")),
-          );
 
   /**
    * The Vault, once the acting User may take `action` on it. A Vault they cannot see answers
@@ -284,14 +311,13 @@ const make = Effect.gen(function* () {
     vaultId: string,
     action: AccessPolicy.Action,
   ) {
-    const userId = yield* actor;
+    const { userId, can } = yield* caller;
     const row = yield* findVault(vaultId);
     if (Option.isNone(row)) return yield* fail("not-found", NOT_FOUND);
-    const resource = yield* resourceOf(row.value);
-    if (!(yield* allowed(userId, "vault.view", resource))) {
-      return yield* fail("not-found", NOT_FOUND);
-    }
-    if (!(yield* allowed(userId, action, resource))) {
+    const known = yield* spacesOf([row.value]);
+    const resource = resourceOf(row.value, known);
+    if (!can("vault.view", resource)) return yield* fail("not-found", NOT_FOUND);
+    if (!can(action, resource)) {
       return yield* fail(
         "forbidden",
         action === "vault.edit"
@@ -306,23 +332,58 @@ const make = Effect.gen(function* () {
     if (action === "vault.edit" && row.value.archivedAt !== null) {
       return yield* fail("forbidden", "This Vault is archived: restore it to change its secrets.");
     }
-    return { userId, row: row.value, resource };
+    return { userId, can, row: row.value, resource, known };
   });
+
+  /**
+   * The name rule, for every write: never the Hub's own; a name that changes how tools run only
+   * from whom the policy lets set one (the Owner), and only confirmed. Says whether it is one.
+   */
+  const checkName = Effect.fn("Vaults.checkName")(function* (
+    name: string,
+    can: Can,
+    resource: AccessPolicy.VaultResource,
+    confirmed: boolean | undefined,
+  ) {
+    switch (secretNameRisk(name)) {
+      case "invalid":
+        return yield* fail("invalid-name", invalidName(name));
+      case "gateway":
+        return yield* fail("reserved-name", `${name} is reserved: the Hub sets it.`);
+      case "dangerous":
+        if (!can("vault.dangerousName", resource)) {
+          return yield* fail(
+            "dangerous-name",
+            `${name} changes how the agent's tools run or whom they trust: only the Owner sets it.`,
+          );
+        }
+        if (confirmed !== true) {
+          return yield* fail(
+            "confirm-dangerous",
+            `${name} changes how the agent's tools run or whom they trust. Confirm to save it.`,
+          );
+        }
+        return true;
+      default:
+        return false;
+    }
+  });
+
+  const ENTRY_FROM = `
+    FROM vault_entries e
+    LEFT JOIN vault_entries o ON o.entry_id = e.linked_entry_id AND o.vault_id = '${MAIN_VAULT_ID}'
+  `;
 
   const entriesOf = (vaultId: string) =>
     sql<EntryRow>`
-      SELECT ${sql.literal(ENTRY_COLUMNS)}
-      FROM vault_entries e
-      LEFT JOIN vault_entries o ON o.entry_id = e.linked_entry_id AND o.vault_id = ${MAIN_VAULT_ID}
+      SELECT ${sql.literal(ENTRY_COLUMNS)} ${sql.literal(ENTRY_FROM)}
       WHERE e.vault_id = ${vaultId}
       ORDER BY e.name
     `.pipe(Effect.catch(storage("read the Vault's secrets")));
 
   const findEntry = (vaultId: string, entryId: string) =>
     sql<EntryRow>`
-      SELECT ${sql.literal(ENTRY_COLUMNS)}
-      FROM vault_entries e
-      LEFT JOIN vault_entries o ON o.entry_id = e.linked_entry_id AND o.vault_id = ${MAIN_VAULT_ID}
+      SELECT ${sql.literal(ENTRY_COLUMNS)} ${sql.literal(ENTRY_FROM)}
       WHERE e.vault_id = ${vaultId} AND e.entry_id = ${entryId}
     `.pipe(
       Effect.map((rows) => Option.fromNullishOr(rows[0])),
@@ -334,26 +395,6 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
-
-  const entryOf = (row: EntryRow, seesMain: boolean): VaultEntry => {
-    const broken = row.kind === "link" && row.linkedName === null;
-    return {
-      id: VaultEntryId.make(row.entryId),
-      vaultId: VaultId.make(row.vaultId),
-      name: row.name,
-      description: row.description,
-      kind: row.kind,
-      broken,
-      linkedFrom:
-        seesMain && row.kind === "link" && row.linkedEntryId !== null && !broken
-          ? { entryId: VaultEntryId.make(row.linkedEntryId), name: row.linkedName ?? "" }
-          : null,
-      unmasked: (row.kind === "link" ? (row.linkedUnmasked ?? 0) : row.unmasked) === 1,
-      version: row.version,
-      updatedAt: row.updatedAt,
-      updatedBy: row.updatedBy as UserId | null,
-    };
-  };
 
   const nameTaken = (vaultId: string, name: string, except?: string) =>
     sql<{ readonly entryId: string }>`
@@ -368,32 +409,40 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const writeValue = (entryId: string, value: string) =>
-    store
-      .set(valueEntryName(entryId), new TextEncoder().encode(value))
+  /** A new value under a new id: no row points at it until its transaction commits. */
+  const writeValue = Effect.fn("Vaults.writeValue")(function* (value: string) {
+    const valueId = yield* newId("value");
+    yield* values
+      .set(valueId, new TextEncoder().encode(value))
       .pipe(Effect.catch(storage("store the secret")));
+    return valueId;
+  });
 
-  /** Removes a value; one left behind by a failure is swept at the next start. */
-  const removeValue = (entryId: string) =>
-    store.remove(valueEntryName(entryId)).pipe(
-      Effect.catch((cause) =>
-        Effect.logWarning("Vaults: could not remove a value; the next start removes it", {
-          entryId,
-          cause,
-        }),
-      ),
-    );
+  /** Removes a value no row points at; one left behind by a failure is swept at the next start. */
+  const removeValue = (valueId: string | null) =>
+    valueId === null
+      ? Effect.void
+      : values.remove(valueId).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("Vaults: could not remove a value; the next start removes it", {
+              valueId,
+              cause,
+            }),
+          ),
+        );
 
-  const readValue = (entryId: string) =>
-    store.get(valueEntryName(entryId)).pipe(
-      Effect.catch(storage("read the secret")),
-      Effect.flatMap(
-        Option.match({
-          onNone: () => fail("not-found", "This secret's value is missing."),
-          onSome: (bytes) => Effect.succeed(new TextDecoder().decode(bytes)),
-        }),
-      ),
-    );
+  const readValue = (valueId: string | null) =>
+    valueId === null
+      ? fail("not-found", "This secret's value is missing.")
+      : values.get(valueId).pipe(
+          Effect.catch(storage("read the secret")),
+          Effect.flatMap(
+            Option.match({
+              onNone: () => fail("not-found", "This secret's value is missing."),
+              onSome: (bytes) => Effect.succeed(new TextDecoder().decode(bytes)),
+            }),
+          ),
+        );
 
   const recordEdit = (input: {
     readonly userId: UserId;
@@ -404,6 +453,7 @@ const make = Effect.gen(function* () {
     readonly op: string;
     readonly from?: string;
     readonly brokenLinks?: number;
+    readonly dangerous?: boolean;
   }) =>
     audit.record({
       actor: AuditLog.userActor(input.userId),
@@ -417,44 +467,55 @@ const make = Effect.gen(function* () {
         op: input.op,
         ...(input.from === undefined ? {} : { from: input.from }),
         ...(input.brokenLinks === undefined ? {} : { brokenLinks: input.brokenLinks }),
+        ...(input.dangerous === true ? { dangerous: true } : {}),
       },
     });
 
-  const seesMain = (userId: UserId) => allowed(userId, "vault.view", mainResource);
-
   const result = Effect.fn("Vaults.result")(function* (
-    userId: UserId,
+    can: Can,
+    resource: AccessPolicy.VaultResource,
     vaultId: string,
     entryId: string,
     warnings: ReadonlyArray<VaultWarning>,
   ) {
     const row = yield* findEntry(vaultId, entryId);
-    return { entry: entryOf(row, yield* seesMain(userId)), warnings } satisfies VaultEntryResult;
+    return {
+      entry: entryOf(row, can("vault.view", mainResource), can("vault.edit", resource)),
+      warnings,
+    } satisfies VaultEntryResult;
+  });
+
+  /**
+   * Runs `write` (the rows and the audit) in one transaction after `value` is stored under a new
+   * id; on failure that value goes, and on success `replaced` (the old one) does.
+   */
+  const withNewValue = Effect.fn("Vaults.withNewValue")(function* <A, E>(
+    value: string | undefined,
+    what: string,
+    write: (valueId: string | null) => Effect.Effect<A, E>,
+  ) {
+    const valueId = value === undefined ? null : yield* writeValue(value);
+    return yield* sql
+      .withTransaction(write(valueId))
+      .pipe(
+        Effect.catch((error) => removeValue(valueId).pipe(Effect.andThen(orStorage(what)(error)))),
+      );
   });
 
   const list = Effect.gen(function* () {
-    const userId = yield* actor;
+    const { can } = yield* caller;
     const rows = yield* sql<VaultRow>`
       SELECT ${sql.literal(VAULT_COLUMNS)} FROM vaults v ORDER BY v.is_main DESC, v.position, v.name
     `.pipe(Effect.catch(storage("read the Vaults")));
-    const spaceIds = new Set(
-      rows.flatMap((row) => (row.spaceId === null ? [] : [row.spaceId as SpaceId])),
-    );
-    const names = yield* spaces
-      .spacesById([...spaceIds])
-      .pipe(Effect.catch(storage("read the Vaults' Organizations")));
-    const vaults: Array<VaultSummary> = [];
-    for (const row of rows) {
-      if (!(yield* allowed(userId, "vault.view", yield* resourceOf(row)))) continue;
-      const spaceName =
-        row.spaceId === null ? null : (names.get(row.spaceId as SpaceId)?.name ?? null);
-      vaults.push(yield* summaryOf(userId, row, spaceName));
-    }
+    const known = yield* spacesOf(rows);
+    const vaults = rows
+      .filter((row) => can("vault.view", resourceOf(row, known)))
+      .map((row) => summaryOf(row, known, can));
     return { vaults };
   }).pipe(Effect.withSpan("Vaults.list"));
 
   const create = Effect.fn("Vaults.create")(function* (input: VaultCreateInput) {
-    const userId = yield* actor;
+    const { userId, can } = yield* caller;
     let space: AccessPolicy.SpaceResource | null = null;
     if (input.spaceId !== null) {
       const found = yield* spaces
@@ -465,7 +526,7 @@ const make = Effect.gen(function* () {
       }
       space = found.value.resource;
     }
-    if (!(yield* allowed(userId, "vault.manage", { kind: "vault", isMain: false, space }))) {
+    if (!can("vault.manage", { kind: "vault", isMain: false, space })) {
       return yield* fail("forbidden", "Only the Owner creates Vaults.");
     }
     const vaultId = yield* newId("vault");
@@ -491,14 +552,14 @@ const make = Effect.gen(function* () {
           });
         }),
       )
-      .pipe(Effect.catchIf((error) => !isVaultError(error), storage("create the Vault")));
+      .pipe(Effect.catch(orStorage("create the Vault")));
     const row = yield* findVault(vaultId);
     if (Option.isNone(row)) return yield* fail("not-found", NOT_FOUND);
-    return yield* summaryOf(userId, row.value, yield* spaceNameOf(row.value.spaceId));
+    return summaryOf(row.value, yield* spacesOf([row.value]), can);
   });
 
   const update = Effect.fn("Vaults.update")(function* (input: VaultUpdateInput) {
-    const { userId, row } = yield* authorizeVault(input.vaultId, "vault.manage");
+    const { userId, can, row } = yield* authorizeVault(input.vaultId, "vault.manage");
     const renamed = input.name !== undefined && input.name !== row.name;
     if (row.isMain === 1 && (renamed || input.archived !== undefined)) {
       return yield* fail("main-vault", "The Main vault keeps its name and is never archived.");
@@ -550,10 +611,10 @@ const make = Effect.gen(function* () {
           }
         }),
       )
-      .pipe(Effect.catchIf((error) => !isVaultError(error), storage("change the Vault")));
+      .pipe(Effect.catch(orStorage("change the Vault")));
     const updated = yield* findVault(row.vaultId);
     if (Option.isNone(updated)) return yield* fail("not-found", NOT_FOUND);
-    return yield* summaryOf(userId, updated.value, yield* spaceNameOf(updated.value.spaceId));
+    return summaryOf(updated.value, yield* spacesOf([updated.value]), can);
   });
 
   const remove = Effect.fn("Vaults.remove")(function* (input: VaultDeleteInput) {
@@ -561,11 +622,13 @@ const make = Effect.gen(function* () {
     if (row.isMain === 1) {
       return yield* fail("main-vault", "The Main vault is never deleted.");
     }
-    const entries = yield* entriesOf(row.vaultId);
-    yield* sql
+    // The values the deleted rows held, read in the same transaction that deletes them.
+    const removed = yield* sql
       .withTransaction(
         Effect.gen(function* () {
-          yield* sql`DELETE FROM vault_entries WHERE vault_id = ${row.vaultId}`;
+          const gone = yield* sql<{ readonly valueId: string | null }>`
+            DELETE FROM vault_entries WHERE vault_id = ${row.vaultId} RETURNING value_id AS "valueId"
+          `;
           yield* sql`DELETE FROM vault_allowances WHERE vault_id = ${row.vaultId}`;
           yield* sql`DELETE FROM space_default_vaults WHERE vault_id = ${row.vaultId}`;
           yield* sql`DELETE FROM project_vault_choices WHERE vault_id = ${row.vaultId}`;
@@ -575,31 +638,30 @@ const make = Effect.gen(function* () {
             action: "vault.delete",
             spaceId: row.spaceId as SpaceId | null,
             target: { kind: "vault", id: row.vaultId, name: row.name },
-            detail: { entries: entries.length },
+            detail: { entries: gone.length },
           });
+          return gone;
         }),
       )
       .pipe(Effect.catch(storage("delete the Vault")));
-    // After the rows: a value whose row is gone is never read again, and the next start sweeps it.
-    for (const entry of entries) {
-      if (entry.kind !== "link") yield* removeValue(entry.entryId);
-    }
+    for (const { valueId } of removed) yield* removeValue(valueId);
     return { deleted: true };
   });
 
   const listEntries = Effect.fn("Vaults.listEntries")(function* (input: VaultEntriesListInput) {
-    const { userId, row } = yield* authorizeVault(input.vaultId, "vault.view");
+    const { can, row, resource, known } = yield* authorizeVault(input.vaultId, "vault.view");
     const entries = yield* entriesOf(row.vaultId);
-    const main = yield* seesMain(userId);
+    const seesMain = can("vault.view", mainResource);
+    const canEdit = can("vault.edit", resource);
     return {
-      vault: yield* summaryOf(userId, row, yield* spaceNameOf(row.spaceId)),
-      entries: entries.map((entry) => entryOf(entry, main)),
+      vault: summaryOf(row, known, can),
+      entries: entries.map((entry) => entryOf(entry, seesMain, canEdit)),
     } satisfies VaultEntriesListResult;
   });
 
   const putEntry = Effect.fn("Vaults.putEntry")(function* (input: VaultEntryPutInput) {
-    const { userId, row } = yield* authorizeVault(input.vaultId, "vault.edit");
-    yield* checkName(input.name);
+    const { userId, can, row, resource } = yield* authorizeVault(input.vaultId, "vault.edit");
+    const dangerous = yield* checkName(input.name, can, resource, input.confirmDangerous);
     const value = input.value === undefined ? undefined : Redacted.value(input.value);
     if (value !== undefined) {
       const problem = valueProblem(value);
@@ -613,37 +675,29 @@ const make = Effect.gen(function* () {
       if (value === undefined) return yield* fail("invalid-value", "A secret needs a value.");
       yield* nameTaken(row.vaultId, input.name);
       const entryId = yield* newId("secret");
-      // The value first: a row never points at a value that is not there.
-      yield* writeValue(entryId, value);
-      yield* sql
-        .withTransaction(
-          Effect.gen(function* () {
-            yield* sql`
-              INSERT INTO vault_entries (entry_id, vault_id, name, description, kind, unmasked, version, created_at, updated_at, updated_by)
-              VALUES (${entryId}, ${row.vaultId}, ${input.name}, ${input.description ?? null}, 'own', ${isShort(value) ? 1 : 0}, 1, ${at}, ${at}, ${userId})
-            `;
-            yield* recordEdit({
-              userId,
-              vault: row,
-              entryId,
-              name: input.name,
-              kind: "own",
-              op: "add",
-            });
-          }),
-        )
-        .pipe(
-          Effect.catch((cause) =>
-            removeValue(entryId).pipe(
-              Effect.andThen(
-                nameTaken(row.vaultId, input.name).pipe(
-                  Effect.andThen(storage("add the secret")(cause)),
-                ),
-              ),
-            ),
-          ),
-        );
-      return yield* result(userId, row.vaultId, entryId, warnings);
+      yield* withNewValue(value, "add the secret", (valueId) =>
+        Effect.gen(function* () {
+          yield* sql`
+            INSERT INTO vault_entries (entry_id, vault_id, name, description, kind, value_id, unmasked, version, created_at, updated_at, updated_by)
+            VALUES (${entryId}, ${row.vaultId}, ${input.name}, ${input.description ?? null}, 'own', ${valueId}, ${isShort(value) ? 1 : 0}, 1, ${at}, ${at}, ${userId})
+          `;
+          yield* recordEdit({
+            userId,
+            vault: row,
+            entryId,
+            name: input.name,
+            kind: "own",
+            op: "add",
+            dangerous,
+          });
+        }),
+      ).pipe(
+        Effect.catch((error) =>
+          // A name taken meanwhile says so; anything else stays storage's.
+          nameTaken(row.vaultId, input.name).pipe(Effect.andThen(Effect.fail(error))),
+        ),
+      );
+      return yield* result(can, resource, row.vaultId, entryId, warnings);
     }
 
     const entry = yield* findEntry(row.vaultId, input.entryId);
@@ -653,39 +707,48 @@ const make = Effect.gen(function* () {
         `${entry.name} is a Secret link: its value is the Main vault's. Replace the original there, or delete the link and add a secret of this Vault's own.`,
       );
     }
+    // A name that changes how tools run stays the Owner's, whatever the change.
+    yield* checkName(entry.name, can, resource, input.confirmDangerous);
     const renamed = input.name !== entry.name;
     if (renamed) yield* nameTaken(row.vaultId, input.name, entry.entryId);
     const described = input.description !== undefined && input.description !== entry.description;
     if (value === undefined && !renamed && !described) {
-      return yield* result(userId, row.vaultId, entry.entryId, []);
+      return yield* result(can, resource, row.vaultId, entry.entryId, []);
     }
-    if (value !== undefined) yield* writeValue(entry.entryId, value);
-    yield* sql
-      .withTransaction(
-        Effect.gen(function* () {
-          yield* sql`
-            UPDATE vault_entries SET
-              name = ${input.name},
-              description = ${input.description === undefined ? entry.description : input.description},
-              unmasked = ${value === undefined ? entry.unmasked : isShort(value) ? 1 : 0},
-              version = version + ${value === undefined ? 0 : 1},
-              updated_at = ${at},
-              updated_by = ${userId}
-            WHERE entry_id = ${entry.entryId}
-          `;
-          yield* recordEdit({
-            userId,
-            vault: row,
-            entryId: entry.entryId,
-            name: input.name,
-            kind: entry.kind,
-            op: value !== undefined ? "replace" : renamed ? "rename" : "describe",
-            ...(renamed ? { from: entry.name } : {}),
-          });
-        }),
-      )
-      .pipe(Effect.catch(storage("change the secret")));
-    return yield* result(userId, row.vaultId, entry.entryId, warnings);
+    // The new value under a new id; the row, its version and the audit move to it together.
+    const replaced = yield* withNewValue(value, "change the secret", (valueId) =>
+      Effect.gen(function* () {
+        const current = yield* sql<{ readonly valueId: string | null }>`
+          SELECT value_id AS "valueId" FROM vault_entries WHERE entry_id = ${entry.entryId}
+        `;
+        const before = current[0];
+        if (before === undefined) return yield* fail("not-found", NOT_FOUND);
+        yield* sql`
+          UPDATE vault_entries SET
+            name = ${input.name},
+            description = ${input.description === undefined ? entry.description : input.description},
+            value_id = ${valueId ?? before.valueId},
+            unmasked = ${value === undefined ? entry.unmasked : isShort(value) ? 1 : 0},
+            version = version + ${value === undefined ? 0 : 1},
+            updated_at = ${at},
+            updated_by = ${userId}
+          WHERE entry_id = ${entry.entryId}
+        `;
+        yield* recordEdit({
+          userId,
+          vault: row,
+          entryId: entry.entryId,
+          name: input.name,
+          kind: entry.kind,
+          op: value !== undefined ? "replace" : renamed ? "rename" : "describe",
+          ...(renamed ? { from: entry.name } : {}),
+          dangerous,
+        });
+        return valueId === null ? null : before.valueId;
+      }),
+    );
+    yield* removeValue(replaced);
+    return yield* result(can, resource, row.vaultId, entry.entryId, warnings);
   });
 
   const linksTo = (entryId: string) =>
@@ -704,10 +767,13 @@ const make = Effect.gen(function* () {
     if (links.length > 0 && input.breakLinks !== true) {
       return { deleted: false, brokenLinks: links } satisfies VaultEntryDeleteResult;
     }
-    yield* sql
+    const gone = yield* sql
       .withTransaction(
         Effect.gen(function* () {
-          yield* sql`DELETE FROM vault_entries WHERE entry_id = ${entry.entryId}`;
+          const deleted = yield* sql<{ readonly valueId: string | null }>`
+            DELETE FROM vault_entries WHERE entry_id = ${entry.entryId} RETURNING value_id AS "valueId"
+          `;
+          if (deleted.length === 0) return yield* fail("not-found", NOT_FOUND);
           yield* recordEdit({
             userId,
             vault: row,
@@ -717,10 +783,11 @@ const make = Effect.gen(function* () {
             op: "delete",
             ...(links.length > 0 ? { brokenLinks: links.length } : {}),
           });
+          return deleted[0]?.valueId ?? null;
         }),
       )
-      .pipe(Effect.catch(storage("delete the secret")));
-    if (entry.kind !== "link") yield* removeValue(entry.entryId);
+      .pipe(Effect.catch(orStorage("delete the secret")));
+    yield* removeValue(gone);
     return { deleted: true, brokenLinks: links } satisfies VaultEntryDeleteResult;
   });
 
@@ -732,8 +799,8 @@ const make = Effect.gen(function* () {
     input: VaultEntryFromMainInput,
     kind: "link" | "copy",
   ) {
-    const { userId, row } = yield* authorizeVault(input.vaultId, "vault.edit");
-    if (!(yield* allowed(userId, "vault.edit", mainResource))) {
+    const { userId, can, row, resource } = yield* authorizeVault(input.vaultId, "vault.edit");
+    if (!can("vault.edit", mainResource)) {
       return yield* fail("forbidden", "Only the Owner links or copies the Main vault's secrets.");
     }
     if (row.vaultId === MAIN_VAULT_ID) {
@@ -747,39 +814,32 @@ const make = Effect.gen(function* () {
       return yield* fail("not-linkable", "A Secret link points at a secret, never at a link.");
     }
     const name = input.name ?? source.name;
-    yield* checkName(name);
+    const dangerous = yield* checkName(name, can, resource, input.confirmDangerous);
     yield* nameTaken(row.vaultId, name);
     const entryId = yield* newId("secret");
     const at = yield* now;
     const description = input.description === undefined ? source.description : input.description;
-    if (kind === "copy") yield* writeValue(entryId, yield* readValue(source.entryId));
-    yield* sql
-      .withTransaction(
-        Effect.gen(function* () {
-          yield* sql`
-            INSERT INTO vault_entries (entry_id, vault_id, name, description, kind, linked_entry_id, unmasked, version, created_at, updated_at, updated_by)
-            VALUES (${entryId}, ${row.vaultId}, ${name}, ${description}, ${kind}, ${kind === "link" ? source.entryId : null}, ${source.unmasked}, 1, ${at}, ${at}, ${userId})
-          `;
-          yield* recordEdit({
-            userId,
-            vault: row,
-            entryId,
-            name,
-            kind,
-            op: kind,
-            from: source.name,
-          });
-        }),
-      )
-      .pipe(
-        Effect.catch((cause) =>
-          (kind === "copy" ? removeValue(entryId) : Effect.void).pipe(
-            Effect.andThen(storage(`add the ${kind}`)(cause)),
-          ),
-        ),
-      );
+    const copied = kind === "copy" ? yield* readValue(source.valueId) : undefined;
+    yield* withNewValue(copied, `add the ${kind}`, (valueId) =>
+      Effect.gen(function* () {
+        yield* sql`
+          INSERT INTO vault_entries (entry_id, vault_id, name, description, kind, linked_entry_id, value_id, unmasked, version, created_at, updated_at, updated_by)
+          VALUES (${entryId}, ${row.vaultId}, ${name}, ${description}, ${kind}, ${kind === "link" ? source.entryId : null}, ${valueId}, ${source.unmasked}, 1, ${at}, ${at}, ${userId})
+        `;
+        yield* recordEdit({
+          userId,
+          vault: row,
+          entryId,
+          name,
+          kind,
+          op: kind,
+          from: source.name,
+          dangerous,
+        });
+      }),
+    );
     const warnings: ReadonlyArray<VaultWarning> = source.unmasked === 1 ? ["short-value"] : [];
-    return yield* result(userId, row.vaultId, entryId, warnings);
+    return yield* result(can, resource, row.vaultId, entryId, warnings);
   });
 
   const reveal = Effect.fn("Vaults.reveal")(function* (input: {
@@ -788,11 +848,10 @@ const make = Effect.gen(function* () {
   }) {
     const { userId, row } = yield* authorizeVault(input.vaultId, "vault.reveal");
     const entry = yield* findEntry(row.vaultId, input.entryId);
-    const holder = entry.kind === "link" ? entry.linkedEntryId : entry.entryId;
-    if (holder === null || (entry.kind === "link" && entry.linkedName === null)) {
+    if (entry.kind === "link" && entry.linkedName === null) {
       return yield* fail("not-found", `${entry.name} is a broken link: its original is gone.`);
     }
-    const value = yield* readValue(holder);
+    const value = yield* readValue(entry.kind === "link" ? entry.linkedValueId : entry.valueId);
     // Recorded before the value leaves: one whose reveal could not be recorded is not shown.
     yield* audit
       .record({
@@ -845,45 +904,46 @@ const ensureMainVault = Effect.gen(function* () {
 });
 
 /**
- * Values whose entry is gone (a deletion that stopped between the row and the value, or a restore
- * of an older database): removed, so no sealed value outlives its secret.
+ * Values no row points at (a write or deletion that stopped half-way, or an older database
+ * restored): removed, so no sealed value outlives its secret. Only the Vault values' own folder.
  */
 const sweepOrphanValues = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
-  const store = yield* ServerSecretStore.ServerSecretStore;
-  const fs = yield* FileSystem.FileSystem;
-  if (store.directory === undefined) return;
-  const names = yield* fs.readDirectory(store.directory).pipe(Effect.orElseSucceed(() => []));
+  const values = yield* ServerSecretStore.VaultValueStore;
+  const stored = yield* values.list;
   const held = new Set(
-    (yield* sql<{ readonly entryId: string }>`
-      SELECT entry_id AS "entryId" FROM vault_entries WHERE kind <> 'link'
-    `).map((row) => valueEntryName(row.entryId)),
+    (yield* sql<{ readonly valueId: string }>`
+      SELECT value_id AS "valueId" FROM vault_entries WHERE value_id IS NOT NULL
+    `).map((row) => row.valueId),
   );
   let removed = 0;
-  for (const file of names) {
-    const name = file.replace(/\.(sealed|bin)$/u, "");
-    if (name === file || !name.startsWith(SecretCipher.VAULT_VALUE_ENTRY_PREFIX)) continue;
-    if (held.has(name)) continue;
-    yield* store.remove(name).pipe(Effect.ignore);
+  for (const valueId of stored) {
+    if (held.has(valueId)) continue;
+    yield* values.remove(valueId).pipe(Effect.ignore);
     removed += 1;
   }
-  if (removed > 0) yield* Effect.logInfo("Vaults: removed values of deleted secrets", { removed });
+  if (removed > 0) yield* Effect.logInfo("Vaults: removed values no secret holds", { removed });
 });
 
-/** The Hub's start: the Main vault, the database's key check, and no orphaned values. */
-const start = Effect.gen(function* () {
-  const { keyring } = yield* ServerSecretStore.MasterKeyring;
-  yield* ensureMainVault.pipe(Effect.orDie);
-  if (Option.isSome(keyring)) {
+/**
+ * The Hub's start: the database's key check first (a wrong key changes nothing in the database),
+ * then the Main vault and the sweep. A joined machine has no master key and no Vaults: nothing is
+ * written and every call says so.
+ */
+export const layer = Layer.effect(
+  Vaults,
+  Effect.gen(function* () {
+    const { keyring } = yield* ServerSecretStore.MasterKeyring;
+    if (Option.isNone(keyring)) return unavailable;
     yield* VaultKeyCheck.checkDatabaseKey(keyring.value).pipe(
       Effect.catchTags({ SqlError: (cause) => Effect.die(cause) }),
     );
+    yield* ensureMainVault.pipe(Effect.orDie);
     yield* sweepOrphanValues.pipe(
       Effect.catch((cause) =>
-        Effect.logWarning("Vaults: could not sweep values of deleted secrets", { cause }),
+        Effect.logWarning("Vaults: could not sweep values no secret holds", { cause }),
       ),
     );
-  }
-});
-
-export const layer = Layer.effect(Vaults, Effect.andThen(start, make));
+    return yield* make;
+  }),
+);

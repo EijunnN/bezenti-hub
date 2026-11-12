@@ -159,6 +159,22 @@ export class ServerSecretStore extends Context.Service<
   }
 >()("t3/auth/ServerSecretStore") {}
 
+/**
+ * A Vault's values: their own folder of the store (`secrets/vault-values/`) and purpose, so no
+ * other caller's name reaches one. Kept only where a master key seals them: on a joined machine
+ * every operation fails rather than store a value in clear.
+ */
+export class VaultValueStore extends Context.Service<
+  VaultValueStore,
+  {
+    readonly get: (id: string) => Effect.Effect<Option.Option<Uint8Array>, SecretStoreError>;
+    readonly set: (id: string, value: Uint8Array) => Effect.Effect<void, SecretStoreError>;
+    readonly remove: (id: string) => Effect.Effect<void, SecretStoreError>;
+    /** The ids of every value stored, for the start's sweep of values no secret points at. */
+    readonly list: Effect.Effect<ReadonlyArray<string>, SecretStoreError>;
+  }
+>()("t3/auth/ServerSecretStore/VaultValueStore") {}
+
 /** The master key the store opened with; none on a joined machine. */
 export class MasterKeyring extends Context.Service<
   MasterKeyring,
@@ -255,12 +271,17 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
   const keyring = opened !== undefined && Result.isSuccess(opened) ? opened.success : undefined;
   const unavailable = opened !== undefined && Result.isFailure(opened) ? opened.failure : undefined;
 
-  const sealedPath = (name: string) =>
-    path.join(serverConfig.secretsDir, `${name}${MasterKeyFile.SEALED_EXTENSION}`);
-  const plainPath = (name: string) =>
-    path.join(serverConfig.secretsDir, `${name}${MasterKeyFile.PLAIN_EXTENSION}`);
+  type Namespace = MasterKeyFile.StoreNamespace;
+  const TOP: Namespace = MasterKeyFile.STORE_NAMESPACES[0];
+  const VAULT: Namespace = MasterKeyFile.VAULT_VALUES_NAMESPACE;
+  const dirOf = (ns: Namespace) =>
+    ns.dir === "" ? serverConfig.secretsDir : path.join(serverConfig.secretsDir, ns.dir);
+  const sealedPath = (name: string, ns: Namespace = TOP) =>
+    path.join(dirOf(ns), `${name}${MasterKeyFile.SEALED_EXTENSION}`);
+  const plainPath = (name: string, ns: Namespace = TOP) =>
+    path.join(dirOf(ns), `${name}${MasterKeyFile.PLAIN_EXTENSION}`);
   /** Where this store writes `name`: sealed on a Hub, in clear on a joined machine. */
-  const entryPath = keyring === undefined ? plainPath : sealedPath;
+  const entryPath = (name: string) => (keyring === undefined ? plainPath(name) : sealedPath(name));
 
   const notReadable = (name: string, cause: string) =>
     new SecretStoreDecodeError({ resource: `secret ${name}`, cause });
@@ -285,21 +306,17 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
   const getSealed = Effect.fn("ServerSecretStore.getSealed")(function* (
     current: MasterKeyFile.Keyring,
     name: string,
+    ns: Namespace = TOP,
   ) {
-    const stored = yield* readOptional(name, sealedPath(name));
+    const stored = yield* readOptional(name, sealedPath(name, ns));
     if (Option.isNone(stored)) {
       // Never accepted: an entry in clear after the startup was planted, or is from before it.
-      if (yield* isPresent(name, plainPath(name))) {
+      if (yield* isPresent(name, plainPath(name, ns))) {
         return yield* notReadable(name, "stored in clear; restart the Hub to encrypt it");
       }
       return Option.none<Uint8Array>();
     }
-    const opened = SecretCipher.open(
-      current.keys,
-      SecretCipher.entryPurpose(name),
-      name,
-      stored.value,
-    );
+    const opened = SecretCipher.open(current.keys, ns.purpose, name, stored.value);
     switch (opened._tag) {
       case "opened":
         return Option.some(opened.plaintext);
@@ -329,15 +346,22 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
       ? effect
       : Effect.fail(new SecretStoreReadError({ resource: `secret ${name}`, cause: unavailable }));
 
-  const get: ServerSecretStore["Service"]["get"] = (name) =>
-    whenOpen(name, keyring === undefined ? getPlain(name) : getSealed(keyring, name)).pipe(
-      Effect.withSpan("ServerSecretStore.get"),
-    );
+  /** A name is one file of the store's own folder: never a path into another namespace. */
+  const validName = (name: string) =>
+    /^[^/\\]+$/u.test(name) && name !== "." && name !== ".."
+      ? Effect.void
+      : Effect.fail(notReadable(name.slice(0, 40), "not a secret's name"));
+  const named = <A, E>(name: string, effect: Effect.Effect<A, E>) =>
+    Effect.andThen(validName(name), effect);
 
-  const sealFor = (name: string, value: Uint8Array) =>
-    keyring === undefined
-      ? value
-      : SecretCipher.seal(keyring.current, SecretCipher.entryPurpose(name), name, value);
+  const get: ServerSecretStore["Service"]["get"] = (name) =>
+    named(
+      name,
+      whenOpen(name, keyring === undefined ? getPlain(name) : getSealed(keyring, name)),
+    ).pipe(Effect.withSpan("ServerSecretStore.get"));
+
+  const sealFor = (name: string, value: Uint8Array, ns: Namespace = TOP) =>
+    keyring === undefined ? value : SecretCipher.seal(keyring.current, ns.purpose, name, value);
 
   const withFiles = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem | Path.Path>) =>
     effect.pipe(
@@ -346,7 +370,10 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
     );
 
   const set: ServerSecretStore["Service"]["set"] = (name, value) =>
-    whenOpen(name, withFiles(writeAtomically(entryPath(name), sealFor(name, value)))).pipe(
+    named(
+      name,
+      whenOpen(name, withFiles(writeAtomically(entryPath(name), sealFor(name, value)))),
+    ).pipe(
       Effect.mapError(
         (cause) => new SecretStorePersistError({ resource: `secret ${name}`, cause }),
       ),
@@ -356,7 +383,10 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
   // `link` publishes the fully written temp file under the final name, or fails with
   // AlreadyExists, so a concurrent reader never observes a partially written secret.
   const create: ServerSecretStore["Service"]["create"] = (name, value) =>
-    whenOpen(name, withFiles(createExclusively(entryPath(name), sealFor(name, value)))).pipe(
+    named(
+      name,
+      whenOpen(name, withFiles(createExclusively(entryPath(name), sealFor(name, value)))),
+    ).pipe(
       Effect.mapError(
         (cause) => new SecretStorePersistError({ resource: `secret ${name}`, cause }),
       ),
@@ -417,10 +447,69 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
       );
 
   const remove: ServerSecretStore["Service"]["remove"] = (name) =>
-    whenOpen(name, removeFile(name, sealedPath(name))).pipe(
+    named(name, whenOpen(name, removeFile(name, sealedPath(name)))).pipe(
       Effect.andThen(removeFile(name, plainPath(name))),
       Effect.withSpan("ServerSecretStore.remove"),
     );
+
+  /** A Vault value is only ever sealed: without a key there is nothing to keep it in. */
+  const vaultKeyring = (id: string) =>
+    keyring === undefined
+      ? Effect.fail(
+          new SecretStorePersistError({
+            resource: `vault value ${id}`,
+            cause: "Vault values are kept only on a Hub, sealed with its master key.",
+          }),
+        )
+      : Effect.succeed(keyring);
+  const vaultValues = VaultValueStore.of({
+    get: Effect.fn("VaultValueStore.get")((id: string) =>
+      named(
+        id,
+        whenOpen(
+          id,
+          Effect.flatMap(vaultKeyring(id), (current) => getSealed(current, id, VAULT)),
+        ),
+      ),
+    ),
+    set: Effect.fn("VaultValueStore.set")((id: string, value: Uint8Array) =>
+      named(
+        id,
+        whenOpen(
+          id,
+          Effect.flatMap(vaultKeyring(id), () =>
+            fileSystem.makeDirectory(dirOf(VAULT), { recursive: true, mode: 0o700 }).pipe(
+              Effect.andThen(
+                withFiles(writeAtomically(sealedPath(id, VAULT), sealFor(id, value, VAULT))),
+              ),
+              Effect.mapError(
+                (cause) => new SecretStorePersistError({ resource: `vault value ${id}`, cause }),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+    remove: Effect.fn("VaultValueStore.remove")((id: string) =>
+      named(id, whenOpen(id, removeFile(id, sealedPath(id, VAULT)))).pipe(
+        Effect.andThen(removeFile(id, plainPath(id, VAULT))),
+      ),
+    ),
+    list: fileSystem.readDirectory(dirOf(VAULT)).pipe(
+      Effect.map((names) =>
+        names.flatMap((file) => {
+          for (const extension of [MasterKeyFile.SEALED_EXTENSION, MasterKeyFile.PLAIN_EXTENSION]) {
+            if (file.endsWith(extension) && file.length > extension.length) {
+              return [file.slice(0, -extension.length)];
+            }
+          }
+          return [];
+        }),
+      ),
+      Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed([])),
+      Effect.mapError((cause) => new SecretStoreReadError({ resource: "vault values", cause })),
+    ),
+  });
 
   return Context.make(
     ServerSecretStore,
@@ -433,6 +522,7 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
       remove,
     }),
   ).pipe(
+    Context.add(VaultValueStore, vaultValues),
     Context.add(
       MasterKeyring,
       MasterKeyring.of({

@@ -19,6 +19,7 @@ import { assert, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Logger from "effect/Logger";
 import * as Redacted from "effect/Redacted";
 import * as References from "effect/References";
@@ -90,6 +91,13 @@ const hub = Effect.gen(function* () {
   );
   const vaults = Context.get(server.services, Vaults.Vaults);
   const store = Context.get(server.services, ServerSecretStore.ServerSecretStore);
+  const valuesDir = NodePath.join(store.directory ?? "", "vault-values");
+  /** The sealed file holding an entry's value now. */
+  const valueFileOf = (entryId: string) =>
+    server.sql<{ readonly valueId: string }>`
+      SELECT value_id AS "valueId" FROM vault_entries WHERE entry_id = ${entryId}
+    `.pipe(Effect.map((rows) => NodePath.join(valuesDir, `${rows[0]?.valueId}.sealed`)));
+  const valueFiles = () => (NodeFS.existsSync(valuesDir) ? NodeFS.readdirSync(valuesDir) : []);
   const as =
     (userId: UserId, spaceLimit?: SpaceId) =>
     <A, E, R>(effect: Effect.Effect<A, E, R>) =>
@@ -108,6 +116,9 @@ const hub = Effect.gen(function* () {
     people,
     vaults,
     store,
+    valuesDir,
+    valueFileOf,
+    valueFiles,
     as,
     reveal,
   };
@@ -452,13 +463,8 @@ it.effect(
       for (const name of ["path", "1ABC", "A=B", "A B", "A\u0000B", "", "Ä"]) {
         assert.equal(yield* reasonOf(put(name)), "invalid-name", JSON.stringify(name));
       }
+      // The Hub's own: refused even to the Owner, confirmed or not.
       for (const name of [
-        "PATH",
-        "HOME",
-        "LD_PRELOAD",
-        "DYLD_INSERT_LIBRARIES",
-        "NODE_OPTIONS",
-        "BASH_ENV",
         "T3_TOKEN",
         "T3CODE_HOME",
         "ANTHROPIC_BASE_URL",
@@ -466,6 +472,20 @@ it.effect(
         "OPENAI_BASE_URL",
       ]) {
         assert.equal(yield* reasonOf(put(name)), "reserved-name", name);
+        assert.equal(
+          yield* reasonOf(
+            vaults
+              .putEntry({
+                vaultId: MAIN_VAULT_ID,
+                name,
+                value: Redacted.make("long-enough-value"),
+                confirmDangerous: true,
+              })
+              .pipe(as(ownerId)),
+          ),
+          "reserved-name",
+          name,
+        );
       }
       assert.equal(yield* reasonOf(put("NUL_INSIDE", "abc\u0000def")), "invalid-value");
       assert.equal(yield* reasonOf(put("TOO_BIG", "x".repeat(64 * 1024 + 1))), "invalid-value");
@@ -508,7 +528,7 @@ it.effect(
     });
     return Effect.gen(function* () {
       const setup = yield* hub;
-      const { server, vaults, as, people, store, owner } = setup;
+      const { server, vaults, as, people, owner, valuesDir } = setup;
       const { acme, own } = yield* acmeSecrets(setup);
       yield* vaults
         .putEntry({ vaultId: acme.id, name: "ADMIN_TOKEN", value: Redacted.make(ADMIN_WRITES) })
@@ -548,14 +568,11 @@ it.effect(
         assert.isFalse(mentionsAValue(text), `a value is in the table ${name}`);
       }
       // Sealed files, none in clear.
-      const directory = store.directory ?? "";
-      const files = NodeFS.readdirSync(directory).filter((file) =>
-        file.startsWith(SecretCipher.VAULT_VALUE_ENTRY_PREFIX),
-      );
+      const files = setup.valueFiles();
       assert.isAbove(files.length, 0);
       for (const file of files) {
         assert.match(file, /\.sealed$/);
-        const bytes = NodeFS.readFileSync(NodePath.join(directory, file)).toString("latin1");
+        const bytes = NodeFS.readFileSync(NodePath.join(valuesDir, file)).toString("latin1");
         assert.isFalse(mentionsAValue(bytes), `${file} holds a value in clear`);
       }
       const recorded = [
@@ -580,13 +597,8 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const setup = yield* hub;
-      const { server, vaults, as, ownerId, store } = setup;
+      const { server, vaults, as, ownerId, store, valueFiles } = setup;
       const { acme, own } = yield* acmeSecrets(setup);
-      const directory = store.directory ?? "";
-      const valueFiles = () =>
-        NodeFS.readdirSync(directory).filter((file) =>
-          file.startsWith(SecretCipher.VAULT_VALUE_ENTRY_PREFIX),
-        );
       // GITHUB_TOKEN, its copy and ACME_API_KEY hold values; the link holds none.
       assert.lengthOf(valueFiles(), 3);
       yield* vaults
@@ -598,35 +610,51 @@ it.effect(
       yield* vaults.remove({ vaultId: acme.id }).pipe(as(ownerId));
       assert.lengthOf(valueFiles(), 1);
 
-      yield* store.set(
-        `${SecretCipher.VAULT_VALUE_ENTRY_PREFIX}secret-gone`,
-        new TextEncoder().encode("left-behind-value"),
-      );
+      // A replace leaves one value, the new one.
+      const github = (yield* vaults.listEntries({ vaultId: MAIN_VAULT_ID }).pipe(as(ownerId)))
+        .entries[0]!;
+      yield* vaults
+        .putEntry({
+          vaultId: MAIN_VAULT_ID,
+          entryId: github.id,
+          name: github.name,
+          value: Redacted.make(ROTATED),
+        })
+        .pipe(as(ownerId));
+      assert.lengthOf(valueFiles(), 1);
+
+      const values = Context.get(server.services, ServerSecretStore.VaultValueStore);
+      yield* values.set("value-left-behind", new TextEncoder().encode("left-behind-value"));
+      // A Hub secret whose name looks like a value is not the sweep's.
+      yield* store.set("value-not-a-vault-one", new TextEncoder().encode("hub-secret"));
       assert.lengthOf(valueFiles(), 2);
       yield* Layer.build(Vaults.layer.pipe(Layer.provide(Layer.succeedContext(server.services))));
       assert.lengthOf(valueFiles(), 1);
+      assert.isTrue((yield* store.get("value-not-a-vault-one"))._tag === "Some");
+      // No name of the store's own reaches the Vault values' folder.
+      assert.equal(
+        (yield* Effect.flip(store.get(`vault-values/${valueFiles()[0]!.replace(".sealed", "")}`)))
+          ._tag,
+        "SecretStoreDecodeError",
+      );
     }),
 );
 
 it.effect("a value's file renamed to another secret, or from another entry, does not open", () =>
   Effect.gen(function* () {
     const setup = yield* hub;
-    const { vaults, as, ownerId, store } = setup;
+    const { vaults, as, ownerId, store, valueFileOf } = setup;
     const { acme, own, copy } = yield* acmeSecrets(setup);
     const directory = store.directory ?? "";
-    const fileOf = (entryId: string) =>
-      NodePath.join(directory, `${SecretCipher.VAULT_VALUE_ENTRY_PREFIX}${entryId}.sealed`);
-    NodeFS.copyFileSync(fileOf(own.id), fileOf(copy.id));
+    NodeFS.copyFileSync(yield* valueFileOf(own.id), yield* valueFileOf(copy.id));
     assert.equal(
       yield* reasonOf(vaults.reveal({ vaultId: acme.id, entryId: copy.id }).pipe(as(ownerId))),
       "storage",
     );
     // A Hub secret (another purpose) moved under a Vault value's name does not open either.
-    const hubSecret = NodeFS.readdirSync(directory).find(
-      (file) => file.endsWith(".sealed") && !file.startsWith(SecretCipher.VAULT_VALUE_ENTRY_PREFIX),
-    );
+    const hubSecret = NodeFS.readdirSync(directory).find((file) => file.endsWith(".sealed"));
     assert.isDefined(hubSecret);
-    NodeFS.copyFileSync(NodePath.join(directory, hubSecret!), fileOf(own.id));
+    NodeFS.copyFileSync(NodePath.join(directory, hubSecret!), yield* valueFileOf(own.id));
     assert.equal(
       yield* reasonOf(vaults.reveal({ vaultId: acme.id, entryId: own.id }).pipe(as(ownerId))),
       "storage",
@@ -675,4 +703,215 @@ it.effect(
       const wrong = yield* Effect.flip(run(keyring(first)));
       assert.equal(wrong._tag, "MasterKeyError");
     }),
+);
+
+it.effect(
+  "a name that changes how tools run: never an Admin's; the Owner's only confirmed, and audited",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub;
+      const { vaults, as, ownerId, people, server } = setup;
+      const { acme } = yield* acmeSecrets(setup);
+      const put = (who: UserId, name: string, confirmDangerous?: boolean) =>
+        vaults
+          .putEntry({
+            vaultId: acme.id,
+            name,
+            value: Redacted.make("long-enough-value"),
+            ...(confirmDangerous === undefined ? {} : { confirmDangerous }),
+          })
+          .pipe(as(who));
+      for (const name of [
+        "GIT_SSH_COMMAND",
+        "NODE_OPTIONS",
+        "LD_PRELOAD",
+        "PYTHONSTARTUP",
+        "HTTPS_PROXY",
+        "NODE_EXTRA_CA_CERTS",
+        "BASH_FUNC_LS",
+        "XDG_CONFIG_HOME",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+      ]) {
+        assert.equal(yield* reasonOf(put(people.admin.id, name, true)), "dangerous-name", name);
+      }
+      assert.equal(yield* reasonOf(put(ownerId, "GIT_SSH_COMMAND")), "confirm-dangerous");
+      const set = yield* put(ownerId, "GIT_SSH_COMMAND", true);
+      // Once set, an Admin neither replaces nor renames it.
+      assert.equal(
+        yield* reasonOf(
+          vaults
+            .putEntry({
+              vaultId: acme.id,
+              entryId: set.entry.id,
+              name: "GIT_SSH_COMMAND",
+              value: Redacted.make("ssh -o ProxyCommand=evil"),
+              confirmDangerous: true,
+            })
+            .pipe(as(people.admin.id)),
+        ),
+        "dangerous-name",
+      );
+      assert.equal(
+        yield* reasonOf(
+          vaults
+            .putEntry({ vaultId: acme.id, entryId: set.entry.id, name: "SAFE_NAME" })
+            .pipe(as(people.admin.id)),
+        ),
+        "dangerous-name",
+      );
+      // Nor renames a plain one into one.
+      const plain = yield* put(people.admin.id, "PLAIN_TOKEN");
+      assert.equal(
+        yield* reasonOf(
+          vaults
+            .putEntry({
+              vaultId: acme.id,
+              entryId: plain.entry.id,
+              name: "NODE_OPTIONS",
+              confirmDangerous: true,
+            })
+            .pipe(as(people.admin.id)),
+        ),
+        "dangerous-name",
+      );
+      const [audited] = yield* server.sql<{ readonly detail_json: string }>`
+        SELECT detail_json FROM audit_log
+        WHERE action = 'secret.edit' AND target_name = 'GIT_SSH_COMMAND'
+      `;
+      assert.equal(JSON.parse(audited?.detail_json ?? "{}").dangerous, true);
+    }),
+);
+
+it.effect(
+  "a replace that fails leaves the old value live and unaudited, and no new value behind",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub;
+      const { vaults, as, ownerId, server, valueFiles } = setup;
+      const { acme, own } = yield* acmeSecrets(setup);
+      const before = valueFiles().toSorted();
+      yield* server.sql`
+        CREATE TRIGGER vault_entries_refuse BEFORE UPDATE ON vault_entries
+        BEGIN SELECT RAISE(ABORT, 'the disk is full'); END
+      `;
+      assert.equal(
+        yield* reasonOf(
+          vaults
+            .putEntry({
+              vaultId: acme.id,
+              entryId: own.id,
+              name: own.name,
+              value: Redacted.make(ROTATED),
+            })
+            .pipe(as(ownerId)),
+        ),
+        "storage",
+      );
+      yield* server.sql`DROP TRIGGER vault_entries_refuse`;
+      const shown = yield* vaults.reveal({ vaultId: acme.id, entryId: own.id }).pipe(as(ownerId));
+      assert.equal(Redacted.value(shown.value), ACME_OWN);
+      const listed = yield* vaults.listEntries({ vaultId: acme.id }).pipe(as(ownerId));
+      assert.equal(listed.entries.find((entry) => entry.id === own.id)?.version, 1);
+      const replaces = yield* server.sql<{ readonly n: number }>`
+        SELECT COUNT(*) AS n FROM audit_log
+        WHERE action = 'secret.edit' AND detail_json LIKE '%"replace"%'
+      `;
+      assert.equal(replaces[0]?.n, 0);
+      assert.deepEqual(valueFiles().toSorted(), before);
+    }),
+);
+
+it.effect("a link tells those who do not see the Main vault nothing of its original", () =>
+  Effect.gen(function* () {
+    const setup = yield* hub;
+    const { vaults, as, ownerId, people } = setup;
+    const acme = yield* vaults
+      .create({ name: "Acme secrets", spaceId: setup.acmeId })
+      .pipe(as(ownerId));
+    const pin = yield* vaults
+      .putEntry({ vaultId: MAIN_VAULT_ID, name: "SHORT_PIN", value: Redacted.make("1234") })
+      .pipe(as(ownerId));
+    const link = yield* vaults
+      .linkEntry({ vaultId: acme.id, sourceEntryId: pin.entry.id })
+      .pipe(as(ownerId));
+    const seen = (who: UserId) =>
+      vaults.listEntries({ vaultId: acme.id }).pipe(
+        as(who),
+        Effect.map((listed) => listed.entries.find((entry) => entry.id === link.entry.id)!),
+      );
+    assert.isTrue((yield* seen(ownerId)).unmasked);
+    for (const who of [people.admin, people.member, people.guest]) {
+      const entry = yield* seen(who.id);
+      assert.isFalse(entry.unmasked, `${who.id} learnt the original is short`);
+      assert.isNull(entry.linkedFrom);
+    }
+    const rotatedAt = (yield* seen(people.member.id)).updatedAt;
+    yield* vaults
+      .putEntry({
+        vaultId: MAIN_VAULT_ID,
+        entryId: pin.entry.id,
+        name: "SHORT_PIN",
+        value: Redacted.make("a-much-longer-value"),
+      })
+      .pipe(as(ownerId));
+    const after = yield* seen(people.member.id);
+    assert.equal(after.version, 1);
+    assert.equal(after.updatedAt, rotatedAt);
+    yield* vaults
+      .deleteEntry({ vaultId: MAIN_VAULT_ID, entryId: pin.entry.id, breakLinks: true })
+      .pipe(as(ownerId));
+    // Its editors learn it broke; its readers do not learn the original is gone.
+    assert.isTrue((yield* seen(people.admin.id)).broken);
+    assert.isFalse((yield* seen(people.guest.id)).broken);
+    assert.isFalse((yield* seen(people.member.id)).broken);
+  }),
+);
+
+it.effect("a joined machine has no Vaults: nothing is written, every call says so", () =>
+  Effect.gen(function* () {
+    const { server, as, ownerId } = yield* hub;
+    yield* server.sql`DELETE FROM vaults`;
+    yield* server.sql`DELETE FROM vault_key_check`;
+    const joined = Context.add(server.services, ServerSecretStore.MasterKeyring, {
+      keyring: Option.none(),
+      unavailable: Option.none(),
+    });
+    const built = yield* Layer.build(
+      Vaults.layer.pipe(Layer.provide(Layer.succeedContext(joined))),
+    );
+    const vaults = Context.get(built, Vaults.Vaults);
+    const rows = yield* server.sql<{ readonly n: number }>`
+      SELECT (SELECT COUNT(*) FROM vaults) + (SELECT COUNT(*) FROM vault_key_check) AS n
+    `;
+    assert.equal(rows[0]?.n, 0);
+    assert.equal(yield* reasonOf(vaults.list.pipe(as(ownerId))), "unavailable");
+    assert.equal(
+      yield* reasonOf(
+        vaults
+          .putEntry({ vaultId: MAIN_VAULT_ID, name: "X_TOKEN", value: Redacted.make("long-value") })
+          .pipe(as(ownerId)),
+      ),
+      "unavailable",
+    );
+  }),
+);
+
+it.effect("a database another key sealed stops the start before the database changes", () =>
+  Effect.gen(function* () {
+    const { server } = yield* hub;
+    const stranger = SecretCipher.MasterKey.generate();
+    yield* server.sql`DELETE FROM vaults`;
+    yield* server.sql`
+      UPDATE vault_key_check SET key_id = ${stranger.id},
+        sealed = ${SecretCipher.seal(stranger, "key-check", "vault_key_check", new TextEncoder().encode("t3code vault key check"))}
+    `;
+    const failed = yield* Effect.flip(
+      Layer.build(Vaults.layer.pipe(Layer.provide(Layer.succeedContext(server.services)))),
+    );
+    assert.equal(failed._tag, "MasterKeyError");
+    const rows = yield* server.sql<{ readonly n: number }>`SELECT COUNT(*) AS n FROM vaults`;
+    assert.equal(rows[0]?.n, 0, "the Main vault was written before the key check");
+  }),
 );

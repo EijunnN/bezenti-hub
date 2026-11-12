@@ -52,7 +52,7 @@ export const checkDatabaseKey = Effect.fn("Vaults.checkDatabaseKey")(function* (
   );
   if (opened._tag !== "opened" || new TextDecoder().decode(opened.plaintext) !== KEY_CHECK_TEXT) {
     return yield* keyCheckFailure(
-      `The master key ${keyring.keyFile} (id ${keyring.current.id}) is not the key this database's Vaults were encrypted with (id ${stored.keyId}). The Hub does not start and changed nothing. Restore the master key from your backup with \`t3 secrets key import <file>\`, or point T3CODE_MASTER_KEY_FILE at it.`,
+      `The master key ${keyring.keyFile} (id ${keyring.current.id}) opens the secrets folder but not this database's key check (id ${stored.keyId}): the database and the secrets folder come from different Hubs. The Hub does not start and did not change the database (the secrets folder was already checked, and prepared, with this key). Restore the matching database or master key from your backup (\`t3 secrets key import <file>\`, or T3CODE_MASTER_KEY_FILE).`,
     );
   }
   if (stored.keyId !== keyring.current.id) {

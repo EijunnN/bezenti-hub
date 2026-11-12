@@ -530,14 +530,15 @@ export class SpaceDirectory extends Context.Service<
       spaceId: SpaceId,
     ) => Effect.Effect<{ readonly id: SpaceId; readonly name: string }, SpaceClaimError>;
     /**
-     * Refuses what the policy denies the User on `resource`, and anything outside the one Space an
-     * agent bound to a Space's machine may act in (`CommandActor.spaceLimit`).
+     * What the User may do, decided once per request: the policy, and nothing outside the one
+     * Space an agent bound to a Space's machine may act in (`CommandActor.spaceLimit`).
      */
-    readonly authorizeResource: (
+    readonly authorizer: (
       userId: UserId,
-      action: AccessPolicy.Action,
-      resource: AccessPolicy.Resource,
-    ) => Effect.Effect<void, SpaceAccessDeniedError | SpaceDirectoryStorageError>;
+    ) => Effect.Effect<
+      (action: AccessPolicy.Action, resource: AccessPolicy.Resource) => boolean,
+      SpaceDirectoryStorageError
+    >;
     /**
      * Makes the User a Member of the Organization with the Role; false when they already are one.
      * Run it in the caller's transaction (accepting an Invitation), then `changed` after it.
@@ -1838,12 +1839,12 @@ const make = Effect.gen(function* () {
     createOrganization,
     claimCreation,
     authorize,
-    authorizeResource: Effect.fn("SpaceDirectory.authorizeResource")(function* (
-      userId: UserId,
-      action: AccessPolicy.Action,
-      resource: AccessPolicy.Resource,
-    ) {
-      yield* requireAllowed(yield* currentPrincipal(userId), action, resource);
+    authorizer: Effect.fn("SpaceDirectory.authorizer")(function* (userId: UserId) {
+      const principal = yield* currentPrincipal(userId);
+      const limit = yield* CommandActor.spaceLimit;
+      return (action: AccessPolicy.Action, resource: AccessPolicy.Resource) =>
+        (limit === undefined || spacesOf(resource).every((spaceId) => spaceId === limit)) &&
+        allows(principal, action, resource);
     }),
     authorizeItem,
     actingUser,

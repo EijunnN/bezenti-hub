@@ -60,45 +60,121 @@ export const SECRET_VALUE_MAX_BYTES = 64 * 1024;
 export const SECRET_MASK_MIN_LENGTH = 6;
 
 /**
- * What the AI gateway (spec 4) sets in the agent's environment: a Vault never overrides it. The
- * list both specs share (spec 4 exports it when its drivers set them).
+ * What the AI gateway (spec 4) sets in the agent's environment: a Vault never overrides it, not
+ * even the Owner's. The list both specs share (spec 4 exports it when its drivers set them).
  */
-const AI_GATEWAY_ENV_NAMES = [
+const AI_GATEWAY_ENV_NAMES: ReadonlySet<string> = new Set([
   "ANTHROPIC_BASE_URL",
   "ANTHROPIC_AUTH_TOKEN",
   "ANTHROPIC_MODEL",
   "OPENAI_BASE_URL",
   "CLAUDE_CONFIG_DIR",
   "CODEX_HOME",
-] as const;
+]);
+const GATEWAY_PREFIXES = ["T3_", "T3CODE_"] as const;
 
-/** Names that would break or take over the agent's environment: never a Vault's. */
-const RESERVED_SECRET_NAMES: ReadonlySet<string> = new Set([
+/**
+ * Names that change how the agent's tools run or whom they trust: the process and its loaders,
+ * interpreters' startup options, git and ssh hooks, proxies and CAs, home, temp and shell, and the
+ * keys and base URLs AI providers read. Only the Owner sets one, after confirming; Admins never.
+ */
+const DANGEROUS_NAMES: ReadonlySet<string> = new Set([
   "PATH",
   "HOME",
   "USER",
   "LOGNAME",
   "SHELL",
   "PWD",
-  "NODE_OPTIONS",
-  // Read by shells before anything the agent runs.
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "COMSPEC",
+  "PATHEXT",
+  "SYSTEMROOT",
+  "WINDIR",
+  "PSMODULEPATH",
   "BASH_ENV",
   "ENV",
   "IFS",
+  "PS4",
   "PROMPT_COMMAND",
-  ...AI_GATEWAY_ENV_NAMES,
+  "ZDOTDIR",
+  "EDITOR",
+  "VISUAL",
+  "PAGER",
+  "BROWSER",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "NODE_EXTRA_CA_CERTS",
+  "NODE_TLS_REJECT_UNAUTHORIZED",
+  "PYTHONSTARTUP",
+  "PYTHONPATH",
+  "PYTHONHOME",
+  "PYTHONHTTPSVERIFY",
+  "PERL5OPT",
+  "PERL5LIB",
+  "PERLLIB",
+  "RUBYOPT",
+  "RUBYLIB",
+  "JAVA_TOOL_OPTIONS",
+  "_JAVA_OPTIONS",
+  "JDK_JAVA_OPTIONS",
+  "CLASSPATH",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "CURL_CA_BUNDLE",
+  "REQUESTS_CA_BUNDLE",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "FTP_PROXY",
 ]);
-/** Prefixes of reserved names: the dynamic loaders' and the Hub's own. */
-const RESERVED_SECRET_NAME_PREFIXES = ["LD_", "DYLD_", "T3_", "T3CODE_"] as const;
+const DANGEROUS_PREFIXES = [
+  "LD_",
+  "DYLD_",
+  "BASH_FUNC_",
+  "GIT_",
+  "SSH_",
+  "XDG_",
+  "NPM_CONFIG_",
+  "YARN_",
+  "PIP_",
+  "CARGO_",
+  "RUSTUP_",
+  "GOFLAGS",
+  "DOCKER_",
+  // AI providers' keys and base URLs: a value here takes over the agent's model account.
+  "ANTHROPIC_",
+  "OPENAI_",
+  "AZURE_OPENAI_",
+  "GEMINI_",
+  "GOOGLE_",
+  "VERTEX_",
+  "CLAUDE_",
+  "CODEX_",
+  "MISTRAL_",
+  "GROQ_",
+  "OPENROUTER_",
+  "XAI_",
+  "DEEPSEEK_",
+  "CURSOR_",
+  "OPENCODE_",
+] as const;
 
-/** Why `name` cannot name a secret, or undefined when it can. The one rule for every door. */
-export const secretNameProblem = (name: string): "invalid" | "reserved" | undefined => {
+/**
+ * What a name is, for every door: `invalid` (not an environment variable), `gateway` (the Hub's
+ * own: refused for everyone), `dangerous` (the Owner only, confirmed), or undefined. Compared
+ * uppercased, as Windows reads environment names.
+ */
+export const secretNameRisk = (name: string): "invalid" | "gateway" | "dangerous" | undefined => {
   if (!SECRET_NAME_PATTERN.test(name)) return "invalid";
-  if (
-    RESERVED_SECRET_NAMES.has(name) ||
-    RESERVED_SECRET_NAME_PREFIXES.some((prefix) => name.startsWith(prefix))
-  ) {
-    return "reserved";
+  const upper = name.toUpperCase();
+  if (AI_GATEWAY_ENV_NAMES.has(upper) || GATEWAY_PREFIXES.some((p) => upper.startsWith(p))) {
+    return "gateway";
+  }
+  if (DANGEROUS_NAMES.has(upper) || DANGEROUS_PREFIXES.some((p) => upper.startsWith(p))) {
+    return "dangerous";
   }
   return undefined;
 };
@@ -159,6 +235,12 @@ export const VaultErrorReason = Schema.Literals([
   "duplicate-name",
   "main-vault",
   "not-linkable",
+  /** A name that changes how tools run: the Owner's alone. */
+  "dangerous-name",
+  /** The Owner's dangerous name, not yet confirmed (`confirmDangerous`). */
+  "confirm-dangerous",
+  /** Vaults live on the Hub: a joined machine has none. */
+  "unavailable",
   "storage",
 ]);
 export type VaultErrorReason = typeof VaultErrorReason.Type;
@@ -171,7 +253,7 @@ export class VaultError extends Schema.TaggedError<VaultError>()("VaultError", {
 
 const VaultName = TrimmedNonEmptyString.check(Schema.isMaxLength(80));
 const VaultDescription = Schema.String.check(Schema.isMaxLength(500));
-/** Checked on the Hub with `secretNameProblem`, which says why. */
+/** Checked on the Hub with `secretNameRisk`, which says why. */
 const SecretName = Schema.String.check(Schema.isMaxLength(128));
 /** A value going into the Hub: Redacted, so no log, span or error shows it. */
 const SecretValueInput = Schema.RedactedFromValue(Schema.String);
@@ -216,6 +298,8 @@ export const VaultEntryPutInput = Schema.Struct({
   name: SecretName,
   description: Schema.optionalKey(Schema.NullOr(VaultDescription)),
   value: Schema.optionalKey(SecretValueInput),
+  /** The Owner confirms a name that changes how tools run (`secretNameRisk`: dangerous). */
+  confirmDangerous: Schema.optionalKey(Schema.Boolean),
 });
 export type VaultEntryPutInput = typeof VaultEntryPutInput.Type;
 
@@ -257,6 +341,7 @@ export const VaultEntryFromMainInput = Schema.Struct({
   /** The variable's name in this Vault; the original's when omitted. */
   name: Schema.optionalKey(SecretName),
   description: Schema.optionalKey(Schema.NullOr(VaultDescription)),
+  confirmDangerous: Schema.optionalKey(Schema.Boolean),
 });
 export type VaultEntryFromMainInput = typeof VaultEntryFromMainInput.Type;
 

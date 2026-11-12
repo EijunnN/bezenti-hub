@@ -107,9 +107,10 @@ export const AUDIT_DETAIL_KEYS = {
   "secret.reveal": ["vault", "vaultId", "kind"],
   /**
    * As `secret.reveal`, with `op`: `add`, `replace` (a new value), `rename`, `describe`, `link`,
-   * `copy` or `delete` (`brokenLinks`: how many Secret links its deletion broke).
+   * `copy` or `delete` (`brokenLinks`: how many Secret links its deletion broke); `dangerous` when
+   * the Owner confirmed a name that changes how tools run.
    */
-  "secret.edit": ["vault", "vaultId", "kind", "op", "from", "brokenLinks"],
+  "secret.edit": ["vault", "vaultId", "kind", "op", "from", "brokenLinks", "dangerous"],
   "vault.create": [],
   /** The name `from` and `to`, whether it was described, and `archived` when that changed. */
   "vault.update": ["from", "to", "described", "archived"],
