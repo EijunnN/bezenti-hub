@@ -204,7 +204,17 @@ export type Action =
    * Choose a Space's default Vaults and its Projects' adds and removes, decided on the Space
    * (spec 5 ticket 03): the Owner, an Organization's Admins.
    */
-  | "vault.choose";
+  | "vault.choose"
+  /**
+   * Register, change, allow, order and delete the Installation's AI accounts: the Owner alone,
+   * decided on the Installation.
+   */
+  | "aiAccount.manage"
+  /**
+   * Use the AI accounts allowed to a Space or to oneself in that Space (AllowedAiAccounts): whoever
+   * may start a Thread there, Guests included; decided on the Space.
+   */
+  | "aiAccount.use";
 
 /** Actions that read or manage rather than add something to the Space. */
 const NON_CREATING: ReadonlySet<Action> = new Set([
@@ -629,6 +639,17 @@ export function decide(principal: Principal, action: Action, resource: Resource)
     return principal.isOwner || principal.installationPermissions.has("environments.registerOwn")
       ? allow
       : deny("missing-installation-permission");
+  }
+  if (action === "aiAccount.manage") {
+    if (resource.kind !== "installation") return deny("wrong-resource");
+    return principal.isOwner ? allow : deny("owner-only");
+  }
+  // Working in the Space: the same rule as starting a Thread there (archived, frozen, another
+  // User's Personal space and an Organization one is not a Member of are refused).
+  if (action === "aiAccount.use") {
+    return isSpace(resource)
+      ? decide(principal, "thread.create", resource)
+      : deny("wrong-resource");
   }
   if (action === "environment.dedicate" || action === "masterKey.backup") {
     if (resource.kind !== "installation") return deny("wrong-resource");

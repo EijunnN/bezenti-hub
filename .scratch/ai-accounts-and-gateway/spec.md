@@ -282,6 +282,7 @@ Por eso no basta con ponerlo delante: las decisiones 2 y 8 de «Cuentas de IA» 
   12. Clientes: desktop y móvil.
   13. Inventario de puertas y pase completo.
 
+- **Excepción conocida a «sin servicios de upstream» (ADR 0007, ticket 02):** CLIProxyAPI 8.0.67, aun con `-local-model`, consulta cada 3 h la última versión del cliente de Antigravity y la del Grok CLI en npm. La release fijada no tiene opción para apagarlo y un proxy limitado al proceso también llevaría el tráfico a los proveedores. Se acepta (no llevan credenciales, prompts ni cuentas; solo revelan la IP del Hub) y se revisa en cada subida de la versión fijada.
 - **Riesgo aceptado, endurecimiento posterior (revisión del ticket 01):** CLIProxyAPI corre con el usuario del Hub y podría leer su `stateDir`. Se acepta solo porque el Hub ejecuta únicamente versiones fijadas en el repo con su SHA-256 y verificadas por él. Ticket posterior: ejecutar CLIProxyAPI en su propio contenedor rootless de Podman o con su propio uid.
 
 ## Preguntas abiertas (decididas)

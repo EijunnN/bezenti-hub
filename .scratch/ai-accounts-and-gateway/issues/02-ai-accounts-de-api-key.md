@@ -4,15 +4,30 @@
 
 **Blocked by:** 01.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Migración 112: `ai_accounts` (tipo, proveedor, prioridad, estado, deshabilitada, base URL y modelos para `openai-compatible`), `ai_account_allowances`, columna `aiAccountId` en la elección de modelo del Thread.
-- [ ] Credencial en el almacén cifrado (`ai-account-<id>`); ninguna puerta la devuelve, ni al Owner: solo «Replace credential».
-- [ ] Sincronización con CLIProxyAPI por la Management API (o reescritura de config y recarga): cada cuenta con `prefix: acct-<id>`; deshabilitar o borrar la quita.
-- [ ] Catálogo de modelos por cuenta (`/v1/models` del prefijo), en caché, para el selector y la gateway.
-- [ ] `AllowedAiAccounts.for(userId, spaceId)`: Space ∪ User, sin deshabilitadas, solo si el User trabaja en ese Space. Único sitio que lo calcula.
-- [ ] Red-first, con Owner, Admin, Member y Guest de dos Organizations: solo el Owner crea, edita, ordena, permite y borra; `aiAccounts.list` a un Member de Acme no incluye cuentas solo de Globex ni campos de credencial; una sesión con `spaceLimit` no ve cuentas de otro Space.
-- [ ] Puertas: WS `aiAccounts.list`, `aiAccounts.create`, `aiAccounts.update`, `aiAccounts.delete`, `aiAccounts.allow`, `aiAccounts.reorder` en `RPC_SPACE_ACCESS`. Sin HttpApi, raw routes ni MCP. Credenciales fuera de logs, spans y argv (test de humo).
-- [ ] Auditoría `ai_account.create`, `ai_account.update`, `ai_account.delete`, `ai_account.allow`, sin credenciales.
-- [ ] Web/desktop: Settings → AI accounts (lista por prioridad, añadir API key, allowances, estado). Nombres accesibles entregados.
-- [ ] Prueba real: el Owner añade una cuenta `openai-compatible` contra un servidor falso de proveedor, la permite a Acme; el `config.yaml` de CLIProxyAPI tiene el prefijo y no hay rastro de la clave fuera del almacén y el config 0600.
+- [x] Migración 112: `ai_accounts` (tipo, proveedor, prioridad, estado, deshabilitada, base URL y modelos para `openai-compatible`), `ai_account_allowances`, columna `aiAccountId` en la elección de modelo del Thread.
+- [x] Credencial en el almacén cifrado (`ai-account-<id>`); ninguna puerta la devuelve, ni al Owner: solo «Replace credential».
+- [x] Sincronización con CLIProxyAPI por la Management API (o reescritura de config y recarga): cada cuenta con `prefix: acct-<id>`; deshabilitar o borrar la quita.
+- [x] Catálogo de modelos por cuenta (`/v1/models` del prefijo), en caché, para el selector y la gateway.
+- [x] `AllowedAiAccounts.for(userId, spaceId)`: Space ∪ User, sin deshabilitadas, solo si el User trabaja en ese Space. Único sitio que lo calcula.
+- [x] Red-first, con Owner, Admin, Member y Guest de dos Organizations: solo el Owner crea, edita, ordena, permite y borra; `aiAccounts.list` a un Member de Acme no incluye cuentas solo de Globex ni campos de credencial; una sesión con `spaceLimit` no ve cuentas de otro Space.
+- [x] Puertas: WS `aiAccounts.list`, `aiAccounts.create`, `aiAccounts.update`, `aiAccounts.delete`, `aiAccounts.allow`, `aiAccounts.reorder` en `RPC_SPACE_ACCESS`. Sin HttpApi, raw routes ni MCP. Credenciales fuera de logs, spans y argv (test de humo).
+- [x] Auditoría `ai_account.create`, `ai_account.update`, `ai_account.delete`, `ai_account.allow`, sin credenciales.
+- [x] Web/desktop: Settings → AI accounts (lista por prioridad, añadir API key, allowances, estado). Nombres accesibles entregados.
+- [x] Prueba real: el Owner añade una cuenta `openai-compatible` contra un servidor falso de proveedor, la permite a Acme; el `config.yaml` de CLIProxyAPI tiene el prefijo y no hay rastro de la clave fuera del almacén y el config 0600.
+
+**Hecho** (rama `impl/aig-02`):
+
+- Migración 112: `ai_accounts` (tipo, proveedor, prioridad global, estado y mensaje, deshabilitada, `credential_id`, `key_hint` con 4 caracteres como mucho, base URL y modelos de `openai-compatible`) y `ai_account_allowances` (`space` | `user`). `aiAccountId` va en el JSON de `modelSelection` (contracts), junto a `instanceId`.
+- Credenciales: nunca en la base. `ServerSecretStore.AiAccountCredentialStore`, carpeta propia `secrets/ai-accounts/<id>.sealed` con propósito `ai-account-credential` (`MasterKeyFile.STORE_NAMESPACES`; la rotación y el arranque las cubren). La carpeta y el ayudante se comparten con los valores de Vaults (`sealedOnly`). «Replace credential» escribe un id nuevo, cambia la fila y borra el viejo; el arranque barre credenciales sin fila. Ninguna respuesta la devuelve: el Owner ve `…<4 últimos>`; los demás, nombre, proveedor, estado y dónde la pueden usar.
+- CLIProxyAPI: solo por la Management API (`PATCH /v8/management/config` con toda la sección `api-keys`, comprobado contra la 8.0.67 real: bloques `claude`, `codex`, `gemini`, `vertex`, `xai`, `meta`, `openai-compatibility`, cada uno con `prefix: acct-<id>` y `keys: [{api-key}]`), nunca un archivo que escriba el Hub; `routing.force-model-prefix: true`. Cada arranque (caída, update, rollback) se aprovisiona desde el almacén antes de contar como «running» (`AiGateway.setProvisioner`); un rechazo deja las cuentas en `error` («Not in the AI gateway yet») y se reintenta cada 10 s sin tumbar la gateway. Deshabilitar o borrar la quita. Borrar: fila → CLIProxyAPI → almacén; un Hub que muere a medias no deja nada al arrancar (CLIProxyAPI muere con él y su config en memoria se borra; el barrido quita la credencial).
+- Catálogo: `AiAccounts.modelsOf(id)` lee `/v1/models` del prefijo (caché 5 min); tras cada escritura espera a que CLIProxyAPI recargue antes de marcar `working`.
+- `AllowedAiAccounts.for(userId, spaceId)` / `forSpaces` (`ai/AllowedAiAccounts.ts`): cuentas no deshabilitadas permitidas al Space ∪ al User, y ninguna si el User no puede trabajar en ese Space (`AccessPolicy` `aiAccount.use` = la regla de `thread.create`: Guests incluidos, nada en Spaces archivados, congelados ni Personal space ajeno). Sin caché. La usa `aiAccounts.list`.
+- Permisos: `aiAccount.manage` (Installation, solo Owner) decidido por `SpaceDirectory.authorizer`, así que una sesión con `spaceLimit` (también la del Owner) no gestiona ni ve detalles; las escrituras son además `INSTALLATION_RPC_METHODS` con `settings:write`.
+- Puertas: WS `aiAccounts.list` (unscoped con regla en `RPC_SPACE_ACCESS`, lectura `orchestration:read`), `aiAccounts.create|update|delete|allow|reorder` (installation). Sin HttpApi, raw routes, cookies ni MCP; `DoorRules.test.ts` comprueba que solo `AiAccounts` lee el almacén de credenciales y que ninguna respuesta tiene un campo de credencial.
+- Auditoría: `ai_account.create` (provider, type), `ai_account.update` (from/to, disabled, credential: replaced, endpoint, priority), `ai_account.delete`, `ai_account.allow` (recuentos). Nunca la clave.
+- Web: Settings → AI accounts (`/settings/ai-accounts`, grupo Agents, visible para todos). Nombres accesibles: formulario «Add an API key» con «AI account name», «Provider», «API key», «Base URL», «Models», «Add AI account»; lista «AI accounts»; por cuenta «Status of <name>», «Move <name> up/down», «Disable/Enable <name>», «Delete <name>», «Confirm delete <name>», formulario «Replace credential of <name>» con «New API key for <name>» y «Replace credential», formulario «Who may use <name>» con «Allow <name> in <Space>», «Allow <name> to <User>» y «Save who may use it».
+- Tests: `ai/AiAccounts.test.ts` (7, con el CLIProxyAPI falso ampliado: PATCH de config, `/v1/models` por prefijo, modo `refuse`), filas nuevas en `AccessPolicy.test.ts`, `RpcAuthorization.test.ts`, `DoorRules.test.ts`, `settingsSearch.test.ts`. Red-first por mutación: gestionar para todos (4 fallos), la política sin Owner (4), ignorar el Space de trabajo en AllowedAiAccounts (1), ignorar `spaceLimit` en la lista (1), borrar sin tocar CLIProxyAPI (1).
+- Prueba real (`makita-livepass-s4-02`, CLIProxyAPI 8.0.67 real): todo PASS.
+- Riesgos: si no hay tmpfs, la config de CLIProxyAPI (con las claves) cae en `<stateDir>/ai-gateway/run` (aviso ya existente en Settings); CLIProxyAPI 8.0.67 sigue consultando versiones de Antigravity y de Grok CLI en internet aunque se use `-local-model`.

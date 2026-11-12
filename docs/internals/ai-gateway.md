@@ -103,3 +103,54 @@ WS only: `aiGateway.status` (a stream), `aiGateway.checkForUpdates`, `aiGateway.
 in `RpcSpaceAccess`: the Owner's alone, whatever the scopes; the changes also need
 `settings:write`). No HttpApi endpoint, raw route, cookie or MCP tool, so `DoorRules.ts` lists
 none.
+
+## AI accounts (API keys)
+
+`ai/AiAccounts.ts` is the one service; WS `aiAccounts.*` are its doors (spec 4 ticket 02).
+
+- **Where credentials live:** never in the database (migration 112 keeps `ai_accounts` and
+  `ai_account_allowances`; `key_hint` holds at most the last four characters, shown to the Owner
+  only). Each key is an entry of `ServerSecretStore.AiAccountCredentialStore`:
+  `secrets/ai-accounts/<credential id>.sealed`, purpose `ai-account-credential` (its own folder,
+  like Vault values). «Replace credential» writes a new id, then the row, then removes the old
+  one; the start sweeps credentials no row holds. No answer returns a key, not to the Owner.
+- **Into CLIProxyAPI:** only through the Management API (`PATCH /v8/management/config` with the
+  whole `api-keys` section, so a disabled or deleted account goes), never a file the Hub writes.
+  Each account is under `prefix: acct-<id>` and `routing.force-model-prefix` is on, so only
+  `acct-<id>/<model>` is served. CLIProxyAPI keeps them in its own config in the memory folder.
+  Every start (crash, update, roll back) is provisioned from the store before it counts as
+  running (`AiGateway.setProvisioner`).
+- **One bad account never takes the others out:** each is checked before anything is sent; if
+  CLIProxyAPI still refuses the set, the Hub sends what it held before, then each other account
+  alone, first to last, and only the refused one stays out (`error`, with CLIProxyAPI's reason,
+  quoted values and keys removed). A refused account is not sent again unchanged on that gateway.
+  A key the store cannot read aborts the change and leaves the gateway as it was. A change that
+  fails as a whole is retried after 10 s, doubling up to 5 min. One change and its check have a
+  30 s deadline; the lock covers only the change, not the model-list check (`unverified` when the
+  list cannot be read). Renames, allowances and order never reach the gateway.
+- **A key leaves only once the gateway drops it:** «Replace credential» and «Delete» retire the
+  old key (`ai_account_retired_credentials`; a deleted account stays as `removing`, out of every
+  list but the Owner's). It leaves the store, with the row, only after a change the gateway
+  accepted without it. Until then the call answers `still-live` and the Hub keeps retrying. With
+  no gateway running the key is live nowhere and goes at once (`gateway: "not-running"`). The
+  Hub's start, before any CLIProxyAPI holds keys, removes every retired key and orphan.
+- **Who:** only the Owner, unlimited, manages (`aiAccount.manage` on the Installation, through
+  `SpaceDirectory.authorizer`, so an agent limited to one Space manages nothing; the writes are
+  also `INSTALLATION_RPC_METHODS`). `aiAccounts.list` gives anyone else name, provider and status
+  of what they may use, and where.
+- **AllowedAiAccounts** (`ai/AllowedAiAccounts.ts`) is the one rule: enabled accounts allowed to
+  the Space or to the User, and none unless the User may work in that Space (`aiAccount.use`:
+  whoever may start a Thread there, Guests included). Evaluated on every call. The gateway layer,
+  the picker and the move plan ask it; nothing else decides.
+- **Models:** `modelsOf(accountId)` reads the gateway's `/v1/models` for the account's prefix,
+  cached five minutes.
+- Audit: `ai_account.create|update|delete|allow` with provider, type and counts, never a key.
+
+## Known exception to «no upstream services»
+
+CLIProxyAPI 8.0.67, even with `-local-model`, asks the internet for the latest Antigravity client
+version (`antigravity-hub-auto-updater-….run.app`, every 3 h) and the Grok CLI version
+(`registry.npmjs.org/@xai-official/grok/latest`). The pinned release has no setting that turns these
+off (none among its config keys in the binary), and a proxy scoped to the child
+would also carry the providers' own traffic. Accepted as a known exception to ADR 0007: the requests
+carry no credential, prompt or account, only the Hub's address. Revisit at each pin update.

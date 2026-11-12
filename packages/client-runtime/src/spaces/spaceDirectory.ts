@@ -154,6 +154,10 @@ export const AUDIT_ACTION_LABELS: Record<AuditAction, string> = {
   "ai_gateway.update": "Updated the AI gateway",
   "ai_gateway.rollback": "Rolled back the AI gateway",
   "ai_gateway.enable": "Turned the AI gateway on or off",
+  "ai_account.create": "Added an AI account",
+  "ai_account.update": "Changed an AI account",
+  "ai_account.delete": "Deleted an AI account",
+  "ai_account.allow": "Changed who may use an AI account",
 };
 
 export const INSTALLATION_PERMISSION_LABELS: Record<InstallationPermission, string> = {

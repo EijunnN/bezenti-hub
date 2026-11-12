@@ -26,6 +26,18 @@ import {
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/rpc/Rpc";
 import {
+  AiAccountAllowInput,
+  AiAccountCreateInput,
+  AiAccountDeleteInput,
+  AiAccountDeleteResult,
+  AiAccountError,
+  AiAccountListInput,
+  AiAccountListResult,
+  AiAccountReorderInput,
+  AiAccountSummary,
+  AiAccountUpdateInput,
+} from "./aiAccounts.ts";
+import {
   AiGatewayError,
   AiGatewaySetEnabledInput,
   AiGatewayStatus,
@@ -623,6 +635,14 @@ export const WS_METHODS = {
   aiGatewayUpdate: "aiGateway.update",
   aiGatewayRollback: "aiGateway.rollback",
   aiGatewaySetEnabled: "aiGateway.setEnabled",
+
+  // The Owner's AI accounts: everyone lists what they may use; only the Owner changes them.
+  aiAccountsList: "aiAccounts.list",
+  aiAccountsCreate: "aiAccounts.create",
+  aiAccountsUpdate: "aiAccounts.update",
+  aiAccountsDelete: "aiAccounts.delete",
+  aiAccountsAllow: "aiAccounts.allow",
+  aiAccountsReorder: "aiAccounts.reorder",
   projectCloneStart: "projectClone.start",
   projectCloneCancel: "projectClone.cancel",
   projectCloneRetry: "projectClone.retry",
@@ -1259,6 +1279,39 @@ const WsAiGatewaySetEnabledRpc = Rpc.make(WS_METHODS.aiGatewaySetEnabled, {
   payload: AiGatewaySetEnabledInput,
   success: AiGatewayStatus,
   error: Schema.Union([AiGatewayError, EnvironmentAuthorizationError]),
+});
+
+// No RPC returns a credential, not to the Owner either: it goes in with create or update only.
+const AiAccountRpcError = Schema.Union([AiAccountError, EnvironmentAuthorizationError]);
+const WsAiAccountsListRpc = Rpc.make(WS_METHODS.aiAccountsList, {
+  payload: AiAccountListInput,
+  success: AiAccountListResult,
+  error: AiAccountRpcError,
+});
+const WsAiAccountsCreateRpc = Rpc.make(WS_METHODS.aiAccountsCreate, {
+  payload: AiAccountCreateInput,
+  success: AiAccountSummary,
+  error: AiAccountRpcError,
+});
+const WsAiAccountsUpdateRpc = Rpc.make(WS_METHODS.aiAccountsUpdate, {
+  payload: AiAccountUpdateInput,
+  success: AiAccountSummary,
+  error: AiAccountRpcError,
+});
+const WsAiAccountsDeleteRpc = Rpc.make(WS_METHODS.aiAccountsDelete, {
+  payload: AiAccountDeleteInput,
+  success: AiAccountDeleteResult,
+  error: AiAccountRpcError,
+});
+const WsAiAccountsAllowRpc = Rpc.make(WS_METHODS.aiAccountsAllow, {
+  payload: AiAccountAllowInput,
+  success: AiAccountSummary,
+  error: AiAccountRpcError,
+});
+const WsAiAccountsReorderRpc = Rpc.make(WS_METHODS.aiAccountsReorder, {
+  payload: AiAccountReorderInput,
+  success: AiAccountListResult,
+  error: AiAccountRpcError,
 });
 
 // Returns when the project exists and cloning starts; progress uses the subscription.
@@ -2201,6 +2254,12 @@ export const WsRpcGroup = RpcGroup.make(
   WsAiGatewayUpdateRpc,
   WsAiGatewayRollbackRpc,
   WsAiGatewaySetEnabledRpc,
+  WsAiAccountsListRpc,
+  WsAiAccountsCreateRpc,
+  WsAiAccountsUpdateRpc,
+  WsAiAccountsDeleteRpc,
+  WsAiAccountsAllowRpc,
+  WsAiAccountsReorderRpc,
   WsProjectCloneStartRpc,
   WsProjectCloneCancelRpc,
   WsProjectCloneRetryRpc,

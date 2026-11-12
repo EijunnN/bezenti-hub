@@ -24,7 +24,9 @@ export type SealPurpose =
   | "key-check"
   | "backup-record"
   | "secret-file"
-  | "vault-value";
+  | "vault-value"
+  /** An AI account's credential (spec 4): `secrets/ai-accounts/`. */
+  | "ai-account-credential";
 
 const hkdf = (key: Buffer, info: string, length: number) =>
   Buffer.from(NodeCrypto.hkdfSync("sha256", key, Buffer.alloc(0), info, length));

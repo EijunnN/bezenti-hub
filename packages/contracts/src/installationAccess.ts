@@ -93,6 +93,13 @@ export const INSTALLATION_RPC_METHODS = [
   WS_METHODS.aiGatewayUpdate,
   WS_METHODS.aiGatewayRollback,
   WS_METHODS.aiGatewaySetEnabled,
+  // The Installation's AI accounts: only the Owner registers, changes, allows and orders them
+  // (`aiAccounts.list` is everyone's, filtered by AllowedAiAccounts).
+  WS_METHODS.aiAccountsCreate,
+  WS_METHODS.aiAccountsUpdate,
+  WS_METHODS.aiAccountsDelete,
+  WS_METHODS.aiAccountsAllow,
+  WS_METHODS.aiAccountsReorder,
 ] as const;
 export type InstallationRpcMethod = (typeof INSTALLATION_RPC_METHODS)[number];
 

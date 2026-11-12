@@ -194,6 +194,8 @@ is the one service; WS RPCs `vaults.*` and HTTP `vaults.reveal` are its doors.
   re-seals them, and `t3 secrets key import` refuses a key that does not open them. A joined
   machine (no master key) keeps no Vault value and runs no Vaults: every call answers
   `unavailable` and nothing is written to its database.
+- **AI accounts' credentials** (spec 4) use the same scheme in `secrets/ai-accounts/`, purpose
+  `ai-account-credential`; see docs/internals/ai-gateway.md.
 - **Writes:** every value write goes to a new value id. The row (pointing at it), its version and
   the audit commit in one transaction; only then is the old value removed; if the transaction
   fails, the new value is. A crash between the two leaves a value no row points at, which the

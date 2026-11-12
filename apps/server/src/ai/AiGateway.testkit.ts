@@ -24,10 +24,10 @@ import { CliproxyReleases } from "./CliproxyReleases.ts";
 
 /**
  * What the fake does: `serve`; `exit` at once (a release that never starts); `wide`, listening on
- * every address; `decoy`, leaving the port to another process that records what it is sent (as a
+ * every address; `refuse`, serving but refusing every config change; `decoy`, leaving the port to another process that records what it is sent (as a
  * local process that took the port first would).
  */
-export type FakeCliproxyMode = "serve" | "exit" | "wide" | "decoy";
+export type FakeCliproxyMode = "serve" | "exit" | "wide" | "decoy" | "refuse";
 
 /** A line a careless release might print: credentials by name and by shape. */
 export const LEAKY_LINE =
@@ -73,17 +73,66 @@ if (mode === "decoy") {
   process.on("SIGTERM", () => { decoy.kill("SIGKILL"); process.exit(0); });
   setInterval(() => {}, 1000);
 } else {
+  // The AI accounts' API keys, as the management API sets them (PATCH of the whole section),
+  // and the models each prefix serves: an openai-compatibility entry's own, else a small catalog.
+  let apiKeys = {};
+  const CATALOG = { claude: ["claude-sonnet-5-5"], codex: ["gpt-5.5"], gemini: ["gemini-3-pro"], vertex: ["gemini-3-pro"], xai: ["grok-5"], meta: ["muse-spark-1.3"] };
+  const modelIds = () => Object.entries(apiKeys).flatMap(([block, entries]) =>
+    (Array.isArray(entries) ? entries : []).flatMap((entry) =>
+      (block === "openai-compatibility" ? (entry.models ?? []).map((model) => model.alias ?? model.name) : CATALOG[block] ?? [])
+        .map((model) => entry.prefix + "/" + model)));
+  const invalid = (patch) => {
+    for (const [block, entries] of Object.entries(patch["api-keys"] ?? {})) {
+      if (!Array.isArray(entries)) return "api-keys." + block + " must be a list";
+      for (const [index, entry] of entries.entries()) {
+        if (!Array.isArray(entry.keys)) return "api-keys." + block + "[" + index + "].keys must be a list";
+        if (entry.keys.some((key) => typeof key["api-key"] !== "string")) return "api-keys." + block + "[" + index + "] key";
+        // Like a provider CLIProxyAPI cannot use, quoting what it was sent.
+        if (String(entry["base-url"] ?? "").includes("refuse.invalid")) return "api-keys." + block + "[" + index + "] cannot use base-url with key ` +
+  "`" +
+  String.raw`" + entry.keys[0]["api-key"] + "` +
+  "`" +
+  String.raw`";
+      }
+    }
+    return undefined;
+  };
   http.createServer((request, response) => {
     const auth = request.headers.authorization ?? "";
     response.setHeader("X-CPA-VERSION", version);
     if (request.url === "/v8/management/config") {
-      response.statusCode = auth === "Bearer " + secret ? 200 : 401;
-      response.end(JSON.stringify(response.statusCode === 200 ? { "config-version": 8 } : { error: "missing management key" }));
+      if (auth !== "Bearer " + secret) {
+        response.statusCode = 401;
+        response.end(JSON.stringify({ error: "missing management key" }));
+        return;
+      }
+      if (request.method === "PATCH") {
+        let body = "";
+        request.on("data", (chunk) => { body += chunk; });
+        request.on("end", () => {
+          const patch = JSON.parse(body);
+          fs.appendFileSync(path.join(dir, "fake-patches.log"), "patch" + String.fromCharCode(10));
+          const problem = invalid(patch);
+          // A file fake-refuse-all beside the config: refuses every change from now on, like a broken release.
+          if (problem !== undefined || mode === "refuse" || fs.existsSync(path.join(dir, "fake-refuse-all"))) {
+            response.statusCode = 422;
+            response.end(JSON.stringify({ error: "invalid_config", message: problem ?? "refused" }));
+            return;
+          }
+          apiKeys = { ...apiKeys, ...(patch["api-keys"] ?? {}) };
+          fs.writeFileSync(path.join(dir, "fake-api-keys-" + process.pid + ".json"), JSON.stringify(apiKeys));
+          response.statusCode = 200;
+          response.end(JSON.stringify({ "config-version": 8, status: "ok" }));
+        });
+        return;
+      }
+      response.statusCode = 200;
+      response.end(JSON.stringify({ "config-version": 8, "api-keys": apiKeys }));
       return;
     }
     if (request.url === "/v1/models") {
-      response.statusCode = auth === "Bearer " + clientKey ? 200 : 401;
-      response.end(JSON.stringify({ data: [] }));
+      response.statusCode = fs.existsSync(path.join(dir, "fake-models-down")) ? 503 : auth === "Bearer " + clientKey ? 200 : 401;
+      response.end(JSON.stringify({ data: response.statusCode === 200 ? modelIds().map((id) => ({ id, object: "model" })) : [] }));
       return;
     }
     response.statusCode = 404;

@@ -611,6 +611,11 @@ it.effect(
         "ai_gateway.update",
         "ai_gateway.rollback",
         "ai_gateway.enable",
+        // ai/AiAccounts.test.ts (spec 4 ticket 02)
+        "ai_account.create",
+        "ai_account.update",
+        "ai_account.delete",
+        "ai_account.allow",
       ];
       assert.sameMembers(
         [...new Set([...expected.map((row) => row.action), ...recordedElsewhere])],

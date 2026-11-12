@@ -55,6 +55,10 @@ export const AuditAction = Schema.Literals([
   "ai_gateway.update",
   "ai_gateway.rollback",
   "ai_gateway.enable",
+  "ai_account.create",
+  "ai_account.update",
+  "ai_account.delete",
+  "ai_account.allow",
 ]);
 export type AuditAction = typeof AuditAction.Type;
 
@@ -68,6 +72,7 @@ export const AuditTargetKind = Schema.Literals([
   "secret",
   "vault",
   "environment",
+  "ai_account",
 ]);
 export type AuditTargetKind = typeof AuditTargetKind.Type;
 
@@ -191,6 +196,13 @@ export const AUDIT_DETAIL_KEYS = {
   "ai_gateway.rollback": ["from", "version", "outcome", "reason"],
   /** `on` or `off`, as the Owner chose where the environment does not decide. */
   "ai_gateway.enable": ["to"],
+  /** The account's provider and type; never its credential, nor any part of it. */
+  "ai_account.create": ["provider", "type"],
+  /** What changed: `from` and `to` on a rename, `disabled`, `credential` (replaced), `endpoint`. */
+  "ai_account.update": ["provider", "from", "to", "disabled", "credential", "endpoint", "priority"],
+  "ai_account.delete": ["provider"],
+  /** How many Spaces and Users it is allowed to now, and the change. */
+  "ai_account.allow": ["spaces", "users", "added", "removed"],
 } as const satisfies Record<AuditAction, ReadonlyArray<string>>;
 
 export type AuditDetailOf<A extends AuditAction> = {
