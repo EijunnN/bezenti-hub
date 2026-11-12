@@ -168,6 +168,26 @@ describe("every door of the Hub declares its rule", () => {
     expect(ws).not.toMatch(/effectiveVaults\.forThread/u);
   });
 
+  it("delivers secret values only where a process starts (spec 5 ticket 04)", () => {
+    // SecretDelivery reads values: each module that reaches it starts a process of a Thread
+    // (a provider session, a shell, a setup script), or asks only whether it has secrets.
+    const deliveryUsers = files
+      .filter(({ text }) => /vaults\/SecretDelivery\.ts"/u.test(text))
+      .map(({ file }) => file);
+    expect(deliveryUsers.toSorted()).toEqual([
+      "environment/ThreadWorkspace.ts",
+      "orchestration-v2/Orchestrator.ts",
+      "orchestration-v2/ProviderSessionManager.ts",
+      "project/ProjectSetupScriptRunner.ts",
+      "server.ts",
+    ]);
+    const orchestrator = files.find(({ file }) => file === "orchestration-v2/Orchestrator.ts");
+    expect(orchestrator?.text).not.toMatch(/\.(forProcess|forTurn)\(/u);
+    // On the wire, values go only with the calls that start a process.
+    const wire = files.find(({ file }) => file === "environment/RemoteExecutorWire.ts")?.text ?? "";
+    expect(wire.match(/secretEnv: Schema\.optionalKey\(SecretEnv\)/gu)?.length).toBe(3);
+  });
+
   it("reaches the Owner's SSH install only through its HTTP endpoints: no WS or MCP door", () => {
     const users = files
       .filter(({ text }) => /sshInstall\/SshInstall\.ts"/u.test(text))
