@@ -1007,6 +1007,7 @@ it.live.skipIf(!posix || platform === undefined)(
         ]),
       ].join("\n");
       assert.include(recorded, "AI gateway request");
+      assert.include(recorded, "AI gateway request refused");
       assert.include(recorded, ids.claudeA);
       assert.include(recorded, "/api/ai/anthropic/v1/messages");
       for (const leak of [

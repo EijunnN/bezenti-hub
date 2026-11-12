@@ -101,8 +101,8 @@ version, `updated` or `failed`, reason) and `ai_gateway.rollback` (`rolled-back`
 WS only: `aiGateway.status` (a stream), `aiGateway.checkForUpdates`, `aiGateway.update`,
 `aiGateway.rollback`, `aiGateway.setEnabled`, all in `INSTALLATION_RPC_METHODS` (`installation`
 in `RpcSpaceAccess`: the Owner's alone, whatever the scopes; the changes also need
-`settings:write`). No HttpApi endpoint, raw route, cookie or MCP tool, so `DoorRules.ts` lists
-none.
+`settings:write`). No HttpApi endpoint or MCP tool. The one raw route is the gateway layer
+(`/api/ai/*`, below), in `DoorRules.RAW_ROUTE_RULES` and `AMBIENT_COOKIE_RULES`.
 
 ## AI accounts (API keys)
 
@@ -236,6 +236,65 @@ keys; `type: subscription`. Pure parts in `ai/subscriptionLogin.ts`.
 - **No callback listener:** CLIProxyAPI 8.0.67 opens no port of its own for an OAuth callback
   (checked with `ss -ltnp` during a redirect sign-in in the live pass): the address the provider
   returns to does not open, and the Owner pastes it.
+
+## The gateway layer: `/api/ai/*`
+
+Spec 4 ticket 04. Every AI request from an agent or a local CLI goes through the Hub's own layer
+(`ai/AiGatewayRoute.ts`), never to CLIProxyAPI directly; the Hub's client key never leaves the Hub.
+
+- **Routes** (`gatewayShapes.matchGatewayRoute`, the only paths that exist): OpenAI
+  `/api/ai/openai/v1/{chat/completions,responses,models}`, Claude
+  `/api/ai/anthropic/v1/{messages,messages/count_tokens,models}`, Gemini
+  `/api/ai/gemini/v1beta/models` and `/api/ai/gemini/v1beta/models/<model>:{generateContent,streamGenerateContent}`.
+  Each maps to one fixed CLIProxyAPI path; anything else under `/api/ai/` (its management API,
+  `/v0`, dot segments, `%2F`, embeddings…) is 404 and reaches nothing. The model lists are answered
+  by the Hub: plain names of what the key may use (the Thread's account, or every allowed one).
+- **Gateway keys** (`ai/AiGatewayKeys.ts`, migration 113 `ai_gateway_keys`): `t3gk_` + 32 random
+  bytes, stored only as SHA-256, revocable. A **Thread key** is for (the Thread's turn owner, its
+  Space, the Thread); `issueForThread` revokes the Thread's earlier keys (one per provider session,
+  ticket 06 hands it to the agent) and it expires after 7 days at most. A **User key** is for one
+  Space the User works in (local CLIs; ticket 10 gives it a screen); `revoke` by its User or the
+  Owner, audited `ai_gateway_key.create|revoke`.
+- **Authentication:** only the key, in `Authorization: Bearer` (every shape), `x-api-key`
+  (Claude) or `x-goog-api-key` (Gemini). Two different keys, a key in the query, a session cookie
+  or any other credential: 401. The route reads no cookie at all (`AMBIENT_COOKIE_RULES`: refused).
+- **Every request is decided again** (`AiGatewayKeys.authorize`, the one rule of the door): the
+  key's row (unknown, revoked, expired → 401); its User still active (401); for a Thread key, the
+  Thread neither archived nor deleted (401), still in the key's Space (a Project moved → 403), still
+  owned by the key's User (403), its Project not moving (503); then `AllowedAiAccounts.for(User,
+  Space)` now, gateway accounts only (none → 403). Nothing is cached: an allowance removed, a
+  membership ended or an account disabled or deleted fails the next request.
+- **Routing** (`gatewayShapes.planRoute`): the account the client pinned with `acct-<id>/<model>`
+  (must be allowed: else 403), else the Thread's (`modelSelection.aiAccountId`; no longer allowed →
+  403 «Switch AI account», never a silent fallback), else the first allowed account by global
+  priority that serves the model (`AiAccounts.modelsOf`; none → 404). Then the failovers: every
+  other allowed account of the **same provider** that serves the same model, by priority. The Hub
+  always sends `acct-<id>/<model>`; a double or malformed prefix is 400. A 429 from CLIProxyAPI
+  tries the next; none left answers 429 «No allowed AI account for <provider> has quota left;
+  switch AI account» in the client's shape.
+- **What crosses:** to CLIProxyAPI the rewritten body, the Hub's client key and only `accept`,
+  `anthropic-version`, `anthropic-beta`, `user-agent` (no `X-*`, cookie or forwarding header), and
+  for Gemini only `alt=sse`. Back: the status, `content-type` and the Hub's own `cache-control:
+  no-cache, no-transform` (so compression never holds SSE back), the body streamed chunk by chunk
+  through `makeResponseTap`, which strips the account's prefix, filters an SSE error event's words
+  and reads the tokens. An upstream error is answered in the client's shape: the provider's words
+  for a 4xx (emails, URLs, keys, token shapes and `acct-…/` removed), a fixed sentence for auth,
+  quota and 5xx.
+- **Account in use:** `AiGatewayActivity.noteInUse` keeps each Thread's last account and model
+  (`ai_gateway_thread_accounts`) and publishes a change (`subscribeAccountsInUse`) for the Thread's
+  header; every request ends in one `GatewayRequestRecord` (`subscribeRequests`: User, Space,
+  Thread, key, account, provider, model, status, duration, failovers, tokens), which ticket 05
+  stores as usage.
+- **Limits:** a body over 32 MiB (`T3CODE_AI_GATEWAY_MAX_REQUEST_BYTES`) is 413 before anything is
+  sent; a compressed body 415; 16 requests at once per key and 256 per Hub (429 beyond); 10 minutes
+  to the first byte and 60 for a whole answer. No quotas.
+- **Logs and spans:** one line and one span (`AiGateway.request`) per request with method, route,
+  account, model, status, failovers and tokens; a refusal logs method, matched route and status.
+  Never a header, a key, a body or a prompt. The HTTP server's own span is off for `/api/ai/*`
+  (`http.ts`), since a client could put a key in the address.
+- **Who reaches it:** whoever reaches the Hub's URL: joined machines by it, Sandboxes through their
+  Hub socket, which forwards `/api/ai/…` (and still nothing of CLIProxyAPI, which listens on loopback
+  only). The key is what decides.
 
 ## Known exception to «no upstream services»
 

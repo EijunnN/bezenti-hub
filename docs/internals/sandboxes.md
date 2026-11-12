@@ -97,7 +97,8 @@ server in its own rootless container, `t3-<sandboxId>` (labels `io.t3code.sandbo
 - **The Hub socket.** [SandboxHubSocket](../../apps/server/src/sandboxes/SandboxHubSocket.ts): per
   Sandbox the Hub listens on `<Sandboxes root>/.hub/<hash>/hub.sock` (short: a UNIX socket path has
   ~107 bytes), mounted at `/run/t3-hub`. It forwards to the Hub's loopback listener only
-  `/api/environment/connect` (upgrade included), `/api/git/…` and exactly `/mcp`, normalized,
+  `/api/environment/connect` (upgrade included), `/api/git/…`, exactly `/mcp` and the AI gateway
+  layer `/api/ai/…` (never CLIProxyAPI itself; a gateway key decides there), normalized,
   dropping `Forwarded`/`X-Forwarded-*`, `TE` and `Trailer`; anything else gets 404 without reaching
   the Hub. A refused upgrade is answered and the connection closed. Seen from the Hub these
   requests come from loopback, which is what lets the credential cross plain HTTP.
@@ -903,7 +904,7 @@ joined server, but connects nothing of its own:
   capabilities, no new privileges, its own slirp4netns network without the host's loopback, only
   its home mounted read-write, its Sandbox credential and `joined-hub.json` written outside the home and
   mounted read-only, and the Hub reached only through the UNIX socket proxy
-  (`/api/environment/connect`, `/api/git/…`, `/mcp`, 404 otherwise), which forwards to the Hub's
+  (`/api/environment/connect`, `/api/git/…`, `/mcp`, `/api/ai/…`, 404 otherwise), which forwards to the Hub's
   own address (`https://`, with SNI for a host name; plain `http://` only for a Hub on that
   machine).
 - **A home is never reused.** At start, and whenever its Sandbox's server ends, the host asks the

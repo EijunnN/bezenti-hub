@@ -98,14 +98,14 @@ const readBody = Effect.fn("AiGatewayRoute.readBody")(function* (
   return Buffer.concat(chunks);
 });
 
-const makeHandler = (deps: {
+const makeHandler = Effect.fn("AiGatewayRoute.makeHandler")(function* (deps: {
   readonly keys: AiGatewayKeys.AiGatewayKeys["Service"];
   readonly accounts: AiAccounts.AiAccounts["Service"];
   readonly gateway: AiGateway.AiGateway["Service"];
   readonly activity: AiGatewayActivity.AiGatewayActivity["Service"];
   readonly httpClient: HttpClient.HttpClient;
   readonly limits: AiGatewayLimits;
-}) => {
+}) {
   const inFlight = new Map<string, number>();
   let total = 0;
   const acquire = (keyId: string) =>
@@ -133,12 +133,30 @@ const makeHandler = (deps: {
   const modelsOf = (accountId: AiAccountId) =>
     deps.accounts.modelsOf(accountId).pipe(Effect.orElseSucceed(() => [] as ReadonlyArray<string>));
 
-  return Effect.gen(function* () {
+  // What a request that ends before reaching an account leaves in the log: its method, the route
+  // it matched (never the client's path) and the status.
+  const seen = new WeakMap<HttpServerRequest.HttpServerRequest, string>();
+  const noteRefusal = Effect.fn("AiGatewayRoute.noteRefusal")(function* (
+    response: HttpServerResponse.HttpServerResponse,
+  ) {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    if (response.status < 400 || seen.get(request) === "recorded") return;
+    yield* Effect.logInfo("AI gateway request refused").pipe(
+      Effect.annotateLogs({
+        method: request.method,
+        route: seen.get(request) ?? "unknown",
+        status: response.status,
+      }),
+    );
+  });
+
+  const handler = Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const startedAt = yield* DateTime.now;
     const url = parseRequestPath(request.url);
     if (url === undefined) return shapeError("openai", 400, "Bad request.");
     const route = matchGatewayRoute(request.method, url.pathname);
+    if (route._tag === "models" || route._tag === "proxy") seen.set(request, route.route);
     if (route._tag === "not-found") return shapeError(route.shape, 404, "Not found.");
     if (route._tag === "method-not-allowed") {
       return shapeError(route.shape, 405, "Method not allowed.");
@@ -248,6 +266,7 @@ const makeHandler = (deps: {
         readonly failovers: number;
         readonly usage: AiGatewayActivity.GatewayRequestRecord["usage"];
       }) {
+        seen.set(request, "recorded");
         const endedAt = yield* DateTime.now;
         const entry: AiGatewayActivity.GatewayRequestRecord = {
           at: DateTime.formatIso(startedAt),
@@ -382,13 +401,15 @@ const makeHandler = (deps: {
     return shapeError(shape, 503, "No AI account could serve this request.");
     // The permit and the upstream request live in the request's scope: until the answer is sent.
   }).pipe(
+    Effect.tap(noteRefusal),
     Effect.catchCause((cause) =>
       Effect.logWarning("AI gateway request failed", { cause }).pipe(
         Effect.as(shapeError("openai", 502, "The AI gateway failed.")),
       ),
     ),
   );
-};
+  return handler;
+});
 
 /** Registered on a Hub that keeps AI accounts; a joined machine serves none of `/api/ai/*`. */
 export const layer = HttpRouter.use((router) =>
@@ -405,7 +426,7 @@ export const layer = HttpRouter.use((router) =>
     ) {
       return;
     }
-    const handler = makeHandler({
+    const handler = yield* makeHandler({
       keys: keys.value,
       accounts: accounts.value,
       gateway: gateway.value,

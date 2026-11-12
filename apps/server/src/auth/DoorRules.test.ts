@@ -243,6 +243,13 @@ describe("every door of the Hub declares its rule", () => {
     const gateway = Object.keys(RAW_ROUTE_RULES).filter((door) => door.startsWith("ai/"));
     expect(gateway).toEqual(["ai/AiGatewayRoute.ts: * `${AI_GATEWAY_ROUTE_PREFIX}/*`"]);
     expect(AMBIENT_COOKIE_RULES[gateway[0]!]).toHaveProperty("refused");
+    // Keys are read and written by AiGatewayKeys alone (the migration aside): no other door.
+    expect(
+      files
+        .filter(({ text }) => /\bai_gateway_keys\b/u.test(text))
+        .map(({ file }) => file)
+        .toSorted(),
+    ).toEqual(["ai/AiGatewayKeys.ts", "persistence/Migrations/113_AiGatewayKeys.ts"]);
     // The route reads no cookie and no session: only its key headers.
     const route = files.find(({ file }) => file === "ai/AiGatewayRoute.ts")?.text ?? "";
     expect(route).not.toMatch(/cookie|EnvironmentAuth|SessionStore|authenticateRequest/iu);
