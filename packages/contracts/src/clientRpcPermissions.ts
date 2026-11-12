@@ -68,6 +68,14 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [ORCHESTRATION_V2_WS_METHODS.forceStopThread]: AuthOrchestrationOperateScope,
   // A guest link hands thread access to someone outside, like a pairing link.
   [WS_METHODS.guestShareCreate]: AuthAccessWriteScope,
+  // Vaults: who may is the Hub's (AccessPolicy `vault.*`); the session must hold access:write.
+  [WS_METHODS.vaultsCreate]: AuthAccessWriteScope,
+  [WS_METHODS.vaultsUpdate]: AuthAccessWriteScope,
+  [WS_METHODS.vaultsDelete]: AuthAccessWriteScope,
+  [WS_METHODS.vaultsEntriesPut]: AuthAccessWriteScope,
+  [WS_METHODS.vaultsEntriesDelete]: AuthAccessWriteScope,
+  [WS_METHODS.vaultsEntriesLink]: AuthAccessWriteScope,
+  [WS_METHODS.vaultsEntriesCopy]: AuthAccessWriteScope,
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 

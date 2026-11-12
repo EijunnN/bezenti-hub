@@ -7,6 +7,7 @@ import type { RpcSession } from "../rpc/session.ts";
 import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import {
+  AuthAccessWriteScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthPreviewOperateScope,
@@ -188,6 +189,27 @@ describe("command permissions", () => {
             yield* permissions.authorize(registry, env);
           }
         }
+      }),
+    ),
+  );
+
+  it.effect("requires the destination access:write grant to change a Vault's secrets", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const put = createCommandPermissions(runtime, WS_METHODS.vaultsEntriesPut);
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        expect(registry.get(put.permissionAtom(env))).toBe(false);
+        registry.set(
+          sessions(env),
+          AsyncResult.success({
+            ...grant(false),
+            scopes: [AuthAccessWriteScope],
+            permissions: [AuthAccessWriteScope],
+          }),
+        );
+        expect(registry.get(put.permissionAtom(env))).toBe(true);
+        yield* put.authorize(registry, env);
       }),
     ),
   );

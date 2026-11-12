@@ -5,7 +5,6 @@ import {
   authScopeRequiredResponse,
   AssetCreateUrlInput,
   AuthAccessReadScope,
-  AuthAccessWriteScope,
   ServerSettingsPatch,
   ProviderInstanceMutation,
   requiredScopesForServerSettingsPatch,
@@ -116,16 +115,9 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.serverReportClientActivity]: AuthOrchestrationReadScope,
   [WS_METHODS.scheduledTasksSubscribe]: AuthOrchestrationReadScope,
   [WS_METHODS.secretsAnswerRequest]: AuthOrchestrationOperateScope,
-  // Vaults: names to read, secrets to write; who may is AccessPolicy's (`vault.*`).
+  // Vaults: names to read (writes are CLIENT_GUARDED_RPC_SCOPES'); who may is AccessPolicy's.
   [WS_METHODS.vaultsList]: AuthAccessReadScope,
-  [WS_METHODS.vaultsCreate]: AuthAccessWriteScope,
-  [WS_METHODS.vaultsUpdate]: AuthAccessWriteScope,
-  [WS_METHODS.vaultsDelete]: AuthAccessWriteScope,
   [WS_METHODS.vaultsEntriesList]: AuthAccessReadScope,
-  [WS_METHODS.vaultsEntriesPut]: AuthAccessWriteScope,
-  [WS_METHODS.vaultsEntriesDelete]: AuthAccessWriteScope,
-  [WS_METHODS.vaultsEntriesLink]: AuthAccessWriteScope,
-  [WS_METHODS.vaultsEntriesCopy]: AuthAccessWriteScope,
   // Delivery logs hold request bodies, so they need the same scope as the URL.
   [WS_METHODS.scheduledTasksListWebhookDeliveries]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksGetWebhookDelivery]: AuthOrchestrationOperateScope,
