@@ -28,8 +28,12 @@ import {
   fakeReleases,
   memorySecretStore,
 } from "./AiGateway.testkit.ts";
-import { type CliproxyPlatform, cliproxyPlatformOf } from "./cliproxyRelease.ts";
-import { CliproxyReleases } from "./CliproxyReleases.ts";
+import {
+  type CliproxyPlatform,
+  cliproxyPlatformOf,
+  PINNED_CLIPROXY_RELEASE,
+} from "./cliproxyRelease.ts";
+import { CliproxyReleases, layer as CliproxyReleasesLayer } from "./CliproxyReleases.ts";
 
 const os = HostProcess.Platform.defaultValue();
 const platform = cliproxyPlatformOf(os, HostProcess.Architecture.defaultValue());
@@ -537,5 +541,59 @@ describe.skipIf(!posix || platform === undefined)("the Hub's AI gateway (CLIProx
       assert.isFalse(NodeFS.existsSync(NodePath.join(harness.stateDir, "ai-gateway")));
       yield* Scope.close(scope, Exit.void);
     }),
+  );
+});
+
+// The real pinned release from GitHub: downloads 25 MB, so only when asked
+// (`T3CODE_TEST_LIVE_CLIPROXY=1`); the fake release above covers the rest without a network.
+describe.skipIf(
+  !posix ||
+    platform === undefined ||
+    HostProcess.Environment.defaultValue().T3CODE_TEST_LIVE_CLIPROXY !== "1",
+)("the pinned CLIProxyAPI release", () => {
+  it.live(
+    "downloads, verifies and runs on loopback, refusing the management API without its key",
+    () =>
+      Effect.gen(function* () {
+        const harness = makeHarness();
+        const scope = yield* Scope.make();
+        const gateway = yield* AiGateway.make({
+          mode: "managed",
+          os,
+          stateDir: harness.stateDir,
+          platform,
+          pinned: PINNED_CLIPROXY_RELEASE,
+          runtimeFolder: { directory: harness.runDir, inMemory: true },
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              Layer.succeed(ServerSecretStore, harness.store.service),
+              CliproxyReleasesLayer.pipe(Layer.provide(FetchHttpClient.layer)),
+              Layer.succeed(
+                AuditLog.AuditLog,
+                AuditLog.AuditLog.of({
+                  record: () => Effect.void,
+                  list: () => Effect.die("not used"),
+                }),
+              ),
+              FetchHttpClient.layer,
+            ),
+          ),
+          Scope.provide(scope),
+        );
+        const status = yield* running(gateway);
+        assert.equal(status.version, PINNED_CLIPROXY_RELEASE.version);
+        const endpoint = Option.getOrThrow(yield* gateway.endpoint);
+        assert.match(endpoint.baseUrl, /^http:\/\/127\.0\.0\.1:\d+$/u);
+        const without = yield* httpGet(`${endpoint.baseUrl}/v8/management/config`);
+        assert.equal(without.status, 401);
+        const withKey = yield* httpGet(
+          `${endpoint.baseUrl}/v8/management/config`,
+          Redacted.value(endpoint.managementKey),
+        );
+        assert.equal(withKey.status, 200);
+        yield* Scope.close(scope, Exit.void);
+        assert.lengthOf(runningPids(harness.stateDir), 0);
+      }),
   );
 });

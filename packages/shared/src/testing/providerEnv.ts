@@ -12,6 +12,8 @@ const KEPT_ENV = new Set([
   "T3CODE_TEST_HEADLESS_SHELL",
   // Opt-in: builds the real Sandbox image (slow), which SandboxImage.build.test.ts skips without.
   "T3CODE_TEST_SANDBOX_IMAGE_BUILD",
+  // Opt-in: downloads and runs the pinned CLIProxyAPI release, which AiGateway.test.ts skips without.
+  "T3CODE_TEST_LIVE_CLIPROXY",
 ]);
 
 if (process.env.T3CODE_TEST_KEEP_PROVIDER_ENV !== "1") {
