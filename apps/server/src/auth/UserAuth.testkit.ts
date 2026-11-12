@@ -31,6 +31,7 @@ import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as EnvironmentConnectRoute from "../environments/connectRoute.ts";
 import * as EnvironmentGitRoute from "../environments/gitRoute.ts";
+import * as AiGatewayRoute from "../ai/AiGatewayRoute.ts";
 import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as HubEnvironmentsHttp from "../environments/http.ts";
@@ -345,6 +346,8 @@ export const serveAuthHttpWith = Effect.fn(function* (
         routes,
         EnvironmentConnectRoute.layer.pipe(Layer.provide(Layer.succeedContext(services))),
         EnvironmentGitRoute.layer.pipe(Layer.provide(Layer.succeedContext(services))),
+        // Only with AI accounts among the services (spec 4 ticket 04): `/api/ai/*` as on the Hub.
+        AiGatewayRoute.layer.pipe(Layer.provide(Layer.succeedContext(services))),
         // Only with previews among the services (the «Hub con Environments» testkit).
         HubPreviewRoute.routeLayer.pipe(Layer.provide(Layer.succeedContext(services))),
         // Hosts under the preview zone go to previews before any route, as in the server.

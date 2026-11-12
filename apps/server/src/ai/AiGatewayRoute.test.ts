@@ -3,7 +3,7 @@
  * (Admin), Grace (Member) and Linus (Guest) of Acme and Gus of Globex: a key reaches only what
  * AllowedAiAccounts gives its User in its Space now, streamed, failing over within one provider.
  */
-// @effect-diagnostics nodeBuiltinImport:off - raw HTTP for path tricks, the fake gateway's files.
+// @effect-diagnostics nodeBuiltinImport:off globalFetchInEffect:off - a client on the real port: streams, raw paths, the fake gateway's files.
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
@@ -290,7 +290,7 @@ const call = (
     readonly key?: string;
     readonly keyHeader?: "authorization" | "x-api-key" | "x-goog-api-key";
     readonly body?: unknown;
-    readonly rawBody?: string | Uint8Array;
+    readonly rawBody?: string;
     readonly method?: string;
     readonly headers?: Record<string, string>;
   } = {},
@@ -310,7 +310,7 @@ const call = (
       ...(init.body === undefined
         ? init.rawBody === undefined
           ? {}
-          : { body: init.rawBody as BodyInit }
+          : { body: init.rawBody as string }
         : { body: JSON.stringify(init.body) }),
     });
     const text = await response.text();

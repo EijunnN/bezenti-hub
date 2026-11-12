@@ -228,6 +228,26 @@ describe("every door of the Hub declares its rule", () => {
     }
   });
 
+  it("reaches CLIProxyAPI's API only through the gateway layer, with a gateway key and no cookie (spec 4 ticket 04)", () => {
+    // The Hub's client key: written into its config, used by the management client and the
+    // gateway layer, nothing else.
+    const clientKeyUsers = files
+      .filter(({ text }) => /\.clientKey\b/u.test(text))
+      .map(({ file }) => file)
+      .toSorted();
+    expect(clientKeyUsers).toEqual([
+      "ai/AiGatewayRoute.ts",
+      "ai/CliproxyManagement.ts",
+      "ai/cliproxyConfig.ts",
+    ]);
+    const gateway = Object.keys(RAW_ROUTE_RULES).filter((door) => door.startsWith("ai/"));
+    expect(gateway).toEqual(["ai/AiGatewayRoute.ts: * `${AI_GATEWAY_ROUTE_PREFIX}/*`"]);
+    expect(AMBIENT_COOKIE_RULES[gateway[0]!]).toHaveProperty("refused");
+    // The route reads no cookie and no session: only its key headers.
+    const route = files.find(({ file }) => file === "ai/AiGatewayRoute.ts")?.text ?? "";
+    expect(route).not.toMatch(/cookie|EnvironmentAuth|SessionStore|authenticateRequest/iu);
+  });
+
   it("signs in to subscriptions over the Owner's WS RPCs only: no callback route, tokens read by AiAccounts alone", () => {
     // Every sign-in door is the Owner's, on the Installation, whatever the session's scopes.
     const signIn = [...WsRpcGroup.requests.keys()].filter((tag) =>

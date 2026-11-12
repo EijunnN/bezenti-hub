@@ -38,12 +38,13 @@ import type { SandboxLimits } from "./sandboxLimits.ts";
 import { SandboxHubAddress, SandboxRuntime } from "./SandboxRuntime.ts";
 
 describe("what a Sandbox reaches of its Hub", () => {
-  it("is the Environment connection, the Hub's git and its MCP endpoint, nothing else", () => {
+  it("is the Environment connection, the Hub's git, its MCP endpoint and AI gateway, nothing else", () => {
     for (const allowed of [
       "/api/environment/connect",
       "/api/git/project-1/info/refs",
       "/api/git/thread/t-1/git-upload-pack",
       "/mcp",
+      "/api/ai/anthropic/v1/messages",
     ]) {
       assert.isTrue(isSandboxHubPath(allowed), allowed);
     }
@@ -56,6 +57,11 @@ describe("what a Sandbox reaches of its Hub", () => {
       "/ws",
       "/mcpx",
       "/mcp/anything",
+      // CLIProxyAPI's own paths are not the Hub's: a Sandbox never reaches them by any name.
+      "/api/aix",
+      "/api/ai",
+      "/v8/management/config",
+      "/v1/chat/completions",
     ]) {
       assert.isFalse(isSandboxHubPath(refused), refused);
     }

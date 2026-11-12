@@ -618,6 +618,9 @@ it.effect(
         "ai_account.allow",
         // ai/AiAccounts.subscriptions.test.ts (spec 4 ticket 03)
         "ai_account.login",
+        // ai/AiGatewayRoute.test.ts (spec 4 ticket 04)
+        "ai_gateway_key.create",
+        "ai_gateway_key.revoke",
       ];
       assert.sameMembers(
         [...new Set([...expected.map((row) => row.action), ...recordedElsewhere])],
