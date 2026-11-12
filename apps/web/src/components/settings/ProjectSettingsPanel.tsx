@@ -67,6 +67,7 @@ import {
   SCRATCH_PROJECT_TITLE,
 } from "./ProjectSettingsPanel.logic";
 import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
+import { ProjectVaults } from "./VaultChoices";
 import { readUnloadedThreadCount } from "../../state/olderSettledShelf";
 import { settingsScopeEnvironmentLabels } from "./settingsScopeAxis";
 
@@ -229,6 +230,28 @@ function ProjectSpaceSettings({ group }: { group: SidebarProjectSnapshot }) {
       />
       {dialog}
     </SettingsSection>
+  );
+}
+
+/** «Vaults»: the Project's adds and removes among the Vaults allowed to its Space (spec 5). */
+function ProjectVaultsSettings({ group }: { group: SidebarProjectSnapshot }) {
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const view = useCurrentSpace((state) =>
+    state.environmentId === primaryEnvironmentId ? state.view : null,
+  );
+  const primaryMembers = group.memberProjects.filter(
+    (member) => member.environmentId === primaryEnvironmentId,
+  );
+  const project = primaryMembers.length === 1 ? primaryMembers[0] : undefined;
+  if (primaryEnvironmentId === null || view === null || project === undefined) return null;
+  // Threads without a Project take their Space's defaults: the scratch Project chooses none.
+  if (project.isScratch === true) return null;
+  return (
+    <ProjectVaults
+      environmentId={primaryEnvironmentId}
+      projectId={project.id}
+      spaceId={project.spaceId ?? view.personalSpaceId}
+    />
   );
 }
 
@@ -739,6 +762,7 @@ function ProjectDetail({
           ) : null}
         </SettingsSection>
         <ProjectSpaceSettings group={group} />
+        <ProjectVaultsSettings group={group} />
         <ProjectPreferredEnvironmentSettings group={group} canEdit={canEditGroup} />
         <ProjectDefaultsSettings category="project" />
         <ProjectActionsSettings />

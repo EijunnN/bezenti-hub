@@ -117,6 +117,14 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.vaultsEntriesLink]: VAULTS,
   [WS_METHODS.vaultsEntriesCopy]: VAULTS,
   [WS_METHODS.aiAccountsList]: AI_ACCOUNTS_LIST,
+  // Spec 5 ticket 03. Allowances and a Space's defaults: AccessPolicy `vault.manage` and
+  // `vault.choose` in Vaults. A Project's choices and a Thread's names: the named Project or
+  // Thread must be visible first, then the same rules (EffectiveVaults for the Thread).
+  [WS_METHODS.vaultsAllow]: VAULTS,
+  [WS_METHODS.vaultsSpaceDefaultsSet]: VAULTS,
+  [WS_METHODS.vaultsChoices]: "project",
+  [WS_METHODS.vaultsProjectChoicesSet]: "project",
+  [WS_METHODS.vaultsThreadEnvironment]: "thread",
   [WS_METHODS.projectsCreateFromThread]: "thread",
   // An app acts inside its Thread's live session, so it is its creator's, like a message.
   [WS_METHODS.mcpAppsCallTool]: "owned",

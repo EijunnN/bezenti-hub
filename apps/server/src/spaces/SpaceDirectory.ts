@@ -217,6 +217,13 @@ const spacesOf = (resource: AccessPolicy.Resource): ReadonlyArray<string> => {
   }
 };
 
+/**
+ * A Project's Space in SQL, given its `space_id` column: a Project from before Spaces is the
+ * Owner's Personal space's. The one rule; whoever selects Projects by Space uses it.
+ */
+export const projectSpaceSql = (column: string) =>
+  `COALESCE(${column}, 'personal:' || (SELECT user_id FROM users WHERE is_owner = 1))`;
+
 const isAccessDenied = Schema.is(SpaceAccessDeniedError);
 const isNotFound = Schema.is(SpaceNotFoundError);
 
@@ -462,6 +469,17 @@ export class SpaceDirectory extends Context.Service<
     readonly spaceOf: (
       item: ItemRef,
     ) => Effect.Effect<Option.Option<AccessPolicy.SpaceResource>, SpaceDirectoryStorageError>;
+    /**
+     * Spec 5 ticket 03: a Thread's Space (as `spaceOf`) and its Project, for what the Thread
+     * receives (EffectiveVaults). None when the Thread or its Space is missing.
+     */
+    readonly placementOf: (threadId: ThreadId) => Effect.Effect<
+      Option.Option<{
+        readonly space: AccessPolicy.SpaceResource;
+        readonly projectId: ProjectId | null;
+      }>,
+      SpaceDirectoryStorageError
+    >;
     /** A Space as the policy decides on it, with its stored name; None when missing. */
     readonly spaceById: (
       spaceId: SpaceId,
@@ -1150,7 +1168,7 @@ const make = Effect.gen(function* () {
       FROM (
         SELECT COALESCE(owner_user_id, ${sql.literal(OWNER_ID)}) AS owner_user_id, project_id,
           archived_at IS NOT NULL AS archived,
-          COALESCE(space_id, 'personal:' || ${sql.literal(OWNER_ID)}) AS space_id
+          ${sql.literal(projectSpaceSql("space_id"))} AS space_id
         FROM projection_projects WHERE project_id = ${projectId}
       ) item LEFT JOIN spaces s ON s.space_id = item.space_id
     `,
@@ -1741,8 +1759,7 @@ const make = Effect.gen(function* () {
     return row.value.frozen ? ("frozen" as const) : ("open" as const);
   });
 
-  const spaceOf = Effect.fn("SpaceDirectory.spaceOf")(function* (item: ItemRef) {
-    const row = yield* findItem(item);
+  const spaceOfRow = (row: Option.Option<typeof ItemRow.Type>) => {
     if (Option.isNone(row) || row.value.spaceId === null || row.value.kind === null) {
       return Option.none<AccessPolicy.SpaceResource>();
     }
@@ -1753,6 +1770,18 @@ const make = Effect.gen(function* () {
       archived: row.value.spaceArchived,
       frozen: row.value.frozen,
     });
+  };
+
+  const spaceOf = Effect.fn("SpaceDirectory.spaceOf")(function* (item: ItemRef) {
+    return spaceOfRow(yield* findItem(item));
+  });
+
+  const placementOf = Effect.fn("SpaceDirectory.placementOf")(function* (threadId: ThreadId) {
+    const row = yield* findItem({ kind: "thread", id: threadId });
+    return Option.map(spaceOfRow(row), (space) => ({
+      space,
+      projectId: Option.isSome(row) ? (row.value.projectId as ProjectId | null) : null,
+    }));
   });
 
   const spaceById = Effect.fn("SpaceDirectory.spaceById")(function* (spaceId: SpaceId) {
@@ -1805,6 +1834,7 @@ const make = Effect.gen(function* () {
     projectAccessEnds,
     projectAccessHeld,
     spaceOf,
+    placementOf,
     spaceById,
     spacesById,
     spaceState,

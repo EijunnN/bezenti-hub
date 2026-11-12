@@ -86,6 +86,9 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.vaultsEntriesDelete]: AuthAccessWriteScope,
   [WS_METHODS.vaultsEntriesLink]: AuthAccessWriteScope,
   [WS_METHODS.vaultsEntriesCopy]: AuthAccessWriteScope,
+  [WS_METHODS.vaultsAllow]: AuthAccessWriteScope,
+  [WS_METHODS.vaultsSpaceDefaultsSet]: AuthAccessWriteScope,
+  [WS_METHODS.vaultsProjectChoicesSet]: AuthAccessWriteScope,
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 

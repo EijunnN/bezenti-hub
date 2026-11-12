@@ -1,0 +1,555 @@
+import { fetchInstallationUsers } from "@t3tools/client-runtime/spaces/space-directory";
+import type {
+  EnvironmentId,
+  InstallationUser,
+  ProjectId,
+  SpaceId,
+  ThreadId,
+  VaultChoices,
+  VaultId,
+  VaultSource,
+  VaultSubject,
+  VaultSummary,
+  VaultThreadEnvironment,
+} from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import { KeyRoundIcon } from "lucide-react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
+
+import { PrimaryEnvironmentHttpClient } from "../../environments/primary/httpClient";
+import { errorMessageOf } from "../../lib/errorMessage";
+import { runPrimaryHttp } from "../../lib/runtime";
+import { useCurrentSpace } from "../../state/currentSpace";
+import { serverEnvironment } from "../../state/server";
+import { useAtomCommand } from "../../state/use-atom-command";
+import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { SettingsRow, SettingsSection } from "./settingsLayout";
+import { SELECT_CLASS, settle } from "./vaultCommands";
+
+// Spec 5 ticket 03: allowing Vaults (the Owner), a Space's defaults and a Project's choices (the
+// Owner and the Space's Admins), and the names a Thread receives. Never values.
+
+/** Shown before a Vault is allowed to a User: ADR 0004, nothing isolates a Space's processes. */
+const USER_ALLOWANCE_RISK =
+  "Only this User's turns, terminals and scripts receive it, but in a shared Sandbox other agents of the same Space can read a running process's environment.";
+const UNDERSTOOD = "I understand other agents in a shared Sandbox can read it";
+
+const SOURCE_LABEL: Record<VaultSource, string> = {
+  user: "yours",
+  project: "added by the Project",
+  space: "Space default",
+};
+
+const subjectKey = (subject: VaultSubject) =>
+  subject.kind === "space" ? `space:${subject.spaceId}` : `user:${subject.userId}`;
+
+/** Whom one of the Owner's own Vaults is allowed to; the Owner adds and takes back. */
+export function VaultAllowances(props: {
+  readonly environmentId: EnvironmentId;
+  readonly vault: VaultSummary;
+  readonly onChanged: () => Promise<void>;
+}) {
+  const { vault, environmentId } = props;
+  const allow = useAtomCommand(serverEnvironment.allowVault, "allow a Vault");
+  const spaces = useCurrentSpace((state) => state.view?.spaces ?? []);
+  const [users, setUsers] = useState<ReadonlyArray<InstallationUser>>([]);
+  const [choice, setChoice] = useState("");
+  const [understood, setUnderstood] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the Installation's Users, whom the Owner may allow the Vault to.
+  useEffect(() => {
+    let cancelled = false;
+    void runPrimaryHttp(PrimaryEnvironmentHttpClient.pipe(Effect.flatMap(fetchInstallationUsers)))
+      .then((list) => {
+        if (!cancelled) setUsers(list.users.filter((user) => user.status !== "removed"));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const allowed = new Set(vault.allowances.map((allowance) => subjectKey(allowance.subject)));
+  const options: ReadonlyArray<{
+    readonly key: string;
+    readonly subject: VaultSubject;
+    readonly label: string;
+  }> = [
+    ...spaces.map((space) => ({
+      key: `space:${space.id}`,
+      subject: { kind: "space", spaceId: space.id } as const,
+      label: `Space: ${space.name}`,
+    })),
+    ...users.map((user) => ({
+      key: `user:${user.id}`,
+      subject: { kind: "user", userId: user.id } as const,
+      label: `User: ${user.displayName}`,
+    })),
+  ].filter((option) => !allowed.has(option.key));
+  const picked = options.find((option) => option.key === choice);
+  const toUser = picked?.subject.kind === "user";
+
+  const change = async (subject: VaultSubject, isAllowed: boolean) => {
+    setPending(true);
+    setError(null);
+    try {
+      await settle(
+        allow({ environmentId, input: { vaultId: vault.id, subject, allowed: isAllowed } }),
+      );
+      setChoice("");
+      setUnderstood(false);
+      await props.onChanged();
+    } catch (cause) {
+      setError(errorMessageOf(cause, "Could not change whom the Vault is allowed to."));
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-2 px-4 pb-4">
+      <p className="text-xs font-medium">Allowed to</p>
+      {vault.allowances.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          Nobody yet: no Space or User receives this Vault.
+        </p>
+      ) : (
+        <ul className="flex flex-wrap gap-2" aria-label={`Allowed to: ${vault.name}`}>
+          {vault.allowances.map((allowance) => {
+            const name = allowance.name ?? "(gone)";
+            return (
+              <li key={subjectKey(allowance.subject)} className="flex items-center gap-1">
+                <Badge variant="outline" size="sm">
+                  {allowance.subject.kind === "user" ? `User: ${name}` : `Space: ${name}`}
+                </Badge>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  disabled={pending}
+                  aria-label={`Take back ${vault.name} from ${name}`}
+                  onClick={() => void change(allowance.subject, false)}
+                >
+                  Take back
+                </Button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+        <label className="flex flex-1 flex-col gap-1 text-xs font-medium">
+          Allow to
+          <select
+            aria-label={`Allow ${vault.name} to`}
+            className={SELECT_CLASS}
+            disabled={pending}
+            value={choice}
+            onChange={(event) => {
+              setChoice(event.currentTarget.value);
+              setUnderstood(false);
+            }}
+          >
+            <option value="">Choose a Space or a User…</option>
+            {options.map((option) => (
+              <option key={option.key} value={option.key}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <Button
+          size="sm"
+          disabled={pending || picked === undefined || (toUser && !understood)}
+          aria-label={`Allow ${vault.name}`}
+          onClick={() => {
+            if (picked !== undefined) void change(picked.subject, true);
+          }}
+        >
+          Allow
+        </Button>
+      </div>
+      {toUser ? (
+        <div className="flex flex-col gap-1 rounded-md border border-warning/40 bg-warning/8 p-2">
+          <p className="text-xs" role="note">
+            {USER_ALLOWANCE_RISK}
+          </p>
+          <label className="flex items-center gap-2 text-xs font-medium">
+            <input
+              type="checkbox"
+              aria-label={UNDERSTOOD}
+              checked={understood}
+              onChange={(event) => setUnderstood(event.currentTarget.checked)}
+            />
+            {UNDERSTOOD}
+          </label>
+        </div>
+      ) : null}
+      {error === null ? null : (
+        <span className="text-xs text-destructive" role="alert">
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function useChoices(environmentId: EnvironmentId, spaceId: SpaceId | null, projectId?: ProjectId) {
+  const read = useAtomCommand(serverEnvironment.vaultChoices, "read a Space's Vaults");
+  const [loaded, setLoaded] = useState<{
+    readonly spaceId: SpaceId;
+    readonly choices: VaultChoices;
+  } | null>(null);
+  const [failed, setFailed] = useState<{
+    readonly spaceId: SpaceId | null;
+    readonly message: string;
+  } | null>(null);
+  // What another Space answered, or how it failed, is never shown for this one.
+  const choices = loaded !== null && loaded.spaceId === spaceId ? loaded.choices : null;
+  const error = failed !== null && failed.spaceId === spaceId ? failed.message : null;
+  const setError = (message: string | null) =>
+    setFailed(message === null ? null : { spaceId, message });
+  const setChoices = (next: VaultChoices) => setLoaded({ spaceId: next.spaceId, choices: next });
+  const load = useEffectEvent(async (space: SpaceId) =>
+    settle(
+      read({
+        environmentId,
+        input: projectId === undefined ? { spaceId: space } : { spaceId: space, projectId },
+      }),
+    ),
+  );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads the Space's (and Project's) Vault choices from the Hub when the Space changes.
+  useEffect(() => {
+    if (spaceId === null) return;
+    let cancelled = false;
+    void load(spaceId).then(
+      (next) => {
+        if (!cancelled) setLoaded({ spaceId, choices: next });
+      },
+      (cause: unknown) => {
+        if (!cancelled) {
+          setFailed({ spaceId, message: errorMessageOf(cause, "Could not read the Vaults.") });
+        }
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [spaceId]);
+  return { choices, setChoices, error, setError };
+}
+
+/** Settings → Vaults → «Default Vaults»: which allowed Vaults every Thread of a Space receives. */
+export function SpaceDefaultVaults(props: { readonly environmentId: EnvironmentId }) {
+  const { environmentId } = props;
+  const view = useCurrentSpace((state) => state.view);
+  const spaces = view?.spaces ?? [];
+  const [spaceId, setSpaceId] = useState<SpaceId | null>(null);
+  const shown = spaceId ?? spaces[0]?.id ?? null;
+  const { choices, setChoices, error, setError } = useChoices(environmentId, shown);
+  const save = useAtomCommand(serverEnvironment.setVaultSpaceDefaults, "set default Vaults");
+  const [pending, setPending] = useState(false);
+  if (spaces.length === 0) return null;
+  const spaceName = spaces.find((space) => space.id === shown)?.name ?? "this Space";
+
+  const setDefaults = async (vaultIds: ReadonlyArray<VaultId>) => {
+    if (shown === null) return;
+    setPending(true);
+    setError(null);
+    try {
+      setChoices(await settle(save({ environmentId, input: { spaceId: shown, vaultIds } })));
+    } catch (cause) {
+      setError(errorMessageOf(cause, "Could not change the default Vaults."));
+    } finally {
+      setPending(false);
+    }
+  };
+  const defaults = choices?.defaults ?? [];
+  const byId = new Map((choices?.allowed ?? []).map((option) => [option.vaultId, option]));
+  const ordered = [
+    ...(choices?.fixedDefaults ?? []),
+    ...defaults,
+    ...(choices?.allowed ?? [])
+      .map((option) => option.vaultId)
+      .filter((id) => !defaults.includes(id) && !(choices?.fixedDefaults ?? []).includes(id)),
+  ];
+
+  return (
+    <SettingsSection id="default-vaults" title="Default Vaults">
+      <SettingsRow
+        title="Every Thread of a Space receives its defaults"
+        description="Projects add or remove Vaults among the ones allowed to their Space. When two Vaults define the same name, a User's own Vault wins, then the Project's, then the defaults in this order."
+        status={
+          error === null ? null : (
+            <span className="text-destructive" role="alert">
+              {error}
+            </span>
+          )
+        }
+        control={
+          <select
+            aria-label="Space for default Vaults"
+            className={`${SELECT_CLASS} sm:w-56`}
+            value={shown ?? ""}
+            onChange={(event) => setSpaceId(event.currentTarget.value as SpaceId)}
+          >
+            {spaces.map((space) => (
+              <option key={space.id} value={space.id}>
+                {space.name}
+              </option>
+            ))}
+          </select>
+        }
+      />
+      {choices === null ? null : choices.allowed.length === 0 ? (
+        <p className="px-4 pb-4 text-xs text-muted-foreground">
+          No Vault is allowed to {spaceName} yet.
+        </p>
+      ) : (
+        <ul
+          className="flex flex-col divide-y divide-border/60"
+          aria-label={`Default Vaults of ${spaceName}`}
+        >
+          {ordered.map((vaultId) => {
+            const option = byId.get(vaultId);
+            if (option === undefined) return null;
+            const fixed = choices.fixedDefaults.includes(vaultId);
+            const index = defaults.indexOf(vaultId);
+            const isDefault = fixed || index >= 0;
+            return (
+              <li key={vaultId} className="flex items-center gap-3 px-4 py-2 text-sm">
+                <label className="flex flex-1 items-center gap-2">
+                  <input
+                    type="checkbox"
+                    aria-label={`Default: ${option.name}`}
+                    checked={isDefault}
+                    disabled={
+                      fixed || pending || !choices.canChoose || (option.archived && !isDefault)
+                    }
+                    onChange={(event) =>
+                      void setDefaults(
+                        event.currentTarget.checked
+                          ? [...defaults, vaultId]
+                          : defaults.filter((id) => id !== vaultId),
+                      )
+                    }
+                  />
+                  <span className="font-medium">{option.name}</span>
+                  <span className="truncate text-xs text-muted-foreground">
+                    {option.names.join(", ") || "no secrets yet"}
+                  </span>
+                  {fixed ? (
+                    <Badge size="sm" variant="outline">
+                      Always
+                    </Badge>
+                  ) : null}
+                  {option.archived ? (
+                    <Badge size="sm" variant="outline">
+                      Archived
+                    </Badge>
+                  ) : null}
+                </label>
+                {index > 0 && choices.canChoose ? (
+                  <Button
+                    size="xs"
+                    variant="ghost"
+                    disabled={pending}
+                    aria-label={`Move ${option.name} up`}
+                    onClick={() => {
+                      const next = [...defaults];
+                      next.splice(index - 1, 0, ...next.splice(index, 1));
+                      void setDefaults(next);
+                    }}
+                  >
+                    Move up
+                  </Button>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </SettingsSection>
+  );
+}
+
+/** Project settings → «Vaults»: add or remove, for this Project, Vaults allowed to its Space. */
+export function ProjectVaults(props: {
+  readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId;
+  readonly spaceId: SpaceId;
+}) {
+  const { environmentId, projectId, spaceId } = props;
+  const { choices, setChoices, error, setError } = useChoices(environmentId, spaceId, projectId);
+  const save = useAtomCommand(serverEnvironment.setVaultProjectChoice, "change a Project's Vaults");
+  const [pending, setPending] = useState(false);
+  if (choices === null) {
+    return error === null ? null : (
+      <SettingsSection title="Vaults">
+        <SettingsRow
+          title="Secrets this Project's Threads receive"
+          status={
+            <span className="text-destructive" role="alert">
+              {error}
+            </span>
+          }
+        />
+      </SettingsSection>
+    );
+  }
+  if (choices.allowed.length === 0) return null;
+  const isDefault = (vaultId: VaultId) =>
+    choices.fixedDefaults.includes(vaultId) || choices.defaults.includes(vaultId);
+  return (
+    <SettingsSection title="Vaults">
+      <SettingsRow
+        title="Secrets this Project's Threads receive"
+        description="Its Space's default Vaults, plus the ones you add here, minus the ones you remove. A Vault added here wins a name it shares with a default."
+        status={
+          error === null ? null : (
+            <span className="text-destructive" role="alert">
+              {error}
+            </span>
+          )
+        }
+      />
+      <ul className="flex flex-col divide-y divide-border/60" aria-label="Project Vaults">
+        {choices.allowed.map((option) => {
+          const current =
+            choices.projectChoices.find((choice) => choice.vaultId === option.vaultId)?.choice ??
+            "inherit";
+          return (
+            <li key={option.vaultId} className="flex items-center gap-3 px-4 py-2 text-sm">
+              <span className="flex-1 font-medium">{option.name}</span>
+              {choices.fixedDefaults.includes(option.vaultId) ? (
+                <span className="text-xs text-muted-foreground">Always (Personal space)</span>
+              ) : (
+                <select
+                  aria-label={`${option.name} in this Project`}
+                  className={`${SELECT_CLASS} sm:w-56`}
+                  disabled={pending || !choices.canChoose}
+                  value={current}
+                  onChange={(event) => {
+                    const choice = event.currentTarget.value as "add" | "remove" | "inherit";
+                    setPending(true);
+                    setError(null);
+                    void settle(
+                      save({
+                        environmentId,
+                        input: { projectId, vaultId: option.vaultId, choice },
+                      }),
+                    )
+                      .then(setChoices, (cause: unknown) =>
+                        setError(errorMessageOf(cause, "Could not change the Project's Vaults.")),
+                      )
+                      .finally(() => setPending(false));
+                  }}
+                >
+                  <option value="inherit">
+                    {isDefault(option.vaultId)
+                      ? "As the Space (default)"
+                      : "As the Space (not a default)"}
+                  </option>
+                  <option value="add">Add</option>
+                  <option value="remove">Remove</option>
+                </select>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </SettingsSection>
+  );
+}
+
+/** The Thread's «Secrets»: the names its turns receive for you, and which Vault wins each. */
+export function ThreadSecrets(props: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+}) {
+  const read = useAtomCommand(serverEnvironment.threadVaultEnvironment, "read a Thread's secrets");
+  const [answer, setAnswer] = useState<{
+    readonly threadId: ThreadId;
+    readonly request: number;
+    readonly shown: VaultThreadEnvironment | null;
+    readonly error: string | null;
+  } | null>(null);
+  const latest = useRef(0);
+  // Another Thread's answer, or one a newer request replaced, is never shown.
+  const current = answer !== null && answer.threadId === props.threadId ? answer : null;
+  const shown = current?.shown ?? null;
+  const error = current?.error ?? null;
+  return (
+    <Popover
+      onOpenChange={(open) => {
+        if (!open) return;
+        const { threadId } = props;
+        const request = ++latest.current;
+        setAnswer(null);
+        const settleWith = (next: {
+          readonly shown: VaultThreadEnvironment | null;
+          readonly error: string | null;
+        }) => {
+          if (request === latest.current) setAnswer({ threadId, request, ...next });
+        };
+        void settle(read({ environmentId: props.environmentId, input: { threadId } })).then(
+          (loaded) => settleWith({ shown: loaded, error: null }),
+          (cause: unknown) =>
+            settleWith({
+              shown: null,
+              error: errorMessageOf(cause, "Could not read the Thread's secrets."),
+            }),
+        );
+      }}
+    >
+      <PopoverTrigger
+        render={
+          <Button size="xs" variant="ghost-muted" aria-label="Secrets">
+            <KeyRoundIcon aria-hidden />
+            Secrets
+          </Button>
+        }
+      />
+      <PopoverPopup className="w-96">
+        <div className="flex flex-col gap-2 text-sm">
+          <p className="font-medium">Secrets</p>
+          <p className="text-xs text-muted-foreground">
+            The environment variables your turns, terminals and scripts in this Thread receive.
+            Values are never shown.
+          </p>
+          {error !== null ? (
+            <p className="text-xs text-destructive" role="alert">
+              {error}
+            </p>
+          ) : shown === null ? null : shown.variables.length === 0 ? (
+            <p className="text-xs text-muted-foreground">This Thread receives no secrets.</p>
+          ) : (
+            <ul className="flex flex-col gap-1" aria-label="Secrets this Thread receives">
+              {shown.variables.map((variable) => (
+                <li key={variable.name} className="flex flex-col">
+                  <span>
+                    <code className="font-mono text-xs">{variable.name}</code>{" "}
+                    <span className="text-xs text-muted-foreground">
+                      from {variable.vaultName} ({SOURCE_LABEL[variable.source]})
+                    </span>
+                  </span>
+                  {variable.shadowed.length > 0 ? (
+                    <span className="text-xs text-muted-foreground">
+                      Wins over{" "}
+                      {variable.shadowed
+                        .map((other) => `${other.vaultName} (${SOURCE_LABEL[other.source]})`)
+                        .join(", ")}
+                    </span>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </PopoverPopup>
+    </Popover>
+  );
+}

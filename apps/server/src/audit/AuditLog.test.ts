@@ -604,6 +604,18 @@ it.effect(
         "vault.create",
         "vault.update",
         "vault.delete",
+        // vaults/EffectiveVaults.test.ts (spec 5 ticket 03)
+        "vault.allow",
+        "vault.choose",
+        // ai/AiGateway.test.ts (spec 4 ticket 01)
+        "ai_gateway.update",
+        "ai_gateway.rollback",
+        "ai_gateway.enable",
+        // ai/AiAccounts.test.ts (spec 4 ticket 02)
+        "ai_account.create",
+        "ai_account.update",
+        "ai_account.delete",
+        "ai_account.allow",
       ];
       assert.sameMembers(
         [...new Set([...expected.map((row) => row.action), ...recordedElsewhere])],

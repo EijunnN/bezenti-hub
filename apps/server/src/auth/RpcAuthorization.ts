@@ -124,6 +124,9 @@ export const RPC_REQUIRED_SCOPES = {
   // Vaults: names to read (writes are CLIENT_GUARDED_RPC_SCOPES'); who may is AccessPolicy's.
   [WS_METHODS.vaultsList]: AuthAccessReadScope,
   [WS_METHODS.vaultsEntriesList]: AuthAccessReadScope,
+  [WS_METHODS.vaultsChoices]: AuthAccessReadScope,
+  // A Thread's secret names, as its other reads.
+  [WS_METHODS.vaultsThreadEnvironment]: AuthOrchestrationReadScope,
   // Delivery logs hold request bodies, so they need the same scope as the URL.
   [WS_METHODS.scheduledTasksListWebhookDeliveries]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksGetWebhookDelivery]: AuthOrchestrationOperateScope,

@@ -419,6 +419,14 @@ import {
   VaultListResult,
   VaultSummary,
   VaultUpdateInput,
+  // Spec 5 ticket 03: allowances, defaults and the effective set.
+  VaultAllowInput,
+  VaultChoices,
+  VaultChoicesInput,
+  VaultProjectChoiceSetInput,
+  VaultSpaceDefaultsSetInput,
+  VaultThreadEnvironment,
+  VaultThreadEnvironmentInput,
 } from "./vaults.ts";
 import { Project, ProjectMutation, ProjectMutationError } from "./project.ts";
 
@@ -566,6 +574,12 @@ export const WS_METHODS = {
   vaultsEntriesDelete: "vaults.entries.delete",
   vaultsEntriesLink: "vaults.entries.link",
   vaultsEntriesCopy: "vaults.entries.copy",
+  // Vaults, spec 5 ticket 03: allowances, defaults, Project choices and a Thread's names.
+  vaultsAllow: "vaults.allow",
+  vaultsChoices: "vaults.choices",
+  vaultsSpaceDefaultsSet: "vaults.spaceDefaults.set",
+  vaultsProjectChoicesSet: "vaults.projectChoices.set",
+  vaultsThreadEnvironment: "vaults.threadEnvironment",
   guestShareCreate: "guestShare.create",
   scheduledTasksListWebhookDeliveries: "scheduledTasks.listWebhookDeliveries",
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
@@ -2048,6 +2062,32 @@ const WsVaultsEntriesCopyRpc = Rpc.make(WS_METHODS.vaultsEntriesCopy, {
   success: VaultEntryResult,
   error: VaultRpcError,
 });
+// Spec 5 ticket 03: allowances, defaults, Project choices and a Thread's names.
+const WsVaultsAllowRpc = Rpc.make(WS_METHODS.vaultsAllow, {
+  payload: VaultAllowInput,
+  success: VaultSummary,
+  error: VaultRpcError,
+});
+const WsVaultsChoicesRpc = Rpc.make(WS_METHODS.vaultsChoices, {
+  payload: VaultChoicesInput,
+  success: VaultChoices,
+  error: VaultRpcError,
+});
+const WsVaultsSpaceDefaultsSetRpc = Rpc.make(WS_METHODS.vaultsSpaceDefaultsSet, {
+  payload: VaultSpaceDefaultsSetInput,
+  success: VaultChoices,
+  error: VaultRpcError,
+});
+const WsVaultsProjectChoicesSetRpc = Rpc.make(WS_METHODS.vaultsProjectChoicesSet, {
+  payload: VaultProjectChoiceSetInput,
+  success: VaultChoices,
+  error: VaultRpcError,
+});
+const WsVaultsThreadEnvironmentRpc = Rpc.make(WS_METHODS.vaultsThreadEnvironment, {
+  payload: VaultThreadEnvironmentInput,
+  success: VaultThreadEnvironment,
+  error: VaultRpcError,
+});
 
 const WsScheduledTasksListWebhookDeliveriesRpc = Rpc.make(
   WS_METHODS.scheduledTasksListWebhookDeliveries,
@@ -2158,6 +2198,11 @@ export const WsRpcGroup = RpcGroup.make(
   WsVaultsEntriesDeleteRpc,
   WsVaultsEntriesLinkRpc,
   WsVaultsEntriesCopyRpc,
+  WsVaultsAllowRpc,
+  WsVaultsChoicesRpc,
+  WsVaultsSpaceDefaultsSetRpc,
+  WsVaultsProjectChoicesSetRpc,
+  WsVaultsThreadEnvironmentRpc,
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
   WsServerReportClientActivityRpc,

@@ -3,7 +3,9 @@ import * as Schema from "effect/Schema";
 import {
   IsoDateTime,
   makeEntityId,
+  ProjectId,
   SpaceId,
+  ThreadId,
   TrimmedNonEmptyString,
   UserId,
 } from "./baseSchemas.ts";
@@ -180,6 +182,24 @@ export const secretNameRisk = (name: string): "invalid" | "gateway" | "dangerous
 };
 
 export const VaultEntryKind = Schema.Literals(["own", "copy", "link"]);
+
+/**
+ * Whom the Owner allows a Vault to (ticket 03): a Space (its Threads may receive it) or a User
+ * (their own turns, terminals and scripts, in any of their Spaces).
+ */
+export const VaultSubject = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("space"), spaceId: SpaceId }),
+  Schema.Struct({ kind: Schema.Literal("user"), userId: UserId }),
+]);
+export type VaultSubject = typeof VaultSubject.Type;
+
+/** One allowance, as the Owner sees it in Settings → Vaults. */
+export const VaultAllowance = Schema.Struct({
+  subject: VaultSubject,
+  /** The Space's or the User's name; null once it is gone. */
+  name: Schema.NullOr(Schema.String),
+});
+export type VaultAllowance = typeof VaultAllowance.Type;
 export type VaultEntryKind = typeof VaultEntryKind.Type;
 
 /** A Vault as the viewer sees it, with what the viewer may do there. */
@@ -199,6 +219,11 @@ export const VaultSummary = Schema.Struct({
   canManage: Schema.Boolean,
   /** Reveal values: the Owner, with a strong factor. */
   canReveal: Schema.Boolean,
+  /**
+   * Whom the Owner allowed it to; empty for anyone who does not manage it. An Organization's
+   * Vault reaches its own Organization without one; the Main vault only the Owner's Personal space.
+   */
+  allowances: Schema.Array(VaultAllowance),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -239,6 +264,8 @@ export const VaultErrorReason = Schema.Literals([
   "dangerous-name",
   /** The Owner's dangerous name, not yet confirmed (`confirmDangerous`). */
   "confirm-dangerous",
+  /** A Vault not allowed to that Space or User (ticket 03). */
+  "not-allowed",
   /** Vaults live on the Hub: a joined machine has none. */
   "unavailable",
   "storage",
@@ -358,3 +385,111 @@ export const VaultRevealResult = Schema.Struct({
   value: Schema.RedactedFromValue(Schema.String),
 });
 export type VaultRevealResult = typeof VaultRevealResult.Type;
+
+// Allowances, defaults and the effective set (spec 5 ticket 03): names only, never values.
+
+/** `vaults.allow`: the Owner allows a Vault to a Space or a User, or takes it back. */
+export const VaultAllowInput = Schema.Struct({
+  vaultId: VaultId,
+  subject: VaultSubject,
+  allowed: Schema.Boolean,
+});
+export type VaultAllowInput = typeof VaultAllowInput.Type;
+
+/**
+ * Where a Thread's Vault comes from, in the order that wins a name both define: the acting
+ * User's own, then the ones its Project adds, then its Space's defaults.
+ */
+export const VaultSource = Schema.Literals(["user", "project", "space"]);
+export type VaultSource = typeof VaultSource.Type;
+
+/** A Project's choice about one Vault allowed to its Space; `inherit` clears it. */
+export const VaultProjectChoice = Schema.Literals(["add", "remove"]);
+export type VaultProjectChoice = typeof VaultProjectChoice.Type;
+
+/** A Vault allowed to a Space, as the Space's and its Projects' Vault pickers list it. */
+export const VaultChoiceOption = Schema.Struct({
+  vaultId: VaultId,
+  name: Schema.String,
+  isMain: Schema.Boolean,
+  archived: Schema.Boolean,
+  /** The secrets' names it holds (never values). */
+  names: Schema.Array(Schema.String),
+});
+export type VaultChoiceOption = typeof VaultChoiceOption.Type;
+
+/** `vaults.choices`: a Space's defaults, and a Project's adds and removes when one is named. */
+export const VaultChoicesInput = Schema.Struct({
+  spaceId: SpaceId,
+  projectId: Schema.optionalKey(ProjectId),
+});
+export type VaultChoicesInput = typeof VaultChoicesInput.Type;
+
+export const VaultChoices = Schema.Struct({
+  spaceId: SpaceId,
+  projectId: Schema.NullOr(ProjectId),
+  /** The Owner, or an Admin of the Space: they change the defaults and the Project's choices. */
+  canChoose: Schema.Boolean,
+  /** The Vaults allowed to the Space, in the Owner's order. */
+  allowed: Schema.Array(VaultChoiceOption),
+  /** The Space's defaults, the first winning a name they share. */
+  defaults: Schema.Array(VaultId),
+  /** Fixed defaults nobody unsets (the Main vault in the Owner's Personal space). */
+  fixedDefaults: Schema.Array(VaultId),
+  projectChoices: Schema.Array(Schema.Struct({ vaultId: VaultId, choice: VaultProjectChoice })),
+});
+export type VaultChoices = typeof VaultChoices.Type;
+
+/** `vaults.spaceDefaults.set`: the Space's defaults in order (the first wins a shared name). */
+export const VaultSpaceDefaultsSetInput = Schema.Struct({
+  spaceId: SpaceId,
+  vaultIds: Schema.Array(VaultId).check(Schema.isMaxLength(200)),
+});
+export type VaultSpaceDefaultsSetInput = typeof VaultSpaceDefaultsSetInput.Type;
+
+/** `vaults.projectChoices.set`: add or remove one allowed Vault for a Project, or inherit. */
+export const VaultProjectChoiceSetInput = Schema.Struct({
+  projectId: ProjectId,
+  vaultId: VaultId,
+  choice: Schema.Literals(["add", "remove", "inherit"]),
+});
+export type VaultProjectChoiceSetInput = typeof VaultProjectChoiceSetInput.Type;
+
+/** `vaults.threadEnvironment`: the names the caller's turns in a Thread receive. */
+export const VaultThreadEnvironmentInput = Schema.Struct({ threadId: ThreadId });
+export type VaultThreadEnvironmentInput = typeof VaultThreadEnvironmentInput.Type;
+
+/** A Vault that also defines the name and lost to the winner. */
+export const VaultShadowed = Schema.Struct({
+  vaultId: VaultId,
+  vaultName: Schema.String,
+  source: VaultSource,
+});
+export type VaultShadowed = typeof VaultShadowed.Type;
+
+/** One variable a Thread receives: its name, which Vault wins it, and whom it beat. */
+export const VaultThreadVariable = Schema.Struct({
+  name: Schema.String,
+  description: Schema.NullOr(Schema.String),
+  vaultId: VaultId,
+  vaultName: Schema.String,
+  source: VaultSource,
+  /** Shorter than SECRET_MASK_MIN_LENGTH: delivered, never masked. */
+  unmasked: Schema.Boolean,
+  /** A name that changes how tools run, set by the Owner (`secretNameRisk`). */
+  dangerous: Schema.Boolean,
+  shadowed: Schema.Array(VaultShadowed),
+});
+export type VaultThreadVariable = typeof VaultThreadVariable.Type;
+
+export const VaultThreadEnvironment = Schema.Struct({
+  threadId: ThreadId,
+  spaceId: SpaceId,
+  projectId: Schema.NullOr(ProjectId),
+  /** The Vaults it receives, in the order that wins. */
+  vaults: Schema.Array(
+    Schema.Struct({ vaultId: VaultId, name: Schema.String, source: VaultSource }),
+  ),
+  variables: Schema.Array(VaultThreadVariable),
+});
+export type VaultThreadEnvironment = typeof VaultThreadEnvironment.Type;

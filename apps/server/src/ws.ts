@@ -117,6 +117,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as Vaults from "./vaults/Vaults.ts";
+import * as EffectiveVaults from "./vaults/EffectiveVaults.ts";
 import * as GuestShareService from "./guest/GuestShareService.ts";
 import {
   bufferShellLiveStream,
@@ -1272,6 +1273,7 @@ export const layerWsRpc = (
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
       const secretRequests = yield* SecretRequests.SecretRequests;
       const vaults = yield* Vaults.Vaults;
+      const effectiveVaults = yield* EffectiveVaults.EffectiveVaults;
       const guestShares = yield* GuestShareService.GuestShareService;
       const pullRequests = yield* PullRequestService.PullRequestService;
       const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
@@ -2372,6 +2374,13 @@ export const layerWsRpc = (
         [WS_METHODS.vaultsEntriesDelete]: (input) => vaults.deleteEntry(input),
         [WS_METHODS.vaultsEntriesLink]: (input) => vaults.linkEntry(input),
         [WS_METHODS.vaultsEntriesCopy]: (input) => vaults.copyEntry(input),
+        // Spec 5 ticket 03: allowances (the Owner), defaults and Project choices (the Owner and
+        // the Space's Admins), and a Thread's names for the caller. Names only, never values.
+        [WS_METHODS.vaultsAllow]: (input) => vaults.allow(input),
+        [WS_METHODS.vaultsChoices]: (input) => vaults.choices(input),
+        [WS_METHODS.vaultsSpaceDefaultsSet]: (input) => vaults.setSpaceDefaults(input),
+        [WS_METHODS.vaultsProjectChoicesSet]: (input) => vaults.setProjectChoice(input),
+        [WS_METHODS.vaultsThreadEnvironment]: (input) => effectiveVaults.threadEnvironment(input),
         [WS_METHODS.scheduledTasksListWebhookDeliveries]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
             Effect.andThen(scheduledTasks.listWebhookDeliveries(input)),

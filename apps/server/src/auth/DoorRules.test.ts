@@ -152,10 +152,20 @@ describe("every door of the Hub declares its rule", () => {
     const vaultRpcs = [...WsRpcGroup.requests.values()].filter((rpc) =>
       rpc._tag.startsWith("vaults."),
     );
-    expect(vaultRpcs.length).toBe(9);
+    expect(vaultRpcs.length).toBe(14);
     for (const rpc of vaultRpcs) {
       expect(successFields(rpc.successSchema.ast), rpc._tag).not.toContain("value");
+      // Spec 5 ticket 03: nor the id of one (EffectiveVaults' are for delivery alone).
+      expect(successFields(rpc.successSchema.ast), rpc._tag).not.toContain("valueId");
     }
+    // The effective set with value ids is for delivery (ticket 04) alone: the only door that
+    // reaches it is the Thread's names, which strip them (EffectiveVaults.threadEnvironment).
+    const effectiveUsers = files
+      .filter(({ text }) => /vaults\/EffectiveVaults\.ts"/u.test(text))
+      .map(({ file }) => file);
+    expect(effectiveUsers.toSorted()).toEqual(["server.ts", "ws.ts"]);
+    const ws = files.find(({ file }) => file === "ws.ts")?.text ?? "";
+    expect(ws).not.toMatch(/effectiveVaults\.forThread/u);
   });
 
   it("keeps AI accounts' credentials in the Hub: only AiAccounts reads them, no answer carries one", () => {
