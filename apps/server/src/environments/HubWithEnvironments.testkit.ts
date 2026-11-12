@@ -109,13 +109,20 @@ const layerNoProviders = Layer.succeed(ProviderInstanceRegistry.ProviderInstance
   subscribeChanges: Effect.never,
 } as unknown as ProviderInstanceRegistry.ProviderInstanceRegistry["Service"]);
 
+/** A shell a machine's terminal started: its folder and the environment it got. */
+export interface PtySpawn {
+  readonly cwd: string;
+  readonly env: Readonly<Record<string, string | undefined>>;
+}
+
 /**
  * A shell that answers each line typed with the folder it started in, as `pwd` would, so a test
- * sees which machine and folder a terminal runs in without a real shell.
+ * sees which machine and folder a terminal runs in without a real shell. Each start is recorded.
  */
-const echoingPty: PtyAdapter.PtyAdapter["Service"] = {
+const echoingPty = (spawns: Array<PtySpawn>): PtyAdapter.PtyAdapter["Service"] => ({
   spawn: (input) =>
     Effect.sync(() => {
+      spawns.push({ cwd: input.cwd, env: { ...input.env } });
       const listeners = new Set<(data: string) => void>();
       return {
         pid: 4242,
@@ -132,32 +139,33 @@ const echoingPty: PtyAdapter.PtyAdapter["Service"] = {
         onExit: () => () => undefined,
       } satisfies PtyAdapter.PtyProcess;
     }),
-};
+});
 
 /**
  * The workspace services a joined machine answers files, search and terminals with. As in joined
  * mode, it knows only the workspace roots of the calls its Hub is running.
  */
-const layerMachineWorkspace = Layer.mergeAll(
-  WorkspaceFileSystem.layer.pipe(Layer.provide(KnownWorkspaces.layerJoined)),
-  Layer.effect(
-    TerminalManager.TerminalManager,
-    Effect.flatMap(ServerConfig.ServerConfig, (config) =>
-      TerminalManager.makeWithOptions({
-        logsDir: config.terminalLogsDir,
-        ptyAdapter: echoingPty,
-        processKillGraceMs: 1,
-        subprocessPollIntervalMs: 60_000,
-      }),
-    ),
-  ).pipe(Layer.provide(ProcessRunner.layer)),
-  PreviewManager.layer,
-  Layer.mock(PortScanner.PortDiscovery)({ trackAgent: () => () => undefined }),
-).pipe(
-  Layer.provideMerge(WorkspaceEntries.layer),
-  Layer.provideMerge(WorkspacePaths.layer),
-  Layer.provideMerge(JoinedWorkspaceRoots.layer),
-);
+const layerMachineWorkspace = (spawns: Array<PtySpawn>) =>
+  Layer.mergeAll(
+    WorkspaceFileSystem.layer.pipe(Layer.provide(KnownWorkspaces.layerJoined)),
+    Layer.effect(
+      TerminalManager.TerminalManager,
+      Effect.flatMap(ServerConfig.ServerConfig, (config) =>
+        TerminalManager.makeWithOptions({
+          logsDir: config.terminalLogsDir,
+          ptyAdapter: echoingPty(spawns),
+          processKillGraceMs: 1,
+          subprocessPollIntervalMs: 60_000,
+        }),
+      ),
+    ).pipe(Layer.provide(ProcessRunner.layer)),
+    PreviewManager.layer,
+    Layer.mock(PortScanner.PortDiscovery)({ trackAgent: () => () => undefined }),
+  ).pipe(
+    Layer.provideMerge(WorkspaceEntries.layer),
+    Layer.provideMerge(WorkspacePaths.layer),
+    Layer.provideMerge(JoinedWorkspaceRoots.layer),
+  );
 
 const layerCheckpoints = CheckpointStore.layer.pipe(
   Layer.provide(VcsDriverRegistry.layer),
@@ -242,6 +250,8 @@ export interface TestEnvironment {
   readonly mcpConfigs: ReadonlyArray<McpProviderSessionConfig>;
   /** Where this machine keeps Project checkouts (`<T3 home>/projects`). */
   readonly workspaceRoot: string;
+  /** Every shell its terminals started, in order, with the environment each got. */
+  readonly ptySpawns: ReadonlyArray<PtySpawn>;
   /** The method of each request the Hub sent this machine, in order. */
   readonly requests: ReadonlyArray<string>;
   /** Resolves once the Hub sent `method`, counting from request number `from`. */
@@ -290,8 +300,11 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
   readonly onWelcome?: (welcome: EnvironmentWelcomeFrame) => Effect.Effect<void>;
   /** Runs when the Hub refuses a connection before any welcome, with why. */
   readonly onRefused?: (reason: EnvironmentCloseReason | undefined) => Effect.Effect<void>;
+  /** The executor contract its hello names; the current one by default. */
+  readonly executorContractVersion?: number;
 }) {
   const scope = yield* Effect.scope;
+  const ptySpawns: Array<PtySpawn> = [];
   const mcpConfigs: Array<McpProviderSessionConfig> = [];
   const requests: Array<string> = [];
   const requested = yield* PubSub.unbounded<string>();
@@ -347,7 +360,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
         layerCheckpoints,
         layerNoProviders,
         ProjectStore.layer,
-        layerMachineWorkspace,
+        layerMachineWorkspace(ptySpawns),
         layerTextGeneration(input.textGeneration),
       ),
     ),
@@ -399,7 +412,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
     sessions: described.sessions,
     workspaceRoot: described.workspaceRoot,
     orchestration: described.orchestration,
-    executorContractVersion: ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
+    executorContractVersion: input.executorContractVersion ?? ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
     ...(input.sandbox === undefined ? {} : { sandbox: input.sandbox }),
   }));
   const heartbeat: Effect.Effect<EnvironmentHeartbeatFrame> = Effect.map(report, (described) => ({
@@ -481,6 +494,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
     credential: input.credential,
     mcpConfigs,
     workspaceRoot: (yield* report).workspaceRoot,
+    ptySpawns,
     requests,
     awaitRequest,
     awaitAnswered,
@@ -770,6 +784,8 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     readonly connect?: boolean;
     /** The machine's own text generation (with its providers); none by default. */
     readonly textGeneration?: ProviderTextGeneration;
+    /** The executor contract the machine runs; the current one by default. */
+    readonly executorContractVersion?: number;
   }) {
     const joined = yield* joinMachine(
       server,
@@ -786,6 +802,9 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
       adapters: input.adapters,
       connect: input.connect ?? true,
       ...(input.textGeneration === undefined ? {} : { textGeneration: input.textGeneration }),
+      ...(input.executorContractVersion === undefined
+        ? {}
+        : { executorContractVersion: input.executorContractVersion }),
     });
   });
   /**

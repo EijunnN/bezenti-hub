@@ -160,13 +160,14 @@ export const loadFixture = Effect.fn(function* (name: string) {
 type LoadedFixture = Effect.Success<ReturnType<typeof loadFixture>>;
 
 const placeOn =
-  (environmentId: EnvironmentId, worktreePath?: string) =>
+  (environmentId: EnvironmentId, worktreePath?: string, ownerUserId?: UserId) =>
   (command: OrchestrationV2Command): OrchestrationV2Command =>
     command.type === "thread.create"
       ? {
           ...command,
           activeEnvironmentId: environmentId,
           ...(worktreePath === undefined ? {} : { worktreePath }),
+          ...(ownerUserId === undefined ? {} : { ownerUserId }),
         }
       : command;
 
@@ -184,6 +185,8 @@ export const replayOn = Effect.fn(function* (
     readonly spaceId?: SpaceId;
     /** Runs on the Hub's checkout of the Project once it is made, before the Thread starts. */
     readonly afterSeed?: (workspaceRoot: string) => Effect.Effect<void>;
+    /** Whose Thread it is, as the server stamps it from the creator's session. */
+    readonly ownerUserId?: UserId;
   } = {},
 ) {
   const created = loaded.materialized.commands.find((command) => command.type === "thread.create");
@@ -202,7 +205,7 @@ export const replayOn = Effect.fn(function* (
     yield* Effect.promise(() => NodeFSP.mkdir(worktreePath!, { recursive: true }));
     yield* git(worktreePath, ["init", "--quiet"]);
   }
-  const place = placeOn(environment.environmentId, worktreePath);
+  const place = placeOn(environment.environmentId, worktreePath, options.ownerUserId);
   return yield* runOrchestratorV2Scenario(
     {
       name: `${loaded.fixture.name}/remote`,
