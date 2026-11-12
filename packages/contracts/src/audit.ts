@@ -34,6 +34,9 @@ export const AuditAction = Schema.Literals([
   "cliSession.issue",
   "secret.reveal",
   "secret.edit",
+  "vault.create",
+  "vault.update",
+  "vault.delete",
   "secret.master_key.export",
   "secret.master_key.rotate",
   "environment.register",
@@ -58,6 +61,7 @@ export const AuditTargetKind = Schema.Literals([
   "thread",
   "session",
   "secret",
+  "vault",
   "environment",
 ]);
 export type AuditTargetKind = typeof AuditTargetKind.Type;
@@ -99,8 +103,18 @@ export const AUDIT_DETAIL_KEYS = {
   "appSignIn.approve": ["client", "redirect"],
   "mcpClient.approve": ["client", "access", "method"],
   "cliSession.issue": ["sessionId", "label", "scopes"],
-  "secret.reveal": ["vault"],
-  "secret.edit": ["vault"],
+  /** The Vault's name and id and the entry's kind (`own`, `copy`, `link`); never the value. */
+  "secret.reveal": ["vault", "vaultId", "kind"],
+  /**
+   * As `secret.reveal`, with `op`: `add`, `replace` (a new value), `rename`, `describe`, `link`,
+   * `copy` or `delete` (`brokenLinks`: how many Secret links its deletion broke).
+   */
+  "secret.edit": ["vault", "vaultId", "kind", "op", "from", "brokenLinks"],
+  "vault.create": [],
+  /** The name `from` and `to`, whether it was described, and `archived` when that changed. */
+  "vault.update": ["from", "to", "described", "archived"],
+  /** How many secrets it held. */
+  "vault.delete": ["entries"],
   /** `settings` or `cli`, and the key's id (a fingerprint, never the key). */
   "secret.master_key.export": ["via", "keyId"],
   /** The key ids before and after (fingerprints, never keys). */

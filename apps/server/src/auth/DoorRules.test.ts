@@ -3,7 +3,8 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
-import { EnvironmentHttpApi } from "@t3tools/contracts";
+import { EnvironmentHttpApi, WsRpcGroup } from "@t3tools/contracts";
+import type * as SchemaAST from "effect/SchemaAST";
 import { describe, expect, it } from "@effect/vitest";
 import * as HttpApi from "effect/http-api/HttpApi";
 import { Tool } from "effect/ai";
@@ -71,6 +72,34 @@ const endpoints = (() => {
   return found;
 })();
 
+/** Every field name a schema can carry, at any depth and in any union member. */
+const successFields = (
+  ast: SchemaAST.AST,
+  into: Set<string> = new Set(),
+  seen: Set<SchemaAST.AST> = new Set(),
+): Set<string> => {
+  if (seen.has(ast)) return into;
+  seen.add(ast);
+  switch (ast._tag) {
+    case "Objects":
+      for (const property of ast.propertySignatures) {
+        into.add(String(property.name));
+        successFields(property.type, into, seen);
+      }
+      break;
+    case "Arrays":
+      for (const element of [...ast.elements, ...ast.rest]) successFields(element, into, seen);
+      break;
+    case "Union":
+      for (const member of ast.types) successFields(member, into, seen);
+      break;
+    case "Suspend":
+      successFields(ast.thunk(), into, seen);
+      break;
+  }
+  return into;
+};
+
 const undeclared = (doors: ReadonlyArray<string>, rules: Readonly<Record<string, unknown>>) =>
   [...new Set(doors)].filter((door) => !Object.hasOwn(rules, door)).toSorted();
 const stale = (doors: ReadonlyArray<string>, rules: Readonly<Record<string, unknown>>) =>
@@ -103,6 +132,30 @@ describe("every door of the Hub declares its rule", () => {
       ...Object.values(MCP_TOOL_RULES),
     ].flatMap((rule) => ("rpc" in rule ? [rule.rpc] : []));
     expect(twins.filter((method) => spaceAccessForRpcMethod(method) === undefined)).toEqual([]);
+  });
+
+  it("reads a Vault's value only through HTTP `vaults.reveal`: no WS, MCP or CLI door", () => {
+    // The only callers of the reveal: the HTTP door, and the Vaults service that defines it.
+    const callers = files
+      .filter(({ text }) => /\.reveal\(|\.authorizeReveal\(/u.test(text))
+      .map(({ file }) => file);
+    expect(callers.toSorted()).toEqual(["vaults/http.ts"]);
+    expect(Object.keys(HTTP_ENDPOINT_RULES).filter((name) => /reveal/iu.test(name))).toEqual([
+      "vaults.reveal",
+    ]);
+    expect(
+      [...Object.keys(MCP_TOOL_RULES), ...Object.keys(RAW_ROUTE_RULES)].filter((name) =>
+        /vault|reveal/iu.test(name),
+      ),
+    ).toEqual([]);
+    // No WS answer about Vaults has a field that could carry a value.
+    const vaultRpcs = [...WsRpcGroup.requests.values()].filter((rpc) =>
+      rpc._tag.startsWith("vaults."),
+    );
+    expect(vaultRpcs.length).toBe(9);
+    for (const rpc of vaultRpcs) {
+      expect(successFields(rpc.successSchema.ast), rpc._tag).not.toContain("value");
+    }
   });
 
   it("reaches the Owner's SSH install only through its HTTP endpoints: no WS or MCP door", () => {

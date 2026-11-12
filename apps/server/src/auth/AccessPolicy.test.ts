@@ -164,19 +164,28 @@ const spacelessVps: AccessPolicy.EnvironmentResource = {
   workSpaceId: ORG,
 };
 
+const mainVault: AccessPolicy.VaultResource = { kind: "vault", isMain: true, space: null };
+const ownersVault: AccessPolicy.VaultResource = { kind: "vault", isMain: false, space: null };
+const orgVault: AccessPolicy.VaultResource = { kind: "vault", isMain: false, space: organization };
+const archivedOrgVault: AccessPolicy.VaultResource = {
+  kind: "vault",
+  isMain: false,
+  space: archivedOrganization,
+};
+
 const allow = AccessPolicy.allow;
 const deny = AccessPolicy.deny;
 
+type Row = readonly [
+  string,
+  AccessPolicy.Principal,
+  AccessPolicy.Action,
+  AccessPolicy.Resource,
+  AccessPolicy.Decision,
+];
+
 // One row per rule. Later tickets add rows (and actions), never a new suite.
-const rows: ReadonlyArray<
-  readonly [
-    string,
-    AccessPolicy.Principal,
-    AccessPolicy.Action,
-    AccessPolicy.Resource,
-    AccessPolicy.Decision,
-  ]
-> = [
+const rows: ReadonlyArray<Row> = [
   // The Owner holds every permission.
   ["Owner views an Organization", owner, "space.view", organization, allow],
   ["Owner views another User's Personal space", owner, "space.view", personalOf("grace"), allow],
@@ -1335,6 +1344,63 @@ const rows: ReadonlyArray<
     organization,
     deny("wrong-resource"),
   ],
+  // Vaults (spec 5 «Vaults»): the Owner does all; an Organization's Admins edit its Vaults without
+  // reading them; its Members and Guests see names; the Main vault is the Owner's alone.
+  ...(
+    [
+      ["Owner", owner, ["vault.view", "vault.edit", "vault.manage", "vault.reveal"], []],
+      ["Admin", admin, ["vault.view", "vault.edit"], ["vault.manage", "vault.reveal"]],
+      ["Member", member, ["vault.view"], ["vault.edit", "vault.manage", "vault.reveal"]],
+      ["Guest", guest, ["vault.view"], ["vault.edit", "vault.manage", "vault.reveal"]],
+    ] as const
+  ).flatMap(([who, actor, allowed, denied]) => [
+    ...allowed.map((action): Row => [
+      `${who}: ${action} on its Organization's Vault`,
+      actor,
+      action,
+      orgVault,
+      allow,
+    ]),
+    ...denied.map((action): Row => [
+      `${who}: no ${action} on its Organization's Vault`,
+      actor,
+      action,
+      orgVault,
+      action === "vault.edit" ? deny("role-not-allowed") : deny("owner-only"),
+    ]),
+  ]),
+  ...(["vault.view", "vault.edit", "vault.manage", "vault.reveal"] as const).flatMap(
+    (action): ReadonlyArray<Row> => [
+      [`Owner: ${action} on the Main vault`, owner, action, mainVault, allow],
+      ...([admin, member, guest] as const).map((actor): Row => [
+        `${actor.userId}: no ${action} on the Main vault`,
+        actor,
+        action,
+        mainVault,
+        deny("owner-only"),
+      ]),
+      [
+        `another Organization's Admin: no ${action}`,
+        outsider,
+        action,
+        orgVault,
+        action === "vault.manage" || action === "vault.reveal"
+          ? deny("owner-only")
+          : deny("not-a-member"),
+      ],
+    ],
+  ),
+  [
+    "Admin: no edit in an archived Organization",
+    admin,
+    "vault.edit",
+    archivedOrgVault,
+    deny("space-archived"),
+  ],
+  ["Owner: edits in an archived Organization", owner, "vault.edit", archivedOrgVault, allow],
+  ["Owner's own Vault: not an Admin's", admin, "vault.view", ownersVault, deny("owner-only")],
+  ["a Vault action on a Space", owner, "vault.view", organization, deny("wrong-resource")],
+  ["a Space action on a Vault", owner, "space.view", orgVault, deny("wrong-resource")],
   // Dedicated machines: the Owner gives one to an Organization, whose Users who work there use it
   // for its Threads, as its Sandbox; other Spaces neither see nor use it.
   ["Owner dedicates machines", owner, "environment.dedicate", AccessPolicy.installation, allow],

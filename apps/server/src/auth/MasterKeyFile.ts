@@ -396,7 +396,12 @@ export const openKeyring = Effect.fn("MasterKeyFile.openKeyring")(function* (
       if (expired.has(entry.file)) continue;
       const stored = yield* readEntry(entry.file);
       if (Option.isNone(stored)) continue;
-      const result = SecretCipher.open(keys, "server-secret", entry.name, stored.value.bytes);
+      const result = SecretCipher.open(
+        keys,
+        SecretCipher.entryPurpose(entry.name),
+        entry.name,
+        stored.value.bytes,
+      );
       if (result._tag !== "opened") {
         return yield* fail(
           "damaged",
@@ -414,7 +419,12 @@ export const openKeyring = Effect.fn("MasterKeyFile.openKeyring")(function* (
         if (Option.isNone(stored)) continue;
         // The first encrypting build kept sealed values in `.bin`: one that opens (its tag
         // verifies under its name and purpose) is already sealed, never sealed a second time.
-        const already = SecretCipher.open(keys, "server-secret", entry.name, stored.value.bytes);
+        const already = SecretCipher.open(
+          keys,
+          SecretCipher.entryPurpose(entry.name),
+          entry.name,
+          stored.value.bytes,
+        );
         const sealedPath = path.join(secretsDir, `${entry.name}${SEALED_EXTENSION}`);
         const header = SecretCipher.parseHeader(stored.value.bytes);
         if (already._tag === "opened" && header._tag === "sealed" && header.keyId === target.id) {
@@ -425,7 +435,7 @@ export const openKeyring = Effect.fn("MasterKeyFile.openKeyring")(function* (
         const plaintext = already._tag === "opened" ? already.plaintext : stored.value.bytes;
         yield* writeAtomically(
           sealedPath,
-          SecretCipher.seal(target, "server-secret", entry.name, plaintext),
+          SecretCipher.seal(target, SecretCipher.entryPurpose(entry.name), entry.name, plaintext),
           timesOf(stored.value.info),
         ).pipe(Effect.catch(io(`encrypt ${entry.file}`)));
         written += 1;
@@ -439,7 +449,7 @@ export const openKeyring = Effect.fn("MasterKeyFile.openKeyring")(function* (
       const info = yield* statOf(entry.file);
       yield* writeAtomically(
         entry.file,
-        SecretCipher.seal(target, "server-secret", entry.name, plaintext),
+        SecretCipher.seal(target, SecretCipher.entryPurpose(entry.name), entry.name, plaintext),
         timesOf(info),
       ).pipe(Effect.catch(io(`re-encrypt ${entry.file}`)));
       written += 1;
@@ -619,7 +629,12 @@ export const importKey = Effect.fn("MasterKeyFile.importKey")(function* (
   for (const entry of sealed.values()) {
     const stored = yield* readEntry(entry.file);
     if (Option.isNone(stored)) continue;
-    const opened = SecretCipher.open([key], "server-secret", entry.name, stored.value.bytes);
+    const opened = SecretCipher.open(
+      [key],
+      SecretCipher.entryPurpose(entry.name),
+      entry.name,
+      stored.value.bytes,
+    );
     if (opened._tag !== "opened") return yield* refuse;
   }
   const check = yield* readEntry(path.join(config.secretsDir, KEY_CHECK_FILE));

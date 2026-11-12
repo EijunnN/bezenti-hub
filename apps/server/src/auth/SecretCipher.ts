@@ -19,7 +19,22 @@ const KEY_TEXT_PREFIX = "t3-master-key-v1:";
 const PROOF_LENGTH = 8;
 
 /** What a sealed value is for: each gets its own subkey. */
-export type SealPurpose = "server-secret" | "key-check" | "backup-record" | "secret-file";
+export type SealPurpose =
+  | "server-secret"
+  | "key-check"
+  | "backup-record"
+  | "secret-file"
+  | "vault-value";
+
+/** Store entries holding a Vault's value; sealed with their own purpose (`entryPurpose`). */
+export const VAULT_VALUE_ENTRY_PREFIX = "vault-value-";
+
+/**
+ * The purpose of a store entry, told by its name: a Vault's values have their own subkey, so no
+ * other entry can be renamed into one (or out of one) and still open.
+ */
+export const entryPurpose = (name: string): SealPurpose =>
+  name.startsWith(VAULT_VALUE_ENTRY_PREFIX) ? "vault-value" : "server-secret";
 
 const hkdf = (key: Buffer, info: string, length: number) =>
   Buffer.from(NodeCrypto.hkdfSync("sha256", key, Buffer.alloc(0), info, length));

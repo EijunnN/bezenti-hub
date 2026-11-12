@@ -67,6 +67,11 @@ const PREVIEW_PROFILES = {
   unscoped:
     "the caller's own preview browser profiles: ServerBrowser keys them by User (PreviewProfiles)",
 };
+/** Vaults name no Thread or Project: each Vault is its Organization's or the Owner's. */
+const VAULTS = {
+  unscoped:
+    "Vaults: AccessPolicy `vault.*` for the session's User through SpaceDirectory.authorizeResource (spaceLimit too); a hidden Vault answers like a missing one; no value is returned",
+};
 const INSTALLATION_ACCESS = Object.fromEntries(
   INSTALLATION_RPC_METHODS.map((method) => [method, "installation"]),
 ) as Readonly<Record<InstallationRpcMethod, "installation">>;
@@ -97,6 +102,15 @@ export const RPC_SPACE_ACCESS = {
   [ORCHESTRATION_V2_WS_METHODS.forceStopThread]: "thread",
   [WS_METHODS.guestShareCreate]: "thread",
   [WS_METHODS.secretsAnswerRequest]: "thread",
+  [WS_METHODS.vaultsList]: VAULTS,
+  [WS_METHODS.vaultsCreate]: VAULTS,
+  [WS_METHODS.vaultsUpdate]: VAULTS,
+  [WS_METHODS.vaultsDelete]: VAULTS,
+  [WS_METHODS.vaultsEntriesList]: VAULTS,
+  [WS_METHODS.vaultsEntriesPut]: VAULTS,
+  [WS_METHODS.vaultsEntriesDelete]: VAULTS,
+  [WS_METHODS.vaultsEntriesLink]: VAULTS,
+  [WS_METHODS.vaultsEntriesCopy]: VAULTS,
   [WS_METHODS.projectsCreateFromThread]: "thread",
   // An app acts inside its Thread's live session, so it is its creator's, like a message.
   [WS_METHODS.mcpAppsCallTool]: "owned",

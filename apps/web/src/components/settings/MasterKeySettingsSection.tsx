@@ -58,7 +58,7 @@ export function MasterKeySettingsSection() {
         if (!cancelled) setStatus(next);
       },
       (cause: unknown) => {
-        if (!cancelled) setError(errorMessageOf(cause));
+        if (!cancelled) setError(errorMessageOf(cause, "Could not read the master key's status."));
       },
     );
     return () => {
@@ -74,7 +74,7 @@ export function MasterKeySettingsSection() {
     try {
       await action();
     } catch (cause) {
-      setError(errorMessageOf(cause));
+      setError(errorMessageOf(cause, "That did not work. Try again."));
     } finally {
       setPending(false);
     }

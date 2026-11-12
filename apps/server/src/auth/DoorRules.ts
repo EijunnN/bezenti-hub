@@ -27,6 +27,10 @@ const SSH_INSTALL = own(
 const MASTER_KEY = own(
   "AccessPolicy `masterKey.backup` on the Installation (the Owner only), plus the access scopes; the download also needs a strong factor in the request (UserDirectory.confirmStrongFactor) and is audited before the key leaves (MasterKeyBackup.export); a backup counts only once confirmed with the key's first characters; no WS or MCP door",
 );
+/** The one door that reads a Vault's value; the WS RPCs return names only. */
+const VAULT_REVEAL = own(
+  "Vaults.authorizeReveal (AccessPolicy `vault.reveal`: the Owner only), checked before the strong factor in the request (UserDirectory.confirmStrongFactor), then Vaults.reveal, audited `secret.reveal` before the value leaves; no WS, MCP or CLI door",
+);
 const WEBHOOK = own("the task's secret token in the path; runs as the task's creator");
 const THREAD_READ = own(
   "SpaceVisibility.visibleThreadIds like getThreadProjection: hidden answers thread_not_found",
@@ -135,6 +139,7 @@ export const HTTP_ENDPOINT_RULES: Readonly<Record<string, DoorRule>> = {
   "vaults.masterKeyBackup": MASTER_KEY,
   "vaults.masterKeyBackupConfirm": MASTER_KEY,
   "vaults.masterKeyStatus": MASTER_KEY,
+  "vaults.reveal": VAULT_REVEAL,
   "webhooks.webhookGet": WEBHOOK,
   "webhooks.webhookPatch": WEBHOOK,
   "webhooks.webhookPost": WEBHOOK,

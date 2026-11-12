@@ -23,6 +23,7 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import * as VaultKeyCheck from "../vaults/VaultKeyCheck.ts";
 import * as ServerOwnership from "../serverOwnership.ts";
 import { authLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
@@ -58,6 +59,27 @@ const auditRotation = Effect.fn("cli.secrets.auditRotation")(function* (
     ),
     Effect.catchCause((cause) =>
       Effect.logWarning("Could not record it in the audit log", { cause }),
+    ),
+  );
+});
+
+/**
+ * The database's key check follows the key, so the next start opens it even once the previous key
+ * is deleted. A failure here is finished by that start while the previous key is kept.
+ */
+const resealDatabaseCheck = Effect.fn("cli.secrets.resealDatabaseCheck")(function* (
+  config: ServerConfig.ServerConfig["Service"],
+) {
+  yield* MasterKeyFile.openKeyring("owner").pipe(
+    Effect.flatMap(VaultKeyCheck.checkDatabaseKey),
+    Effect.provide(
+      SqlitePersistence.layerConfig.pipe(Layer.provideMerge(ServerConfig.layer(config))),
+    ),
+    Effect.catchCause((cause) =>
+      Effect.logWarning(
+        "Could not re-encrypt the database's key check; the Hub's next start does it while master.key.previous is kept",
+        { cause },
+      ),
     ),
   );
 });
@@ -196,6 +218,7 @@ const rotateCommand = Command.make("rotate", { ...authLocationFlags }).pipe(
         Effect.provide(ServerConfig.layer(config)),
         Effect.mapError(keyError),
       );
+      yield* resealDatabaseCheck(config);
       yield* auditRotation(config, {
         actor: AuditLog.cliActor,
         action: "secret.master_key.rotate",

@@ -87,7 +87,16 @@ export interface EnvironmentResource {
   readonly workSpaceId?: SpaceId;
 }
 
+/** A Vault of secrets: the Owner's Main vault, another of the Owner's, or an Organization's. */
+export interface VaultResource {
+  readonly kind: "vault";
+  readonly isMain: boolean;
+  /** The Organization whose Vault it is; null for the Owner's own (the Main vault among them). */
+  readonly space: SpaceResource | null;
+}
+
 export type Resource =
+  | VaultResource
   | SpaceResource
   | InstallationResource
   | OwnedResource
@@ -175,7 +184,16 @@ export type Action =
    * See the master key's status and download its backup: the Owner alone, decided on the
    * Installation. Whoever holds it reads every secret from a copy of the Hub's disk.
    */
-  | "masterKey.backup";
+  | "masterKey.backup"
+  // Vaults (`VaultResource`; see `decideVault`).
+  /** See a Vault and its secrets' names and descriptions, never values. */
+  | "vault.view"
+  /** Add, replace, rename and delete a Vault's secrets without reading them. */
+  | "vault.edit"
+  /** Create, rename, describe, archive and delete a Vault: the Owner. */
+  | "vault.manage"
+  /** Read a secret's value: the Owner (the door also asks for a strong factor). */
+  | "vault.reveal";
 
 /** Actions that read or manage rather than add something to the Space. */
 const NON_CREATING: ReadonlySet<Action> = new Set([
@@ -504,8 +522,36 @@ const decideMove = (principal: Principal, { from, to }: MoveResource): Decision 
   return mayMoveOut(principal, from);
 };
 
+const VAULT_ACTIONS: ReadonlySet<Action> = new Set([
+  "vault.view",
+  "vault.edit",
+  "vault.manage",
+  "vault.reveal",
+]);
+
+/**
+ * Vaults. The Owner does everything, and alone creates, manages and reveals; the Main vault and
+ * the Owner's other Vaults are the Owner's alone. An Organization's Vault: its Admins add, replace
+ * and delete secrets without reading them; its Members and Guests see names only.
+ */
+const decideVault = (principal: Principal, action: Action, vault: VaultResource): Decision => {
+  if (principal.isOwner) return allow;
+  if (action === "vault.manage" || action === "vault.reveal") return deny("owner-only");
+  const space = vault.space;
+  if (vault.isMain || space === null) return deny("owner-only");
+  if (space.kind !== "organization") return deny("wrong-resource");
+  if (space.archived) return deny("space-archived");
+  if (space.frozen) return deny("space-frozen");
+  return inOrganization(principal, space, action === "vault.edit" ? ADMIN_ONLY : undefined);
+};
+
 export function decide(principal: Principal, action: Action, resource: Resource): Decision {
   if (principal.inactive === true) return deny("user-inactive");
+  if (VAULT_ACTIONS.has(action) || resource.kind === "vault") {
+    return VAULT_ACTIONS.has(action) && resource.kind === "vault"
+      ? decideVault(principal, action, resource)
+      : deny("wrong-resource");
+  }
   if (USER_ACTIONS.has(action) || isUser(resource)) {
     if (!USER_ACTIONS.has(action) || !isUser(resource)) return deny("wrong-resource");
     if (!principal.isOwner) return deny("owner-only");

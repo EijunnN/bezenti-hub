@@ -294,7 +294,12 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
       }
       return Option.none<Uint8Array>();
     }
-    const opened = SecretCipher.open(current.keys, "server-secret", name, stored.value);
+    const opened = SecretCipher.open(
+      current.keys,
+      SecretCipher.entryPurpose(name),
+      name,
+      stored.value,
+    );
     switch (opened._tag) {
       case "opened":
         return Option.some(opened.plaintext);
@@ -332,7 +337,7 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
   const sealFor = (name: string, value: Uint8Array) =>
     keyring === undefined
       ? value
-      : SecretCipher.seal(keyring.current, "server-secret", name, value);
+      : SecretCipher.seal(keyring.current, SecretCipher.entryPurpose(name), name, value);
 
   const withFiles = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem | Path.Path>) =>
     effect.pipe(

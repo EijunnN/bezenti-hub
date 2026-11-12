@@ -384,6 +384,23 @@ import {
   SourceControlSignInResult,
 } from "./sourceControl.ts";
 import { VcsError } from "./vcs.ts";
+import {
+  VaultCreateInput,
+  VaultDeleteInput,
+  VaultDeleteResult,
+  VaultEntriesListInput,
+  VaultEntriesListResult,
+  VaultEntryDeleteInput,
+  VaultEntryDeleteResult,
+  VaultEntryFromMainInput,
+  VaultEntryPutInput,
+  VaultEntryResult,
+  VaultError,
+  VaultListInput,
+  VaultListResult,
+  VaultSummary,
+  VaultUpdateInput,
+} from "./vaults.ts";
 import { Project, ProjectMutation, ProjectMutationError } from "./project.ts";
 
 export const WS_METHODS = {
@@ -520,6 +537,16 @@ export const WS_METHODS = {
   scheduledTasksRunNow: "scheduledTasks.runNow",
   scheduledTasksRotateWebhookToken: "scheduledTasks.rotateWebhookToken",
   secretsAnswerRequest: "secrets.answerRequest",
+  // Vaults: names and metadata only. Values go in with `put` and out only by HTTP `vaults.reveal`.
+  vaultsList: "vaults.list",
+  vaultsCreate: "vaults.create",
+  vaultsUpdate: "vaults.update",
+  vaultsDelete: "vaults.delete",
+  vaultsEntriesList: "vaults.entries.list",
+  vaultsEntriesPut: "vaults.entries.put",
+  vaultsEntriesDelete: "vaults.entries.delete",
+  vaultsEntriesLink: "vaults.entries.link",
+  vaultsEntriesCopy: "vaults.entries.copy",
   guestShareCreate: "guestShare.create",
   scheduledTasksListWebhookDeliveries: "scheduledTasks.listWebhookDeliveries",
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
@@ -1873,6 +1900,53 @@ const WsSecretsAnswerRequestRpc = Rpc.make(WS_METHODS.secretsAnswerRequest, {
   error: Schema.Union([SecretRequestError, EnvironmentAuthorizationError]),
 });
 
+const VaultRpcError = Schema.Union([VaultError, EnvironmentAuthorizationError]);
+const WsVaultsListRpc = Rpc.make(WS_METHODS.vaultsList, {
+  payload: VaultListInput,
+  success: VaultListResult,
+  error: VaultRpcError,
+});
+const WsVaultsCreateRpc = Rpc.make(WS_METHODS.vaultsCreate, {
+  payload: VaultCreateInput,
+  success: VaultSummary,
+  error: VaultRpcError,
+});
+const WsVaultsUpdateRpc = Rpc.make(WS_METHODS.vaultsUpdate, {
+  payload: VaultUpdateInput,
+  success: VaultSummary,
+  error: VaultRpcError,
+});
+const WsVaultsDeleteRpc = Rpc.make(WS_METHODS.vaultsDelete, {
+  payload: VaultDeleteInput,
+  success: VaultDeleteResult,
+  error: VaultRpcError,
+});
+const WsVaultsEntriesListRpc = Rpc.make(WS_METHODS.vaultsEntriesList, {
+  payload: VaultEntriesListInput,
+  success: VaultEntriesListResult,
+  error: VaultRpcError,
+});
+const WsVaultsEntriesPutRpc = Rpc.make(WS_METHODS.vaultsEntriesPut, {
+  payload: VaultEntryPutInput,
+  success: VaultEntryResult,
+  error: VaultRpcError,
+});
+const WsVaultsEntriesDeleteRpc = Rpc.make(WS_METHODS.vaultsEntriesDelete, {
+  payload: VaultEntryDeleteInput,
+  success: VaultEntryDeleteResult,
+  error: VaultRpcError,
+});
+const WsVaultsEntriesLinkRpc = Rpc.make(WS_METHODS.vaultsEntriesLink, {
+  payload: VaultEntryFromMainInput,
+  success: VaultEntryResult,
+  error: VaultRpcError,
+});
+const WsVaultsEntriesCopyRpc = Rpc.make(WS_METHODS.vaultsEntriesCopy, {
+  payload: VaultEntryFromMainInput,
+  success: VaultEntryResult,
+  error: VaultRpcError,
+});
+
 const WsScheduledTasksListWebhookDeliveriesRpc = Rpc.make(
   WS_METHODS.scheduledTasksListWebhookDeliveries,
   {
@@ -1973,6 +2047,15 @@ export const WsRpcGroup = RpcGroup.make(
   WsScheduledTasksRunNowRpc,
   WsScheduledTasksRotateWebhookTokenRpc,
   WsSecretsAnswerRequestRpc,
+  WsVaultsListRpc,
+  WsVaultsCreateRpc,
+  WsVaultsUpdateRpc,
+  WsVaultsDeleteRpc,
+  WsVaultsEntriesListRpc,
+  WsVaultsEntriesPutRpc,
+  WsVaultsEntriesDeleteRpc,
+  WsVaultsEntriesLinkRpc,
+  WsVaultsEntriesCopyRpc,
   WsScheduledTasksListWebhookDeliveriesRpc,
   WsScheduledTasksGetWebhookDeliveryRpc,
   WsServerReportClientActivityRpc,
