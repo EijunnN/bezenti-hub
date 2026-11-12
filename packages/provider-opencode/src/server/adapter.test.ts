@@ -61,6 +61,8 @@ const decodeOpenCodeSettings = Schema.decodeEffect(OpenCodeSettings);
 const OPEN_CODE_TEST_SETTINGS = Schema.decodeSync(OpenCodeSettings)({
   serverUrl: "http://test.invalid",
 });
+/** No external server: each session starts its own. */
+const OWN_SERVER_SETTINGS = Schema.decodeSync(OpenCodeSettings)({});
 
 function promiseGate<A>() {
   let resolve!: (value: A) => void;
@@ -313,6 +315,54 @@ describe("OpenCodeAdapterV2", () => {
       const terminal = events.findLast((event) => event.type === "turn.terminal");
       assert.strictEqual(session?.providerSession.lastError, sample.expected);
       assert.strictEqual(terminal?.failure?.message, sample.expected);
+    }).pipe(
+      Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+      Effect.scoped,
+    ),
+  );
+
+  it.effect("spec 5: starts its own server with the Thread's secrets, never an external one", () =>
+    Effect.gen(function* () {
+      const seen: Array<NodeJS.ProcessEnv | undefined> = [];
+      const runtimeService = {
+        connectToOpenCodeServer: (input: { readonly environment?: NodeJS.ProcessEnv }) =>
+          Effect.sync(() => void seen.push(input.environment)).pipe(
+            Effect.andThen(Effect.die("stop after the server start")),
+          ),
+        createOpenCodeSdkClient: () => ({}),
+      } as unknown as OpenCodeRuntime.OpenCodeRuntime["Service"];
+      const host = {
+        paths: { cwd: "/workspace" },
+        resolveAttachmentPath: () => null,
+      } as unknown as ProviderHost.ProviderHost["Service"];
+      const make = (settings: typeof OPEN_CODE_TEST_SETTINGS) =>
+        makeOpenCodeAdapterV2({
+          instanceId: ProviderInstanceId.make("opencode-secrets"),
+          settings,
+          environment: { HOME_THING: "kept" },
+        }).pipe(
+          Effect.provideService(OpenCodeRuntime.OpenCodeRuntime, runtimeService),
+          Effect.provideService(ProviderHost.ProviderHost, host),
+        );
+      const own = yield* make(OWN_SERVER_SETTINGS);
+      assert.isTrue(own.receivesSecretEnv);
+      yield* Effect.exit(
+        own.openSession({
+          threadId: ThreadId.make("thread-opencode-secrets"),
+          providerSessionId: ProviderSessionId.make("session-opencode-secrets"),
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("opencode-secrets"),
+            model: "anthropic/claude-sonnet",
+          },
+          runtimePolicy: runtimePolicy("full-access", { cwd: "/workspace" }),
+          secretEnv: { fingerprint: "set-1", variables: [{ name: "ACME_TOKEN", value: "v-1" }] },
+        }),
+      );
+      assert.equal(seen[0]?.ACME_TOKEN, "v-1");
+      assert.equal(seen[0]?.HOME_THING, "kept");
+      // An external server is not ours to start: it never claims to take secrets.
+      const external = yield* make(OPEN_CODE_TEST_SETTINGS);
+      assert.isUndefined(external.receivesSecretEnv);
     }).pipe(
       Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
       Effect.scoped,

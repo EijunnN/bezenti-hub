@@ -312,63 +312,76 @@ and that no Vault RPC answers a `value` or a `valueId`.
 
 ## Delivery as environment variables (`vaults/SecretDelivery.ts`, spec 5 ticket 04)
 
-`SecretDelivery` is the one place that turns the effective set into the environment of one process,
-as that process starts. It reads the values from `VaultValueStore` at that moment and hands them to
-the caller, which sends them on at once: nothing on the Hub keeps them after the call.
+`SecretDelivery` is the one place that turns the effective set into the environment of one process.
+`plan` names what a process would get (names and value ids, and a fingerprint of them) without
+reading a value; `resolve` reads the values from `VaultValueStore` only when a process actually
+starts, and hands them to the caller, which sends them on at once. Nothing on the Hub keeps them.
 
 **Who receives what** is decided on the Hub, never from a client or an agent:
 
 - a turn: the Thread's owner (`orchestration_v2_projection_threads.owner_user_id`; a child Thread
-  speaks for its root's owner). A Thread without an owner (from before Users) gets nothing;
-- a terminal: the signed-in User who opens or attaches it (only the Thread's owner may: `work`);
+  speaks for its root's owner), whoever sends the turn. Nobody continues another User's Thread
+  (`thread.continue`, also for the Owner and Admins), so another User's own Vaults never reach it.
+  A Thread without an owner (from before Users) gets nothing;
+- a terminal: the signed-in User who opens or attaches it. Terminals are `work` doors: only the
+  Thread's owner passes (`SpaceVisibility.claimWork`), so no User attaches another's shell;
 - a setup script on the Hub machine: the Thread's owner.
 
 **The doors** (each calls `SecretDelivery`, `DoorRules.test.ts` lists them):
 
-| Door                                    | Where                                 | Field on the wire                         |
-| --------------------------------------- | ------------------------------------- | ----------------------------------------- |
-| A provider session opens                | `ProviderSessionManager.open`         | `provider.openSession` `secretEnv`        |
-| A terminal opens                        | `ThreadWorkspace.terminalOpen`        | `terminal.open` `secretEnv`               |
-| An attach starts a shell (new terminal) | `ThreadWorkspace.terminalAttach`      | `terminal.stream` `secretEnv` (used once) |
-| A setup script on the Hub machine       | `ProjectSetupScriptRunner`            | in process                                |
-| Choosing a provider session id          | `Orchestrator` (names only, no value) | none                                      |
+| Door                                    | Where                                | Field on the wire                  |
+| --------------------------------------- | ------------------------------------ | ---------------------------------- |
+| A provider session opens                | `ProviderSessionManager.open`        | `provider.openSession` `secretEnv` |
+| A terminal opens                        | `ThreadWorkspace.terminalOpen`       | `terminal.open` `secretEnv`        |
+| An attach starts a shell (new terminal) | `ThreadWorkspace.terminalAttach`     | `terminal.stream` `secretEnv`      |
+| A setup script on the Hub machine       | `ProjectSetupScriptRunner`           | in process                         |
+| Choosing a provider session id          | `Orchestrator` (`mayReceiveSecrets`) | none                               |
 
 Dev servers started from a terminal, by the agent or by a script inherit that process's
 environment; previews get nothing of their own. MCP tools that run commands do so inside the agent
 or a terminal, and so with that process's environment. A moved Thread's setup script on the target
 machine (`move.prepare`) and setup scripts of other machines get no secrets yet.
 
-**Rules, in `SecretDelivery.forProcess`:**
+**Rules:**
 
 - a machine that does not serve the Thread's Space (`servesSpace`, spec 3 ticket 12) gets nothing;
-- a machine on executor contract 9 or earlier and a non-empty set: `SecretDeliveryError`
-  (`outdated-machine`, «<machine> needs an update to receive this Thread's secrets»). The turn
-  fails with that message, the terminal answers it (`secrets_unavailable`). An empty set works as
-  before. `RemoteEnvironments.invoke` also strips `secretEnv` from anything sent to such a machine;
+- `resolve` on a machine of executor contract 9 or earlier with a non-empty set fails
+  (`SecretDeliveryError`, `outdated-machine`, «<machine> needs an update to receive this Thread's
+  secrets»): the turn fails with it, a terminal open answers it (`secrets_unavailable`). An empty set
+  works as before, and such a machine still reattaches a running shell (the attach goes without
+  `cwd`, so it cannot start one). `RemoteEnvironments.invoke` refuses, never strips, any `secretEnv`
+  bound for such a machine: the last guard;
 - a `dangerous` name is delivered only while the Owner is the last who set it (`updated_by`);
-- a fingerprint (sha256 of the User and each name and value id, never a value) names the set.
+- the fingerprint (sha256 of the User and each name and value id) names the set; an empty set is
+  `none`, sent explicitly, so a set that became empty is a change too.
 
-**Provider sessions.** `ProviderSessionManager` keeps each live session's fingerprint. A turn whose
-set differs (a rotation, a revoked Vault, another set) releases the Thread's session and opens a
-new one with the new environment: providers cannot change a live process's environment. A process
-that holds secrets serves one Thread: no other Thread joins it, and the instance-wide session a
-shared provider (Codex) uses for every Thread never gets secrets. A Thread with secrets gets its own
-session id (`Orchestrator.providerSessionIdFor`, `SecretDelivery.receivesSecrets`); a Codex Thread
-that got the shared id before it had secrets fails its turn with «… start a new Thread to receive
-them». Only adapters with `receivesSecretEnv` (Claude, Codex, and ACP registry agents such as Replay,
-through `processEnvironment`) take a non-empty set; any other (Cursor, OpenCode, Pi, Kiro, …)
-refuses the session (`SecretDeliveryError`, `provider`) instead of starting without them.
+**Provider sessions.** `ProviderSessionManager` plans the set at each open and keeps each live
+session's fingerprint; under the session's open lock it decides: the same set reuses the session
+(no value read); another set releases the Thread's session and opens a new one, whose values are
+read then. A session with a turn or background work under way is never killed for it: it goes on
+with what it started with, and the first open after that work ends opens the new one. A process
+that holds secrets serves one Thread, and the instance-wide session a shared provider (Codex) uses
+for every Thread never gets secrets; this is checked before anything is released. A Thread that may
+receive secrets (`mayReceiveSecrets`: one query over the Vaults that could reach its Space or owner,
+a superset of the set) gets its own session id. Adapters with `receivesSecretEnv` take a non-empty
+set: Claude, Codex, Pi, Muse, OpenCode (its own server per session; not an external `serverUrl`),
+and ACP agents whose own runtime starts them with `processEnvironment` (ACP registry agents such as
+Replay, Kiro, fx, Grok). Cursor (its SDK runs in the server's process), Antigravity and any adapter
+built with a custom runtime refuse a session with secrets (`SecretDeliveryError`, `provider`)
+instead of starting without them; with an empty set they work as before.
 
-**Terminals.** `TerminalManager.open(input, { secretEnv })` puts the values in the shell's spawn
-environment and drops them once it spawned; the session keeps only the fingerprint. A running shell
-keeps what it started with: an open (or attach) with another set leaves it running and its snapshot
-says `secretsStale`, which the web terminal shows as «Secrets changed: reopen to update». A shell
-started again from an attach after it exited starts without secrets and is stale too.
+**Terminals.** The Hub first sends only the set's name (`{ fingerprint }`, or `none` with no
+variables). A running shell keeps what it started with; with another set its snapshot says
+`secretsStale`, shown as «Secrets changed: reopen to update». A shell that would start answers
+`secrets_required`, and the Hub then reads the values and sends them: a reattach to a running shell
+reads none. `TerminalManager` never starts a shell that had secrets without the Hub's values (a
+restart through an attach included), puts them in the spawn environment only, and keeps only the
+fingerprint.
 
 **On the machine** (`EnvironmentAgent`): `secretEnv` goes into the provider adapter
 (`openSessionWithSecrets`) or the terminal, and nowhere else: never in arguments (agent scopes
 wrap commands without it), files, logs, spans or the idempotency memory (which keeps answers, not
-requests). The decoded request is not kept once the call answered.
+requests).
 
 **What it does not cover (accepted):**
 
@@ -378,7 +391,8 @@ requests). The decoded request is not kept once the call answered.
   (`/proc/<pid>/environ`, ADR 0004): per-process delivery keeps one User's secrets out of another's
   processes, not out of reach of a determined agent in the same Space;
 - a provider process keeps its environment in memory for its life; Claude's adapter also keeps the
-  session's set to start each turn's process with it;
+  session's set to start each turn's process with it; a busy session keeps an old set until its
+  work ends;
 - Codex's own shell policy leaves out variables whose names contain `KEY`, `SECRET` or `TOKEN` from
   the commands it runs, unless its config says otherwise.
 

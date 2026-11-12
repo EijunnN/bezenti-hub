@@ -1607,6 +1607,27 @@ describe("PiAdapterV2", () => {
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
+  it.effect("spec 5: starts the session's pi process with the Thread's secrets", () =>
+    Effect.gen(function* () {
+      const fake = yield* makeFakePi;
+      const adapter = yield* makeAdapter(fake, "");
+      assert.isTrue(adapter.receivesSecretEnv);
+      yield* adapter.openSession({
+        threadId: THREAD_ID,
+        providerSessionId: SESSION_ID,
+        modelSelection: modelSelection("default"),
+        runtimePolicy,
+        secretEnv: { fingerprint: "set-1", variables: [{ name: "ACME_TOKEN", value: "v-1" }] },
+      });
+      const spawn = fake.lastSpawn();
+      assert.equal(spawn.env.ACME_TOKEN, "v-1");
+      assert.isFalse(
+        spawn.args.some((arg) => arg.includes("v-1")),
+        "never in its arguments",
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
   it.effect("rejects a resume while a turn is active", () =>
     Effect.gen(function* () {
       const fake = yield* makeFakePi;
