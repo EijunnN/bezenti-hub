@@ -177,6 +177,7 @@ describe("RPC authorization scopes", () => {
           WS_METHODS.aiGatewayCheckForUpdates,
           WS_METHODS.aiGatewayUpdate,
           WS_METHODS.aiGatewayRollback,
+          WS_METHODS.aiGatewaySetEnabled,
         ]) {
           expect([method, spaceAccessForRpcMethod(method)]).toEqual([method, "installation"]);
           const refused = yield* guardRpcPayload(
