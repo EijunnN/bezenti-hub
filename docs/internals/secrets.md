@@ -353,7 +353,8 @@ that holds secrets serves one Thread: no other Thread joins it, and the instance
 shared provider (Codex) uses for every Thread never gets secrets. A Thread with secrets gets its own
 session id (`Orchestrator.providerSessionIdFor`, `SecretDelivery.receivesSecrets`); a Codex Thread
 that got the shared id before it had secrets fails its turn with «… start a new Thread to receive
-them». Only adapters with `receivesSecretEnv` (Claude, Codex) take a non-empty set; any other
+them». Only adapters with `receivesSecretEnv` (Claude, Codex, and ACP registry agents such as Replay,
+through `processEnvironment`) take a non-empty set; any other (Cursor, OpenCode, Pi, Kiro, …)
 refuses the session (`SecretDeliveryError`, `provider`) instead of starting without them.
 
 **Terminals.** `TerminalManager.open(input, { secretEnv })` puts the values in the shell's spawn
