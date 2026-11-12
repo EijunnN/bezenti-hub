@@ -89,7 +89,8 @@ if (mode === "decoy") {
   const REDIRECT = { antigravity: "http://localhost:51121/oauth-callback", codex: "http://localhost:1455/auth/callback", claude: "http://localhost:54545/callback", devin: "http://127.0.0.1:" + port + "/callback" };
   const TOKEN_MODELS = { antigravity: ["gemini-3-pro", "claude-sonnet-5-5"], claude: ["claude-sonnet-5-5"], codex: ["gpt-5.5"], kimi: ["kimi-k2"], xai: ["grok-5"], devin: ["devin-1"], meta: ["muse-spark-1.3"], vertex: ["gemini-3-pro"] };
   const randomText = () => Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-  const freshToken = (provider) => ({ type: provider, email: "owner@example.com", access_token: "fake-access-" + randomText(), refresh_token: "fake-refresh-" + randomText(), expired: new Date(Date.now() + 3600000).toISOString(), last_refresh: new Date().toISOString() });
+  const emailNow = () => (fs.existsSync(path.join(dir, "fake-oauth-email")) ? fs.readFileSync(path.join(dir, "fake-oauth-email"), "utf8").trim() : "owner@example.com");
+  const freshToken = (provider) => ({ type: provider, email: emailNow(), access_token: "fake-access-" + randomText(), refresh_token: "fake-refresh-" + randomText(), expired: new Date(Date.now() + 3600000).toISOString(), last_refresh: new Date().toISOString() });
   const writeToken = (name, token) => fs.writeFileSync(path.join(authDir, name), JSON.stringify(token), { mode: 0o600 });
   const tokenFiles = () => (authDir === undefined || !fs.existsSync(authDir) ? [] : fs.readdirSync(authDir).filter((name) => name.endsWith(".json")));
   const readToken = (name) => { try { return JSON.parse(fs.readFileSync(path.join(authDir, name), "utf8")); } catch { return {}; } };
@@ -129,7 +130,9 @@ if (mode === "decoy") {
       const login = logins.get(back.searchParams.get("state"));
       if (login === undefined || login.provider !== body.provider) return send(response, 404, { status: "error", error: "unknown or expired state" });
       if (back.searchParams.get("code") === "fake-good-code") {
-        writeToken(login.provider + "-owner@example.com.json", freshToken(login.provider));
+        writeToken(login.provider + "-" + emailNow() + ".json", freshToken(login.provider));
+        // Like two sign-ins landing at once: a second new file of the same provider.
+        if (fs.existsSync(path.join(dir, "fake-oauth-twice"))) writeToken(login.provider + "-second@example.com.json", freshToken(login.provider));
         login.status = "ok";
       } else {
         login.status = "error";
@@ -158,7 +161,10 @@ if (mode === "decoy") {
       writeToken("vertex-" + account.project_id + ".json", { type: "vertex", project_id: account.project_id, email: account.client_email, location: "us-central1", service_account: account });
       return send(response, 200, { status: "ok" });
     }
-    if (route === "/credentials" && request.method === "GET") return send(response, 200, { files: credentialList() });
+    if (route === "/credentials" && request.method === "GET") {
+      if (fs.existsSync(path.join(dir, "fake-credentials-down"))) return send(response, 503, { error: "down" });
+      return send(response, 200, { files: credentialList() });
+    }
     if (route === "/credentials/download" && request.method === "GET") {
       if (safeName === null || !fs.existsSync(path.join(authDir, safeName))) return send(response, 404, { error: "file not found" });
       response.statusCode = 200;

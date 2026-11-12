@@ -7,7 +7,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
-import { HttpClient, HttpClientRequest } from "effect/http";
+import { HttpClient, HttpClientRequest, UrlParams } from "effect/http";
 
 import { filterGatewayLine } from "./gatewayLogFilter.ts";
 
@@ -70,8 +70,17 @@ export interface CliproxyCredential {
   readonly modtime: string | null;
 }
 
+/** Every query value of a management call (a sign-in state, a credential name) out of spans. */
+const ALL_QUERY_VALUES: ReadonlyArray<RegExp> = [/^/u];
+
 export const makeCliproxyManagement = Effect.gen(function* () {
-  const client = yield* HttpClient.HttpClient;
+  const httpClient = yield* HttpClient.HttpClient;
+  const client = {
+    execute: (request: HttpClientRequest.HttpClientRequest) =>
+      httpClient
+        .execute(request)
+        .pipe(Effect.provideService(UrlParams.CurrentRedactedNames, ALL_QUERY_VALUES)),
+  };
   /** A management call with a JSON answer (or none): its status and body, never thrown. */
   const managementJson = (
     endpoint: CliproxyEndpoint,
@@ -368,13 +377,8 @@ export const makeCliproxyManagement = Effect.gen(function* () {
           > =>
             response.status === 200
               ? Effect.succeed({ _tag: "accepted" } as const)
-              : response.text.pipe(
-                  Effect.orElseSucceed(() => ""),
-                  Effect.map((text) => ({
-                    _tag: "refused" as const,
-                    reason: refusalReasonOf(text, []),
-                  })),
-                ),
+              : // Its words could quote the key it was sent: a fixed reason, never its text.
+                Effect.succeed({ _tag: "refused" as const, reason: `HTTP ${response.status}` }),
         ),
         Effect.timeout("15 seconds"),
         Effect.mapError(

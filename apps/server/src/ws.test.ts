@@ -782,7 +782,7 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(SourceControlDiscovery.SourceControlDiscovery)({}),
   Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({}),
   Layer.mock(SourceControlSignIn.SourceControlSignIn)({}),
-  Layer.mock(AiGateway.AiGateway)({}),
+  Layer.mock(AiGateway.AiGateway)({ authDir: "" }),
   Layer.mock(AiAccounts.AiAccounts)({}),
   Layer.mock(StorageCleanup.StorageCleanup)({}),
   Layer.mock(DatabaseStorage.DatabaseStorage)({}),

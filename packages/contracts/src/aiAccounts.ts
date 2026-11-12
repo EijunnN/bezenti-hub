@@ -229,6 +229,8 @@ export const AiAccountLoginCompleteInput = Schema.Struct({
   loginId: TrimmedNonEmptyString.check(Schema.isMaxLength(100)),
   /** `redirect` flows: the address the browser landed on, pasted. */
   redirectUrl: Schema.optionalKey(Schema.RedactedFromValue(Schema.String)),
+  /** «Sign in again» came back as another account: use it anyway. */
+  confirmIdentity: Schema.optionalKey(Schema.Boolean),
 });
 export type AiAccountLoginCompleteInput = typeof AiAccountLoginCompleteInput.Type;
 
@@ -255,6 +257,8 @@ export const AiAccountErrorReason = Schema.Literals([
   "pending",
   /** The provider or CLIProxyAPI refused the sign-in. */
   "sign-in-failed",
+  /** «Sign in again» came back as another account: the Owner confirms before it replaces it. */
+  "identity-mismatch",
 ]);
 export type AiAccountErrorReason = typeof AiAccountErrorReason.Type;
 

@@ -37,8 +37,10 @@ import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -65,6 +67,7 @@ import { filterGatewayLine } from "./gatewayLogFilter.ts";
 import {
   CLIPROXY_PROVIDER,
   checkPastedRedirect,
+  cliproxyTypeOf,
   httpsPageOf,
   isVertexServiceAccount,
   LOGIN_TTL_MS,
@@ -289,7 +292,9 @@ const statusOf = (
         "Deleted, but its key is still live in the AI gateway, which has not taken the change yet. The Hub keeps trying.",
     };
   }
-  if (row.disabled === 1) return { status: "disabled", statusMessage: "Disabled by the Owner." };
+  if (row.disabled === 1) {
+    return { status: "disabled", statusMessage: row.statusMessage ?? "Disabled by the Owner." };
+  }
   if (!context.running) {
     return { status: "pending", statusMessage: "The AI gateway is not running." };
   }
@@ -392,7 +397,9 @@ export interface AiAccountsOptions {
 const NO_MEMORY_FOLDER =
   "This Hub has no folder in memory ($XDG_RUNTIME_DIR or /dev/shm) for the AI gateway, so subscriptions are not loaded: their tokens would sit in clear on the disk.";
 /** How often the Hub reads back the tokens CLIProxyAPI refreshed, to seal them again. */
-const TOKEN_POLL_MS = 60_000;
+const TOKEN_POLL_MS = 10_000;
+/** Even with no file changed, the tokens are read back this often (and while a sign-in is open). */
+const TOKEN_FULL_PASS_MS = 5 * 60_000;
 /** How long the Hub waits for CLIProxyAPI to finish a sign-in it was handed. */
 const LOGIN_STATUS_ROUNDS = 60;
 const DEVICE_STATUS_ROUNDS = 4;
@@ -425,6 +432,24 @@ const tokenStatusOf = (
   return { status: "working", message: null };
 };
 
+/** Every token file the gateway lists and when it changed, to notice a refresh cheaply. */
+const modtimesOf = (listed: ReadonlyArray<CliproxyCredential>) =>
+  listed
+    .map((entry) => `${entry.name}@${entry.modtime ?? ""}`)
+    .toSorted()
+    .join("|");
+
+/** A new subscription waits for the Owner to check who it signed in as. */
+const confirmMessageOf = (signedInAs: string | null) =>
+  `Signed in as ${signedInAs ?? "an account the provider did not name"}. Check it is the right account, then turn it on.`;
+
+/** A token a sign-in brought back, sealed under its own id. */
+interface TakenToken {
+  readonly tokenId: string;
+  readonly token: Record<string, unknown>;
+  readonly signedInAs: string | null;
+}
+
 /** A sign-in the Owner started and has not finished: one at a time on the Hub. */
 interface PendingLogin {
   readonly loginId: string;
@@ -443,6 +468,8 @@ interface PendingLogin {
   /** Files CLIProxyAPI held before: the sign-in's token is a new one. */
   readonly before: ReadonlySet<string>;
   completing: boolean;
+  /** «Sign in again» as another account: its token, held until the Owner confirms. */
+  held?: (TakenToken & { readonly mismatch: string }) | undefined;
 }
 
 const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions) {
@@ -455,6 +482,8 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
   const allowed = yield* AllowedAiAccounts.AllowedAiAccounts;
   const management = yield* makeCliproxyManagement;
   const tokens = yield* ServerSecretStore.AiAccountTokenStore;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const usageReader = yield* makeCliproxyApi;
 
   /** A stored credential to remove: an API key (`cred-…`) or a subscription's token (`tok-…`). */
@@ -558,6 +587,7 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     `;
     for (const { credentialId } of retired) {
       if (liveCredentials.has(credentialId)) continue;
+      if (tokensUnknown && isTokenId(credentialId)) continue;
       yield* storedRemove(credentialId);
       yield* sql`DELETE FROM ai_account_retired_credentials WHERE credential_id = ${credentialId}`;
     }
@@ -582,10 +612,19 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     WHERE disabled = 0 AND deleted_at IS NULL AND type = 'subscription' AND credential_id IS NOT NULL
     ORDER BY priority, account_id
   `;
+  /** Every subscription account that exists, enabled or not: whose newer token is still worth keeping. */
+  const existingSubscriptions = sql<AccountRow>`
+    SELECT ${sql.literal(ACCOUNT_COLUMNS)} FROM ai_accounts
+    WHERE deleted_at IS NULL AND type = 'subscription' AND credential_id IS NOT NULL
+  `;
   /** The sign-in in progress, if any: its token file must not be swept before it is captured. */
   let pendingLogin: PendingLogin | undefined;
   /** Token ids whose file the running CLIProxyAPI held at the last look. */
   let liveTokens: ReadonlySet<string> = new Set();
+  /** The last token reconcile failed: which token files the gateway holds is not known. */
+  let tokensUnknown = false;
+  /** Our token files' times at the last look, so the poll reads tokens only when one changed. */
+  let seenModtimes = "";
 
   /** What the Hub knows is live in the gateway: API keys it holds and token files it has. */
   const liveCredentialIds = () =>
@@ -594,16 +633,31 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
       ...liveTokens,
     ]);
 
+  /** The sign-in in progress, unless its time is over (then it is forgotten). */
+  const activeLogin = Effect.gen(function* () {
+    const login = pendingLogin;
+    if (login === undefined) return undefined;
+    if (!login.completing && (yield* Clock.currentTimeMillis) >= login.expiresAt) {
+      pendingLogin = undefined;
+      if (login.held !== undefined) {
+        yield* tokens.remove(login.held.tokenId).pipe(Effect.ignore({ log: true }));
+      }
+      return undefined;
+    }
+    return login;
+  });
+
   /**
-   * Seals what CLIProxyAPI holds when it is newer than the sealed copy (it refreshed the token, and
-   * a refresh may rotate the refresh token, so the sealed one would die), and never the other way
-   * round: a copy older than the sealed one is replaced by the sealed one. Under the lock.
+   * Seals a copy of an account's current token when it is newer than the sealed one (CLIProxyAPI
+   * refreshed it, and a refresh may rotate the refresh token, so the sealed one would die), and
+   * never the other way round. Only a token of the account's provider. Under the lock.
    */
   const captureIfNewer = Effect.fn("AiAccounts.captureIfNewer")(function* (
     row: AccountRow,
     tokenId: string,
     inGateway: Record<string, unknown>,
   ) {
+    if (inGateway.type !== cliproxyTypeOf(row.provider)) return false;
     const current = yield* tokens.get(tokenId).pipe(Effect.mapError(unreadable));
     const sealed = Option.isSome(current) ? parseToken(current.value) : undefined;
     if (sealed !== undefined && newerToken(sealed, inGateway) !== "gateway") return false;
@@ -615,51 +669,143 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
   });
 
   /**
-   * Under the lock, by the management API: each account's newest token wins, wherever it is; files
-   * of accounts gone or signed in again go, and stray sign-in files when none is in progress.
-   * Without a folder in memory none stays. Answers the token ids the gateway holds now.
+   * Whether a token file stays in the gateway. The Hub's own (`acct-…-tok-….json`): only the
+   * current token of an enabled account, with a folder in memory. Any other: only the new file of
+   * the sign-in in progress (its provider's, not there when it started), on that gateway.
+   */
+  const keepFile = (
+    entry: { readonly name: string; readonly provider: string | null },
+    wanted: ReadonlyMap<string, string>,
+    login: PendingLogin | undefined,
+    baseUrl: string | undefined,
+  ) => {
+    const ours = parseTokenFileName(entry.name);
+    if (ours !== undefined) return wanted.get(ours.accountId) === ours.tokenId;
+    return (
+      login !== undefined &&
+      baseUrl !== undefined &&
+      login.baseUrl === baseUrl &&
+      entry.provider === CLIPROXY_PROVIDER[login.provider] &&
+      !login.before.has(entry.name)
+    );
+  };
+
+  /**
+   * With no CLIProxyAPI answering (stopped, off, or about to launch): the memory folder's token
+   * files read and removed directly. A newer copy of an existing account's current token is sealed
+   * first; every file not wanted goes (the next launch must not load it). Answers the token ids
+   * still in the folder. Under the lock.
+   */
+  const reconcileFolder = Effect.fn("AiAccounts.reconcileFolder")(function* () {
+    const inMemory = (yield* gateway.status).credentialsInMemory;
+    const rows = yield* subscriptionAccounts.pipe(Effect.mapError(unreadable));
+    const existing = new Map(
+      (yield* existingSubscriptions.pipe(Effect.mapError(unreadable))).map(
+        (row) => [row.accountId, row] as const,
+      ),
+    );
+    const wanted = new Map(
+      inMemory ? rows.map((row) => [row.accountId, row.credentialId ?? ""] as const) : [],
+    );
+    const names = yield* fileSystem
+      .readDirectory(gateway.authDir)
+      .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
+    const left = new Set<string>();
+    for (const name of names) {
+      if (!name.endsWith(".json")) continue;
+      const file = path.join(gateway.authDir, name);
+      const ours = parseTokenFileName(name);
+      if (ours !== undefined) {
+        const row = existing.get(ours.accountId);
+        if (row !== undefined && row.credentialId === ours.tokenId) {
+          const bytes = yield* fileSystem.readFile(file).pipe(Effect.option);
+          const token = Option.isSome(bytes) ? parseToken(bytes.value) : undefined;
+          if (token !== undefined) yield* captureIfNewer(row, ours.tokenId, token);
+        }
+        if (wanted.get(ours.accountId) === ours.tokenId) {
+          left.add(ours.tokenId);
+          continue;
+        }
+      }
+      // No sign-in survives its gateway: any other file goes too.
+      const removed = yield* fileSystem.remove(file).pipe(
+        Effect.as(true),
+        Effect.catch((cause) =>
+          Effect.logWarning("AiAccounts: could not remove a token file", { name, cause }).pipe(
+            Effect.as(false),
+          ),
+        ),
+      );
+      if (!removed && ours !== undefined) left.add(ours.tokenId);
+    }
+    return left;
+  });
+
+  /**
+   * Under the lock, by the management API: each account's newest token wins, wherever it is; a
+   * file not kept (keepFile) goes, after its newer token is sealed. One account failing leaves the
+   * others. Without a folder in memory none stays. Answers the token ids the gateway holds now.
    */
   const reconcileTokens = Effect.fn("AiAccounts.reconcileTokens")(function* (
     endpoint: CliproxyEndpoint,
   ) {
     const inMemory = (yield* gateway.status).credentialsInMemory;
     const rows = yield* subscriptionAccounts.pipe(Effect.mapError(unreadable));
+    const existing = new Map(
+      (yield* existingSubscriptions.pipe(Effect.mapError(unreadable))).map(
+        (row) => [row.accountId, row] as const,
+      ),
+    );
     const wanted = new Map(
       inMemory ? rows.map((row) => [row.accountId, row.credentialId ?? ""] as const) : [],
     );
+    const login = yield* activeLogin;
     const held = yield* management.credentials(endpoint);
+    const oneAccount = (accountId: string) => (cause: unknown) =>
+      Effect.logWarning("AiAccounts: could not reconcile a subscription's token", {
+        accountId,
+        cause,
+      }).pipe(Effect.andThen(Effect.sync(() => (dirty = true))));
     for (const entry of held) {
+      if (keepFile(entry, wanted, login, endpoint.baseUrl)) continue;
       const ours = parseTokenFileName(entry.name);
-      const keep =
-        ours !== undefined
-          ? wanted.get(ours.accountId) === ours.tokenId
-          : inMemory && pendingLogin !== undefined;
-      if (!keep) yield* management.deleteCredential(endpoint, entry.name);
+      yield* Effect.gen(function* () {
+        // A refreshed token of an account that still exists is sealed before its file goes.
+        const row = ours === undefined ? undefined : existing.get(ours.accountId);
+        if (ours !== undefined && row !== undefined && row.credentialId === ours.tokenId) {
+          const copy = yield* management.downloadCredential(endpoint, entry.name);
+          const token = Option.isSome(copy) ? parseToken(copy.value) : undefined;
+          if (token !== undefined) yield* captureIfNewer(row, ours.tokenId, token);
+        }
+        yield* management.deleteCredential(endpoint, entry.name);
+      }).pipe(Effect.catch(oneAccount(ours?.accountId ?? entry.name)));
     }
     const names = new Set(held.map((entry) => entry.name));
     for (const row of inMemory ? rows : []) {
       const tokenId = row.credentialId ?? "";
-      const stored = yield* tokens.get(tokenId).pipe(Effect.mapError(unreadable));
-      const sealed = Option.isSome(stored) ? parseToken(stored.value) : undefined;
-      if (sealed === undefined) {
-        yield* setStatus(
-          row.accountId,
-          tokenId,
-          "needs-sign-in",
-          "Its sign-in is missing from the Hub's store: sign in again.",
-        );
-        continue;
-      }
-      const name = tokenFileNameOf(row.accountId, tokenId);
-      if (names.has(name)) {
-        const copy = yield* management.downloadCredential(endpoint, name);
-        const inGateway = Option.isSome(copy) ? parseToken(copy.value) : undefined;
-        if (inGateway !== undefined) {
-          if (yield* captureIfNewer(row, tokenId, inGateway)) continue;
-          if (newerToken(sealed, inGateway) !== "sealed") continue;
+      yield* Effect.gen(function* () {
+        const stored = yield* tokens.get(tokenId).pipe(Effect.mapError(unreadable));
+        const sealed = Option.isSome(stored) ? parseToken(stored.value) : undefined;
+        if (sealed === undefined) {
+          yield* setStatus(
+            row.accountId,
+            tokenId,
+            "needs-sign-in",
+            "Its sign-in is missing from the Hub's store: sign in again.",
+          );
+          return;
         }
-      }
-      yield* management.uploadCredential(endpoint, name, tokenForAccount(sealed, row.accountId));
+        const name = tokenFileNameOf(row.accountId, tokenId);
+        if (names.has(name)) {
+          const copy = yield* management.downloadCredential(endpoint, name);
+          const inGateway = Option.isSome(copy) ? parseToken(copy.value) : undefined;
+          if (inGateway !== undefined) {
+            if (yield* captureIfNewer(row, tokenId, inGateway)) return;
+            if (newerToken(sealed, inGateway) !== "sealed") return;
+          }
+        }
+        yield* management.uploadCredential(endpoint, name, tokenForAccount(sealed, row.accountId));
+      }).pipe(Effect.catch(oneAccount(row.accountId)));
     }
     const now = yield* management.credentials(endpoint);
     const present = new Map(now.map((entry) => [entry.name, entry]));
@@ -679,7 +825,13 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
       const { status, message } = tokenStatusOf(entry);
       yield* setStatus(row.accountId, tokenId, status, message);
     }
+    // Another set of tokens in the gateway: its quota windows are read again.
+    if (holding.size !== liveTokens.size || [...holding].some((id) => !liveTokens.has(id))) {
+      quotaCache = undefined;
+    }
     liveTokens = holding;
+    tokensUnknown = false;
+    seenModtimes = modtimesOf(now);
     return holding;
   });
 
@@ -701,6 +853,25 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     ),
     Effect.withSpan("AiAccounts.refreshTokens"),
   );
+
+  /** A cheap look (the list only): the tokens are read back when one of the Hub's files changed. */
+  let lastFullPass = 0;
+  const pollTokens = Effect.gen(function* () {
+    const endpoint = yield* gateway.endpoint;
+    if (Option.isNone(endpoint)) return;
+    const at = yield* Clock.currentTimeMillis;
+    const listed = yield* management.credentials(endpoint.value).pipe(Effect.option);
+    if (
+      Option.isSome(listed) &&
+      modtimesOf(listed.value) === seenModtimes &&
+      pendingLogin === undefined &&
+      at - lastFullPass < TOKEN_FULL_PASS_MS
+    ) {
+      return;
+    }
+    lastFullPass = at;
+    yield* refreshTokens;
+  });
 
   /**
    * Under the lock: the enabled accounts that pass their own checks, with their keys from the
@@ -805,11 +976,23 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     for (const { row, reason } of bad) {
       yield* setStatus(row.accountId, row.credentialId ?? "", "error", reason);
     }
-    yield* reconcileTokens(endpoint);
+    yield* reconcileTokens(endpoint).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("AiAccounts: could not reconcile the subscriptions' tokens", {
+          reason: error.message,
+        }).pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              tokensUnknown = true;
+            }),
+          ),
+        ),
+      ),
+    );
     const retiredLeft = yield* cleanupRetired(liveCredentialIds()).pipe(
       Effect.mapError(unreadable),
     );
-    dirty = retiredLeft;
+    dirty = retiredLeft || tokensUnknown;
     retryDelayMs = RETRY_FIRST_MS;
     return accepted;
   });
@@ -894,6 +1077,28 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     }
   });
 
+  /** Under the lock, with no CLIProxyAPI answering: the memory folder's token files directly. */
+  const folderNow = reconcileFolder().pipe(
+    Effect.tap((left) =>
+      Effect.sync(() => {
+        liveTokens = left;
+        tokensUnknown = false;
+      }),
+    ),
+    Effect.catch((error) =>
+      Effect.logWarning("AiAccounts: could not reconcile the gateway's token folder", {
+        reason: error.message,
+      }).pipe(
+        Effect.andThen(
+          Effect.sync(() => {
+            tokensUnknown = true;
+          }),
+        ),
+      ),
+    ),
+    Effect.asVoid,
+  );
+
   /**
    * After a change to what the gateway holds: into the running gateway now. With none running,
    * no key is live anywhere, so retired ones go at once (`not-running`).
@@ -902,14 +1107,17 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     const endpoint = yield* gateway.endpoint;
     if (Option.isNone(endpoint)) {
       yield* syncLock.withPermits(1)(
-        Effect.suspend(() =>
-          live === undefined
-            ? cleanupRetired(new Set()).pipe(
-                Effect.tap((left) => Effect.sync(() => (dirty = left))),
-                Effect.ignore({ log: true }),
-              )
-            : Effect.sync(() => (dirty = true)),
-        ),
+        Effect.gen(function* () {
+          yield* folderNow;
+          if (live !== undefined) {
+            dirty = true;
+            return;
+          }
+          dirty = yield* cleanupRetired(liveCredentialIds()).pipe(
+            Effect.map((left) => left || tokensUnknown),
+            Effect.orElseSucceed(() => true),
+          );
+        }),
       );
       return "not-running" as const;
     }
@@ -919,6 +1127,20 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     );
   }).pipe(Effect.withSpan("AiAccounts.sync"));
 
+  yield* gateway.setBeforeLaunch(() =>
+    syncLock.withPermits(1)(
+      Effect.gen(function* () {
+        const login = pendingLogin;
+        if (login !== undefined && !login.completing) {
+          pendingLogin = undefined;
+          yield* dropHeld(login);
+        }
+        yield* folderNow;
+      }),
+    ),
+  );
+  // At the Hub's stop, the tokens CLIProxyAPI refreshed since the last look are sealed first.
+  yield* Effect.addFinalizer(() => refreshTokens);
   // Every start (a crash and its restart, an update, a roll back) gets the accounts before it
   // counts as running, its check forked; a start that raced this registration is caught below.
   yield* gateway.setProvisioner((endpoint) =>
@@ -961,7 +1183,7 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
   // CLIProxyAPI refreshes subscription tokens by itself: read them back and seal the newer ones.
   yield* Effect.gen(function* () {
     yield* Effect.sleep(Duration.millis(options.tokenPollMs ?? TOKEN_POLL_MS));
-    yield* refreshTokens;
+    yield* pollTokens;
   }).pipe(Effect.forever, Effect.forkScoped);
 
   const catalogIds = Effect.gen(function* () {
@@ -1099,7 +1321,8 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
       const entry = held.find((candidate) => candidate.name === name);
       const limits = quotas.get(name);
       extras.set(row.accountId, {
-        signedInAs: signedInAsOf(entry?.email),
+        signedInAs:
+          signedInAsOf(entry?.email) ?? signedInAsOf((yield* sealedOf(row.credentialId))?.email),
         // Its windows only: nothing derived from the credential.
         usageLimits:
           limits === undefined
@@ -1633,6 +1856,7 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     const loginId = `login-${yield* newId(16)}`;
     const expiresAt = (yield* Clock.currentTimeMillis) + (options.loginTtlMs ?? LOGIN_TTL_MS);
     // One sign-in at a time: a new one replaces the one before.
+    yield* dropHeld(pendingLogin);
     pendingLogin = {
       loginId,
       ownerId: userId,
@@ -1658,18 +1882,14 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
   });
 
   /**
-   * Under the lock: the token file a sign-in or import just left in the gateway (one it did not
-   * hold before), sealed under a new token id, and the account it belongs to written; then handed
-   * back under the account's name and prefix, and the file CLIProxyAPI named removed.
+   * Under the lock: the one token file a sign-in or import just left in the gateway (of its
+   * provider, not held before), checked to be of that provider and sealed under a new token id; the
+   * file CLIProxyAPI named goes. Anything else (none, several, another type) is refused.
    */
-  const capture = Effect.fn("AiAccounts.capture")(function* (input: {
+  const takeToken = Effect.fn("AiAccounts.takeToken")(function* (input: {
     readonly endpoint: CliproxyEndpoint;
-    readonly userId: UserId;
-    readonly provider: AiAccountProvider;
     readonly cliproxyProvider: string;
     readonly before: ReadonlySet<string>;
-    readonly target: PendingLogin["target"];
-    readonly kind: "new" | "again" | "import";
   }) {
     const { endpoint } = input;
     let found: ReadonlyArray<CliproxyCredential> = [];
@@ -1678,14 +1898,12 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
       const held = yield* management
         .credentials(endpoint)
         .pipe(Effect.orElseSucceed((): ReadonlyArray<CliproxyCredential> => []));
-      found = held
-        .filter(
-          (entry) =>
-            parseTokenFileName(entry.name) === undefined &&
-            !input.before.has(entry.name) &&
-            (entry.provider === null || entry.provider === input.cliproxyProvider),
-        )
-        .toSorted((a, b) => (b.modtime ?? "").localeCompare(a.modtime ?? ""));
+      found = held.filter(
+        (entry) =>
+          parseTokenFileName(entry.name) === undefined &&
+          !input.before.has(entry.name) &&
+          entry.provider === input.cliproxyProvider,
+      );
     }
     const dropRaw = Effect.forEach(
       found,
@@ -1693,22 +1911,58 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
         management.deleteCredential(endpoint, entry.name).pipe(Effect.ignore({ log: true })),
       { discard: true },
     );
-    const newest = found[0];
-    if (newest === undefined) {
+    const only = found[0];
+    if (only === undefined) {
       return yield* fail("sign-in-failed", "The AI gateway signed in but kept no credential.");
     }
+    if (found.length > 1) {
+      yield* dropRaw;
+      return yield* fail(
+        "sign-in-failed",
+        "More than one new sign-in came back from the AI gateway. Start it again.",
+      );
+    }
     const copy = yield* management
-      .downloadCredential(endpoint, newest.name)
+      .downloadCredential(endpoint, only.name)
       .pipe(Effect.orElseSucceed(() => Option.none<Uint8Array>()));
     const token = Option.isSome(copy) ? parseToken(copy.value) : undefined;
-    if (token === undefined) {
+    if (token === undefined || token.type !== input.cliproxyProvider) {
       yield* dropRaw;
-      return yield* fail("sign-in-failed", "The AI gateway kept a credential the Hub cannot read.");
+      return yield* fail("sign-in-failed", "The AI gateway kept a credential the Hub cannot use.");
     }
     const tokenId = `tok-${yield* newId(16)}`;
     yield* tokens
       .set(tokenId, sealedTokenBytes(token))
-      .pipe(Effect.catch(storage("store the sign-in")));
+      .pipe(
+        Effect.catch((error) => dropRaw.pipe(Effect.andThen(storage("store the sign-in")(error)))),
+      );
+    yield* dropRaw;
+    return { tokenId, token, signedInAs: signedInAsOf(token.email) };
+  });
+
+  /** The sealed token of an account, when the store has one the Hub can read. */
+  const sealedOf = (tokenId: string | null) =>
+    tokenId === null
+      ? Effect.succeed(undefined)
+      : tokens.get(tokenId).pipe(
+          Effect.map((stored) => (Option.isSome(stored) ? parseToken(stored.value) : undefined)),
+          Effect.orElseSucceed(() => undefined),
+        );
+
+  /**
+   * Under the lock: a taken token onto its account. A new account starts disabled, with who it
+   * signed in as, until the Owner checks it and turns it on; «Sign in again» swaps the token under
+   * the account's allowances and retires the old one. Then the token goes into the gateway.
+   */
+  const attach = Effect.fn("AiAccounts.attach")(function* (input: {
+    readonly endpoint: CliproxyEndpoint;
+    readonly userId: UserId;
+    readonly provider: AiAccountProvider;
+    readonly target: PendingLogin["target"];
+    readonly kind: "new" | "again" | "import";
+    readonly taken: TakenToken;
+  }) {
+    const { tokenId, token, signedInAs } = input.taken;
     const at = yield* now;
     const target = input.target;
     const written = yield* sql
@@ -1749,10 +2003,11 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
           `;
           yield* sql`
             INSERT INTO ai_accounts (account_id, name, type, provider, priority, status, disabled,
-              credential_id, key_hint, base_url, models_json, created_at, updated_at, created_by)
+              status_message, credential_id, key_hint, base_url, models_json, created_at,
+              updated_at, created_by)
             VALUES (${accountId}, ${target.name}, 'subscription', ${input.provider},
-              ${(last[0]?.top ?? 0) + 1}, 'pending', 0, ${tokenId}, NULL, NULL, '[]', ${at}, ${at},
-              ${input.userId})
+              ${(last[0]?.top ?? 0) + 1}, 'pending', 1, ${confirmMessageOf(signedInAs)}, ${tokenId},
+              NULL, NULL, '[]', ${at}, ${at}, ${input.userId})
           `;
           yield* audit.record({
             actor: AuditLog.userActor(input.userId),
@@ -1774,22 +2029,29 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
             .remove(tokenId)
             .pipe(
               Effect.ignore({ log: true }),
-              Effect.andThen(dropRaw),
               Effect.andThen(orStorage("save the sign-in")(error)),
             ),
         ),
       );
-    // Into the gateway under the account's own name and prefix; the file it named goes.
-    yield* management
-      .uploadCredential(
-        endpoint,
-        tokenFileNameOf(written, tokenId),
-        tokenForAccount(token, written),
-      )
-      .pipe(Effect.ignore({ log: true }));
-    yield* dropRaw;
+    // «Sign in again»: into the gateway under the account's own name and prefix now. A new
+    // account goes in once the Owner turns it on.
+    if (target._tag === "again") {
+      yield* management
+        .uploadCredential(
+          input.endpoint,
+          tokenFileNameOf(written, tokenId),
+          tokenForAccount(token, written),
+        )
+        .pipe(Effect.ignore({ log: true }));
+    }
     return written;
   });
+
+  /** A token taken but held back for the Owner's confirmation goes from the store. */
+  const dropHeld = (login: PendingLogin | undefined) =>
+    login?.held === undefined
+      ? Effect.void
+      : tokens.remove(login.held.tokenId).pipe(Effect.ignore({ log: true }));
 
   const loginComplete = Effect.fn("AiAccounts.loginComplete")(function* (
     input: AiAccountLoginCompleteInput,
@@ -1805,9 +2067,27 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     ) {
       return yield* fail("expired", LOGIN_GONE);
     }
+    // Claimed before anything else yields: a second call at once is refused, never run twice.
     if (login.completing) return yield* fail("pending", "That sign-in is being finished.");
-    const forget = Effect.sync(() => {
-      if (pendingLogin === login) pendingLogin = undefined;
+    login.completing = true;
+    return yield* completeLogin(input, login, userId).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          login.completing = false;
+        }),
+      ),
+    );
+  });
+
+  const completeLogin = Effect.fn("AiAccounts.completeLogin")(function* (
+    input: AiAccountLoginCompleteInput,
+    login: PendingLogin,
+    userId: UserId,
+  ) {
+    const forget = Effect.suspend(() => {
+      if (pendingLogin !== login) return Effect.void;
+      pendingLogin = undefined;
+      return dropHeld(login);
     });
     if ((yield* Clock.currentTimeMillis) >= login.expiresAt) {
       yield* forget;
@@ -1817,6 +2097,37 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     if (Option.isNone(endpoint) || endpoint.value.baseUrl !== login.baseUrl) {
       yield* forget;
       return yield* fail("expired", "The AI gateway restarted since. Start the sign-in again.");
+    }
+    const finish = (taken: TakenToken) =>
+      syncLock
+        .withPermits(1)(
+          attach({
+            endpoint: endpoint.value,
+            userId,
+            provider: login.provider,
+            target: login.target,
+            kind: login.target._tag,
+            taken,
+          }),
+        )
+        .pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              if (pendingLogin === login) pendingLogin = undefined;
+            }),
+          ),
+          Effect.flatMap((accountId) =>
+            syncNow.pipe(Effect.andThen(ownerSummaryOf(userId, accountId))),
+          ),
+        );
+    // «Sign in again» as another account, held for the Owner's word.
+    if (login.held !== undefined) {
+      if (input.confirmIdentity !== true) {
+        return yield* fail("identity-mismatch", login.held.mismatch);
+      }
+      const taken = login.held;
+      login.held = undefined;
+      return yield* finish(taken);
     }
     const auditTarget =
       login.target._tag === "new"
@@ -1845,7 +2156,6 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
         state: login.state,
       });
       if (checked._tag === "refused") return yield* fail("invalid", checked.problem.message);
-      login.completing = true;
       const handed = yield* management
         .oauthCallback(endpoint.value, cliproxyProvider, checked.redirectUrl)
         .pipe(Effect.orElseSucceed(() => false));
@@ -1855,8 +2165,6 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
           "callback",
         );
       }
-    } else {
-      login.completing = true;
     }
     const rounds = login.flow === "redirect" ? LOGIN_STATUS_ROUNDS : DEVICE_STATUS_ROUNDS;
     let outcome: "ok" | "wait" | "error" = "wait";
@@ -1868,7 +2176,6 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     }
     if (outcome === "wait") {
       if (login.flow === "device") {
-        login.completing = false;
         return yield* fail(
           "pending",
           "Not signed in yet: finish on the provider's page, then try again.",
@@ -1882,21 +2189,28 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     if (outcome === "error") {
       return yield* failed("The provider did not sign you in. Start it again.", "refused");
     }
-    const accountId = yield* syncLock
+    const taken = yield* syncLock
       .withPermits(1)(
-        capture({
-          endpoint: endpoint.value,
-          userId,
-          provider: login.provider,
-          cliproxyProvider,
-          before: login.before,
-          target: login.target,
-          kind: login.target._tag,
-        }),
+        takeToken({ endpoint: endpoint.value, cliproxyProvider, before: login.before }),
       )
-      .pipe(Effect.ensuring(forget));
-    yield* syncNow;
-    return yield* ownerSummaryOf(userId, accountId);
+      .pipe(Effect.tapError(() => forget));
+    if (login.target._tag === "again") {
+      const accountId = login.target.accountId;
+      const rows = yield* sql<{ readonly name: string; readonly credentialId: string | null }>`
+        SELECT name AS "name", credential_id AS "credentialId" FROM ai_accounts
+        WHERE account_id = ${accountId}
+      `.pipe(Effect.catch(storage("read the AI account")));
+      const before = yield* sealedOf(rows[0]?.credentialId ?? null);
+      const was = signedInAsOf(before?.email);
+      if (was !== taken.signedInAs) {
+        login.held = {
+          ...taken,
+          mismatch: `This sign-in is ${taken.signedInAs ?? "an account the provider did not name"}, not ${was ?? "an account the provider did not name"} as before. Confirm to use it for ${rows[0]?.name ?? "this AI account"}.`,
+        };
+        return yield* fail("identity-mismatch", login.held.mismatch);
+      }
+    }
+    return yield* finish(taken);
   });
 
   const importVertex = Effect.fn("AiAccounts.importVertex")(function* (
@@ -1927,14 +2241,18 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
             `The AI gateway refused it${answer.reason === "" ? "" : `: ${answer.reason}`}.`,
           );
         }
-        return yield* capture({
+        const taken = yield* takeToken({
+          endpoint,
+          cliproxyProvider: "vertex",
+          before: new Set(before.map((entry) => entry.name)),
+        });
+        return yield* attach({
           endpoint,
           userId,
           provider: "vertex",
-          cliproxyProvider: "vertex",
-          before: new Set(before.map((entry) => entry.name)),
           target: { _tag: "new", name: input.name },
           kind: "import",
+          taken,
         });
       }),
     );

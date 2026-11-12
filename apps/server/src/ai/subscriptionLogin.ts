@@ -209,8 +209,15 @@ export const isVertexServiceAccount = (text: string) => {
   }
 };
 
-/** Fields where CLIProxyAPI's token formats keep when they were issued or expire. */
-const TIME_FIELDS = ["expired", "expires_at", "expiry", "expire", "last_refresh", "timestamp"];
+/**
+ * The times a token carries, most telling first: when CLIProxyAPI last refreshed it, then when its
+ * access token expires, then when it was written. Each group lists the formats' spellings.
+ */
+const TIME_ORDER: ReadonlyArray<ReadonlyArray<string>> = [
+  ["last_refresh"],
+  ["expired", "expires_at", "expiry", "expire"],
+  ["timestamp"],
+];
 
 const timeOf = (value: unknown): number | undefined => {
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -224,16 +231,12 @@ const timeOf = (value: unknown): number | undefined => {
   return undefined;
 };
 
-/**
- * How recent a token is: the latest time it carries (its access token's expiry, its last
- * refresh). A refresh always moves one forward, so the newer of two copies has the larger one.
- */
-const freshnessOf = (token: Record<string, unknown>): number | undefined => {
-  const times = TIME_FIELDS.flatMap((field) => {
+const firstTime = (token: Record<string, unknown>, fields: ReadonlyArray<string>) => {
+  for (const field of fields) {
     const time = timeOf(token[field]);
-    return time === undefined ? [] : [time];
-  });
-  return times.length === 0 ? undefined : Math.max(...times);
+    if (time !== undefined) return time;
+  }
+  return undefined;
 };
 
 /** The same token, whatever prefix or switch the Hub set on it. */
@@ -244,27 +247,30 @@ const sameToken = (a: Record<string, unknown>, b: Record<string, unknown>) => {
 };
 
 /**
- * Which copy of an account's token to keep: the one CLIProxyAPI holds when it is newer (it
- * refreshed it, and a refresh may have rotated the refresh token, so the sealed copy is dead), the
- * sealed one when it is newer (a stale file a restart left in memory), else neither changes.
- * Without times to compare, a copy that differs from the sealed one is CLIProxyAPI's refresh.
+ * Which copy of an account's token to keep. The first time both carry decides (last refresh, then
+ * access expiry, then written): the gateway's when later (it refreshed, maybe rotating the refresh
+ * token), the sealed one when later (a stale file a restart left in memory). Otherwise, if they
+ * differ, the gateway's: CLIProxyAPI is the only one that writes a token.
  */
 export const newerToken = (
   sealed: Record<string, unknown>,
   inGateway: Record<string, unknown>,
 ): "gateway" | "sealed" | "same" => {
   if (sameToken(sealed, inGateway)) return "same";
-  const ours = freshnessOf(sealed);
-  const theirs = freshnessOf(inGateway);
-  if (ours !== undefined && theirs !== undefined) {
-    if (theirs > ours) return "gateway";
-    if (ours > theirs) return "sealed";
-    return "same";
+  for (const fields of TIME_ORDER) {
+    const ours = firstTime(sealed, fields);
+    const theirs = firstTime(inGateway, fields);
+    if (ours === undefined || theirs === undefined || ours === theirs) continue;
+    return theirs > ours ? "gateway" : "sealed";
   }
-  if (theirs !== undefined && ours === undefined) return "gateway";
-  if (ours !== undefined && theirs === undefined) return "sealed";
   return "gateway";
 };
+
+/** The token `type` CLIProxyAPI writes for an account's provider (Vertex: `vertex`). */
+export const cliproxyTypeOf = (provider: string): string =>
+  provider in CLIPROXY_PROVIDER
+    ? CLIPROXY_PROVIDER[provider as keyof typeof CLIPROXY_PROVIDER]
+    : provider;
 
 /** A CLIProxyAPI token's account label (an email), safe to show the Owner. */
 export const signedInAsOf = (email: unknown): string | null =>

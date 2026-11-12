@@ -43,6 +43,7 @@ import {
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as AiAccounts from "./AiAccounts.ts";
 import * as AiGateway from "./AiGateway.ts";
+import { newerToken } from "./subscriptionLogin.ts";
 import { fakeCliproxyRelease, fakeReleases, pinsOf } from "./AiGateway.testkit.ts";
 import { cliproxyPlatformOf } from "./cliproxyRelease.ts";
 import { CliproxyReleases } from "./CliproxyReleases.ts";
@@ -68,6 +69,7 @@ const startStack = Effect.fn(function* (
     readonly dir: string;
     readonly inMemory?: boolean;
     readonly options?: AiAccounts.AiAccountsOptions;
+    readonly ownerPlacement?: boolean;
   },
 ) {
   const scope = yield* Scope.make();
@@ -76,7 +78,9 @@ const startStack = Effect.fn(function* (
   const memory = NodePath.join(input.dir, "memory");
   NodeFS.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const gateway = yield* AiGateway.make({
-    placement: { _tag: "forced", enabled: true },
+    placement: input.ownerPlacement
+      ? { _tag: "owner", defaultEnabled: true }
+      : { _tag: "forced", enabled: true },
     os,
     stateDir,
     platform: platform!,
@@ -123,7 +127,11 @@ const startStack = Effect.fn(function* (
 });
 
 const hub = Effect.fn(function* (
-  input: { readonly inMemory?: boolean; readonly options?: AiAccounts.AiAccountsOptions } = {},
+  input: {
+    readonly inMemory?: boolean;
+    readonly options?: AiAccounts.AiAccountsOptions;
+    readonly ownerPlacement?: boolean;
+  } = {},
 ) {
   const server = yield* serveAuthHttp;
   const authenticator = yield* makeAuthenticator();
@@ -196,11 +204,14 @@ const signIn = Effect.fn(function* (
   const started = yield* stack.accounts
     .loginStart({ provider, name }, SESSION)
     .pipe(setup.as(setup.ownerId));
-  return yield* stack.accounts
+  const account = yield* stack.accounts
     .loginComplete(
       { loginId: started.loginId, redirectUrl: Redacted.make(landedOn(started.url)) },
       SESSION,
     )
+    .pipe(setup.as(setup.ownerId));
+  return yield* stack.accounts
+    .update({ accountId: account.id, disabled: false })
     .pipe(setup.as(setup.ownerId));
 });
 
@@ -474,6 +485,16 @@ live(
       ];
       assert.isAbove(spans.length, 0);
       assert.isFalse(recorded.some(mentionsAToken), "a token reached a log or a span");
+      const urls = spans.flatMap((span) =>
+        Array.from(span.attributes.entries())
+          .filter(([key]) => key.startsWith("url."))
+          .map(([, value]) => String(value)),
+      );
+      assert.isAbove(urls.length, 0);
+      assert.isFalse(
+        urls.some((url) => /[?&](state|name)=(?!REDACTED|%3Credacted|<redacted)/iu.test(url)),
+        `a sign-in state or credential name reached a span: ${urls.find((url) => /[?&](state|name)=/u.test(url))}`,
+      );
     }).pipe(
       Effect.withTracer(tracer),
       Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
@@ -669,6 +690,7 @@ live("a device sign-in (Kimi) finishes once the Owner approves it on the provide
     NodeFS.writeFileSync(NodePath.join(stack.memory, "fake-device-approve"), "");
     const account = yield* complete;
     assert.equal(account.provider, "kimi");
+    yield* stack.accounts.update({ accountId: account.id, disabled: false }).pipe(as(ownerId));
     assert.isDefined(tokenFileOf(stack, account.id));
   }),
 );
@@ -735,6 +757,8 @@ live("a Vertex service account is imported and sealed; anything else is refused"
       .pipe(as(ownerId));
     assert.equal(account.provider, "vertex");
     assert.equal(account.type, "subscription");
+    assert.equal(account.details?.signedInAs, "agent@acme-vertex.iam.gserviceaccount.com");
+    yield* stack.accounts.update({ accountId: account.id, disabled: false }).pipe(as(ownerId));
     const file = tokenFileOf(stack, account.id);
     assert.isDefined(file);
     assert.notInclude(filesIn(stack.authDir), "vertex-acme-vertex.json");
@@ -770,4 +794,236 @@ live(
       yield* stack.accounts.sync;
       assert.equal((yield* ownerView(setup, stack, claude.id))?.status, "needs-sign-in");
     }),
+);
+
+it("keeps the newest copy of a token: last refresh first, then access expiry; else the gateway's", () => {
+  const sealed = {
+    type: "claude",
+    refresh_token: "a",
+    last_refresh: "2026-11-01T00:00:00Z",
+    expired: "2026-11-01T01:00:00Z",
+  };
+  // A later refresh wins even with an earlier access expiry.
+  assert.equal(
+    newerToken(sealed, {
+      ...sealed,
+      refresh_token: "b",
+      last_refresh: "2026-11-02T00:00:00Z",
+      expired: "2026-10-01T00:00:00Z",
+    }),
+    "gateway",
+  );
+  // An older refresh loses whatever else it carries.
+  assert.equal(
+    newerToken(sealed, {
+      ...sealed,
+      refresh_token: "c",
+      last_refresh: "2026-10-01T00:00:00Z",
+      expired: "2030-01-01T00:00:00Z",
+    }),
+    "sealed",
+  );
+  // Same times, different contents: CLIProxyAPI is the only writer, its copy wins.
+  assert.equal(newerToken(sealed, { ...sealed, refresh_token: "d" }), "gateway");
+  assert.equal(newerToken(sealed, { ...sealed, prefix: "acct-x", disabled: false }), "same");
+});
+
+live(
+  "a new subscription stays disabled, with who it signed in as, until the Owner turns it on",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub();
+      const { stack, as, ownerId } = setup;
+      const started = yield* stack.accounts
+        .loginStart({ provider: "antigravity", name: "Owner Google" }, SESSION)
+        .pipe(as(ownerId));
+      const account = yield* stack.accounts
+        .loginComplete(
+          { loginId: started.loginId, redirectUrl: Redacted.make(landedOn(started.url)) },
+          SESSION,
+        )
+        .pipe(as(ownerId));
+      assert.isTrue(account.disabled);
+      assert.equal(account.status, "disabled");
+      assert.equal(account.details?.signedInAs, "owner@example.com");
+      assert.match(account.statusMessage ?? "", /^Signed in as owner@example\.com\./u);
+      // Not in the gateway, not used, until confirmed.
+      assert.isUndefined(tokenFileOf(stack, account.id));
+      assert.deepEqual(yield* stack.accounts.modelsOf(account.id), []);
+      yield* stack.accounts.update({ accountId: account.id, disabled: false }).pipe(as(ownerId));
+      assert.isDefined(tokenFileOf(stack, account.id));
+    }),
+);
+
+live(
+  "«Sign in again» as another account keeps the old token until the Owner confirms the new identity",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub();
+      const { stack, as, ownerId } = setup;
+      const account = yield* signIn(setup, stack, "claude", "Owner Claude");
+      const before = tokenFileOf(stack, account.id);
+      NodeFS.writeFileSync(NodePath.join(stack.memory, "fake-oauth-email"), "someone@else.test");
+      const again = yield* stack.accounts
+        .loginStart({ provider: "claude", accountId: account.id }, SESSION)
+        .pipe(as(ownerId));
+      const complete = (confirmIdentity?: boolean) =>
+        stack.accounts
+          .loginComplete(
+            {
+              loginId: again.loginId,
+              redirectUrl: Redacted.make(landedOn(again.url)),
+              ...(confirmIdentity === undefined ? {} : { confirmIdentity }),
+            },
+            SESSION,
+          )
+          .pipe(as(ownerId));
+      const refused = yield* Effect.flip(complete());
+      assert.equal(refused.reason, "identity-mismatch");
+      assert.match(refused.message, /someone@else\.test, not owner@example\.com/u);
+      assert.equal(tokenFileOf(stack, account.id), before, "the token was swapped unconfirmed");
+      const swapped = yield* complete(true);
+      assert.equal(swapped.details?.signedInAs, "someone@else.test");
+      assert.notEqual(tokenFileOf(stack, account.id), before);
+    }),
+);
+
+live("a sign-in that brings back two new files, or another provider's, is refused", () =>
+  Effect.gen(function* () {
+    const setup = yield* hub();
+    const { stack, as, ownerId } = setup;
+    NodeFS.writeFileSync(NodePath.join(stack.memory, "fake-oauth-twice"), "");
+    const started = yield* stack.accounts
+      .loginStart({ provider: "codex", name: "Owner ChatGPT" }, SESSION)
+      .pipe(as(ownerId));
+    assert.equal(
+      yield* reasonOf(
+        stack.accounts
+          .loginComplete(
+            { loginId: started.loginId, redirectUrl: Redacted.make(landedOn(started.url)) },
+            SESSION,
+          )
+          .pipe(as(ownerId)),
+      ),
+      "sign-in-failed",
+    );
+    assert.deepEqual(
+      filesIn(stack.authDir).filter((name) => name.endsWith(".json")),
+      [],
+    );
+    assert.deepEqual((yield* stack.accounts.list.pipe(as(ownerId))).accounts, []);
+  }),
+);
+
+live(
+  "an open sign-in keeps only its own provider's new file; an expired or replaced one keeps none",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub();
+      const { stack, as, ownerId } = setup;
+      const raw = (name: string, type: string) =>
+        NodeFS.writeFileSync(
+          NodePath.join(stack.authDir, name),
+          JSON.stringify({ type, refresh_token: "fake-refresh-raw" }),
+        );
+      yield* stack.accounts
+        .loginStart({ provider: "antigravity", name: "Owner Google" }, SESSION)
+        .pipe(as(ownerId));
+      raw("antigravity-new@example.com.json", "antigravity");
+      raw("claude-stray@example.com.json", "claude");
+      yield* stack.accounts.sync;
+      assert.deepEqual(
+        filesIn(stack.authDir).filter((name) => name.endsWith(".json")),
+        ["antigravity-new@example.com.json"],
+      );
+      // Another sign-in replaces it: that file was there before the new one, so it goes.
+      yield* stack.accounts
+        .loginStart({ provider: "antigravity", name: "Owner Google" }, SESSION)
+        .pipe(as(ownerId));
+      yield* stack.accounts.sync;
+      assert.deepEqual(
+        filesIn(stack.authDir).filter((name) => name.endsWith(".json")),
+        [],
+      );
+
+      // An expired one (its time is none here) keeps nothing either.
+      yield* stack.stop;
+      const expiring = yield* startStack(setup.server, {
+        dir: setup.dir,
+        options: { tokenPollMs: 60_000, loginTtlMs: 0 },
+      });
+      yield* expiring.accounts
+        .loginStart({ provider: "antigravity", name: "Owner Google" }, SESSION)
+        .pipe(as(ownerId));
+      raw("antigravity-late@example.com.json", "antigravity");
+      yield* expiring.accounts.sync;
+      assert.deepEqual(
+        filesIn(expiring.authDir).filter((name) => name.endsWith(".json")),
+        [],
+      );
+    }),
+);
+
+live(
+  "with the gateway off, a refreshed token is sealed and disabling or deleting leaves no token in the memory folder",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub({ ownerPlacement: true });
+      const { stack, as, ownerId } = setup;
+      const account = yield* signIn(setup, stack);
+      const file = tokenFileOf(stack, account.id) ?? "";
+      const tokenId = tokenIdOf(file) ?? "";
+      const rotated = yield* refreshInGateway(stack, file);
+      // Off by the Owner: its process goes; the file stays in memory, its newer token is sealed.
+      yield* stack.gateway.setEnabled(false).pipe(as(ownerId));
+      assert.isTrue(Option.isNone(yield* stack.gateway.endpoint));
+      yield* stack.accounts.sync;
+      assert.equal((yield* sealedToken(setup, tokenId))?.refresh_token, rotated.refresh_token);
+      yield* stack.accounts.update({ accountId: account.id, disabled: true }).pipe(as(ownerId));
+      assert.isUndefined(tokenFileOf(stack, account.id), "a disabled account's token stayed");
+      assert.equal((yield* sealedToken(setup, tokenId))?.refresh_token, rotated.refresh_token);
+      // A stray file and an unknown account's go before the next launch.
+      NodeFS.writeFileSync(NodePath.join(stack.authDir, "claude-stray.json"), "{}");
+      yield* stack.accounts.update({ accountId: account.id, disabled: false }).pipe(as(ownerId));
+      const deleted = yield* stack.accounts.remove({ accountId: account.id }).pipe(as(ownerId));
+      assert.equal(deleted.gateway, "not-running");
+      assert.deepEqual(
+        filesIn(stack.authDir).filter((name) => name.endsWith(".json")),
+        [],
+      );
+      assert.isUndefined(yield* sealedToken(setup, tokenId));
+    }),
+);
+
+live("at the Hub's stop, a token CLIProxyAPI refreshed since the last look is sealed", () =>
+  Effect.gen(function* () {
+    const setup = yield* hub();
+    const { stack } = setup;
+    const account = yield* signIn(setup, stack);
+    const file = tokenFileOf(stack, account.id) ?? "";
+    const rotated = yield* refreshInGateway(stack, file);
+    // The poll is a minute away here: only the stop reads it back.
+    yield* stack.stop;
+    assert.equal(
+      (yield* sealedToken(setup, tokenIdOf(file) ?? ""))?.refresh_token,
+      rotated.refresh_token,
+    );
+  }),
+);
+
+live("a token reconcile that fails leaves the API keys provisioned", () =>
+  Effect.gen(function* () {
+    const setup = yield* hub();
+    const { stack, as, ownerId } = setup;
+    NodeFS.writeFileSync(NodePath.join(stack.memory, "fake-credentials-down"), "");
+    const made = yield* stack.accounts
+      .create({
+        name: "Key",
+        provider: "claude",
+        apiKey: Redacted.make("sk-ant-0123456789abcdef0123"),
+      })
+      .pipe(as(ownerId));
+    const shown = yield* ownerView(setup, stack, made.id);
+    assert.equal(shown?.status, "working");
+  }),
 );
