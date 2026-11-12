@@ -44,6 +44,7 @@ import { cn } from "~/lib/utils";
 import { textDirection } from "~/textDirection";
 import { useClientSettings } from "../../hooks/useSettings";
 import { GuestShareIndicator } from "./GuestShareControls";
+import { ThreadSecrets } from "../settings/VaultChoices";
 import { EnvironmentStatusDot } from "../EnvironmentStatusDot";
 import {
   type ActiveEnvironmentView,
@@ -512,6 +513,9 @@ export const ChatHeader = memo(function ChatHeader({
           ) : null}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
+      {isServerThread ? (
+        <ThreadSecrets environmentId={activeThreadEnvironmentId} threadId={activeThreadId} />
+      ) : null}
       {isServerThread ? <GuestShareIndicator threadRef={activeThreadRef} /> : null}
     </div>
   );

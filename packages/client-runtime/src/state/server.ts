@@ -1052,6 +1052,27 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:vaults:entries:copy",
       tag: WS_METHODS.vaultsEntriesCopy,
     }),
+    // Spec 5 ticket 03: allowances, defaults, Project choices and a Thread's secret names.
+    allowVault: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:vaults:allow",
+      tag: WS_METHODS.vaultsAllow,
+    }),
+    vaultChoices: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:vaults:choices",
+      tag: WS_METHODS.vaultsChoices,
+    }),
+    setVaultSpaceDefaults: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:vaults:space-defaults:set",
+      tag: WS_METHODS.vaultsSpaceDefaultsSet,
+    }),
+    setVaultProjectChoice: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:vaults:project-choices:set",
+      tag: WS_METHODS.vaultsProjectChoicesSet,
+    }),
+    threadVaultEnvironment: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:vaults:thread-environment",
+      tag: WS_METHODS.vaultsThreadEnvironment,
+    }),
     refreshUsageRates: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:refresh-usage-rates",
       tag: WS_METHODS.serverRefreshUsageRates,

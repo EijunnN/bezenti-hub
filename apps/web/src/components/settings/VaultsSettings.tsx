@@ -29,6 +29,7 @@ import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { emptyStepUp, StepUpFields, toStepUp } from "./AccountSettingsSection";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
+import { SpaceDefaultVaults, VaultAllowances } from "./VaultChoices";
 
 const SELECT_CLASS = "h-8 w-full rounded-md border border-input bg-background px-2 text-sm";
 const VALUE_INPUT_PROPS = {
@@ -236,6 +237,7 @@ function VaultsPage({ environmentId }: { readonly environmentId: EnvironmentId }
           />
         ))
       )}
+      <SpaceDefaultVaults environmentId={environmentId} />
     </>
   );
 }
@@ -471,6 +473,13 @@ function VaultSection(props: {
               return null;
             })
           }
+        />
+      ) : null}
+      {vault.canManage && props.mayWrite && !vault.isMain && vault.spaceId === null ? (
+        <VaultAllowances
+          environmentId={environmentId}
+          vault={vault}
+          onChanged={() => props.onChanged(false)}
         />
       ) : null}
     </SettingsSection>
