@@ -160,8 +160,8 @@ export function AiGatewaySettingsPanel() {
         ) : null}
         {on && !status.credentialsInMemory ? (
           <SettingsRow
-            title="Credentials on disk"
-            description="This machine has no folder in memory ($XDG_RUNTIME_DIR or /dev/shm), so the gateway's subscription credentials are kept on its disk, readable only by the Hub's user."
+            title="No folder in memory"
+            description="This machine has no folder in memory ($XDG_RUNTIME_DIR or /dev/shm). The gateway's config (with its keys) is on the disk, readable only by the Hub's user, and subscriptions are not loaded or signed in: their tokens would sit on the disk in clear. API keys still work."
           />
         ) : null}
         {on ? (

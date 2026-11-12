@@ -32,7 +32,11 @@ import {
   AiAccountDeleteResult,
   AiAccountError,
   AiAccountListInput,
+  AiAccountImportVertexInput,
   AiAccountListResult,
+  AiAccountLoginCompleteInput,
+  AiAccountLoginStartInput,
+  AiAccountLoginStartResult,
   AiAccountReorderInput,
   AiAccountSummary,
   AiAccountUpdateInput,
@@ -643,6 +647,10 @@ export const WS_METHODS = {
   aiAccountsDelete: "aiAccounts.delete",
   aiAccountsAllow: "aiAccounts.allow",
   aiAccountsReorder: "aiAccounts.reorder",
+  // Subscription AI accounts (spec 4 ticket 03): signed in through CLIProxyAPI, Owner only.
+  aiAccountsLoginStart: "aiAccounts.login.start",
+  aiAccountsLoginComplete: "aiAccounts.login.complete",
+  aiAccountsImportVertex: "aiAccounts.importVertex",
   projectCloneStart: "projectClone.start",
   projectCloneCancel: "projectClone.cancel",
   projectCloneRetry: "projectClone.retry",
@@ -1311,6 +1319,21 @@ const WsAiAccountsAllowRpc = Rpc.make(WS_METHODS.aiAccountsAllow, {
 const WsAiAccountsReorderRpc = Rpc.make(WS_METHODS.aiAccountsReorder, {
   payload: AiAccountReorderInput,
   success: AiAccountListResult,
+  error: AiAccountRpcError,
+});
+const WsAiAccountsLoginStartRpc = Rpc.make(WS_METHODS.aiAccountsLoginStart, {
+  payload: AiAccountLoginStartInput,
+  success: AiAccountLoginStartResult,
+  error: AiAccountRpcError,
+});
+const WsAiAccountsLoginCompleteRpc = Rpc.make(WS_METHODS.aiAccountsLoginComplete, {
+  payload: AiAccountLoginCompleteInput,
+  success: AiAccountSummary,
+  error: AiAccountRpcError,
+});
+const WsAiAccountsImportVertexRpc = Rpc.make(WS_METHODS.aiAccountsImportVertex, {
+  payload: AiAccountImportVertexInput,
+  success: AiAccountSummary,
   error: AiAccountRpcError,
 });
 
@@ -2260,6 +2283,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsAiAccountsDeleteRpc,
   WsAiAccountsAllowRpc,
   WsAiAccountsReorderRpc,
+  WsAiAccountsLoginStartRpc,
+  WsAiAccountsLoginCompleteRpc,
+  WsAiAccountsImportVertexRpc,
   WsProjectCloneStartRpc,
   WsProjectCloneCancelRpc,
   WsProjectCloneRetryRpc,

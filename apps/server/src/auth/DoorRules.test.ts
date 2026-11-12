@@ -9,7 +9,10 @@ import { describe, expect, it } from "@effect/vitest";
 import * as HttpApi from "effect/http-api/HttpApi";
 import { Tool } from "effect/ai";
 
+import { INSTALLATION_RPC_METHODS } from "@t3tools/contracts";
+
 import {
+  AI_ACCOUNT_SIGN_IN_RULES,
   AMBIENT_COOKIE_RULES,
   HTTP_ENDPOINT_RULES,
   MCP_TOOL_RULES,
@@ -210,7 +213,10 @@ describe("every door of the Hub declares its rule", () => {
       "aiAccounts.allow",
       "aiAccounts.create",
       "aiAccounts.delete",
+      "aiAccounts.importVertex",
       "aiAccounts.list",
+      "aiAccounts.login.complete",
+      "aiAccounts.login.start",
       "aiAccounts.reorder",
       "aiAccounts.update",
     ]);
@@ -220,6 +226,42 @@ describe("every door of the Hub declares its rule", () => {
         expect(fields, rpc._tag).not.toContain(credential);
       }
     }
+  });
+
+  it("signs in to subscriptions over the Owner's WS RPCs only: no callback route, tokens read by AiAccounts alone", () => {
+    // Every sign-in door is the Owner's, on the Installation, whatever the session's scopes.
+    const signIn = [...WsRpcGroup.requests.keys()].filter((tag) =>
+      /^aiAccounts\.(login\.|importVertex)/u.test(tag),
+    );
+    expect(signIn.toSorted()).toEqual(Object.keys(AI_ACCOUNT_SIGN_IN_RULES).toSorted());
+    for (const method of signIn) {
+      expect([
+        method,
+        (INSTALLATION_RPC_METHODS as ReadonlyArray<string>).includes(method),
+      ]).toEqual([method, true]);
+      expect([method, spaceAccessForRpcMethod(method)]).toEqual([method, "installation"]);
+    }
+    // No door on the Hub takes a provider's redirect: no route or endpoint for a callback.
+    expect(
+      [...Object.keys(HTTP_ENDPOINT_RULES), ...Object.keys(RAW_ROUTE_RULES), ...rawRoutes].filter(
+        (door) =>
+          /callback|oauth-callback|auth-url/iu.test(door) && /ai|account|gateway/iu.test(door),
+      ),
+    ).toEqual([]);
+    // The tokens' store folder is read by AiAccounts alone, which hands them to CLIProxyAPI.
+    const readers = files
+      .filter(({ text }) => /AiAccountTokenStore\b/u.test(text))
+      .map(({ file }) => file);
+    expect(readers.toSorted()).toEqual(["ai/AiAccounts.ts", "auth/ServerSecretStore.ts"]);
+    // Only the Hub's management client talks to CLIProxyAPI's sign-in and credential API.
+    // (The fake CLIProxyAPI of the tests, a testkit, answers them.)
+    const management = files
+      .filter(({ file }) => !file.endsWith(".testkit.ts"))
+      .filter(({ text }) =>
+        /\/oauth\/(auth-url|callback|status)|\/credentials\/download/u.test(text),
+      )
+      .map(({ file }) => file);
+    expect(management.toSorted()).toEqual(["ai/CliproxyManagement.ts"]);
   });
 
   it("reaches the Owner's SSH install only through its HTTP endpoints: no WS or MCP door", () => {

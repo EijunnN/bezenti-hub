@@ -100,6 +100,11 @@ export const INSTALLATION_RPC_METHODS = [
   WS_METHODS.aiAccountsDelete,
   WS_METHODS.aiAccountsAllow,
   WS_METHODS.aiAccountsReorder,
+  // Subscription AI accounts (spec 4 ticket 03): signing in and importing are the Owner's alone;
+  // the Hub has no callback route (the Owner pastes the address the browser landed on).
+  WS_METHODS.aiAccountsLoginStart,
+  WS_METHODS.aiAccountsLoginComplete,
+  WS_METHODS.aiAccountsImportVertex,
 ] as const;
 export type InstallationRpcMethod = (typeof INSTALLATION_RPC_METHODS)[number];
 

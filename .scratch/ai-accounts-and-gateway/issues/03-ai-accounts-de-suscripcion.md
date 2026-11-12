@@ -4,16 +4,44 @@
 
 **Blocked by:** 02.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `aiAccounts.login.start` (URL de autorización del proveedor vía Management API) y `aiAccounts.login.complete` (URL pegada, entregada a CLIProxyAPI). Solo Owner. El estado del login caduca a los 10 minutos.
-- [ ] Al completar: el token se lee de CLIProxyAPI, se guarda cifrado y se le asigna `prefix: acct-<id>`. Al arrancar el Hub, los tokens se escriben desde el almacén al `auth-dir` en memoria; los refrescos se recogen y se vuelven a cifrar.
-- [ ] Importación de cuenta de servicio de Vertex (JSON), cifrada.
-- [ ] Estado por cuenta (working, needs sign-in again, quota exhausted, error) y ventanas de cuota con el lector existente `usage/cliproxyApi.ts` apuntado a la gateway gestionada.
-- [ ] Aviso de ToS (ADR 0005) en todas las suscripciones y, en Antigravity, la nota de ofuscación de CLIProxyAPI (endurecida en v8.0.65).
-- [ ] Red-first: `login.complete` con un estado de otro login o caducado se rechaza; un no-Owner no puede iniciar ni completar; tras reiniciar el Hub sin tmpfs persistido, la cuenta sigue funcionando desde el almacén; ningún token queda en claro en disco persistente (salvo el aviso sin tmpfs).
-- [ ] Puertas: WS `aiAccounts.login.start`, `aiAccounts.login.complete` en `RPC_SPACE_ACCESS` (Installation, solo Owner). Sin raw route de callback en el Hub (se pega la URL). Tokens fuera de logs, spans y argv.
-- [ ] Auditoría `ai_account.login`.
-- [ ] Web/desktop: «Add subscription» con proveedor, «Open sign-in», «Paste the address you landed on», «Sign in again».
-- [ ] Tests con el CLIProxyAPI falso (Management API de login, refresco, cuotas).
-- [ ] Prueba real: si hay una suscripción de prueba disponible, el Owner añade Codex desde un navegador que no es el del VPS; si no, el flujo completo contra el CLIProxyAPI falso y capturas.
+- [x] `aiAccounts.login.start` (URL de autorización del proveedor vía Management API) y `aiAccounts.login.complete` (URL pegada, entregada a CLIProxyAPI). Solo Owner. El estado del login caduca a los 10 minutos.
+- [x] Al completar: el token se lee de CLIProxyAPI, se guarda cifrado y se le asigna `prefix: acct-<id>`. Al arrancar el Hub, los tokens se escriben desde el almacén al `auth-dir` en memoria; los refrescos se recogen y se vuelven a cifrar.
+- [x] Importación de cuenta de servicio de Vertex (JSON), cifrada.
+- [x] Estado por cuenta (working, needs sign-in again, quota exhausted, error) y ventanas de cuota con el lector existente `usage/cliproxyApi.ts` apuntado a la gateway gestionada.
+- [x] Aviso de ToS (ADR 0005) en todas las suscripciones y, en Antigravity, la nota de ofuscación de CLIProxyAPI (endurecida en v8.0.65).
+- [x] Red-first: `login.complete` con un estado de otro login o caducado se rechaza; un no-Owner no puede iniciar ni completar; tras reiniciar el Hub sin tmpfs persistido, la cuenta sigue funcionando desde el almacén; ningún token queda en claro en disco persistente (salvo el aviso sin tmpfs).
+- [x] Puertas: WS `aiAccounts.login.start`, `aiAccounts.login.complete` en `RPC_SPACE_ACCESS` (Installation, solo Owner). Sin raw route de callback en el Hub (se pega la URL). Tokens fuera de logs, spans y argv.
+- [x] Auditoría `ai_account.login`.
+- [x] Web/desktop: «Add subscription» con proveedor, «Open sign-in», «Paste the address you landed on», «Sign in again».
+- [x] Tests con el CLIProxyAPI falso (Management API de login, refresco, cuotas).
+- [x] Prueba real: si hay una suscripción de prueba disponible, el Owner añade Codex desde un navegador que no es el del VPS; si no, el flujo completo contra el CLIProxyAPI falso y capturas.
+
+**Hecho** (rama `impl/aig-03`):
+
+- Inicio de sesión: `aiAccounts.login.start` pide a CLIProxyAPI (8.0.67 real: `GET /v8/management/oauth/auth-url?provider=`) la página del proveedor y guarda **un** inicio pendiente en el Hub (uno nuevo sustituye al anterior): `state` de CLIProxyAPI, el `redirect_uri` de la página, el User y el **id de sesión** del Owner, 10 minutos y la gateway en que empezó. Solo se muestra una página `https:`. Flujos de redirección (Claude, Codex, Antigravity, Devin): el Owner pega la dirección localhost a la que llegó («Paste the address you landed on»). Flujos de dispositivo (Kimi, xAI, Meta): código en pantalla y «I have signed in» (`pending` hasta que el proveedor acepta).
+- La dirección pegada (`ai/subscriptionLogin.ts`, `checkPastedRedirect`) debe tener el esquema, host, puerto y ruta del `redirect_uri` de ese inicio, sin usuario, un solo `state` igual (tiempo constante), un `code` y sin `error`; viaja Redacted. El Hub nunca la pide: a CLIProxyAPI (`POST /oauth/callback`) le llega una dirección rehecha con solo `code`, `state` y `scope`. Otra sesión, otro inicio, caducado, gateway reiniciada o ya completado → `expired`; nada rechazado llega a CLIProxyAPI.
+- Tokens: almacén propio `ServerSecretStore.AiAccountTokenStore` (`secrets/ai-account-tokens/tok-<id>.sealed`, propósito `ai-account-oauth-token`, cubierto por la rotación). Al completar, el Hub toma el archivo nuevo de CLIProxyAPI, lo sella, crea la cuenta (o «Sign in again»: token nuevo, el viejo retirado), lo devuelve como `acct-<cuenta>-<token>.json` con `prefix: acct-<cuenta>` y borra el que nombró CLIProxyAPI. Vertex: `POST /oauth/import?provider=vertex` y la misma captura. `reconcileTokens` (con el mismo lock que las API keys, en cada arranque antes de «running», tras cada cambio y cada minuto): gana la copia más nueva esté donde esté (refresco de CLIProxyAPI → se vuelve a sellar; copia vieja en memoria → se sube la sellada; nunca se sella una más vieja), y se borran archivos de cuentas borradas, deshabilitadas o reautenticadas y los de inicios no capturados.
+- Sin tmpfs (decisión): no se carga ninguna suscripción ni se puede iniciar sesión o importar; las cuentas muestran el error, los tokens sellados se guardan, Settings → AI gateway lo dice. Así ningún token OAuth queda en claro en disco persistente.
+- Estado por cuenta desde `GET /credentials` (needs sign-in again, quota exhausted, error, working), «Signed in as» y, para Claude y Codex, ventanas de cuota con el lector existente `usage/cliproxyApi.ts` (`api: "v8"`) contra la gateway gestionada (5 min de caché, solo ventanas).
+- Puertas: WS `aiAccounts.login.start`, `aiAccounts.login.complete`, `aiAccounts.importVertex` en `INSTALLATION_RPC_METHODS` (solo Owner, `settings:write`), `DoorRules.AI_ACCOUNT_SIGN_IN_RULES`; ninguna raw route de callback. Auditoría `ai_account.login` (provider, kind, outcome, reason) y `ai_account.create`.
+- Web: «Add subscription» (nombre, proveedor, aviso de ToS y, en Antigravity, la nota de ofuscación v8.0.65), «Start sign-in», «Open sign-in», «Paste the address you landed on», «Finish sign-in», «Sign in again», «Import a Vertex service account».
+- Tests: `AiAccounts.subscriptions.test.ts` (11) con el CLIProxyAPI falso ampliado (OAuth de redirección y dispositivo, archivos de credenciales, refresco con rotación, import de Vertex, `requests/api-call`). Red-first por mutación (12, todas detectadas): sin Owner, sin sesión, sin `state`, sin host/ruta, reenviar lo pegado, sin caducidad, sin re-sellar refrescos, sin subir la sellada sobre una vieja, sin borrar en CLIProxyAPI, sin comprobar tmpfs, token en un log, sin barrer archivos sueltos. Más `DoorRules`, `RpcAuthorization`, `AuditLog`.
+- Prueba real (`makita-livepass-s4-03`, CLIProxyAPI 8.0.67 real): página de Google con `state` y redirección localhost; pegados malformado, ajeno (otro host, IP de metadatos) y con otro `state` rechazados sin llegar a CLIProxyAPI; un Member no puede iniciar ni completar; la dirección correcta con un código inventado llega una vez y vuelve el rechazo del proveedor; una cuenta completada (como la deja la captura) se restaura desde el almacén al reiniciar con la carpeta en memoria vacía; borrar la quita de CLIProxyAPI y del almacén; el token no está en logs, `ps`, el entorno de CLIProxyAPI ni en claro bajo el home del Hub.
+- Riesgos: un solo inicio a la vez; dos procesos Hub sobre el mismo `stateDir` no están soportados (la regla «nunca más viejo» usa un lock en proceso); borrar no revoca el refresh token en el proveedor (CLIProxyAPI no tiene esa llamada); el archivo de un borrado mientras el Hub estaba parado puede cargarse unos segundos en el arranque siguiente antes de la reconciliación (solo el Hub habla con CLIProxyAPI).
+
+**Hecho tras la revisión** (12 hallazgos):
+
+- Gateway parada y antes de cada arranque (`AiGateway.setBeforeLaunch`, `authDir`): el Hub lee y borra los archivos de la carpeta en memoria directamente; sella antes la copia más nueva del token actual de una cuenta que existe, y borra todo lo que no sea el token actual de una cuenta habilitada (borrar o deshabilitar con la gateway apagada no deja token en claro; el siguiente CLIProxyAPI no lo carga).
+- Archivos sin prefijo: solo sobrevive el archivo nuevo del proveedor del inicio en curso, en esa gateway y dentro de sus 10 minutos; uno caducado, sustituido o terminado se olvida y sus archivos se borran. El Hub es el único cliente y siempre pide `acct-<id>/<modelo>`.
+- Refrescos: antes de borrar el archivo de una cuenta que existe se sella su copia más nueva; finalizador al parar el Hub; sondeo cada 10 s por `modtime` (lectura completa si algo cambió, si hay un inicio abierto o archivos ajenos, y cada 5 min).
+- Cuenta nueva deshabilitada con «Signed in as <email>» hasta que el Owner la activa; «Sign in again» con otra identidad responde `identity-mismatch` y guarda el token nuevo hasta «Use the new account» (`confirmIdentity`).
+- Captura: exactamente un archivo nuevo del proveedor y `type` igual al proveedor; si no, se rechaza y se borran.
+- «Más nuevo»: `last_refresh`, luego caducidad del acceso, luego `timestamp`; empate con contenido distinto → la de CLIProxyAPI. Se comprueba el `type` antes de sellar.
+- `completing` se marca de forma síncrona y se libera con `ensuring`.
+- Spans HTTP de la Management API sin valores de query (`UrlParams.CurrentRedactedNames`); el rechazo de Vertex dice solo el HTTP.
+- Un fallo de tokens no tumba las API keys (por cuenta, con `tokensUnknown` que retiene los tokens retirados).
+- Lector de cuotas: aviso en el log si no puede leer; campos de `/credentials` de la 8.0.67 comprobados en vivo.
+- CLIProxyAPI 8.0.67 no abre puerto de callback durante un inicio de redirección (solo su puerto en 127.0.0.1, `ss -ltnp`). Documentados: sin revocación en el proveedor; tmpfs puede ir a swap (swap cifrado).
+- Red-first: los 9 tests nuevos o cambiados fallan con el código anterior (cc436713ff) y pasan ahora. Prueba real: 32 PASS.

@@ -81,6 +81,132 @@ if (mode === "decoy") {
     (Array.isArray(entries) ? entries : []).flatMap((entry) =>
       (block === "openai-compatibility" ? (entry.models ?? []).map((model) => model.alias ?? model.name) : CATALOG[block] ?? [])
         .map((model) => entry.prefix + "/" + model)));
+  // Subscriptions (spec 4 ticket 03): sign-ins through the management API, and token files in
+  // the auth-dir, as the real one keeps them (it reads the folder, so do we).
+  const authDir = (/auth-dir:\s*"?([^"\n]+)"?/u.exec(text) || [])[1];
+  const logins = new Map();
+  const DEVICE = ["kimi", "xai", "meta"];
+  const REDIRECT = { antigravity: "http://localhost:51121/oauth-callback", codex: "http://localhost:1455/auth/callback", claude: "http://localhost:54545/callback", devin: "http://127.0.0.1:" + port + "/callback" };
+  const TOKEN_MODELS = { antigravity: ["gemini-3-pro", "claude-sonnet-5-5"], claude: ["claude-sonnet-5-5"], codex: ["gpt-5.5"], kimi: ["kimi-k2"], xai: ["grok-5"], devin: ["devin-1"], meta: ["muse-spark-1.3"], vertex: ["gemini-3-pro"] };
+  const randomText = () => Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  const emailNow = () => (fs.existsSync(path.join(dir, "fake-oauth-email")) ? fs.readFileSync(path.join(dir, "fake-oauth-email"), "utf8").trim() : "owner@example.com");
+  const freshToken = (provider) => ({ type: provider, email: emailNow(), access_token: "fake-access-" + randomText(), refresh_token: "fake-refresh-" + randomText(), expired: new Date(Date.now() + 3600000).toISOString(), last_refresh: new Date().toISOString() });
+  const writeToken = (name, token) => fs.writeFileSync(path.join(authDir, name), JSON.stringify(token), { mode: 0o600 });
+  const tokenFiles = () => (authDir === undefined || !fs.existsSync(authDir) ? [] : fs.readdirSync(authDir).filter((name) => name.endsWith(".json")));
+  const readToken = (name) => { try { return JSON.parse(fs.readFileSync(path.join(authDir, name), "utf8")); } catch { return {}; } };
+  const credentialList = () => tokenFiles().map((name) => {
+    const token = readToken(name);
+    return { id: name, name, auth_index: name, provider: token.type, type: token.type, email: token.email, status: token.fake_status || "active", status_message: token.fake_status_message || "", requires_sign_in: token.fake_requires_sign_in === true, quota_blocked: token.fake_quota_blocked === true, unavailable: false, disabled: false, modtime: fs.statSync(path.join(authDir, name)).mtime.toISOString() };
+  });
+  const tokenModelIds = () => tokenFiles().flatMap((name) => {
+    const token = readToken(name);
+    return typeof token.prefix === "string" ? (TOKEN_MODELS[token.type] || []).map((model) => token.prefix + "/" + model) : [];
+  });
+  const readBody = (request) => new Promise((resolve) => { const chunks = []; request.on("data", (chunk) => chunks.push(chunk)); request.on("end", () => resolve(Buffer.concat(chunks))); });
+  const send = (response, status, value) => { response.statusCode = status; response.setHeader("content-type", "application/json"); response.end(JSON.stringify(value)); };
+  const seen = (what) => fs.appendFileSync(path.join(dir, "fake-oauth.jsonl"), JSON.stringify(what) + String.fromCharCode(10));
+  const oauth = async (request, response, url) => {
+    const route = url.pathname.slice("/v8/management".length);
+    const name = url.searchParams.get("name");
+    const safeName = name !== null && /^[A-Za-z0-9@._-]+$/u.test(name) ? name : null;
+    if (route === "/oauth/auth-url" && request.method === "GET") {
+      const provider = url.searchParams.get("provider");
+      seen({ route, provider });
+      if (fs.existsSync(path.join(dir, "fake-oauth-down"))) return send(response, 500, { error: "oauth down" });
+      if (!DEVICE.includes(provider) && REDIRECT[provider] === undefined) return send(response, 404, { error: "provider_not_found" });
+      const state = randomText();
+      if (DEVICE.includes(provider)) {
+        logins.set(state, { provider, status: "wait", device: true, polls: 0 });
+        return send(response, 200, { status: "ok", flow: "device", state, url: "https://fake-provider.test/" + provider + "/device?user_code=FAKE-CODE", user_code: "FAKE-CODE", expires_in: 1800 });
+      }
+      logins.set(state, { provider, status: "wait", device: false, polls: 0 });
+      return send(response, 200, { status: "ok", state, url: "https://fake-provider.test/" + provider + "/authorize?redirect_uri=" + encodeURIComponent(REDIRECT[provider]) + "&state=" + state });
+    }
+    if (route === "/oauth/callback" && request.method === "POST") {
+      const body = JSON.parse((await readBody(request)).toString("utf8") || "{}");
+      seen({ route, provider: body.provider, redirect_url: body.redirect_url });
+      let back;
+      try { back = new URL(body.redirect_url); } catch { return send(response, 400, { status: "error", error: "invalid redirect_url" }); }
+      const login = logins.get(back.searchParams.get("state"));
+      if (login === undefined || login.provider !== body.provider) return send(response, 404, { status: "error", error: "unknown or expired state" });
+      if (back.searchParams.get("code") === "fake-good-code") {
+        writeToken(login.provider + "-" + emailNow() + ".json", freshToken(login.provider));
+        // Like two sign-ins landing at once: a second new file of the same provider.
+        if (fs.existsSync(path.join(dir, "fake-oauth-twice"))) writeToken(login.provider + "-second@example.com.json", freshToken(login.provider));
+        login.status = "ok";
+      } else {
+        login.status = "error";
+      }
+      return send(response, 200, { status: "ok" });
+    }
+    if (route === "/oauth/status" && request.method === "GET") {
+      const login = logins.get(url.searchParams.get("state"));
+      if (login === undefined) return send(response, 404, { status: "error", error: "unknown or expired state" });
+      if (login.device && login.status === "wait") {
+        login.polls += 1;
+        if (fs.existsSync(path.join(dir, "fake-device-deny"))) login.status = "error";
+        else if (fs.existsSync(path.join(dir, "fake-device-approve"))) {
+          writeToken(login.provider + "-owner@example.com.json", freshToken(login.provider));
+          login.status = "ok";
+        }
+      }
+      return send(response, 200, login.status === "error" ? { status: "error", error: "Failed to exchange token" } : { status: login.status });
+    }
+    if (route === "/oauth/import" && request.method === "POST") {
+      const raw = (await readBody(request)).toString("utf8");
+      seen({ route, provider: url.searchParams.get("provider") });
+      let account;
+      try { account = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1)); } catch { return send(response, 400, { error: "invalid service account" }); }
+      if (account.type !== "service_account") return send(response, 400, { error: "invalid service account" });
+      writeToken("vertex-" + account.project_id + ".json", { type: "vertex", project_id: account.project_id, email: account.client_email, location: "us-central1", service_account: account });
+      return send(response, 200, { status: "ok" });
+    }
+    if (route === "/credentials" && request.method === "GET") {
+      if (fs.existsSync(path.join(dir, "fake-credentials-down"))) return send(response, 503, { error: "down" });
+      return send(response, 200, { files: credentialList() });
+    }
+    if (route === "/credentials/download" && request.method === "GET") {
+      if (safeName === null || !fs.existsSync(path.join(authDir, safeName))) return send(response, 404, { error: "file not found" });
+      response.statusCode = 200;
+      response.end(fs.readFileSync(path.join(authDir, safeName)));
+      return;
+    }
+    if (route === "/credentials" && request.method === "POST") {
+      const body = await readBody(request);
+      if (safeName === null) return send(response, 400, { error: "invalid name" });
+      fs.writeFileSync(path.join(authDir, safeName), body, { mode: 0o600 });
+      seen({ route, method: "POST", name: safeName });
+      return send(response, 200, { status: "ok" });
+    }
+    if (route === "/credentials" && request.method === "DELETE") {
+      if (safeName === null || !fs.existsSync(path.join(authDir, safeName))) return send(response, 404, { error: "auth file not found" });
+      fs.unlinkSync(path.join(authDir, safeName));
+      seen({ route, method: "DELETE", name: safeName });
+      return send(response, 200, { status: "ok" });
+    }
+    // A refresh as CLIProxyAPI does it: a new access token, and a rotated refresh token.
+    if (route === "/fake/refresh" && request.method === "POST") {
+      if (safeName === null || !fs.existsSync(path.join(authDir, safeName))) return send(response, 404, { error: "auth file not found" });
+      const token = readToken(safeName);
+      const later = Date.parse(token.expired || "") || Date.now();
+      Object.assign(token, { access_token: "fake-access-" + randomText(), refresh_token: "fake-refresh-" + randomText(), expired: new Date(later + 3600000).toISOString(), last_refresh: new Date().toISOString() });
+      writeToken(safeName, token);
+      return send(response, 200, { refresh_token: token.refresh_token, access_token: token.access_token });
+    }
+    if (route === "/requests/api-call" && request.method === "POST") {
+      const body = JSON.parse((await readBody(request)).toString("utf8") || "{}");
+      const token = safeName === null ? readToken(String(body.auth_index)) : {};
+      const reset = new Date(Date.now() + 3600000).toISOString();
+      if (token.type === "claude" && String(body.url).includes("/api/oauth/usage")) {
+        return send(response, 200, { status_code: 200, body: JSON.stringify({ five_hour: { utilization: 42, resets_at: reset }, seven_day: { utilization: 7, resets_at: reset } }) });
+      }
+      if (token.type === "codex" && String(body.url).endsWith("/usage")) {
+        return send(response, 200, { status_code: 200, body: JSON.stringify({ plan_type: "plus", rate_limit: { primary_window: { used_percent: 30, reset_at: Math.floor(Date.now() / 1000) + 3600, limit_window_seconds: 18000 } } }) });
+      }
+      return send(response, 200, { status_code: 404, body: "" });
+    }
+    return send(response, 404, { error: "not found" });
+  };
   const invalid = (patch) => {
     for (const [block, entries] of Object.entries(patch["api-keys"] ?? {})) {
       if (!Array.isArray(entries)) return "api-keys." + block + " must be a list";
@@ -132,7 +258,16 @@ if (mode === "decoy") {
     }
     if (request.url === "/v1/models") {
       response.statusCode = fs.existsSync(path.join(dir, "fake-models-down")) ? 503 : auth === "Bearer " + clientKey ? 200 : 401;
-      response.end(JSON.stringify({ data: response.statusCode === 200 ? modelIds().map((id) => ({ id, object: "model" })) : [] }));
+      response.end(JSON.stringify({ data: response.statusCode === 200 ? [...modelIds(), ...tokenModelIds()].map((id) => ({ id, object: "model" })) : [] }));
+      return;
+    }
+    if (request.url.startsWith("/v8/management/")) {
+      if (auth !== "Bearer " + secret) {
+        response.statusCode = 401;
+        response.end(JSON.stringify({ error: "missing management key" }));
+        return;
+      }
+      oauth(request, response, new URL(request.url, "http://fake.invalid")).catch(() => send(response, 500, { error: "fake failed" }));
       return;
     }
     response.statusCode = 404;

@@ -2856,6 +2856,12 @@ export const layerWsRpc = (
         [WS_METHODS.aiAccountsDelete]: (input) => aiAccounts.remove(input),
         [WS_METHODS.aiAccountsAllow]: (input) => aiAccounts.allow(input),
         [WS_METHODS.aiAccountsReorder]: (input) => aiAccounts.reorder(input),
+        // Subscriptions (spec 4 ticket 03): a sign-in belongs to the session that started it.
+        [WS_METHODS.aiAccountsLoginStart]: (input) =>
+          aiAccounts.loginStart(input, principal.sessionId),
+        [WS_METHODS.aiAccountsLoginComplete]: (input) =>
+          aiAccounts.loginComplete(input, principal.sessionId),
+        [WS_METHODS.aiAccountsImportVertex]: (input) => aiAccounts.importVertex(input),
         [WS_METHODS.projectCloneStart]: (input) =>
           requireCloneDestination(input.destinationPath, { asProject: true }).pipe(
             Effect.andThen(

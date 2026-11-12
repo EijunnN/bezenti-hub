@@ -59,6 +59,8 @@ export const AuditAction = Schema.Literals([
   "ai_account.update",
   "ai_account.delete",
   "ai_account.allow",
+  // Spec 4 ticket 03: a subscription signed in (or not), or a Vertex service account imported.
+  "ai_account.login",
 ]);
 export type AuditAction = typeof AuditAction.Type;
 
@@ -203,6 +205,8 @@ export const AUDIT_DETAIL_KEYS = {
   "ai_account.delete": ["provider"],
   /** How many Spaces and Users it is allowed to now, and the change. */
   "ai_account.allow": ["spaces", "users", "added", "removed"],
+  /** Which provider, a new account or «Sign in again», and how it ended; never a token. */
+  "ai_account.login": ["provider", "kind", "outcome", "reason"],
 } as const satisfies Record<AuditAction, ReadonlyArray<string>>;
 
 export type AuditDetailOf<A extends AuditAction> = {

@@ -7,6 +7,7 @@
 import * as Schema from "effect/Schema";
 
 import { makeEntityId, SpaceId, TrimmedNonEmptyString, UserId } from "./baseSchemas.ts";
+import { ServerProviderUsageLimits } from "./providerUsageLimits.ts";
 
 export const AiAccountId = makeEntityId("AiAccountId");
 export type AiAccountId = typeof AiAccountId.Type;
@@ -50,6 +51,22 @@ export const AiApiKeyProvider = Schema.Literals(AI_API_KEY_PROVIDERS);
 export type AiApiKeyProvider = typeof AiApiKeyProvider.Type;
 
 /**
+ * The providers a subscription AI account signs in to through CLIProxyAPI (OAuth), plus Vertex,
+ * whose service account is imported (ticket 03).
+ */
+const AI_SUBSCRIPTION_PROVIDERS = [
+  "claude",
+  "codex",
+  "antigravity",
+  "kimi",
+  "xai",
+  "devin",
+  "meta",
+] as const satisfies ReadonlyArray<AiAccountProvider>;
+export const AiSubscriptionProvider = Schema.Literals(AI_SUBSCRIPTION_PROVIDERS);
+export type AiSubscriptionProvider = typeof AiSubscriptionProvider.Type;
+
+/**
  * `unverified`: in the gateway, model list unreadable. `removing`: deleted, its key maybe still
  * live in the gateway. `needs-sign-in` and `quota-exhausted`: subscriptions (ticket 03).
  */
@@ -81,6 +98,10 @@ export const AiAccountDetails = Schema.Struct({
   /** `openai-compatible`: the models the Owner listed. */
   models: Schema.Array(Schema.String),
   allowances: AiAccountAllowances,
+  /** A subscription: the account the provider says it signed in as (an email), when it says. */
+  signedInAs: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  /** A Claude or Codex subscription: its quota windows, when the provider reports them. */
+  usageLimits: Schema.optionalKey(Schema.NullOr(ServerProviderUsageLimits)),
   createdAt: Schema.String,
   updatedAt: Schema.String,
 });
@@ -172,6 +193,55 @@ export const AiAccountReorderInput = Schema.Struct({
 });
 export type AiAccountReorderInput = typeof AiAccountReorderInput.Type;
 
+/**
+ * «Add subscription» or «Sign in again» (`accountId`): asks CLIProxyAPI for the provider's
+ * sign-in page. One sign-in at a time; it lasts 10 minutes and only the session that started it
+ * may complete it.
+ */
+export const AiAccountLoginStartInput = Schema.Struct({
+  provider: AiSubscriptionProvider,
+  /** A new account's name; omitted with `accountId`. */
+  name: Schema.optionalKey(AiAccountName),
+  /** «Sign in again» on this account. */
+  accountId: Schema.optionalKey(AiAccountId),
+});
+export type AiAccountLoginStartInput = typeof AiAccountLoginStartInput.Type;
+
+export const AiAccountLoginStartResult = Schema.Struct({
+  loginId: Schema.String,
+  provider: AiSubscriptionProvider,
+  /**
+   * `redirect`: the browser lands on a localhost address, which the Owner pastes back.
+   * `device`: the Owner types `userCode` on the provider's page; nothing is pasted.
+   */
+  flow: Schema.Literals(["redirect", "device"]),
+  /** The provider's sign-in page. */
+  url: Schema.String,
+  userCode: Schema.NullOr(Schema.String),
+  expiresAt: Schema.String,
+});
+export type AiAccountLoginStartResult = typeof AiAccountLoginStartResult.Type;
+
+/** The address the browser landed on holds a one-time code: Redacted, never logged. */
+export const AI_LOGIN_REDIRECT_MAX_LENGTH = 4096;
+
+export const AiAccountLoginCompleteInput = Schema.Struct({
+  loginId: TrimmedNonEmptyString.check(Schema.isMaxLength(100)),
+  /** `redirect` flows: the address the browser landed on, pasted. */
+  redirectUrl: Schema.optionalKey(Schema.RedactedFromValue(Schema.String)),
+  /** «Sign in again» came back as another account: use it anyway. */
+  confirmIdentity: Schema.optionalKey(Schema.Boolean),
+});
+export type AiAccountLoginCompleteInput = typeof AiAccountLoginCompleteInput.Type;
+
+/** A Vertex service account (its JSON key), imported as a subscription AI account. */
+export const AI_SERVICE_ACCOUNT_MAX_LENGTH = 16 * 1024;
+export const AiAccountImportVertexInput = Schema.Struct({
+  name: AiAccountName,
+  serviceAccount: AiCredentialInput,
+});
+export type AiAccountImportVertexInput = typeof AiAccountImportVertexInput.Type;
+
 export const AiAccountErrorReason = Schema.Literals([
   "not-found",
   "forbidden",
@@ -181,6 +251,14 @@ export const AiAccountErrorReason = Schema.Literals([
   "unavailable",
   /** Saved on the Hub, but the gateway has not dropped the old key yet: the Hub keeps trying. */
   "still-live",
+  /** No sign-in with that id for this session, or it is over (10 minutes, or the gateway restarted). */
+  "expired",
+  /** A device sign-in the Owner has not finished on the provider's page yet. */
+  "pending",
+  /** The provider or CLIProxyAPI refused the sign-in. */
+  "sign-in-failed",
+  /** «Sign in again» came back as another account: the Owner confirms before it replaces it. */
+  "identity-mismatch",
 ]);
 export type AiAccountErrorReason = typeof AiAccountErrorReason.Type;
 

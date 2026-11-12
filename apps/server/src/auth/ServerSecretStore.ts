@@ -190,6 +190,22 @@ export class AiAccountCredentialStore extends Context.Service<
   }
 >()("t3/auth/ServerSecretStore/AiAccountCredentialStore") {}
 
+/**
+ * Subscription AI accounts' OAuth tokens (spec 4 ticket 03): their own folder
+ * (`secrets/ai-account-tokens/`) and purpose. A token is re-sealed here each time CLIProxyAPI
+ * refreshes it; it is in clear only in CLIProxyAPI's `auth-dir` in memory.
+ */
+export class AiAccountTokenStore extends Context.Service<
+  AiAccountTokenStore,
+  {
+    readonly get: (id: string) => Effect.Effect<Option.Option<Uint8Array>, SecretStoreError>;
+    readonly set: (id: string, value: Uint8Array) => Effect.Effect<void, SecretStoreError>;
+    readonly remove: (id: string) => Effect.Effect<void, SecretStoreError>;
+    /** The ids of every token stored, for the start's sweep of ones no account holds. */
+    readonly list: Effect.Effect<ReadonlyArray<string>, SecretStoreError>;
+  }
+>()("t3/auth/ServerSecretStore/AiAccountTokenStore") {}
+
 /** The master key the store opened with; none on a joined machine. */
 export class MasterKeyring extends Context.Service<
   MasterKeyring,
@@ -548,6 +564,17 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
     remove: Effect.fn("AiAccountCredentialStore.remove")(aiAccountStore.remove),
     list: aiAccountStore.list,
   });
+  const aiTokenStore = sealedOnly(
+    MasterKeyFile.AI_ACCOUNT_TOKENS_NAMESPACE,
+    "AI account token",
+    "AI accounts' tokens are kept only on a Hub, sealed with its master key.",
+  );
+  const aiAccountTokens = AiAccountTokenStore.of({
+    get: Effect.fn("AiAccountTokenStore.get")(aiTokenStore.get),
+    set: Effect.fn("AiAccountTokenStore.set")(aiTokenStore.set),
+    remove: Effect.fn("AiAccountTokenStore.remove")(aiTokenStore.remove),
+    list: aiTokenStore.list,
+  });
 
   return Context.make(
     ServerSecretStore,
@@ -562,6 +589,7 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
   ).pipe(
     Context.add(VaultValueStore, vaultValues),
     Context.add(AiAccountCredentialStore, aiAccountCredentials),
+    Context.add(AiAccountTokenStore, aiAccountTokens),
     Context.add(
       MasterKeyring,
       MasterKeyring.of({

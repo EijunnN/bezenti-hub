@@ -98,6 +98,15 @@ export class AiGateway extends Context.Service<
      * update, a roll back): the AI accounts (AiAccounts). A failure is a failed start, tried again.
      */
     readonly setProvisioner: (provision: CliproxyProvisioner) => Effect.Effect<void>;
+    /** CLIProxyAPI's `auth-dir` (in the run folder): the subscriptions' token files. */
+    readonly authDir: string;
+    /**
+     * Run on the `auth-dir` before every CLIProxyAPI launch (AiAccounts: unwanted token files go
+     * before it can load them). A failure is logged; the launch goes on.
+     */
+    readonly setBeforeLaunch: (
+      hook: (authDir: string) => Effect.Effect<void>,
+    ) => Effect.Effect<void>;
   }
 >()("t3/ai/AiGateway") {}
 
@@ -264,6 +273,7 @@ export const make = Effect.fn("AiGateway.make")(function* (options: AiGatewayOpt
   let previousVersion: string | null = null;
   let supervisor: Fiber.Fiber<void> | undefined;
   let provisioner: CliproxyProvisioner | undefined;
+  let beforeLaunch: ((authDir: string) => Effect.Effect<void>) | undefined;
 
   const statusNow = (): AiGatewayStatus => ({
     state,
@@ -429,6 +439,8 @@ export const make = Effect.fn("AiGateway.make")(function* (options: AiGatewayOpt
   ) {
     const binary = yield* binaryOf(installed).pipe(Effect.mapError(startFailure));
     yield* prepareRunDir.pipe(Effect.mapError(retryable));
+    const hook = beforeLaunch;
+    if (hook !== undefined) yield* hook(authDir);
     const managementKey = yield* store.getOrCreateRandom(MANAGEMENT_KEY_SECRET, 32).pipe(
       Effect.map((bytes) => Redacted.make(Buffer.from(bytes).toString("base64url"))),
       Effect.mapError(() => retryable(storeError("read")())),
@@ -967,6 +979,13 @@ export const make = Effect.fn("AiGateway.make")(function* (options: AiGatewayOpt
       Effect.sync(() => {
         provisioner = provision;
       }),
+    ),
+    authDir,
+    setBeforeLaunch: Effect.fn("AiGateway.setBeforeLaunch")(
+      (next: (authDir: string) => Effect.Effect<void>) =>
+        Effect.sync(() => {
+          beforeLaunch = next;
+        }),
     ),
   });
 });
