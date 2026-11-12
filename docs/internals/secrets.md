@@ -238,6 +238,71 @@ is the one service; WS RPCs `vaults.*` and HTTP `vaults.reveal` are its doors.
   as `Schema.RedactedFromValue`, so no log, span or error shows them. Every change is audited
   (`vault.create|update|delete`, `secret.edit` with `op`) with names and kinds, never values.
 
+## Allowing Vaults (spec 5, ticket 03)
+
+Which Vaults may reach a Space or a User is one rule, `vaults/VaultReach.ts`, used by the doors
+that choose Vaults and by the effective set:
+
+- **The Main vault** reaches only the Owner's Personal space, where it is always a default (a
+  fixed one, «Always» in Settings). It is never allowed to anyone (`main-vault`): its secrets
+  reach others only through Secret links or copies.
+- **An Organization's Vault** reaches its own Organization, without an allowance, and nothing
+  else: allowing it to another Space or to a User is refused (`not-allowed`), so what its Admins
+  write stays in their Organization.
+- **One of the Owner's other Vaults** reaches the Spaces and Users the Owner allowed it to
+  (`vaults.allow`, AccessPolicy `vault.manage`: the Owner; audited `vault.allow`). Taking it back
+  from a Space also drops that Space's default and its Projects' choices of it, so allowing it again
+  never brings them back unseen. Allowing it to a User shows the shared-Sandbox warning first
+  (ADR 0004): only that User's turns, terminals and scripts receive it, but other agents in the
+  same Sandbox can read a running process's environment.
+- Allowance rows on the Main vault or on an Organization's Vault are ignored when reading, so a
+  stray row never widens what a Vault reaches.
+- **Who sees and edits the Owner's allowed Vaults** (`AccessPolicy.decideAllowedVault`): whoever
+  works in an allowed Space, or is an allowed User, sees its names. An Admin edits its secrets only
+  while it reaches nothing but Organizations they run (no User, no Personal space, no other
+  Organization). Whom a Vault is allowed to is shown to the Owner alone.
+
+**Choosing** (`vault.choose`, decided on the Space: the Owner anywhere, a Personal space
+included; an Organization's Admins while it is open): `vaults.spaceDefaults.set` replaces a
+Space's defaults, in order; `vaults.projectChoices.set` adds, removes or clears (`inherit`) one
+Vault for a Project. Both accept only Vaults allowed to the Space (`not-allowed`) and are audited
+`vault.choose` per Vault changed (`scope`, `choice`, `position`, `projectId`). The scratch Project
+(Threads without a Project) takes no choices: it spans every Space. `vaults.choices` reads them for
+whoever sees the Space.
+
+## The effective set (`vaults/EffectiveVaults.ts`)
+
+`EffectiveVaults.forThread({ threadId, actingUserId })` is the only place that computes which
+secrets a turn, a terminal or a script of a Thread receives. Delivery (ticket 04), masking (05),
+the agent's list of names (06) and the move plan (07) call it. Recomputed on every call, never
+cached: a rotation, a revocation or a Membership that ends takes effect at the next turn or
+terminal.
+
+1. The Thread's Space (`SpaceDirectory.placementOf`: the Thread's own, else its Project's) must
+   be one the acting User works in, else `forbidden`: nothing is computed for a removed Member.
+2. Space side: the Space's defaults, plus the Project's `add`s, minus its `remove`s, all limited to
+   the Vaults allowed to that Space now. A choice left behind by a Project that moved Space, or a
+   default whose allowance was taken back, changes nothing.
+3. User side: the Vaults allowed to the acting User, whichever Space the Thread is in. Never
+   another User's, even in the same Thread or Sandbox.
+4. Without archived Vaults, broken Secret links (a link's value and length are its original's),
+   and names `secretNameRisk` calls `invalid` or `gateway`, however they got in. `dangerous` names
+   are delivered (only the Owner sets them) and marked.
+
+**Precedence for a name several Vaults define:** the User's own Vaults, then the Project's adds,
+then the Space's defaults. Within the User's and the Project's, the Owner's order (Settings →
+Vaults: the Main vault, then position, then name); within the defaults, the order they were set
+in (the Main vault first in the Owner's Personal space). The losers are listed as `shadowed`, and
+the Thread's «Secrets» panel says «Wins over …». Precedence only picks among entries already
+allowed: it never lets a name in that rule 4 keeps out.
+
+It returns value ids (`VaultValueStore` entries; a link's is its original's), never values: only
+delivery reads them. `vaults.threadEnvironment` (WS, the Thread must be visible) computes it for the
+caller and strips value and entry ids: each User sees what their own turns would receive.
+`DoorRules.test.ts` checks that only `server.ts` and `ws.ts` reach the service and that no Vault
+RPC answers a `value` or a `valueId`.
+
 ## What is not covered here
 
-- Allowing Vaults to Spaces and Users, the effective set, delivery and masking: tickets 03 to 06.
+- Delivery as environment variables, masking, the agent's names and missing secrets: tickets 04
+  to 06.
