@@ -24,6 +24,8 @@ import {
   type ProjectId,
   type ProviderDriverKind,
   type ProviderInstanceId,
+  SECRET_ENV_CONTRACT_VERSION,
+  SECRET_ENV_FIELD,
   TextGenerationError,
   ThreadId,
   VcsUnsupportedOperationError,
@@ -414,7 +416,26 @@ const make = Effect.gen(function* () {
     },
   ): Effect.fn.Return<CallOutcome> {
     const spec = REMOTE_OPERATIONS[operation];
-    const payload = yield* encodeJson(spec.input, input).pipe(Effect.orDie);
+    // Spec 5: secrets go only to a machine of contract 10 or later. `SecretDelivery` refuses a
+    // Thread with secrets on an older one first, with why; this is the last guard, so a value
+    // never crosses to a machine that would not know to keep it out of everything but the process.
+    const outdated =
+      link.contractVersion < SECRET_ENV_CONTRACT_VERSION &&
+      typeof input === "object" &&
+      input !== null &&
+      SECRET_ENV_FIELD in input;
+    if (outdated) {
+      yield* Effect.logWarning("Withheld secrets from a machine before executor contract 10", {
+        environmentId: link.environmentId,
+        operation,
+      });
+    }
+    const payload = yield* encodeJson(
+      spec.input,
+      outdated
+        ? Object.fromEntries(Object.entries(input).filter(([key]) => key !== SECRET_ENV_FIELD))
+        : input,
+    ).pipe(Effect.orDie);
     const idempotencyKey = yield* EnvironmentExecutor.nextIdempotencyKey(operation);
     let result: ExecutorCallResult | undefined;
     for (let resends = 0; result === undefined; resends += 1) {
@@ -787,6 +808,8 @@ const make = Effect.gen(function* () {
       ),
     // Deciding makes no network call: a model change that may need a new session restarts it.
     planSelectionTransition: () => Effect.succeed({ type: "restart_session" }),
+    // Carried to the machine, whose own adapter takes them or refuses the session.
+    receivesSecretEnv: true,
     openSession: Effect.fn("RemoteEnvironments.openSession")(function* (input) {
       yield* requireSandboxSpace(link, driver, input.threadId).pipe(
         Effect.mapError(

@@ -1,4 +1,4 @@
-import type { OrchestrationV2HistoricalMessage } from "@t3tools/contracts";
+import type { OrchestrationV2HistoricalMessage, SecretEnv } from "@t3tools/contracts";
 import {
   ChatAttachment,
   CheckpointId,
@@ -463,6 +463,12 @@ export interface ProviderAdapterV2OpenSessionInput {
   readonly resumeFromSession?: OrchestrationV2ProviderSession;
   readonly initialNativeThreadId?: string;
   readonly initialProviderItemIdentityVersion?: 2;
+  /**
+   * The Thread's secrets for its owner (spec 5): only into the environment of the process the
+   * session starts, never into arguments, files or logs. Only adapters with `receivesSecretEnv`
+   * get a non-empty one.
+   */
+  readonly secretEnv?: SecretEnv;
 }
 
 export interface ProviderAdapterV2EnsureThreadInput {
@@ -709,5 +715,7 @@ export class ProviderAdapterV2 extends Context.Service<
     readonly openSession: (
       input: ProviderAdapterV2OpenSessionInput,
     ) => Effect.Effect<ProviderAdapterV2SessionRuntime, ProviderAdapterV2Error, Scope.Scope>;
+    /** Puts `secretEnv` into the environment of each process its sessions start. */
+    readonly receivesSecretEnv?: true;
   }
 >()("@t3tools/provider-core/server/ProviderAdapter/ProviderAdapterV2") {}

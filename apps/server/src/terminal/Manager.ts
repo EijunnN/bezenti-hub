@@ -34,6 +34,7 @@ import {
   ClaudeSettings,
   CodexSettings,
   ProviderInstanceId,
+  type SecretEnv,
   TerminalEnvironmentUnavailableError,
 } from "@t3tools/contracts";
 import { makeKeyedCoalescingWorker } from "@t3tools/shared/KeyedCoalescingWorker";
@@ -65,7 +66,10 @@ import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as ServerConfig from "../config.ts";
 import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
-import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
+import {
+  applySecretEnv,
+  mergeProviderInstanceEnvironment,
+} from "@t3tools/provider-core/server/instanceEnvironment";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/ProviderInstanceRegistryHydration.ts";
@@ -167,11 +171,21 @@ class TerminalProcessSignalError extends Schema.TaggedError<TerminalProcessSigna
   }
 }
 
+/**
+ * Spec 5: the secrets of the User who opens a terminal, for the shell it starts. Never part of the
+ * terminal's input (a client's), never kept once the shell started: only their fingerprint stays,
+ * to tell a shell that runs with older ones (`secretsStale`).
+ */
+export interface TerminalSecrets {
+  readonly secretEnv?: SecretEnv | undefined;
+}
+
 export class TerminalManager extends Context.Service<
   TerminalManager,
   {
     readonly open: (
       input: TerminalOpenInput,
+      secrets?: TerminalSecrets,
     ) => Effect.Effect<TerminalSessionSnapshot, TerminalError>;
 
     readonly getShell: (input: TerminalObserveInput) => Effect.Effect<string, TerminalError>;
@@ -195,6 +209,8 @@ export class TerminalManager extends Context.Service<
     readonly attachOutputStream: (
       input: TerminalAttachInput,
       viewerId: string,
+      /** For a shell the attach starts (a new terminal, or `restartIfNotRunning`); used once. */
+      secrets?: TerminalSecrets,
     ) => Stream.Stream<TerminalAttachStreamEvent, TerminalError>;
 
     readonly observeStream: (
@@ -306,6 +322,12 @@ interface TerminalSessionState {
   hasRunningSubprocess: boolean;
   childCommandLabel: string | null;
   runtimeEnv: Record<string, string> | null;
+  /** Spec 5: the secrets for the next start, dropped as soon as the shell spawned. */
+  pendingSecretEnv: SecretEnv | null;
+  /** Which secrets the running shell got (none: null). */
+  secretFingerprint: string | null;
+  /** The shell runs with secrets that changed since it started. */
+  secretsStale: boolean;
 }
 
 interface TerminalGrid {
@@ -401,7 +423,15 @@ function snapshot(session: TerminalSessionState): TerminalSessionSnapshot {
     sequence: session.eventSequence,
     cols: session.cols,
     rows: session.rows,
+    ...(session.secretsStale ? { secretsStale: true } : {}),
   };
+}
+
+/** Spec 5: a running shell keeps its secrets; it is stale once the User's set differs. */
+function noteSecrets(session: TerminalSessionState, secrets: TerminalSecrets | undefined) {
+  if (secrets === undefined) return;
+  session.secretsStale =
+    (session.secretFingerprint ?? null) !== (secrets.secretEnv?.fingerprint ?? null);
 }
 
 function summary(session: TerminalSessionState): TerminalSummary {
@@ -2479,7 +2509,18 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
                 }
               }
             }
-            const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
+            // Spec 5: the secrets go into this shell's environment and are then dropped here.
+            const secrets = session.pendingSecretEnv;
+            session.pendingSecretEnv = null;
+            const previousSecrets = session.secretFingerprint;
+            session.secretFingerprint = secrets?.fingerprint ?? null;
+            // Started again without the User's set (a restart from an attach): reopen to get them.
+            session.secretsStale = secrets === null && previousSecrets !== null;
+            const spawnResult = yield* trySpawn(
+              shellCandidates,
+              applySecretEnv(terminalEnv, secrets ?? undefined, platform),
+              session,
+            );
             ptyProcess = spawnResult.process;
             startedShell = spawnResult.shellLabel;
 
@@ -2828,6 +2869,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   const openWithWorkspaceLease = Effect.fn("terminal.openLocked")(function* (
     requestedInput: TerminalOpenInput,
+    secrets: TerminalSecrets | undefined,
   ) {
     const terminalId = requestedInput.terminalId;
     yield* assertValidCwd(requestedInput.cwd);
@@ -2875,6 +2917,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         hasRunningSubprocess: false,
         childCommandLabel: null,
         runtimeEnv: normalizedRuntimeEnv(input.env),
+        pendingSecretEnv: secrets?.secretEnv ?? null,
+        secretFingerprint: null,
+        secretsStale: false,
       };
 
       const createdSession = session;
@@ -2935,6 +2980,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
 
     if (!liveSession.process) {
+      liveSession.pendingSecretEnv = secrets?.secretEnv ?? null;
       yield* startSession(
         liveSession,
         {
@@ -2952,19 +2998,23 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       yield* resizeSession(liveSession, liveSession.process, targetCols, targetRows);
     }
 
+    // A running shell keeps the secrets it started with; the client says to reopen it.
+    noteSecrets(liveSession, secrets);
     return snapshot(liveSession);
   });
 
-  const openLocked = (input: TerminalOpenInput) =>
+  const openLocked = (input: TerminalOpenInput, secrets?: TerminalSecrets) =>
     withWorkspaceLease(
       path.resolve(input.worktreePath ?? input.cwd),
-      openWithWorkspaceLease(input),
+      openWithWorkspaceLease(input, secrets),
     );
 
-  const open: TerminalManager["Service"]["open"] = (input) =>
+  const open: TerminalManager["Service"]["open"] = (input, secrets) =>
     withThreadLock(
       input.threadId,
-      resolveLaunchInputEnvironment(input).pipe(Effect.flatMap(openLocked)),
+      resolveLaunchInputEnvironment(input).pipe(
+        Effect.flatMap((resolved) => openLocked(resolved, secrets)),
+      ),
     );
 
   const getShell = Effect.fn("terminal.getShell")(function* (input: TerminalObserveInput) {
@@ -2975,7 +3025,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     return session.shell;
   });
 
-  const openOrAttachForStream = Effect.fnUntraced(function* (requestedInput: TerminalAttachInput) {
+  const openOrAttachForStream = Effect.fnUntraced(function* (
+    requestedInput: TerminalAttachInput,
+    takeSecrets: () => TerminalSecrets | undefined,
+  ) {
     const terminalId = requestedInput.terminalId;
     const input = withSharedGrid(toSessionKey(requestedInput.threadId, terminalId), requestedInput);
     const existing = yield* getSession(input.threadId, terminalId);
@@ -2996,7 +3049,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         terminalId,
         cwd: input.cwd,
       });
-      return yield* Effect.uninterruptible(openLocked(resolvedInput));
+      return yield* Effect.uninterruptible(openLocked(resolvedInput, takeSecrets()));
     }
 
     const session = existing.value;
@@ -3009,9 +3062,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         terminalId,
         cwd: input.cwd,
       });
-      return yield* Effect.uninterruptible(openLocked(resolvedInput));
+      return yield* Effect.uninterruptible(openLocked(resolvedInput, takeSecrets()));
     }
 
+    noteSecrets(session, takeSecrets());
     if (
       session.process &&
       session.status === "running" &&
@@ -3156,11 +3210,12 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     };
   };
 
-  const attachStream: TerminalManager["Service"]["attachStream"] = (
-    input,
-    listener,
-    registerCleanup,
-    viewerId,
+  const attachStreamWith = (
+    input: TerminalAttachInput,
+    listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>,
+    registerCleanup: ((stop: () => void) => void) | undefined,
+    viewerId: string | undefined,
+    takeSecrets: () => TerminalSecrets | undefined,
   ) => {
     const viewer = viewerId ?? `stream:${++anonymousViewerCount}`;
     let detach = () => {};
@@ -3172,7 +3227,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           ? { cols: input.cols, rows: input.rows }
           : null,
       );
-      return openOrAttachForStream(input);
+      return openOrAttachForStream(input, takeSecrets);
     });
     return streamSession(
       input,
@@ -3192,6 +3247,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       Effect.onError(() => Effect.sync(detach)),
     );
   };
+
+  const attachStream: TerminalManager["Service"]["attachStream"] = (
+    input,
+    listener,
+    registerCleanup,
+    viewerId,
+  ) => attachStreamWith(input, listener, registerCleanup, viewerId, () => undefined);
 
   const observeStream: TerminalManager["Service"]["observeStream"] = (
     input,
@@ -3219,20 +3281,33 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       registerCleanup,
     );
 
-  const attachOutputStream: TerminalManager["Service"]["attachOutputStream"] = (input, viewerId) =>
-    Stream.unwrap(
+  const attachOutputStream: TerminalManager["Service"]["attachOutputStream"] = (
+    input,
+    viewerId,
+    secrets,
+  ) => {
+    // Used by the first attach only, then dropped: the stream may live for hours.
+    let pending = secrets;
+    const takeSecrets = () => {
+      const taken = pending;
+      pending = undefined;
+      return taken;
+    };
+    return Stream.unwrap(
       Effect.acquireRelease(
         Effect.sync(() => retainViewerOnce(input, viewerId, null)),
         (release) => Effect.sync(release),
       ).pipe(
         Effect.as(
           terminalOutputStream(
-            (listener, registerCleanup) => attachStream(input, listener, registerCleanup, viewerId),
+            (listener, registerCleanup) =>
+              attachStreamWith(input, listener, registerCleanup, viewerId, takeSecrets),
             (listener, registerCleanup) => resyncStream(input, listener, registerCleanup),
           ),
         ),
       ),
     );
+  };
 
   const metadataEventFromTerminalEvent = (
     event: TerminalEvent,

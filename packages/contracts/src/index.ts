@@ -18,6 +18,7 @@ export * from "./sshInstall.ts";
 export * from "./environment.ts";
 export * from "./environmentHttp.ts";
 export * from "./environmentExecutor.ts";
+export * from "./secretEnv.ts";
 export * from "./desktopBootstrap.ts";
 export * from "./desktopBrowser.ts";
 export * from "./desktopAppActivation.ts";

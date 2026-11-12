@@ -104,6 +104,8 @@ export const TerminalSessionSnapshot = Schema.Struct({
   // The PTY grid every renderer of this terminal should draw; absent from older servers.
   cols: Schema.optional(TerminalColsSchema),
   rows: Schema.optional(TerminalRowsSchema),
+  // The shell kept the Thread's secrets it started with, which changed since: reopen to update.
+  secretsStale: Schema.optional(Schema.Boolean),
 });
 export type TerminalSessionSnapshot = typeof TerminalSessionSnapshot.Type;
 
@@ -375,12 +377,19 @@ export class TerminalEnvironmentUnavailableError extends Schema.TaggedError<Term
       "environment_offline",
       "outside_thread_workspace",
       "hub_runs_no_agents",
+      // Spec 5: the Thread's secrets could not reach the shell (an outdated machine, storage).
+      "secrets_unavailable",
     ]),
     environmentName: Schema.optional(Schema.String),
+    /** Why, for `secrets_unavailable`: a message that names no value. */
+    detail: Schema.optional(Schema.String),
   },
 ) {
   override get message() {
     if (this.reason === "hub_runs_no_agents") return HUB_RUNS_NO_AGENTS_MESSAGE;
+    if (this.reason === "secrets_unavailable") {
+      return this.detail ?? "This Thread's secrets could not reach the terminal. Try again.";
+    }
     return this.reason === "environment_offline"
       ? `Environment offline: ${this.environmentName ?? "this Thread's Environment"} is not connected.`
       : "This terminal can only open inside the Thread's workspace.";

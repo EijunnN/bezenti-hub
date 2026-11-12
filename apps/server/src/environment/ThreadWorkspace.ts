@@ -6,6 +6,7 @@
 import {
   FilesystemBrowseError,
   type FilesystemBrowseInput,
+  ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
   type EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
   HUB_RUNS_NO_AGENTS_MESSAGE,
@@ -66,6 +67,7 @@ import * as HubRunsAgents from "./HubRunsAgents.ts";
 import * as ProjectCheckouts from "./ProjectCheckouts.ts";
 import * as RemoteEnvironments from "./RemoteEnvironments.ts";
 import { locateInCheckout } from "./WorkspaceLocation.ts";
+import * as SecretDelivery from "../vaults/SecretDelivery.ts";
 
 /** Who asks: the session's User, whose rules a forwarded call keeps to. */
 export interface WorkspaceCaller {
@@ -134,6 +136,8 @@ export const make = Effect.gen(function* () {
   // Sandboxes start for these calls and count them, and open terminals, as activity.
   const demand = yield* Effect.serviceOption(EnvironmentDemand.EnvironmentDemand);
   const runsAgents = yield* HubRunsAgents.HubRunsAgents;
+  // Spec 5 ticket 04: a shell gets the secrets of the User who opens it, read as it opens.
+  const secretDelivery = yield* Effect.serviceOption(SecretDelivery.SecretDelivery);
   const hubMachine = Option.isSome(registry)
     ? yield* Effect.option(registry.value.get(registry.value.hubMachineEnvironmentId))
     : Option.none();
@@ -422,6 +426,43 @@ export const make = Effect.gen(function* () {
       runRemote,
     );
 
+  /**
+   * The caller's secrets for a shell of the Thread on its machine (the Hub machine: `local`).
+   * Fails, never opens the shell without them, when the machine is too old for secrets.
+   */
+  const terminalSecrets = (
+    threadId: string,
+    caller: WorkspaceCaller,
+    where: { readonly environmentId: EnvironmentId; readonly contractVersion: number },
+  ): Effect.Effect<TerminalManager.TerminalSecrets | undefined, TerminalError> =>
+    Option.isNone(secretDelivery)
+      ? Effect.succeed(undefined)
+      : secretDelivery.value
+          .forProcess({
+            threadId: ThreadId.make(threadId),
+            actingUserId: caller.userId,
+            target: where,
+          })
+          .pipe(
+            Effect.map((secretEnv) => (secretEnv === undefined ? undefined : { secretEnv })),
+            Effect.mapError(
+              (error) =>
+                new TerminalEnvironmentUnavailableError({
+                  threadId,
+                  reason: "secrets_unavailable",
+                  detail: error.message,
+                }),
+            ),
+          );
+  const LOCAL_TARGET = {
+    environmentId: HUB_MACHINE_ENVIRONMENT_ID,
+    contractVersion: ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
+  };
+  const remoteTarget = (where: Extract<Route, { _tag: "remote" }>) => ({
+    environmentId: where.environmentId,
+    contractVersion: where.forward.contractVersion(),
+  });
+
   /** The folders a terminal names, resolved onto the Thread's machine; undefined if outside. */
   const terminalFolders = <I extends TerminalAttachInput>(
     route: Extract<Route, { _tag: "remote" }>,
@@ -547,16 +588,27 @@ export const make = Effect.gen(function* () {
     viewerId: string | undefined,
     runLocal: (
       terminals: TerminalManager.TerminalManager["Service"],
+      secrets: TerminalManager.TerminalSecrets | undefined,
     ) => Stream.Stream<TerminalAttachStreamEvent, TerminalError>,
   ): Stream.Stream<TerminalAttachStreamEvent, TerminalError> =>
     Stream.unwrap(
       Effect.gen(function* () {
         const refuse = terminalUnavailable(input.threadId);
         const where = yield* route(input.threadId, caller);
-        if (where._tag === "local") return runLocal((yield* local).terminals);
+        // Spec 5: an attach may start the shell (a new terminal), with the caller's secrets.
+        const withSecrets = mode === "attach" && input.cwd !== undefined;
+        if (where._tag === "local") {
+          const secrets = withSecrets
+            ? yield* terminalSecrets(input.threadId, caller, LOCAL_TARGET)
+            : undefined;
+          return runLocal((yield* local).terminals, secrets);
+        }
         if (where._tag !== "remote") return Stream.fail(refuse(where));
         const resolved = terminalFolders(where, input);
         if (resolved === undefined) return Stream.fail(refuse(REFUSED));
+        const secrets = withSecrets
+          ? yield* terminalSecrets(input.threadId, caller, remoteTarget(where))
+          : undefined;
         yield* remember(input, caller, where);
         // An open terminal keeps its Sandbox from idling, for as long as the stream lives.
         if (Option.isSome(demand)) yield* demand.value.hold(where.environmentId);
@@ -566,6 +618,7 @@ export const make = Effect.gen(function* () {
             root: where.remoteBase,
             input: resolved,
             ...(viewerId === undefined ? {} : { viewerId }),
+            ...(secrets?.secretEnv === undefined ? {} : { secretEnv: secrets.secretEnv }),
           })
           .pipe(
             Stream.catchTags({
@@ -719,14 +772,25 @@ export const make = Effect.gen(function* () {
       terminalCall(
         input,
         acting(caller),
-        (terminals) => terminals.open(input),
+        // Spec 5: the shell gets the opening User's secrets.
+        (terminals) =>
+          terminalSecrets(input.threadId, caller, LOCAL_TARGET).pipe(
+            Effect.flatMap((secrets) => terminals.open(input, secrets)),
+          ),
         (forward, where) => {
           const resolved = terminalFolders(where, input);
           return resolved === undefined
             ? undefined
-            : forward
-                .call("terminal.open", { root: where.remoteBase, input: resolved })
-                .pipe(Effect.tap(() => remember(input, caller, where)));
+            : terminalSecrets(input.threadId, caller, remoteTarget(where)).pipe(
+                Effect.flatMap((secrets) =>
+                  forward.call("terminal.open", {
+                    root: where.remoteBase,
+                    input: resolved,
+                    ...(secrets?.secretEnv === undefined ? {} : { secretEnv: secrets.secretEnv }),
+                  }),
+                ),
+                Effect.tap(() => remember(input, caller, where)),
+              );
         },
       ),
     terminalWrite: (input: TerminalWriteInput, caller: WorkspaceCaller) =>
@@ -766,8 +830,8 @@ export const make = Effect.gen(function* () {
         (forward) => forward.call("terminal.close", input),
       ),
     terminalAttach: (input: TerminalAttachInput, viewerId: string, caller: WorkspaceCaller) =>
-      terminalStream(input, acting(caller), "attach", viewerId, (terminals) =>
-        terminals.attachOutputStream(input, viewerId),
+      terminalStream(input, acting(caller), "attach", viewerId, (terminals, secrets) =>
+        terminals.attachOutputStream(input, viewerId, secrets),
       ),
     terminalObserve: (input: TerminalObserveInput, caller: WorkspaceCaller) =>
       terminalStream(input, caller, "observe", undefined, (terminals) =>

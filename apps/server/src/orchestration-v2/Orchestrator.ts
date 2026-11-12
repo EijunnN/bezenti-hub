@@ -201,6 +201,7 @@ import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import { threadAccessOf } from "./commandAccess.ts";
 import * as DirectoryRoots from "../spaces/directoryRoots.ts";
 import * as ServerConfig from "../config.ts";
+import * as SecretDelivery from "../vaults/SecretDelivery.ts";
 import { scratchRootOf } from "../environment/ScratchWorkspace.ts";
 import { effectiveOwner } from "../spaces/SpaceVisibility.ts";
 
@@ -1076,6 +1077,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
   // The server provides it; orchestrator tests without Spaces leave every command unchecked.
   const spaces = yield* Effect.serviceOption(SpaceDirectory.SpaceDirectory);
+  // Spec 5: a Thread with secrets gets its own provider process, never one shared by Threads.
+  const secretDelivery = yield* Effect.serviceOption(SecretDelivery.SecretDelivery);
+  const receivesSecrets = (threadId: ThreadId) =>
+    Option.isNone(secretDelivery)
+      ? Effect.succeed(false)
+      : // Unreadable: a process of its own, the side that never shares secrets.
+        secretDelivery.value.receivesSecrets(threadId).pipe(Effect.orElseSucceed(() => true));
   const serverConfig = yield* Effect.serviceOption(ServerConfig.ServerConfig);
   const sqlClient = yield* Effect.serviceOption(SqlClient.SqlClient);
   const nextTurnItemOrdinal = (
@@ -1194,15 +1202,20 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     capabilitiesFor(input.threadId, input.providerInstanceId, input.environmentId).pipe(
       Effect.flatMap((capabilities) =>
         capabilities.sessions.supportsMultipleProviderThreadsPerSession
-          ? Effect.succeed(
+          ? receivesSecrets(input.threadId)
+          : Effect.succeed(true),
+      ),
+      Effect.flatMap((ownProcess) =>
+        ownProcess
+          ? idAllocator.allocate.providerSession({
+              providerInstanceId: input.providerInstanceId,
+              threadId: input.threadId,
+            })
+          : Effect.succeed(
               idAllocator.derive.providerSession({
                 providerInstanceId: input.providerInstanceId,
               }),
-            )
-          : idAllocator.allocate.providerSession({
-              providerInstanceId: input.providerInstanceId,
-              threadId: input.threadId,
-            }),
+            ),
       ),
     );
 

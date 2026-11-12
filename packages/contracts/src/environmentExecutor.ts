@@ -20,12 +20,11 @@ import {
 } from "./environmentConnection.ts";
 
 /**
- * 8: previews through the Hub (`preview.proxyHttp`, `preview.proxySocket`,
- * `preview.proxySocketSend`). A machine reports its own in its hello.
- * 9: new checkouts from the Hub's copy of its checkout (`WireCheckout.fromHub` and `subfolder`,
- * the `X-T3-Checkout` fetch); the Hub sends `fromHub` only to machines of 9 or later.
+ * 8: previews through the Hub (`preview.proxy*`). 9: checkouts from the Hub's copy
+ * (`WireCheckout.fromHub`, `subfolder`). 10: a Thread's secrets as environment variables
+ * (`secretEnv`, `secretEnv.ts`); a machine before 10 gets none.
  */
-export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 9;
+export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 10;
 
 /**
  * The Hub machine's Environment id. It is a constant so the `environments` table can seed the

@@ -1,4 +1,10 @@
-import { ProjectId, type ProjectScript } from "@t3tools/contracts";
+import {
+  ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
+  HUB_MACHINE_ENVIRONMENT_ID,
+  ProjectId,
+  type ProjectScript,
+  ThreadId,
+} from "@t3tools/contracts";
 import {
   projectScriptRuntimeEnv,
   projectScriptTerminalInput,
@@ -18,6 +24,7 @@ import * as Schema from "effect/Schema";
 
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
+import * as SecretDelivery from "../vaults/SecretDelivery.ts";
 import * as ProjectService from "./ProjectService.ts";
 
 export interface ProjectSetupScriptRunnerResultNoScript {
@@ -72,7 +79,7 @@ export class ProjectSetupScriptOperationError extends Schema.TaggedError<Project
     projectId: Schema.optional(Schema.String),
     projectCwd: Schema.optional(Schema.String),
     worktreePath: Schema.String,
-    operation: Schema.Literals(["resolveProject", "readSettings", "openTerminal"]),
+    operation: Schema.Literals(["resolveProject", "readSettings", "readSecrets", "openTerminal"]),
     cause: Schema.Defect(),
   },
 ) {
@@ -186,6 +193,8 @@ function wrapCommandForCompletion(
 export const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const terminalManager = yield* TerminalManager.TerminalManager;
+  // Spec 5 ticket 04: a setup script runs here, in a shell with its Thread owner's secrets.
+  const secretDelivery = yield* Effect.serviceOption(SecretDelivery.SecretDelivery);
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const random = yield* SecureRandom.SecureRandom;
   const serviceScope = yield* Effect.scope;
@@ -436,15 +445,38 @@ export const make = Effect.gen(function* () {
       terminalId,
       onStartupPrompt: observed?.flushPartialLine ?? Effect.void,
     });
+    const secretEnv = Option.isNone(secretDelivery)
+      ? undefined
+      : yield* secretDelivery.value
+          .forTurn({
+            threadId: ThreadId.make(input.threadId),
+            target: {
+              environmentId: HUB_MACHINE_ENVIRONMENT_ID,
+              contractVersion: ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
+            },
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProjectSetupScriptOperationError({
+                  ...errorContext,
+                  operation: "readSecrets",
+                  cause,
+                }),
+            ),
+          );
     const { completionShell, commandLine } = yield* Effect.gen(function* () {
       const shell = yield* terminalManager
-        .open({
-          threadId: input.threadId,
-          terminalId,
-          cwd,
-          worktreePath: input.worktreePath,
-          env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0" },
-        })
+        .open(
+          {
+            threadId: input.threadId,
+            terminalId,
+            cwd,
+            worktreePath: input.worktreePath,
+            env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0" },
+          },
+          secretEnv === undefined ? undefined : { secretEnv },
+        )
         .pipe(
           Effect.andThen(() =>
             terminalManager

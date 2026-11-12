@@ -63,6 +63,7 @@ import {
   ProviderTurnId,
   ProviderUserInputAnswers,
   RunAttemptId,
+  SecretEnv,
   RunId,
   RuntimeRequestId,
   ThreadId,
@@ -153,6 +154,8 @@ const OpenSessionInput = Schema.Struct({
   initialProviderItemIdentityVersion: Schema.optionalKey(Schema.Literal(2)),
   mcp: Schema.optionalKey(WireMcpCredential),
   checkout: Schema.optionalKey(WireCheckout),
+  /** Contract 10: the Thread owner's secrets, for the provider process's environment alone. */
+  secretEnv: Schema.optionalKey(SecretEnv),
 });
 
 /** Which optional session methods the Environment's runtime has. */
@@ -513,7 +516,16 @@ export const REMOTE_OPERATIONS = {
     FilesystemBrowseResult,
     FilesystemBrowseError,
   ),
-  "terminal.open": workspace(rooted(TerminalOpenInput), TerminalSessionSnapshot, TerminalError),
+  "terminal.open": workspace(
+    Schema.Struct({
+      root: Schema.String,
+      input: TerminalOpenInput,
+      /** Contract 10: the opening User's secrets, for the shell's environment alone. */
+      secretEnv: Schema.optionalKey(SecretEnv),
+    }),
+    TerminalSessionSnapshot,
+    TerminalError,
+  ),
   "terminal.write": workspace(TerminalWriteInput, Schema.Void, TerminalError),
   "terminal.resize": workspace(
     Schema.Struct({ input: TerminalResizeInput, viewerId: Schema.optionalKey(Schema.String) }),
@@ -530,6 +542,8 @@ export const REMOTE_OPERATIONS = {
       root: Schema.String,
       input: TerminalAttachInput,
       viewerId: Schema.optionalKey(Schema.String),
+      /** Contract 10: for a shell the attach starts, the opening User's secrets. */
+      secretEnv: Schema.optionalKey(SecretEnv),
     }),
     Schema.Void,
     TerminalError,

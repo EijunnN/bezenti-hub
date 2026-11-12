@@ -97,6 +97,11 @@ function curatedCauseMessages(cause: unknown): {
       }
       if (typeof cause !== "object") break;
       const tag = (cause as Record<string, unknown>)._tag;
+      // Spec 5: why a Thread with secrets did not start, also as a machine sent it (a defect
+      // keeps its name and message).
+      if (tag === "SecretDeliveryError" || stringField(cause, "name") === "SecretDeliveryError") {
+        return { known: stringField(cause, "message"), category: categoryMessage() };
+      }
       switch (tag) {
         case "ContextHandoffBudgetError":
           return { known: new ContextHandoffBudgetError().message, category: categoryMessage() };
@@ -186,7 +191,7 @@ export function knownProviderFailureMessage(cause: unknown): string | undefined 
   return curatedCauseMessages(cause).known;
 }
 
-function stringField(value: unknown, key: "message" | "code"): string | undefined {
+function stringField(value: unknown, key: "message" | "code" | "name"): string | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   try {
     const candidate = (value as Record<string, unknown>)[key];

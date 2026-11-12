@@ -22,6 +22,7 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { openSessionWithSecrets } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -944,7 +945,7 @@ export const layerProviderAdapterRegistry: Layer.Layer<
                 cause,
               }),
           ),
-          Effect.flatMap((target) => target.openSession(input)),
+          Effect.flatMap((target) => openSessionWithSecrets(target, input)),
         ),
     });
     // An instance the Hub machine lacks is still reachable on an Environment that has it.

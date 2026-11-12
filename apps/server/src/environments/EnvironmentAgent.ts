@@ -34,6 +34,7 @@ import {
 } from "@t3tools/contracts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { openSessionWithSecrets } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
@@ -498,26 +499,28 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
       });
     }
     const scope = yield* Scope.fork(agentScope);
-    const runtime = yield* adapter
-      .openSession({
-        threadId: request.threadId,
-        providerSessionId: request.providerSessionId,
-        modelSelection: request.modelSelection,
-        runtimePolicy: request.runtimePolicy,
-        ...(request.resumeFromSession === undefined
-          ? {}
-          : { resumeFromSession: request.resumeFromSession }),
-        ...(request.initialNativeThreadId === undefined
-          ? {}
-          : { initialNativeThreadId: request.initialNativeThreadId }),
-        ...(request.initialProviderItemIdentityVersion === undefined
-          ? {}
-          : { initialProviderItemIdentityVersion: request.initialProviderItemIdentityVersion }),
-      })
-      .pipe(
-        Effect.provideService(Scope.Scope, scope),
-        Effect.onError(() => Scope.close(scope, Exit.void)),
-      );
+    // Spec 5: the Thread's secrets go into the provider process's environment and nowhere else:
+    // never logged, written or kept here once the session opened (the adapter refuses them if it
+    // cannot put them in its process).
+    const runtime = yield* openSessionWithSecrets(adapter, {
+      threadId: request.threadId,
+      providerSessionId: request.providerSessionId,
+      modelSelection: request.modelSelection,
+      runtimePolicy: request.runtimePolicy,
+      ...(request.resumeFromSession === undefined
+        ? {}
+        : { resumeFromSession: request.resumeFromSession }),
+      ...(request.initialNativeThreadId === undefined
+        ? {}
+        : { initialNativeThreadId: request.initialNativeThreadId }),
+      ...(request.initialProviderItemIdentityVersion === undefined
+        ? {}
+        : { initialProviderItemIdentityVersion: request.initialProviderItemIdentityVersion }),
+      ...(request.secretEnv === undefined ? {} : { secretEnv: request.secretEnv }),
+    }).pipe(
+      Effect.provideService(Scope.Scope, scope),
+      Effect.onError(() => Scope.close(scope, Exit.void)),
+    );
     const session: LocalSession = {
       threadId: request.threadId,
       driver: adapter.driver,
@@ -647,7 +650,11 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
       "terminal.stream",
       request.subscriptionId,
       request.mode === "attach"
-        ? terminals.attachOutputStream(input, request.viewerId ?? request.subscriptionId)
+        ? terminals.attachOutputStream(
+            input,
+            request.viewerId ?? request.subscriptionId,
+            request.secretEnv === undefined ? undefined : { secretEnv: request.secretEnv },
+          )
         : terminalOutputStream(
             (listener, registerCleanup) =>
               terminals.observeStream(input, listener, registerCleanup),
@@ -1032,7 +1039,13 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
               Effect.catchTags({
                 WorkspaceRootEscapeError: () => Effect.fail(terminalOutside(rooted.input.threadId)),
               }),
-              Effect.flatMap((input) => terminals.open(input)),
+              // Spec 5: the opening User's secrets, for this shell's environment alone.
+              Effect.flatMap((input) =>
+                terminals.open(
+                  input,
+                  rooted.secretEnv === undefined ? undefined : { secretEnv: rooted.secretEnv },
+                ),
+              ),
             ),
         );
       }
