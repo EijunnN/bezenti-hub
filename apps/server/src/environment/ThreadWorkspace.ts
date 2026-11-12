@@ -132,6 +132,10 @@ const isAbsolute = (path: string) =>
   path.startsWith("/") || path.startsWith("\\") || isWindowsAbsolutePath(path);
 
 const isTerminalUnavailable = Schema.is(TerminalEnvironmentUnavailableError);
+/** An attach without a folder found no shell to reattach (as the machine says it, old or new). */
+const noShellToReattach = (error: TerminalError) =>
+  error._tag === "TerminalSessionLookupError" ||
+  (isTerminalUnavailable(error) && error.reason === "outside_thread_workspace");
 
 export const make = Effect.gen(function* () {
   const registry = yield* Effect.serviceOption(EnvironmentExecutor.EnvironmentExecutorRegistry);
@@ -679,7 +683,7 @@ export const make = Effect.gen(function* () {
           const delivery = secretDelivery.value;
           // No running shell to reattach: say why it does not start (the machine needs an update).
           return open(undefined).pipe(
-            Stream.catchTag("TerminalSessionLookupError", () =>
+            Stream.catchIf(noShellToReattach, () =>
               Stream.fromEffect(
                 delivery
                   .resolve(plan)

@@ -27,6 +27,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
+import * as Stream from "effect/Stream";
 
 import { addMember, joinOrganization } from "../auth/UserAuth.testkit.ts";
 import * as CommandActor from "../auth/CommandActor.ts";
@@ -372,6 +373,25 @@ describe("Hub con Environments: a Thread's secrets as environment variables", ()
         );
       }
       assert.equal(old.ptySpawns.length, 1, "no shell started without its secrets");
+      // An attach that would make a new terminal says the same; the running one still reattaches.
+      const attached = yield* Effect.exit(
+        workspace
+          .terminalAttach({ threadId, terminalId: "term-3", cwd: workspaceRoot }, "viewer-1", {
+            userId: owner,
+          })
+          .pipe(Stream.take(1), Stream.runDrain),
+      );
+      assert.isTrue(Exit.isFailure(attached));
+      if (Exit.isFailure(attached)) {
+        assert.include(Cause.pretty(attached.cause), "Old laptop needs an update");
+      }
+      const reattached = yield* workspace
+        .terminalAttach({ threadId, terminalId: "term-1", cwd: workspaceRoot }, "viewer-2", {
+          userId: owner,
+        })
+        .pipe(Stream.take(1), Stream.runCollect);
+      assert.equal(reattached.length, 1, "the running shell reattaches, nothing is read");
+      assert.equal(old.ptySpawns.length, 1);
       assert.isTrue(
         old.ptySpawns.every((spawn) => spawn.env.OWNER_TOKEN === undefined),
         "the value never reached the old machine",
