@@ -4,14 +4,38 @@
 
 **Blocked by:** spec 5 · 01 (almacén cifrado).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Manifiesto en el repo con versión fijada y SHA-256 por plataforma (linux amd64/arm64, darwin amd64/arm64). Descarga a `<stateDir>/ai-gateway/bin/<versión>/`; nunca ejecuta un binario sin verificar. Red-first: un archivo con hash distinto, o ausente en `checksums.txt`, se rechaza y no se ejecuta.
-- [ ] Proceso hijo con el usuario del Hub, `host: 127.0.0.1`, puerto libre; lanzado solo con `-config <ruta>` (ningún secreto en argv); reinicio con backoff; stdout/stderr filtrados antes de los logs del Hub.
-- [ ] `config.yaml` 0600: `remote-management.allow-remote: false`, panel desactivado, `secret-key` y client key aleatorias guardadas en el almacén cifrado, estadísticas y logs de peticiones desactivados.
-- [ ] `auth-dir` en `$XDG_RUNTIME_DIR` o `/dev/shm` (0700); si no hay tmpfs, `<stateDir>/ai-gateway/auth` y aviso en Settings.
-- [ ] Red-first: la gateway no escucha fuera de loopback; la Management API sin la clave responde 401; un Sandbox (runtime Podman) no conecta al puerto de CLIProxyAPI.
-- [ ] Settings → AI gateway (solo Owner): versión, estado, uptime, «Check for updates» (consulta GitHub solo al pulsar o abrir la sección), «Update to vX» (descarga, verifica, arranca en paralelo, prueba de salud y modelos, cambia) y «Roll back». Auditoría `ai_gateway.update`, `ai_gateway.rollback`.
-- [ ] Puertas: WS `aiGateway.status`, `aiGateway.checkForUpdates`, `aiGateway.update`, `aiGateway.rollback` en `RPC_SPACE_ACCESS` (Installation, solo Owner). Ninguna HttpApi, raw route ni herramienta MCP. Logs, OTLP y argumentos de proceso sin claves (test de humo).
-- [ ] Tests del gestor con un binario de test que hace de CLIProxyAPI (arranque, caída y reinicio, config escrita, update y rollback); un test de integración con la release real, que se salta sin red.
-- [ ] Prueba real en WSL: el Hub dev descarga la versión fijada, Settings → AI gateway la muestra «Running», `ss -ltnp` solo la ve en 127.0.0.1, matar el proceso lo reinicia.
+- [x] Manifiesto en el repo con versión fijada y SHA-256 por plataforma (linux amd64/arm64, darwin amd64/arm64). Descarga a `<stateDir>/ai-gateway/bin/<versión>/`; nunca ejecuta un binario sin verificar. Red-first: un archivo con hash distinto, o ausente en `checksums.txt`, se rechaza y no se ejecuta.
+- [x] Proceso hijo con el usuario del Hub, `host: 127.0.0.1`, puerto libre; lanzado solo con `-config <ruta>` (ningún secreto en argv); reinicio con backoff; stdout/stderr filtrados antes de los logs del Hub.
+- [x] `config.yaml` 0600: `remote-management.allow-remote: false`, panel desactivado, `secret-key` y client key aleatorias guardadas en el almacén cifrado, estadísticas y logs de peticiones desactivados.
+- [x] `auth-dir` en `$XDG_RUNTIME_DIR` o `/dev/shm` (0700); si no hay tmpfs, `<stateDir>/ai-gateway/auth` y aviso en Settings.
+- [x] Red-first: la gateway no escucha fuera de loopback; la Management API sin la clave responde 401; un Sandbox (runtime Podman) no conecta al puerto de CLIProxyAPI.
+- [x] Settings → AI gateway (solo Owner): versión, estado, uptime, «Check for updates» (consulta GitHub solo al pulsar o abrir la sección), «Update to vX» (descarga, verifica, arranca en paralelo, prueba de salud y modelos, cambia) y «Roll back». Auditoría `ai_gateway.update`, `ai_gateway.rollback`.
+- [x] Puertas: WS `aiGateway.status`, `aiGateway.checkForUpdates`, `aiGateway.update`, `aiGateway.rollback` en `RPC_SPACE_ACCESS` (Installation, solo Owner). Ninguna HttpApi, raw route ni herramienta MCP. Logs, OTLP y argumentos de proceso sin claves (test de humo).
+- [x] Tests del gestor con un binario de test que hace de CLIProxyAPI (arranque, caída y reinicio, config escrita, update y rollback); un test de integración con la release real, que se salta sin red.
+- [x] Prueba real en WSL: el Hub dev descarga la versión fijada, Settings → AI gateway la muestra «Running», `ss -ltnp` solo la ve en 127.0.0.1, matar el proceso lo reinicia.
+
+**Hecho** (rama `impl/aig-01`):
+
+- `apps/server/src/ai/`: `cliproxyRelease.ts` fija la v8.0.67 y el SHA-256 de los cuatro archivos de producción (Linux toma la build `_no-plugin`: nada de código cargado en caliente); `CliproxyReleases.ts` solo pide a las URL de releases de GitHub construidas desde una versión validada; `cliproxyInstall.ts` exige el hash de `checksums.txt` y, para la fijada, el del código (si falta o difiere: `CliproxyRefusedError`, nada se escribe ni se ejecuta, y no se reintenta), saca el binario en memoria y lo escribe 0700 en `<stateDir>/ai-gateway/bin/<versión>/`; antes de cada arranque se vuelve a hashear contra el registro del almacén cifrado (`ai-gateway-releases`). Windows: `unsupported` (solo desarrollo, en WSL).
+- `AiGateway.ts`: hijo con `-config <ruta>` como únicos argumentos, entorno limpio (`PATH`, `HOME`, token de arranque; nada del Hub), `setpriv --pdeathsig KILL` en Linux (muere con el Hub aunque lo maten con -9), barrido al arrancar de los `run-*.pid` cuyo proceso lleva su token en `/proc/<pid>/environ`; puerto libre en 127.0.0.1; sano cuando `GET /v8/management/config` responde 200 con la clave; reinicio con backoff 1 s→60 s; salida filtrada (claves y tokens `[redacted]`) al log del Hub; estado publicado (`changes`). Config y `auth-dir` en una carpeta en memoria (`$XDG_RUNTIME_DIR` o `/dev/shm`, 0700, nunca enlace ni ajena); config por arranque, 0600, borrada al parar; sin tmpfs, `<stateDir>/ai-gateway/run` y aviso en Settings. Mejora sobre el ticket: también el `config.yaml` (con la client key) vive en memoria.
+- Claves de gestión y de cliente: 32 bytes aleatorios en el almacén cifrado; nunca en argv, logs, spans ni errores (CLIProxyAPI guarda el `secret-key` como bcrypt).
+- Update/rollback: instala y verifica, arranca al lado, prueba gestión y `/v1/models` con la client key, cambia y guarda la anterior; un fallo deja la que corría. Auditoría `ai_gateway.update`/`ai_gateway.rollback` (from, version, outcome, reason).
+- Puertas: solo WS `aiGateway.status/checkForUpdates/update/rollback` en `INSTALLATION_RPC_METHODS` (solo Owner; update/rollback además `settings:write`). Ninguna HttpApi, raw route, cookie ni MCP, así que `DoorRules.ts` no cambia. `T3CODE_AI_GATEWAY=managed|off`; sin definir, producción lo gestiona y un Hub dev no.
+- Web: Settings → AI gateway (Agents; fuera del menú de un Member): estado, versión, uptime y reinicios, aviso sin tmpfs, «Check for updates» (consulta GitHub solo con la sección abierta), «Update to X», «Roll back to Y».
+- Tests: `AiGateway.test.ts` con un CLIProxyAPI falso (archivo tar.gz con script, sin red): arranque, config, 401 sin clave, argv/entorno/logs/spans sin claves, solo loopback, hash fijado/listado/ausente rechazado, binario cambiado no se ejecuta, caída y reinicio, parada sin restos, restos de un Hub matado (solo PID verificado), update/rollback/auditoría, update fallido; prueba opcional con la release real (`T3CODE_TEST_LIVE_CLIPROXY=1`). `PodmanSandboxRuntime.test.ts`: un Sandbox no conecta al puerto. `RpcAuthorization.test.ts`: un Member es rechazado. Todo red-first por mutación.
+- Docs: `docs/internals/ai-gateway.md`, `environment-auth.md`, `docs/user/install.md`.
+
+**Hecho tras la revisión** (17 hallazgos):
+
+- Solo versiones fijadas: `PINNED_CLIPROXY_RELEASES` (8.0.66 y 8.0.67, SHA-256 por plataforma). `aiGateway.update` rechaza una versión no fijada antes de descargar; ya no se consulta `checksums.txt` ni la última release de GitHub; «Roll back» vuelve a la anterior fijada. La elección del Owner (rollback o una fijada más vieja) se registra (`chosenByOwner`) y ni una caída ni un reinicio ni una subida del Hub la deshacen.
+- Dónde corre: solo en un Hub (`aiGatewayPlacement`). Una máquina unida (y el servidor de un Sandbox) nunca lo arranca, descarga ni prepara. App de escritorio y Hub dev: apagado hasta que el Owner pulsa «Turn on» (`aiGateway.setEnabled`, auditado `ai_gateway.enable`); `T3CODE_AI_GATEWAY` manda donde está.
+- Carrera de puerto: antes de mandar ninguna clave, el Hub comprueba que es su propio hijo (sockets del PID: `/proc/net/tcp` contra `/proc/<pid>/fd`, `lsof` en macOS) quien escucha en el puerto, y solo en 127.0.0.1; si escucha en otra dirección se mata y no se reintenta. Se repite cuando responde.
+- Sin contacto con fuera: `-local-model` (catálogos embebidos), panel y su actualización apagados, sin mDNS, plugins ni pprof; claves del v8 (`management.allow-remote`) comprobadas contra el `config.example.yaml` fijado.
+- Huérfanos: grupo de procesos propio; registro con PID, hora de arranque y ejecutable; al arrancar solo se mata un resto cuyo PID conserva ambos. La client key se rota en cada arranque. Limpiar restos nunca impide arrancar (errores a log).
+- Cambio de release: arranca la nueva, la comprueba, la registra y solo entonces para la vieja; un fallo deja la vieja corriendo y el registro intacto. Lectura-escritura del registro bajo el mismo lock. Se borran las releases que no son activa ni anterior.
+- Logs: redacción por nombre (`access_token`, `refresh_token`, `api_key`, `client_secret`, `key=`, `Authorization`…) y por forma (`AIza…`, `ya29.…`, `1//…`, `sk-…`, `ghp_…`, JWT), con guiones bajos.
+- Descarga en stream con límite duro de 100 MB y hash al vuelo; gunzip en el pool de hilos; el binario se re-hashea en stream. Auditoría con la versión pedida y `rolled-back`. Estado en stream por WS (`aiGateway.status`). `switchTo` es `Effect.fn`.
+- Aislamiento: documentado que corre con el usuario del Hub (aceptable solo por las versiones fijadas y verificadas); contenedor o uid propio anotado en el spec como endurecimiento posterior. Solo se le pasan stdio.
+- Red-first por mutación de cada regla nueva.

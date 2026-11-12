@@ -87,6 +87,12 @@ export const INSTALLATION_RPC_METHODS = [
   WS_METHODS.sourceControlSignInWait,
   WS_METHODS.sourceControlSignInCancel,
   WS_METHODS.sourceControlStar,
+  // The Hub's AI gateway: what it runs, and which release.
+  WS_METHODS.aiGatewayStatus,
+  WS_METHODS.aiGatewayCheckForUpdates,
+  WS_METHODS.aiGatewayUpdate,
+  WS_METHODS.aiGatewayRollback,
+  WS_METHODS.aiGatewaySetEnabled,
 ] as const;
 export type InstallationRpcMethod = (typeof INSTALLATION_RPC_METHODS)[number];
 

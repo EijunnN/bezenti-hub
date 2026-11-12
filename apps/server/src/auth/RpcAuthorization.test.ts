@@ -171,6 +171,24 @@ describe("RPC authorization scopes", () => {
           ]);
           yield* guardRpcPayload(method, {}, everything, {} as never, UserId.make("owner"));
         }
+        // The Hub's AI gateway: which CLIProxyAPI release runs, and its status, are the Owner's.
+        for (const method of [
+          WS_METHODS.aiGatewayStatus,
+          WS_METHODS.aiGatewayCheckForUpdates,
+          WS_METHODS.aiGatewayUpdate,
+          WS_METHODS.aiGatewayRollback,
+          WS_METHODS.aiGatewaySetEnabled,
+        ]) {
+          expect([method, spaceAccessForRpcMethod(method)]).toEqual([method, "installation"]);
+          const refused = yield* guardRpcPayload(
+            method,
+            { version: "9.9.9" },
+            member,
+            {} as never,
+            UserId.make("member"),
+          ).pipe(Effect.flip);
+          expect([method, refused.message]).toEqual([method, INSTALLATION_OWNER_ONLY_MESSAGE]);
+        }
         // An ACP agent's model provider is set on the Installation's provider instance, with
         // its secrets; the Project only says where the agent runs.
         for (const method of [

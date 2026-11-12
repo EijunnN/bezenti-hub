@@ -151,6 +151,9 @@ export const AUDIT_ACTION_LABELS: Record<AuditAction, string> = {
   "sandbox.delete": "Deleted a Sandbox",
   "sandbox.limits.change": "Changed Sandbox limits",
   "sandbox.image.update": "Updated the Sandbox image",
+  "ai_gateway.update": "Updated the AI gateway",
+  "ai_gateway.rollback": "Rolled back the AI gateway",
+  "ai_gateway.enable": "Turned the AI gateway on or off",
 };
 
 export const INSTALLATION_PERMISSION_LABELS: Record<InstallationPermission, string> = {

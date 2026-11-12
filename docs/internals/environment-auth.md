@@ -482,7 +482,8 @@ providers. Two layers now do:
   whole Hub), storage cleanup, process, trace, telemetry and usage diagnostics, signalling a
   process, triage, every provider, provider sign-in, ACP registry install and an ACP agent's
   model provider (secrets included; the Project only says where the agent runs), device hosts,
-  device actions and shutdown, and the Hub's source-control sign-in and starring. The
+  device actions and shutdown, the Hub's source-control sign-in and starring, and the Hub's
+  AI gateway (`aiGateway.*`, [ai-gateway.md](ai-gateway.md)). The
   middleware refuses them with `SpaceActionDeniedError` ("Only the Owner of this Hub can do
   that.") unless the session sees everything (the Owner, or no Owner yet), whatever its
   scopes, and says that rather than naming a missing scope; an Admin is refused like a Member.
@@ -516,8 +517,8 @@ providers. Two layers now do:
 
 Clients hide what a Member cannot do rather than fail: command permissions refuse
 `INSTALLATION_RPC_METHODS` for a session that is not the Owner's
-(`sessionActsForInstallation`), the web Settings drop Providers, Devices, Maintenance,
-Diagnostics, Source control and Secrets for a Member (opening one says only the Owner changes
+(`sessionActsForInstallation`), the web Settings drop Providers, AI gateway, Devices,
+Maintenance, Diagnostics, Source control and Secrets for a Member (opening one says only the Owner changes
 them) and mark Threads, Browser, Worktrees, Keybindings, Projects and Labs as the Hub's, whose
 rows a Member cannot change are inert and say only the Owner changes them, and
 mobile Settings drop Providers, Source control and Maintenance. Settings stored once for the

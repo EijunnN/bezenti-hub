@@ -52,6 +52,9 @@ export const AuditAction = Schema.Literals([
   "sandbox.delete",
   "sandbox.limits.change",
   "sandbox.image.update",
+  "ai_gateway.update",
+  "ai_gateway.rollback",
+  "ai_gateway.enable",
 ]);
 export type AuditAction = typeof AuditAction.Type;
 
@@ -183,6 +186,11 @@ export const AUDIT_DETAIL_KEYS = {
    * `from` one version to `version` at the Owner's request.
    */
   "sandbox.image.update": ["via", "outcome", "version", "from", "reason"],
+  /** The CLIProxyAPI releases before and after; `updated` or `failed`, with the trimmed reason. */
+  "ai_gateway.update": ["from", "version", "outcome", "reason"],
+  "ai_gateway.rollback": ["from", "version", "outcome", "reason"],
+  /** `on` or `off`, as the Owner chose where the environment does not decide. */
+  "ai_gateway.enable": ["to"],
 } as const satisfies Record<AuditAction, ReadonlyArray<string>>;
 
 export type AuditDetailOf<A extends AuditAction> = {

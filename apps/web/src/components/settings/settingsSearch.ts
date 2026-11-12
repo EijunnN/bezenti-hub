@@ -24,6 +24,7 @@ export type SettingsPath =
   | "/settings/keybindings"
   | "/settings/snap-shot"
   | "/settings/providers"
+  | "/settings/ai-gateway"
   | "/settings/threads"
   | "/settings/browser"
   | "/settings/devices"
@@ -90,6 +91,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/keybindings": "Keybindings",
   "/settings/snap-shot": "SnapShots",
   "/settings/providers": "Providers",
+  "/settings/ai-gateway": "AI gateway",
   "/settings/threads": "Threads",
   "/settings/browser": "Browser",
   "/settings/devices": "Devices",
@@ -126,6 +128,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
     heading: "Agents",
     paths: [
       "/settings/providers",
+      "/settings/ai-gateway",
       "/settings/threads",
       "/settings/browser",
       "/settings/devices",
@@ -158,6 +161,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
  */
 export const SETTINGS_OWNER_ONLY_PATHS: ReadonlySet<SettingsPath> = new Set<SettingsPath>([
   "/settings/providers",
+  "/settings/ai-gateway",
   "/settings/devices",
   "/settings/maintenance",
   "/settings/diagnostics",
@@ -1142,6 +1146,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     secretsFeatureOnly: true,
   },
   {
+    id: "ai-gateway",
+    title: "AI gateway",
+    to: "/settings/ai-gateway",
+    searchTerms: ["cliproxyapi cli proxy api update roll back version subscriptions"],
+  },
+  {
     id: "archive",
     title: "Archived threads",
     to: "/settings/archived",
@@ -1163,6 +1173,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/snap-shot": null,
   "/settings/keybindings": null,
   "/settings/providers": null,
+  "/settings/ai-gateway": null,
   "/settings/threads": null,
   "/settings/browser": null,
   "/settings/devices": null,

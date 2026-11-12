@@ -282,6 +282,8 @@ Por eso no basta con ponerlo delante: las decisiones 2 y 8 de «Cuentas de IA» 
   12. Clientes: desktop y móvil.
   13. Inventario de puertas y pase completo.
 
+- **Riesgo aceptado, endurecimiento posterior (revisión del ticket 01):** CLIProxyAPI corre con el usuario del Hub y podría leer su `stateDir`. Se acepta solo porque el Hub ejecuta únicamente versiones fijadas en el repo con su SHA-256 y verificadas por él. Ticket posterior: ejecutar CLIProxyAPI en su propio contenedor rootless de Podman o con su propio uid.
+
 ## Preguntas abiertas (decididas)
 
 El Owner aceptó todas las recomendaciones el 2026-11-11; cada «Recomendación» de abajo es la decisión.

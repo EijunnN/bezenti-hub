@@ -199,6 +199,8 @@ import * as VaultsHttp from "./vaults/http.ts";
 import * as Vaults from "./vaults/Vaults.ts";
 import * as EffectiveVaults from "./vaults/EffectiveVaults.ts";
 import * as MasterKeyBackup from "./auth/MasterKeyBackup.ts";
+import * as AiGateway from "./ai/AiGateway.ts";
+import * as CliproxyReleases from "./ai/CliproxyReleases.ts";
 import * as JoinedHub from "./environments/JoinedHub.ts";
 import type { JoinedHubState } from "./environments/joinedHubState.ts";
 import * as NetService from "@t3tools/shared/Net";
@@ -616,6 +618,8 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
     }),
   ).pipe(Layer.provide(DelegatedTaskQuestionReactor.layer), Layer.provide(ProjectionStoreV2.layer)),
   ProviderUsageLimitsIngestion.layer,
+  // CLIProxyAPI, run by the Hub on loopback (`T3CODE_AI_GATEWAY`).
+  AiGateway.layerFromConfig.pipe(Layer.provide(CliproxyReleases.layer)),
   layerProviderInstallationRefresh,
   ReplayMarkers.layer,
   Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),

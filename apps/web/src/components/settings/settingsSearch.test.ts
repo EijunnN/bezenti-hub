@@ -134,6 +134,7 @@ describe("searchSettings", () => {
     const memberNav = settingsNavGroupsFor(false).flatMap((group) => group.paths);
     expect(memberNav).not.toContain("/settings/providers");
     expect(memberNav).not.toContain("/settings/maintenance");
+    expect(memberNav).not.toContain("/settings/ai-gateway");
     expect(memberNav).toContain("/settings/threads");
     expect(settingsNavGroupsFor(true)).toBe(SETTINGS_NAV_GROUPS);
   });

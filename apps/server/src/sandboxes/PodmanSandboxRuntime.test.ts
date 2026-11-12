@@ -9,6 +9,7 @@ import * as NodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { afterAll, assert, beforeAll, describe, it } from "@effect/vitest";
 import { EnvironmentId, SpaceId } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -19,6 +20,8 @@ import * as Redacted from "effect/Redacted";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
+import { startFakeGateway } from "../ai/AiGateway.testkit.ts";
+import { cliproxyPlatformOf } from "../ai/cliproxyRelease.ts";
 import * as ServerConfig from "../config.ts";
 import * as PodmanSandboxRuntime from "./PodmanSandboxRuntime.ts";
 import {
@@ -395,6 +398,30 @@ describe.skipIf(!rootlessPodmanAvailable)("the Podman Sandbox runtime", () => {
         );
         assert.equal(internet, "200");
       }).pipe(Effect.scoped),
+  );
+
+  it.live("cannot reach the Hub's AI gateway, which listens on the Hub's loopback only", () =>
+    Effect.gen(function* () {
+      const { globex } = yield* twoSandboxes();
+      const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-podman-ai-gateway-"));
+      const os = HostProcess.Platform.defaultValue();
+      const platform = cliproxyPlatformOf(os, HostProcess.Architecture.defaultValue());
+      assert.isDefined(platform);
+      const port = yield* startFakeGateway({ dir, os, platform: platform! });
+      const targets = [
+        `127.0.0.1:${port}`,
+        `10.0.2.2:${port}`,
+        `host.containers.internal:${port}`,
+        ...hostAddresses().map((address) => `${address}:${port}`),
+      ];
+      const results = JSON.parse(yield* execNode(globex, probeScript(targets))) as string[];
+      for (const [index, result] of results.entries()) {
+        assert.isFalse(
+          result.startsWith("answered") || result.startsWith("connected"),
+          `${targets[index]}: ${result}`,
+        );
+      }
+    }).pipe(Effect.scoped),
   );
 
   it.live("reaches its Hub only through its socket, for the Environment connection and git", () =>

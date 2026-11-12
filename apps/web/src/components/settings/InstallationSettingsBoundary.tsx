@@ -15,7 +15,7 @@ const SETTINGS_HUB_WIDE_PATHS: ReadonlySet<string> = new Set([
 ]);
 
 const OWNER_ONLY_SETTINGS_NOTICE =
-  "Only the Owner of this Hub changes its providers, devices, maintenance, source control and secrets.";
+  "Only the Owner of this Hub changes its providers, AI gateway, devices, maintenance, source control and secrets.";
 const HUB_WIDE_SETTINGS_NOTICE =
   "These settings apply to the whole Hub, so only its Owner changes them.";
 

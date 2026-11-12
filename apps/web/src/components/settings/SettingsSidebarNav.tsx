@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ComponentType, type KeyboardEvent } f
 import {
   ArchiveIcon,
   BotIcon,
+  NetworkIcon,
   CalendarClockIcon,
   FileDiffIcon,
   FlaskConicalIcon,
@@ -77,6 +78,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/keybindings": KeyboardIcon,
   "/settings/snap-shot": SnapShotIcon,
   "/settings/providers": BotIcon,
+  "/settings/ai-gateway": NetworkIcon,
   "/settings/threads": MessagesSquareIcon,
   "/settings/browser": GlobeIcon,
   "/settings/devices": SmartphoneIcon,
