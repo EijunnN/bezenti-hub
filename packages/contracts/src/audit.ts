@@ -37,6 +37,8 @@ export const AuditAction = Schema.Literals([
   "vault.create",
   "vault.update",
   "vault.delete",
+  "vault.allow",
+  "vault.choose",
   "secret.master_key.export",
   "secret.master_key.rotate",
   "environment.register",
@@ -116,6 +118,13 @@ export const AUDIT_DETAIL_KEYS = {
   "vault.update": ["from", "to", "described", "archived"],
   /** How many secrets it held. */
   "vault.delete": ["entries"],
+  /** Allowed (`allowed`: true) or taken back, to a `space` or a `user` (`subjectKind`, `subjectId`). */
+  "vault.allow": ["subjectKind", "subjectId", "subjectName", "allowed"],
+  /**
+   * A Space's defaults or a Project's choice changed: `scope` space or project (`projectId`),
+   * `choice` default, none, add, remove or inherit, and the default's `position`.
+   */
+  "vault.choose": ["scope", "projectId", "choice", "position"],
   /** `settings` or `cli`, and the key's id (a fingerprint, never the key). */
   "secret.master_key.export": ["via", "keyId"],
   /** The key ids before and after (fingerprints, never keys). */

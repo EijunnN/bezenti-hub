@@ -136,6 +136,8 @@ export const AUDIT_ACTION_LABELS: Record<AuditAction, string> = {
   "vault.create": "Created a Vault",
   "vault.update": "Changed a Vault",
   "vault.delete": "Deleted a Vault",
+  "vault.allow": "Allowed a Vault",
+  "vault.choose": "Chose a Vault",
   "secret.master_key.export": "Backed up the master key",
   "secret.master_key.rotate": "Rotated the master key",
   "environment.register": "Registered an Environment",

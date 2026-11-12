@@ -462,6 +462,17 @@ export class SpaceDirectory extends Context.Service<
     readonly spaceOf: (
       item: ItemRef,
     ) => Effect.Effect<Option.Option<AccessPolicy.SpaceResource>, SpaceDirectoryStorageError>;
+    /**
+     * Spec 5 ticket 03: a Thread's Space (as `spaceOf`) and its Project, for what the Thread
+     * receives (EffectiveVaults). None when the Thread or its Space is missing.
+     */
+    readonly placementOf: (threadId: ThreadId) => Effect.Effect<
+      Option.Option<{
+        readonly space: AccessPolicy.SpaceResource;
+        readonly projectId: ProjectId | null;
+      }>,
+      SpaceDirectoryStorageError
+    >;
     /** A Space as the policy decides on it, with its stored name; None when missing. */
     readonly spaceById: (
       spaceId: SpaceId,
@@ -1741,8 +1752,7 @@ const make = Effect.gen(function* () {
     return row.value.frozen ? ("frozen" as const) : ("open" as const);
   });
 
-  const spaceOf = Effect.fn("SpaceDirectory.spaceOf")(function* (item: ItemRef) {
-    const row = yield* findItem(item);
+  const spaceOfRow = (row: Option.Option<typeof ItemRow.Type>) => {
     if (Option.isNone(row) || row.value.spaceId === null || row.value.kind === null) {
       return Option.none<AccessPolicy.SpaceResource>();
     }
@@ -1753,6 +1763,18 @@ const make = Effect.gen(function* () {
       archived: row.value.spaceArchived,
       frozen: row.value.frozen,
     });
+  };
+
+  const spaceOf = Effect.fn("SpaceDirectory.spaceOf")(function* (item: ItemRef) {
+    return spaceOfRow(yield* findItem(item));
+  });
+
+  const placementOf = Effect.fn("SpaceDirectory.placementOf")(function* (threadId: ThreadId) {
+    const row = yield* findItem({ kind: "thread", id: threadId });
+    return Option.map(spaceOfRow(row), (space) => ({
+      space,
+      projectId: Option.isSome(row) ? (row.value.projectId as ProjectId | null) : null,
+    }));
   });
 
   const spaceById = Effect.fn("SpaceDirectory.spaceById")(function* (spaceId: SpaceId) {
@@ -1805,6 +1827,7 @@ const make = Effect.gen(function* () {
     projectAccessEnds,
     projectAccessHeld,
     spaceOf,
+    placementOf,
     spaceById,
     spacesById,
     spaceState,

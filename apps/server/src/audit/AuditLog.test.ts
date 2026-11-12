@@ -604,6 +604,9 @@ it.effect(
         "vault.create",
         "vault.update",
         "vault.delete",
+        // vaults/EffectiveVaults.test.ts (spec 5 ticket 03)
+        "vault.allow",
+        "vault.choose",
       ];
       assert.sameMembers(
         [...new Set([...expected.map((row) => row.action), ...recordedElsewhere])],

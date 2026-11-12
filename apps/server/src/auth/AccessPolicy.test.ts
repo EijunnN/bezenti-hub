@@ -164,14 +164,34 @@ const spacelessVps: AccessPolicy.EnvironmentResource = {
   workSpaceId: ORG,
 };
 
-const mainVault: AccessPolicy.VaultResource = { kind: "vault", isMain: true, space: null };
-const ownersVault: AccessPolicy.VaultResource = { kind: "vault", isMain: false, space: null };
-const orgVault: AccessPolicy.VaultResource = { kind: "vault", isMain: false, space: organization };
-const archivedOrgVault: AccessPolicy.VaultResource = {
+const vault = (
+  space: AccessPolicy.SpaceResource | null,
+  options: {
+    readonly isMain?: boolean;
+    readonly allowedSpaces?: ReadonlyArray<AccessPolicy.SpaceResource>;
+    readonly allowedUsers?: ReadonlyArray<string>;
+  } = {},
+): AccessPolicy.VaultResource => ({
   kind: "vault",
-  isMain: false,
-  space: archivedOrganization,
-};
+  isMain: options.isMain ?? false,
+  space,
+  allowedSpaces: options.allowedSpaces ?? [],
+  allowedUsers: (options.allowedUsers ?? []).map((id) => UserId.make(id)),
+});
+const mainVault = vault(null, { isMain: true });
+const ownersVault = vault(null);
+const orgVault = vault(organization);
+const archivedOrgVault = vault(archivedOrganization);
+// Spec 5 ticket 03: the Owner's own Vaults, allowed to Spaces and Users.
+const allowedToAcme = vault(null, { allowedSpaces: [organization] });
+const allowedToAcmeAndOther = vault(null, { allowedSpaces: [organization, otherOrganization] });
+const allowedToAcmeAndGrace = vault(null, {
+  allowedSpaces: [organization],
+  allowedUsers: ["grace"],
+});
+const allowedToGrace = vault(null, { allowedUsers: ["grace"] });
+const allowedToGracesPersonal = vault(null, { allowedSpaces: [personalOf("grace")] });
+const allowedToArchivedAcme = vault(null, { allowedSpaces: [archivedOrganization] });
 
 const allow = AccessPolicy.allow;
 const deny = AccessPolicy.deny;
@@ -1421,6 +1441,101 @@ const rows: ReadonlyArray<Row> = [
   ["Owner's own Vault: not an Admin's", admin, "vault.view", ownersVault, deny("owner-only")],
   ["a Vault action on a Space", owner, "vault.view", organization, deny("wrong-resource")],
   ["a Space action on a Vault", owner, "space.view", orgVault, deny("wrong-resource")],
+  // Spec 5 ticket 03: the Owner's own Vaults reach whom the Owner allowed them to. Whoever works
+  // in an allowed Space, or is an allowed User, sees the names; an Admin edits the secrets only
+  // while the Vault reaches nothing but Organizations they run.
+  ["an Admin sees a Vault allowed to Acme", admin, "vault.view", allowedToAcme, allow],
+  ["a Member sees a Vault allowed to Acme", member, "vault.view", allowedToAcme, allow],
+  ["a Guest sees a Vault allowed to Acme", guest, "vault.view", allowedToAcme, allow],
+  [
+    "another Organization's Admin does not",
+    outsider,
+    "vault.view",
+    allowedToAcme,
+    deny("owner-only"),
+  ],
+  ["an Admin edits a Vault allowed to Acme alone", admin, "vault.edit", allowedToAcme, allow],
+  ["a Member does not edit it", member, "vault.edit", allowedToAcme, deny("owner-only")],
+  [
+    "an Admin does not edit one that also reaches another Organization",
+    admin,
+    "vault.edit",
+    allowedToAcmeAndOther,
+    deny("owner-only"),
+  ],
+  [
+    "an Admin does not edit one that also reaches a User",
+    admin,
+    "vault.edit",
+    allowedToAcmeAndGrace,
+    deny("owner-only"),
+  ],
+  [
+    "nobody edits one allowed only to Users",
+    admin,
+    "vault.edit",
+    allowedToGrace,
+    deny("owner-only"),
+  ],
+  ["the allowed User sees its names", member, "vault.view", allowedToGrace, allow],
+  ["another User does not", admin, "vault.view", allowedToGrace, deny("owner-only")],
+  [
+    "a Personal space's User sees one allowed to it",
+    personalCreator,
+    "vault.view",
+    allowedToGracesPersonal,
+    allow,
+  ],
+  [
+    "a Personal space's User does not edit it",
+    personalCreator,
+    "vault.edit",
+    allowedToGracesPersonal,
+    deny("owner-only"),
+  ],
+  [
+    "nothing through an archived Organization",
+    admin,
+    "vault.view",
+    allowedToArchivedAcme,
+    deny("owner-only"),
+  ],
+  ["only the Owner allows a Vault", admin, "vault.manage", allowedToAcme, deny("owner-only")],
+  [
+    "the Main vault stays the Owner's alone, whatever it holds",
+    admin,
+    "vault.view",
+    vault(null, { isMain: true, allowedSpaces: [organization], allowedUsers: ["ada"] }),
+    deny("owner-only"),
+  ],
+  // Choosing a Space's defaults and its Projects' adds and removes.
+  ["Owner chooses an Organization's Vaults", owner, "vault.choose", organization, allow],
+  ["Owner chooses a Personal space's Vaults", owner, "vault.choose", personalOf("grace"), allow],
+  ["an Admin chooses Acme's Vaults", admin, "vault.choose", organization, allow],
+  ["a Member does not", member, "vault.choose", organization, deny("role-not-allowed")],
+  ["a Guest does not", guest, "vault.choose", organization, deny("role-not-allowed")],
+  [
+    "another Organization's Admin does not",
+    outsider,
+    "vault.choose",
+    organization,
+    deny("not-a-member"),
+  ],
+  [
+    "an Admin does not in an archived Organization",
+    admin,
+    "vault.choose",
+    archivedOrganization,
+    deny("space-archived"),
+  ],
+  [
+    "a Personal space's User does not choose its Vaults",
+    personalCreator,
+    "vault.choose",
+    personalOf("grace"),
+    deny("owner-only"),
+  ],
+  ["choosing is decided on a Space", owner, "vault.choose", orgVault, deny("wrong-resource")],
   // Dedicated machines: the Owner gives one to an Organization, whose Users who work there use it
   // for its Threads, as its Sandbox; other Spaces neither see nor use it.
   ["Owner dedicates machines", owner, "environment.dedicate", AccessPolicy.installation, allow],

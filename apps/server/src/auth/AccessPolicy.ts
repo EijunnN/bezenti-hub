@@ -93,6 +93,10 @@ export interface VaultResource {
   readonly isMain: boolean;
   /** The Organization whose Vault it is; null for the Owner's own (the Main vault among them). */
   readonly space: SpaceResource | null;
+  // Spec 5 ticket 03: whom the Owner allowed one of their own Vaults to (none for the Main vault
+  // or an Organization's, which reaches its Organization without one).
+  readonly allowedSpaces: ReadonlyArray<SpaceResource>;
+  readonly allowedUsers: ReadonlyArray<UserId>;
 }
 
 export type Resource =
@@ -195,7 +199,12 @@ export type Action =
   /** Read a secret's value: the Owner (the door also asks for a strong factor). */
   | "vault.reveal"
   /** Set a secret whose name changes how tools run (`secretNameRisk`): the Owner, confirmed. */
-  | "vault.dangerousName";
+  | "vault.dangerousName"
+  /**
+   * Choose a Space's default Vaults and its Projects' adds and removes, decided on the Space
+   * (spec 5 ticket 03): the Owner, an Organization's Admins.
+   */
+  | "vault.choose";
 
 /** Actions that read or manage rather than add something to the Space. */
 const NON_CREATING: ReadonlySet<Action> = new Set([
@@ -533,19 +542,66 @@ const VAULT_ACTIONS: ReadonlySet<Action> = new Set([
 ]);
 
 /**
- * Vaults. The Owner does everything, and alone creates, manages and reveals; the Main vault and
- * the Owner's other Vaults are the Owner's alone. An Organization's Vault: its Admins add, replace
- * and delete secrets without reading them; its Members and Guests see names only.
+ * Vaults. The Owner does everything, and alone creates, manages, allows and reveals; the Main
+ * vault is the Owner's alone. An Organization's Vault: its Admins add, replace and delete secrets
+ * without reading them; its Members and Guests see names only.
  */
 const decideVault = (principal: Principal, action: Action, vault: VaultResource): Decision => {
   if (principal.isOwner) return allow;
   if (action !== "vault.view" && action !== "vault.edit") return deny("owner-only");
+  if (vault.isMain) return deny("owner-only");
   const space = vault.space;
-  if (vault.isMain || space === null) return deny("owner-only");
+  if (space === null) return decideAllowedVault(principal, action, vault);
   if (space.kind !== "organization") return deny("wrong-resource");
   if (space.archived) return deny("space-archived");
   if (space.frozen) return deny("space-frozen");
   return inOrganization(principal, space, action === "vault.edit" ? ADMIN_ONLY : undefined);
+};
+
+/**
+ * Spec 5 ticket 03. One of the Owner's own Vaults, allowed to Spaces and Users: whoever works in
+ * one of those Spaces, or is one of those Users, sees its names. An Admin edits its secrets only
+ * while it reaches nothing but Organizations they run: no User, no Personal space, no other
+ * Organization, so their writes stop at their Organizations.
+ */
+const decideAllowedVault = (
+  principal: Principal,
+  action: Action,
+  vault: VaultResource,
+): Decision => {
+  const open = (space: SpaceResource) => !space.archived && !space.frozen;
+  const sees = (space: SpaceResource) =>
+    open(space) &&
+    (space.kind === "personal"
+      ? inPersonalSpace(principal, space)._tag === "Allow"
+      : inOrganization(principal, space)._tag === "Allow");
+  if (action === "vault.view") {
+    return vault.allowedUsers.includes(principal.userId) || vault.allowedSpaces.some(sees)
+      ? allow
+      : deny("owner-only");
+  }
+  const runs = (space: SpaceResource) =>
+    open(space) &&
+    space.kind === "organization" &&
+    inOrganization(principal, space, ADMIN_ONLY)._tag === "Allow";
+  return vault.allowedUsers.length === 0 &&
+    vault.allowedSpaces.length > 0 &&
+    vault.allowedSpaces.every(runs)
+    ? allow
+    : deny("owner-only");
+};
+
+/**
+ * Spec 5 ticket 03: which Vaults a Space and its Projects receive. The Owner chooses anywhere,
+ * a Personal space included (its User only sees the names); an Organization's Admins choose in
+ * it while it is open.
+ */
+const decideVaultChoice = (principal: Principal, space: SpaceResource): Decision => {
+  if (principal.isOwner) return allow;
+  if (space.kind !== "organization") return deny("owner-only");
+  if (space.archived) return deny("space-archived");
+  if (space.frozen) return deny("space-frozen");
+  return inOrganization(principal, space, ADMIN_ONLY);
 };
 
 export function decide(principal: Principal, action: Action, resource: Resource): Decision {
@@ -554,6 +610,9 @@ export function decide(principal: Principal, action: Action, resource: Resource)
     return VAULT_ACTIONS.has(action) && resource.kind === "vault"
       ? decideVault(principal, action, resource)
       : deny("wrong-resource");
+  }
+  if (action === "vault.choose") {
+    return isSpace(resource) ? decideVaultChoice(principal, resource) : deny("wrong-resource");
   }
   if (USER_ACTIONS.has(action) || isUser(resource)) {
     if (!USER_ACTIONS.has(action) || !isUser(resource)) return deny("wrong-resource");
