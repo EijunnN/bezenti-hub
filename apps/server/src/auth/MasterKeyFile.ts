@@ -141,6 +141,8 @@ export const STORE_NAMESPACES = [
   { dir: "vault-values", purpose: "vault-value" },
   // AI accounts' credentials (spec 4), read only by AiAccounts.
   { dir: "ai-accounts", purpose: "ai-account-credential" },
+  // Subscription AI accounts' OAuth tokens (spec 4 ticket 03), read only by AiAccounts.
+  { dir: "ai-account-tokens", purpose: "ai-account-oauth-token" },
 ] as const satisfies ReadonlyArray<{
   readonly dir: string;
   readonly purpose: SecretCipher.SealPurpose;
@@ -148,6 +150,7 @@ export const STORE_NAMESPACES = [
 export type StoreNamespace = (typeof STORE_NAMESPACES)[number];
 export const VAULT_VALUES_NAMESPACE: StoreNamespace = STORE_NAMESPACES[1];
 export const AI_ACCOUNT_CREDENTIALS_NAMESPACE: StoreNamespace = STORE_NAMESPACES[2];
+export const AI_ACCOUNT_TOKENS_NAMESPACE: StoreNamespace = STORE_NAMESPACES[3];
 
 interface Entry {
   /** Unique across folders: `<dir>/<name>`. */

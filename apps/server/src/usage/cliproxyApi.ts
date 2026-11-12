@@ -22,7 +22,17 @@ import { makeUnavailableUsageLimits } from "@t3tools/provider-core/server/usageL
 export interface CliproxyHub {
   readonly url: UsageLimitSourceConfig["url"];
   readonly managementKey: string;
+  /**
+   * Which management API it speaks: `v0` (an external hub, the default) or `v8` (the CLIProxyAPI
+   * the Hub runs itself, spec 4 ticket 03: `credentials` and `requests/api-call`).
+   */
+  readonly api?: "v0" | "v8";
 }
+
+const MANAGEMENT_ROUTES = {
+  v0: { base: "v0/management", authFiles: "auth-files", apiCall: "api-call" },
+  v8: { base: "v8/management", authFiles: "credentials", apiCall: "requests/api-call" },
+} as const;
 
 const AuthFile = Schema.Struct({
   id: Schema.String,
@@ -186,7 +196,7 @@ export const makeCliproxyApi = Effect.gen(function* () {
     const url = yield* Effect.try({
       try: () =>
         new URL(
-          `v0/management/${path}`,
+          `${MANAGEMENT_ROUTES[hub.api ?? "v0"].base}/${path}`,
           hub.url.endsWith("/") ? hub.url : `${hub.url}/`,
         ).toString(),
       catch: () => new UsageLimitSourceError({ detail: "The hub URL is not valid." }),
@@ -208,7 +218,7 @@ export const makeCliproxyApi = Effect.gen(function* () {
   });
 
   const authFiles = Effect.fn("CliproxyApi.authFiles")(function* (hub: CliproxyHub) {
-    const response = yield* management(hub, "auth-files");
+    const response = yield* management(hub, MANAGEMENT_ROUTES[hub.api ?? "v0"].authFiles);
     return (yield* decodeAuthFiles(response)).files;
   });
 
@@ -235,7 +245,7 @@ export const makeCliproxyApi = Effect.gen(function* () {
             // The OAuth usage endpoint can return 429 without a Claude Code user agent.
             "User-Agent": "claude-code/2.1.273",
           };
-    const raw = yield* management(hub, "api-call", {
+    const raw = yield* management(hub, MANAGEMENT_ROUTES[hub.api ?? "v0"].apiCall, {
       auth_index: account.auth_index,
       method: data === undefined ? "GET" : "POST",
       url,

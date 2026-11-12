@@ -26,7 +26,9 @@ export type SealPurpose =
   | "secret-file"
   | "vault-value"
   /** An AI account's credential (spec 4): `secrets/ai-accounts/`. */
-  | "ai-account-credential";
+  | "ai-account-credential"
+  /** A subscription AI account's OAuth token (spec 4 ticket 03): `secrets/ai-account-tokens/`. */
+  | "ai-account-oauth-token";
 
 const hkdf = (key: Buffer, info: string, length: number) =>
   Buffer.from(NodeCrypto.hkdfSync("sha256", key, Buffer.alloc(0), info, length));
