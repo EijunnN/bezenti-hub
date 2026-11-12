@@ -448,7 +448,7 @@ export const make = Effect.gen(function* () {
     const secretEnv = Option.isNone(secretDelivery)
       ? undefined
       : yield* secretDelivery.value
-          .forTurn({
+          .planTurn({
             threadId: ThreadId.make(input.threadId),
             target: {
               environmentId: HUB_MACHINE_ENVIRONMENT_ID,
@@ -456,6 +456,7 @@ export const make = Effect.gen(function* () {
             },
           })
           .pipe(
+            Effect.flatMap(secretDelivery.value.resolve),
             Effect.mapError(
               (cause) =>
                 new ProjectSetupScriptOperationError({
@@ -475,7 +476,7 @@ export const make = Effect.gen(function* () {
             worktreePath: input.worktreePath,
             env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0" },
           },
-          secretEnv === undefined ? undefined : { secretEnv },
+          secretEnv,
         )
         .pipe(
           Effect.andThen(() =>

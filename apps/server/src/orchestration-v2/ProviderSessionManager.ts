@@ -5,6 +5,7 @@ import {
   ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
   HUB_MACHINE_ENVIRONMENT_ID,
   isOrchestrationV2WorkActive,
+  NO_SECRETS_FINGERPRINT,
   SecretDeliveryError,
   type SecretEnv,
   ModelSelection,
@@ -361,9 +362,10 @@ export const layerWithOptions = (
               .pipe(Effect.map((id) => id === environments.value.hubMachineEnvironmentId));
       const mcpSessionRegistry = yield* McpSessionRegistry.McpSessionRegistry;
       const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
-      // Spec 5 ticket 04: a session's process gets its Thread owner's secrets, read as it opens.
+      // Spec 5 ticket 04: a session's process gets its Thread owner's secrets. The plan (names and
+      // value ids) decides; values are read only when a new process starts.
       const secretDelivery = yield* Effect.serviceOption(SecretDelivery.SecretDelivery);
-      const secretEnvFor = Effect.fn("ProviderSessionManagerV2.secretEnvFor")(function* (
+      const secretPlanFor = Effect.fn("ProviderSessionManagerV2.secretPlanFor")(function* (
         threadId: ThreadId,
       ) {
         if (Option.isNone(secretDelivery)) return undefined;
@@ -381,7 +383,7 @@ export const layerWithOptions = (
                 }),
               })),
             );
-        return yield* secretDelivery.value.forTurn({ threadId, target });
+        return yield* secretDelivery.value.planTurn({ threadId, target });
       });
       /** Unreadable settings must preserve explicit browser-access opt-outs. */
       const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
@@ -2203,13 +2205,20 @@ export const layerWithOptions = (
       type OpenInput = Parameters<ProviderSessionManagerV2Shape["open"]>[0];
       const openLocked = (
         input: OpenInput,
-        secretEnv: SecretEnv | undefined,
-        secretFingerprint: string,
-        shared: (driver: string) => ProviderSessionOpenError,
+        plan: SecretDelivery.SecretPlan | undefined,
+        openFailed: (cause: unknown) => ProviderSessionOpenError,
       ) =>
         sessionOpen.withLock(
           input.providerSessionId,
           Effect.gen(function* () {
+            const secretFingerprint = plan?.fingerprint ?? NO_SECRETS_FINGERPRINT;
+            const shared = (driver: string) =>
+              openFailed(new SecretDeliveryError({ reason: "shared-process", provider: driver }));
+            const sharedId =
+              input.providerSessionId ===
+              idAllocator.derive.providerSession({
+                providerInstanceId: input.modelSelection.instanceId,
+              });
             const cwd = input.runtimePolicy.cwd;
             if (cwd !== null && (yield* runsHere(input.threadId))) {
               const workspaceIsDirectory = yield* fileSystem.stat(cwd).pipe(
@@ -2224,7 +2233,31 @@ export const layerWithOptions = (
               }
             }
             const key = sessionKey(input.providerSessionId);
-            const existing = (yield* Ref.get(sessions)).get(key);
+            const current = (yield* Ref.get(sessions)).get(key);
+            // A changed set (a rotation, a revoked Vault) means a new process: a provider cannot
+            // change a live one's environment. Decided here, under the lock, so a concurrent open
+            // never releases the session another just made.
+            let existing = current;
+            if (current !== undefined && current.secretFingerprint !== secretFingerprint) {
+              const others = [...current.attachedThreadIds].some((id) => id !== input.threadId);
+              // A process other Threads share is never released for one Thread's secrets.
+              if (others || sharedId) return yield* shared(current.runtime.driver);
+              const busy =
+                current.busyTurns.size > 0 ||
+                (yield* (current.runtime.hasPendingBackgroundWork ?? Effect.succeed(false)).pipe(
+                  Effect.orElseSucceed(() => true),
+                ));
+              if (!busy) {
+                yield* releaseEntry({
+                  providerSessionId: input.providerSessionId,
+                  reason: "manual_shutdown",
+                  detail: "This Thread's secrets changed.",
+                }).pipe(Effect.mapError(openFailed));
+                existing = undefined;
+              }
+              // Busy: a turn or its background work runs there. The session goes on with what it
+              // started with; the first open after that work ends opens a new one.
+            }
             if (existing !== undefined) {
               const attached = existing.attachedThreadIds.has(input.threadId);
               if (!attached && !existing.supportsMultipleProviderThreads) {
@@ -2234,8 +2267,8 @@ export const layerWithOptions = (
                   cause: `Provider ${existing.runtime.driver} does not support attaching multiple app threads to one session.`,
                 });
               }
-              // A process holding one Thread's secrets serves no other, nor one with another set.
-              if (existing.secretFingerprint !== secretFingerprint) {
+              // A process holding one Thread's secrets serves no other.
+              if (!attached && existing.secretFingerprint !== secretFingerprint) {
                 return yield* shared(existing.runtime.driver);
               }
               if (!attached) yield* agentScope.clear(input.threadId);
@@ -2260,15 +2293,14 @@ export const layerWithOptions = (
             );
             // A provider whose one process serves every Thread (its session id derives from the
             // instance alone) never gets a Thread's secrets.
-            if (
-              secretEnv !== undefined &&
-              input.providerSessionId ===
-                idAllocator.derive.providerSession({
-                  providerInstanceId: input.modelSelection.instanceId,
-                })
-            ) {
+            if (secretFingerprint !== NO_SECRETS_FINGERPRINT && sharedId) {
               return yield* shared(adapter.driver);
             }
+            // The values, read now that a process starts (a machine too old for them refuses).
+            const secretEnv: SecretEnv | undefined =
+              plan === undefined || plan.variables.length === 0 || Option.isNone(secretDelivery)
+                ? undefined
+                : yield* secretDelivery.value.resolve(plan).pipe(Effect.mapError(openFailed));
             const prepared = yield* prepareMcpSession(
               input.threadId,
               input.modelSelection.instanceId,
@@ -2406,25 +2438,8 @@ export const layerWithOptions = (
               providerSessionId: input.providerSessionId,
               cause,
             });
-          const secretEnv: SecretEnv | undefined = yield* secretEnvFor(input.threadId).pipe(
-            Effect.mapError(openFailed),
-          );
-          const secretFingerprint = SecretDelivery.fingerprintOfEnv(secretEnv);
-          const shared = (driver: string) =>
-            openFailed(new SecretDeliveryError({ reason: "shared-process", provider: driver }));
-          // A changed set (a rotation, a revoked Vault) reopens the Thread's own session: a
-          // provider cannot change a live process's environment.
-          const stale = (yield* Ref.get(sessions)).get(sessionKey(input.providerSessionId));
-          if (stale !== undefined && stale.secretFingerprint !== secretFingerprint) {
-            const others = [...stale.attachedThreadIds].some((id) => id !== input.threadId);
-            if (others) return yield* shared(stale.runtime.driver);
-            yield* releaseEntry({
-              providerSessionId: input.providerSessionId,
-              reason: "manual_shutdown",
-              detail: "This Thread's secrets changed.",
-            }).pipe(Effect.mapError(openFailed));
-          }
-          return yield* openLocked(input, secretEnv, secretFingerprint, shared);
+          const plan = yield* secretPlanFor(input.threadId).pipe(Effect.mapError(openFailed));
+          return yield* openLocked(input, plan, openFailed);
         }),
         isLive: (providerSessionId) =>
           Ref.get(sessions).pipe(

@@ -34,6 +34,7 @@ import {
   ClaudeSettings,
   CodexSettings,
   ProviderInstanceId,
+  NO_SECRETS_FINGERPRINT,
   type SecretEnv,
   TerminalEnvironmentUnavailableError,
 } from "@t3tools/contracts";
@@ -172,13 +173,11 @@ class TerminalProcessSignalError extends Schema.TaggedError<TerminalProcessSigna
 }
 
 /**
- * Spec 5: the secrets of the User who opens a terminal, for the shell it starts. Never part of the
- * terminal's input (a client's), never kept once the shell started: only their fingerprint stays,
- * to tell a shell that runs with older ones (`secretsStale`).
+ * Spec 5: which secrets the User who opens a terminal has now (`fingerprint`), with their values
+ * when a shell may start. Never part of the terminal's input; values are dropped once it spawned.
+ * A shell that would start without values answers `secrets_required` instead.
  */
-export interface TerminalSecrets {
-  readonly secretEnv?: SecretEnv | undefined;
-}
+export type TerminalSecrets = SecretEnv;
 
 export class TerminalManager extends Context.Service<
   TerminalManager,
@@ -324,7 +323,7 @@ interface TerminalSessionState {
   runtimeEnv: Record<string, string> | null;
   /** Spec 5: the secrets for the next start, dropped as soon as the shell spawned. */
   pendingSecretEnv: SecretEnv | null;
-  /** Which secrets the running shell got (none: null). */
+  /** Which secrets the running shell got (`none`: none; null: started without the Hub's word). */
   secretFingerprint: string | null;
   /** The shell runs with secrets that changed since it started. */
   secretsStale: boolean;
@@ -431,8 +430,31 @@ function snapshot(session: TerminalSessionState): TerminalSessionSnapshot {
 function noteSecrets(session: TerminalSessionState, secrets: TerminalSecrets | undefined) {
   if (secrets === undefined) return;
   session.secretsStale =
-    (session.secretFingerprint ?? null) !== (secrets.secretEnv?.fingerprint ?? null);
+    (session.secretFingerprint ?? NO_SECRETS_FINGERPRINT) !== secrets.fingerprint;
 }
+
+/**
+ * Spec 5: the secrets a shell about to start gets, or `secrets_required` when the Hub sent only
+ * which set is current. A shell that had secrets never starts again without the Hub's word.
+ */
+const secretsForStart = (
+  session: { readonly threadId: string; readonly secretFingerprint: string | null },
+  secrets: TerminalSecrets | undefined,
+): Effect.Effect<SecretEnv | null, TerminalEnvironmentUnavailableError> => {
+  const required = Effect.fail(
+    new TerminalEnvironmentUnavailableError({
+      threadId: session.threadId,
+      reason: "secrets_required",
+    }),
+  );
+  if (secrets === undefined) {
+    return (session.secretFingerprint ?? NO_SECRETS_FINGERPRINT) === NO_SECRETS_FINGERPRINT
+      ? Effect.succeed(null)
+      : required;
+  }
+  if (secrets.fingerprint === NO_SECRETS_FINGERPRINT) return Effect.succeed(secrets);
+  return secrets.variables === undefined ? required : Effect.succeed(secrets);
+};
 
 function summary(session: TerminalSessionState): TerminalSummary {
   return {
@@ -2512,10 +2534,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             // Spec 5: the secrets go into this shell's environment and are then dropped here.
             const secrets = session.pendingSecretEnv;
             session.pendingSecretEnv = null;
-            const previousSecrets = session.secretFingerprint;
-            session.secretFingerprint = secrets?.fingerprint ?? null;
-            // Started again without the User's set (a restart from an attach): reopen to get them.
-            session.secretsStale = secrets === null && previousSecrets !== null;
+            session.secretFingerprint = secrets?.fingerprint ?? NO_SECRETS_FINGERPRINT;
+            session.secretsStale = false;
             const spawnResult = yield* trySpawn(
               shellCandidates,
               applySecretEnv(terminalEnv, secrets ?? undefined, platform),
@@ -2878,6 +2898,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     const input = withSharedGrid(sessionKey, requestedInput);
     const existing = yield* getSession(input.threadId, terminalId);
     if (Option.isNone(existing)) {
+      const startSecrets = yield* secretsForStart(
+        { threadId: input.threadId, secretFingerprint: null },
+        secrets,
+      );
       yield* flushPersist(input.threadId, terminalId);
       const inherited = yield* readHistory(input.threadId, terminalId);
       const history = new BoundedTerminalHistory(
@@ -2917,7 +2941,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         hasRunningSubprocess: false,
         childCommandLabel: null,
         runtimeEnv: normalizedRuntimeEnv(input.env),
-        pendingSecretEnv: secrets?.secretEnv ?? null,
+        pendingSecretEnv: startSecrets,
         secretFingerprint: null,
         secretsStale: false,
       };
@@ -2956,6 +2980,11 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       liveSession.cwd !== input.cwd ||
       runtimeEnvChanged ||
       liveSession.worktreePath !== nextWorktreePath;
+    // Decided before anything stops: a shell that would start without its values never does.
+    const startSecrets =
+      launchContextChanged || !liveSession.process
+        ? yield* secretsForStart(liveSession, secrets)
+        : null;
 
     if (launchContextChanged) {
       yield* stopProcess(liveSession);
@@ -2980,7 +3009,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
 
     if (!liveSession.process) {
-      liveSession.pendingSecretEnv = secrets?.secretEnv ?? null;
+      liveSession.pendingSecretEnv = startSecrets;
       yield* startSession(
         liveSession,
         {
@@ -3286,11 +3315,12 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     viewerId,
     secrets,
   ) => {
-    // Used by the first attach only, then dropped: the stream may live for hours.
+    // Values serve the first attach only, then are dropped: the stream may live for hours. The
+    // fingerprint stays, so a later start asks for them again (`secrets_required`).
     let pending = secrets;
     const takeSecrets = () => {
       const taken = pending;
-      pending = undefined;
+      if (pending?.variables !== undefined) pending = { fingerprint: pending.fingerprint };
       return taken;
     };
     return Stream.unwrap(

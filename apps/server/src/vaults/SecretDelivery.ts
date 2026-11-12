@@ -1,13 +1,14 @@
 /**
- * Spec 5 ticket 04: the one place that turns a Thread's effective set into one process's secrets,
- * read from the store as it starts and kept nowhere. Who receives them is decided here, on the Hub
- * (a turn: its Thread owner; a terminal or script: who starts it). docs/internals/secrets.md.
+ * Spec 5 ticket 04: the one place that turns a Thread's effective set into one process's secrets.
+ * `plan` names the set (no value read); `resolve` reads the values only when a process starts.
+ * Who receives them is decided here, on the Hub. docs/internals/secrets.md, «Delivery».
  */
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- a sync hash of names and value ids, never of values.
 import * as NodeCrypto from "node:crypto";
 import {
   type EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
+  NO_SECRETS_FINGERPRINT,
   SECRET_ENV_CONTRACT_VERSION,
   type SecretEnv,
   SecretDeliveryError,
@@ -25,13 +26,17 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { servesSpace } from "../sandboxes/sandboxSpace.ts";
 import * as EffectiveVaults from "./EffectiveVaults.ts";
 
-/** The fingerprint of no secrets: what a process started without any has. */
-const NO_SECRETS_FINGERPRINT = "none";
-
 /** The machine a process starts on: the Thread's Active environment, and its executor contract. */
 export interface SecretTarget {
   readonly environmentId: EnvironmentId;
   readonly contractVersion: number;
+}
+
+/** What a process would receive, by name and value id: no value is read to make one. */
+export interface SecretPlan {
+  readonly fingerprint: string;
+  readonly target: SecretTarget;
+  readonly variables: ReadonlyArray<{ readonly name: string; readonly valueId: string }>;
 }
 
 export type SecretDeliveryFailure = VaultError | SecretDeliveryError;
@@ -42,25 +47,33 @@ export class SecretDelivery extends Context.Service<
     /** Whose secrets the Thread's turns receive: its owner, or its root Thread's. */
     readonly turnOwner: (threadId: ThreadId) => Effect.Effect<Option.Option<UserId>, VaultError>;
     /**
-     * The secrets a process of the Thread receives when `actingUserId` starts it on `target`; none
+     * What a process of the Thread receives when `actingUserId` starts it on `target`: nothing
      * without a User, for a Thread that is gone, or on a machine that does not serve its Space.
      */
-    readonly forProcess: (input: {
+    readonly plan: (input: {
       readonly threadId: ThreadId;
       readonly actingUserId: UserId | undefined;
       readonly target: SecretTarget;
-    }) => Effect.Effect<SecretEnv | undefined, SecretDeliveryFailure>;
-    /** Whether the Thread's turns receive any secret (names only: no value is read). */
-    readonly receivesSecrets: (threadId: ThreadId) => Effect.Effect<boolean, VaultError>;
-    /** `forProcess` for the Thread's turns: its owner starts them. */
-    readonly forTurn: (input: {
+    }) => Effect.Effect<SecretPlan, VaultError>;
+    /** `plan` for the Thread's turns: its owner starts them. */
+    readonly planTurn: (input: {
       readonly threadId: ThreadId;
       readonly target: SecretTarget;
-    }) => Effect.Effect<SecretEnv | undefined, SecretDeliveryFailure>;
+    }) => Effect.Effect<SecretPlan, VaultError>;
+    /**
+     * The values, read now for a process about to start. A machine before contract 10 with a
+     * non-empty plan is refused (`outdated-machine`).
+     */
+    readonly resolve: (plan: SecretPlan) => Effect.Effect<SecretEnv, SecretDeliveryFailure>;
+    /**
+     * Whether the Thread could receive any secret: one cheap query, a superset of the set (no
+     * value nor effective set is read). Used to give such a Thread a provider process of its own.
+     */
+    readonly mayReceiveSecrets: (threadId: ThreadId) => Effect.Effect<boolean, VaultError>;
   }
 >()("t3/vaults/SecretDelivery") {}
 
-/** The fingerprint of a set: its names and value ids (a replace writes a new id), never values. */
+/** The fingerprint of a set: its User, names and value ids (a replace writes a new id). */
 const fingerprintOf = (
   actingUserId: UserId,
   variables: ReadonlyArray<{ readonly name: string; readonly valueId: string }>,
@@ -71,6 +84,13 @@ const fingerprintOf = (
         .update(JSON.stringify([actingUserId, variables.map((v) => [v.name, v.valueId])]))
         .digest("hex")
         .slice(0, 32);
+
+/** The plan of a process that gets no secret. */
+export const emptyPlan = (target: SecretTarget): SecretPlan => ({
+  fingerprint: NO_SECRETS_FINGERPRINT,
+  target,
+  variables: [],
+});
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -119,12 +139,12 @@ const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => undefined),
     );
 
-  const forProcess = Effect.fn("SecretDelivery.forProcess")(function* (input: {
+  const plan = Effect.fn("SecretDelivery.plan")(function* (input: {
     readonly threadId: ThreadId;
     readonly actingUserId: UserId | undefined;
     readonly target: SecretTarget;
   }) {
-    if (input.actingUserId === undefined) return undefined;
+    if (input.actingUserId === undefined) return emptyPlan(input.target);
     const set = yield* effective
       .forThread({ threadId: input.threadId, actingUserId: input.actingUserId })
       .pipe(
@@ -134,7 +154,7 @@ const make = Effect.gen(function* () {
           () => Effect.succeedNone,
         ),
       );
-    if (Option.isNone(set) || set.value.variables.length === 0) return undefined;
+    if (Option.isNone(set) || set.value.variables.length === 0) return emptyPlan(input.target);
     // A machine that does not run this Space's Threads gets nothing (spec 3, ticket 12).
     if (input.target.environmentId !== HUB_MACHINE_ENVIRONMENT_ID) {
       const serves = yield* servesSpace(
@@ -145,70 +165,85 @@ const make = Effect.gen(function* () {
         Effect.provideService(SqlClient.SqlClient, sql),
         Effect.catch(storage("check the machine's Space")),
       );
-      if (!serves) return undefined;
-    }
-    if (input.target.contractVersion < SECRET_ENV_CONTRACT_VERSION) {
-      const environmentName = yield* machineName(input.target.environmentId);
-      return yield* new SecretDeliveryError({
-        reason: "outdated-machine",
-        ...(environmentName === undefined ? {} : { environmentName }),
-      });
+      if (!serves) return emptyPlan(input.target);
     }
     const trusted = yield* ownerSet(
       set.value.variables.filter((v) => v.dangerous).map((v) => v.valueId),
     );
-    const delivered: Array<{ name: string; valueId: string; value: string }> = [];
-    for (const variable of set.value.variables) {
-      if (variable.dangerous && !trusted.has(variable.valueId)) continue;
-      const bytes = yield* values
-        .get(variable.valueId)
-        .pipe(Effect.catch(storage("read the Thread's secrets")));
-      // A value gone from the store (a race with a delete) is left out, never sent empty.
-      if (Option.isNone(bytes)) continue;
-      delivered.push({
-        name: variable.name,
-        valueId: variable.valueId,
-        value: new TextDecoder().decode(bytes.value),
-      });
-    }
-    if (delivered.length === 0) return undefined;
+    const variables = set.value.variables
+      .filter((v) => !v.dangerous || trusted.has(v.valueId))
+      .map((v) => ({ name: v.name, valueId: v.valueId }));
     return {
-      fingerprint: fingerprintOf(input.actingUserId, delivered),
-      variables: delivered.map(({ name, value }) => ({ name, value })),
-    } satisfies SecretEnv;
+      fingerprint: fingerprintOf(input.actingUserId, variables),
+      target: input.target,
+      variables,
+    } satisfies SecretPlan;
   });
 
-  const forTurn = Effect.fn("SecretDelivery.forTurn")(function* (input: {
+  const planTurn = Effect.fn("SecretDelivery.planTurn")(function* (input: {
     readonly threadId: ThreadId;
     readonly target: SecretTarget;
   }) {
     const owner = yield* turnOwner(input.threadId);
-    return yield* forProcess({
+    return yield* plan({
       threadId: input.threadId,
       actingUserId: Option.getOrUndefined(owner),
       target: input.target,
     });
   });
 
-  const receivesSecrets = Effect.fn("SecretDelivery.receivesSecrets")(function* (
-    threadId: ThreadId,
-  ) {
-    const owner = yield* turnOwner(threadId);
-    if (Option.isNone(owner)) return false;
-    return yield* effective.forThread({ threadId, actingUserId: owner.value }).pipe(
-      Effect.map((set) => set.variables.length > 0),
-      Effect.catchIf(
-        (error) => error.reason === "not-found",
-        () => Effect.succeed(false),
-      ),
-    );
+  const resolve = Effect.fn("SecretDelivery.resolve")(function* (planned: SecretPlan) {
+    if (planned.variables.length === 0) {
+      return { fingerprint: NO_SECRETS_FINGERPRINT, variables: [] } satisfies SecretEnv;
+    }
+    if (planned.target.contractVersion < SECRET_ENV_CONTRACT_VERSION) {
+      const environmentName = yield* machineName(planned.target.environmentId);
+      return yield* new SecretDeliveryError({
+        reason: "outdated-machine",
+        ...(environmentName === undefined ? {} : { environmentName }),
+      });
+    }
+    const delivered: Array<{ name: string; value: string }> = [];
+    for (const variable of planned.variables) {
+      const bytes = yield* values
+        .get(variable.valueId)
+        .pipe(Effect.catch(storage("read the Thread's secrets")));
+      // A value gone from the store (a race with a delete) is left out, never sent empty.
+      if (Option.isNone(bytes)) continue;
+      delivered.push({ name: variable.name, value: new TextDecoder().decode(bytes.value) });
+    }
+    return { fingerprint: planned.fingerprint, variables: delivered } satisfies SecretEnv;
   });
 
-  return SecretDelivery.of({ turnOwner, forProcess, receivesSecrets, forTurn });
+  const mayReceiveSecrets = Effect.fn("SecretDelivery.mayReceiveSecrets")(function* (
+    threadId: ThreadId,
+  ) {
+    const rows = yield* sql<{ readonly found: number }>`
+      WITH t AS (
+        SELECT COALESCE(th.space_id, p.space_id,
+            'personal:' || (SELECT user_id FROM users WHERE is_owner = 1)) AS space_id,
+          COALESCE(th.owner_user_id, root.owner_user_id) AS owner_id
+        FROM orchestration_v2_projection_threads th
+        LEFT JOIN orchestration_v2_projection_threads root
+          ON root.thread_id = json_extract(th.payload_json, '$.lineage.rootThreadId')
+        LEFT JOIN projection_projects p ON p.project_id = th.project_id
+        WHERE th.thread_id = ${threadId}
+      )
+      SELECT EXISTS (
+        SELECT 1 FROM t, vaults v JOIN vault_entries e ON e.vault_id = v.vault_id
+        WHERE t.owner_id IS NOT NULL AND v.archived_at IS NULL AND (
+          (v.is_main = 1 AND t.space_id = 'personal:' || t.owner_id)
+          OR v.space_id = t.space_id
+          OR EXISTS (SELECT 1 FROM vault_allowances a WHERE a.vault_id = v.vault_id AND (
+            (a.subject_kind = 'space' AND a.subject_id = t.space_id)
+            OR (a.subject_kind = 'user' AND a.subject_id = t.owner_id)))
+        )
+      ) AS found
+    `.pipe(Effect.catch(storage("check the Thread's Vaults")));
+    return rows[0]?.found === 1;
+  });
+
+  return SecretDelivery.of({ turnOwner, plan, planTurn, resolve, mayReceiveSecrets });
 });
 
 export const layer = Layer.effect(SecretDelivery, make);
-
-/** The fingerprint a process started with `secretEnv` has. */
-export const fingerprintOfEnv = (secretEnv: SecretEnv | undefined): string =>
-  secretEnv?.fingerprint ?? NO_SECRETS_FINGERPRINT;

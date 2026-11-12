@@ -178,6 +178,8 @@ function makeFxAcpAdapterFlavor(options: FxAdapterV2Options): AcpAdapterV2Flavor
     runtimeHarness: "fx",
     capabilities: FxProviderCapabilitiesV2,
     makeRuntime: (input) => makeRuntime(input).pipe(Effect.map(withFxSessionMode)),
+    // Spec 5: its own runtime starts fx with `processEnvironment` (a Thread's secrets in it).
+    ...(options.makeRuntime === undefined ? { receivesSecretEnv: true as const } : {}),
     applyModelSelection: ({ runtime, modelSelection }) =>
       applyFxModelSelection(runtime, modelSelection, options.defaultModel).pipe(
         Effect.tap(() => applyFxEffortDefault(runtime, modelSelection)),

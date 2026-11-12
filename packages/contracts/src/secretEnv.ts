@@ -10,14 +10,17 @@ export const SECRET_ENV_CONTRACT_VERSION = 10;
 export const SecretEnvVariable = Schema.Struct({ name: Schema.String, value: Schema.String });
 export type SecretEnvVariable = typeof SecretEnvVariable.Type;
 
+/** The fingerprint of no secrets: sent explicitly, so a set that became empty is a change. */
+export const NO_SECRETS_FINGERPRINT = "none";
+
 /**
- * The secrets one process receives, for the User who starts it (`EffectiveVaults`). `fingerprint`
- * names the set (its names and value ids, never values): a process started with another one has
- * stale secrets. The machine puts `variables` in that process's environment and nowhere else.
+ * The secrets of the User who starts a process. `fingerprint` names the set (names and value ids,
+ * never values). Without `variables` it only says which set is current: a running process with
+ * another is stale, and a process that would start asks for the values (`secrets_required`).
  */
 export const SecretEnv = Schema.Struct({
   fingerprint: TrimmedNonEmptyString,
-  variables: Schema.Array(SecretEnvVariable),
+  variables: Schema.optionalKey(Schema.Array(SecretEnvVariable)),
 });
 export type SecretEnv = typeof SecretEnv.Type;
 

@@ -379,6 +379,8 @@ export class TerminalEnvironmentUnavailableError extends Schema.TaggedError<Term
       "hub_runs_no_agents",
       // Spec 5: the Thread's secrets could not reach the shell (an outdated machine, storage).
       "secrets_unavailable",
+      // The shell would start, and the Hub sent only which secrets are current: send the values.
+      "secrets_required",
     ]),
     environmentName: Schema.optional(Schema.String),
     /** Why, for `secrets_unavailable`: a message that names no value. */
@@ -387,6 +389,7 @@ export class TerminalEnvironmentUnavailableError extends Schema.TaggedError<Term
 ) {
   override get message() {
     if (this.reason === "hub_runs_no_agents") return HUB_RUNS_NO_AGENTS_MESSAGE;
+    if (this.reason === "secrets_required") return "This terminal needs its secrets to start.";
     if (this.reason === "secrets_unavailable") {
       return this.detail ?? "This Thread's secrets could not reach the terminal. Try again.";
     }

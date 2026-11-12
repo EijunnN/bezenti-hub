@@ -1083,7 +1083,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     Option.isNone(secretDelivery)
       ? Effect.succeed(false)
       : // Unreadable: a process of its own, the side that never shares secrets.
-        secretDelivery.value.receivesSecrets(threadId).pipe(Effect.orElseSucceed(() => true));
+        secretDelivery.value.mayReceiveSecrets(threadId).pipe(Effect.orElseSucceed(() => true));
   const serverConfig = yield* Effect.serviceOption(ServerConfig.ServerConfig);
   const sqlClient = yield* Effect.serviceOption(SqlClient.SqlClient);
   const nextTurnItemOrdinal = (

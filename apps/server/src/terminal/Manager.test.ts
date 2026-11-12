@@ -12,6 +12,7 @@ import {
   TerminalProviderInstanceNotFoundError,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -431,6 +432,82 @@ it.layer(
       assert.equal(second.threadId, "thread-1");
       assert.equal(third.threadId, "thread-1");
       expect(ptyAdapter.spawnInputs).toHaveLength(1);
+    }),
+  );
+
+  it.effect("spec 5: a shell gets its secrets, keeps them, and says when the set changed", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      const withValues = {
+        fingerprint: "set-1",
+        variables: [{ name: "ACME_TOKEN", value: "v-1" }],
+      };
+      yield* manager.open(openInput(), withValues);
+      expect(ptyAdapter.spawnInputs).toHaveLength(1);
+      expect(ptyAdapter.spawnInputs[0]!.env.ACME_TOKEN).toBe("v-1");
+      // The same set: nothing to say. Another set: the running shell keeps its own, and says so.
+      expect(
+        (yield* manager.open(openInput(), { fingerprint: "set-1" })).secretsStale,
+      ).toBeUndefined();
+      expect((yield* manager.open(openInput(), { fingerprint: "set-2" })).secretsStale).toBe(true);
+      // A set that became empty is a change too.
+      const emptied = yield* manager.open(openInput(), { fingerprint: "none", variables: [] });
+      expect(emptied.secretsStale).toBe(true);
+      expect(ptyAdapter.spawnInputs).toHaveLength(1);
+    }),
+  );
+
+  it.effect("spec 5: never starts a shell without the values it should have", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager();
+      const required = (exit: Exit.Exit<unknown, unknown>) =>
+        Exit.isFailure(exit) &&
+        (
+          Option.getOrUndefined(Cause.findErrorOption(exit.cause)) as
+            | { reason?: string }
+            | undefined
+        )?.reason === "secrets_required";
+      // Only the set's name: a shell that would start asks for the values.
+      expect(
+        required(yield* Effect.exit(manager.open(openInput(), { fingerprint: "set-1" }))),
+      ).toBe(true);
+      expect(ptyAdapter.spawnInputs).toHaveLength(0);
+      const exited = yield* Deferred.make<void>();
+      const unsubscribeEvents = yield* manager.subscribe((event) =>
+        event.type === "exited"
+          ? Deferred.succeed(exited, undefined).pipe(Effect.asVoid)
+          : Effect.void,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribeEvents));
+      yield* manager.open(openInput(), {
+        fingerprint: "set-1",
+        variables: [{ name: "ACME_TOKEN", value: "v-1" }],
+      });
+      ptyAdapter.processes[0]?.emitExit({ exitCode: 0, signal: 0 });
+      yield* Deferred.await(exited);
+      // A restart through an attach that carries no values never starts a shell without them.
+      const restarted = yield* Effect.exit(
+        manager
+          .attachOutputStream({ ...openInput(), restartIfNotRunning: true }, "viewer-1", {
+            fingerprint: "set-1",
+          })
+          .pipe(Stream.take(1), Stream.runDrain),
+      );
+      expect(required(restarted)).toBe(true);
+      const unknown = yield* Effect.exit(
+        manager
+          .attachOutputStream({ ...openInput(), restartIfNotRunning: true }, "viewer-2")
+          .pipe(Stream.take(1), Stream.runDrain),
+      );
+      expect(required(unknown)).toBe(true);
+      expect(ptyAdapter.spawnInputs).toHaveLength(1);
+      // With the values it starts again, with them.
+      yield* manager.open(openInput(), {
+        fingerprint: "set-1",
+        variables: [{ name: "ACME_TOKEN", value: "v-1" }],
+      });
+      expect(ptyAdapter.spawnInputs).toHaveLength(2);
+      expect(ptyAdapter.spawnInputs[1]!.env.ACME_TOKEN).toBe("v-1");
     }),
   );
 

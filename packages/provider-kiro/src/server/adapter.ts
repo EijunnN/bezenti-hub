@@ -544,6 +544,8 @@ function makeKiroAcpAdapterFlavor(options: KiroAdapterV2Options): AcpAdapterV2Fl
     // `_kiro/hooks/*` requests, which T3 does not answer.
     clientCapabilitiesMeta: { kiro: { hooks: { enabled: true, v2: true } } },
     makeRuntime,
+    // Spec 5: its own runtime starts Kiro with `processEnvironment` (a Thread's secrets in it).
+    ...(options.makeRuntime === undefined ? { receivesSecretEnv: true as const } : {}),
     promptFailure: kiroPromptFailure,
     ignoreSessionUpdate: makeKiroCloudConfigFilter(),
     normalizeSessionUpdate: (notification) =>

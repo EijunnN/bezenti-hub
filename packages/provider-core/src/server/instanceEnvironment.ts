@@ -53,10 +53,10 @@ export const applySecretEnv = (
   secretEnv: SecretEnv | undefined,
   platform: string,
 ): NodeJS.ProcessEnv => {
-  if (secretEnv === undefined || secretEnv.variables.length === 0) return env;
+  if (secretEnv?.variables === undefined || secretEnv.variables.length === 0) return env;
   const windows = platform === "win32";
   const next: NodeJS.ProcessEnv = { ...env };
-  for (const variable of secretEnv.variables) {
+  for (const variable of secretEnv.variables ?? []) {
     const name = windows ? variable.name.toUpperCase() : variable.name;
     if (windows) {
       for (const inherited of Object.keys(next)) {
@@ -70,7 +70,7 @@ export const applySecretEnv = (
 
 /** Whether a session would carry secrets. */
 const hasSecretEnv = (secretEnv: SecretEnv | undefined): secretEnv is SecretEnv =>
-  secretEnv !== undefined && secretEnv.variables.length > 0;
+  secretEnv?.variables !== undefined && secretEnv.variables.length > 0;
 
 /**
  * Opens a session; one with secrets only on an adapter that puts them in its processes

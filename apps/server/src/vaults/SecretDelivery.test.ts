@@ -9,6 +9,7 @@ import {
   MAIN_VAULT_ID,
   ThreadId,
   UserId,
+  type SecretEnv,
   type VaultEntryId,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
@@ -63,30 +64,34 @@ const ownersThread = Effect.gen(function* () {
     `;
     return ThreadId.make(id);
   });
-  return { server, owner, put, thread, delivery };
+  // A process starting: the plan, then its values.
+  const forTurn = (input: Parameters<typeof delivery.planTurn>[0]) =>
+    delivery.planTurn(input).pipe(Effect.flatMap(delivery.resolve));
+  const forProcess = (input: Parameters<typeof delivery.plan>[0]) =>
+    delivery.plan(input).pipe(Effect.flatMap(delivery.resolve));
+  return { server, owner, put, thread, delivery, forTurn, forProcess };
 });
 
-const valueOf = (
-  secretEnv: { readonly variables: ReadonlyArray<{ name: string; value: string }> } | undefined,
-  name: string,
-) => secretEnv?.variables.find((variable) => variable.name === name)?.value;
+const valueOf = (secretEnv: SecretEnv | undefined, name: string) =>
+  secretEnv?.variables?.find((variable) => variable.name === name)?.value;
 
 it.effect("a turn gets its Thread owner's secrets, a child Thread its root's", () =>
   Effect.gen(function* () {
-    const { owner, put, thread, delivery } = yield* ownersThread;
+    const { owner, put, thread, delivery, forTurn, forProcess } = yield* ownersThread;
     yield* put("OWNER_TOKEN", "owner-token-value");
     const root = yield* thread("thread:root");
     const child = yield* thread("thread:child", root);
-    const turn = yield* delivery.forTurn({ threadId: root, target: HUB });
+    const turn = yield* forTurn({ threadId: root, target: HUB });
     assert.equal(valueOf(turn, "OWNER_TOKEN"), "owner-token-value");
-    const childTurn = yield* delivery.forTurn({ threadId: child, target: HUB });
+    const childTurn = yield* forTurn({ threadId: child, target: HUB });
     assert.equal(valueOf(childTurn, "OWNER_TOKEN"), "owner-token-value");
     assert.equal(turn?.fingerprint, childTurn?.fingerprint);
     // A process nobody starts gets nothing.
-    assert.isUndefined(
-      yield* delivery.forProcess({ threadId: root, actingUserId: undefined, target: HUB }),
-    );
-    assert.isTrue(yield* delivery.receivesSecrets(root));
+    assert.deepEqual(yield* forProcess({ threadId: root, actingUserId: undefined, target: HUB }), {
+      fingerprint: "none",
+      variables: [],
+    });
+    assert.isTrue(yield* delivery.mayReceiveSecrets(root));
     assert.deepEqual(yield* delivery.turnOwner(child), yield* delivery.turnOwner(root));
     assert.deepEqual(yield* delivery.turnOwner(root), Option.some(owner));
   }).pipe(Effect.scoped),
@@ -94,12 +99,12 @@ it.effect("a turn gets its Thread owner's secrets, a child Thread its root's", (
 
 it.effect("a rotation changes what the next process gets, and its fingerprint", () =>
   Effect.gen(function* () {
-    const { put, thread, delivery } = yield* ownersThread;
+    const { put, thread, forTurn } = yield* ownersThread;
     yield* put("OWNER_TOKEN", "first-value");
     const threadId = yield* thread("thread:rotate");
-    const before = yield* delivery.forTurn({ threadId, target: HUB });
+    const before = yield* forTurn({ threadId, target: HUB });
     yield* put("OWNER_TOKEN", "rotated-value");
-    const after = yield* delivery.forTurn({ threadId, target: HUB });
+    const after = yield* forTurn({ threadId, target: HUB });
     assert.equal(valueOf(after, "OWNER_TOKEN"), "rotated-value");
     assert.notEqual(before?.fingerprint, after?.fingerprint);
     assert.notInclude(after?.fingerprint ?? "", "rotated-value");
@@ -108,13 +113,16 @@ it.effect("a rotation changes what the next process gets, and its fingerprint", 
 
 it.effect("a machine before executor contract 10 gets a refusal, not a process without them", () =>
   Effect.gen(function* () {
-    const { put, thread, delivery } = yield* ownersThread;
+    const { put, thread, forTurn } = yield* ownersThread;
     const threadId = yield* thread("thread:old");
     const old = { environmentId: HUB_MACHINE_ENVIRONMENT_ID, contractVersion: 9 };
     // Without secrets, an old machine works as before.
-    assert.isUndefined(yield* delivery.forTurn({ threadId, target: old }));
+    assert.deepEqual(yield* forTurn({ threadId, target: old }), {
+      fingerprint: "none",
+      variables: [],
+    });
     yield* put("OWNER_TOKEN", "owner-token-value");
-    const refused = yield* Effect.exit(delivery.forTurn({ threadId, target: old }));
+    const refused = yield* Effect.exit(forTurn({ threadId, target: old }));
     assert.isTrue(Exit.isFailure(refused));
     assert.include(JSON.stringify(refused), "outdated-machine");
   }).pipe(Effect.scoped),
@@ -122,30 +130,31 @@ it.effect("a machine before executor contract 10 gets a refusal, not a process w
 
 it.effect("a machine that does not serve the Thread's Space gets nothing", () =>
   Effect.gen(function* () {
-    const { put, thread, delivery } = yield* ownersThread;
+    const { put, thread, forTurn } = yield* ownersThread;
     yield* put("OWNER_TOKEN", "owner-token-value");
     const threadId = yield* thread("thread:elsewhere");
     const unknown = {
       environmentId: EnvironmentId.make("environment:unknown"),
       contractVersion: ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
     };
-    assert.isUndefined(yield* delivery.forTurn({ threadId, target: unknown }));
+    assert.deepEqual(yield* forTurn({ threadId, target: unknown }), {
+      fingerprint: "none",
+      variables: [],
+    });
   }).pipe(Effect.scoped),
 );
 
 it.effect("a name that changes how tools run goes only as the Owner set it", () =>
   Effect.gen(function* () {
-    const { server, put, thread, delivery } = yield* ownersThread;
+    const { server, put, thread, forTurn } = yield* ownersThread;
     yield* put("LD_PRELOAD_LIBS", "/owner/lib.so", true);
     const threadId = yield* thread("thread:dangerous");
     assert.equal(
-      valueOf(yield* delivery.forTurn({ threadId, target: HUB }), "LD_PRELOAD_LIBS"),
+      valueOf(yield* forTurn({ threadId, target: HUB }), "LD_PRELOAD_LIBS"),
       "/owner/lib.so",
     );
     // Written by anyone else (a write the Owner did not make), it is never delivered.
     yield* server.sql`UPDATE vault_entries SET updated_by = 'someone-else' WHERE name = 'LD_PRELOAD_LIBS'`;
-    assert.isUndefined(
-      valueOf(yield* delivery.forTurn({ threadId, target: HUB }), "LD_PRELOAD_LIBS"),
-    );
+    assert.isUndefined(valueOf(yield* forTurn({ threadId, target: HUB }), "LD_PRELOAD_LIBS"));
   }).pipe(Effect.scoped),
 );

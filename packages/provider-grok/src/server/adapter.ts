@@ -289,14 +289,16 @@ export function makeGrokAcpAdapterFlavor(
     }),
     makeRuntime:
       options.makeRuntime ??
-      (({ runtimePolicy, ...input }) =>
+      (({ runtimePolicy, processEnvironment, ...input }) =>
         makeGrokAcpRuntime({
           ...input,
           interruptPromptOnCancel: input.interruptPromptOnCancel ?? false,
           grokSettings: options.settings,
-          environment: options.environment,
+          environment: { ...options.environment, ...processEnvironment },
           runtimeMode: grokLaunchRuntimeMode(runtimePolicy),
         })),
+    // Spec 5: its own runtime starts Grok with `processEnvironment` (a Thread's secrets in it).
+    ...(options.makeRuntime === undefined ? { receivesSecretEnv: true as const } : {}),
     // Auto prompts represent classifier refusals and must reach the user.
     permissionDisposition: (policy, request) =>
       grokLaunchRuntimeMode(policy) === "auto" ? "ask" : acpPermissionDisposition(policy, request),

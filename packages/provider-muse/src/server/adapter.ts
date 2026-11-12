@@ -38,6 +38,8 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import { applySecretEnv } from "@t3tools/provider-core/server/instanceEnvironment";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
@@ -280,6 +282,8 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: options.instanceId,
     driver: MUSE_PROVIDER,
+    // Spec 5: each session's host process gets the Thread's secrets.
+    receivesSecretEnv: true,
     getCapabilities: Effect.fn("MuseAdapter.getCapabilities")(function () {
       return Effect.succeed(MuseProviderCapabilitiesV2);
     }),
@@ -1676,9 +1680,11 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
       const launchHost = Effect.fnUntraced(function* () {
         const epoch = ++hostEpoch;
         const mcpSession = yield* mcpSessions.read(input.threadId);
-        const environment = McpProviderSession.withAgentDeviceEnvironment(
-          options.environment,
-          mcpSession,
+        // Spec 5: the Thread's secrets, in this session's host process alone.
+        const environment = applySecretEnv(
+          McpProviderSession.withAgentDeviceEnvironment(options.environment, mcpSession),
+          input.secretEnv,
+          yield* HostProcess.Platform,
         );
         const launch = yield* agentScope.wrap({
           command: options.settings.binaryPath || "muse",

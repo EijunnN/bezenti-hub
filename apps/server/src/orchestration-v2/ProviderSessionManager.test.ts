@@ -4054,14 +4054,37 @@ it.effect("ProviderSessionManagerV2 gives a delegated child its project's device
   }),
 );
 
-/** Spec 5: a fake delivery handing each Thread the secrets the test sets for it. */
-const fakeSecretDelivery = (byThread: Map<string, SecretEnv | undefined>) =>
-  SecretDelivery.SecretDelivery.of({
+/**
+ * Spec 5: a fake delivery handing each Thread the secrets the test sets for it. `resolved`
+ * counts the reads of values: a plan reads none.
+ */
+const fakeSecretDelivery = (
+  byThread: Map<string, SecretEnv | undefined>,
+  resolved: { count: number } = { count: 0 },
+) => {
+  const byFingerprint = new Map<string, SecretEnv>();
+  return SecretDelivery.SecretDelivery.of({
     turnOwner: () => Effect.succeedNone,
-    forProcess: () => Effect.succeed(undefined),
-    receivesSecrets: (threadId) => Effect.succeed(byThread.get(threadId) !== undefined),
-    forTurn: ({ threadId }) => Effect.succeed(byThread.get(threadId)),
+    mayReceiveSecrets: (threadId) => Effect.succeed(byThread.get(threadId) !== undefined),
+    plan: ({ target }) => Effect.succeed(SecretDelivery.emptyPlan(target)),
+    planTurn: ({ threadId, target }) =>
+      Effect.sync(() => {
+        const set = byThread.get(threadId);
+        if (set === undefined) return SecretDelivery.emptyPlan(target);
+        byFingerprint.set(set.fingerprint, set);
+        return {
+          fingerprint: set.fingerprint,
+          target,
+          variables: (set.variables ?? []).map((v) => ({ name: v.name, valueId: set.fingerprint })),
+        };
+      }),
+    resolve: (plan) =>
+      Effect.sync(() => {
+        resolved.count += 1;
+        return byFingerprint.get(plan.fingerprint) ?? { fingerprint: "none", variables: [] };
+      }),
   });
+};
 
 const secretSet = (fingerprint: string, value: string): SecretEnv => ({
   fingerprint,
@@ -4097,7 +4120,7 @@ it.effect("ProviderSessionManagerV2 reopens a Thread's session once its secrets 
       assert.equal((yield* Ref.get(state)).openCount, 2, "a changed set opens a new session");
       assert.equal((yield* Ref.get(state)).closeCount, 1, "the old process is gone");
       assert.deepEqual(
-        opened.map((secretEnv) => secretEnv?.variables[0]?.value),
+        opened.map((secretEnv) => secretEnv?.variables?.[0]?.value),
         ["first-value", "rotated-value"],
       );
     });
@@ -4168,6 +4191,141 @@ it.effect("ProviderSessionManagerV2 never puts a Thread's secrets in a shared pr
           idleTimeoutMs: 60_000,
           secretDelivery: fakeSecretDelivery(byThread),
         }),
+      ),
+    );
+  }),
+);
+
+const secretsHarness = Effect.fn(function* (threadIds: ReadonlyArray<ThreadId>) {
+  const eventSink = yield* EventSink.EventSinkV2;
+  const idAllocator = yield* IdAllocator.IdAllocatorV2;
+  const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+  const now = yield* DateTime.now;
+  yield* eventSink.write({
+    events: yield* Effect.forEach(threadIds, (threadId) =>
+      makeThreadCreatedEvent({ idAllocator, threadId, now }),
+    ),
+  });
+  return { idAllocator, manager };
+});
+
+it.effect("ProviderSessionManagerV2 reads no secret value to reuse a live session", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const threadId = ThreadId.make("thread-provider-session-manager-no-read");
+    const byThread = new Map<string, SecretEnv | undefined>([
+      [threadId, secretSet("set-1", "value")],
+    ]);
+    const resolved = { count: 0 };
+    yield* Effect.gen(function* () {
+      const { idAllocator, manager } = yield* secretsHarness([threadId]);
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const open = manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      yield* open;
+      yield* open;
+      yield* open;
+      assert.equal(resolved.count, 1, "values are read once, for the one process that started");
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          secretDelivery: fakeSecretDelivery(byThread, resolved),
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 refuses a shared process before releasing anything", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const threadId = ThreadId.make("thread-provider-session-manager-shared-release");
+    const byThread = new Map<string, SecretEnv | undefined>();
+    yield* Effect.gen(function* () {
+      const { idAllocator, manager } = yield* secretsHarness([threadId]);
+      const shared = idAllocator.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      yield* manager.open({ threadId, providerSessionId: shared, modelSelection, runtimePolicy });
+      byThread.set(threadId, secretSet("set-1", "value"));
+      const refused = yield* Effect.exit(
+        manager.open({ threadId, providerSessionId: shared, modelSelection, runtimePolicy }),
+      );
+      assert.isTrue(Exit.isFailure(refused));
+      assert.equal((yield* Ref.get(state)).closeCount, 0, "the shared process keeps running");
+      assert.isTrue(yield* manager.isLive(shared));
+    }).pipe(
+      Effect.provide(
+        layerTest({ state, idleTimeoutMs: 60_000, secretDelivery: fakeSecretDelivery(byThread) }),
+      ),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 keeps a busy session and reopens it once the work ends", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const busy = yield* Ref.make(true);
+    const threadId = ThreadId.make("thread-provider-session-manager-busy");
+    const byThread = new Map<string, SecretEnv | undefined>([
+      [threadId, secretSet("set-1", "first")],
+    ]);
+    yield* Effect.gen(function* () {
+      const { idAllocator, manager } = yield* secretsHarness([threadId]);
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const open = manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      yield* open;
+      byThread.set(threadId, secretSet("set-2", "rotated"));
+      yield* open;
+      assert.equal((yield* Ref.get(state)).closeCount, 0, "a running turn is never killed");
+      assert.equal((yield* Ref.get(state)).openCount, 1);
+      yield* Ref.set(busy, false);
+      yield* open;
+      assert.equal((yield* Ref.get(state)).openCount, 2, "the next open after it reopens");
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          hasPendingBackgroundWork: Ref.get(busy),
+          secretDelivery: fakeSecretDelivery(byThread),
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 reopens once when two opens see the same change", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const threadId = ThreadId.make("thread-provider-session-manager-race");
+    const byThread = new Map<string, SecretEnv | undefined>([
+      [threadId, secretSet("set-1", "first")],
+    ]);
+    yield* Effect.gen(function* () {
+      const { idAllocator, manager } = yield* secretsHarness([threadId]);
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const open = manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      yield* open;
+      byThread.set(threadId, secretSet("set-2", "rotated"));
+      const [first, second] = yield* Effect.all([open, open], { concurrency: "unbounded" });
+      assert.strictEqual(first, second, "both get the one new session");
+      assert.equal((yield* Ref.get(state)).openCount, 2);
+      assert.equal((yield* Ref.get(state)).closeCount, 1);
+      assert.isTrue(yield* manager.isLive(providerSessionId));
+    }).pipe(
+      Effect.provide(
+        layerTest({ state, idleTimeoutMs: 60_000, secretDelivery: fakeSecretDelivery(byThread) }),
       ),
     );
   }),

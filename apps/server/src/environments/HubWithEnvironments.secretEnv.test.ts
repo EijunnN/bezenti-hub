@@ -37,6 +37,8 @@ import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
+import * as SecretDelivery from "../vaults/SecretDelivery.ts";
 import * as Vaults from "../vaults/Vaults.ts";
 import {
   type Hub,
@@ -106,7 +108,7 @@ const recordingSecrets = (
   ).pipe(Layer.provide(adapters));
 
 const valueOf = (secretEnv: SecretEnv | undefined, name: string) =>
-  secretEnv?.variables.find((variable) => variable.name === name)?.value;
+  secretEnv?.variables?.find((variable) => variable.name === name)?.value;
 
 /** Ada and Grace (Members of Acme) share Acme's Sandbox; Grace has a Vault of her own. */
 const sharedSandbox = Effect.fn(function* () {
@@ -190,6 +192,7 @@ const sharedSandbox = Effect.fn(function* () {
     adaThread,
     graceThread,
     graceVault: graceVault.id,
+    acmeVault: acmeVault.id,
     project,
     thread,
     vaults,
@@ -373,6 +376,117 @@ describe("Hub con Environments: a Thread's secrets as environment variables", ()
         old.ptySpawns.every((spawn) => spawn.env.OWNER_TOKEN === undefined),
         "the value never reached the old machine",
       );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("say a running shell is stale once the User's set became empty", () =>
+    Effect.gen(function* () {
+      const s = yield* sharedSandbox();
+      const open = () =>
+        s.workspace.terminalOpen(
+          { threadId: s.graceThread, terminalId: "term-1", cwd: s.acmeWeb.workspaceRoot },
+          { userId: s.grace },
+        );
+      yield* open();
+      assert.equal(lastShell(s.sandbox).GRACE_TOKEN, GRACE_TOKEN);
+      yield* s.vaults.setSpaceDefaults({ spaceId: s.acme, vaultIds: [] }).pipe(s.asOwner);
+      yield* s.vaults
+        .allow({
+          vaultId: s.graceVault,
+          subject: { kind: "user", userId: s.grace },
+          allowed: false,
+        })
+        .pipe(s.asOwner);
+      const reopened = yield* open();
+      assert.isTrue(reopened.secretsStale, "no secrets now: the shell that has some is stale");
+      assert.equal(s.sandbox.ptySpawns.length, 1, "it keeps running");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("give a turn its Thread owner's secrets, never those of whoever continues it", () =>
+    Effect.gen(function* () {
+      const s = yield* sharedSandbox();
+      // A Vault of the Owner's, allowed to the Owner alone.
+      const ownersOwn = yield* s.vaults
+        .create({ name: "Owner keys", spaceId: null })
+        .pipe(s.asOwner);
+      yield* s.vaults
+        .putEntry({ vaultId: ownersOwn.id, name: "OWNER_ONLY", value: Redacted.make(OWNER_TOKEN) })
+        .pipe(s.asOwner);
+      yield* s.vaults
+        .allow({ vaultId: ownersOwn.id, subject: { kind: "user", userId: s.owner }, allowed: true })
+        .pipe(s.asOwner);
+      const delivery = s.hub.service(SecretDelivery.SecretDelivery);
+      const target = {
+        environmentId: sandboxEnvironmentIdOf(s.acme),
+        contractVersion: 10,
+      };
+      const graces = yield* delivery.planTurn({ threadId: s.graceThread, target });
+      assert.deepEqual(
+        graces.variables.map((v) => v.name),
+        ["ACME_TOKEN", "GRACE_TOKEN"],
+        "Grace's Thread: her set, whoever sends the turn",
+      );
+      // Nobody else continues it: the Owner and an Admin are refused at the door.
+      const directory = s.hub.service(SpaceDirectory.SpaceDirectory);
+      const continued = yield* Effect.exit(
+        directory.authorizeItem(s.owner, "thread.continue", { kind: "thread", id: s.graceThread }),
+      );
+      assert.isTrue(Exit.isFailure(continued), "the Owner does not speak in Grace's Thread");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("never attach one User's terminal for another (no door lets them)", () =>
+    Effect.gen(function* () {
+      const s = yield* sharedSandbox();
+      // terminal.attach, open, write and observe are «work» doors: only the Thread's owner passes.
+      const visibility = s.hub.service(SpaceVisibility.SpaceVisibility);
+      const claim = (userId: UserId) =>
+        Effect.flatten(visibility.viewer(userId)).pipe(
+          Effect.flatMap((viewer) => visibility.claimWork(viewer, userId, s.graceThread)),
+        );
+      assert.equal(yield* claim(s.grace), "allowed");
+      assert.equal(yield* claim(s.ada), "not-yours");
+      assert.equal(yield* claim(s.owner), "not-yours");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("refuse, never strip, secrets sent to a machine before contract 10", () =>
+    Effect.gen(function* () {
+      const instanceId = "claudeAgent" as ProviderInstanceId;
+      const hub = yield* makeHub();
+      const old = yield* hub.join({
+        name: "Old laptop",
+        adapters: idleAdapters(instanceId),
+        executorContractVersion: 9,
+      });
+      const projectId = ProjectId.make("project:old-guard");
+      const { workspaceRoot } = yield* seedProject(hub.server, {
+        projectId,
+        title: "Old",
+        defaultModelSelection: null,
+      });
+      yield* checkoutOnMachine(hub, old.environmentId, projectId);
+      const registry = hub.service(EnvironmentExecutor.EnvironmentExecutorRegistry);
+      const forward = Option.getOrThrow((yield* registry.get(old.environmentId)).workspace.forward);
+      const checkout = Option.getOrThrow(
+        yield* (yield* registry.get(old.environmentId)).workspace.paths.checkout(projectId),
+      );
+      void workspaceRoot;
+      const sent = yield* Effect.exit(
+        forward.call("terminal.open", {
+          root: checkout,
+          input: { threadId: "thread:old-guard", terminalId: "term-1", cwd: checkout },
+          secretEnv: {
+            fingerprint: "set-1",
+            variables: [{ name: "OWNER_TOKEN", value: OWNER_TOKEN }],
+          },
+        }),
+      );
+      assert.isTrue(Exit.isFailure(sent));
+      if (Exit.isFailure(sent)) assert.include(Cause.pretty(sent.cause), "needs an update");
+      assert.isEmpty(old.ptySpawns, "no shell started without its secrets");
+      assert.isFalse(old.requests.includes("terminal.open"), "nothing was sent");
     }).pipe(Effect.scoped),
   );
 });

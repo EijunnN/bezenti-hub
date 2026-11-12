@@ -8,6 +8,9 @@ import {
   type FilesystemBrowseInput,
   ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
   type EnvironmentId,
+  NO_SECRETS_FINGERPRINT,
+  SECRET_ENV_CONTRACT_VERSION,
+  type SecretEnv,
   HUB_MACHINE_ENVIRONMENT_ID,
   HUB_RUNS_NO_AGENTS_MESSAGE,
   type PreviewAdjustInput,
@@ -50,6 +53,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
@@ -126,6 +130,8 @@ const relativeInside = (path: string): string | undefined => {
 
 const isAbsolute = (path: string) =>
   path.startsWith("/") || path.startsWith("\\") || isWindowsAbsolutePath(path);
+
+const isTerminalUnavailable = Schema.is(TerminalEnvironmentUnavailableError);
 
 export const make = Effect.gen(function* () {
   const registry = yield* Effect.serviceOption(EnvironmentExecutor.EnvironmentExecutorRegistry);
@@ -426,34 +432,54 @@ export const make = Effect.gen(function* () {
       runRemote,
     );
 
-  /**
-   * The caller's secrets for a shell of the Thread on its machine (the Hub machine: `local`).
-   * Fails, never opens the shell without them, when the machine is too old for secrets.
-   */
-  const terminalSecrets = (
+  type Target = { readonly environmentId: EnvironmentId; readonly contractVersion: number };
+  const secretsUnavailable = (threadId: string) => (error: { readonly message: string }) =>
+    new TerminalEnvironmentUnavailableError({
+      threadId,
+      reason: "secrets_unavailable",
+      detail: error.message,
+    });
+  /** Which secrets the caller's shells of the Thread on `target` get now: no value is read. */
+  const terminalPlan = (
     threadId: string,
     caller: WorkspaceCaller,
-    where: { readonly environmentId: EnvironmentId; readonly contractVersion: number },
-  ): Effect.Effect<TerminalManager.TerminalSecrets | undefined, TerminalError> =>
+    target: Target,
+  ): Effect.Effect<SecretDelivery.SecretPlan | undefined, TerminalError> =>
     Option.isNone(secretDelivery)
       ? Effect.succeed(undefined)
       : secretDelivery.value
-          .forProcess({
-            threadId: ThreadId.make(threadId),
-            actingUserId: caller.userId,
-            target: where,
-          })
-          .pipe(
-            Effect.map((secretEnv) => (secretEnv === undefined ? undefined : { secretEnv })),
-            Effect.mapError(
-              (error) =>
-                new TerminalEnvironmentUnavailableError({
-                  threadId,
-                  reason: "secrets_unavailable",
-                  detail: error.message,
-                }),
-            ),
-          );
+          .plan({ threadId: ThreadId.make(threadId), actingUserId: caller.userId, target })
+          .pipe(Effect.mapError(secretsUnavailable(threadId)));
+  /** The set's name only; an empty set is said explicitly, so a shell that had secrets is stale. */
+  const currentSecrets = (plan: SecretDelivery.SecretPlan): SecretEnv =>
+    plan.variables.length === 0
+      ? { fingerprint: NO_SECRETS_FINGERPRINT, variables: [] }
+      : { fingerprint: plan.fingerprint };
+  const isSecretsRequired = (error: unknown) =>
+    isTerminalUnavailable(error) && error.reason === "secrets_required";
+  /**
+   * Calls with the set's name; the machine answers `secrets_required` only when a shell would
+   * start, and then the values are read and sent. A reattach to a running shell reads none.
+   */
+  const withTerminalSecrets = <A, E>(
+    threadId: string,
+    plan: SecretDelivery.SecretPlan | undefined,
+    call: (secrets: SecretEnv | undefined) => Effect.Effect<A, E>,
+  ): Effect.Effect<A, E | TerminalError> =>
+    plan === undefined || Option.isNone(secretDelivery)
+      ? call(undefined)
+      : call(currentSecrets(plan)).pipe(
+          Effect.catchIf(isSecretsRequired, () =>
+            secretDelivery.value
+              .resolve(plan)
+              .pipe(Effect.mapError(secretsUnavailable(threadId)), Effect.flatMap(call)),
+          ),
+        );
+  /** A machine before contract 10 gets no `secretEnv`: only an empty set, or a refusal. */
+  const outdatedWith = (target: Target, plan: SecretDelivery.SecretPlan | undefined) =>
+    target.contractVersion < SECRET_ENV_CONTRACT_VERSION &&
+    plan !== undefined &&
+    plan.variables.length > 0;
   const LOCAL_TARGET = {
     environmentId: HUB_MACHINE_ENVIRONMENT_ID,
     contractVersion: ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
@@ -596,37 +622,79 @@ export const make = Effect.gen(function* () {
         const refuse = terminalUnavailable(input.threadId);
         const where = yield* route(input.threadId, caller);
         // Spec 5: an attach may start the shell (a new terminal), with the caller's secrets.
-        const withSecrets = mode === "attach" && input.cwd !== undefined;
+        const attach = mode === "attach";
+        /** Opens with the set's name; again with the values if a shell would start. */
+        const withSecrets = (
+          plan: SecretDelivery.SecretPlan | undefined,
+          open: (
+            secrets: SecretEnv | undefined,
+          ) => Stream.Stream<TerminalAttachStreamEvent, TerminalError>,
+        ): Stream.Stream<TerminalAttachStreamEvent, TerminalError> =>
+          plan === undefined || Option.isNone(secretDelivery)
+            ? open(undefined)
+            : open(currentSecrets(plan)).pipe(
+                Stream.catchIf(isSecretsRequired, () =>
+                  Stream.unwrap(
+                    secretDelivery.value
+                      .resolve(plan)
+                      .pipe(Effect.mapError(secretsUnavailable(input.threadId)), Effect.map(open)),
+                  ),
+                ),
+              );
         if (where._tag === "local") {
-          const secrets = withSecrets
-            ? yield* terminalSecrets(input.threadId, caller, LOCAL_TARGET)
+          const plan = attach
+            ? yield* terminalPlan(input.threadId, caller, LOCAL_TARGET)
             : undefined;
-          return runLocal((yield* local).terminals, secrets);
+          const terminals = (yield* local).terminals;
+          return withSecrets(plan, (secrets) => runLocal(terminals, secrets));
         }
         if (where._tag !== "remote") return Stream.fail(refuse(where));
-        const resolved = terminalFolders(where, input);
+        const target = remoteTarget(where);
+        const plan = attach ? yield* terminalPlan(input.threadId, caller, target) : undefined;
+        const outdated = outdatedWith(target, plan);
+        // A machine too old for secrets only reattaches a running shell: nothing that starts one.
+        const { cwd: _cwd, restartIfNotRunning: _restart, ...attachOnly } = input;
+        const resolved = terminalFolders(where, outdated ? attachOnly : input);
         if (resolved === undefined) return Stream.fail(refuse(REFUSED));
-        const secrets = withSecrets
-          ? yield* terminalSecrets(input.threadId, caller, remoteTarget(where))
-          : undefined;
         yield* remember(input, caller, where);
         // An open terminal keeps its Sandbox from idling, for as long as the stream lives.
         if (Option.isSome(demand)) yield* demand.value.hold(where.environmentId);
-        return where.forward
-          .stream("terminal.stream", {
-            mode,
-            root: where.remoteBase,
-            input: resolved,
-            ...(viewerId === undefined ? {} : { viewerId }),
-            ...(secrets?.secretEnv === undefined ? {} : { secretEnv: secrets.secretEnv }),
-          })
-          .pipe(
-            Stream.catchTags({
-              EnvironmentExecutorUnavailableError: () =>
-                Stream.fail(refuse({ _tag: "offline", name: where.name })),
-            }),
-            Stream.interruptWhen(untilUnusable(where.environmentId, caller, input.threadId)),
+        const open = (secrets: SecretEnv | undefined) =>
+          where.forward
+            .stream("terminal.stream", {
+              mode,
+              root: where.remoteBase,
+              input: resolved,
+              ...(viewerId === undefined ? {} : { viewerId }),
+              ...(secrets === undefined ? {} : { secretEnv: secrets }),
+            })
+            .pipe(
+              Stream.catchTags({
+                EnvironmentExecutorUnavailableError: () =>
+                  Stream.fail(refuse({ _tag: "offline", name: where.name })),
+              }),
+              Stream.interruptWhen(untilUnusable(where.environmentId, caller, input.threadId)),
+            );
+        if (outdated && plan !== undefined && Option.isSome(secretDelivery)) {
+          const delivery = secretDelivery.value;
+          // No running shell to reattach: say why it does not start (the machine needs an update).
+          return open(undefined).pipe(
+            Stream.catchTag("TerminalSessionLookupError", () =>
+              Stream.fromEffect(
+                delivery
+                  .resolve(plan)
+                  .pipe(
+                    Effect.mapError(secretsUnavailable(input.threadId)),
+                    Effect.andThen(Effect.fail(refuse(REFUSED))),
+                  ),
+              ),
+            ),
           );
+        }
+        return withSecrets(
+          target.contractVersion < SECRET_ENV_CONTRACT_VERSION ? undefined : plan,
+          open,
+        );
       }),
     );
 
@@ -774,21 +842,39 @@ export const make = Effect.gen(function* () {
         acting(caller),
         // Spec 5: the shell gets the opening User's secrets.
         (terminals) =>
-          terminalSecrets(input.threadId, caller, LOCAL_TARGET).pipe(
-            Effect.flatMap((secrets) => terminals.open(input, secrets)),
+          terminalPlan(input.threadId, caller, LOCAL_TARGET).pipe(
+            Effect.flatMap((plan) =>
+              withTerminalSecrets(input.threadId, plan, (secrets) =>
+                terminals.open(input, secrets),
+              ),
+            ),
           ),
         (forward, where) => {
           const resolved = terminalFolders(where, input);
+          const target = remoteTarget(where);
           return resolved === undefined
             ? undefined
-            : terminalSecrets(input.threadId, caller, remoteTarget(where)).pipe(
-                Effect.flatMap((secrets) =>
-                  forward.call("terminal.open", {
-                    root: where.remoteBase,
-                    input: resolved,
-                    ...(secrets?.secretEnv === undefined ? {} : { secretEnv: secrets.secretEnv }),
-                  }),
-                ),
+            : terminalPlan(input.threadId, caller, target).pipe(
+                Effect.flatMap((plan) => {
+                  const open = (secrets: SecretEnv | undefined) =>
+                    forward.call("terminal.open", {
+                      root: where.remoteBase,
+                      input: resolved,
+                      ...(secrets === undefined ? {} : { secretEnv: secrets }),
+                    });
+                  // A machine too old for secrets: an empty set works as before, else it says why.
+                  if (target.contractVersion < SECRET_ENV_CONTRACT_VERSION) {
+                    return outdatedWith(target, plan) &&
+                      plan !== undefined &&
+                      Option.isSome(secretDelivery)
+                      ? secretDelivery.value.resolve(plan).pipe(
+                          Effect.mapError(secretsUnavailable(input.threadId)),
+                          Effect.flatMap(() => open(undefined)),
+                        )
+                      : open(undefined);
+                  }
+                  return withTerminalSecrets(input.threadId, plan, open);
+                }),
                 Effect.tap(() => remember(input, caller, where)),
               );
         },

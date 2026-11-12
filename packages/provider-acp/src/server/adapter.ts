@@ -71,6 +71,8 @@ import type * as EffectAcpSchema from "effect-acp/compat";
 
 import { formatReadToolLabel, formatSearchToolLabel } from "@t3tools/shared/toolActivity";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import { applySecretEnv } from "@t3tools/provider-core/server/instanceEnvironment";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { makeAcpMcpOverAcpBridge, type AcpMcpOverAcpBridge } from "./mcpOverAcpBridge.ts";
 import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresentation";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
@@ -1694,6 +1696,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
     }),
     openSession: Effect.fn("AcpAdapterV2.openSession")(
       function* (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) {
+        const hostPlatform = yield* HostProcess.Platform;
         const sessionScope = yield* Effect.scope;
         let itemIdentityVersion: 2 | undefined =
           input.initialProviderItemIdentityVersion ??
@@ -2316,12 +2319,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             ...(mcpContext.processEnvironment === undefined && input.secretEnv === undefined
               ? {}
               : {
-                  processEnvironment: {
-                    ...mcpContext.processEnvironment,
-                    ...Object.fromEntries(
-                      (input.secretEnv?.variables ?? []).map((v) => [v.name, v.value]),
-                    ),
-                  },
+                  processEnvironment: applySecretEnv(
+                    { ...mcpContext.processEnvironment },
+                    input.secretEnv,
+                    hostPlatform,
+                  ),
                 }),
             ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
             interruptPromptOnCancel: flavor.interruptPromptOnCancel ?? false,

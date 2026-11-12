@@ -653,7 +653,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
         ? terminals.attachOutputStream(
             input,
             request.viewerId ?? request.subscriptionId,
-            request.secretEnv === undefined ? undefined : { secretEnv: request.secretEnv },
+            request.secretEnv,
           )
         : terminalOutputStream(
             (listener, registerCleanup) =>
@@ -1040,12 +1040,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
                 WorkspaceRootEscapeError: () => Effect.fail(terminalOutside(rooted.input.threadId)),
               }),
               // Spec 5: the opening User's secrets, for this shell's environment alone.
-              Effect.flatMap((input) =>
-                terminals.open(
-                  input,
-                  rooted.secretEnv === undefined ? undefined : { secretEnv: rooted.secretEnv },
-                ),
-              ),
+              Effect.flatMap((input) => terminals.open(input, rooted.secretEnv)),
             ),
         );
       }

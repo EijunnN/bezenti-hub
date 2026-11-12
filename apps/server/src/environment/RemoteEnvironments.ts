@@ -26,6 +26,8 @@ import {
   type ProviderInstanceId,
   SECRET_ENV_CONTRACT_VERSION,
   SECRET_ENV_FIELD,
+  SecretDeliveryError,
+  TerminalEnvironmentUnavailableError,
   TextGenerationError,
   ThreadId,
   VcsUnsupportedOperationError,
@@ -396,6 +398,34 @@ const make = Effect.gen(function* () {
     });
   });
 
+  /** The «needs an update» refusal, in the operation's own error. */
+  const outdatedRefusal = Effect.fn("RemoteEnvironments.outdatedRefusal")(function* (
+    link: Link,
+    operation: RemoteOperation,
+    input: object,
+  ) {
+    const [row] = yield* sql<{ readonly name: string }>`
+      SELECT name FROM environments WHERE environment_id = ${link.environmentId}
+    `.pipe(Effect.orElseSucceed(() => []));
+    const refusal = new SecretDeliveryError({
+      reason: "outdated-machine",
+      ...(row === undefined ? {} : { environmentName: row.name }),
+    });
+    if (operation.startsWith("provider.")) {
+      return new ProviderAdapter.ProviderAdapterProtocolError({
+        driver: ((input as { readonly instanceId?: string }).instanceId ??
+          "provider") as ProviderDriverKind,
+        detail: refusal.message,
+        cause: refusal,
+      });
+    }
+    return new TerminalEnvironmentUnavailableError({
+      threadId: streamThreadOf(input) ?? "",
+      reason: "secrets_unavailable",
+      detail: refusal.message,
+    });
+  });
+
   const sha256Hex = (bytes: Uint8Array) =>
     digester.digest(Digest.sha256, bytes).pipe(
       Effect.orDie,
@@ -416,26 +446,17 @@ const make = Effect.gen(function* () {
     },
   ): Effect.fn.Return<CallOutcome> {
     const spec = REMOTE_OPERATIONS[operation];
-    // Spec 5: secrets go only to a machine of contract 10 or later. `SecretDelivery` refuses a
-    // Thread with secrets on an older one first, with why; this is the last guard, so a value
-    // never crosses to a machine that would not know to keep it out of everything but the process.
-    const outdated =
+    // Spec 5: secrets go only to a machine of contract 10 or later. The Hub decides that before
+    // (`SecretDelivery`); this last guard refuses the call, never sends it or starts it without.
+    if (
       link.contractVersion < SECRET_ENV_CONTRACT_VERSION &&
       typeof input === "object" &&
       input !== null &&
-      SECRET_ENV_FIELD in input;
-    if (outdated) {
-      yield* Effect.logWarning("Withheld secrets from a machine before executor contract 10", {
-        environmentId: link.environmentId,
-        operation,
-      });
+      SECRET_ENV_FIELD in input
+    ) {
+      return { _tag: "failed", error: yield* outdatedRefusal(link, operation, input) };
     }
-    const payload = yield* encodeJson(
-      spec.input,
-      outdated
-        ? Object.fromEntries(Object.entries(input).filter(([key]) => key !== SECRET_ENV_FIELD))
-        : input,
-    ).pipe(Effect.orDie);
+    const payload = yield* encodeJson(spec.input, input).pipe(Effect.orDie);
     const idempotencyKey = yield* EnvironmentExecutor.nextIdempotencyKey(operation);
     let result: ExecutorCallResult | undefined;
     for (let resends = 0; result === undefined; resends += 1) {
