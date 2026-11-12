@@ -158,6 +158,40 @@ describe("every door of the Hub declares its rule", () => {
     }
   });
 
+  it("keeps AI accounts' credentials in the Hub: only AiAccounts reads them, no answer carries one", () => {
+    // The store's folder for them is read only by AiAccounts, which writes them into CLIProxyAPI.
+    const readers = files
+      .filter(({ text }) => /AiAccountCredentialStore\b/u.test(text))
+      .map(({ file }) => file);
+    expect(readers.toSorted()).toEqual(["ai/AiAccounts.ts", "auth/ServerSecretStore.ts"]);
+    // No HTTP, raw route or MCP door for AI accounts: only the WS RPCs.
+    expect(
+      [
+        ...Object.keys(HTTP_ENDPOINT_RULES),
+        ...Object.keys(MCP_TOOL_RULES),
+        ...Object.keys(RAW_ROUTE_RULES),
+      ].filter((name) => /aiAccount|ai-account|ai_account/iu.test(name)),
+    ).toEqual([]);
+    // No WS answer about AI accounts has a field that could carry a credential.
+    const accountRpcs = [...WsRpcGroup.requests.values()].filter((rpc) =>
+      rpc._tag.startsWith("aiAccounts."),
+    );
+    expect(accountRpcs.map((rpc) => rpc._tag).toSorted()).toEqual([
+      "aiAccounts.allow",
+      "aiAccounts.create",
+      "aiAccounts.delete",
+      "aiAccounts.list",
+      "aiAccounts.reorder",
+      "aiAccounts.update",
+    ]);
+    for (const rpc of accountRpcs) {
+      const fields = successFields(rpc.successSchema.ast);
+      for (const credential of ["apiKey", "key", "credential", "secret", "token", "value"]) {
+        expect(fields, rpc._tag).not.toContain(credential);
+      }
+    }
+  });
+
   it("reaches the Owner's SSH install only through its HTTP endpoints: no WS or MCP door", () => {
     const users = files
       .filter(({ text }) => /sshInstall\/SshInstall\.ts"/u.test(text))

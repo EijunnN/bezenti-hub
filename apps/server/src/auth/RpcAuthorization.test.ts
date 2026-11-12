@@ -189,6 +189,24 @@ describe("RPC authorization scopes", () => {
           ).pipe(Effect.flip);
           expect([method, refused.message]).toEqual([method, INSTALLATION_OWNER_ONLY_MESSAGE]);
         }
+        // The Installation's AI accounts: only the Owner registers, changes, allows and orders them.
+        for (const method of [
+          WS_METHODS.aiAccountsCreate,
+          WS_METHODS.aiAccountsUpdate,
+          WS_METHODS.aiAccountsDelete,
+          WS_METHODS.aiAccountsAllow,
+          WS_METHODS.aiAccountsReorder,
+        ]) {
+          expect([method, spaceAccessForRpcMethod(method)]).toEqual([method, "installation"]);
+          const refused = yield* guardRpcPayload(
+            method,
+            { accountId: "acct", accountIds: [] },
+            member,
+            {} as never,
+            UserId.make("member"),
+          ).pipe(Effect.flip);
+          expect([method, refused.message]).toEqual([method, INSTALLATION_OWNER_ONLY_MESSAGE]);
+        }
         // An ACP agent's model provider is set on the Installation's provider instance, with
         // its secrets; the Project only says where the agent runs.
         for (const method of [

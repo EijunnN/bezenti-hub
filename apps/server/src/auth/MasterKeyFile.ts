@@ -139,7 +139,7 @@ const readKeyFile = Effect.fn("MasterKeyFile.readKeyFile")(function* (file: stri
 export const STORE_NAMESPACES = [
   { dir: "", purpose: "server-secret" },
   { dir: "vault-values", purpose: "vault-value" },
-  // AI accounts' credentials (spec 4): `ServerSecretStore.AiAccountCredentialStore`.
+  // AI accounts' credentials (spec 4), read only by AiAccounts.
   { dir: "ai-accounts", purpose: "ai-account-credential" },
 ] as const satisfies ReadonlyArray<{
   readonly dir: string;
