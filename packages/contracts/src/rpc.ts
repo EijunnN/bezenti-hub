@@ -25,6 +25,12 @@ import {
 } from "./providerSetup.ts";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/rpc/Rpc";
+import {
+  AiGatewayError,
+  AiGatewayStatus,
+  AiGatewayUpdateCheck,
+  AiGatewayUpdateInput,
+} from "./aiGateway.ts";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
@@ -568,6 +574,12 @@ export const WS_METHODS = {
   sourceControlAppAccess: "sourceControl.appAccess",
   sourceControlStarred: "sourceControl.starred",
   sourceControlStar: "sourceControl.star",
+
+  // The Hub's AI gateway (CLIProxyAPI it runs): its Owner's alone.
+  aiGatewayStatus: "aiGateway.status",
+  aiGatewayCheckForUpdates: "aiGateway.checkForUpdates",
+  aiGatewayUpdate: "aiGateway.update",
+  aiGatewayRollback: "aiGateway.rollback",
   projectCloneStart: "projectClone.start",
   projectCloneCancel: "projectClone.cancel",
   projectCloneRetry: "projectClone.retry",
@@ -1169,6 +1181,32 @@ const WsSourceControlStarRpc = Rpc.make(WS_METHODS.sourceControlStar, {
   payload: SourceControlStarredInput,
   success: Schema.Boolean,
   error: EnvironmentAuthorizationError,
+});
+
+// The Hub's AI gateway: status, a GitHub check only when asked, update and roll back.
+const WsAiGatewayStatusRpc = Rpc.make(WS_METHODS.aiGatewayStatus, {
+  payload: Schema.Struct({}),
+  success: AiGatewayStatus,
+  error: Schema.Union([AiGatewayError, EnvironmentAuthorizationError]),
+});
+
+const WsAiGatewayCheckForUpdatesRpc = Rpc.make(WS_METHODS.aiGatewayCheckForUpdates, {
+  payload: Schema.Struct({}),
+  success: AiGatewayUpdateCheck,
+  error: Schema.Union([AiGatewayError, EnvironmentAuthorizationError]),
+});
+
+// Returns once the new release answers and serves in place of the old one, kept for roll back.
+const WsAiGatewayUpdateRpc = Rpc.make(WS_METHODS.aiGatewayUpdate, {
+  payload: AiGatewayUpdateInput,
+  success: AiGatewayStatus,
+  error: Schema.Union([AiGatewayError, EnvironmentAuthorizationError]),
+});
+
+const WsAiGatewayRollbackRpc = Rpc.make(WS_METHODS.aiGatewayRollback, {
+  payload: Schema.Struct({}),
+  success: AiGatewayStatus,
+  error: Schema.Union([AiGatewayError, EnvironmentAuthorizationError]),
 });
 
 // Returns when the project exists and cloning starts; progress uses the subscription.
@@ -2019,6 +2057,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsSourceControlAppAccessRpc,
   WsSourceControlStarredRpc,
   WsSourceControlStarRpc,
+  WsAiGatewayStatusRpc,
+  WsAiGatewayCheckForUpdatesRpc,
+  WsAiGatewayUpdateRpc,
+  WsAiGatewayRollbackRpc,
   WsProjectCloneStartRpc,
   WsProjectCloneCancelRpc,
   WsProjectCloneRetryRpc,

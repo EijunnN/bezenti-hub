@@ -249,6 +249,7 @@ import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.
 import * as OtlpEndpointCheck from "./observability/OtlpEndpointCheck.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
 import * as SourceControlSignIn from "./sourceControl/SourceControlSignIn.ts";
+import * as AiGateway from "./ai/AiGateway.ts";
 import * as SourceControlBuiltInDrivers from "./sourceControl/builtInDrivers.ts";
 import * as SourceControlProviderRegistry from "./sourceControl/SourceControlProviderRegistry.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
@@ -1368,6 +1369,7 @@ export const layerWsRpc = (
       const sourceControlRepositories =
         yield* SourceControlRepositoryService.SourceControlRepositoryService;
       const sourceControlSignIn = yield* SourceControlSignIn.SourceControlSignIn;
+      const aiGateway = yield* AiGateway.AiGateway;
       const withPullRequestViewer = pullRequests.withRoutingCredential;
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const triage = yield* TriageService.TriageService;
@@ -2816,6 +2818,10 @@ export const layerWsRpc = (
         [WS_METHODS.sourceControlAppAccess]: (input) => sourceControlSignIn.access(input),
         [WS_METHODS.sourceControlStarred]: (input) => sourceControlSignIn.starred(input),
         [WS_METHODS.sourceControlStar]: (input) => sourceControlSignIn.star(input),
+        [WS_METHODS.aiGatewayStatus]: () => aiGateway.status,
+        [WS_METHODS.aiGatewayCheckForUpdates]: () => aiGateway.checkForUpdates,
+        [WS_METHODS.aiGatewayUpdate]: (input) => aiGateway.update(input.version),
+        [WS_METHODS.aiGatewayRollback]: () => aiGateway.rollback,
         [WS_METHODS.projectCloneStart]: (input) =>
           requireCloneDestination(input.destinationPath, { asProject: true }).pipe(
             Effect.andThen(
