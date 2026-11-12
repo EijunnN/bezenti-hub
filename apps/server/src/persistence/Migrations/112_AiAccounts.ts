@@ -24,7 +24,9 @@ export default Effect.gen(function* () {
       models_json TEXT NOT NULL DEFAULT '[]',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      created_by TEXT
+      created_by TEXT,
+      -- Deleted, kept until the gateway confirms it no longer holds the key.
+      deleted_at TEXT
     )
   `;
   yield* sql`CREATE UNIQUE INDEX ai_accounts_name_idx ON ai_accounts (name COLLATE NOCASE)`;
@@ -39,6 +41,15 @@ export default Effect.gen(function* () {
       subject_id TEXT NOT NULL,
       created_at TEXT NOT NULL,
       PRIMARY KEY (account_id, subject_kind, subject_id)
+    )
+  `;
+  // A replaced or deleted account's old key: kept until the gateway confirms it dropped it, then
+  // removed from the store with its row (the Hub's start removes them all: nothing runs yet).
+  yield* sql`
+    CREATE TABLE ai_account_retired_credentials (
+      credential_id TEXT PRIMARY KEY,
+      account_id TEXT NOT NULL,
+      retired_at TEXT NOT NULL
     )
   `;
   yield* sql`

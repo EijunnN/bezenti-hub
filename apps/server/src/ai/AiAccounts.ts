@@ -18,6 +18,7 @@ import {
   type AiAccountSummary,
   type AiAccountType,
   type AiAccountUpdateInput,
+  type AiGatewayState,
   AI_CREDENTIAL_MAX_LENGTH,
   aiAccountPrefixOf,
   type AiApiKeyProvider,
@@ -34,6 +35,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
@@ -94,8 +96,19 @@ const CATALOG_TTL_MS = 5 * 60_000;
 /** After a write, how long the Hub waits for CLIProxyAPI's model list to show the accounts. */
 const MODEL_LIST_ATTEMPTS = 20;
 const MODEL_LIST_PAUSE = Duration.millis(250);
-/** After a write the gateway refused or missed, the Hub tries again this often. */
-const RETRY_EVERY = Duration.seconds(10);
+/** One change and its check, from reading the accounts to their status, within this. */
+const PROVISION_DEADLINE = Duration.seconds(30);
+/** After a change the gateway refused or missed, the Hub tries again, waiting longer each time. */
+const RETRY_FIRST_MS = 10_000;
+const RETRY_MAX_MS = 5 * 60_000;
+const RETRY_TICK = Duration.seconds(1);
+/** Gateway states with no CLIProxyAPI process: whatever it held is gone with it. */
+const GONE_STATES: ReadonlySet<AiGatewayState> = new Set([
+  "off",
+  "unsupported",
+  "restarting",
+  "failed",
+]);
 
 interface AccountRow {
   readonly accountId: string;
@@ -112,6 +125,7 @@ interface AccountRow {
   readonly modelsJson: string;
   readonly createdAt: string;
   readonly updatedAt: string;
+  readonly deletedAt: string | null;
 }
 
 interface AllowanceRow {
@@ -125,7 +139,7 @@ const ACCOUNT_COLUMNS = `
   priority AS "priority", status AS "status", status_message AS "statusMessage",
   disabled AS "disabled", credential_id AS "credentialId", key_hint AS "keyHint",
   base_url AS "baseUrl", models_json AS "modelsJson", created_at AS "createdAt",
-  updated_at AS "updatedAt"
+  updated_at AS "updatedAt", deleted_at AS "deletedAt"
 `;
 
 const encodeModels = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
@@ -154,6 +168,10 @@ const credentialProblem = (value: string): string | undefined => {
   if (/[\s\u0000-\u001f\u007f]/u.test(value)) {
     return "An API key has no spaces, line breaks or control characters.";
   }
+  // Zero-width and other invisible format characters (U+200B, U+FEFF…), often pasted along.
+  if (/\p{Cf}/u.test(value)) {
+    return "This API key has an invisible character in it, often copied along with it: type or paste it again.";
+  }
   return undefined;
 };
 
@@ -178,6 +196,106 @@ const baseUrlProblem = (value: string): string | undefined => {
     return "The base URL has no query or fragment.";
   }
   return undefined;
+};
+
+/** Why CLIProxyAPI cannot take an account as it is stored; checked before anything is sent. */
+const accountProblem = (row: AccountRow): string | undefined => {
+  if (row.type !== "api-key") return "Not an API key account.";
+  if (row.provider === "openai-compatible") {
+    if (row.baseUrl === null) return "It needs a base URL.";
+    const problem = baseUrlProblem(row.baseUrl);
+    if (problem !== undefined) return problem;
+    if (modelsOfRow(row).length === 0) return "It needs at least one model.";
+    return undefined;
+  }
+  return row.baseUrl === null ? undefined : "Only an OpenAI-compatible account takes a base URL.";
+};
+
+/** What CLIProxyAPI holds of an account: a change of any part is a new entry for it. */
+const fingerprintOf = (row: AccountRow) =>
+  [row.credentialId, row.provider, row.baseUrl ?? "", row.modelsJson].join("|");
+
+/** An enabled account as it goes to CLIProxyAPI. */
+interface Desired {
+  readonly row: AccountRow;
+  readonly fingerprint: string;
+  readonly account: CliproxyApiKeyAccount;
+}
+
+interface ViewContext {
+  readonly running: boolean;
+  /** Accounts whose old key the gateway may still hold. */
+  readonly stillLive: ReadonlySet<string>;
+}
+
+const statusOf = (
+  row: AccountRow,
+  context: ViewContext,
+): Pick<AiAccountSummary, "status" | "statusMessage"> => {
+  if (row.deletedAt !== null) {
+    return {
+      status: "removing",
+      statusMessage:
+        "Deleted, but its key is still live in the AI gateway, which has not taken the change yet. The Hub keeps trying.",
+    };
+  }
+  if (row.disabled === 1) return { status: "disabled", statusMessage: "Disabled by the Owner." };
+  if (!context.running) {
+    return { status: "pending", statusMessage: "The AI gateway is not running." };
+  }
+  if (context.stillLive.has(row.accountId)) {
+    return {
+      status: row.status,
+      statusMessage:
+        "Its old key is still live in the AI gateway, which has not taken the new one yet. The Hub keeps trying.",
+    };
+  }
+  return { status: row.status, statusMessage: row.statusMessage };
+};
+
+/**
+ * One account as a User sees it: the Owner with every detail but the credential (and only the
+ * allowances to Spaces and Users that still exist), anyone else with where they may use it.
+ */
+const summaryOf = (
+  row: AccountRow,
+  context: ViewContext,
+  view:
+    | { readonly _tag: "owner"; readonly allowances: ReadonlyArray<AllowanceRow> }
+    | { readonly _tag: "user"; readonly usableIn: ReadonlyArray<SpaceId> },
+): AiAccountSummary => {
+  const mine =
+    view._tag === "owner"
+      ? view.allowances.filter((allowance) => allowance.accountId === row.accountId)
+      : [];
+  return {
+    id: row.accountId as AiAccountId,
+    name: row.name,
+    type: row.type,
+    provider: row.provider,
+    priority: row.priority,
+    ...statusOf(row, context),
+    disabled: row.disabled === 1,
+    usableIn: view._tag === "user" ? view.usableIn : [],
+    details:
+      view._tag === "user"
+        ? null
+        : {
+            keyHint: row.keyHint,
+            baseUrl: row.baseUrl,
+            models: modelsOfRow(row),
+            allowances: {
+              spaceIds: mine
+                .filter((allowance) => allowance.subjectKind === "space")
+                .map((allowance) => allowance.subjectId as SpaceId),
+              userIds: mine
+                .filter((allowance) => allowance.subjectKind === "user")
+                .map((allowance) => allowance.subjectId as UserId),
+            },
+            createdAt: row.createdAt,
+            updatedAt: row.updatedAt,
+          },
+  };
 };
 
 const UNAVAILABLE = new AiAccountError({
@@ -251,138 +369,332 @@ const make = Effect.gen(function* () {
     return userId;
   });
 
-  /** One write at a time: each reads the accounts afresh, so the last one written is the latest. */
+  /** One config change at a time: each reads the accounts afresh, so the last one is the latest. */
   const syncLock = yield* Semaphore.make(1);
-  /** The gateway start the accounts were last written to; another one needs them again. */
-  let provisionedBaseUrl: string | undefined;
+  const layerScope = yield* Scope.Scope;
+  /**
+   * What the running CLIProxyAPI holds, as its last accepted change left it (each replaces the
+   * whole `api-keys` section): account → credential and fingerprint. A fresh start holds nothing.
+   * Forgotten when the process is gone.
+   */
+  let live:
+    | {
+        readonly baseUrl: string;
+        readonly entries: ReadonlyMap<string, { credentialId: string; fingerprint: string }>;
+      }
+    | undefined;
+  /** Accounts CLIProxyAPI refused, by gateway and fingerprint: not sent again unchanged. */
+  const refusedBefore = new Map<string, string>();
+  /** What the last attempt sent (for its status if it fails). */
+  let attempted: ReadonlyArray<{ readonly id: string; readonly credentialId: string }> = [];
   let dirty = false;
+  let retryDelayMs = RETRY_FIRST_MS;
+  let nextRetryAt = 0;
   let catalog:
     | { readonly baseUrl: string; readonly at: number; readonly ids: ReadonlyArray<string> }
     | undefined;
 
   const enabledAccounts = sql<AccountRow>`
     SELECT ${sql.literal(ACCOUNT_COLUMNS)} FROM ai_accounts
-    WHERE disabled = 0 AND type = 'api-key' AND credential_id IS NOT NULL
+    WHERE disabled = 0 AND deleted_at IS NULL AND type = 'api-key' AND credential_id IS NOT NULL
     ORDER BY priority, account_id
   `;
 
-  const setStatus = (accountId: string, status: AiAccountStatus, message: string | null) =>
-    sql`UPDATE ai_accounts SET status = ${status}, status_message = ${message} WHERE account_id = ${accountId}`;
+  /** Only while the row still holds that credential, enabled and not deleted (no raced write). */
+  const setStatus = (
+    accountId: string,
+    credentialId: string,
+    status: AiAccountStatus,
+    message: string | null,
+  ) =>
+    sql`
+      UPDATE ai_accounts SET status = ${status}, status_message = ${message}
+      WHERE account_id = ${accountId} AND credential_id = ${credentialId}
+        AND disabled = 0 AND deleted_at IS NULL
+    `.pipe(Effect.ignore({ log: true }));
 
   /**
-   * Writes the enabled accounts, with their credentials from the store, into `endpoint`: the
-   * whole `api-keys` section, so a disabled or deleted account goes. Then each account's status.
+   * Retired keys (replaced, or of a deleted account) the gateway no longer holds: out of the
+   * store, and a deleted account's row with its last one.
    */
-  const provision = (endpoint: CliproxyEndpoint) =>
-    syncLock
-      .withPermits(1)(
-        Effect.gen(function* () {
-          const rows = yield* enabledAccounts.pipe(
-            Effect.mapError(
-              () => new CliproxyManagementError({ message: "Could not read the AI accounts." }),
-            ),
-          );
-          const accounts: Array<CliproxyApiKeyAccount> = [];
-          const missing: Array<string> = [];
-          for (const row of rows) {
-            const stored = yield* credentials
-              .get(row.credentialId ?? "")
-              .pipe(Effect.orElseSucceed(() => Option.none<Uint8Array>()));
-            if (Option.isNone(stored)) {
-              missing.push(row.accountId);
-              continue;
-            }
-            accounts.push({
-              id: row.accountId,
-              provider: row.provider as AiApiKeyProvider,
-              apiKey: new TextDecoder().decode(stored.value),
-              baseUrl: row.baseUrl,
-              models: modelsOfRow(row),
-            });
-          }
-          yield* management.setApiKeys(endpoint, renderCliproxyApiKeys(accounts));
-          provisionedBaseUrl = endpoint.baseUrl;
-          catalog = undefined;
-          dirty = false;
-          // CLIProxyAPI applies a config change by reloading it: its model list catches up shortly.
-          const expected = accounts.map((account) => `${aiAccountPrefixOf(account.id)}/`);
-          let ids = yield* management.modelIds(endpoint).pipe(Effect.option);
-          for (let attempt = 0; attempt < MODEL_LIST_ATTEMPTS; attempt += 1) {
-            const listed = ids;
-            if (
-              Option.isSome(listed) &&
-              expected.every((prefix) => listed.value.some((id) => id.startsWith(prefix)))
-            ) {
-              break;
-            }
-            yield* Effect.sleep(MODEL_LIST_PAUSE);
-            ids = yield* management.modelIds(endpoint).pipe(Effect.option);
-          }
-          if (Option.isSome(ids)) {
-            catalog = {
-              baseUrl: endpoint.baseUrl,
-              at: yield* Clock.currentTimeMillis,
-              ids: ids.value,
-            };
-          }
-          for (const account of accounts) {
-            const prefix = `${aiAccountPrefixOf(account.id)}/`;
-            const serves = Option.isNone(ids) || ids.value.some((id) => id.startsWith(prefix));
-            yield* setStatus(
-              account.id,
-              serves ? "working" : "error",
-              serves ? null : "The AI gateway lists no models for this account.",
-            ).pipe(Effect.ignore({ log: true }));
-          }
-          for (const accountId of missing) {
-            yield* setStatus(
-              accountId,
-              "error",
-              "Its credential is missing from the Hub's store: replace it.",
-            ).pipe(Effect.ignore({ log: true }));
-          }
-        }),
-      )
-      .pipe(Effect.withSpan("AiAccounts.provision"));
+  const cleanupRetired = Effect.fn("AiAccounts.cleanupRetired")(function* (
+    liveCredentials: ReadonlySet<string>,
+  ) {
+    const retired = yield* sql<{ readonly credentialId: string }>`
+      SELECT credential_id AS "credentialId" FROM ai_account_retired_credentials
+    `;
+    for (const { credentialId } of retired) {
+      if (liveCredentials.has(credentialId)) continue;
+      yield* credentials.remove(credentialId);
+      yield* sql`DELETE FROM ai_account_retired_credentials WHERE credential_id = ${credentialId}`;
+    }
+    yield* sql`
+      DELETE FROM ai_accounts WHERE deleted_at IS NOT NULL
+        AND account_id NOT IN (SELECT account_id FROM ai_account_retired_credentials)
+    `;
+    const left = yield* sql<{ readonly n: number }>`
+      SELECT COUNT(*) AS n FROM ai_account_retired_credentials
+    `;
+    return (left[0]?.n ?? 0) > 0;
+  });
+
+  const unreadable = () =>
+    new CliproxyManagementError({
+      message: "Could not read the AI accounts on the Hub; the AI gateway keeps what it has.",
+    });
 
   /**
-   * The gateway did not take them: no account counts as working until a write goes through,
-   * which the Hub tries again every RETRY_EVERY. The gateway itself keeps running.
+   * Under the lock: the enabled accounts that pass their own checks, with their keys from the
+   * store, into `endpoint`. If CLIProxyAPI refuses them together, what it held before and then
+   * each other account alone, first to last: only the one it refuses stays out, with its reason.
+   * A key the store cannot read aborts it all and leaves the gateway as it is.
    */
-  const refused = Effect.fn("AiAccounts.refused")(function* (error: CliproxyManagementError) {
+  const commit = Effect.fn("AiAccounts.commit")(function* (endpoint: CliproxyEndpoint) {
+    const rows = yield* enabledAccounts.pipe(Effect.mapError(unreadable));
+    const desired: Array<Desired> = [];
+    const bad: Array<{ readonly row: AccountRow; readonly reason: string }> = [];
+    for (const row of rows) {
+      const problem = accountProblem(row);
+      if (problem !== undefined) {
+        bad.push({ row, reason: problem });
+        continue;
+      }
+      const stored = yield* credentials
+        .get(row.credentialId ?? "")
+        .pipe(Effect.mapError(unreadable));
+      if (Option.isNone(stored)) {
+        bad.push({ row, reason: "Its key is missing from the Hub's store: replace it." });
+        continue;
+      }
+      desired.push({
+        row,
+        fingerprint: fingerprintOf(row),
+        account: {
+          id: row.accountId,
+          provider: row.provider as AiApiKeyProvider,
+          apiKey: new TextDecoder().decode(stored.value),
+          baseUrl: row.baseUrl,
+          models: modelsOfRow(row),
+        },
+      });
+    }
+    const secrets = desired.map((entry) => entry.account.apiKey);
+    const refusalKey = (entry: Desired) => `${endpoint.baseUrl}|${entry.fingerprint}`;
+    const sendable = desired.filter((entry) => {
+      const reason = refusedBefore.get(refusalKey(entry));
+      if (reason !== undefined) bad.push({ row: entry.row, reason });
+      return reason === undefined;
+    });
+    // Every account this change tries to send, for its status if it all fails.
+    attempted = sendable.map((entry) => ({
+      id: entry.row.accountId,
+      credentialId: entry.row.credentialId ?? "",
+    }));
+    const attempt = (set: ReadonlyArray<Desired>) =>
+      management.setApiKeys(
+        endpoint,
+        renderCliproxyApiKeys(set.map((entry) => entry.account)),
+        secrets,
+      );
+    let accepted: Array<Desired> = sendable;
+    const together = yield* attempt(sendable);
+    if (together._tag === "refused") {
+      const before = live?.baseUrl === endpoint.baseUrl ? live.entries : new Map();
+      let base = sendable.filter(
+        (entry) => before.get(entry.row.accountId)?.fingerprint === entry.fingerprint,
+      );
+      if ((yield* attempt(base))._tag === "refused") {
+        base = [];
+        const empty = yield* attempt([]);
+        if (empty._tag === "refused") {
+          return yield* new CliproxyManagementError({
+            message: `CLIProxyAPI refused even no AI accounts (HTTP ${empty.status}${empty.reason === "" ? "" : `: ${empty.reason}`}).`,
+          });
+        }
+      }
+      accepted = [...base];
+      for (const entry of sendable) {
+        if (accepted.includes(entry)) continue;
+        const next = sendable.filter((other) => other === entry || accepted.includes(other));
+        const answer = yield* attempt(next);
+        if (answer._tag === "accepted") {
+          accepted = next;
+        } else {
+          const reason = `The AI gateway refused it${answer.reason === "" ? "" : `: ${answer.reason}`}.`;
+          refusedBefore.set(refusalKey(entry), reason);
+          bad.push({ row: entry.row, reason });
+        }
+      }
+      // The last change sent may be a refused one: send what stands, so it is what runs.
+      if ((yield* attempt(accepted))._tag === "refused") {
+        return yield* new CliproxyManagementError({
+          message: "CLIProxyAPI refused AI accounts it had just taken.",
+        });
+      }
+    }
+    live = {
+      baseUrl: endpoint.baseUrl,
+      entries: new Map(
+        accepted.map((entry) => [
+          entry.row.accountId,
+          { credentialId: entry.row.credentialId ?? "", fingerprint: entry.fingerprint },
+        ]),
+      ),
+    };
+    attempted = [];
+    catalog = undefined;
+    for (const { row, reason } of bad) {
+      yield* setStatus(row.accountId, row.credentialId ?? "", "error", reason);
+    }
+    const retiredLeft = yield* cleanupRetired(
+      new Set([...live.entries.values()].map((entry) => entry.credentialId)),
+    ).pipe(Effect.mapError(unreadable));
+    dirty = retiredLeft;
+    retryDelayMs = RETRY_FIRST_MS;
+    return accepted;
+  });
+
+  /**
+   * Outside the lock: CLIProxyAPI applies a change by reloading its config, so its model list
+   * catches up shortly. Each account sent is `working` once listed, `unverified` if the list
+   * cannot be read, `error` if it never shows.
+   */
+  const verify = Effect.fn("AiAccounts.verify")(function* (
+    endpoint: CliproxyEndpoint,
+    accepted: ReadonlyArray<Desired>,
+  ) {
+    const expected = accepted.map((entry) => `${aiAccountPrefixOf(entry.row.accountId)}/`);
+    let ids = yield* management.modelIds(endpoint).pipe(Effect.option);
+    for (let round = 0; round < MODEL_LIST_ATTEMPTS; round += 1) {
+      const listed = ids;
+      if (
+        Option.isSome(listed) &&
+        expected.every((prefix) => listed.value.some((id) => id.startsWith(prefix)))
+      ) {
+        break;
+      }
+      yield* Effect.sleep(MODEL_LIST_PAUSE);
+      ids = yield* management.modelIds(endpoint).pipe(Effect.option);
+    }
+    if (Option.isSome(ids)) {
+      catalog = { baseUrl: endpoint.baseUrl, at: yield* Clock.currentTimeMillis, ids: ids.value };
+    }
+    for (const entry of accepted) {
+      const prefix = `${aiAccountPrefixOf(entry.row.accountId)}/`;
+      const credentialId = entry.row.credentialId ?? "";
+      if (Option.isNone(ids)) {
+        yield* setStatus(
+          entry.row.accountId,
+          credentialId,
+          "unverified",
+          "In the AI gateway, but its model list could not be read.",
+        );
+      } else if (ids.value.some((id) => id.startsWith(prefix))) {
+        yield* setStatus(entry.row.accountId, credentialId, "working", null);
+      } else {
+        yield* setStatus(
+          entry.row.accountId,
+          credentialId,
+          "error",
+          "The AI gateway lists no models for this account.",
+        );
+      }
+    }
+  });
+
+  /** A change, then its check, within one deadline. */
+  const provision = Effect.fn("AiAccounts.provision")(function* (endpoint: CliproxyEndpoint) {
+    const done = yield* Effect.gen(function* () {
+      const accepted = yield* syncLock.withPermits(1)(commit(endpoint));
+      yield* verify(endpoint, accepted);
+    }).pipe(Effect.timeoutOption(PROVISION_DEADLINE));
+    if (Option.isNone(done)) {
+      return yield* new CliproxyManagementError({
+        message: `The AI gateway did not take the AI accounts within ${Duration.toSeconds(PROVISION_DEADLINE)} s.`,
+      });
+    }
+  });
+
+  /**
+   * The gateway did not take them: the accounts it was sent and does not hold are `error`, and
+   * the Hub tries again, waiting longer each time (up to RETRY_MAX_MS). The gateway keeps running.
+   */
+  const failed = Effect.fn("AiAccounts.failed")(function* (error: CliproxyManagementError) {
     dirty = true;
+    nextRetryAt = (yield* Clock.currentTimeMillis) + retryDelayMs;
+    retryDelayMs = Math.min(retryDelayMs * 2, RETRY_MAX_MS);
     yield* Effect.logWarning("AiAccounts: the AI gateway did not take the AI accounts", {
       reason: error.message,
     });
-    yield* sql`
-      UPDATE ai_accounts SET status = 'error', status_message = ${`Not in the AI gateway yet: ${error.message}`}
-      WHERE disabled = 0
-    `.pipe(Effect.ignore({ log: true }));
+    const sent = attempted;
+    attempted = [];
+    for (const { id, credentialId } of sent) {
+      if (live?.entries.get(id)?.credentialId === credentialId) continue;
+      yield* setStatus(id, credentialId, "error", `Not in the AI gateway yet: ${error.message}`);
+    }
   });
 
-  /** After a change: into the running gateway now, or at its next start; retried if refused. */
-  const sync = Effect.gen(function* () {
+  /**
+   * After a change to what the gateway holds: into the running gateway now. With none running,
+   * no key is live anywhere, so retired ones go at once (`not-running`).
+   */
+  const syncNow = Effect.gen(function* () {
     const endpoint = yield* gateway.endpoint;
-    if (Option.isNone(endpoint)) return;
-    yield* provision(endpoint.value).pipe(Effect.catch(refused));
+    if (Option.isNone(endpoint)) {
+      yield* syncLock.withPermits(1)(
+        Effect.suspend(() =>
+          live === undefined
+            ? cleanupRetired(new Set()).pipe(
+                Effect.tap((left) => Effect.sync(() => (dirty = left))),
+                Effect.ignore({ log: true }),
+              )
+            : Effect.sync(() => (dirty = true)),
+        ),
+      );
+      return "not-running" as const;
+    }
+    return yield* provision(endpoint.value).pipe(
+      Effect.as("applied" as const),
+      Effect.catch((error) => failed(error).pipe(Effect.as("failed" as const))),
+    );
   }).pipe(Effect.withSpan("AiAccounts.sync"));
 
   // Every start (a crash and its restart, an update, a roll back) gets the accounts before it
-  // counts as running; a start that raced this registration is caught by the watcher below.
-  yield* gateway.setProvisioner((endpoint) => provision(endpoint).pipe(Effect.catch(refused)));
+  // counts as running, its check forked; a start that raced this registration is caught below.
+  yield* gateway.setProvisioner((endpoint) =>
+    syncLock
+      .withPermits(1)(commit(endpoint))
+      .pipe(
+        Effect.timeoutOption(PROVISION_DEADLINE),
+        Effect.flatMap(
+          Option.match({
+            onNone: () => failed(new CliproxyManagementError({ message: "It took too long." })),
+            onSome: (accepted) => verify(endpoint, accepted).pipe(Effect.forkIn(layerScope)),
+          }),
+        ),
+        Effect.catch(failed),
+        Effect.asVoid,
+      ),
+  );
   yield* gateway.changes.pipe(
-    Stream.filter((status) => status.state === "running"),
-    Stream.runForEach(() =>
+    Stream.runForEach((status) =>
       Effect.gen(function* () {
+        if (GONE_STATES.has(status.state)) {
+          // Its process is gone, and what it held with it.
+          live = undefined;
+          yield* syncNow;
+          return;
+        }
+        if (status.state !== "running") return;
         const endpoint = yield* gateway.endpoint;
-        if (Option.isSome(endpoint) && endpoint.value.baseUrl !== provisionedBaseUrl) yield* sync;
+        if (Option.isSome(endpoint) && endpoint.value.baseUrl !== live?.baseUrl) yield* syncNow;
       }),
     ),
     Effect.forkScoped,
   );
   yield* Effect.gen(function* () {
-    yield* Effect.sleep(RETRY_EVERY);
-    if (dirty) yield* sync;
+    yield* Effect.sleep(RETRY_TICK);
+    if (dirty && (yield* Clock.currentTimeMillis) >= nextRetryAt) yield* syncNow;
   }).pipe(Effect.forever, Effect.forkScoped);
 
   const catalogIds = Effect.gen(function* () {
@@ -404,14 +716,21 @@ const make = Effect.gen(function* () {
     return ids;
   });
 
-  const findAccount = (accountId: string) =>
-    sql<AccountRow>`SELECT ${sql.literal(ACCOUNT_COLUMNS)} FROM ai_accounts WHERE account_id = ${accountId}`.pipe(
-      Effect.map((rows) => Option.fromNullishOr(rows[0])),
-      Effect.catch(storage("read the AI account")),
-      Effect.flatMap(
-        Option.match({ onNone: () => fail("not-found", NOT_FOUND), onSome: Effect.succeed }),
-      ),
-    );
+  const findRow = Effect.fn("AiAccounts.findRow")(function* (accountId: string) {
+    const rows = yield* sql<AccountRow>`
+      SELECT ${sql.literal(ACCOUNT_COLUMNS)} FROM ai_accounts WHERE account_id = ${accountId}
+    `.pipe(Effect.catch(storage("read the AI account")));
+    const row = rows[0];
+    if (row === undefined) return yield* fail("not-found", NOT_FOUND);
+    return row;
+  });
+
+  /** An account that is not being deleted. */
+  const findAccount = Effect.fn("AiAccounts.findAccount")(function* (accountId: string) {
+    const row = yield* findRow(accountId);
+    if (row.deletedAt !== null) return yield* fail("not-found", NOT_FOUND);
+    return row;
+  });
 
   const allowancesOf = (accountIds: ReadonlyArray<string>) =>
     accountIds.length === 0
@@ -422,62 +741,73 @@ const make = Effect.gen(function* () {
           ORDER BY subject_kind, subject_id
         `.pipe(Effect.catch(storage("read who may use the AI accounts")));
 
-  const statusOf = (row: AccountRow, running: boolean) =>
-    row.disabled === 1
-      ? { status: row.status, statusMessage: "Disabled by the Owner." }
-      : !running
-        ? { status: "pending" as const, statusMessage: "The AI gateway is not running." }
-        : { status: row.status, statusMessage: row.statusMessage };
+  /** Accounts whose old key the gateway may still hold (replaced or deleted, not yet dropped). */
+  const stillLive = sql<{ readonly accountId: string }>`
+    SELECT DISTINCT account_id AS "accountId" FROM ai_account_retired_credentials
+  `.pipe(
+    Effect.map((rows) => new Set(rows.map((row) => row.accountId))),
+    Effect.catch(storage("read the AI accounts")),
+  );
 
-  /** The Owner's view of an account: everything but the credential, which nobody gets back. */
-  const ownerSummary = (
-    row: AccountRow,
-    allowances: ReadonlyArray<AllowanceRow>,
-    running: boolean,
-  ): AiAccountSummary => {
-    const mine = allowances.filter((allowance) => allowance.accountId === row.accountId);
+  /** What the summaries need to know of the gateway now. */
+  const viewContext = Effect.gen(function* () {
     return {
-      id: row.accountId as AiAccountId,
-      name: row.name,
-      type: row.type,
-      provider: row.provider,
-      priority: row.priority,
-      ...statusOf(row, running),
-      disabled: row.disabled === 1,
-      usableIn: [],
-      details: {
-        keyHint: row.keyHint,
-        baseUrl: row.baseUrl,
-        models: modelsOfRow(row),
-        allowances: {
-          spaceIds: mine
-            .filter((allowance) => allowance.subjectKind === "space")
-            .map((allowance) => allowance.subjectId as SpaceId),
-          userIds: mine
-            .filter((allowance) => allowance.subjectKind === "user")
-            .map((allowance) => allowance.subjectId as UserId),
-        },
-        createdAt: row.createdAt,
-        updatedAt: row.updatedAt,
-      },
-    };
-  };
-
-  const gatewayRunning = Effect.map(gateway.endpoint, Option.isSome);
-
-  const ownerList = Effect.gen(function* () {
-    const rows = yield* sql<AccountRow>`
-      SELECT ${sql.literal(ACCOUNT_COLUMNS)} FROM ai_accounts ORDER BY priority, account_id
-    `.pipe(Effect.catch(storage("read the AI accounts")));
-    const allowances = yield* allowancesOf(rows.map((row) => row.accountId));
-    const running = yield* gatewayRunning;
-    return rows.map((row) => ownerSummary(row, allowances, running));
+      running: Option.isSome(yield* gateway.endpoint),
+      stillLive: yield* stillLive,
+    } satisfies ViewContext;
   });
 
-  const ownerSummaryOf = Effect.fn("AiAccounts.ownerSummaryOf")(function* (accountId: string) {
-    const row = yield* findAccount(accountId);
-    const allowances = yield* allowancesOf([row.accountId]);
-    return ownerSummary(row, allowances, yield* gatewayRunning);
+  /**
+   * The Owner's existing Spaces and Users, in one read each: an allowance to a deleted Space or a
+   * removed User is not shown and is dropped by the next `allow`.
+   */
+  const existingSubjects = Effect.fn("AiAccounts.existingSubjects")(function* (
+    ownerId: UserId,
+    spaceIds: ReadonlyArray<SpaceId>,
+  ) {
+    const known = yield* spaces.spacesById(spaceIds).pipe(Effect.catch(storage("read the Spaces")));
+    const users = yield* spaces.listUsers(ownerId).pipe(Effect.catch(storage("read the Users")));
+    return {
+      spaces: new Set<string>(known.keys()),
+      users: new Set<string>(
+        users.filter((user) => user.status !== "removed").map((user) => user.id),
+      ),
+    };
+  });
+
+  const ownerAccounts = Effect.fn("AiAccounts.ownerAccounts")(function* (
+    ownerId: UserId,
+    only?: string,
+  ) {
+    const rows =
+      only === undefined
+        ? yield* sql<AccountRow>`
+          SELECT ${sql.literal(ACCOUNT_COLUMNS)} FROM ai_accounts ORDER BY priority, account_id
+        `.pipe(Effect.catch(storage("read the AI accounts")))
+        : [yield* findRow(only)];
+    const allowances = yield* allowancesOf(rows.map((row) => row.accountId));
+    const existing = yield* existingSubjects(
+      ownerId,
+      allowances.flatMap((allowance) =>
+        allowance.subjectKind === "space" ? [allowance.subjectId as SpaceId] : [],
+      ),
+    );
+    const shown = allowances.filter((allowance) =>
+      allowance.subjectKind === "space"
+        ? existing.spaces.has(allowance.subjectId)
+        : existing.users.has(allowance.subjectId),
+    );
+    const context = yield* viewContext;
+    return rows.map((row) => summaryOf(row, context, { _tag: "owner", allowances: shown }));
+  });
+
+  const ownerSummaryOf = Effect.fn("AiAccounts.ownerSummaryOf")(function* (
+    ownerId: UserId,
+    accountId: string,
+  ) {
+    const [summary] = yield* ownerAccounts(ownerId, accountId);
+    if (summary === undefined) return yield* fail("not-found", NOT_FOUND);
+    return summary;
   });
 
   /**
@@ -488,69 +818,55 @@ const make = Effect.gen(function* () {
     userId: UserId,
     can: (action: AccessPolicy.Action, resource: AccessPolicy.Resource) => boolean,
   ) {
-    {
-      const limit = yield* CommandActor.spaceLimit;
-      const viewable = yield* spaces
-        .viewableSpaces(userId)
-        .pipe(Effect.catch(storage("read your Spaces")));
-      const candidates = limit !== undefined ? [limit] : viewable === "all" ? [] : [...viewable];
-      const known = yield* spaces
-        .spacesById(candidates)
-        .pipe(Effect.catch(storage("read your Spaces")));
-      const working = candidates.filter((spaceId) => {
-        const space = known.get(spaceId);
-        return space !== undefined && can("aiAccount.use", space.resource);
-      });
-      const bySpace = yield* allowed
-        .forSpaces(userId, working)
-        .pipe(Effect.catch(storage("read the AI accounts you may use")));
-      const usableIn = new Map<string, Array<SpaceId>>();
-      for (const [spaceId, accounts] of bySpace) {
-        for (const account of accounts) {
-          const where = usableIn.get(account.id) ?? [];
-          where.push(spaceId);
-          usableIn.set(account.id, where);
-        }
+    const limit = yield* CommandActor.spaceLimit;
+    const viewable = yield* spaces
+      .viewableSpaces(userId)
+      .pipe(Effect.catch(storage("read your Spaces")));
+    const candidates = limit !== undefined ? [limit] : viewable === "all" ? [] : [...viewable];
+    const known = yield* spaces
+      .spacesById(candidates)
+      .pipe(Effect.catch(storage("read your Spaces")));
+    const working = candidates.filter((spaceId) => {
+      const space = known.get(spaceId);
+      return space !== undefined && can("aiAccount.use", space.resource);
+    });
+    const bySpace = yield* allowed
+      .forSpaces(userId, working)
+      .pipe(Effect.catch(storage("read the AI accounts you may use")));
+    const usableIn = new Map<string, Array<SpaceId>>();
+    for (const [spaceId, accounts] of bySpace) {
+      for (const account of accounts) {
+        const where = usableIn.get(account.id) ?? [];
+        where.push(spaceId);
+        usableIn.set(account.id, where);
       }
-      if (usableIn.size === 0) return [] as ReadonlyArray<AiAccountSummary>;
-      const rows = yield* sql<AccountRow>`
-        SELECT ${sql.literal(ACCOUNT_COLUMNS)} FROM ai_accounts
-        WHERE ${sql.in("account_id", [...usableIn.keys()])}
-        ORDER BY priority, account_id
-      `.pipe(Effect.catch(storage("read the AI accounts")));
-      const running = yield* gatewayRunning;
-      return rows.map((row): AiAccountSummary => ({
-        id: row.accountId as AiAccountId,
-        name: row.name,
-        type: row.type,
-        provider: row.provider,
-        priority: row.priority,
-        ...statusOf(row, running),
-        disabled: row.disabled === 1,
-        usableIn: usableIn.get(row.accountId) ?? [],
-        details: null,
-      }));
     }
+    if (usableIn.size === 0) return [] as ReadonlyArray<AiAccountSummary>;
+    const rows = yield* sql<AccountRow>`
+      SELECT ${sql.literal(ACCOUNT_COLUMNS)} FROM ai_accounts
+      WHERE ${sql.in("account_id", [...usableIn.keys()])} AND deleted_at IS NULL
+      ORDER BY priority, account_id
+    `.pipe(Effect.catch(storage("read the AI accounts")));
+    const context = yield* viewContext;
+    return rows.map((row) =>
+      summaryOf(row, context, { _tag: "user", usableIn: usableIn.get(row.accountId) ?? [] }),
+    );
   });
 
   const list = Effect.gen(function* () {
     const { userId, manages, can } = yield* caller;
-    const accounts = manages ? yield* ownerList : yield* usableList(userId, can);
+    const accounts = manages ? yield* ownerAccounts(userId) : yield* usableList(userId, can);
     return { accounts, canManage: manages } satisfies AiAccountListResult;
   }).pipe(Effect.withSpan("AiAccounts.list"));
 
-  const nameTaken = (name: string, except?: string) =>
-    sql<{ readonly accountId: string }>`
+  const nameTaken = Effect.fn("AiAccounts.nameTaken")(function* (name: string, except?: string) {
+    const rows = yield* sql<{ readonly accountId: string }>`
       SELECT account_id AS "accountId" FROM ai_accounts WHERE name = ${name} COLLATE NOCASE
-    `.pipe(
-      Effect.map((rows) => rows.some((row) => row.accountId !== except)),
-      Effect.catch(storage("read the AI accounts")),
-      Effect.flatMap((taken) =>
-        taken
-          ? fail("duplicate-name", `There is already an AI account named ${name}.`)
-          : Effect.void,
-      ),
-    );
+    `.pipe(Effect.catch(storage("read the AI accounts")));
+    if (rows.some((row) => row.accountId !== except)) {
+      return yield* fail("duplicate-name", `There is already an AI account named ${name}.`);
+    }
+  });
 
   /** A new credential under a new id: no row points at it until its transaction commits. */
   const writeCredential = Effect.fn("AiAccounts.writeCredential")(function* (key: string) {
@@ -561,24 +877,24 @@ const make = Effect.gen(function* () {
     return credentialId;
   });
 
-  /** Removes a credential no row points at; one left behind by a failure is swept at the next start. */
-  const removeCredential = (credentialId: string | null) =>
-    credentialId === null
-      ? Effect.void
-      : credentials
-          .remove(credentialId)
-          .pipe(
-            Effect.catch((cause) =>
-              Effect.logWarning(
-                "AiAccounts: could not remove a credential; the next start removes it",
-                { credentialId, cause },
-              ),
-            ),
-          );
+  /** Removes a credential no row holds; one left behind by a failure is swept at the next start. */
+  const removeCredential = Effect.fn("AiAccounts.removeCredential")(function* (
+    credentialId: string | null,
+  ) {
+    if (credentialId === null) return;
+    yield* credentials.remove(credentialId).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("AiAccounts: could not remove a credential; the next start removes it", {
+          credentialId,
+          cause,
+        }),
+      ),
+    );
+  });
 
   /**
    * Runs `write` (rows and audit) in one transaction after `key` is stored under a new id; on
-   * failure that credential goes, on success the one it replaced (`write`'s answer) does.
+   * failure that credential goes.
    */
   const withNewCredential = Effect.fn("AiAccounts.withNewCredential")(function* <A, E>(
     key: string | undefined,
@@ -614,6 +930,14 @@ const make = Effect.gen(function* () {
     }
     return Effect.void;
   };
+
+  /** Whether the gateway still may hold one of the account's retired keys. */
+  const keyStillLive = Effect.fn("AiAccounts.keyStillLive")(function* (accountId: string) {
+    const rows = yield* sql<{ readonly n: number }>`
+      SELECT COUNT(*) AS n FROM ai_account_retired_credentials WHERE account_id = ${accountId}
+    `.pipe(Effect.catch(storage("read the AI account")));
+    return (rows[0]?.n ?? 0) > 0;
+  });
 
   const create = Effect.fn("AiAccounts.create")(function* (input: AiAccountCreateInput) {
     const userId = yield* manager;
@@ -656,10 +980,15 @@ const make = Effect.gen(function* () {
         nameTaken(input.name).pipe(Effect.andThen(Effect.fail(error))),
       ),
     );
-    yield* sync;
-    return yield* ownerSummaryOf(accountId);
+    yield* syncNow;
+    return yield* ownerSummaryOf(userId, accountId);
   });
 
+  /**
+   * Rename, disable or enable, «Replace credential», or an OpenAI-compatible account's URL and
+   * models. Only what the gateway holds (not the name) changes the gateway. A replaced key stays
+   * retired until the gateway confirms it dropped it; until then the call says it is still live.
+   */
   const update = Effect.fn("AiAccounts.update")(function* (input: AiAccountUpdateInput) {
     const userId = yield* manager;
     const row = yield* findAccount(input.accountId);
@@ -678,16 +1007,24 @@ const make = Effect.gen(function* () {
       (input.baseUrl !== undefined && input.baseUrl !== row.baseUrl) ||
       (models !== undefined && encodeModels(models) !== row.modelsJson);
     if (!renamed && !toggled && key === undefined && !endpointChanged) {
-      return yield* ownerSummaryOf(row.accountId);
+      return yield* ownerSummaryOf(userId, row.accountId);
     }
+    const gatewayChanges = toggled || key !== undefined || endpointChanged;
     const at = yield* now;
-    const replaced = yield* withNewCredential(key, "change the AI account", (credentialId) =>
+    yield* withNewCredential(key, "change the AI account", (credentialId) =>
       Effect.gen(function* () {
         const current = yield* sql<{ readonly credentialId: string | null }>`
-          SELECT credential_id AS "credentialId" FROM ai_accounts WHERE account_id = ${row.accountId}
+          SELECT credential_id AS "credentialId" FROM ai_accounts
+          WHERE account_id = ${row.accountId} AND deleted_at IS NULL
         `;
         const before = current[0];
         if (before === undefined) return yield* fail("not-found", NOT_FOUND);
+        if (credentialId !== null && before.credentialId !== null) {
+          yield* sql`
+            INSERT INTO ai_account_retired_credentials (credential_id, account_id, retired_at)
+            VALUES (${before.credentialId}, ${row.accountId}, ${at})
+          `;
+        }
         yield* sql`
           UPDATE ai_accounts SET
             name = ${input.name ?? row.name},
@@ -696,8 +1033,8 @@ const make = Effect.gen(function* () {
             key_hint = ${key === undefined ? row.keyHint : hintOf(key)},
             base_url = ${input.baseUrl ?? row.baseUrl},
             models_json = ${models === undefined ? row.modelsJson : encodeModels(models)},
-            status = ${key === undefined && !toggled ? row.status : "pending"},
-            status_message = ${key === undefined && !toggled ? row.statusMessage : null},
+            status = ${gatewayChanges ? "pending" : row.status},
+            status_message = ${gatewayChanges ? null : row.statusMessage},
             updated_at = ${at}
           WHERE account_id = ${row.accountId}
         `;
@@ -713,65 +1050,73 @@ const make = Effect.gen(function* () {
             ...(endpointChanged ? { endpoint: true } : {}),
           },
         });
-        return credentialId === null ? null : before.credentialId;
       }),
     );
-    // The gateway gets the new credential (or loses a disabled account) before the old one goes.
-    yield* sync;
-    yield* removeCredential(replaced);
-    return yield* ownerSummaryOf(row.accountId);
+    if (gatewayChanges) yield* syncNow;
+    if (key !== undefined && (yield* keyStillLive(row.accountId))) {
+      return yield* fail(
+        "still-live",
+        "The new key is saved, but the AI gateway has not taken it yet and the old key is still live there. The Hub keeps trying.",
+      );
+    }
+    return yield* ownerSummaryOf(userId, row.accountId);
   });
 
   /**
-   * Its row, allowances and audit in one transaction; then it leaves the gateway, then its
-   * credential leaves the store. A Hub that stops half-way loses nothing it should keep: the
-   * gateway is rebuilt from the rows at its next start, and the start sweeps credentials no row
-   * holds.
+   * Deleted at once for everyone (no allowance, not in the gateway's next change); its key stays
+   * retired until the gateway confirms it dropped it, and its row with it. Until then the call says
+   * the key is still live; with no gateway running it is live nowhere, and goes at once.
    */
   const remove = Effect.fn("AiAccounts.remove")(function* (input: AiAccountDeleteInput) {
     const userId = yield* manager;
-    const row = yield* findAccount(input.accountId);
-    const gone = yield* sql
-      .withTransaction(
-        Effect.gen(function* () {
-          yield* sql`DELETE FROM ai_account_allowances WHERE account_id = ${row.accountId}`;
-          const deleted = yield* sql<{ readonly credentialId: string | null }>`
-            DELETE FROM ai_accounts WHERE account_id = ${row.accountId}
-            RETURNING credential_id AS "credentialId"
-          `;
-          if (deleted.length === 0) return yield* fail("not-found", NOT_FOUND);
-          yield* audit.record({
-            actor: AuditLog.userActor(userId),
-            action: "ai_account.delete",
-            target: { kind: "ai_account", id: row.accountId, name: row.name },
-            detail: { provider: row.provider },
-          });
-          return deleted[0]?.credentialId ?? null;
-        }),
-      )
-      .pipe(Effect.catch(orStorage("delete the AI account")));
-    yield* sync;
-    yield* removeCredential(gone);
-    return { deleted: true } satisfies AiAccountDeleteResult;
+    const row = yield* findRow(input.accountId);
+    if (row.deletedAt === null) {
+      const at = yield* now;
+      yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* sql`DELETE FROM ai_account_allowances WHERE account_id = ${row.accountId}`;
+            if (row.credentialId !== null) {
+              yield* sql`
+                INSERT INTO ai_account_retired_credentials (credential_id, account_id, retired_at)
+                VALUES (${row.credentialId}, ${row.accountId}, ${at})
+              `;
+            }
+            yield* sql`
+              UPDATE ai_accounts SET deleted_at = ${at}, credential_id = NULL, status = 'removing',
+                status_message = NULL, updated_at = ${at}
+              WHERE account_id = ${row.accountId}
+            `;
+            yield* audit.record({
+              actor: AuditLog.userActor(userId),
+              action: "ai_account.delete",
+              target: { kind: "ai_account", id: row.accountId, name: row.name },
+              detail: { provider: row.provider },
+            });
+          }),
+        )
+        .pipe(Effect.catch(orStorage("delete the AI account")));
+    }
+    const outcome = yield* syncNow;
+    if (yield* keyStillLive(row.accountId)) {
+      return yield* fail(
+        "still-live",
+        "Deleted, but its key is still live in the AI gateway, which has not taken the change yet. The Hub keeps trying to remove it.",
+      );
+    }
+    return {
+      deleted: true,
+      gateway: outcome === "not-running" ? "not-running" : "removed",
+    } satisfies AiAccountDeleteResult;
   });
 
+  /** Replaces who may use it; Spaces and Users that no longer exist are dropped. */
   const allow = Effect.fn("AiAccounts.allow")(function* (input: AiAccountAllowInput) {
     const userId = yield* manager;
     const row = yield* findAccount(input.accountId);
-    const spaceIds = [...new Set(input.spaceIds)];
-    const userIds = [...new Set(input.userIds)];
-    const known = yield* spaces.spacesById(spaceIds).pipe(Effect.catch(storage("read the Spaces")));
-    const unknownSpace = spaceIds.find((spaceId) => !known.has(spaceId));
-    if (unknownSpace !== undefined) {
-      return yield* fail("not-found", "One of those Spaces does not exist.");
-    }
-    for (const user of userIds) {
-      const found = yield* spaces
-        .installationUser(user)
-        .pipe(Effect.catch(storage("read the Users")));
-      if (Option.isNone(found))
-        return yield* fail("not-found", "One of those Users does not exist.");
-    }
+    const existing = yield* existingSubjects(userId, [...new Set(input.spaceIds)]);
+    const spaceIds = [...new Set(input.spaceIds)].filter((id) => existing.spaces.has(id));
+    const userIds = [...new Set(input.userIds)].filter((id) => existing.users.has(id));
     const at = yield* now;
     yield* sql
       .withTransaction(
@@ -813,9 +1158,10 @@ const make = Effect.gen(function* () {
         }),
       )
       .pipe(Effect.catch(orStorage("change who may use the AI account")));
-    return yield* ownerSummaryOf(row.accountId);
+    return yield* ownerSummaryOf(userId, row.accountId);
   });
 
+  /** The Installation's one order; the gateway does not hold it, so it is not touched. */
   const reorder = Effect.fn("AiAccounts.reorder")(function* (input: AiAccountReorderInput) {
     const userId = yield* manager;
     yield* sql
@@ -828,7 +1174,7 @@ const make = Effect.gen(function* () {
             readonly provider: string;
           }>`
             SELECT account_id AS "accountId", name AS "name", priority AS "priority", provider AS "provider"
-            FROM ai_accounts
+            FROM ai_accounts WHERE deleted_at IS NULL
           `;
           const ordered = [...new Set(input.accountIds)];
           if (
@@ -851,7 +1197,10 @@ const make = Effect.gen(function* () {
         }),
       )
       .pipe(Effect.catch(orStorage("change the order of the AI accounts")));
-    return { accounts: yield* ownerList, canManage: true } satisfies AiAccountListResult;
+    return {
+      accounts: yield* ownerAccounts(userId),
+      canManage: true,
+    } satisfies AiAccountListResult;
   });
 
   const modelsOf = Effect.fn("AiAccounts.modelsOf")(function* (accountId: AiAccountId) {
@@ -862,16 +1211,28 @@ const make = Effect.gen(function* () {
     return ids.filter((id) => id.startsWith(prefix)).map((id) => id.slice(prefix.length));
   });
 
-  return AiAccounts.of({ list, create, update, remove, allow, reorder, modelsOf, sync });
+  return AiAccounts.of({
+    list,
+    create,
+    update,
+    remove,
+    allow,
+    reorder,
+    modelsOf,
+    sync: Effect.asVoid(syncNow),
+  });
 });
 
 /**
- * Credentials no account holds (a write or deletion that stopped half-way, or an older database
- * restored): removed, so no credential outlives its account. Only their own folder of the store.
+ * At the Hub's start no CLIProxyAPI holds a key yet: retired keys and deleted accounts go, and
+ * credentials no account holds (a write that stopped half-way, an older database restored).
  */
-const sweepOrphanCredentials = Effect.gen(function* () {
+const sweepCredentials = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const credentials = yield* ServerSecretStore.AiAccountCredentialStore;
+  yield* sql`DELETE FROM ai_account_retired_credentials`;
+  yield* sql`DELETE FROM ai_account_allowances WHERE account_id IN (SELECT account_id FROM ai_accounts WHERE deleted_at IS NOT NULL)`;
+  yield* sql`DELETE FROM ai_accounts WHERE deleted_at IS NOT NULL`;
   const stored = yield* credentials.list;
   const held = new Set(
     (yield* sql<{ readonly credentialId: string }>`
@@ -890,15 +1251,15 @@ const sweepOrphanCredentials = Effect.gen(function* () {
 });
 
 /**
- * The Hub's AI accounts: the start sweeps orphaned credentials, then hands the gateway what it
- * writes into every CLIProxyAPI it starts. A joined machine keeps none and writes nothing.
+ * The Hub's AI accounts: the start sweeps retired and orphaned credentials, then hands the
+ * gateway what it writes into every CLIProxyAPI it starts. A joined machine keeps none.
  */
 export const layer = Layer.effect(
   AiAccounts,
   Effect.gen(function* () {
     const { keyring } = yield* ServerSecretStore.MasterKeyring;
     if (Option.isNone(keyring)) return unavailable;
-    yield* sweepOrphanCredentials.pipe(
+    yield* sweepCredentials.pipe(
       Effect.catch((cause) =>
         Effect.logWarning("AiAccounts: could not sweep credentials no AI account holds", { cause }),
       ),

@@ -8,6 +8,8 @@ import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import { HttpClient, HttpClientRequest } from "effect/http";
 
+import { filterGatewayLine } from "./gatewayLogFilter.ts";
+
 const MANAGEMENT_PATH = "/v8/management";
 
 export interface CliproxyEndpoint {
@@ -30,17 +32,27 @@ export class CliproxyManagementError extends Schema.TaggedError<CliproxyManageme
 ) {}
 
 /**
- * CLIProxyAPI's error code on a refusal (`invalid_config`), never its message: that one can quote
- * part of a value it could not read.
+ * CLIProxyAPI's reason for a refusal, safe to show the Owner: its error code and message, with
+ * every quoted fragment (where it echoes what it could not read) dropped and every key it was sent
+ * redacted, cut short.
  */
-const refusalOf = (text: string) => {
+const refusalReasonOf = (text: string, secrets: ReadonlyArray<string>) => {
   try {
-    const code = (JSON.parse(text) as { readonly error?: unknown }).error;
-    return typeof code === "string" && /^[a-z_]{1,40}$/u.test(code) ? `: ${code}` : "";
+    const body = JSON.parse(text) as { readonly error?: unknown; readonly message?: unknown };
+    const parts = [body.error, body.message].filter(
+      (part): part is string => typeof part === "string" && part.length > 0,
+    );
+    const joined = parts.join(": ").replace(/`[^`]*`|"[^"]*"|'[^']*'/gu, "…");
+    return filterGatewayLine(joined, secrets).slice(0, 200);
   } catch {
     return "";
   }
 };
+
+/** What CLIProxyAPI said to a config change: applied, or refused (it applies all or nothing). */
+export type CliproxyConfigAnswer =
+  | { readonly _tag: "accepted" }
+  | { readonly _tag: "refused"; readonly status: number; readonly reason: string };
 
 export const makeCliproxyManagement = Effect.gen(function* () {
   const client = yield* HttpClient.HttpClient;
@@ -76,7 +88,11 @@ export const makeCliproxyManagement = Effect.gen(function* () {
      * API, so they never go to a file the Hub writes on the disk. CLIProxyAPI checks the whole
      * patch and applies all or nothing. The error says how it answered, never what was sent.
      */
-    setApiKeys: (endpoint: CliproxyEndpoint, apiKeys: Record<string, unknown>) =>
+    setApiKeys: (
+      endpoint: CliproxyEndpoint,
+      apiKeys: Record<string, unknown>,
+      secrets: ReadonlyArray<string>,
+    ) =>
       client
         .execute(
           HttpClientRequest.patch(`${endpoint.baseUrl}${MANAGEMENT_PATH}/config`).pipe(
@@ -85,23 +101,21 @@ export const makeCliproxyManagement = Effect.gen(function* () {
           ),
         )
         .pipe(
+          Effect.flatMap((response): Effect.Effect<CliproxyConfigAnswer, unknown> =>
+            response.status === 200
+              ? Effect.succeed({ _tag: "accepted" })
+              : response.text.pipe(
+                  Effect.orElseSucceed(() => ""),
+                  Effect.map((text): CliproxyConfigAnswer => ({
+                    _tag: "refused",
+                    status: response.status,
+                    reason: refusalReasonOf(text, secrets),
+                  })),
+                ),
+          ),
           Effect.timeout("15 seconds"),
           Effect.mapError(
             () => new CliproxyManagementError({ message: "CLIProxyAPI did not answer." }),
-          ),
-          Effect.flatMap((response): Effect.Effect<void, CliproxyManagementError> =>
-            response.status === 200
-              ? Effect.void
-              : response.text.pipe(
-                  Effect.orElseSucceed(() => ""),
-                  Effect.flatMap((text) =>
-                    Effect.fail(
-                      new CliproxyManagementError({
-                        message: `CLIProxyAPI refused the AI accounts (HTTP ${response.status}${refusalOf(text)}).`,
-                      }),
-                    ),
-                  ),
-                ),
           ),
           Effect.withSpan("CliproxyManagement.setApiKeys"),
         ),

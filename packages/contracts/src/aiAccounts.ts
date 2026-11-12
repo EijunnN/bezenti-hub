@@ -50,14 +50,16 @@ export const AiApiKeyProvider = Schema.Literals(AI_API_KEY_PROVIDERS);
 export type AiApiKeyProvider = typeof AiApiKeyProvider.Type;
 
 /**
- * `pending`: not in the gateway yet (it is off or starting). `working`: in the gateway, serving
- * models. `error`: the gateway refused it (`statusMessage`). `needs-sign-in` and
- * `quota-exhausted` are for subscriptions (ticket 03).
+ * `unverified`: in the gateway, model list unreadable. `removing`: deleted, its key maybe still
+ * live in the gateway. `needs-sign-in` and `quota-exhausted`: subscriptions (ticket 03).
  */
 export const AiAccountStatus = Schema.Literals([
   "pending",
   "working",
+  "unverified",
   "error",
+  "disabled",
+  "removing",
   "needs-sign-in",
   "quota-exhausted",
 ]);
@@ -146,7 +148,14 @@ export type AiAccountUpdateInput = typeof AiAccountUpdateInput.Type;
 
 export const AiAccountDeleteInput = Schema.Struct({ accountId: AiAccountId });
 export type AiAccountDeleteInput = typeof AiAccountDeleteInput.Type;
-export const AiAccountDeleteResult = Schema.Struct({ deleted: Schema.Boolean });
+/**
+ * `removed`: the gateway confirmed it no longer holds the key. `not-running`: the gateway is not
+ * running, so the key is live nowhere. Otherwise the call fails with `still-live`.
+ */
+export const AiAccountDeleteResult = Schema.Struct({
+  deleted: Schema.Boolean,
+  gateway: Schema.Literals(["removed", "not-running"]),
+});
 export type AiAccountDeleteResult = typeof AiAccountDeleteResult.Type;
 
 /** The account's allowances, replaced as a whole. */
@@ -170,6 +179,8 @@ export const AiAccountErrorReason = Schema.Literals([
   "duplicate-name",
   "storage",
   "unavailable",
+  /** Saved on the Hub, but the gateway has not dropped the old key yet: the Hub keeps trying. */
+  "still-live",
 ]);
 export type AiAccountErrorReason = typeof AiAccountErrorReason.Type;
 

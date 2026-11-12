@@ -87,6 +87,12 @@ if (mode === "decoy") {
       for (const [index, entry] of entries.entries()) {
         if (!Array.isArray(entry.keys)) return "api-keys." + block + "[" + index + "].keys must be a list";
         if (entry.keys.some((key) => typeof key["api-key"] !== "string")) return "api-keys." + block + "[" + index + "] key";
+        // Like a provider CLIProxyAPI cannot use, quoting what it was sent.
+        if (String(entry["base-url"] ?? "").includes("refuse.invalid")) return "api-keys." + block + "[" + index + "] cannot use base-url with key ` +
+  "`" +
+  String.raw`" + entry.keys[0]["api-key"] + "` +
+  "`" +
+  String.raw`";
       }
     }
     return undefined;
@@ -105,8 +111,10 @@ if (mode === "decoy") {
         request.on("data", (chunk) => { body += chunk; });
         request.on("end", () => {
           const patch = JSON.parse(body);
+          fs.appendFileSync(path.join(dir, "fake-patches.log"), "patch" + String.fromCharCode(10));
           const problem = invalid(patch);
-          if (problem !== undefined || mode === "refuse") {
+          // A file fake-refuse-all beside the config: refuses every change from now on, like a broken release.
+          if (problem !== undefined || mode === "refuse" || fs.existsSync(path.join(dir, "fake-refuse-all"))) {
             response.statusCode = 422;
             response.end(JSON.stringify({ error: "invalid_config", message: problem ?? "refused" }));
             return;
@@ -123,7 +131,7 @@ if (mode === "decoy") {
       return;
     }
     if (request.url === "/v1/models") {
-      response.statusCode = auth === "Bearer " + clientKey ? 200 : 401;
+      response.statusCode = fs.existsSync(path.join(dir, "fake-models-down")) ? 503 : auth === "Bearer " + clientKey ? 200 : 401;
       response.end(JSON.stringify({ data: response.statusCode === 200 ? modelIds().map((id) => ({ id, object: "model" })) : [] }));
       return;
     }

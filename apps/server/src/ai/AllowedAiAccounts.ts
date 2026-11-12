@@ -98,7 +98,7 @@ const make = Effect.gen(function* () {
         l.subject_kind AS "subjectKind", l.subject_id AS "subjectId"
       FROM ai_accounts a
       JOIN ai_account_allowances l ON l.account_id = a.account_id
-      WHERE a.disabled = 0 AND (
+      WHERE a.disabled = 0 AND a.deleted_at IS NULL AND (
         (l.subject_kind = 'user' AND l.subject_id = ${userId})
         OR (l.subject_kind = 'space' AND ${sql.in("l.subject_id", working)})
       )

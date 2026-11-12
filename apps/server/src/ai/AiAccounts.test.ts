@@ -67,6 +67,7 @@ const mentionsAKey = (text: string) => KEYS.some((key) => text.includes(key));
 const startGateway = Effect.fn(function* (
   services: Context.Context<ServerSecretStore.ServerSecretStore>,
   mode: FakeCliproxyMode = "serve",
+  enabled = true,
 ) {
   const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-ai-accounts-"));
   const release = fakeCliproxyRelease(dir, "1.0.0", mode);
@@ -74,7 +75,7 @@ const startGateway = Effect.fn(function* (
   const memory = NodePath.join(dir, "memory");
   NodeFS.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const gateway = yield* AiGateway.make({
-    placement: { _tag: "forced", enabled: true },
+    placement: { _tag: "forced", enabled },
     os,
     stateDir,
     platform: platform!,
@@ -134,8 +135,12 @@ const prefixesIn = (config: Effect.Success<ReturnType<typeof gatewayConfig>>) =>
     .map((entry) => entry.prefix)
     .toSorted();
 
-const hub = (mode: FakeCliproxyMode = "serve") =>
+/** While true, the credential store fails every read (an unreadable disk, a busy file). */
+const storeFault = { failReads: false };
+
+const hub = (mode: FakeCliproxyMode = "serve", options: { readonly gateway?: boolean } = {}) =>
   Effect.gen(function* () {
+    storeFault.failReads = false;
     const server = yield* serveAuthHttp;
     const authenticator = yield* makeAuthenticator();
     const { created } = yield* bootstrapOwner(server, authenticator);
@@ -172,13 +177,30 @@ const hub = (mode: FakeCliproxyMode = "serve") =>
     };
     const directory = Context.get(server.services, SpaceDirectory.SpaceDirectory);
     yield* directory.membershipsChanged(Object.values(people));
-    const { gateway, memory } = yield* startGateway(server.services, mode);
+    const { gateway, memory } = yield* startGateway(server.services, mode, options.gateway ?? true);
+    const realStore = Context.get(server.services, ServerSecretStore.AiAccountCredentialStore);
+    const faultyStore = ServerSecretStore.AiAccountCredentialStore.of({
+      ...realStore,
+      get: (id) =>
+        storeFault.failReads
+          ? Effect.fail(
+              new ServerSecretStore.SecretStoreReadError({
+                resource: `credential ${id}`,
+                cause: "EIO",
+              }),
+            )
+          : realStore.get(id),
+    });
     const context = yield* Layer.build(
       AiAccounts.layer.pipe(
         Layer.provide(AuditLog.layer),
         Layer.provide(Layer.succeed(AiGateway.AiGateway, gateway)),
         Layer.provide(FetchHttpClient.layer),
-        Layer.provide(Layer.succeedContext(server.services)),
+        Layer.provide(
+          Layer.succeedContext(
+            Context.add(server.services, ServerSecretStore.AiAccountCredentialStore, faultyStore),
+          ),
+        ),
       ),
     );
     const accounts = Context.get(context, AiAccounts.AiAccounts);
@@ -596,5 +618,208 @@ it.live.skipIf(!posix || platform === undefined)(
       const left = NodeFS.readdirSync(credentialsDir);
       assert.notInclude(left, "cred-0123456789abcdef0123456789abcdef.sealed");
       assert.equal(left.length, 1);
+    }),
+);
+
+/** How many config changes the fake CLIProxyAPI was sent. */
+const patchesSent = (memory: string) => {
+  const log = NodePath.join(memory, "fake-patches.log");
+  return NodeFS.existsSync(log) ? NodeFS.readFileSync(log, "utf8").split("\n").length - 1 : 0;
+};
+
+const keyOf = (config: Effect.Success<ReturnType<typeof gatewayConfig>>, prefix: string) =>
+  Object.values(config["api-keys"] ?? {})
+    .flat()
+    .find((entry) => entry.prefix === prefix)?.keys[0]?.["api-key"];
+
+it.live.skipIf(!posix || platform === undefined)(
+  "a key replaced or an account deleted while the gateway refuses is not a success, and its old key goes once the gateway takes it",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub();
+      const { accounts, as, ownerId, gateway, memory, credentialsDir, people } = setup;
+      yield* waitRunning(gateway);
+      const { acme, globex } = yield* ownerSetup(setup);
+      const refuseAll = NodePath.join(memory, "fake-refuse-all");
+      NodeFS.writeFileSync(refuseAll, "");
+      const filesBefore = NodeFS.readdirSync(credentialsDir).toSorted();
+
+      // A leaked key replaced: not reported done while the gateway still serves it.
+      const replaced = yield* Effect.flip(
+        accounts
+          .update({ accountId: acme.id, apiKey: Redacted.make(REPLACED_KEY) })
+          .pipe(as(ownerId)),
+      );
+      assert.equal(replaced.reason, "still-live");
+      assert.equal(keyOf(yield* gatewayConfig(gateway), `acct-${acme.id}`), ACME_KEY);
+      const listed = yield* accounts.list.pipe(as(ownerId));
+      assert.match(
+        listed.accounts.find((account) => account.id === acme.id)?.statusMessage ?? "",
+        /old key is still live/u,
+      );
+      // Deleted: gone for everyone at once, but not reported done while the gateway holds it.
+      const deleted = yield* Effect.flip(
+        accounts.remove({ accountId: globex.id }).pipe(as(ownerId)),
+      );
+      assert.equal(deleted.reason, "still-live");
+      assert.equal(
+        (yield* accounts.list.pipe(as(ownerId))).accounts.find(
+          (account) => account.id === globex.id,
+        )?.status,
+        "removing",
+      );
+      assert.deepEqual(namesOf((yield* accounts.list.pipe(as(people.globexMember))).accounts), []);
+      assert.includeMembers(NodeFS.readdirSync(credentialsDir), filesBefore);
+
+      // The gateway takes changes again: the old keys leave it, then the store.
+      NodeFS.rmSync(refuseAll);
+      yield* accounts.sync;
+      const config = yield* gatewayConfig(gateway);
+      assert.equal(keyOf(config, `acct-${acme.id}`), REPLACED_KEY);
+      assert.notInclude(prefixesIn(config), `acct-${globex.id}`);
+      assert.notInclude(JSON.stringify(config), ACME_KEY);
+      const after = yield* accounts.list.pipe(as(ownerId));
+      assert.notInclude(
+        after.accounts.map((account) => account.id),
+        globex.id,
+      );
+      assert.isNull(after.accounts.find((account) => account.id === acme.id)?.statusMessage);
+      // Grace's, Old Acme's and Acme's new key: the old Acme key and Globex's are gone.
+      assert.equal(NodeFS.readdirSync(credentialsDir).length, 3);
+    }),
+);
+
+it.live.skipIf(!posix || platform === undefined)(
+  "with no gateway running a deleted account's key is live nowhere: it goes at once",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub("serve", { gateway: false });
+      const { accounts, as, ownerId, credentialsDir } = setup;
+      const made = yield* accounts
+        .create({ name: "Lonely", provider: "xai", apiKey: Redacted.make(GRACE_KEY) })
+        .pipe(as(ownerId));
+      assert.equal(NodeFS.readdirSync(credentialsDir).length, 1);
+      const result = yield* accounts.remove({ accountId: made.id }).pipe(as(ownerId));
+      assert.deepEqual(result, { deleted: true, gateway: "not-running" });
+      assert.equal(NodeFS.readdirSync(credentialsDir).length, 0);
+      assert.deepEqual((yield* accounts.list.pipe(as(ownerId))).accounts, []);
+    }),
+);
+
+it.live.skipIf(!posix || platform === undefined)(
+  "a key the store cannot read leaves the gateway as it is, rather than dropping the account",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub();
+      const { accounts, as, ownerId, gateway } = setup;
+      yield* waitRunning(gateway);
+      const first = yield* accounts
+        .create({ name: "First", provider: "claude", apiKey: Redacted.make(GLOBEX_KEY) })
+        .pipe(as(ownerId));
+      storeFault.failReads = true;
+      const second = yield* accounts
+        .create({ name: "Second", provider: "xai", apiKey: Redacted.make(GRACE_KEY) })
+        .pipe(as(ownerId));
+      const held = yield* gatewayConfig(gateway);
+      assert.equal(keyOf(held, `acct-${first.id}`), GLOBEX_KEY, "a read error dropped an account");
+      assert.notInclude(prefixesIn(held), `acct-${second.id}`);
+      storeFault.failReads = false;
+      yield* accounts.sync;
+      assert.deepEqual(
+        prefixesIn(yield* gatewayConfig(gateway)),
+        [`acct-${first.id}`, `acct-${second.id}`].toSorted(),
+      );
+    }),
+);
+
+it.live.skipIf(!posix || platform === undefined)(
+  "one account the gateway refuses stays out alone, with its reason; the others stay live and it is not sent again unchanged",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub();
+      const { accounts, as, ownerId, gateway, memory } = setup;
+      yield* waitRunning(gateway);
+      const good = yield* accounts
+        .create({
+          name: "Good",
+          provider: "openai-compatible",
+          apiKey: Redacted.make(ACME_KEY),
+          baseUrl: "https://good.example/v1",
+          models: ["deepseek-chat"],
+        })
+        .pipe(as(ownerId));
+      const bad = yield* accounts
+        .create({
+          name: "Bad",
+          provider: "openai-compatible",
+          apiKey: Redacted.make(REPLACED_KEY),
+          baseUrl: "https://refuse.invalid/v1",
+          models: ["deepseek-chat"],
+        })
+        .pipe(as(ownerId));
+      assert.deepEqual(prefixesIn(yield* gatewayConfig(gateway)), [`acct-${good.id}`]);
+      const listed = (yield* accounts.list.pipe(as(ownerId))).accounts;
+      assert.equal(listed.find((account) => account.id === good.id)?.status, "working");
+      const refused = listed.find((account) => account.id === bad.id);
+      assert.equal(refused?.status, "error");
+      assert.match(refused?.statusMessage ?? "", /refused it: invalid_config/u);
+      assert.isFalse(mentionsAKey(refused?.statusMessage ?? ""), "the reason quoted a key");
+      // Unchanged, it is not sent again: one change, the good account alone.
+      const before = patchesSent(memory);
+      yield* accounts.sync;
+      assert.equal(patchesSent(memory) - before, 1);
+      assert.deepEqual(prefixesIn(yield* gatewayConfig(gateway)), [`acct-${good.id}`]);
+    }),
+);
+
+it.live.skipIf(!posix || platform === undefined)(
+  "renames, allowances and order leave the gateway alone; an unreadable model list is unverified",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub();
+      const { accounts, as, ownerId, gateway, memory, acmeId } = setup;
+      yield* waitRunning(gateway);
+      const { acme, old } = yield* ownerSetup(setup);
+      const before = patchesSent(memory);
+      yield* accounts.update({ accountId: acme.id, name: "Acme renamed" }).pipe(as(ownerId));
+      const allowed = yield* accounts
+        .allow({
+          accountId: acme.id,
+          // A Space deleted meanwhile is dropped, not refused.
+          spaceIds: [acmeId, SpaceId.make("space-deleted-meanwhile")],
+          userIds: [UserId.make("user-removed-meanwhile")],
+        })
+        .pipe(as(ownerId));
+      assert.deepEqual(allowed.details?.allowances, { spaceIds: [acmeId], userIds: [] });
+      const order = (yield* accounts.list.pipe(as(ownerId))).accounts.map((account) => account.id);
+      yield* accounts.reorder({ accountIds: order.toReversed() }).pipe(as(ownerId));
+      assert.equal(patchesSent(memory), before, "a change the gateway does not hold reached it");
+      // A disabled account always says so.
+      assert.equal(
+        (yield* accounts.list.pipe(as(ownerId))).accounts.find((account) => account.id === old.id)
+          ?.status,
+        "disabled",
+      );
+      NodeFS.writeFileSync(NodePath.join(memory, "fake-models-down"), "");
+      const added = yield* accounts
+        .create({ name: "Unlisted", provider: "meta", apiKey: Redacted.make(GRACE_KEY) })
+        .pipe(as(ownerId));
+      assert.equal(
+        (yield* accounts.list.pipe(as(ownerId))).accounts.find((account) => account.id === added.id)
+          ?.status,
+        "unverified",
+      );
+      // A key with an invisible character is refused, saying why.
+      const invisible = yield* Effect.flip(
+        accounts
+          .create({
+            name: "Zero width",
+            provider: "xai",
+            apiKey: Redacted.make(`sk-abc\u200bdef1234567890`),
+          })
+          .pipe(as(ownerId)),
+      );
+      assert.equal(invisible.reason, "invalid");
+      assert.match(invisible.message, /invisible character/u);
     }),
 );
