@@ -25,6 +25,7 @@ export type SettingsPath =
   | "/settings/snap-shot"
   | "/settings/providers"
   | "/settings/ai-gateway"
+  | "/settings/ai-accounts"
   | "/settings/threads"
   | "/settings/browser"
   | "/settings/devices"
@@ -92,6 +93,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/snap-shot": "SnapShots",
   "/settings/providers": "Providers",
   "/settings/ai-gateway": "AI gateway",
+  "/settings/ai-accounts": "AI accounts",
   "/settings/threads": "Threads",
   "/settings/browser": "Browser",
   "/settings/devices": "Devices",
@@ -128,6 +130,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
     heading: "Agents",
     paths: [
       "/settings/providers",
+      "/settings/ai-accounts",
       "/settings/ai-gateway",
       "/settings/threads",
       "/settings/browser",
@@ -1152,6 +1155,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["cliproxyapi cli proxy api update roll back version subscriptions"],
   },
   {
+    id: "ai-accounts",
+    title: "AI accounts",
+    to: "/settings/ai-accounts",
+    searchTerms: ["api key anthropic openai gemini vertex xai openrouter deepseek allow priority"],
+  },
+  {
     id: "archive",
     title: "Archived threads",
     to: "/settings/archived",
@@ -1174,6 +1183,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/keybindings": null,
   "/settings/providers": null,
   "/settings/ai-gateway": null,
+  "/settings/ai-accounts": null,
   "/settings/threads": null,
   "/settings/browser": null,
   "/settings/devices": null,

@@ -8,7 +8,7 @@ import {
 } from "./runtime.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 
-/** The Hub's AI gateway (Settings → AI gateway): its Owner's alone. */
+/** The Hub's AI gateway (Settings → AI gateway, the Owner's) and its AI accounts. */
 export function createAiGatewayEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
 ) {
@@ -36,6 +36,32 @@ export function createAiGatewayEnvironmentAtoms<R, E>(
     setEnabled: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:ai-gateway:set-enabled",
       tag: WS_METHODS.aiGatewaySetEnabled,
+    }),
+    // AI accounts (spec 4): everyone lists what they may use; the Owner changes them. No answer
+    // carries a credential.
+    listAccounts: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ai-accounts:list",
+      tag: WS_METHODS.aiAccountsList,
+    }),
+    createAccount: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ai-accounts:create",
+      tag: WS_METHODS.aiAccountsCreate,
+    }),
+    updateAccount: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ai-accounts:update",
+      tag: WS_METHODS.aiAccountsUpdate,
+    }),
+    deleteAccount: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ai-accounts:delete",
+      tag: WS_METHODS.aiAccountsDelete,
+    }),
+    allowAccount: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ai-accounts:allow",
+      tag: WS_METHODS.aiAccountsAllow,
+    }),
+    reorderAccounts: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ai-accounts:reorder",
+      tag: WS_METHODS.aiAccountsReorder,
     }),
   };
 }

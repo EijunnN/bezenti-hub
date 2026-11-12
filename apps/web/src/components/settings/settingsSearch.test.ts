@@ -135,6 +135,8 @@ describe("searchSettings", () => {
     expect(memberNav).not.toContain("/settings/providers");
     expect(memberNav).not.toContain("/settings/maintenance");
     expect(memberNav).not.toContain("/settings/ai-gateway");
+    // A Member sees the names of the AI accounts they may use.
+    expect(memberNav).toContain("/settings/ai-accounts");
     expect(memberNav).toContain("/settings/threads");
     expect(settingsNavGroupsFor(true)).toBe(SETTINGS_NAV_GROUPS);
   });
