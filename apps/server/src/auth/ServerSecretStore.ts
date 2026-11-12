@@ -175,6 +175,21 @@ export class VaultValueStore extends Context.Service<
   }
 >()("t3/auth/ServerSecretStore/VaultValueStore") {}
 
+/**
+ * AI accounts' credentials (spec 4): their own folder of the store (`secrets/ai-accounts/`) and
+ * purpose, like Vault values. Kept only where a master key seals them; never in clear.
+ */
+export class AiAccountCredentialStore extends Context.Service<
+  AiAccountCredentialStore,
+  {
+    readonly get: (id: string) => Effect.Effect<Option.Option<Uint8Array>, SecretStoreError>;
+    readonly set: (id: string, value: Uint8Array) => Effect.Effect<void, SecretStoreError>;
+    readonly remove: (id: string) => Effect.Effect<void, SecretStoreError>;
+    /** The ids of every credential stored, for the start's sweep of ones no account holds. */
+    readonly list: Effect.Effect<ReadonlyArray<string>, SecretStoreError>;
+  }
+>()("t3/auth/ServerSecretStore/AiAccountCredentialStore") {}
+
 /** The master key the store opened with; none on a joined machine. */
 export class MasterKeyring extends Context.Service<
   MasterKeyring,
@@ -274,6 +289,7 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
   type Namespace = MasterKeyFile.StoreNamespace;
   const TOP: Namespace = MasterKeyFile.STORE_NAMESPACES[0];
   const VAULT: Namespace = MasterKeyFile.VAULT_VALUES_NAMESPACE;
+  const AI_ACCOUNTS: Namespace = MasterKeyFile.AI_ACCOUNT_CREDENTIALS_NAMESPACE;
   const dirOf = (ns: Namespace) =>
     ns.dir === "" ? serverConfig.secretsDir : path.join(serverConfig.secretsDir, ns.dir);
   const sealedPath = (name: string, ns: Namespace = TOP) =>
@@ -452,63 +468,85 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
       Effect.withSpan("ServerSecretStore.remove"),
     );
 
-  /** A Vault value is only ever sealed: without a key there is nothing to keep it in. */
-  const vaultKeyring = (id: string) =>
-    keyring === undefined
-      ? Effect.fail(
-          new SecretStorePersistError({
-            resource: `vault value ${id}`,
-            cause: "Vault values are kept only on a Hub, sealed with its master key.",
-          }),
-        )
-      : Effect.succeed(keyring);
-  const vaultValues = VaultValueStore.of({
-    get: Effect.fn("VaultValueStore.get")((id: string) =>
-      named(
-        id,
-        whenOpen(
+  /**
+   * A store folder of its own (Vault values, AI accounts' credentials): only ever sealed, so
+   * without a key (a joined machine) every operation fails rather than keep a value in clear.
+   */
+  const sealedOnly = (ns: Namespace, label: string, why: string) => {
+    const sealedKeyring = (id: string) =>
+      keyring === undefined
+        ? Effect.fail(new SecretStorePersistError({ resource: `${label} ${id}`, cause: why }))
+        : Effect.succeed(keyring);
+    return {
+      get: (id: string) =>
+        named(
           id,
-          Effect.flatMap(vaultKeyring(id), (current) => getSealed(current, id, VAULT)),
+          whenOpen(
+            id,
+            Effect.flatMap(sealedKeyring(id), (current) => getSealed(current, id, ns)),
+          ),
         ),
-      ),
-    ),
-    set: Effect.fn("VaultValueStore.set")((id: string, value: Uint8Array) =>
-      named(
-        id,
-        whenOpen(
+      set: (id: string, value: Uint8Array) =>
+        named(
           id,
-          Effect.flatMap(vaultKeyring(id), () =>
-            fileSystem.makeDirectory(dirOf(VAULT), { recursive: true, mode: 0o700 }).pipe(
-              Effect.andThen(
-                withFiles(writeAtomically(sealedPath(id, VAULT), sealFor(id, value, VAULT))),
-              ),
-              Effect.mapError(
-                (cause) => new SecretStorePersistError({ resource: `vault value ${id}`, cause }),
+          whenOpen(
+            id,
+            Effect.flatMap(sealedKeyring(id), () =>
+              fileSystem.makeDirectory(dirOf(ns), { recursive: true, mode: 0o700 }).pipe(
+                Effect.andThen(
+                  withFiles(writeAtomically(sealedPath(id, ns), sealFor(id, value, ns))),
+                ),
+                Effect.mapError(
+                  (cause) => new SecretStorePersistError({ resource: `${label} ${id}`, cause }),
+                ),
               ),
             ),
           ),
         ),
-      ),
-    ),
-    remove: Effect.fn("VaultValueStore.remove")((id: string) =>
-      named(id, whenOpen(id, removeFile(id, sealedPath(id, VAULT)))).pipe(
-        Effect.andThen(removeFile(id, plainPath(id, VAULT))),
-      ),
-    ),
-    list: fileSystem.readDirectory(dirOf(VAULT)).pipe(
-      Effect.map((names) =>
-        names.flatMap((file) => {
-          for (const extension of [MasterKeyFile.SEALED_EXTENSION, MasterKeyFile.PLAIN_EXTENSION]) {
-            if (file.endsWith(extension) && file.length > extension.length) {
-              return [file.slice(0, -extension.length)];
+      remove: (id: string) =>
+        named(id, whenOpen(id, removeFile(id, sealedPath(id, ns)))).pipe(
+          Effect.andThen(removeFile(id, plainPath(id, ns))),
+        ),
+      list: fileSystem.readDirectory(dirOf(ns)).pipe(
+        Effect.map((names) =>
+          names.flatMap((file) => {
+            for (const extension of [
+              MasterKeyFile.SEALED_EXTENSION,
+              MasterKeyFile.PLAIN_EXTENSION,
+            ]) {
+              if (file.endsWith(extension) && file.length > extension.length) {
+                return [file.slice(0, -extension.length)];
+              }
             }
-          }
-          return [];
-        }),
+            return [];
+          }),
+        ),
+        Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed([])),
+        Effect.mapError((cause) => new SecretStoreReadError({ resource: `${label}s`, cause })),
       ),
-      Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed([])),
-      Effect.mapError((cause) => new SecretStoreReadError({ resource: "vault values", cause })),
-    ),
+    };
+  };
+  const vaultStore = sealedOnly(
+    VAULT,
+    "vault value",
+    "Vault values are kept only on a Hub, sealed with its master key.",
+  );
+  const vaultValues = VaultValueStore.of({
+    get: Effect.fn("VaultValueStore.get")(vaultStore.get),
+    set: Effect.fn("VaultValueStore.set")(vaultStore.set),
+    remove: Effect.fn("VaultValueStore.remove")(vaultStore.remove),
+    list: vaultStore.list,
+  });
+  const aiAccountStore = sealedOnly(
+    AI_ACCOUNTS,
+    "AI account credential",
+    "AI accounts' credentials are kept only on a Hub, sealed with its master key.",
+  );
+  const aiAccountCredentials = AiAccountCredentialStore.of({
+    get: Effect.fn("AiAccountCredentialStore.get")(aiAccountStore.get),
+    set: Effect.fn("AiAccountCredentialStore.set")(aiAccountStore.set),
+    remove: Effect.fn("AiAccountCredentialStore.remove")(aiAccountStore.remove),
+    list: aiAccountStore.list,
   });
 
   return Context.make(
@@ -523,6 +561,7 @@ const makeWith = Effect.fn("ServerSecretStore.make")(function* (mode: StoreMode)
     }),
   ).pipe(
     Context.add(VaultValueStore, vaultValues),
+    Context.add(AiAccountCredentialStore, aiAccountCredentials),
     Context.add(
       MasterKeyring,
       MasterKeyring.of({

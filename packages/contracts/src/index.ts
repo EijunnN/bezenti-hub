@@ -83,3 +83,4 @@ export * from "./settingsSecretValue.ts";
 export * from "./clientRpcPermissions.ts";
 export * from "./installationAccess.ts";
 export * from "./aiGateway.ts";
+export * from "./aiAccounts.ts";

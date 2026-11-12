@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
+import { AiAccountId } from "./aiAccounts.ts";
 import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ProviderOptionSelections } from "./model.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
@@ -10,6 +11,8 @@ const ModelSelectionWire = Schema.Struct({
   instanceId: ProviderInstanceId,
   model: TrimmedNonEmptyString,
   options: Schema.optionalKey(ProviderOptionSelections),
+  /** The AI account the Thread uses (spec 4), beside its provider instance. */
+  aiAccountId: Schema.optionalKey(AiAccountId),
 });
 
 const ModelSelectionSource = Schema.Struct({
@@ -17,6 +20,7 @@ const ModelSelectionSource = Schema.Struct({
   instanceId: Schema.optional(Schema.Unknown),
   model: Schema.Unknown,
   options: Schema.optional(Schema.Unknown),
+  aiAccountId: Schema.optional(Schema.Unknown),
 });
 
 export const ModelSelection = ModelSelectionSource.pipe(
@@ -35,6 +39,7 @@ export const ModelSelection = ModelSelectionSource.pipe(
           model: raw.model,
         };
         if (raw.options !== undefined) base.options = raw.options;
+        if (raw.aiAccountId !== undefined) base.aiAccountId = raw.aiAccountId;
         return Effect.succeed(base as typeof ModelSelectionWire.Encoded);
       },
       encode: (value) => {
@@ -43,6 +48,7 @@ export const ModelSelection = ModelSelectionSource.pipe(
           model: value.model,
         };
         if (value.options !== undefined) base.options = value.options;
+        if (value.aiAccountId !== undefined) base.aiAccountId = value.aiAccountId;
         return Effect.succeed(base as typeof ModelSelectionSource.Encoded);
       },
     }),

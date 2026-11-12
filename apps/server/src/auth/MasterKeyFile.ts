@@ -139,12 +139,15 @@ const readKeyFile = Effect.fn("MasterKeyFile.readKeyFile")(function* (file: stri
 export const STORE_NAMESPACES = [
   { dir: "", purpose: "server-secret" },
   { dir: "vault-values", purpose: "vault-value" },
+  // AI accounts' credentials (spec 4): `ServerSecretStore.AiAccountCredentialStore`.
+  { dir: "ai-accounts", purpose: "ai-account-credential" },
 ] as const satisfies ReadonlyArray<{
   readonly dir: string;
   readonly purpose: SecretCipher.SealPurpose;
 }>;
 export type StoreNamespace = (typeof STORE_NAMESPACES)[number];
 export const VAULT_VALUES_NAMESPACE: StoreNamespace = STORE_NAMESPACES[1];
+export const AI_ACCOUNT_CREDENTIALS_NAMESPACE: StoreNamespace = STORE_NAMESPACES[2];
 
 interface Entry {
   /** Unique across folders: `<dir>/<name>`. */

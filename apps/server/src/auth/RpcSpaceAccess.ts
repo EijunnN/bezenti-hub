@@ -72,6 +72,11 @@ const VAULTS = {
   unscoped:
     "Vaults: AccessPolicy `vault.*` for the session's User through SpaceDirectory.authorizeResource (spaceLimit too); a hidden Vault answers like a missing one; no value is returned",
 };
+/** AI accounts name no Thread or Project: the list is AllowedAiAccounts' for the session. */
+const AI_ACCOUNTS_LIST = {
+  unscoped:
+    "AI accounts: AiAccounts.list answers with what AllowedAiAccounts lets the session's User use in the Spaces SpaceDirectory.authorizer lets them act in (spaceLimit too); only the Owner, unlimited, sees every account and its details; no credential is returned",
+};
 const INSTALLATION_ACCESS = Object.fromEntries(
   INSTALLATION_RPC_METHODS.map((method) => [method, "installation"]),
 ) as Readonly<Record<InstallationRpcMethod, "installation">>;
@@ -111,6 +116,7 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.vaultsEntriesDelete]: VAULTS,
   [WS_METHODS.vaultsEntriesLink]: VAULTS,
   [WS_METHODS.vaultsEntriesCopy]: VAULTS,
+  [WS_METHODS.aiAccountsList]: AI_ACCOUNTS_LIST,
   [WS_METHODS.projectsCreateFromThread]: "thread",
   // An app acts inside its Thread's live session, so it is its creator's, like a message.
   [WS_METHODS.mcpAppsCallTool]: "owned",

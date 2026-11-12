@@ -198,6 +198,7 @@ import * as SandboxImageHttp from "./sandboxes/http.ts";
 import * as VaultsHttp from "./vaults/http.ts";
 import * as Vaults from "./vaults/Vaults.ts";
 import * as MasterKeyBackup from "./auth/MasterKeyBackup.ts";
+import * as AiAccounts from "./ai/AiAccounts.ts";
 import * as AiGateway from "./ai/AiGateway.ts";
 import * as CliproxyReleases from "./ai/CliproxyReleases.ts";
 import * as JoinedHub from "./environments/JoinedHub.ts";
@@ -615,8 +616,12 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
     }),
   ).pipe(Layer.provide(DelegatedTaskQuestionReactor.layer), Layer.provide(ProjectionStoreV2.layer)),
   ProviderUsageLimitsIngestion.layer,
-  // CLIProxyAPI, run by the Hub on loopback (`T3CODE_AI_GATEWAY`).
-  AiGateway.layerFromConfig.pipe(Layer.provide(CliproxyReleases.layer)),
+  // CLIProxyAPI, run by the Hub on loopback (`T3CODE_AI_GATEWAY`), and the AI accounts it gets
+  // at every start (spec 4 ticket 02).
+  AiAccounts.layer.pipe(
+    Layer.provideMerge(AiGateway.layerFromConfig.pipe(Layer.provide(CliproxyReleases.layer))),
+    Layer.provide(AuditLog.layer),
+  ),
   layerProviderInstallationRefresh,
   ReplayMarkers.layer,
   Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),

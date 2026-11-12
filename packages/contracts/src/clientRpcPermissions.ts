@@ -48,6 +48,12 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.aiGatewayUpdate]: AuthSettingsWriteScope,
   [WS_METHODS.aiGatewayRollback]: AuthSettingsWriteScope,
   [WS_METHODS.aiGatewaySetEnabled]: AuthSettingsWriteScope,
+  // The Owner's AI accounts, as saving the Hub's settings changes what agents may use.
+  [WS_METHODS.aiAccountsCreate]: AuthSettingsWriteScope,
+  [WS_METHODS.aiAccountsUpdate]: AuthSettingsWriteScope,
+  [WS_METHODS.aiAccountsDelete]: AuthSettingsWriteScope,
+  [WS_METHODS.aiAccountsAllow]: AuthSettingsWriteScope,
+  [WS_METHODS.aiAccountsReorder]: AuthSettingsWriteScope,
   [WS_METHODS.projectCloneStart]: AuthSourceControlWriteScope,
   [WS_METHODS.projectCloneCancel]: AuthSourceControlWriteScope,
   [WS_METHODS.projectCloneRetry]: AuthSourceControlWriteScope,

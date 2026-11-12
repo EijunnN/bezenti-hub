@@ -59,6 +59,7 @@ import {
 import {
   type CliproxyEndpoint,
   type CliproxyManagement,
+  type CliproxyManagementError,
   makeCliproxyManagement,
 } from "./CliproxyManagement.ts";
 import {
@@ -70,6 +71,11 @@ import {
 } from "./cliproxyRelease.ts";
 import { CliproxyReleases } from "./CliproxyReleases.ts";
 import { filterGatewayLine } from "./gatewayLogFilter.ts";
+
+/** Writes the Hub's AI accounts into a CLIProxyAPI that just answered (AiAccounts). */
+export type CliproxyProvisioner = (
+  endpoint: CliproxyEndpoint,
+) => Effect.Effect<void, CliproxyManagementError>;
 
 export class AiGateway extends Context.Service<
   AiGateway,
@@ -87,6 +93,11 @@ export class AiGateway extends Context.Service<
     readonly setEnabled: (enabled: boolean) => Effect.Effect<AiGatewayStatus, AiGatewayError>;
     /** Where the running CLIProxyAPI answers and the Hub's keys for it; none while it does not. */
     readonly endpoint: Effect.Effect<Option.Option<CliproxyEndpoint>>;
+    /**
+     * What every CLIProxyAPI this Hub starts gets before it counts as running (a restart, an
+     * update, a roll back): the AI accounts (AiAccounts). A failure is a failed start, tried again.
+     */
+    readonly setProvisioner: (provision: CliproxyProvisioner) => Effect.Effect<void>;
   }
 >()("t3/ai/AiGateway") {}
 
@@ -252,6 +263,7 @@ export const make = Effect.fn("AiGateway.make")(function* (options: AiGatewayOpt
   let activeVersion: string | null = null;
   let previousVersion: string | null = null;
   let supervisor: Fiber.Fiber<void> | undefined;
+  let provisioner: CliproxyProvisioner | undefined;
 
   const statusNow = (): AiGatewayStatus => ({
     state,
@@ -590,6 +602,13 @@ export const make = Effect.fn("AiGateway.make")(function* (options: AiGatewayOpt
         message: `CLIProxyAPI ${installed.version} listened beyond loopback (${after.join(", ")}); it was stopped and is not started again.`,
         retry: false,
       });
+    }
+    // 4. The AI accounts, from the encrypted store, before anything may use it.
+    const provision = provisioner;
+    if (provision !== undefined) {
+      yield* provision(endpoint).pipe(
+        Effect.mapError((error) => new StartFailure({ message: error.message, retry: true })),
+      );
     }
     return {
       installed,
@@ -943,6 +962,11 @@ export const make = Effect.fn("AiGateway.make")(function* (options: AiGatewayOpt
     }),
     endpoint: Effect.sync(() =>
       state === "running" && current !== undefined ? Option.some(current.endpoint) : Option.none(),
+    ),
+    setProvisioner: Effect.fn("AiGateway.setProvisioner")((provision: CliproxyProvisioner) =>
+      Effect.sync(() => {
+        provisioner = provision;
+      }),
     ),
   });
 });
