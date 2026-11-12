@@ -295,6 +295,32 @@ it.layer(platform)("ServerSecretStore encryption", (it) => {
       }),
     );
 
+    it.effect("re-encrypts a Vault's values too, under their own purpose", () =>
+      Effect.gen(function* () {
+        const baseDir = newBaseDir();
+        const vaultValue = `${SecretCipher.VAULT_VALUE_ENTRY_PREFIX}secret-1`;
+        seedPlaintext(baseDir, { [vaultValue]: "VALUE-VAULT", hub: "VALUE-HUB" });
+        yield* readAll(baseDir, [vaultValue]);
+        const before = NodeFS.readFileSync(entryFileOf(baseDir, vaultValue));
+        const rotated = yield* MasterKeyFile.rotate().pipe(Effect.provide(configAt(baseDir)));
+        const after = NodeFS.readFileSync(entryFileOf(baseDir, vaultValue));
+        assert.equal(after.subarray(5, 13).toString("hex"), rotated.keyId);
+        assert.isFalse(after.equals(before));
+        const key = SecretCipher.MasterKey.parse(NodeFS.readFileSync(keyFileOf(baseDir), "utf8"));
+        assert.equal(
+          SecretCipher.open([key!], "vault-value", vaultValue, after)._tag,
+          "opened",
+          "sealed with the Vault values' own purpose",
+        );
+        assert.equal(
+          SecretCipher.open([key!], "server-secret", vaultValue, after)._tag,
+          "rejected",
+        );
+        const values = yield* readAll(baseDir, [vaultValue, "hub"]);
+        assert.deepEqual(values.map(Option.getOrThrow), ["VALUE-VAULT", "VALUE-HUB"]);
+      }),
+    );
+
     it.effect("stopped half-way, keeps both keys and the next start finishes it", () =>
       Effect.gen(function* () {
         const baseDir = newBaseDir();

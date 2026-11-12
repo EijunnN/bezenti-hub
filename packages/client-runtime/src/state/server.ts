@@ -1015,6 +1015,43 @@ export function createServerEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.threadId, input.turnItemId]),
       },
     }),
+    // Vaults: names and metadata; a value is revealed only over HTTP (`vaults.reveal`).
+    listVaults: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:vaults:list",
+      tag: WS_METHODS.vaultsList,
+    }),
+    createVault: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:vaults:create",
+      tag: WS_METHODS.vaultsCreate,
+    }),
+    updateVault: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:vaults:update",
+      tag: WS_METHODS.vaultsUpdate,
+    }),
+    deleteVault: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:vaults:delete",
+      tag: WS_METHODS.vaultsDelete,
+    }),
+    listVaultEntries: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:vaults:entries:list",
+      tag: WS_METHODS.vaultsEntriesList,
+    }),
+    putVaultEntry: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:vaults:entries:put",
+      tag: WS_METHODS.vaultsEntriesPut,
+    }),
+    deleteVaultEntry: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:vaults:entries:delete",
+      tag: WS_METHODS.vaultsEntriesDelete,
+    }),
+    linkVaultEntry: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:vaults:entries:link",
+      tag: WS_METHODS.vaultsEntriesLink,
+    }),
+    copyVaultEntry: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:vaults:entries:copy",
+      tag: WS_METHODS.vaultsEntriesCopy,
+    }),
     refreshUsageRates: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:refresh-usage-rates",
       tag: WS_METHODS.serverRefreshUsageRates,
