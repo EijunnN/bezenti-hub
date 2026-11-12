@@ -6,6 +6,7 @@ import { AgentScope } from "@t3tools/shared/AgentScope";
 import {
   UserId,
   EnvironmentId,
+  type SecretEnv,
   type ModelSelection,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
@@ -55,6 +56,7 @@ import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as CommandOutputHub from "./CommandOutputHub.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as SecretDelivery from "../vaults/SecretDelivery.ts";
 
 const layerTestDatabase = SqlitePersistence.layerMemory;
 const layerTestStores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
@@ -430,6 +432,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     readonly beforeOpen?: (input: {
       readonly providerSessionId: ProviderSessionId;
       readonly initialProviderItemIdentityVersion?: 2;
+      readonly secretEnv?: SecretEnv;
     }) => Effect.Effect<void>;
     readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
     readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
@@ -570,6 +573,7 @@ function layerTest(input: {
   readonly beforeOpen?: (input: {
     readonly providerSessionId: ProviderSessionId;
     readonly initialProviderItemIdentityVersion?: 2;
+    readonly secretEnv?: SecretEnv;
   }) => Effect.Effect<void>;
   readonly failReleaseEventWrites?: boolean;
   readonly flakyReleaseWrites?: FlakyReleaseWrites;
@@ -590,6 +594,8 @@ function layerTest(input: {
   readonly scopeCloseReached?: Deferred.Deferred<void>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
+  /** Spec 5: the secrets each Thread's turns receive. */
+  readonly secretDelivery?: SecretDelivery.SecretDelivery["Service"];
 }) {
   const layerConfiguredEventSink =
     input.flakyReleaseWrites !== undefined
@@ -671,6 +677,9 @@ function layerTest(input: {
           layerTestStores,
           ...(input.serverSettingsLayer === undefined ? [] : [input.serverSettingsLayer]),
           ...(input.projectServiceLayer === undefined ? [] : [input.projectServiceLayer]),
+          ...(input.secretDelivery === undefined
+            ? []
+            : [Layer.succeed(SecretDelivery.SecretDelivery, input.secretDelivery)]),
         ),
       ),
     ),
@@ -4042,5 +4051,124 @@ it.effect("ProviderSessionManagerV2 gives a delegated child its project's device
       delegatedBy: ThreadId.make("thread-provider-session-manager-parent"),
     });
     assert.isTrue(child?.capabilities?.has("device"));
+  }),
+);
+
+/** Spec 5: a fake delivery handing each Thread the secrets the test sets for it. */
+const fakeSecretDelivery = (byThread: Map<string, SecretEnv | undefined>) =>
+  SecretDelivery.SecretDelivery.of({
+    turnOwner: () => Effect.succeedNone,
+    forProcess: () => Effect.succeed(undefined),
+    receivesSecrets: (threadId) => Effect.succeed(byThread.get(threadId) !== undefined),
+    forTurn: ({ threadId }) => Effect.succeed(byThread.get(threadId)),
+  });
+
+const secretSet = (fingerprint: string, value: string): SecretEnv => ({
+  fingerprint,
+  variables: [{ name: "ACME_TOKEN", value }],
+});
+
+it.effect("ProviderSessionManagerV2 reopens a Thread's session once its secrets change", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const threadId = ThreadId.make("thread-provider-session-manager-secrets");
+    const byThread = new Map<string, SecretEnv | undefined>([
+      [threadId, secretSet("set-1", "first-value")],
+    ]);
+    const opened: Array<SecretEnv | undefined> = [];
+    const effect = Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      yield* eventSink.write({
+        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+      });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const open = manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+      yield* open;
+      yield* open;
+      assert.equal((yield* Ref.get(state)).openCount, 1, "the same set keeps the live session");
+      byThread.set(threadId, secretSet("set-2", "rotated-value"));
+      yield* open;
+      assert.equal((yield* Ref.get(state)).openCount, 2, "a changed set opens a new session");
+      assert.equal((yield* Ref.get(state)).closeCount, 1, "the old process is gone");
+      assert.deepEqual(
+        opened.map((secretEnv) => secretEnv?.variables[0]?.value),
+        ["first-value", "rotated-value"],
+      );
+    });
+    yield* effect.pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          beforeOpen: (input) => Effect.sync(() => void opened.push(input.secretEnv)),
+          secretDelivery: fakeSecretDelivery(byThread),
+        }),
+      ),
+    );
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 never puts a Thread's secrets in a shared process", () =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make(emptyState);
+    const owner = ThreadId.make("thread-provider-session-manager-secret-owner");
+    const other = ThreadId.make("thread-provider-session-manager-secret-other");
+    const byThread = new Map<string, SecretEnv | undefined>([
+      [owner, secretSet("set-1", "owner-value")],
+    ]);
+    const effect = Effect.gen(function* () {
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const now = yield* DateTime.now;
+      yield* eventSink.write({
+        events: [
+          yield* makeThreadCreatedEvent({ idAllocator, threadId: owner, now }),
+          yield* makeThreadCreatedEvent({ idAllocator, threadId: other, now }),
+        ],
+      });
+      const shared = idAllocator.derive.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+      });
+      // The instance-wide process every Thread shares never starts with one Thread's secrets.
+      const refused = yield* Effect.exit(
+        manager.open({ threadId: owner, providerSessionId: shared, modelSelection, runtimePolicy }),
+      );
+      assert.isTrue(Exit.isFailure(refused));
+      assert.include(Cause.pretty((refused as Exit.Failure<unknown, unknown>).cause), "shared");
+      assert.equal((yield* Ref.get(state)).openCount, 0);
+
+      // A process of its own, which no other Thread joins.
+      const own = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId: owner,
+      });
+      yield* manager.open({
+        threadId: owner,
+        providerSessionId: own,
+        modelSelection,
+        runtimePolicy,
+      });
+      const joined = yield* Effect.exit(
+        manager.open({ threadId: other, providerSessionId: own, modelSelection, runtimePolicy }),
+      );
+      assert.isTrue(Exit.isFailure(joined));
+      assert.equal((yield* Ref.get(state)).openCount, 1);
+    });
+    yield* effect.pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          secretDelivery: fakeSecretDelivery(byThread),
+        }),
+      ),
+    );
   }),
 );
