@@ -20,7 +20,7 @@ export const LOGIN_TTL_MS = 10 * 60_000;
 const TOKEN_MAX_BYTES = 64 * 1024;
 
 /**
- * The name CLIProxyAPI uses for each provider (`/oauth/auth-url?provider=`, a token's `type`).
+ * The name CLIProxyAPI uses for each provider (in its sign-in API and as a token's `type`).
  * Vertex is imported (`/oauth/import?provider=vertex`), never signed in to.
  */
 export const CLIPROXY_PROVIDER = {

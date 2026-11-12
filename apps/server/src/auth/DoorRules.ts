@@ -342,3 +342,16 @@ export const AMBIENT_COOKIE_RULES: Readonly<Record<string, AmbientCookieRule>> =
   "server.ts: middleware": none("waits for startup; reads no credential"),
   'ws.ts: GET "/ws"': BY_ENVIRONMENT_AUTH,
 };
+
+/**
+ * Spec 4 ticket 03. Signing in to a subscription (or importing a Vertex account): WS RPCs only, in
+ * INSTALLATION_RPC_METHODS. No raw route or HTTP endpoint takes a provider's callback: the Owner
+ * pastes the address the browser landed on, checked against the sign-in and never fetched.
+ */
+export const AI_ACCOUNT_SIGN_IN_RULES: Readonly<Record<string, DoorRule>> = {
+  [WS_METHODS.aiAccountsLoginStart]: OWNER,
+  [WS_METHODS.aiAccountsLoginComplete]: own(
+    "the Owner, from the session that started that sign-in, within 10 minutes, with its state; the pasted address must be its redirect",
+  ),
+  [WS_METHODS.aiAccountsImportVertex]: OWNER,
+};

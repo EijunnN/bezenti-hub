@@ -616,6 +616,8 @@ it.effect(
         "ai_account.update",
         "ai_account.delete",
         "ai_account.allow",
+        // ai/AiAccounts.subscriptions.test.ts (spec 4 ticket 03)
+        "ai_account.login",
       ];
       assert.sameMembers(
         [...new Set([...expected.map((row) => row.action), ...recordedElsewhere])],

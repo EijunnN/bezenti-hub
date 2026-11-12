@@ -196,6 +196,10 @@ describe("RPC authorization scopes", () => {
           WS_METHODS.aiAccountsDelete,
           WS_METHODS.aiAccountsAllow,
           WS_METHODS.aiAccountsReorder,
+          // Spec 4 ticket 03: signing in to a subscription and importing a Vertex account.
+          WS_METHODS.aiAccountsLoginStart,
+          WS_METHODS.aiAccountsLoginComplete,
+          WS_METHODS.aiAccountsImportVertex,
         ]) {
           expect([method, spaceAccessForRpcMethod(method)]).toEqual([method, "installation"]);
           const refused = yield* guardRpcPayload(
