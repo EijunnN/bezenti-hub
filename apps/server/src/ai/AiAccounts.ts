@@ -329,31 +329,31 @@ const make = Effect.gen(function* () {
       )
       .pipe(Effect.withSpan("AiAccounts.provision"));
 
+  /**
+   * The gateway did not take them: no account counts as working until a write goes through,
+   * which the Hub tries again every RETRY_EVERY. The gateway itself keeps running.
+   */
+  const refused = Effect.fn("AiAccounts.refused")(function* (error: CliproxyManagementError) {
+    dirty = true;
+    yield* Effect.logWarning("AiAccounts: the AI gateway did not take the AI accounts", {
+      reason: error.message,
+    });
+    yield* sql`
+      UPDATE ai_accounts SET status = 'error', status_message = ${`Not in the AI gateway yet: ${error.message}`}
+      WHERE disabled = 0
+    `.pipe(Effect.ignore({ log: true }));
+  });
+
   /** After a change: into the running gateway now, or at its next start; retried if refused. */
   const sync = Effect.gen(function* () {
     const endpoint = yield* gateway.endpoint;
     if (Option.isNone(endpoint)) return;
-    yield* provision(endpoint.value).pipe(
-      Effect.catch((error) =>
-        Effect.gen(function* () {
-          dirty = true;
-          yield* Effect.logWarning("AiAccounts: the AI gateway did not take the AI accounts", {
-            reason: error.message,
-          });
-          // Whatever the gateway holds now is not what the Owner set: no account counts as
-          // working until a write goes through.
-          yield* sql`
-            UPDATE ai_accounts SET status = 'error', status_message = ${`Not in the AI gateway yet: ${error.message}`}
-            WHERE disabled = 0
-          `.pipe(Effect.ignore({ log: true }));
-        }),
-      ),
-    );
+    yield* provision(endpoint.value).pipe(Effect.catch(refused));
   }).pipe(Effect.withSpan("AiAccounts.sync"));
 
   // Every start (a crash and its restart, an update, a roll back) gets the accounts before it
   // counts as running; a start that raced this registration is caught by the watcher below.
-  yield* gateway.setProvisioner(provision);
+  yield* gateway.setProvisioner((endpoint) => provision(endpoint).pipe(Effect.catch(refused)));
   yield* gateway.changes.pipe(
     Stream.filter((status) => status.state === "running"),
     Stream.runForEach(() =>
