@@ -41,6 +41,8 @@ export interface TerminalSessionState {
   readonly updatedAt: string | null;
   readonly version: number;
   readonly lifecycleVersion: number;
+  /** The shell runs with the Thread's secrets as they were when it started (spec 5). */
+  readonly secretsStale: boolean;
 }
 
 export interface TerminalBufferState {
@@ -51,6 +53,7 @@ export interface TerminalBufferState {
   readonly updatedAt: string | null;
   readonly version: number;
   readonly lifecycleVersion: number;
+  readonly secretsStale: boolean;
 }
 
 export interface KnownTerminalSessionTarget {
@@ -80,6 +83,7 @@ export const EMPTY_TERMINAL_BUFFER_STATE = Object.freeze<TerminalBufferState>({
   updatedAt: null,
   version: 0,
   lifecycleVersion: 0,
+  secretsStale: false,
 });
 
 export const EMPTY_TERMINAL_SESSION_STATE = Object.freeze<TerminalSessionState>({
@@ -92,6 +96,7 @@ export const EMPTY_TERMINAL_SESSION_STATE = Object.freeze<TerminalSessionState>(
   updatedAt: null,
   version: 0,
   lifecycleVersion: 0,
+  secretsStale: false,
 });
 
 let terminalAttachGeneration = 0;
@@ -120,6 +125,7 @@ function terminalBufferStateFromSnapshot(
     updatedAt: snapshot.updatedAt,
     version: current.version + 1,
     lifecycleVersion: current.lifecycleVersion,
+    secretsStale: snapshot.secretsStale === true,
   };
 }
 
@@ -153,6 +159,7 @@ export function combineTerminalSessionState(
     updatedAt: latestTimestamp(summary?.updatedAt ?? null, buffer.updatedAt),
     version: buffer.version,
     lifecycleVersion: buffer.lifecycleVersion,
+    secretsStale: buffer.secretsStale,
   };
 }
 

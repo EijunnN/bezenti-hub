@@ -195,11 +195,18 @@ export function synchronizeTerminalOutput(
   return update.cursor;
 }
 
+/** Spec 5: a shell keeps the secrets it started with; reopening it gives it the current ones. */
+const SECRETS_STALE_MESSAGE = "Secrets changed: reopen to update";
+
+type SynchronizedSession = Pick<TerminalSessionState, "output" | "version" | "error"> & {
+  readonly secretsStale?: boolean;
+};
+
 /** Writes what changed between two session notifications: new output, then a new error. */
 export function synchronizeTerminalSession(
   terminal: Parameters<typeof synchronizeTerminalOutput>[0],
-  previous: Pick<TerminalSessionState, "output" | "version" | "error">,
-  session: Pick<TerminalSessionState, "output" | "version" | "error">,
+  previous: SynchronizedSession,
+  session: SynchronizedSession,
   cursor: TerminalOutputCursor,
 ): TerminalOutputCursor {
   const nextCursor =
@@ -209,6 +216,9 @@ export function synchronizeTerminalSession(
   // An attach failure can change only the error, keeping the last buffer.
   if (session.error !== null && session.error !== previous.error) {
     writeSystemMessage(terminal, session.error);
+  }
+  if (session.secretsStale === true && previous.secretsStale !== true) {
+    writeSystemMessage(terminal, SECRETS_STALE_MESSAGE);
   }
   return nextCursor;
 }
@@ -764,6 +774,7 @@ function TerminalSessionViewport({
       }
       outputCursorRef.current = initialOutput.cursor;
       if (latestSession.error !== null) writeSystemMessage(terminal, latestSession.error);
+      if (latestSession.secretsStale) writeSystemMessage(terminal, SECRETS_STALE_MESSAGE);
       synchronizedStatusRef.current = "closed";
       synchronizeTerminalStatus(terminal, latestSession.status, latestSession.version);
       // Read and subscribe in one synchronous step so no output lands between them.
