@@ -92,6 +92,7 @@ export const INSTALLATION_RPC_METHODS = [
   WS_METHODS.aiGatewayCheckForUpdates,
   WS_METHODS.aiGatewayUpdate,
   WS_METHODS.aiGatewayRollback,
+  WS_METHODS.aiGatewaySetEnabled,
 ] as const;
 export type InstallationRpcMethod = (typeof INSTALLATION_RPC_METHODS)[number];
 

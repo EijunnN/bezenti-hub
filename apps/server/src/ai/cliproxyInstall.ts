@@ -1,8 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off -- hashes, gunzip, and owner-only files checked without following links.
 /**
- * Installs a release only once its archive matches its `checksums.txt` and, when pinned, the
- * pinned hash; its binary goes 0700 to `<stateDir>/ai-gateway/bin/<version>/` and is hashed again
- * before every start, so nothing changed on disk is ever run.
+ * Installs only a pinned release, once its archive matches the hash pinned in the code; its binary
+ * goes 0700 to `<stateDir>/ai-gateway/bin/<version>/` and is hashed again (streamed) before every
+ * start, so nothing changed on disk is ever run. Gunzip runs off the event loop.
  */
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
@@ -16,8 +16,7 @@ import * as Schema from "effect/Schema";
 import {
   CLIPROXY_BINARY_NAME,
   type CliproxyPlatform,
-  cliproxyAssetName,
-  parseChecksums,
+  type PinnedCliproxyRelease,
 } from "./cliproxyRelease.ts";
 import type { CliproxyReleases } from "./CliproxyReleases.ts";
 
@@ -31,8 +30,8 @@ export interface InstalledCliproxy {
 const fail = (message: string) => new AiGatewayError({ message });
 
 /**
- * A release the Hub will not run: its archive or binary is not the one verified. Trying again
- * would not change that, so the Hub stops trying until the Owner acts.
+ * A release the Hub will not run: not pinned, or its archive or binary is not the one verified.
+ * Trying again would not change that, so the Hub stops trying until the Owner acts.
  */
 export class CliproxyRefusedError extends Schema.TaggedError<CliproxyRefusedError>()(
   "CliproxyRefusedError",
@@ -41,10 +40,7 @@ export class CliproxyRefusedError extends Schema.TaggedError<CliproxyRefusedErro
 
 const refuse = (message: string) => new CliproxyRefusedError({ message });
 
-const sha256Hex = (bytes: Uint8Array) =>
-  NodeCrypto.createHash("sha256").update(bytes).digest("hex");
-
-const binaryPathOf = (binRoot: string, version: string) =>
+export const binaryPathOf = (binRoot: string, version: string) =>
   NodePath.join(binRoot, version, CLIPROXY_BINARY_NAME);
 
 /**
@@ -75,6 +71,25 @@ const binaryFromTar = (tar: Uint8Array): Uint8Array | undefined => {
   return undefined;
 };
 
+/** Gunzip in libuv's thread pool, never on the event loop; at most 512 MB out. */
+const gunzip = (archive: Uint8Array) =>
+  Effect.callback<Buffer, Error>((resume) => {
+    NodeZlib.gunzip(archive, { maxOutputLength: 512 * 1024 * 1024 }, (error, result) =>
+      resume(error === null ? Effect.succeed(result) : Effect.fail(error)),
+    );
+  });
+
+/** A file's SHA-256, read as a stream. */
+const hashFile = (path: string) =>
+  Effect.callback<string, Error>((resume) => {
+    const hash = NodeCrypto.createHash("sha256");
+    const stream = NodeFS.createReadStream(path);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", (error) => resume(Effect.fail(error)));
+    stream.on("end", () => resume(Effect.succeed(hash.digest("hex"))));
+    return Effect.sync(() => stream.destroy());
+  });
+
 /**
  * A folder of this user, never through a symlink, that nobody else may write: made 0700 when
  * missing. Anything else refuses, since what is in it is run.
@@ -92,58 +107,51 @@ export const ownedFolder = (directory: string) => {
 export const installCliproxy = Effect.fn("cliproxyInstall.install")(function* (input: {
   readonly releases: CliproxyReleases["Service"];
   readonly binRoot: string;
-  readonly version: string;
+  readonly release: PinnedCliproxyRelease;
   readonly platform: CliproxyPlatform;
-  /** The hash the code pins for this release and platform, when it pins this one. */
-  readonly pinnedSha256: string | undefined;
 }) {
-  const name = cliproxyAssetName(input.version, input.platform);
-  const listed = parseChecksums(yield* input.releases.checksums(input.version)).get(name);
-  if (listed === undefined) {
+  const { release } = input;
+  const pinned = release.sha256[input.platform];
+  const archive = yield* input.releases.archive(release, input.platform);
+  if (archive.sha256 !== pinned) {
     return yield* refuse(
-      `CLIProxyAPI ${input.version} lists no checksum for ${name}; not installed.`,
+      `The download of CLIProxyAPI ${release.version} is not the archive this Hub pins; not installed.`,
     );
   }
-  if (input.pinnedSha256 !== undefined && listed !== input.pinnedSha256) {
-    return yield* refuse(
-      `The checksum GitHub lists for CLIProxyAPI ${input.version} is not the one this Hub pins; not installed.`,
-    );
-  }
-  const archive = yield* input.releases.archive(input.version, input.platform);
-  if (sha256Hex(archive) !== listed) {
-    return yield* refuse(
-      `The download of CLIProxyAPI ${input.version} does not match its checksum; not installed.`,
-    );
-  }
-  const binary = yield* Effect.try({
-    try: () => binaryFromTar(NodeZlib.gunzipSync(archive, { maxOutputLength: 512 * 1024 * 1024 })),
-    catch: () => refuse(`The archive of CLIProxyAPI ${input.version} could not be read.`),
-  });
+  const binary = yield* gunzip(archive.bytes).pipe(
+    Effect.map(binaryFromTar),
+    Effect.mapError(() =>
+      refuse(`The archive of CLIProxyAPI ${release.version} could not be read.`),
+    ),
+  );
   if (binary === undefined) {
     return yield* refuse(
-      `The archive of CLIProxyAPI ${input.version} has no ${CLIPROXY_BINARY_NAME}.`,
+      `The archive of CLIProxyAPI ${release.version} has no ${CLIPROXY_BINARY_NAME}.`,
     );
   }
-  const target = binaryPathOf(input.binRoot, input.version);
-  yield* Effect.try({
-    try: () => {
+  const target = binaryPathOf(input.binRoot, release.version);
+  yield* Effect.tryPromise({
+    try: async () => {
       ownedFolder(input.binRoot);
       ownedFolder(NodePath.dirname(target));
       // Written beside its final name and renamed over it, so a half-written binary never runs.
       const temporary = `${target}.tmp-${NodeCrypto.randomBytes(6).toString("hex")}`;
-      const fd = NodeFS.openSync(temporary, "wx", 0o700);
+      const handle = await NodeFS.promises.open(temporary, "wx", 0o700);
       try {
-        NodeFS.writeSync(fd, binary);
-        NodeFS.fsyncSync(fd);
+        await handle.writeFile(binary);
+        await handle.sync();
       } finally {
-        NodeFS.closeSync(fd);
+        await handle.close();
       }
-      NodeFS.renameSync(temporary, target);
+      await NodeFS.promises.rename(temporary, target);
     },
     catch: (cause) =>
-      fail(`Could not write CLIProxyAPI ${input.version}: ${String((cause as Error).message)}`),
+      fail(`Could not write CLIProxyAPI ${release.version}: ${String((cause as Error).message)}`),
   });
-  return { version: input.version, binarySha256: sha256Hex(binary) } satisfies InstalledCliproxy;
+  return {
+    version: release.version,
+    binarySha256: NodeCrypto.createHash("sha256").update(binary).digest("hex"),
+  } satisfies InstalledCliproxy;
 });
 
 /**
@@ -155,21 +163,50 @@ export const verifiedBinary = Effect.fn("cliproxyInstall.verify")(function* (
   installed: InstalledCliproxy,
 ) {
   const path = binaryPathOf(binRoot, installed.version);
-  return yield* Effect.try({
-    try: () => {
-      const info = NodeFS.lstatSync(path);
-      const uid = process.getuid?.();
-      if (!info.isFile() || (uid !== undefined && info.uid !== uid) || (info.mode & 0o022) !== 0) {
-        throw new Error("not the Hub's own file");
-      }
-      if (sha256Hex(NodeFS.readFileSync(path)) !== installed.binarySha256) {
-        throw new Error("changed on disk");
-      }
-      return path;
-    },
-    catch: (cause) =>
-      refuse(
-        `CLIProxyAPI ${installed.version} on disk is not the one the Hub verified (${String((cause as Error).message)}); it was not started.`,
-      ),
+  const refused = (why: string) =>
+    refuse(
+      `CLIProxyAPI ${installed.version} on disk is not the one the Hub verified (${why}); it was not started.`,
+    );
+  const info = yield* Effect.try({
+    try: () => NodeFS.lstatSync(path),
+    catch: () => refused("missing"),
   });
+  const uid = process.getuid?.();
+  if (!info.isFile() || (uid !== undefined && info.uid !== uid) || (info.mode & 0o022) !== 0) {
+    return yield* refused("not the Hub's own file");
+  }
+  const hash = yield* hashFile(path).pipe(Effect.mapError(() => refused("unreadable")));
+  if (hash !== installed.binarySha256) return yield* refused("changed on disk");
+  return path;
+});
+
+const removeAllBut = (binRoot: string, keep: ReadonlyArray<string>) => {
+  const left: Array<string> = [];
+  let names: Array<string> = [];
+  try {
+    names = NodeFS.readdirSync(binRoot);
+  } catch {
+    return left;
+  }
+  for (const name of names) {
+    if (keep.includes(name)) continue;
+    try {
+      NodeFS.rmSync(NodePath.join(binRoot, name), { recursive: true, force: true });
+    } catch {
+      left.push(name);
+    }
+  }
+  return left;
+};
+
+/** Removes installed releases other than `keep`; what cannot be removed is left and logged. */
+export const pruneInstalled = Effect.fn("cliproxyInstall.prune")(function* (
+  binRoot: string,
+  keep: ReadonlyArray<string>,
+) {
+  const left = removeAllBut(binRoot, keep);
+  if (left.length > 0) {
+    yield* Effect.logWarning("Could not remove old AI gateway releases", { left });
+  }
+  return left;
 });

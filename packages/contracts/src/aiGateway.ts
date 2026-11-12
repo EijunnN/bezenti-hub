@@ -37,6 +37,10 @@ export const AiGatewayStatus = Schema.Struct({
   lastError: Schema.NullOr(Schema.String),
   /** False when the subscription credentials sit on the disk: no folder in memory here. */
   credentialsInMemory: Schema.Boolean,
+  /** The releases this Hub pins, oldest first: the only ones it can run. */
+  pinnedVersions: Schema.Array(Schema.String),
+  /** Whether the Owner may turn it on or off here (not on a joined machine, nor when the environment decides). */
+  switchable: Schema.Boolean,
 });
 export type AiGatewayStatus = typeof AiGatewayStatus.Type;
 
@@ -49,6 +53,9 @@ export type AiGatewayUpdateCheck = typeof AiGatewayUpdateCheck.Type;
 
 export const AiGatewayUpdateInput = Schema.Struct({ version: AiGatewayVersion });
 export type AiGatewayUpdateInput = typeof AiGatewayUpdateInput.Type;
+
+export const AiGatewaySetEnabledInput = Schema.Struct({ enabled: Schema.Boolean });
+export type AiGatewaySetEnabledInput = typeof AiGatewaySetEnabledInput.Type;
 
 /** Why an AI gateway action failed, in words for the Owner; never a key. */
 export class AiGatewayError extends Schema.TaggedError<AiGatewayError>()("AiGatewayError", {

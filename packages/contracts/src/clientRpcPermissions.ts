@@ -47,6 +47,7 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   // Which CLIProxyAPI release the Hub runs, as saving the Hub's settings changes what it runs.
   [WS_METHODS.aiGatewayUpdate]: AuthSettingsWriteScope,
   [WS_METHODS.aiGatewayRollback]: AuthSettingsWriteScope,
+  [WS_METHODS.aiGatewaySetEnabled]: AuthSettingsWriteScope,
   [WS_METHODS.projectCloneStart]: AuthSourceControlWriteScope,
   [WS_METHODS.projectCloneCancel]: AuthSourceControlWriteScope,
   [WS_METHODS.projectCloneRetry]: AuthSourceControlWriteScope,

@@ -27,6 +27,7 @@ import * as Schema from "effect/Schema";
 import * as Rpc from "effect/rpc/Rpc";
 import {
   AiGatewayError,
+  AiGatewaySetEnabledInput,
   AiGatewayStatus,
   AiGatewayUpdateCheck,
   AiGatewayUpdateInput,
@@ -580,6 +581,7 @@ export const WS_METHODS = {
   aiGatewayCheckForUpdates: "aiGateway.checkForUpdates",
   aiGatewayUpdate: "aiGateway.update",
   aiGatewayRollback: "aiGateway.rollback",
+  aiGatewaySetEnabled: "aiGateway.setEnabled",
   projectCloneStart: "projectClone.start",
   projectCloneCancel: "projectClone.cancel",
   projectCloneRetry: "projectClone.retry",
@@ -1184,9 +1186,11 @@ const WsSourceControlStarRpc = Rpc.make(WS_METHODS.sourceControlStar, {
 });
 
 // The Hub's AI gateway: status, a GitHub check only when asked, update and roll back.
+// The status now, then each change (a crash and its restart show at once).
 const WsAiGatewayStatusRpc = Rpc.make(WS_METHODS.aiGatewayStatus, {
   payload: Schema.Struct({}),
   success: AiGatewayStatus,
+  stream: true,
   error: Schema.Union([AiGatewayError, EnvironmentAuthorizationError]),
 });
 
@@ -1205,6 +1209,13 @@ const WsAiGatewayUpdateRpc = Rpc.make(WS_METHODS.aiGatewayUpdate, {
 
 const WsAiGatewayRollbackRpc = Rpc.make(WS_METHODS.aiGatewayRollback, {
   payload: Schema.Struct({}),
+  success: AiGatewayStatus,
+  error: Schema.Union([AiGatewayError, EnvironmentAuthorizationError]),
+});
+
+// Where the Owner decides (the desktop app, a dev Hub): run the gateway on this machine or not.
+const WsAiGatewaySetEnabledRpc = Rpc.make(WS_METHODS.aiGatewaySetEnabled, {
+  payload: AiGatewaySetEnabledInput,
   success: AiGatewayStatus,
   error: Schema.Union([AiGatewayError, EnvironmentAuthorizationError]),
 });
@@ -2061,6 +2072,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsAiGatewayCheckForUpdatesRpc,
   WsAiGatewayUpdateRpc,
   WsAiGatewayRollbackRpc,
+  WsAiGatewaySetEnabledRpc,
   WsProjectCloneStartRpc,
   WsProjectCloneCancelRpc,
   WsProjectCloneRetryRpc,

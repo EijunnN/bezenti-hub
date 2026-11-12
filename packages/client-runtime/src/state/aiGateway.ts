@@ -1,7 +1,11 @@
 import { WS_METHODS } from "@t3tools/contracts";
 import type { Atom } from "effect/reactivity";
 
-import { createEnvironmentRpcCommand, createEnvironmentRpcQueryAtomFamily } from "./runtime.ts";
+import {
+  createEnvironmentRpcCommand,
+  createEnvironmentRpcQueryAtomFamily,
+  createEnvironmentRpcSubscriptionAtomFamily,
+} from "./runtime.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 
 /** The Hub's AI gateway (Settings → AI gateway): its Owner's alone. */
@@ -9,11 +13,11 @@ export function createAiGatewayEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
 ) {
   return {
-    // Read again every few seconds, so a crash and its restart show without a reload.
-    status: createEnvironmentRpcQueryAtomFamily(runtime, {
+    // Streamed: a crash and its restart show at once.
+    status: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:ai-gateway:status",
       tag: WS_METHODS.aiGatewayStatus,
-      refreshIntervalMs: 5_000,
+      idleTtlMs: 0,
     }),
     // Fetched while the section is open and again on request; dropped when it closes.
     checkForUpdates: createEnvironmentRpcQueryAtomFamily(runtime, {
@@ -28,6 +32,10 @@ export function createAiGatewayEnvironmentAtoms<R, E>(
     rollback: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:ai-gateway:rollback",
       tag: WS_METHODS.aiGatewayRollback,
+    }),
+    setEnabled: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ai-gateway:set-enabled",
+      tag: WS_METHODS.aiGatewaySetEnabled,
     }),
   };
 }

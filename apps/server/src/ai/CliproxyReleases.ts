@@ -1,92 +1,106 @@
+// @effect-diagnostics nodeBuiltinImport:off -- hashes the download as it arrives.
 /**
- * Where CLIProxyAPI releases come from: GitHub, at the fixed addresses of cliproxyRelease.ts and
- * nowhere else. Asked only when the Hub installs a release or the Owner checks for updates (ADR
- * 0007: no upstream service by default). Tests give their own files.
+ * Where pinned CLIProxyAPI releases come from: GitHub, at the address cliproxyRelease.ts builds
+ * from a pinned version and nowhere else, read as a stream with a hard size limit and hashed as it
+ * arrives. Asked only to install a release. Tests give their own archives.
  */
+import * as NodeCrypto from "node:crypto";
+
 import { AiGatewayError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import {
-  CLIPROXY_LATEST_RELEASE_URL,
   type CliproxyPlatform,
   cliproxyAssetUrl,
-  cliproxyChecksumsUrl,
-  versionOfTag,
+  type PinnedCliproxyRelease,
 } from "./cliproxyRelease.ts";
 
+const isAiGatewayError = Schema.is(AiGatewayError);
+
 /** Larger than any release archive so far (about 25 MB), so a runaway answer is cut short. */
-const MAX_ARCHIVE_BYTES = 200 * 1024 * 1024;
+const MAX_ARCHIVE_BYTES = 100 * 1024 * 1024;
+
+/** A downloaded archive, not yet checked, and the SHA-256 of what arrived. */
+export interface DownloadedArchive {
+  readonly bytes: Uint8Array;
+  readonly sha256: string;
+}
 
 export class CliproxyReleases extends Context.Service<
   CliproxyReleases,
   {
-    /** The newest release's version. */
-    readonly latestVersion: Effect.Effect<string, AiGatewayError>;
-    /** That release's `checksums.txt`. */
-    readonly checksums: (version: string) => Effect.Effect<string, AiGatewayError>;
-    /** That release's archive for this platform, not yet verified. */
     readonly archive: (
-      version: string,
+      release: PinnedCliproxyRelease,
       platform: CliproxyPlatform,
-    ) => Effect.Effect<Uint8Array, AiGatewayError>;
+    ) => Effect.Effect<DownloadedArchive, AiGatewayError>;
   }
 >()("t3/ai/CliproxyReleases") {}
 
-const LatestRelease = Schema.Struct({ tag_name: Schema.String });
-
-const unreachable = (what: string) => () =>
-  new AiGatewayError({ message: `Could not download ${what} from GitHub.` });
+/**
+ * Chunks collected only up to `limit` bytes, whatever the answer announced (or did not), and
+ * hashed on the way.
+ */
+export const collectLimited = Effect.fn("CliproxyReleases.collectLimited")(function* <E>(
+  chunks: Stream.Stream<Uint8Array, E>,
+  limit: number,
+  tooLarge: () => AiGatewayError,
+) {
+  const hash = NodeCrypto.createHash("sha256");
+  const parts: Array<Uint8Array> = [];
+  let total = 0;
+  yield* chunks.pipe(
+    Stream.runForEach((chunk) => {
+      total += chunk.byteLength;
+      if (total > limit) return Effect.fail(tooLarge());
+      hash.update(chunk);
+      parts.push(chunk);
+      return Effect.void;
+    }),
+  );
+  return {
+    bytes: new Uint8Array(Buffer.concat(parts)),
+    sha256: hash.digest("hex"),
+  } satisfies DownloadedArchive;
+});
 
 const make = Effect.gen(function* () {
   const client = (yield* HttpClient.HttpClient).pipe(
     HttpClient.mapRequest(HttpClientRequest.setHeader("User-Agent", "t3code-hub")),
   );
-  const get = (url: string, timeout: "30 seconds" | "5 minutes") =>
-    client
-      .get(url)
-      .pipe(Effect.flatMap(HttpClientResponse.filterStatusOk), Effect.timeout(timeout));
-
   return CliproxyReleases.of({
-    latestVersion: get(CLIPROXY_LATEST_RELEASE_URL, "30 seconds").pipe(
-      Effect.flatMap(HttpClientResponse.schemaBodyJson(LatestRelease)),
-      Effect.mapError(unreachable("the latest CLIProxyAPI release")),
-      Effect.flatMap(({ tag_name }) => {
-        const version = versionOfTag(tag_name);
-        return version === undefined
-          ? Effect.fail(
-              new AiGatewayError({ message: "GitHub named a release that is not a version." }),
-            )
-          : Effect.succeed(version);
-      }),
-      Effect.withSpan("CliproxyReleases.latestVersion"),
-    ),
-    checksums: Effect.fn("CliproxyReleases.checksums")(function* (version: string) {
-      return yield* get(cliproxyChecksumsUrl(version), "30 seconds").pipe(
-        Effect.flatMap((response) => response.text),
-        Effect.mapError(unreachable(`the checksums of CLIProxyAPI ${version}`)),
-      );
-    }),
     archive: Effect.fn("CliproxyReleases.archive")(function* (
-      version: string,
+      release: PinnedCliproxyRelease,
       platform: CliproxyPlatform,
     ) {
-      const tooLarge = new AiGatewayError({ message: `CLIProxyAPI ${version} is too large.` });
-      const response = yield* get(cliproxyAssetUrl(version, platform), "5 minutes").pipe(
-        Effect.mapError(unreachable(`CLIProxyAPI ${version}`)),
-      );
+      const unreachable = () =>
+        new AiGatewayError({ message: `Could not download CLIProxyAPI ${release.version}.` });
+      const tooLarge = () =>
+        new AiGatewayError({
+          message: `The download of CLIProxyAPI ${release.version} is too large.`,
+        });
+      const response = yield* client
+        .get(cliproxyAssetUrl(release, platform))
+        .pipe(
+          Effect.flatMap(HttpClientResponse.filterStatusOk),
+          Effect.timeout("30 seconds"),
+          Effect.mapError(unreachable),
+        );
       if (Number(response.headers["content-length"] ?? "0") > MAX_ARCHIVE_BYTES) {
-        return yield* tooLarge;
+        return yield* tooLarge();
       }
-      const buffer = yield* response.arrayBuffer.pipe(
+      return yield* collectLimited(
+        response.stream.pipe(Stream.mapError(unreachable)),
+        MAX_ARCHIVE_BYTES,
+        tooLarge,
+      ).pipe(
         Effect.timeout("5 minutes"),
-        Effect.mapError(unreachable(`CLIProxyAPI ${version}`)),
+        Effect.mapError((error) => (isAiGatewayError(error) ? error : unreachable())),
       );
-      if (buffer.byteLength > MAX_ARCHIVE_BYTES) return yield* tooLarge;
-      return new Uint8Array(buffer);
     }),
   });
 });

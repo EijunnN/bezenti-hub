@@ -35,16 +35,18 @@ function uptimeLabel(startedAt: string, now: number) {
   return `${seconds} s`;
 }
 
+type Action = "update" | "rollback" | "enable" | "disable";
+
 /**
- * Settings → AI gateway (the Owner's): the CLIProxyAPI release the Hub runs, its state, and
- * updating or rolling it back. GitHub is asked for the newest release only while this is open.
+ * Settings → AI gateway (the Owner's): the pinned CLIProxyAPI release the Hub runs, its state as
+ * it changes, switching between the releases this Hub pins, and turning it on or off where the
+ * Owner decides (the desktop app). Nothing here asks GitHub.
  */
 export function AiGatewaySettingsPanel() {
   const environmentId = usePrimaryEnvironmentId();
   const query = useEnvironmentQuery(
     environmentId === null ? null : aiGatewayEnvironment.status({ environmentId, input: {} }),
   );
-  // Asked when the section opens and on «Check for updates»; never in the background (ADR 0007).
   const latestQuery = useEnvironmentQuery(
     environmentId === null
       ? null
@@ -52,7 +54,8 @@ export function AiGatewaySettingsPanel() {
   );
   const update = useAtomCommand(aiGatewayEnvironment.update, { reportFailure: false });
   const rollback = useAtomCommand(aiGatewayEnvironment.rollback, { reportFailure: false });
-  const [pending, setPending] = useState<"update" | "rollback" | null>(null);
+  const setEnabled = useAtomCommand(aiGatewayEnvironment.setEnabled, { reportFailure: false });
+  const [pending, setPending] = useState<Action | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
 
@@ -62,21 +65,19 @@ export function AiGatewaySettingsPanel() {
     return () => window.clearInterval(timer);
   }, []);
 
-  const act = async (kind: "update" | "rollback", version: string | null) => {
+  const act = async (kind: Action, version: string | null) => {
     if (environmentId === null) return;
     setPending(kind);
     setError(null);
     const result =
       kind === "update" && version !== null
         ? await update({ environmentId, input: { version } })
-        : await rollback({ environmentId, input: {} });
+        : kind === "rollback"
+          ? await rollback({ environmentId, input: {} })
+          : await setEnabled({ environmentId, input: { enabled: kind === "enable" } });
     setPending(null);
-    if (result._tag === "Success") {
-      query.refresh();
-      latestQuery.refresh();
-    } else {
-      setError(failureMessage(result.cause));
-    }
+    if (result._tag === "Success") latestQuery.refresh();
+    else setError(failureMessage(result.cause));
   };
 
   const status = query.data;
@@ -92,10 +93,15 @@ export function AiGatewaySettingsPanel() {
     );
   }
 
-  const manages = status.state !== "off" && status.state !== "unsupported";
+  const on = status.state !== "off" && status.state !== "unsupported";
   const latest = latestQuery.data;
   const latestVersion = latest?.updateAvailable === true ? latest.latestVersion : null;
-  const shownError = error ?? latestQuery.error;
+  const errorRow =
+    error === null ? null : (
+      <span className="text-destructive" role="alert">
+        {error}
+      </span>
+    );
   return (
     <SettingsPageContainer>
       <SettingsSection id="ai-gateway" title="AI gateway">
@@ -115,13 +121,26 @@ export function AiGatewaySettingsPanel() {
             )
           }
         />
+        {status.switchable ? (
+          <SettingsRow
+            title="Run on this machine"
+            description="Agents reach your AI accounts through the gateway. Off until you turn it on in the desktop app."
+            status={on ? null : errorRow}
+            control={
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={pending !== null}
+                onClick={() => void act(on ? "disable" : "enable", null)}
+              >
+                {on ? "Turn off" : "Turn on"}
+              </Button>
+            }
+          />
+        ) : null}
         <SettingsRow
           title="Version"
-          description={
-            status.version === status.pinnedVersion || status.version === null
-              ? `This Hub pins CLIProxyAPI ${status.pinnedVersion}.`
-              : `This Hub pins ${status.pinnedVersion}; the Owner moved it to ${status.version}.`
-          }
+          description={`This Hub pins CLIProxyAPI ${status.pinnedVersions.join(", ")}; it runs only those.`}
           control={
             <span aria-label="AI gateway version" className="font-mono text-sm">
               {status.version ?? "none"}
@@ -133,35 +152,27 @@ export function AiGatewaySettingsPanel() {
             title="Uptime"
             description={
               status.restarts === 0
-                ? "Not restarted since the Hub started."
-                : `Restarted ${status.restarts} ${status.restarts === 1 ? "time" : "times"} since the Hub started.`
+                ? "Not restarted since it started."
+                : `Restarted ${status.restarts} ${status.restarts === 1 ? "time" : "times"} since it started.`
             }
             control={<span className="text-sm">{uptimeLabel(status.startedAt, now)}</span>}
           />
         ) : null}
-        {manages && !status.credentialsInMemory ? (
+        {on && !status.credentialsInMemory ? (
           <SettingsRow
             title="Credentials on disk"
             description="This machine has no folder in memory ($XDG_RUNTIME_DIR or /dev/shm), so the gateway's subscription credentials are kept on its disk, readable only by the Hub's user."
           />
         ) : null}
-        {manages ? (
+        {on ? (
           <SettingsRow
-            title={latestVersion === null ? "Updates" : `CLIProxyAPI ${latestVersion} is available`}
+            title={latestVersion === null ? "Release" : `CLIProxyAPI ${latestVersion} is pinned`}
             description={
-              latest === null
-                ? "Asks GitHub for the newest release; nothing is downloaded until you update."
-                : latestVersion === null
-                  ? `Up to date: ${latest.latestVersion} is the newest release.`
-                  : "Downloads it, checks its checksum, starts it beside the current one and switches once it answers. The current one is kept to roll back."
+              latestVersion === null
+                ? "Runs the newest release this Hub pins. A newer one comes with a Hub update."
+                : "Starts it beside the current one and switches once it answers. The current one is kept to roll back."
             }
-            status={
-              shownError === null ? null : (
-                <span className="text-destructive" role="alert">
-                  {shownError}
-                </span>
-              )
-            }
+            status={errorRow}
             control={
               <div className="flex flex-wrap justify-end gap-2">
                 {status.previousVersion !== null ? (
@@ -171,7 +182,9 @@ export function AiGatewaySettingsPanel() {
                     disabled={pending !== null}
                     onClick={() => void act("rollback", null)}
                   >
-                    {`Roll back to ${status.previousVersion}`}
+                    {pending === "rollback"
+                      ? "Rolling back…"
+                      : `Roll back to ${status.previousVersion}`}
                   </Button>
                 ) : null}
                 {latestVersion !== null ? (
@@ -182,16 +195,7 @@ export function AiGatewaySettingsPanel() {
                   >
                     {pending === "update" ? "Updating…" : `Update to ${latestVersion}`}
                   </Button>
-                ) : (
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    disabled={pending !== null || latestQuery.isPending}
-                    onClick={() => latestQuery.refresh()}
-                  >
-                    {latestQuery.isPending ? "Checking…" : "Check for updates"}
-                  </Button>
-                )}
+                ) : null}
               </div>
             }
           />

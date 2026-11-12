@@ -2818,10 +2818,11 @@ export const layerWsRpc = (
         [WS_METHODS.sourceControlAppAccess]: (input) => sourceControlSignIn.access(input),
         [WS_METHODS.sourceControlStarred]: (input) => sourceControlSignIn.starred(input),
         [WS_METHODS.sourceControlStar]: (input) => sourceControlSignIn.star(input),
-        [WS_METHODS.aiGatewayStatus]: () => aiGateway.status,
+        [WS_METHODS.aiGatewayStatus]: () => aiGateway.changes,
         [WS_METHODS.aiGatewayCheckForUpdates]: () => aiGateway.checkForUpdates,
         [WS_METHODS.aiGatewayUpdate]: (input) => aiGateway.update(input.version),
         [WS_METHODS.aiGatewayRollback]: () => aiGateway.rollback,
+        [WS_METHODS.aiGatewaySetEnabled]: (input) => aiGateway.setEnabled(input.enabled),
         [WS_METHODS.projectCloneStart]: (input) =>
           requireCloneDestination(input.destinationPath, { asProject: true }).pipe(
             Effect.andThen(

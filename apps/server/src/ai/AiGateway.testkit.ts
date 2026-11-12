@@ -9,23 +9,35 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeZlib from "node:zlib";
 
+import { AiGatewayError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import { FetchHttpClient } from "effect/http";
-import { AiGatewayError } from "@t3tools/contracts";
 
 import * as AuditLog from "../audit/AuditLog.ts";
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
 import * as AiGateway from "./AiGateway.ts";
-import { type CliproxyPlatform, cliproxyAssetName } from "./cliproxyRelease.ts";
+import type { CliproxyPlatform, PinnedCliproxyRelease } from "./cliproxyRelease.ts";
 import { CliproxyReleases } from "./CliproxyReleases.ts";
 
-/** What the fake server does: serve, or exit at once (a release that never starts). */
-export type FakeCliproxyMode = "serve" | "exit";
+/**
+ * What the fake does: `serve`; `exit` at once (a release that never starts); `wide`, listening on
+ * every address; `decoy`, leaving the port to another process that records what it is sent (as a
+ * local process that took the port first would).
+ */
+export type FakeCliproxyMode = "serve" | "exit" | "wide" | "decoy";
 
-const FAKE_SERVER = String.raw`
+/** A line a careless release might print: credentials by name and by shape. */
+export const LEAKY_LINE =
+  'token refresh {"refresh_token":"1//0gLeakyRefreshToken_abc-123","access_token":"ya29.a0Leaky_Access-Token123"} ' +
+  "url=https://x.test/v1?key=AIzaSyLeaky_Google-Key1234567890&api_key=sk-ant-leaky_key_1234567890 " +
+  "client_secret=GOCSPX-leaky_secret_123 github ghp_Leaky_Github_Token_1234567890";
+
+const FAKE_SERVER =
+  String.raw`
+import * as childProcess from "node:child_process";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as path from "node:path";
@@ -36,26 +48,48 @@ const host = /^\s+host:\s*"?([^"\n]+)"?/mu.exec(text)[1];
 const secret = /secret-key:\s*"?([^"\n]+)"?/u.exec(text)[1].trim();
 const clientKey = /api-keys:\s*\n\s*-\s*"?([^"\n]+)"?/u.exec(text)[1].trim();
 const version = process.env.FAKE_CLIPROXY_VERSION;
-fs.writeFileSync(path.join(path.dirname(configPath), "fake-" + process.pid + ".json"), JSON.stringify({ argv: process.argv.slice(2), env: Object.keys(process.env), version }));
-// Like a careless release: its own keys in its output, which the Hub must filter.
+const mode = process.env.FAKE_CLIPROXY_MODE;
+const dir = path.dirname(configPath);
+fs.writeFileSync(path.join(dir, "fake-" + process.pid + ".json"), JSON.stringify({ argv: process.argv.slice(2), env: Object.keys(process.env), version }));
+// Like a careless release: its own keys and tokens in its output, which the Hub must filter.
 console.log("CLIProxyAPI Version: " + version + ", management key " + secret + ", client key " + clientKey);
-if (process.env.FAKE_CLIPROXY_MODE === "exit") process.exit(3);
-http.createServer((request, response) => {
-  const auth = request.headers.authorization ?? "";
-  response.setHeader("X-CPA-VERSION", version);
-  if (request.url === "/v8/management/config") {
-    response.statusCode = auth === "Bearer " + secret ? 200 : 401;
-    response.end(JSON.stringify(response.statusCode === 200 ? { "config-version": 8 } : { error: "missing management key" }));
-    return;
-  }
-  if (request.url === "/v1/models") {
-    response.statusCode = auth === "Bearer " + clientKey ? 200 : 401;
-    response.end(JSON.stringify({ data: [] }));
-    return;
-  }
-  response.statusCode = 404;
-  response.end();
-}).listen(port, host);
+console.log(${JSON.stringify(LEAKY_LINE)});
+if (mode === "exit") process.exit(3);
+if (mode === "decoy") {
+  const decoy = childProcess.spawn(process.execPath, ["-e", ` +
+  "`" +
+  String.raw`
+    const fs = require("node:fs");
+    const seen = process.argv[2];
+    require("node:http").createServer((request, response) => {
+      fs.appendFileSync(seen, JSON.stringify({ url: request.url, authorization: request.headers.authorization ?? null }) + "\n");
+      response.statusCode = 200;
+      response.end("{}");
+    }).listen(Number(process.argv[1]), "127.0.0.1");
+  ` +
+  "`" +
+  String.raw`, String(port), path.join(dir, "decoy-seen.jsonl")], { stdio: "ignore" });
+  fs.writeFileSync(path.join(dir, "decoy-pid"), String(decoy.pid));
+  process.on("SIGTERM", () => { decoy.kill("SIGKILL"); process.exit(0); });
+  setInterval(() => {}, 1000);
+} else {
+  http.createServer((request, response) => {
+    const auth = request.headers.authorization ?? "";
+    response.setHeader("X-CPA-VERSION", version);
+    if (request.url === "/v8/management/config") {
+      response.statusCode = auth === "Bearer " + secret ? 200 : 401;
+      response.end(JSON.stringify(response.statusCode === 200 ? { "config-version": 8 } : { error: "missing management key" }));
+      return;
+    }
+    if (request.url === "/v1/models") {
+      response.statusCode = auth === "Bearer " + clientKey ? 200 : 401;
+      response.end(JSON.stringify({ data: [] }));
+      return;
+    }
+    response.statusCode = 404;
+    response.end();
+  }).listen(port, mode === "wide" ? "0.0.0.0" : host);
+}
 `;
 
 const tarHeader = (name: string, size: number, mode: number) => {
@@ -123,36 +157,39 @@ export const fakeCliproxyRelease = (
   return { version, archive, sha256: sha256(archive) };
 };
 
-/** GitHub as the tests see it: these releases, their checksums, and a count of each download. */
+/** The Hub's pins for these fake releases, the same hash on every platform. */
+export const pinsOf = (releases: ReadonlyArray<FakeRelease>): Array<PinnedCliproxyRelease> =>
+  releases.map((release) => ({
+    version: release.version,
+    sha256: {
+      "linux-amd64": release.sha256,
+      "linux-arm64": release.sha256,
+      "darwin-amd64": release.sha256,
+      "darwin-arm64": release.sha256,
+    },
+  }));
+
+/**
+ * GitHub as the tests see it: these archives (or, per version, other bytes in their place), and
+ * a list of each download.
+ */
 export const fakeReleases = (input: {
-  readonly platform: CliproxyPlatform;
   readonly releases: ReadonlyArray<FakeRelease>;
-  readonly latest: string;
-  /** Per version: what the release's `checksums.txt` says instead of the archive's real hash. */
-  readonly listed?: Readonly<Record<string, string | null>>;
+  readonly served?: Readonly<Record<string, Uint8Array>>;
 }) => {
   const downloads: Array<string> = [];
-  const find = (version: string) => input.releases.find((release) => release.version === version);
-  const missing = (version: string) =>
-    new AiGatewayError({ message: `Could not download CLIProxyAPI ${version} from GitHub.` });
   const service = CliproxyReleases.of({
-    latestVersion: Effect.succeed(input.latest),
-    checksums: (version) => {
-      const release = find(version);
-      if (release === undefined) return Effect.fail(missing(version));
-      const listed = input.listed?.[version];
-      const hash = listed === undefined ? release.sha256 : listed;
-      return Effect.succeed(
-        `${"0".repeat(64)}  CLIProxyAPI_${version}_windows_amd64.zip\n` +
-          (hash === null ? "" : `${hash}  ${cliproxyAssetName(version, input.platform)}\n`),
-      );
-    },
-    archive: (version) =>
+    archive: (release: PinnedCliproxyRelease, _platform: CliproxyPlatform) =>
       Effect.suspend(() => {
-        const release = find(version);
-        if (release === undefined) return Effect.fail(missing(version));
-        downloads.push(version);
-        return Effect.succeed(release.archive);
+        const found = input.releases.find((candidate) => candidate.version === release.version);
+        if (found === undefined) {
+          return Effect.fail(
+            new AiGatewayError({ message: `Could not download CLIProxyAPI ${release.version}.` }),
+          );
+        }
+        downloads.push(release.version);
+        const bytes = input.served?.[release.version] ?? found.archive;
+        return Effect.succeed({ bytes, sha256: sha256(bytes) });
       }),
   });
   return { service, downloads };
@@ -193,28 +230,17 @@ export const startFakeGateway = Effect.fn("AiGateway.testkit.startFakeGateway")(
   const stateDir = NodePath.join(input.dir, "state");
   NodeFS.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const gateway = yield* AiGateway.make({
-    mode: "managed",
+    placement: { _tag: "forced", enabled: true },
     os: input.os,
     stateDir,
     platform: input.platform,
-    pinned: {
-      version: release.version,
-      sha256: {
-        "linux-amd64": release.sha256,
-        "linux-arm64": release.sha256,
-        "darwin-amd64": release.sha256,
-        "darwin-arm64": release.sha256,
-      },
-    },
+    pinned: pinsOf([release]),
     runtimeFolder: { directory: NodePath.join(input.dir, "memory"), inMemory: true },
   }).pipe(
     Effect.provide(
       Layer.mergeAll(
         Layer.succeed(ServerSecretStore, memorySecretStore().service),
-        Layer.succeed(
-          CliproxyReleases,
-          fakeReleases({ platform: input.platform, releases: [release], latest: "1.0.0" }).service,
-        ),
+        Layer.succeed(CliproxyReleases, fakeReleases({ releases: [release] }).service),
         Layer.succeed(
           AuditLog.AuditLog,
           AuditLog.AuditLog.of({ record: () => Effect.void, list: () => Effect.die("not used") }),

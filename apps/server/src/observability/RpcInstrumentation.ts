@@ -137,6 +137,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.aiGatewayCheckForUpdates]: "server",
   [WS_METHODS.aiGatewayUpdate]: "server",
   [WS_METHODS.aiGatewayRollback]: "server",
+  [WS_METHODS.aiGatewaySetEnabled]: "server",
   [WS_METHODS.projectCloneStart]: "source-control",
   [WS_METHODS.projectCloneCancel]: "source-control",
   [WS_METHODS.projectCloneRetry]: "source-control",
