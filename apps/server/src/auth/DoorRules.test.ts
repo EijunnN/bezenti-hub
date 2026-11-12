@@ -236,7 +236,7 @@ describe("every door of the Hub declares its rule", () => {
       .map(({ file }) => file)
       .toSorted();
     expect(clientKeyUsers).toEqual([
-      "ai/AiGatewayRoute.ts",
+      "ai/AiGatewayProxy.ts",
       "ai/CliproxyManagement.ts",
       "ai/cliproxyConfig.ts",
     ]);
@@ -251,8 +251,10 @@ describe("every door of the Hub declares its rule", () => {
         .toSorted(),
     ).toEqual(["ai/AiGatewayKeys.ts", "persistence/Migrations/113_AiGatewayKeys.ts"]);
     // The route reads no cookie and no session: only its key headers.
-    const route = files.find(({ file }) => file === "ai/AiGatewayRoute.ts")?.text ?? "";
-    expect(route).not.toMatch(/cookie|EnvironmentAuth|SessionStore|authenticateRequest/iu);
+    for (const file of ["ai/AiGatewayRoute.ts", "ai/AiGatewayProxy.ts"]) {
+      const text = files.find((entry) => entry.file === file)?.text ?? "";
+      expect(text, file).not.toMatch(/cookie|EnvironmentAuth|SessionStore|authenticateRequest/iu);
+    }
   });
 
   it("signs in to subscriptions over the Owner's WS RPCs only: no callback route, tokens read by AiAccounts alone", () => {

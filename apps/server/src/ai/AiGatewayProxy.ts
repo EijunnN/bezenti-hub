@@ -15,7 +15,7 @@ import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import { HttpClient, HttpClientRequest } from "effect/http";
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 
 import * as AiAccounts from "./AiAccounts.ts";
 import * as AiGateway from "./AiGateway.ts";
@@ -409,7 +409,12 @@ const make = Effect.fn("AiGatewayProxy.make")(function* (limits: AiGatewayProxyL
               HttpClientRequest.bodyUint8Array(bodyFor(upstreamModel), "application/json"),
             ),
           )
-          .pipe(Effect.timeout(limits.firstByteMs), Effect.result);
+          .pipe(
+            // An upstream redirect is never followed (it would be a request the Hub did not plan).
+            Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
+            Effect.timeout(limits.firstByteMs),
+            Effect.result,
+          );
       };
 
       let recorded = false;

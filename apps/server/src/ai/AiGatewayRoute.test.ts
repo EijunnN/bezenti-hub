@@ -3,7 +3,7 @@
  * (Admin), Grace (Member) and Linus (Guest) of Acme and Gus of Globex: a key reaches only what
  * AllowedAiAccounts gives its User in its Space now, streamed, failing over within one provider.
  */
-// @effect-diagnostics nodeBuiltinImport:off globalFetchInEffect:off - a client on the real port: streams, raw paths, the fake gateway's files.
+// @effect-diagnostics nodeBuiltinImport:off globalFetchInEffect:off globalTimers:off - a client on the real port: streams, raw paths, the fake gateway's files.
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
