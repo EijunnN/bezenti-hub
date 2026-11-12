@@ -91,6 +91,9 @@ const NOT_FOUND = "That AI account does not exist.";
 const OWNER_ONLY = "Only the Owner manages AI accounts.";
 /** How long a gateway's model list stands for the picker and the gateway. */
 const CATALOG_TTL_MS = 5 * 60_000;
+/** After a write, how long the Hub waits for CLIProxyAPI's model list to show the accounts. */
+const MODEL_LIST_ATTEMPTS = 20;
+const MODEL_LIST_PAUSE = Duration.millis(250);
 /** After a write the gateway refused or missed, the Hub tries again this often. */
 const RETRY_EVERY = Duration.seconds(10);
 
@@ -301,7 +304,20 @@ const make = Effect.gen(function* () {
           provisionedBaseUrl = endpoint.baseUrl;
           catalog = undefined;
           dirty = false;
-          const ids = yield* management.modelIds(endpoint).pipe(Effect.option);
+          // CLIProxyAPI applies a config change by reloading it: its model list catches up shortly.
+          const expected = accounts.map((account) => `${aiAccountPrefixOf(account.id)}/`);
+          let ids = yield* management.modelIds(endpoint).pipe(Effect.option);
+          for (let attempt = 0; attempt < MODEL_LIST_ATTEMPTS; attempt += 1) {
+            const listed = ids;
+            if (
+              Option.isSome(listed) &&
+              expected.every((prefix) => listed.value.some((id) => id.startsWith(prefix)))
+            ) {
+              break;
+            }
+            yield* Effect.sleep(MODEL_LIST_PAUSE);
+            ids = yield* management.modelIds(endpoint).pipe(Effect.option);
+          }
           if (Option.isSome(ids)) {
             catalog = {
               baseUrl: endpoint.baseUrl,

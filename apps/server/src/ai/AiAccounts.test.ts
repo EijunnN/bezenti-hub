@@ -259,13 +259,14 @@ it.live.skipIf(!posix || platform === undefined)(
       const setup = yield* hub();
       const { accounts, as, ownerId, acmeId, people } = setup;
       const { acme } = yield* ownerSetup(setup);
-      const everyone = Object.values(people);
-      const limitedOwner = <A, E, R>(effect: Effect.Effect<A, E, R>) => as(ownerId, acmeId)(effect);
-      for (const [who, run] of [
-        ...everyone.map((userId) => [userId, as(userId)] as const),
-        // The Owner's own agent, bound to Acme's Sandbox, acts on nothing Installation-wide.
-        ["owner limited to Acme", limitedOwner] as const,
-      ]) {
+      // Everyone but the Owner, and the Owner's own agent bound to Acme's Sandbox, which acts
+      // on nothing Installation-wide.
+      const callers: ReadonlyArray<readonly [UserId, SpaceId | undefined]> = [
+        ...Object.values(people).map((userId) => [userId, undefined] as const),
+        [ownerId, acmeId],
+      ];
+      for (const [who, limit] of callers) {
+        const run = as(who, limit);
         const refused = [
           yield* reasonOf(
             accounts
