@@ -10,12 +10,14 @@ import {
   ThreadId,
   UserId,
   type VaultError,
+  VaultThreadEnvironmentInput,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
 
 import * as CommandActor from "../auth/CommandActor.ts";
 import {
@@ -28,6 +30,8 @@ import {
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as EffectiveVaults from "./EffectiveVaults.ts";
 import * as Vaults from "./Vaults.ts";
+
+const decodeThreadEnvironmentInput = Schema.decodeUnknownEffect(VaultThreadEnvironmentInput);
 
 const VALUES = ["acme-default-one-111", "acme-default-two-222", "graces-own-token-333"];
 
@@ -630,5 +634,240 @@ it.effect("a Project moved to another Space receives only the destination's Vaul
       h.names(yield* h.effective.forThread({ threadId: thread, actingUserId: h.ownerId })),
       ["GLOBEX_DEFAULT"],
     );
+  }),
+);
+
+// Review of ticket 03.
+
+it.effect("an allowance whose Space or User is gone can still be taken back", () =>
+  Effect.gen(function* () {
+    const h = yield* hub;
+    const shared = yield* h.ownersVault("Shared", [["SHARED_KEY", VALUES[0]!]]);
+    const gone = SpaceId.make("org-gone");
+    // Rows for a Space and a User that no longer exist (deleted after they were allowed).
+    yield* h.server.sql`
+      INSERT INTO vault_allowances (vault_id, subject_kind, subject_id, created_at)
+      VALUES (${shared}, 'space', ${gone}, '2026-01-01'), (${shared}, 'user', 'ghost', '2026-01-01')
+    `;
+    yield* h.vaults
+      .allow({ vaultId: shared, subject: space(gone), allowed: false })
+      .pipe(h.as(h.ownerId));
+    yield* h.vaults
+      .allow({ vaultId: shared, subject: user(UserId.make("ghost")), allowed: false })
+      .pipe(h.as(h.ownerId));
+    const left = yield* h.server.sql<{ readonly n: number }>`
+      SELECT COUNT(*) AS n FROM vault_allowances WHERE vault_id = ${shared}
+    `;
+    assert.equal(left[0]?.n, 0);
+  }),
+);
+
+it.effect("an archived default can stay or be dropped; no new archived default is added", () =>
+  Effect.gen(function* () {
+    const h = yield* hub;
+    const first = yield* h.ownersVault("First", [["FIRST", VALUES[0]!]]);
+    const second = yield* h.ownersVault("Second", [["SECOND", VALUES[1]!]]);
+    const third = yield* h.ownersVault("Third", [["THIRD", VALUES[2]!]]);
+    for (const vaultId of [first, second, third]) {
+      yield* h.vaults
+        .allow({ vaultId, subject: space(h.acmeId), allowed: true })
+        .pipe(h.as(h.ownerId));
+    }
+    yield* h.vaults
+      .setSpaceDefaults({ spaceId: h.acmeId, vaultIds: [first, second] })
+      .pipe(h.as(h.ada.id));
+    yield* h.vaults.update({ vaultId: first, archived: true }).pipe(h.as(h.ownerId));
+    yield* h.vaults.update({ vaultId: third, archived: true }).pipe(h.as(h.ownerId));
+    // Unchecking another default sends the archived one along: the save goes through.
+    let chosen = yield* h.vaults
+      .setSpaceDefaults({ spaceId: h.acmeId, vaultIds: [first] })
+      .pipe(h.as(h.ada.id));
+    assert.deepEqual(chosen.defaults, [first]);
+    chosen = yield* h.vaults
+      .setSpaceDefaults({ spaceId: h.acmeId, vaultIds: [] })
+      .pipe(h.as(h.ada.id));
+    assert.deepEqual(chosen.defaults, []);
+    assert.equal(
+      yield* reasonOf(
+        h.vaults.setSpaceDefaults({ spaceId: h.acmeId, vaultIds: [third] }).pipe(h.as(h.ada.id)),
+      ),
+      "not-allowed",
+    );
+    const web = yield* h.project(h.ada.cookie, "acme-web", h.acmeId);
+    assert.equal(
+      yield* reasonOf(
+        h.vaults
+          .setProjectChoice({ projectId: web, vaultId: third, choice: "add" })
+          .pipe(h.as(h.ada.id)),
+      ),
+      "not-allowed",
+    );
+  }),
+);
+
+it.effect(
+  "taking a Vault back from the Owner's Personal space drops a legacy Project's choice",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* hub;
+      const mine = yield* h.ownersVault("Mine", [["MINE", VALUES[0]!]]);
+      const personal = SpaceId.make(`personal:${h.ownerId}`);
+      yield* h.vaults
+        .allow({ vaultId: mine, subject: space(personal), allowed: true })
+        .pipe(h.as(h.ownerId));
+      const notes = yield* h.project(h.owner, "notes", personal);
+      // A Project from before Spaces: no Space stamped, so it is the Owner's Personal space's.
+      yield* h.server
+        .sql`UPDATE projection_projects SET space_id = NULL WHERE project_id = ${notes}`;
+      yield* h.vaults
+        .setProjectChoice({ projectId: notes, vaultId: mine, choice: "add" })
+        .pipe(h.as(h.ownerId));
+      yield* h.vaults
+        .allow({ vaultId: mine, subject: space(personal), allowed: false })
+        .pipe(h.as(h.ownerId));
+      const left = yield* h.server.sql<{ readonly n: number }>`
+      SELECT COUNT(*) AS n FROM project_vault_choices WHERE project_id = ${notes}
+    `;
+      assert.equal(left[0]?.n, 0);
+    }),
+);
+
+it.effect("a Project never removes the Main vault from the Owner's Personal space", () =>
+  Effect.gen(function* () {
+    const h = yield* hub;
+    yield* h.vaults
+      .putEntry({
+        vaultId: MAIN_VAULT_ID,
+        name: "MAIN_TOKEN",
+        value: Redacted.make("main-token-value-9"),
+      })
+      .pipe(h.as(h.ownerId));
+    const personal = SpaceId.make(`personal:${h.ownerId}`);
+    const notes = yield* h.project(h.owner, "notes", personal);
+    assert.equal(
+      yield* reasonOf(
+        h.vaults
+          .setProjectChoice({ projectId: notes, vaultId: MAIN_VAULT_ID, choice: "remove" })
+          .pipe(h.as(h.ownerId)),
+      ),
+      "not-allowed",
+    );
+    // A removal planted anyway changes nothing.
+    yield* h.server.sql`
+      INSERT INTO project_vault_choices (project_id, vault_id, choice) VALUES (${notes}, ${MAIN_VAULT_ID}, 'remove')
+    `;
+    const thread = yield* h.thread("thread:notes", h.ownerId, personal, notes);
+    assert.deepEqual(
+      h.names(yield* h.effective.forThread({ threadId: thread, actingUserId: h.ownerId })),
+      ["MAIN_TOKEN"],
+    );
+  }),
+);
+
+it.effect("the Space's choices list names only to whoever may see each Vault", () =>
+  Effect.gen(function* () {
+    const h = yield* hub;
+    const shared = yield* h.ownersVault("Shared", [["SHARED_KEY", VALUES[0]!]]);
+    yield* h.vaults
+      .allow({ vaultId: shared, subject: space(h.acmeId), allowed: true })
+      .pipe(h.as(h.ownerId));
+    const toAda = yield* h.vaults.choices({ spaceId: h.acmeId }).pipe(h.as(h.ada.id));
+    assert.deepEqual(
+      toAda.allowed.map((option) => option.names),
+      [["SHARED_KEY"]],
+    );
+    // An agent bound to Acme does not see the Owner's own Vaults (vault.view), so not their names.
+    const toAgent = yield* h.vaults.choices({ spaceId: h.acmeId }).pipe(h.as(h.ownerId, h.acmeId));
+    assert.deepEqual(
+      toAgent.allowed.map((option) => option.names),
+      [[]],
+    );
+  }),
+);
+
+it.effect("the acting User comes from the session, never from the request or an agent", () =>
+  Effect.gen(function* () {
+    const h = yield* hub;
+    const gracesVault = yield* h.ownersVault("Grace's", [["GRACE_TOKEN", VALUES[2]!]]);
+    yield* h.vaults
+      .allow({ vaultId: gracesVault, subject: user(h.grace.id), allowed: true })
+      .pipe(h.as(h.ownerId));
+    const thread = yield* h.thread("thread:shared", h.grace.id, h.acmeId, null);
+    // The wire input has no User: an extra field is dropped when decoded.
+    const decoded = yield* decodeThreadEnvironmentInput({
+      threadId: thread,
+      actingUserId: h.grace.id,
+    });
+    assert.deepEqual(Object.keys(decoded), ["threadId"]);
+    // Ada's agent (an MCP call bound to Acme) asking with Grace's id still gets Ada's set.
+    const agentOfAda = CommandActor.actAsResolved({
+      _tag: "User",
+      userId: h.ada.id,
+      via: "agent",
+      spaceLimit: h.acmeId,
+    });
+    const shown = yield* h.effective
+      .threadEnvironment({ threadId: thread, actingUserId: h.grace.id } as never)
+      .pipe(agentOfAda);
+    assert.deepEqual(h.names(shown), []);
+  }),
+);
+
+it.effect("a credential bound to Globex gets nothing from Acme, even for the same User", () =>
+  Effect.gen(function* () {
+    const h = yield* hub;
+    const shared = yield* h.ownersVault("Shared", [["SHARED_KEY", VALUES[0]!]]);
+    yield* h.vaults
+      .allow({ vaultId: shared, subject: space(h.acmeId), allowed: true })
+      .pipe(h.as(h.ownerId));
+    yield* h.vaults
+      .setSpaceDefaults({ spaceId: h.acmeId, vaultIds: [shared] })
+      .pipe(h.as(h.ownerId));
+    yield* joinOrganization(h.server, h.globexId, "grace", "member");
+    yield* h.directory.membershipsChanged([h.grace.id]);
+    const thread = yield* h.thread("thread:grace-acme", h.grace.id, h.acmeId, null);
+    assert.deepEqual(
+      h.names(yield* h.effective.threadEnvironment({ threadId: thread }).pipe(h.as(h.grace.id))),
+      ["SHARED_KEY"],
+    );
+    assert.equal(
+      yield* reasonOf(
+        h.effective.threadEnvironment({ threadId: thread }).pipe(h.as(h.grace.id, h.globexId)),
+      ),
+      "not-found",
+    );
+    assert.equal(
+      yield* reasonOf(
+        h.effective
+          .forThread({ threadId: thread, actingUserId: h.grace.id })
+          .pipe(h.as(h.grace.id, h.globexId)),
+      ),
+      "forbidden",
+    );
+  }),
+);
+
+it.effect("names are checked again when the set is computed, whoever wrote them", () =>
+  Effect.gen(function* () {
+    const h = yield* hub;
+    const shared = yield* h.ownersVault("Shared", [["SHARED_KEY", VALUES[0]!]]);
+    yield* h.vaults
+      .allow({ vaultId: shared, subject: space(h.acmeId), allowed: true })
+      .pipe(h.as(h.ownerId));
+    yield* h.vaults
+      .setSpaceDefaults({ spaceId: h.acmeId, vaultIds: [shared] })
+      .pipe(h.as(h.ownerId));
+    yield* h.server.sql`
+      INSERT INTO vault_entries (entry_id, vault_id, name, kind, value_id, unmasked, version, created_at, updated_at)
+      VALUES
+        ('secret-gateway', ${shared}, 'ANTHROPIC_BASE_URL', 'own', 'value-gateway', 0, 1, '2026-01-01', '2026-01-01'),
+        ('secret-lower', ${shared}, 'lower_case', 'own', 'value-lower', 0, 1, '2026-01-01', '2026-01-01'),
+        ('secret-danger', ${shared}, 'GIT_SSH_COMMAND', 'own', 'value-danger', 0, 1, '2026-01-01', '2026-01-01')
+    `;
+    const thread = yield* h.thread("thread:grace", h.grace.id, h.acmeId, null);
+    const set = yield* h.effective.forThread({ threadId: thread, actingUserId: h.grace.id });
+    assert.deepEqual(h.names(set), ["GIT_SSH_COMMAND", "SHARED_KEY"]);
+    assert.isTrue(set.variables.find((variable) => variable.name === "GIT_SSH_COMMAND")?.dangerous);
+    assert.isFalse(set.variables.find((variable) => variable.name === "SHARED_KEY")?.dangerous);
   }),
 );

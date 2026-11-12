@@ -48,6 +48,13 @@ export const isOwnersPersonal = (
     ? Effect.succeed(false)
     : spaces.principalOf(space.personalOwnerUserId).pipe(Effect.map((who) => who.isOwner));
 
+/**
+ * The defaults nobody unsets, among the Vaults allowed to a Space: the Main vault, in the Owner's
+ * Personal space (the only Space it is allowed to). A Project neither removes nor re-adds them.
+ */
+export const fixedDefaults = (allowed: ReadonlyArray<ReachRow>): ReadonlyArray<VaultId> =>
+  allowed.filter((row) => row.isMain).map((row) => row.vaultId);
+
 /** The Vaults allowed to a Space, archived ones included, in the Owner's order. */
 export const allowedToSpace = (
   sql: SqlClient.SqlClient,

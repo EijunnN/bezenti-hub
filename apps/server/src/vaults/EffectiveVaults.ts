@@ -123,7 +123,6 @@ const make = Effect.gen(function* () {
             ON e.kind = 'link' AND o.entry_id = e.linked_entry_id
             AND o.vault_id = (SELECT vault_id FROM vaults WHERE is_main = 1) AND o.kind <> 'link'
           WHERE e.vault_id IN ${sql.in(vaultIds)}
-          ORDER BY e.name
         `;
 
   const forThread = Effect.fn("EffectiveVaults.forThread")(function* (input: {
@@ -152,14 +151,20 @@ const make = Effect.gen(function* () {
       return yield* fail("forbidden", "You no longer work in this Thread's Space.");
     }
 
-    const reach = yield* Effect.gen(function* () {
-      const ownersPersonal = yield* VaultReach.isOwnersPersonal(spaces, space);
-      const allowed = yield* VaultReach.allowedToSpace(sql, space.id, ownersPersonal);
-      const defaults = yield* VaultReach.chosenDefaults(sql, space.id);
-      const choices = projectId === null ? [] : yield* VaultReach.projectChoices(sql, projectId);
-      const ownVaults = yield* VaultReach.allowedToUser(sql, input.actingUserId);
-      return { ownersPersonal, allowed, defaults, choices, ownVaults };
-    }).pipe(Effect.catch(storage("read the Thread's Vaults")));
+    const reach = yield* Effect.all(
+      {
+        allowed: VaultReach.isOwnersPersonal(spaces, space).pipe(
+          Effect.flatMap((ownersPersonal) =>
+            VaultReach.allowedToSpace(sql, space.id, ownersPersonal),
+          ),
+        ),
+        defaults: VaultReach.chosenDefaults(sql, space.id),
+        choices:
+          projectId === null ? Effect.succeed([]) : VaultReach.projectChoices(sql, projectId),
+        ownVaults: VaultReach.allowedToUser(sql, input.actingUserId),
+      },
+      { concurrency: "unbounded" },
+    ).pipe(Effect.catch(storage("read the Thread's Vaults")));
 
     const allowedById = new Map(reach.allowed.map((row) => [row.vaultId, row]));
     const removed = new Set(
@@ -178,14 +183,13 @@ const make = Effect.gen(function* () {
     // The User's own first, then the Project's adds, then the defaults (the Main vault first where
     // it is one); every Space-side Vault only if allowed to the Space, minus the Project's removes.
     for (const row of reach.ownVaults) take(row, "user");
+    // The fixed defaults (the Main vault in the Owner's Personal space): never a Project's choice.
+    const fixed = new Set(VaultReach.fixedDefaults(reach.allowed));
     for (const row of reach.allowed) {
-      if (added.has(row.vaultId)) take(row, "project");
+      if (added.has(row.vaultId) && !fixed.has(row.vaultId)) take(row, "project");
     }
-    const defaults = [
-      ...reach.allowed.filter((row) => row.isMain).map((row) => row.vaultId),
-      ...reach.defaults,
-    ];
-    for (const vaultId of defaults) {
+    for (const vaultId of fixed) take(allowedById.get(vaultId), "space");
+    for (const vaultId of reach.defaults) {
       if (!removed.has(vaultId)) take(allowedById.get(vaultId), "space");
     }
 

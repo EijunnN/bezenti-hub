@@ -217,6 +217,13 @@ const spacesOf = (resource: AccessPolicy.Resource): ReadonlyArray<string> => {
   }
 };
 
+/**
+ * A Project's Space in SQL, given its `space_id` column: a Project from before Spaces is the
+ * Owner's Personal space's. The one rule; whoever selects Projects by Space uses it.
+ */
+export const projectSpaceSql = (column: string) =>
+  `COALESCE(${column}, 'personal:' || (SELECT user_id FROM users WHERE is_owner = 1))`;
+
 const isAccessDenied = Schema.is(SpaceAccessDeniedError);
 const isNotFound = Schema.is(SpaceNotFoundError);
 
@@ -1161,7 +1168,7 @@ const make = Effect.gen(function* () {
       FROM (
         SELECT COALESCE(owner_user_id, ${sql.literal(OWNER_ID)}) AS owner_user_id, project_id,
           archived_at IS NOT NULL AS archived,
-          COALESCE(space_id, 'personal:' || ${sql.literal(OWNER_ID)}) AS space_id
+          ${sql.literal(projectSpaceSql("space_id"))} AS space_id
         FROM projection_projects WHERE project_id = ${projectId}
       ) item LEFT JOIN spaces s ON s.space_id = item.space_id
     `,

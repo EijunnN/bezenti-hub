@@ -32,6 +32,7 @@ import {
   type VaultSummary,
   type VaultUpdateInput,
   type VaultWarning,
+  type InstallationUser,
   // Spec 5 ticket 03.
   type VaultAllowance,
   type VaultAllowInput,
@@ -56,6 +57,7 @@ import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import { projectSpaceSql } from "../spaces/SpaceDirectory.ts";
 import * as VaultKeyCheck from "./VaultKeyCheck.ts";
 import * as VaultReach from "./VaultReach.ts";
 
@@ -374,8 +376,14 @@ const make = Effect.gen(function* () {
     return { userId, can };
   });
 
-  /** The Vaults' Spaces, allowances and allowed Users, in a few reads. */
-  const spacesOf = Effect.fn("Vaults.knownOf")(function* (rows: ReadonlyArray<VaultRow>) {
+  /**
+   * The Vaults' Spaces and allowances, in a few reads; the allowed Users' names only for `who`,
+   * when they manage one of the Vaults (whom a Vault reaches is the Owner's to know), in one read.
+   */
+  const spacesOf = Effect.fn("Vaults.knownOf")(function* (
+    rows: ReadonlyArray<VaultRow>,
+    who?: { readonly userId: UserId; readonly can: Can },
+  ) {
     const vaultIds = rows.map((row) => row.vaultId);
     const allowanceRows =
       vaultIds.length === 0
@@ -400,14 +408,18 @@ const make = Effect.gen(function* () {
       .spacesById([...spaceIds])
       .pipe(Effect.catch(storage("read the Vaults' Organizations")));
     const userNames = new Map<string, string>();
-    for (const allowance of allowanceRows) {
-      if (allowance.subjectKind !== "user" || userNames.has(allowance.subjectId)) continue;
-      const found = yield* spaces
-        .installationUser(allowance.subjectId as UserId)
-        .pipe(Effect.catch(storage("read whom the Vaults are allowed to")));
-      if (Option.isSome(found)) userNames.set(allowance.subjectId, found.value.displayName);
+    const base: Known = { spaces: known, allowances, userNames };
+    const named =
+      who !== undefined &&
+      allowanceRows.some((allowance) => allowance.subjectKind === "user") &&
+      rows.some((row) => who.can("vault.manage", resourceOf(row, base)));
+    if (named) {
+      const users = yield* spaces
+        .listUsers(who.userId)
+        .pipe(Effect.orElseSucceed((): ReadonlyArray<InstallationUser> => []));
+      for (const user of users) userNames.set(user.id, user.displayName);
     }
-    return { spaces: known, allowances, userNames } satisfies Known;
+    return base;
   });
 
   const findVault = (vaultId: string) =>
@@ -427,7 +439,7 @@ const make = Effect.gen(function* () {
     const { userId, can } = yield* caller;
     const row = yield* findVault(vaultId);
     if (Option.isNone(row)) return yield* fail("not-found", NOT_FOUND);
-    const known = yield* spacesOf([row.value]);
+    const known = yield* spacesOf([row.value], { userId, can });
     const resource = resourceOf(row.value, known);
     if (!can("vault.view", resource)) return yield* fail("not-found", NOT_FOUND);
     if (!can(action, resource)) {
@@ -616,11 +628,12 @@ const make = Effect.gen(function* () {
   });
 
   const list = Effect.gen(function* () {
-    const { can } = yield* caller;
+    const who = yield* caller;
+    const { can } = who;
     const rows = yield* sql<VaultRow>`
       SELECT ${sql.literal(VAULT_COLUMNS)} FROM vaults v ORDER BY v.is_main DESC, v.position, v.name
     `.pipe(Effect.catch(storage("read the Vaults")));
-    const known = yield* spacesOf(rows);
+    const known = yield* spacesOf(rows, who);
     const vaults = rows
       .filter((row) => can("vault.view", resourceOf(row, known)))
       .map((row) => summaryOf(row, known, can));
@@ -676,7 +689,7 @@ const make = Effect.gen(function* () {
       .pipe(Effect.catch(orStorage("create the Vault")));
     const row = yield* findVault(vaultId);
     if (Option.isNone(row)) return yield* fail("not-found", NOT_FOUND);
-    return summaryOf(row.value, yield* spacesOf([row.value]), can);
+    return summaryOf(row.value, yield* spacesOf([row.value], { userId, can }), can);
   });
 
   const update = Effect.fn("Vaults.update")(function* (input: VaultUpdateInput) {
@@ -735,7 +748,7 @@ const make = Effect.gen(function* () {
       .pipe(Effect.catch(orStorage("change the Vault")));
     const updated = yield* findVault(row.vaultId);
     if (Option.isNone(updated)) return yield* fail("not-found", NOT_FOUND);
-    return summaryOf(updated.value, yield* spacesOf([updated.value]), can);
+    return summaryOf(updated.value, yield* spacesOf([updated.value], { userId, can }), can);
   });
 
   const remove = Effect.fn("Vaults.remove")(function* (input: VaultDeleteInput) {
@@ -1012,23 +1025,24 @@ const make = Effect.gen(function* () {
       );
     }
     const subject = input.subject;
-    let subjectName: string;
+    const subjectId = subject.kind === "space" ? subject.spaceId : subject.userId;
+    // Allowing needs a living Space or User; taking back never does (it may have been deleted).
+    let subjectName: string = subjectId;
     if (subject.kind === "space") {
       const found = yield* spaces
         .spaceById(subject.spaceId)
         .pipe(Effect.catch(storage("read the Space")));
-      if (Option.isNone(found)) return yield* fail("not-found", "That Space does not exist.");
-      subjectName = found.value.name;
+      if (Option.isSome(found)) subjectName = found.value.name;
+      else if (input.allowed) return yield* fail("not-found", "That Space does not exist.");
     } else {
       const found = yield* spaces
         .installationUser(subject.userId)
         .pipe(Effect.catch(storage("read the User")));
-      if (Option.isNone(found) || (input.allowed && found.value.status === "removed")) {
+      if (Option.isSome(found)) subjectName = found.value.displayName;
+      if (input.allowed && (Option.isNone(found) || found.value.status === "removed")) {
         return yield* fail("not-found", "That User does not exist.");
       }
-      subjectName = found.value.displayName;
     }
-    const subjectId = subject.kind === "space" ? subject.spaceId : subject.userId;
     const at = yield* now;
     yield* sql
       .withTransaction(
@@ -1057,7 +1071,8 @@ const make = Effect.gen(function* () {
               `;
               yield* sql`
                 DELETE FROM project_vault_choices WHERE vault_id = ${row.vaultId} AND project_id IN (
-                  SELECT project_id FROM projection_projects WHERE space_id = ${subjectId}
+                  SELECT project_id FROM projection_projects
+                  WHERE ${sql.literal(projectSpaceSql("space_id"))} = ${subjectId}
                 )
               `;
             }
@@ -1074,7 +1089,7 @@ const make = Effect.gen(function* () {
       .pipe(Effect.catch(orStorage("change whom the Vault is allowed to")));
     const updated = yield* findVault(row.vaultId);
     if (Option.isNone(updated)) return yield* fail("not-found", NOT_FOUND);
-    return summaryOf(updated.value, yield* spacesOf([updated.value]), can);
+    return summaryOf(updated.value, yield* spacesOf([updated.value], { userId, can }), can);
   });
 
   /**
@@ -1144,6 +1159,18 @@ const make = Effect.gen(function* () {
     const { defaults, choices, names } = yield* read.pipe(
       Effect.catch(storage("read the Space's Vaults")),
     );
+    // Its names, as `listEntries` would show them: only to whoever may see the Vault.
+    const rows =
+      allowed.length === 0
+        ? []
+        : yield* sql<VaultRow>`
+            SELECT ${sql.literal(VAULT_COLUMNS)} FROM vaults v
+            WHERE v.vault_id IN ${sql.in(allowed.map((row) => row.vaultId))}
+          `.pipe(Effect.catch(storage("read the Space's Vaults")));
+    const known = yield* spacesOf(rows);
+    const visible = new Set(
+      rows.filter((row) => can("vault.view", resourceOf(row, known))).map((row) => row.vaultId),
+    );
     return {
       spaceId: space.id,
       projectId,
@@ -1153,10 +1180,12 @@ const make = Effect.gen(function* () {
         name: row.name,
         isMain: row.isMain,
         archived: row.archived,
-        names: names.filter((entry) => entry.vaultId === row.vaultId).map((entry) => entry.name),
+        names: visible.has(row.vaultId)
+          ? names.filter((entry) => entry.vaultId === row.vaultId).map((entry) => entry.name)
+          : [],
       })),
       defaults: defaults.filter((vaultId) => allowedIds.has(vaultId)),
-      fixedDefaults: allowed.filter((row) => row.isMain).map((row) => row.vaultId),
+      fixedDefaults: VaultReach.fixedDefaults(allowed),
       projectChoices: choices.filter((choice) => allowedIds.has(choice.vaultId)),
     } satisfies VaultChoices;
   });
@@ -1186,13 +1215,25 @@ const make = Effect.gen(function* () {
     const { userId, can, space, allowed } = yield* choiceSpace({ spaceId: input.spaceId });
     if (!can("vault.choose", space)) return yield* refuseChoice(space);
     const byId = new Map<string, VaultReach.ReachRow>(allowed.map((row) => [row.vaultId, row]));
+    const fixed = new Set<string>(VaultReach.fixedDefaults(allowed));
+    // What the Space received as defaults: the stored ones still allowed (stale rows are not).
+    const effectiveBefore = (stored: ReadonlyArray<VaultId>) =>
+      stored.filter((vaultId) => byId.has(vaultId) && !fixed.has(vaultId));
+    const current = new Set(
+      effectiveBefore(
+        yield* VaultReach.chosenDefaults(sql, space.id).pipe(
+          Effect.catch(storage("read the Space's default Vaults")),
+        ),
+      ),
+    );
     const wanted: Array<VaultReach.ReachRow> = [];
     for (const vaultId of new Set(input.vaultIds)) {
       const row = byId.get(vaultId);
       if (row === undefined) return yield* notAllowedHere(vaultId);
-      // The Main vault is a fixed default of the Owner's Personal space; never a chosen one.
-      if (row.isMain) continue;
-      if (row.archived) {
+      // A fixed default (the Main vault in the Owner's Personal space) is never a chosen one.
+      if (fixed.has(vaultId)) continue;
+      // An archived Vault already a default may stay (or be unchecked); it never becomes one.
+      if (row.archived && !current.has(vaultId)) {
         return yield* fail("not-allowed", `${row.name} is archived: restore it first.`);
       }
       wanted.push(row);
@@ -1200,7 +1241,7 @@ const make = Effect.gen(function* () {
     yield* sql
       .withTransaction(
         Effect.gen(function* () {
-          const before = yield* VaultReach.chosenDefaults(sql, space.id);
+          const before = effectiveBefore(yield* VaultReach.chosenDefaults(sql, space.id));
           yield* sql`DELETE FROM space_default_vaults WHERE space_id = ${space.id}`;
           for (const [position, row] of wanted.entries()) {
             yield* sql`
@@ -1248,6 +1289,15 @@ const make = Effect.gen(function* () {
     const row = allowed.find((candidate) => candidate.vaultId === input.vaultId);
     if (input.choice !== "inherit" && row === undefined)
       return yield* notAllowedHere(input.vaultId);
+    if (input.choice !== "inherit" && VaultReach.fixedDefaults(allowed).includes(input.vaultId)) {
+      return yield* fail(
+        "not-allowed",
+        "The Main vault is always a default of your Personal space: a Project neither adds nor removes it.",
+      );
+    }
+    if (input.choice === "add" && row?.archived === true) {
+      return yield* fail("not-allowed", `${row.name} is archived: restore it first.`);
+    }
     yield* sql
       .withTransaction(
         Effect.gen(function* () {
