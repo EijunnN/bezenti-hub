@@ -251,8 +251,10 @@ that choose Vaults and by the effective set:
   write stays in their Organization.
 - **One of the Owner's other Vaults** reaches the Spaces and Users the Owner allowed it to
   (`vaults.allow`, AccessPolicy `vault.manage`: the Owner; audited `vault.allow`). Taking it back
-  from a Space also drops that Space's default and its Projects' choices of it, so allowing it again
-  never brings them back unseen. Allowing it to a User shows the shared-Sandbox warning first
+  never needs the Space or User to exist any more. Taking it back from a Space also drops that
+  Space's default and its Projects' choices of it (Projects by `SpaceDirectory.projectSpaceSql`,
+  so one from before Spaces counts as the Owner's Personal space's), so allowing it again never
+  brings them back unseen. Allowing it to a User shows the shared-Sandbox warning first
   (ADR 0004): only that User's turns, terminals and scripts receive it, but other agents in the
   same Sandbox can read a running process's environment.
 - Allowance rows on the Main vault or on an Organization's Vault are ignored when reading, so a
@@ -266,7 +268,11 @@ that choose Vaults and by the effective set:
 included; an Organization's Admins while it is open): `vaults.spaceDefaults.set` replaces a
 Space's defaults, in order; `vaults.projectChoices.set` adds, removes or clears (`inherit`) one
 Vault for a Project. Both accept only Vaults allowed to the Space (`not-allowed`) and are audited
-`vault.choose` per Vault changed (`scope`, `choice`, `position`, `projectId`). The scratch Project
+`vault.choose` per effective default or choice changed (`scope`, `choice`, `position`,
+`projectId`). An archived Vault never becomes a default or a Project's add; one already a default
+may stay or be unchecked. The fixed defaults (`VaultReach.fixedDefaults`: the Main vault in the
+Owner's Personal space) are never a Project's add or remove, in the service, in `forThread` and in
+the UI. `vaults.choices` shows a Vault's names only to whoever may `vault.view` it. The scratch Project
 (Threads without a Project) takes no choices: it spans every Space. `vaults.choices` reads them for
 whoever sees the Space.
 

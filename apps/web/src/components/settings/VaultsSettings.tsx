@@ -1,9 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
-  type AtomCommandResult,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
-import {
   type AuthAccount,
   type EnvironmentId,
   MAIN_VAULT_ID,
@@ -30,8 +26,8 @@ import { Input } from "../ui/input";
 import { emptyStepUp, StepUpFields, toStepUp } from "./AccountSettingsSection";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 import { SpaceDefaultVaults, VaultAllowances } from "./VaultChoices";
+import { SELECT_CLASS, settle } from "./vaultCommands";
 
-const SELECT_CLASS = "h-8 w-full rounded-md border border-input bg-background px-2 text-sm";
 const VALUE_INPUT_PROPS = {
   // Not a login: no password manager prompt, but hidden as typed.
   type: "text",
@@ -46,13 +42,6 @@ const VALUE_INPUT_PROPS = {
 /** A revealed value stays on screen this long, at most. */
 const REVEAL_MS = 60_000;
 const CONFIRM_DANGEROUS = "This value changes how tools run";
-
-/** The command's answer, or its error's own message (a Vault's errors name secrets, never values). */
-async function settle<A, E>(pending: Promise<AtomCommandResult<A, E>>): Promise<A> {
-  const result = await pending;
-  if (result._tag === "Success") return result.value;
-  throw new Error(errorMessageOf(squashAtomCommandFailure(result), "That did not work."));
-}
 
 const nameHint = (name: string, isOwner: boolean) => {
   if (name.length === 0) return null;

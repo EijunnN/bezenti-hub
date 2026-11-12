@@ -244,6 +244,8 @@ function ProjectVaultsSettings({ group }: { group: SidebarProjectSnapshot }) {
   );
   const project = primaryMembers.length === 1 ? primaryMembers[0] : undefined;
   if (primaryEnvironmentId === null || view === null || project === undefined) return null;
+  // Threads without a Project take their Space's defaults: the scratch Project chooses none.
+  if (project.isScratch === true) return null;
   return (
     <ProjectVaults
       environmentId={primaryEnvironmentId}
