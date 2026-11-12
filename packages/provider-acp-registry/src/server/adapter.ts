@@ -259,6 +259,8 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
           restartRuntimeAfterPromptError: isCopilotLostSessionError,
         }),
     makeRuntime: options.makeRuntime ?? makeAcpRegistryRuntime(runtimeOptions, catalog),
+    // Its own runtime starts the agent with `processEnvironment` (and so a Thread's secrets).
+    ...(options.makeRuntime === undefined ? { receivesSecretEnv: true as const } : {}),
     ...(runtimeCoordinator === undefined
       ? {}
       : {

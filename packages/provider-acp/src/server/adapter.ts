@@ -344,6 +344,11 @@ export interface AcpAdapterV2Flavor {
       }
     | undefined;
   readonly withRuntimeStartup?: <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
+  /**
+   * Spec 5: its `makeRuntime` starts the agent with `processEnvironment`, so a Thread's secrets
+   * (merged into it) reach the agent's process. Without it, a session with secrets is refused.
+   */
+  readonly receivesSecretEnv?: true;
   readonly makeRuntime: (
     input: AcpAdapterV2RuntimeInput,
   ) => Effect.Effect<
@@ -1680,6 +1685,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: options.instanceId,
     driver,
+    ...(flavor.receivesSecretEnv === true ? { receivesSecretEnv: true as const } : {}),
     getCapabilities: Effect.fn("AcpAdapter.getCapabilities")(function () {
       return Effect.succeed(flavor.capabilities);
     }),
@@ -2306,9 +2312,17 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             mcpServers: mcpContext.servers,
             acpMcpServers: mcpContext.acpServers,
             httpMcpServers: mcpContext.httpServers,
-            ...(mcpContext.processEnvironment === undefined
+            // Spec 5: the Thread's secrets go into the agent process's environment with the rest.
+            ...(mcpContext.processEnvironment === undefined && input.secretEnv === undefined
               ? {}
-              : { processEnvironment: mcpContext.processEnvironment }),
+              : {
+                  processEnvironment: {
+                    ...mcpContext.processEnvironment,
+                    ...Object.fromEntries(
+                      (input.secretEnv?.variables ?? []).map((v) => [v.name, v.value]),
+                    ),
+                  },
+                }),
             ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
             interruptPromptOnCancel: flavor.interruptPromptOnCancel ?? false,
             clientCapabilities: {
