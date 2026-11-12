@@ -30,3 +30,14 @@
 - Web: Settings → Vaults (`/settings/vaults`). Nombres accesibles: «Vault name», «Organization», «Create Vault», lista «Secrets in <Vault>», formulario «Add a secret to <Vault>» con «Variable name», «Value», «Add secret»; grupo «From the Main vault into <Vault>» con «Main vault secret», «Name here», «Add Secret link», «Add copy»; por secreto «Replace value of <NAME>», «New value of <NAME>», «Save value», «Delete <NAME>», «Reveal <NAME>», «Confirm and reveal <NAME>», «Value of <NAME>», «Hide»; «Delete Vault <Vault>».
 - Prueba real (`makita-livepass-s5-02`): todo PASS; los cuatro valores no están en ningún archivo de la base (incluido el WAL), del home del Hub ni del log.
 - Riesgos: borrar una Organization no borra aún sus Vaults (ticket 07; quedan solo para el Owner); un Admin de una Organization edita los Vaults de esa Organization (los permitidos por allowance llegan con el ticket 03); revelar no pide «factor en los últimos 5 min» sino el factor en la propia petición, como la copia de la clave.
+
+**Hecho tras la revisión** (12 hallazgos):
+
+- Nombres: `secretNameRisk` en contracts (comparación en mayúsculas). `gateway` (`T3_*`, `T3CODE_*`, variables de la AI gateway) se rechaza para todos; `dangerous` (opciones de proceso, cargador e intérpretes, `GIT_*`, `SSH_*`, proxies y CA, home, temp, shell, `XDG_*`, `BASH_FUNC_*` y claves y URLs de proveedores de IA como `ANTHROPIC_*`, `OPENAI_*`, `GEMINI_*`, `GOOGLE_*`) solo el Owner, con `confirmDangerous`, auditado `dangerous: true` (acción `vault.dangerousName` de `AccessPolicy`). Un Admin no la crea, no renombra a ella ni toca la del Owner.
+- Valores por id: cada escritura va a un `value_id` nuevo; fila, versión y auditoría en una transacción; el valor viejo se borra después; si falla, se borra el nuevo. El barrido de arranque solo mira la carpeta de valores.
+- Almacén con espacio propio: `ServerSecretStore.VaultValueStore` en `secrets/vault-values/` con propósito `vault-value` por carpeta (`MasterKeyFile.STORE_NAMESPACES`), no por prefijo; los nombres del almacén propio no pueden contener `/`. Sin clave (máquina unida) falla en vez de escribir en claro.
+- Máquina unida: `Vaults.layer` no escribe nada (ni Main vault ni comprobación) y responde `unavailable`.
+- Links: quien no ve el Main vault no sabe si el original es corto, su nombre, ni que se borró (los Admins sí ven «broken»).
+- `remove()` lee los valores dentro de la transacción (`DELETE … RETURNING`); la comprobación de clave de la base corre antes de escribir nada y su mensaje dice qué se tocó.
+- Rendimiento: `SpaceDirectory.authorizer` decide una vez por petición; Spaces con un solo `spacesById`.
+- Web: el formulario se vacía solo si se guardó; carga en paralelo y recarga solo el Vault cambiado; mutaciones en `CLIENT_GUARDED_RPC_SCOPES` (access:write) y `permissionAtom` en la UI; un valor revelado se oculta tras 60 s o al cambiar la versión; casilla «This value changes how tools run».
