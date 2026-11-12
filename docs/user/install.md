@@ -619,6 +619,21 @@ there and says so, so updating never interrupts work. Provider sign-ins live
 in the Sandbox's own files, not in the image, so they survive every update.
 Each build and update is recorded in the audit log.
 
+### The AI gateway
+
+The Hub runs its own copy of [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI),
+which later lets agents use the AI accounts you share. On first start it downloads the
+release this version of T3 Code pins, checks it against a checksum kept in T3 Code itself,
+and runs it on the Hub's loopback address, where only the Hub reaches it. Nothing to install
+or configure.
+
+**Settings → AI gateway** shows whether it is running, its version and uptime. Opening it
+asks GitHub for the newest release; **Update to …** downloads and checks that release,
+starts it beside the current one and switches once it answers, and **Roll back to …** returns
+to the one before. Both are recorded in the audit log. A Hub run from source (`vp run dev`)
+runs no gateway unless started with `T3CODE_AI_GATEWAY=managed`; `T3CODE_AI_GATEWAY=off`
+turns it off on any Hub.
+
 ### Dedicate a machine to an organization
 
 A server of your own, such as a VPS, can serve a whole organization instead of

@@ -14,6 +14,7 @@ import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as Tracer from "effect/Tracer";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 
 import type { AiGatewayStatus } from "@t3tools/contracts";
@@ -87,6 +88,7 @@ interface Harness {
   readonly store: ReturnType<typeof memorySecretStore>;
   readonly audits: Array<AuditLog.AuditRecord>;
   readonly logs: Array<string>;
+  readonly spans: Array<Tracer.NativeSpan>;
 }
 
 const makeHarness = (): Harness => {
@@ -94,7 +96,7 @@ const makeHarness = (): Harness => {
   const stateDir = NodePath.join(dir, "state");
   const runDir = NodePath.join(dir, "memory");
   NodeFS.mkdirSync(stateDir, { mode: 0o700 });
-  return { dir, stateDir, runDir, store: memorySecretStore(), audits: [], logs: [] };
+  return { dir, stateDir, runDir, store: memorySecretStore(), audits: [], logs: [], spans: [] };
 };
 
 /** Starts the gateway in its own scope, as a Hub would, with these releases standing for GitHub. */
@@ -150,6 +152,15 @@ const startGateway = (
         ),
       ),
       Scope.provide(scope),
+      Effect.withTracer(
+        Tracer.make({
+          span: (spanOptions) => {
+            const span = new Tracer.NativeSpan(spanOptions);
+            harness.spans.push(span);
+            return span;
+          },
+        }),
+      ),
     );
     return { gateway, scope };
   });
@@ -261,6 +272,16 @@ describe.skipIf(!posix || platform === undefined)("the Hub's AI gateway (CLIProx
         for (const line of harness.logs) {
           assert.notInclude(line, managementKey!);
           assert.notInclude(line, clientKey!);
+        }
+        // Nor in a span: the health checks are traced, their keys are not.
+        const traced = harness.spans.flatMap((span) => [
+          span.name,
+          ...Array.from(span.attributes.values(), (value) => JSON.stringify(value)),
+        ]);
+        assert.include(traced, "CliproxyManagement.health");
+        for (const value of traced) {
+          assert.notInclude(value, managementKey!);
+          assert.notInclude(value, clientKey!);
         }
         yield* Scope.close(scope, Exit.void);
       }),
