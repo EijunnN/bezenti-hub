@@ -74,7 +74,7 @@ export function MasterKeySettingsSection() {
     try {
       await action();
     } catch (cause) {
-      setError(errorMessageOf(cause, "The master key action failed."));
+      setError(errorMessageOf(cause, "That did not work. Try again."));
     } finally {
       setPending(false);
     }

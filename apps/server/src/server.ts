@@ -196,6 +196,7 @@ import * as DedicatedHost from "./environments/DedicatedHost.ts";
 import * as SandboxImage from "./sandboxes/SandboxImage.ts";
 import * as SandboxImageHttp from "./sandboxes/http.ts";
 import * as VaultsHttp from "./vaults/http.ts";
+import * as Vaults from "./vaults/Vaults.ts";
 import * as MasterKeyBackup from "./auth/MasterKeyBackup.ts";
 import * as AiGateway from "./ai/AiGateway.ts";
 import * as CliproxyReleases from "./ai/CliproxyReleases.ts";
@@ -493,6 +494,8 @@ const layerAuth = Layer.mergeAll(
   InstallationUserService.layer,
   SpaceVisibility.layer,
   AuditLog.layer,
+  // Vaults: their start checks the database against the master key and sweeps orphaned values.
+  Vaults.layer.pipe(Layer.provide(AuditLog.layer)),
   // The Sandboxes' base image: built on this Hub, one build at a time.
   SandboxImage.layer,
   // Sandboxes only with a runtime that runs them (`T3CODE_SANDBOX_RUNTIME`, or rootless Podman);

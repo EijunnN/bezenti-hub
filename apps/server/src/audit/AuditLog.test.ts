@@ -598,10 +598,15 @@ it.effect(
         // vaults/MasterKeyHttp.test.ts (export); `t3 secrets key rotate` (cli/secrets.ts)
         "secret.master_key.export",
         "secret.master_key.rotate",
+        // vaults/Vaults.test.ts
+        "secret.reveal",
+        "secret.edit",
+        "vault.create",
+        "vault.update",
+        "vault.delete",
       ];
-      const hooks = ["secret.reveal", "secret.edit"];
       assert.sameMembers(
-        [...new Set([...expected.map((row) => row.action), ...recordedElsewhere, ...hooks])],
+        [...new Set([...expected.map((row) => row.action), ...recordedElsewhere])],
         [...AuditAction.literals],
       );
     }),

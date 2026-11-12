@@ -19,7 +19,12 @@ const KEY_TEXT_PREFIX = "t3-master-key-v1:";
 const PROOF_LENGTH = 8;
 
 /** What a sealed value is for: each gets its own subkey. */
-export type SealPurpose = "server-secret" | "key-check" | "backup-record" | "secret-file";
+export type SealPurpose =
+  | "server-secret"
+  | "key-check"
+  | "backup-record"
+  | "secret-file"
+  | "vault-value";
 
 const hkdf = (key: Buffer, info: string, length: number) =>
   Buffer.from(NodeCrypto.hkdfSync("sha256", key, Buffer.alloc(0), info, length));

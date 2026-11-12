@@ -40,6 +40,7 @@ import * as HubPreviewRoute from "../preview/hubPreviewRoute.ts";
 import type { PreviewOriginPattern } from "../preview/PreviewOrigin.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import * as VaultsHttp from "../vaults/http.ts";
+import * as Vaults from "../vaults/Vaults.ts";
 import * as MasterKeyBackup from "./MasterKeyBackup.ts";
 import * as SandboxImageHttp from "../sandboxes/http.ts";
 import * as SandboxImage from "../sandboxes/SandboxImage.ts";
@@ -208,6 +209,7 @@ const makeLayerServices = (
           InstallationUserService.layer,
           SpaceVisibility.layer,
           AuditLog.layer,
+          Vaults.layer.pipe(Layer.provide(AuditLog.layer)),
           // The Hub machine runs Threads here unless a test says otherwise (the dev setting). The
           // Owner's SSH installs register machines with it, by the test's policy if it has one.
           SshInstall.layer.pipe(

@@ -209,6 +209,9 @@ const spacesOf = (resource: AccessPolicy.Resource): ReadonlyArray<string> => {
       return [resource.from.id, resource.to.id];
     case "environment":
       return resource.space === undefined ? [] : [resource.space.id];
+    // The Owner's own Vaults (the Main vault among them) are no Space's.
+    case "vault":
+      return resource.space === null ? ["installation"] : [resource.space.id];
     default:
       return ["installation"];
   }
@@ -526,6 +529,16 @@ export class SpaceDirectory extends Context.Service<
       action: AccessPolicy.Action,
       spaceId: SpaceId,
     ) => Effect.Effect<{ readonly id: SpaceId; readonly name: string }, SpaceClaimError>;
+    /**
+     * What the User may do, decided once per request: the policy, and nothing outside the one
+     * Space an agent bound to a Space's machine may act in (`CommandActor.spaceLimit`).
+     */
+    readonly authorizer: (
+      userId: UserId,
+    ) => Effect.Effect<
+      (action: AccessPolicy.Action, resource: AccessPolicy.Resource) => boolean,
+      SpaceDirectoryStorageError
+    >;
     /**
      * Makes the User a Member of the Organization with the Role; false when they already are one.
      * Run it in the caller's transaction (accepting an Invitation), then `changed` after it.
@@ -1826,6 +1839,13 @@ const make = Effect.gen(function* () {
     createOrganization,
     claimCreation,
     authorize,
+    authorizer: Effect.fn("SpaceDirectory.authorizer")(function* (userId: UserId) {
+      const principal = yield* currentPrincipal(userId);
+      const limit = yield* CommandActor.spaceLimit;
+      return (action: AccessPolicy.Action, resource: AccessPolicy.Resource) =>
+        (limit === undefined || spacesOf(resource).every((spaceId) => spaceId === limit)) &&
+        allows(principal, action, resource);
+    }),
     authorizeItem,
     actingUser,
     threadOwner,

@@ -132,26 +132,54 @@ const readKeyFile = Effect.fn("MasterKeyFile.readKeyFile")(function* (file: stri
   return Option.some(key);
 });
 
+/**
+ * The store's folders and what each one's entries are sealed for: the store's own, and a Vault's
+ * values (`ServerSecretStore.VaultValueStore`). The folder, never the name, tells the purpose.
+ */
+export const STORE_NAMESPACES = [
+  { dir: "", purpose: "server-secret" },
+  { dir: "vault-values", purpose: "vault-value" },
+] as const satisfies ReadonlyArray<{
+  readonly dir: string;
+  readonly purpose: SecretCipher.SealPurpose;
+}>;
+export type StoreNamespace = (typeof STORE_NAMESPACES)[number];
+export const VAULT_VALUES_NAMESPACE: StoreNamespace = STORE_NAMESPACES[1];
+
 interface Entry {
+  /** Unique across folders: `<dir>/<name>`. */
+  readonly key: string;
+  /** The entry's name, its associated data. */
   readonly name: string;
   readonly file: string;
+  readonly purpose: SecretCipher.SealPurpose;
 }
 
-/** The store's entries, told apart by name only: sealed (`.sealed`) and in clear (`.bin`). */
+/** Every folder's entries, told apart by name: sealed (`.sealed`) and in clear (`.bin`). */
 const listEntries = Effect.fn("MasterKeyFile.listEntries")(function* (secretsDir: string) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const names = yield* fs.readDirectory(secretsDir).pipe(Effect.catch(io(`list ${secretsDir}`)));
   const sealed = new Map<string, Entry>();
   const plain = new Map<string, Entry>();
-  for (const fileName of names.toSorted()) {
-    for (const [extension, into] of [
-      [SEALED_EXTENSION, sealed],
-      [PLAIN_EXTENSION, plain],
-    ] as const) {
-      if (fileName.endsWith(extension) && fileName.length > extension.length) {
-        const name = fileName.slice(0, -extension.length);
-        into.set(name, { name, file: path.join(secretsDir, fileName) });
+  for (const namespace of STORE_NAMESPACES) {
+    const dir = namespace.dir === "" ? secretsDir : path.join(secretsDir, namespace.dir);
+    const names =
+      namespace.dir === ""
+        ? yield* fs.readDirectory(dir).pipe(Effect.catch(io(`list ${dir}`)))
+        : yield* fs.readDirectory(dir).pipe(
+            Effect.catchReason("PlatformError", "NotFound", () => Effect.succeed([])),
+            Effect.catch(io(`list ${dir}`)),
+          );
+    for (const fileName of names.toSorted()) {
+      for (const [extension, into] of [
+        [SEALED_EXTENSION, sealed],
+        [PLAIN_EXTENSION, plain],
+      ] as const) {
+        if (fileName.endsWith(extension) && fileName.length > extension.length) {
+          const name = fileName.slice(0, -extension.length);
+          const key = `${namespace.dir}/${name}`;
+          into.set(key, { key, name, file: path.join(dir, fileName), purpose: namespace.purpose });
+        }
       }
     }
   }
@@ -315,7 +343,9 @@ export const openKeyring = Effect.fn("MasterKeyFile.openKeyring")(function* (
         );
       }
     }
-    const inClear = [...plain.keys()].filter((name) => !isReplayMarker(name)).length;
+    const inClear = [...plain.values()].filter(
+      (entry) => !entry.key.startsWith("/") || !isReplayMarker(entry.name),
+    ).length;
     if (inClear > 0 || Option.isSome(next)) {
       return yield* fail(
         "needs-hub",
@@ -348,7 +378,7 @@ export const openKeyring = Effect.fn("MasterKeyFile.openKeyring")(function* (
         `The master key ${keyFile} (id ${current.id}) is not the key that encrypted ${entry.file} (id ${header.keyId}). The Hub does not start and changed nothing. ${RESTORE_HINT}`,
       );
     }
-    sealedUnder.set(entry.name, header.keyId);
+    sealedUnder.set(entry.key, header.keyId);
   }
   let checkedPath = Option.none<string>();
   let checkUnder = Option.none<string>();
@@ -373,7 +403,7 @@ export const openKeyring = Effect.fn("MasterKeyFile.openKeyring")(function* (
   // What a write would change: entries in clear, entries under another key, expired markers.
   const expired = new Set<string>();
   for (const entry of [...sealed.values(), ...plain.values()]) {
-    if (!isReplayMarker(entry.name)) continue;
+    if (!entry.key.startsWith("/") || !isReplayMarker(entry.name)) continue;
     const info = yield* statOf(entry.file);
     if (Option.exists(info.mtime, (mtime) => mtime.getTime() < markerCutoff)) {
       expired.add(entry.file);
@@ -384,7 +414,7 @@ export const openKeyring = Effect.fn("MasterKeyFile.openKeyring")(function* (
     (entry) =>
       !expired.has(entry.file) &&
       !vanished.has(entry.file) &&
-      sealedUnder.get(entry.name) !== target.id,
+      sealedUnder.get(entry.key) !== target.id,
   );
   const pending =
     toSeal.length > 0 || toReseal.length > 0 || expired.size > 0 || Option.isSome(next);
@@ -396,26 +426,26 @@ export const openKeyring = Effect.fn("MasterKeyFile.openKeyring")(function* (
       if (expired.has(entry.file)) continue;
       const stored = yield* readEntry(entry.file);
       if (Option.isNone(stored)) continue;
-      const result = SecretCipher.open(keys, "server-secret", entry.name, stored.value.bytes);
+      const result = SecretCipher.open(keys, entry.purpose, entry.name, stored.value.bytes);
       if (result._tag !== "opened") {
         return yield* fail(
           "damaged",
           `${entry.file} does not open with its key: it was altered or moved from another name. Nothing was written. Remove it, or restore it from a backup.`,
         );
       }
-      opened.set(entry.name, result.plaintext);
+      opened.set(entry.key, result.plaintext);
     }
     for (const file of expired) yield* removeFile(file);
     let written = 0;
     for (const entry of toSeal) {
-      const twin = sealed.get(entry.name);
+      const twin = sealed.get(entry.key);
       if (twin === undefined || expired.has(twin.file)) {
         const stored = yield* readEntry(entry.file);
         if (Option.isNone(stored)) continue;
         // The first encrypting build kept sealed values in `.bin`: one that opens (its tag
         // verifies under its name and purpose) is already sealed, never sealed a second time.
-        const already = SecretCipher.open(keys, "server-secret", entry.name, stored.value.bytes);
-        const sealedPath = path.join(secretsDir, `${entry.name}${SEALED_EXTENSION}`);
+        const already = SecretCipher.open(keys, entry.purpose, entry.name, stored.value.bytes);
+        const sealedPath = path.join(path.dirname(entry.file), `${entry.name}${SEALED_EXTENSION}`);
         const header = SecretCipher.parseHeader(stored.value.bytes);
         if (already._tag === "opened" && header._tag === "sealed" && header.keyId === target.id) {
           yield* fs.rename(entry.file, sealedPath).pipe(Effect.catch(io(`rename ${entry.file}`)));
@@ -425,7 +455,7 @@ export const openKeyring = Effect.fn("MasterKeyFile.openKeyring")(function* (
         const plaintext = already._tag === "opened" ? already.plaintext : stored.value.bytes;
         yield* writeAtomically(
           sealedPath,
-          SecretCipher.seal(target, "server-secret", entry.name, plaintext),
+          SecretCipher.seal(target, entry.purpose, entry.name, plaintext),
           timesOf(stored.value.info),
         ).pipe(Effect.catch(io(`encrypt ${entry.file}`)));
         written += 1;
@@ -434,12 +464,12 @@ export const openKeyring = Effect.fn("MasterKeyFile.openKeyring")(function* (
       yield* removeFile(entry.file);
     }
     for (const entry of toReseal) {
-      const plaintext = opened.get(entry.name);
+      const plaintext = opened.get(entry.key);
       if (plaintext === undefined) continue;
       const info = yield* statOf(entry.file);
       yield* writeAtomically(
         entry.file,
-        SecretCipher.seal(target, "server-secret", entry.name, plaintext),
+        SecretCipher.seal(target, entry.purpose, entry.name, plaintext),
         timesOf(info),
       ).pipe(Effect.catch(io(`re-encrypt ${entry.file}`)));
       written += 1;
@@ -485,7 +515,10 @@ export const openKeyring = Effect.fn("MasterKeyFile.openKeyring")(function* (
       previousKeyId: current.id,
     });
   }
-  yield* removeStaleTemps(secretsDir, /./);
+  for (const namespace of STORE_NAMESPACES) {
+    const dir = namespace.dir === "" ? secretsDir : path.join(secretsDir, namespace.dir);
+    yield* removeStaleTemps(dir, /./);
+  }
   yield* removeStaleTemps(path.dirname(keyFile), keyFileNamePattern(path.basename(keyFile)));
 
   const previousKey = Option.isSome(next) ? Option.some(current) : previous;
@@ -619,7 +652,7 @@ export const importKey = Effect.fn("MasterKeyFile.importKey")(function* (
   for (const entry of sealed.values()) {
     const stored = yield* readEntry(entry.file);
     if (Option.isNone(stored)) continue;
-    const opened = SecretCipher.open([key], "server-secret", entry.name, stored.value.bytes);
+    const opened = SecretCipher.open([key], entry.purpose, entry.name, stored.value.bytes);
     if (opened._tag !== "opened") return yield* refuse;
   }
   const check = yield* readEntry(path.join(config.secretsDir, KEY_CHECK_FILE));

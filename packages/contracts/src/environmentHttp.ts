@@ -84,6 +84,8 @@ import {
   MasterKeyBackupRequest,
   MasterKeyBackupResult,
   MasterKeyStatus,
+  VaultRevealRequest,
+  VaultRevealResult,
 } from "./vaults.ts";
 import {
   ChangeHubEnvironmentModeRequest,
@@ -238,6 +240,7 @@ export const EnvironmentInternalErrorReason = Schema.Literals([
   "environments_failed",
   "sandbox_image_failed",
   "master_key_failed",
+  "vaults_failed",
   "internal_error",
 ]);
 export type EnvironmentInternalErrorReason = typeof EnvironmentInternalErrorReason.Type;
@@ -340,6 +343,7 @@ export const EnvironmentResourceNotFoundReason = Schema.Literals([
   "environment_not_found",
   "join_request_not_found",
   "ssh_install_run_not_found",
+  "secret_not_found",
 ]);
 export type EnvironmentResourceNotFoundReason = typeof EnvironmentResourceNotFoundReason.Type;
 
@@ -1541,6 +1545,20 @@ class EnvironmentVaultsHttpApi extends HttpApiGroup.make("vaults")
       payload: MasterKeyBackupConfirmRequest,
       success: MasterKeyStatus,
       error: [...EnvironmentVaultsErrors, EnvironmentHttpConflictError],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  // A secret's value: the Owner only, with a strong factor in the request; the only door that
+  // reads one. HTTP rather than WS, for the same reason as the key.
+  .add(
+    HttpApiEndpoint.post("reveal", "/api/vaults/reveal", {
+      headers: OptionalBearerHeaders,
+      payload: VaultRevealRequest,
+      success: VaultRevealResult,
+      error: [
+        ...EnvironmentVaultsErrors,
+        EnvironmentRateLimitedError,
+        EnvironmentResourceNotFoundError,
+      ],
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 

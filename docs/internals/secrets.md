@@ -181,7 +181,63 @@ A `file` answer is for the agent's own shell, which reads it by path.
   Hub machine runs agents (development, `T3CODE_HUB_RUNS_AGENTS`, and the desktop app); a Thread in
   a Sandbox or on a joined machine cannot read a path on the Hub.
 
+## Vaults (spec 5, ticket 02)
+
+A Vault is a named set of secrets, each under an environment-variable name. `vaults/Vaults.ts`
+is the one service; WS RPCs `vaults.*` and HTTP `vaults.reveal` are its doors.
+
+- **Where values live:** never in the database. Each `own` or `copy` value is an entry of
+  `ServerSecretStore.VaultValueStore`: its own folder, `secrets/vault-values/<value id>.sealed`,
+  sealed under its own purpose (`vault-value`; `MasterKeyFile.STORE_NAMESPACES` gives each folder
+  its purpose, never a name prefix). The store's own names are single file names, so no other
+  caller reaches that folder. The startup authenticates them with every other entry, a rotation
+  re-seals them, and `t3 secrets key import` refuses a key that does not open them. A joined
+  machine (no master key) keeps no Vault value and runs no Vaults: every call answers
+  `unavailable` and nothing is written to its database.
+- **Writes:** every value write goes to a new value id. The row (pointing at it), its version and
+  the audit commit in one transaction; only then is the old value removed; if the transaction
+  fails, the new value is. A crash between the two leaves a value no row points at, which the
+  next start removes (it lists only the Vault values' folder).
+- **Metadata** (migration 111): `vaults` (the Main vault is `vault-main`, made at the Hub's start,
+  never deleted or renamed), `vault_entries` (`own` | `copy` | `link`, `value_id`; a Secret link
+  keeps `linked_entry_id` and is «broken» once its original is gone), `vault_allowances`,
+  `space_default_vaults`, `project_vault_choices` (used from ticket 03) and `vault_key_check`.
+- **The database's key check** (`vaults/VaultKeyCheck.ts`): a known text sealed with the master key,
+  checked first at the start, before anything is written to the database. Written at the first
+  start; re-sealed when it opens only with the previous key (after a rotation; `t3 secrets key
+  rotate` re-seals it at once); a key that opens the secrets folder but not this check stops the
+  Hub: the database and the folder come from different Hubs.
+- **Who may** (`AccessPolicy`, `vault.view|edit|manage|reveal` on a `VaultResource`, through
+  `SpaceDirectory.authorizer`, decided once per request, which also keeps an agent bound to one
+  Space to that Space):
+  the Owner does everything and alone creates, renames, archives, deletes and reveals; the Main
+  vault and the Owner's other Vaults are the Owner's alone; an Organization's Admins add, replace,
+  rename and delete its secrets without reading them; its Members and Guests see names and
+  descriptions. A Vault one cannot see answers like a missing one.
+- **Links and copies** come only from the Main vault and need editing it (the Owner), so no Vault
+  hands a Main vault value to anyone the Owner did not choose. A link reads its original at use, so
+  rotating the original changes every link; a copy is sealed again under its own entry. Deleting an
+  original with links answers with the links it would break until it is asked again with
+  `breakLinks`.
+- **Links seen from an Organization:** whoever does not see the Main vault learns nothing of the
+  original: not whether it is short (`unmasked`), not its version or rotation (a link row's own
+  version never moves), not its name. Its editors (the Owner, the Organization's Admins) see that
+  it broke; its Members and Guests do not.
+- **Names** (`secretNameRisk` in contracts, compared uppercased): `^[A-Z_][A-Z0-9_]{0,127}$`,
+  unique in a Vault. `gateway`: the Hub's own (`T3_*`, `T3CODE_*`, the AI gateway's variables),
+  refused for everyone. `dangerous`: what changes how tools run or whom they trust (process and
+  loader options, interpreters' startup options, `GIT_*`, `SSH_*`, proxies and CAs, home, temp,
+  shell, `XDG_*`, `BASH_FUNC_*`, and every AI provider's keys and base URLs such as
+  `ANTHROPIC_*`, `OPENAI_*`, `GEMINI_*`, `GOOGLE_*`): only the Owner (AccessPolicy
+  `vault.dangerousName`), with `confirmDangerous`, audited `dangerous: true`. An Admin can neither
+  add one, rename into one, nor replace or rename one the Owner set. **Values:** UTF-8 without
+  NUL, at most 64 KiB; shorter than 6 characters is kept with a `short-value` warning and marked
+  `unmasked` (never masked later).
+- **Values out:** only `vaults.reveal` (HTTP), the Owner, after `Vaults.authorizeReveal` and then a
+  strong factor in the request; audited `secret.reveal` before the value leaves. Values in arrive
+  as `Schema.RedactedFromValue`, so no log, span or error shows them. Every change is audited
+  (`vault.create|update|delete`, `secret.edit` with `op`) with names and kinds, never values.
+
 ## What is not covered here
 
-- Vault values in the database (ticket 02) use the same master key and their own purpose; their
-  rotation and the database's key check come with them.
+- Allowing Vaults to Spaces and Users, the effective set, delivery and masking: tickets 03 to 06.

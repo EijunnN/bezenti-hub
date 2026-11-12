@@ -116,6 +116,7 @@ import * as DocumentText from "./provider/DocumentText.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
+import * as Vaults from "./vaults/Vaults.ts";
 import * as GuestShareService from "./guest/GuestShareService.ts";
 import {
   bufferShellLiveStream,
@@ -1269,6 +1270,7 @@ export const layerWsRpc = (
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
       const secretRequests = yield* SecretRequests.SecretRequests;
+      const vaults = yield* Vaults.Vaults;
       const guestShares = yield* GuestShareService.GuestShareService;
       const pullRequests = yield* PullRequestService.PullRequestService;
       const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
@@ -2357,6 +2359,17 @@ export const layerWsRpc = (
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
             Effect.andThen(secretRequests.answer(input)),
           ),
+        // Vaults: each decided by Vaults (AccessPolicy `vault.*`) for the connection's User.
+        // None returns a value; a value is revealed only over HTTP (`vaults.reveal`).
+        [WS_METHODS.vaultsList]: (_input) => vaults.list,
+        [WS_METHODS.vaultsCreate]: (input) => vaults.create(input),
+        [WS_METHODS.vaultsUpdate]: (input) => vaults.update(input),
+        [WS_METHODS.vaultsDelete]: (input) => vaults.remove(input),
+        [WS_METHODS.vaultsEntriesList]: (input) => vaults.listEntries(input),
+        [WS_METHODS.vaultsEntriesPut]: (input) => vaults.putEntry(input),
+        [WS_METHODS.vaultsEntriesDelete]: (input) => vaults.deleteEntry(input),
+        [WS_METHODS.vaultsEntriesLink]: (input) => vaults.linkEntry(input),
+        [WS_METHODS.vaultsEntriesCopy]: (input) => vaults.copyEntry(input),
         [WS_METHODS.scheduledTasksListWebhookDeliveries]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
             Effect.andThen(scheduledTasks.listWebhookDeliveries(input)),
