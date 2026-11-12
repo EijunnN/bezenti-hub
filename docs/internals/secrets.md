@@ -305,10 +305,80 @@ allowed: it never lets a name in that rule 4 keeps out.
 It returns value ids (`VaultValueStore` entries; a link's is its original's), never values: only
 delivery reads them. `vaults.threadEnvironment` (WS, the Thread must be visible) computes it for the
 caller and strips value and entry ids: each User sees what their own turns would receive.
-`DoorRules.test.ts` checks that only `server.ts` and `ws.ts` reach the service and that no Vault
-RPC answers a `value` or a `valueId`.
+`DoorRules.test.ts` checks that only `server.ts`, `ws.ts` and `SecretDelivery` reach the service
+and that no Vault RPC answers a `value` or a `valueId`.
+
+## Delivery as environment variables (`vaults/SecretDelivery.ts`, spec 5 ticket 04)
+
+`SecretDelivery` is the one place that turns the effective set into the environment of one process,
+as that process starts. It reads the values from `VaultValueStore` at that moment and hands them to
+the caller, which sends them on at once: nothing on the Hub keeps them after the call.
+
+**Who receives what** is decided on the Hub, never from a client or an agent:
+
+- a turn: the Thread's owner (`orchestration_v2_projection_threads.owner_user_id`; a child Thread
+  speaks for its root's owner). A Thread without an owner (from before Users) gets nothing;
+- a terminal: the signed-in User who opens or attaches it (only the Thread's owner may: `work`);
+- a setup script on the Hub machine: the Thread's owner.
+
+**The doors** (each calls `SecretDelivery`, `DoorRules.test.ts` lists them):
+
+| Door                                    | Where                                 | Field on the wire                         |
+| --------------------------------------- | ------------------------------------- | ----------------------------------------- |
+| A provider session opens                | `ProviderSessionManager.open`         | `provider.openSession` `secretEnv`        |
+| A terminal opens                        | `ThreadWorkspace.terminalOpen`        | `terminal.open` `secretEnv`               |
+| An attach starts a shell (new terminal) | `ThreadWorkspace.terminalAttach`      | `terminal.stream` `secretEnv` (used once) |
+| A setup script on the Hub machine       | `ProjectSetupScriptRunner`            | in process                                |
+| Choosing a provider session id          | `Orchestrator` (names only, no value) | none                                      |
+
+Dev servers started from a terminal, by the agent or by a script inherit that process's
+environment; previews get nothing of their own. MCP tools that run commands do so inside the agent
+or a terminal, and so with that process's environment. A moved Thread's setup script on the target
+machine (`move.prepare`) and setup scripts of other machines get no secrets yet.
+
+**Rules, in `SecretDelivery.forProcess`:**
+
+- a machine that does not serve the Thread's Space (`servesSpace`, spec 3 ticket 12) gets nothing;
+- a machine on executor contract 9 or earlier and a non-empty set: `SecretDeliveryError`
+  (`outdated-machine`, «<machine> needs an update to receive this Thread's secrets»). The turn
+  fails with that message, the terminal answers it (`secrets_unavailable`). An empty set works as
+  before. `RemoteEnvironments.invoke` also strips `secretEnv` from anything sent to such a machine;
+- a `dangerous` name is delivered only while the Owner is the last who set it (`updated_by`);
+- a fingerprint (sha256 of the User and each name and value id, never a value) names the set.
+
+**Provider sessions.** `ProviderSessionManager` keeps each live session's fingerprint. A turn whose
+set differs (a rotation, a revoked Vault, another set) releases the Thread's session and opens a
+new one with the new environment: providers cannot change a live process's environment. A process
+that holds secrets serves one Thread: no other Thread joins it, and the instance-wide session a
+shared provider (Codex) uses for every Thread never gets secrets. A Thread with secrets gets its own
+session id (`Orchestrator.providerSessionIdFor`, `SecretDelivery.receivesSecrets`); a Codex Thread
+that got the shared id before it had secrets fails its turn with «… start a new Thread to receive
+them». Only adapters with `receivesSecretEnv` (Claude, Codex) take a non-empty set; any other
+refuses the session (`SecretDeliveryError`, `provider`) instead of starting without them.
+
+**Terminals.** `TerminalManager.open(input, { secretEnv })` puts the values in the shell's spawn
+environment and drops them once it spawned; the session keeps only the fingerprint. A running shell
+keeps what it started with: an open (or attach) with another set leaves it running and its snapshot
+says `secretsStale`, which the web terminal shows as «Secrets changed: reopen to update». A shell
+started again from an attach after it exited starts without secrets and is stale too.
+
+**On the machine** (`EnvironmentAgent`): `secretEnv` goes into the provider adapter
+(`openSessionWithSecrets`) or the terminal, and nowhere else: never in arguments (agent scopes
+wrap commands without it), files, logs, spans or the idempotency memory (which keeps answers, not
+requests). The decoded request is not kept once the call answered.
+
+**What it does not cover (accepted):**
+
+- processes already running keep their environment after a revocation or rotation, until they end
+  or are reopened;
+- in a shared Sandbox any process of the Space can read another's environment
+  (`/proc/<pid>/environ`, ADR 0004): per-process delivery keeps one User's secrets out of another's
+  processes, not out of reach of a determined agent in the same Space;
+- a provider process keeps its environment in memory for its life; Claude's adapter also keeps the
+  session's set to start each turn's process with it;
+- Codex's own shell policy leaves out variables whose names contain `KEY`, `SECRET` or `TOKEN` from
+  the commands it runs, unless its config says otherwise.
 
 ## What is not covered here
 
-- Delivery as environment variables, masking, the agent's names and missing secrets: tickets 04
-  to 06.
+- Masking, the agent's names and missing secrets: tickets 05 and 06.
