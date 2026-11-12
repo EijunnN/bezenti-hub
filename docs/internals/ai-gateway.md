@@ -57,7 +57,7 @@ Only on a Hub (`aiGatewayPlacement` in `AiGateway.ts`, the one rule):
 - The run folder holds `config-<token>.yaml` (0600, one per start, removed when it stops) and
   `auth/` (its `auth-dir`, also its `kv.db`). It is in memory when the platform has a folder
   there (`$XDG_RUNTIME_DIR`, else `/dev/shm`; 0700, never a link or someone else's), else
-  `<stateDir>/ai-gateway/run`, which Settings says.
+  `<stateDir>/ai-gateway/run`, which Settings says; there no subscription is loaded (below).
 - Config (`cliproxyConfig.ts`, v8 layout, `config-version: 8`): `server.host: 127.0.0.1` on a
   free port the Hub picks, `management.allow-remote: false`, `secret-key` (CLIProxyAPI hashes
   it on start), control panel and panel updates off, one client key, no mDNS discovery,
@@ -145,6 +145,69 @@ none.
 - **Models:** `modelsOf(accountId)` reads the gateway's `/v1/models` for the account's prefix,
   cached five minutes.
 - Audit: `ai_account.create|update|delete|allow` with provider, type and counts, never a key.
+
+## Subscription AI accounts (OAuth)
+
+Spec 4 ticket 03. The Owner signs in to a subscription (Claude, ChatGPT/Codex, Antigravity, Kimi,
+xAI, Devin, Meta) from Settings → AI accounts → «Add subscription», or imports a Vertex service
+account. The same `AiAccounts` service, rows, allowances, priority and AllowedAiAccounts as API
+keys; `type: subscription`. Pure parts in `ai/subscriptionLogin.ts`.
+
+- **Sign-in:** `aiAccounts.login.start` asks CLIProxyAPI's management API for the provider's page
+  (`GET /oauth/auth-url?provider=`) and keeps one pending sign-in on the Hub (a new one replaces
+  it): its CLIProxyAPI `state`, the `redirect_uri` the page names, the Owner's User and **session
+  id**, 10 minutes, and the gateway it was started on. The page is shown only if it is `https:`.
+  Redirect flows (Claude, Codex, Antigravity, Devin): the provider sends the browser to a localhost
+  address that does not open (the Hub may be a VPS); the Owner pastes it («Paste the address you
+  landed on») into `aiAccounts.login.complete`. Device flows (Kimi, xAI, Meta): the page shows a
+  code; «I have signed in» completes, `pending` until the provider says yes.
+- **The pasted address** (`checkPastedRedirect`) must have the same scheme, host, port and path as
+  that sign-in's `redirect_uri`, no user info, exactly one `state` equal (constant time) to that
+  sign-in's, one `code`, and no `error`. It travels Redacted (never logged). The Hub never fetches
+  it: CLIProxyAPI gets an address rebuilt from the `redirect_uri` with only `code`, `state` and
+  `scope` (`POST /oauth/callback`). Completion is refused (`expired`) from another session, after
+  10 minutes, after the gateway restarted, or once done; refused pastes reach nothing.
+- **Capture:** once CLIProxyAPI reports `ok` (`GET /oauth/status`), the Hub takes the one new
+  token file it did not hold before the sign-in started (`GET /credentials`,
+  `/credentials/download`), seals it under a new token id in its own store
+  (`ServerSecretStore.AiAccountTokenStore`: `secrets/ai-account-tokens/tok-<id>.sealed`, purpose
+  `ai-account-oauth-token`, covered by key rotation), writes the account (or, «Sign in again», the
+  new token id, retiring the old one), hands it back as `acct-<account>-<token id>.json` with
+  `prefix: acct-<account>` (`POST /credentials?name=`) and deletes the file CLIProxyAPI named.
+  Vertex: `POST /oauth/import?provider=vertex`, then the same capture.
+- **Reconcile** (`reconcileTokens`, under the same lock as API keys, at every gateway start before
+  it counts as running, after every change, and every minute): for each enabled subscription the
+  newest copy wins, wherever it is. A copy in CLIProxyAPI newer than the sealed one (a refresh,
+  which may rotate the refresh token) is sealed again; an older one (a stale file a restart left in
+  memory) is replaced by the sealed one; a file of an account deleted, disabled or signed in again,
+  and any token file no sign-in in progress explains, is deleted. "Newer" compares the times a token
+  carries (`expired`, `last_refresh`, `timestamp`…); a sealed copy is never replaced by an older
+  one, so a restart mid-refresh keeps the newest refresh token (the file is still in the memory
+  folder, which survives a Hub restart, not a reboot).
+- **Status:** from CLIProxyAPI's credential list: `requires_sign_in` → «Needs sign-in again»,
+  `quota_blocked` → «Quota exhausted», `error`/`unavailable` → error (its message, quoted values
+  and token shapes removed), else working. The Owner also sees «Signed in as» and, for Claude and
+  Codex, the quota windows read by the existing reader (`usage/cliproxyApi.ts`, `api: "v8"`:
+  `credentials` and `requests/api-call`) pointed at the managed gateway, cached 5 minutes, only
+  windows (nothing derived from the credential).
+- **No folder in memory:** decided stricter than API keys. Without `$XDG_RUNTIME_DIR` or
+  `/dev/shm` the Hub loads no subscription (their files are deleted from the gateway, the accounts
+  show an error, the sealed tokens stay for later) and refuses to start a sign-in or import, so no
+  OAuth token is ever on a persistent disk in clear. Settings → AI gateway says so.
+- **Delete, disable, «Sign in again»:** the token id is retired (`ai_account_retired_credentials`);
+  the file leaves CLIProxyAPI by the next reconcile, and the sealed token leaves the store only
+  after a change the gateway accepted without it (ticket 02's guarantee). The provider's own
+  refresh token is not revoked at the provider (CLIProxyAPI has no call for it).
+- **Doors:** WS only, in `INSTALLATION_RPC_METHODS` (the Owner's alone, `settings:write`):
+  `aiAccounts.login.start`, `aiAccounts.login.complete`, `aiAccounts.importVertex`;
+  `DoorRules.AI_ACCOUNT_SIGN_IN_RULES`. No raw route or HTTP endpoint takes a provider's callback.
+  Audit `ai_account.login` (provider, `new`/`again`/`import`, `signed-in`/`failed`, reason) and
+  `ai_account.create` for a new one. Tokens never in a log, span, error, answer, the database or
+  argv (`AiAccounts.subscriptions.test.ts`; the live pass greps the Hub's home, logs and `ps`).
+- **Known limits:** one sign-in at a time per Hub. Two Hub processes over one state folder are not
+  supported: the "never older" rule is checked under an in-process lock. ToS risk accepted (ADR
+  0005): the form warns on every subscription and, for Antigravity, notes CLIProxyAPI's
+  obfuscation (hardened in v8.0.65).
 
 ## Known exception to «no upstream services»
 
