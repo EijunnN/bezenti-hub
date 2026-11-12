@@ -159,6 +159,8 @@ export const AUDIT_ACTION_LABELS: Record<AuditAction, string> = {
   "ai_account.delete": "Deleted an AI account",
   "ai_account.allow": "Changed who may use an AI account",
   "ai_account.login": "Signed in to a subscription AI account",
+  "ai_gateway_key.create": "Created an AI gateway key",
+  "ai_gateway_key.revoke": "Revoked an AI gateway key",
 };
 
 export const INSTALLATION_PERMISSION_LABELS: Record<InstallationPermission, string> = {

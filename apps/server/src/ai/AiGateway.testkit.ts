@@ -261,6 +261,72 @@ if (mode === "decoy") {
       response.end(JSON.stringify({ data: response.statusCode === 200 ? [...modelIds(), ...tokenModelIds()].map((id) => ({ id, object: "model" })) : [] }));
       return;
     }
+    // The AI API the Hub's gateway layer proxies (spec 4 ticket 04), with force-model-prefix:
+    // only acct-<id>/<model> of a provisioned account is served. Files beside the config steer
+    // it: fake-quota-<id> (429 quoting an email and a key), fake-error-<id> (400 quoting them),
+    // fake-stream-hold (a stream waits for fake-stream-release after its first event),
+    // fake-stream-error (an error event quoting them mid-stream).
+    const aiUrl = new URL(request.url, "http://fake.invalid");
+    const geminiCall = /^\/v1beta\/models\/(.+):(generateContent|streamGenerateContent)$/u.exec(aiUrl.pathname);
+    const AI_PATHS = ["/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages/count_tokens"];
+    if (request.method === "POST" && (AI_PATHS.includes(aiUrl.pathname) || geminiCall !== null)) {
+      readBody(request).then(async (raw) => {
+        let body = {};
+        try { body = JSON.parse(raw.toString("utf8") || "{}"); } catch { body = {}; }
+        const model = geminiCall !== null ? decodeURIComponent(geminiCall[1]) : String(body.model ?? "");
+        const authOk = auth === "Bearer " + clientKey;
+        fs.appendFileSync(path.join(dir, "fake-ai-requests.jsonl"), JSON.stringify({ path: aiUrl.pathname, search: aiUrl.search, model, authOk, headerNames: Object.keys(request.headers).sort(), bodyKeys: Object.keys(body).sort() }) + String.fromCharCode(10));
+        if (!authOk) return send(response, 401, { error: { message: "Missing API key" } });
+        if (![...modelIds(), ...tokenModelIds()].includes(model)) return send(response, 400, { error: { message: "unknown provider for model " + model } });
+        const accountId = model.slice("acct-".length, model.indexOf("/"));
+        response.setHeader("X-Fake-Account", accountId);
+        response.setHeader("Set-Cookie", "fake=1");
+        if (fs.existsSync(path.join(dir, "fake-quota-" + accountId))) return send(response, 429, { error: { message: "Quota exceeded for owner@example.com with sk-ant-leaky_key_1234567890", type: "rate_limit_error" } });
+        if (fs.existsSync(path.join(dir, "fake-error-" + accountId))) return send(response, 400, { error: { message: "Bad request for owner@example.com on " + model + " with sk-ant-leaky_key_1234567890 see https://provider.test/x?key=AIzaSyLeaky_Google-Key1234567890" } });
+        const text = "Hello from " + model;
+        const route = geminiCall !== null ? "gemini" : aiUrl.pathname;
+        const stream = body.stream === true || (geminiCall !== null && geminiCall[2] === "streamGenerateContent");
+        if (!stream) {
+          if (route === "/v1/messages/count_tokens") return send(response, 200, { input_tokens: 11 });
+          if (route === "/v1/messages") return send(response, 200, { id: "msg_1", type: "message", role: "assistant", model, content: [{ type: "text", text }], usage: { input_tokens: 11, output_tokens: 7, cache_read_input_tokens: 3 } });
+          if (route === "/v1/responses") return send(response, 200, { id: "resp_1", object: "response", model, output: [{ type: "message", content: [{ type: "output_text", text }] }], usage: { input_tokens: 11, output_tokens: 7 } });
+          if (route === "gemini") return send(response, 200, { candidates: [{ content: { role: "model", parts: [{ text }] } }], modelVersion: model, usageMetadata: { promptTokenCount: 11, candidatesTokenCount: 7 } });
+          return send(response, 200, { id: "chat_1", object: "chat.completion", model, choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }], usage: { prompt_tokens: 11, completion_tokens: 7 } });
+        }
+        response.statusCode = 200;
+        response.setHeader("content-type", "text/event-stream");
+        const event = (value, name) => response.write((name === undefined ? "" : "event: " + name + String.fromCharCode(10)) + "data: " + JSON.stringify(value) + String.fromCharCode(10, 10));
+        const first = route === "/v1/messages"
+          ? [{ type: "message_start", message: { id: "msg_1", type: "message", role: "assistant", model, content: [], usage: { input_tokens: 11, output_tokens: 1 } } }, "message_start"]
+          : route === "gemini"
+            ? [{ candidates: [{ content: { role: "model", parts: [{ text: "Hello " }] } }], modelVersion: model }]
+            : route === "/v1/responses"
+              ? [{ type: "response.created", response: { id: "resp_1", model } }, "response.created"]
+              : [{ id: "chat_1", object: "chat.completion.chunk", model, choices: [{ index: 0, delta: { role: "assistant", content: "Hello " } }] }];
+        event(first[0], first[1]);
+        if (fs.existsSync(path.join(dir, "fake-stream-hold"))) {
+          const until = Date.now() + 15000;
+          while (!fs.existsSync(path.join(dir, "fake-stream-release")) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        if (fs.existsSync(path.join(dir, "fake-stream-error"))) event({ type: "error", error: { type: "api_error", message: "upstream failure for owner@example.com token sk-ant-leaky_key_1234567890 on " + model, account: "owner@example.com" } }, "error");
+        if (route === "/v1/messages") {
+          event({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } }, "content_block_delta");
+          event({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 7 } }, "message_delta");
+          event({ type: "message_stop" }, "message_stop");
+        } else if (route === "gemini") {
+          event({ candidates: [{ content: { role: "model", parts: [{ text }] }, finishReason: "STOP" }], modelVersion: model, usageMetadata: { promptTokenCount: 11, candidatesTokenCount: 7 } });
+        } else if (route === "/v1/responses") {
+          event({ type: "response.output_text.delta", delta: text }, "response.output_text.delta");
+          event({ type: "response.completed", response: { id: "resp_1", model, usage: { input_tokens: 11, output_tokens: 7 } } }, "response.completed");
+        } else {
+          event({ id: "chat_1", object: "chat.completion.chunk", model, choices: [{ index: 0, delta: { content: text }, finish_reason: "stop" }] });
+          event({ id: "chat_1", object: "chat.completion.chunk", model, choices: [], usage: { prompt_tokens: 11, completion_tokens: 7 } });
+          response.write("data: [DONE]" + String.fromCharCode(10, 10));
+        }
+        response.end();
+      }).catch(() => send(response, 500, { error: "fake failed" }));
+      return;
+    }
     if (request.url.startsWith("/v8/management/")) {
       if (auth !== "Bearer " + secret) {
         response.statusCode = 401;
@@ -270,6 +336,7 @@ if (mode === "decoy") {
       oauth(request, response, new URL(request.url, "http://fake.invalid")).catch(() => send(response, 500, { error: "fake failed" }));
       return;
     }
+    fs.appendFileSync(path.join(dir, "fake-unknown.jsonl"), JSON.stringify({ method: request.method, url: request.url }) + String.fromCharCode(10));
     response.statusCode = 404;
     response.end();
   }).listen(port, mode === "wide" ? "0.0.0.0" : host);

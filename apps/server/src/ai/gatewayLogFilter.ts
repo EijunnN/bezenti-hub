@@ -43,6 +43,7 @@ const TOKEN_SHAPES = [
   /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{10,}/gu, // GitHub
   /\bgithub_pat_[A-Za-z0-9_]{10,}/gu,
   /\bxai-[A-Za-z0-9_-]{10,}/gu,
+  /\bt3gk_[A-Za-z0-9_-]{10,}/gu, // the Hub's own gateway keys (spec 4 ticket 04)
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+)?/gu, // JWT
   /\bbearer\s+[A-Za-z0-9._~+/=-]{8,}/giu,
 ];

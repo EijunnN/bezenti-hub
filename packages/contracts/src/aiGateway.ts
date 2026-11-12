@@ -61,3 +61,17 @@ export type AiGatewaySetEnabledInput = typeof AiGatewaySetEnabledInput.Type;
 export class AiGatewayError extends Schema.TaggedError<AiGatewayError>()("AiGatewayError", {
   message: Schema.String,
 }) {}
+
+/**
+ * Spec 4 ticket 04: the Hub's AI gateway layer, `/api/ai/{openai,anthropic,gemini}/…`, in front of
+ * CLIProxyAPI. Agents and local CLIs reach it with a gateway key, never a session or an
+ * Environment credential.
+ */
+export const AI_GATEWAY_ROUTE_PREFIX = "/api/ai";
+
+/** Every gateway key starts so: `t3gk_` and 32 random bytes, base64url. Stored only hashed. */
+export const AI_GATEWAY_KEY_PREFIX = "t3gk_";
+
+/** `thread`: issued for one Thread's provider session; `user`: a User's key for a local CLI. */
+export const AiGatewayKeyKind = Schema.Literals(["thread", "user"]);
+export type AiGatewayKeyKind = typeof AiGatewayKeyKind.Type;

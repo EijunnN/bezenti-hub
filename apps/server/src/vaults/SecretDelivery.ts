@@ -23,6 +23,7 @@ import * as Option from "effect/Option";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import { threadTurnOwner } from "../orchestration-v2/threadTurnOwner.ts";
 import { servesSpace } from "../sandboxes/sandboxSpace.ts";
 import * as EffectiveVaults from "./EffectiveVaults.ts";
 
@@ -107,15 +108,9 @@ const make = Effect.gen(function* () {
     );
 
   const turnOwner = Effect.fn("SecretDelivery.turnOwner")(function* (threadId: ThreadId) {
-    const rows = yield* sql<{ readonly ownerUserId: string | null }>`
-      SELECT COALESCE(t.owner_user_id, root.owner_user_id) AS "ownerUserId"
-      FROM orchestration_v2_projection_threads t
-      LEFT JOIN orchestration_v2_projection_threads root
-        ON root.thread_id = json_extract(t.payload_json, '$.lineage.rootThreadId')
-      WHERE t.thread_id = ${threadId}
-    `.pipe(Effect.catch(storage("read who owns the Thread")));
-    const owner = rows[0]?.ownerUserId ?? null;
-    return owner === null ? Option.none<UserId>() : Option.some(UserId.make(owner));
+    return yield* threadTurnOwner(sql, threadId).pipe(
+      Effect.catch(storage("read who owns the Thread")),
+    );
   });
 
   /** A name that changes how tools run reaches a process only as the Owner last set it. */

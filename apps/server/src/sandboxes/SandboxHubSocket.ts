@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- a raw HTTP proxy on a UNIX socket, upgrades included.
 /**
  * A container's only way to its Hub: a UNIX socket per Sandbox, forwarding the Environment
- * connection, git and MCP to the Hub's loopback listener (or, on a dedicated machine, to the
+ * connection, git, MCP and the AI gateway (`/api/ai/*`) to the Hub's loopback listener (or, on a dedicated machine, to the
  * Hub's own https address) and answering 404 to any other path. Forwarding headers from the
  * container are dropped. See docs/internals/sandboxes.md.
  */
@@ -10,7 +10,7 @@ import * as NodeHttp from "node:http";
 import * as NodeHttps from "node:https";
 import * as NodeNet from "node:net";
 
-import { ENVIRONMENT_CONNECT_PATH } from "@t3tools/contracts";
+import { AI_GATEWAY_ROUTE_PREFIX, ENVIRONMENT_CONNECT_PATH } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import type * as Scope from "effect/Scope";
 
@@ -20,7 +20,9 @@ import { HUB_REPOSITORY_ROUTE_PREFIX } from "../checkpointing/HubRepository.ts";
 export const isSandboxHubPath = (pathname: string) =>
   pathname === ENVIRONMENT_CONNECT_PATH ||
   pathname.startsWith(`${HUB_REPOSITORY_ROUTE_PREFIX}/`) ||
-  pathname === "/mcp";
+  pathname === "/mcp" ||
+  // The Hub's AI gateway layer (spec 4 ticket 04), never CLIProxyAPI: a gateway key decides.
+  pathname.startsWith(`${AI_GATEWAY_ROUTE_PREFIX}/`);
 
 /** Headers a client could use to pose as another address or scheme, and hop-by-hop ones. */
 const DROPPED_REQUEST_HEADERS = new Set([

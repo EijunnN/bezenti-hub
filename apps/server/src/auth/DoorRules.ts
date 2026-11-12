@@ -146,7 +146,13 @@ export const HTTP_ENDPOINT_RULES: Readonly<Record<string, DoorRule>> = {
   "webhooks.webhookPut": WEBHOOK,
 };
 
+/** Spec 4 ticket 04: a gateway key in a header only, never a cookie or another credential. */
+const AI_GATEWAY = own(
+  "AiGatewayKeys.authorize on every request (key live, User active, Thread in the key's Space and owned by its User), then AllowedAiAccounts now; planRoute pins the model to an allowed account; only fixed CLIProxyAPI paths",
+);
+
 export const RAW_ROUTE_RULES: Readonly<Record<string, DoorRule>> = {
+  "ai/AiGatewayRoute.ts: * `${AI_GATEWAY_ROUTE_PREFIX}/*`": AI_GATEWAY,
   "device/DeviceHubProxy.ts: * `${DeviceService.DEVICE_HUB_ROUTE_PREFIX}/*`": own(
     "DeviceAccess.mayUseDevice, as deviceOpen: the device the path or `device` names, open in a Thread the User sees (works, to drive it); only known parameters pass",
   ),
@@ -301,6 +307,9 @@ const GUEST_COOKIE = refused(
 const ENVIRONMENT_CREDENTIAL = none("the Environment credential in Authorization; no cookie");
 
 export const AMBIENT_COOKIE_RULES: Readonly<Record<string, AmbientCookieRule>> = {
+  "ai/AiGatewayRoute.ts: * `${AI_GATEWAY_ROUTE_PREFIX}/*`": refused(
+    "reads no cookie at all: a gateway key in a header (gatewayKeyOf), never a session",
+  ),
   HttpApi: refused(
     "EnvironmentAuth reads a session cookie past isBrowserOriginAllowed; auth/http.ts sets or clears one only off a preview origin",
   ),

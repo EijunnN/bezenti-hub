@@ -112,6 +112,7 @@ import Migration0109 from "./Migrations/109_ThreadEnvironmentReleases.ts";
 import Migration0110 from "./Migrations/110_EnvironmentSshHosts.ts";
 import Migration0111 from "./Migrations/111_Vaults.ts";
 import Migration0112 from "./Migrations/112_AiAccounts.ts";
+import Migration0113 from "./Migrations/113_AiGatewayKeys.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -226,6 +227,7 @@ const migrationEntries = [
   [110, "EnvironmentSshHosts", Migration0110],
   [111, "Vaults", Migration0111],
   [112, "AiAccounts", Migration0112],
+  [113, "AiGatewayKeys", Migration0113],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

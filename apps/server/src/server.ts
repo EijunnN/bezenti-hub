@@ -202,6 +202,9 @@ import * as SecretDelivery from "./vaults/SecretDelivery.ts";
 import * as MasterKeyBackup from "./auth/MasterKeyBackup.ts";
 import * as AiAccounts from "./ai/AiAccounts.ts";
 import * as AiGateway from "./ai/AiGateway.ts";
+import * as AiGatewayActivity from "./ai/AiGatewayActivity.ts";
+import * as AiGatewayKeys from "./ai/AiGatewayKeys.ts";
+import * as AiGatewayRoute from "./ai/AiGatewayRoute.ts";
 import * as CliproxyReleases from "./ai/CliproxyReleases.ts";
 import * as JoinedHub from "./environments/JoinedHub.ts";
 import type { JoinedHubState } from "./environments/joinedHubState.ts";
@@ -623,8 +626,14 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   ProviderUsageLimitsIngestion.layer,
   // CLIProxyAPI, run by the Hub on loopback (`T3CODE_AI_GATEWAY`), and the AI accounts it gets
   // at every start (spec 4 ticket 02).
-  AiAccounts.layer.pipe(
-    Layer.provideMerge(AiGateway.layerFromConfig.pipe(Layer.provide(CliproxyReleases.layer))),
+  // The gateway layer's keys and what it did (spec 4 ticket 04), over the same AI accounts.
+  AiGatewayKeys.layer.pipe(
+    Layer.provideMerge(AiGatewayActivity.layer),
+    Layer.provideMerge(
+      AiAccounts.layer.pipe(
+        Layer.provideMerge(AiGateway.layerFromConfig.pipe(Layer.provide(CliproxyReleases.layer))),
+      ),
+    ),
     Layer.provide(AuditLog.layer),
   ),
   layerProviderInstallationRefresh,
@@ -778,6 +787,8 @@ const layerMakeRoutes = Layer.mergeAll(
     Ws.layer,
     EnvironmentConnectRoute.layer,
     EnvironmentGitRoute.layer,
+    // `/api/ai/*`: gateway keys only, AllowedAiAccounts on every request (spec 4 ticket 04).
+    AiGatewayRoute.layer,
   ),
   McpHttpServer.layer.pipe(
     // The same executor-backed registry the orchestration uses, by layer memoization.
