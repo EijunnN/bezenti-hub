@@ -7,9 +7,11 @@ import type {
   AiAccountDetails,
   AiAccountProvider,
   AiAccountStatus,
+  AiAccountLoginStartResult,
   AiAccountSummary,
   AiAccountUpdateInput,
   AiApiKeyProvider,
+  AiSubscriptionProvider,
   EnvironmentId,
   InstallationUser,
   SpaceId,
@@ -52,8 +54,29 @@ const API_KEY_PROVIDERS: ReadonlyArray<readonly [AiApiKeyProvider, string]> = [
   ["meta", "Meta"],
   ["openai-compatible", "OpenAI-compatible (DeepSeek, OpenRouter…)"],
 ];
-const providerLabel = (provider: AiAccountProvider) =>
-  API_KEY_PROVIDERS.find(([value]) => value === provider)?.[1] ?? provider;
+/** Subscriptions the Owner signs in to through the Hub's AI gateway (spec 4 ticket 03). */
+const SUBSCRIPTION_PROVIDERS: ReadonlyArray<readonly [AiSubscriptionProvider, string]> = [
+  ["claude", "Claude (Pro or Max)"],
+  ["codex", "ChatGPT (Codex)"],
+  ["antigravity", "Google (Antigravity: AI Pro or Ultra)"],
+  ["kimi", "Kimi"],
+  ["xai", "xAI (Grok)"],
+  ["devin", "Devin"],
+  ["meta", "Meta"],
+];
+const providerLabel = (provider: AiAccountProvider, type?: AiAccountSummary["type"]) =>
+  (type === "subscription"
+    ? (SUBSCRIPTION_PROVIDERS.find(([value]) => value === provider)?.[1] ??
+      (provider === "vertex" ? "Vertex AI (service account)" : undefined))
+    : undefined) ??
+  API_KEY_PROVIDERS.find(([value]) => value === provider)?.[1] ??
+  provider;
+
+/** ADR 0005: the Owner shares a personal subscription knowingly. */
+const TOS_WARNING =
+  "Sharing a personal subscription with your team may break the provider's terms; the provider may suspend the account. API keys and per-seat plans are the compliant choice.";
+const ANTIGRAVITY_NOTE =
+  "CLIProxyAPI disguises its Antigravity traffic (hardened in v8.0.65), a sign that Google detects and may suspend this use.";
 
 const STATUS_LABELS: Readonly<Record<AiAccountStatus, string>> = {
   pending: "Waiting for the AI gateway",
@@ -89,6 +112,12 @@ function useAccountCommands() {
     remove: useAtomCommand(aiGatewayEnvironment.deleteAccount, "delete an AI account"),
     allow: useAtomCommand(aiGatewayEnvironment.allowAccount, "change who may use an AI account"),
     reorder: useAtomCommand(aiGatewayEnvironment.reorderAccounts, "order the AI accounts"),
+    loginStart: useAtomCommand(aiGatewayEnvironment.startAccountLogin, "start a sign-in"),
+    loginComplete: useAtomCommand(aiGatewayEnvironment.completeAccountLogin, "finish a sign-in"),
+    importVertex: useAtomCommand(
+      aiGatewayEnvironment.importVertexAccount,
+      "import a Vertex service account",
+    ),
   };
 }
 type AccountCommands = ReturnType<typeof useAccountCommands>;
@@ -217,7 +246,7 @@ function AiAccountsPage({ environmentId }: { readonly environmentId: Environment
           title={canManage ? "Your AI accounts" : "AI accounts you may use"}
           description={
             canManage
-              ? "API keys the Hub's AI gateway uses for your team's agents, tried first to last. A key never leaves the Hub and is never shown again: replace it to change it. Allow each account to Spaces (everyone who works there) or to Users."
+              ? "API keys and subscriptions the Hub's AI gateway uses for your team's agents, tried first to last. A credential never leaves the Hub and is never shown again: replace it, or sign in again, to change it. Allow each account to Spaces (everyone who works there) or to Users."
               : "The AI accounts your agents may use in your Spaces. Only the Owner adds or changes them."
           }
           status={
@@ -230,6 +259,16 @@ function AiAccountsPage({ environmentId }: { readonly environmentId: Environment
         />
         {manage ? (
           <NewAccountForm environmentId={environmentId} commands={commands} onAdded={refresh} />
+        ) : null}
+        {manage ? (
+          <NewSubscriptionForm
+            environmentId={environmentId}
+            commands={commands}
+            onAdded={refresh}
+          />
+        ) : null}
+        {manage ? (
+          <ImportVertexForm environmentId={environmentId} commands={commands} onAdded={refresh} />
         ) : null}
       </SettingsSection>
       {accounts === null ? null : accounts.length === 0 ? (
@@ -390,6 +429,285 @@ function NewAccountForm(props: {
   );
 }
 
+/**
+ * The Owner signs in on the provider's page in their own browser. The provider sends the browser
+ * back to a localhost address that does not open (the Hub may be on a VPS): the Owner pastes that
+ * address here, and the Hub hands it to its CLIProxyAPI. Device sign-ins show a code instead.
+ */
+function SignInFlow(props: {
+  readonly environmentId: EnvironmentId;
+  readonly commands: AccountCommands;
+  readonly label: string;
+  readonly provider: AiSubscriptionProvider;
+  readonly target: { readonly name: string } | { readonly accountId: AiAccountSummary["id"] };
+  readonly disabled: boolean;
+  readonly onDone: () => Promise<void>;
+}) {
+  const [started, setStarted] = useState<AiAccountLoginStartResult | null>(null);
+  const [landed, setLanded] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const start = () => {
+    setPending(true);
+    setError(null);
+    setLanded("");
+    void settle(
+      props.commands.loginStart({
+        environmentId: props.environmentId,
+        input: { provider: props.provider, ...props.target },
+      }),
+    )
+      .then(setStarted)
+      .catch((cause: unknown) => setError(errorMessageOf(cause, "Could not start the sign-in.")))
+      .finally(() => setPending(false));
+  };
+  const finish = () => {
+    if (started === null) return;
+    setPending(true);
+    setError(null);
+    void settle(
+      props.commands.loginComplete({
+        environmentId: props.environmentId,
+        input: {
+          loginId: started.loginId,
+          ...(started.flow === "redirect" ? { redirectUrl: Redacted.make(landed.trim()) } : {}),
+        },
+      }),
+    )
+      .then(async () => {
+        setStarted(null);
+        setLanded("");
+        await props.onDone();
+      })
+      .catch((cause: unknown) => setError(errorMessageOf(cause, "Could not finish the sign-in.")))
+      .finally(() => setPending(false));
+  };
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          variant={started === null ? "default" : "outline"}
+          type="button"
+          disabled={props.disabled || pending}
+          onClick={start}
+        >
+          {started === null ? props.label : "Start over"}
+        </Button>
+        {started === null ? null : (
+          <a
+            className="text-sm font-medium underline"
+            href={started.url}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Open sign-in
+          </a>
+        )}
+      </div>
+      {started === null ? null : started.flow === "device" ? (
+        <div className="flex flex-col gap-2 text-sm">
+          <span>
+            On the provider's page, enter the code{" "}
+            <code aria-label="Sign-in code">{started.userCode}</code>, then come back.
+          </span>
+          <div>
+            <Button size="sm" type="button" disabled={pending} onClick={finish}>
+              I have signed in
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <form
+          aria-label="Finish the sign-in"
+          className="flex flex-col gap-2 sm:flex-row sm:items-end"
+          onSubmit={(event) => {
+            event.preventDefault();
+            finish();
+          }}
+        >
+          <label className="flex flex-1 flex-col gap-1 text-xs font-medium">
+            Paste the address you landed on
+            <Input
+              aria-label="Paste the address you landed on"
+              nativeInput
+              disabled={pending}
+              placeholder="http://localhost:…/callback?code=…&state=…"
+              value={landed}
+              onChange={(event) => setLanded(event.currentTarget.value)}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+          <Button size="sm" type="submit" disabled={pending || landed.trim().length === 0}>
+            Finish sign-in
+          </Button>
+        </form>
+      )}
+      {started === null ? null : (
+        <span className="text-xs text-muted-foreground">
+          {started.flow === "device"
+            ? "This sign-in lasts 10 minutes."
+            : "After you sign in, the browser lands on a localhost address that does not open. Copy that whole address from the address bar and paste it here. This sign-in lasts 10 minutes."}
+        </span>
+      )}
+      {error === null ? null : (
+        <span className="text-xs text-destructive" role="alert">
+          {error}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** «Add subscription»: a name, the provider, the ToS warning, then the sign-in. */
+function NewSubscriptionForm(props: {
+  readonly environmentId: EnvironmentId;
+  readonly commands: AccountCommands;
+  readonly onAdded: () => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [provider, setProvider] = useState<AiSubscriptionProvider>("claude");
+  return (
+    <section aria-label="Add subscription" className="flex flex-col gap-2 border-t px-4 py-4">
+      <h3 className="text-sm font-medium">Add subscription</h3>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+        <label className="flex flex-1 flex-col gap-1 text-xs font-medium">
+          Subscription name
+          <Input
+            aria-label="Subscription name"
+            nativeInput
+            maxLength={80}
+            value={name}
+            onChange={(event) => setName(event.currentTarget.value)}
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-xs font-medium sm:w-72">
+          Subscription provider
+          <select
+            aria-label="Subscription provider"
+            className={SELECT_CLASS}
+            value={provider}
+            onChange={(event) => setProvider(event.currentTarget.value as AiSubscriptionProvider)}
+          >
+            {SUBSCRIPTION_PROVIDERS.map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <p
+        role="note"
+        aria-label="Terms of service warning"
+        className="text-xs text-warning-foreground"
+      >
+        {TOS_WARNING}
+        {provider === "antigravity" ? ` ${ANTIGRAVITY_NOTE}` : ""}
+      </p>
+      <SignInFlow
+        key={`${provider}|${name.trim()}`}
+        environmentId={props.environmentId}
+        commands={props.commands}
+        label="Start sign-in"
+        provider={provider}
+        target={{ name: name.trim() }}
+        disabled={name.trim().length === 0}
+        onDone={async () => {
+          setName("");
+          await props.onAdded();
+        }}
+      />
+    </section>
+  );
+}
+
+/** A Vertex service account (its JSON key file), imported into the gateway. */
+function ImportVertexForm(props: {
+  readonly environmentId: EnvironmentId;
+  readonly commands: AccountCommands;
+  readonly onAdded: () => Promise<void>;
+}) {
+  const [name, setName] = useState("");
+  const [key, setKey] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <form
+      aria-label="Import a Vertex service account"
+      className="flex flex-col gap-2 border-t px-4 py-4"
+      onSubmit={(event) => {
+        event.preventDefault();
+        setPending(true);
+        setError(null);
+        void settle(
+          props.commands.importVertex({
+            environmentId: props.environmentId,
+            input: { name: name.trim(), serviceAccount: Redacted.make(key.trim()) },
+          }),
+        )
+          .then(async () => {
+            setName("");
+            setKey("");
+            await props.onAdded();
+          })
+          .catch((cause: unknown) => setError(errorMessageOf(cause, "Could not import it.")))
+          .finally(() => setPending(false));
+      }}
+    >
+      <h3 className="text-sm font-medium">Import a Vertex service account</h3>
+      <label className="flex flex-col gap-1 text-xs font-medium">
+        Vertex account name
+        <Input
+          aria-label="Vertex account name"
+          nativeInput
+          disabled={pending}
+          maxLength={80}
+          value={name}
+          onChange={(event) => setName(event.currentTarget.value)}
+        />
+      </label>
+      <label className="flex flex-col gap-1 text-xs font-medium">
+        Service account key (JSON)
+        <textarea
+          aria-label="Service account key (JSON)"
+          className="min-h-20 rounded-md border border-input bg-background px-2 py-1 font-mono text-xs [-webkit-text-security:disc]"
+          disabled={pending}
+          autoComplete="off"
+          spellCheck={false}
+          value={key}
+          onChange={(event) => setKey(event.currentTarget.value)}
+        />
+      </label>
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          type="submit"
+          disabled={pending || name.trim().length === 0 || key.trim().length === 0}
+        >
+          Import
+        </Button>
+        {error === null ? null : (
+          <span className="text-xs text-destructive" role="alert">
+            {error}
+          </span>
+        )}
+      </div>
+    </form>
+  );
+}
+
+/** A subscription's quota windows, as its provider reports them. */
+const quotaText = (details: AiAccountDetails) =>
+  details.usageLimits === undefined || details.usageLimits === null
+    ? null
+    : details.usageLimits.windows.length === 0
+      ? null
+      : `Quota: ${details.usageLimits.windows
+          .map((window) => `${window.label} ${Math.round(window.usedPercent)}% used`)
+          .join(", ")}.`;
+
 function AccountSection(props: {
   readonly environmentId: EnvironmentId;
   readonly commands: AccountCommands;
@@ -439,13 +757,18 @@ function AccountSection(props: {
   return (
     <SettingsSection id={`ai-account-${account.id}`} title={account.name}>
       <SettingsRow
-        title={providerLabel(account.provider)}
+        title={providerLabel(account.provider, account.type)}
         description={
           details === null
             ? `Usable in ${account.usableIn.map(props.spaceName).join(", ")}.`
             : [
                 removing ? null : `Priority ${account.priority}.`,
                 details.keyHint === null ? null : `Key ending in …${details.keyHint}.`,
+                details.signedInAs === undefined || details.signedInAs === null
+                  ? null
+                  : `Signed in as ${details.signedInAs}.`,
+                quotaText(details),
+                account.type === "subscription" ? TOS_WARNING : null,
                 details.baseUrl === null
                   ? null
                   : `${details.baseUrl} (${details.models.join(", ")}).`,
@@ -554,31 +877,44 @@ function AccountSection(props: {
                 pending={pending}
                 onSave={(input) => update(input)}
               />
-              <form
-                aria-label={`Replace credential of ${account.name}`}
-                className="flex flex-col gap-2 sm:flex-row sm:items-end"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void update({ apiKey: Redacted.make(newKey.trim()) }).then((saved) => {
-                    if (saved) setNewKey("");
-                  });
-                }}
-              >
-                <label className="flex flex-1 flex-col gap-1 text-xs font-medium">
-                  New API key
-                  <Input
-                    aria-label={`New API key for ${account.name}`}
-                    nativeInput
-                    disabled={pending}
-                    value={newKey}
-                    onChange={(event) => setNewKey(event.currentTarget.value)}
-                    {...KEY_INPUT_PROPS}
-                  />
-                </label>
-                <Button size="sm" type="submit" disabled={pending || newKey.trim().length === 0}>
-                  Replace credential
-                </Button>
-              </form>
+              {account.type === "subscription" && account.provider !== "vertex" ? (
+                <SignInFlow
+                  environmentId={environmentId}
+                  commands={commands}
+                  label="Sign in again"
+                  provider={account.provider as AiSubscriptionProvider}
+                  target={{ accountId: account.id }}
+                  disabled={pending}
+                  onDone={props.onChanged}
+                />
+              ) : null}
+              {account.type !== "api-key" ? null : (
+                <form
+                  aria-label={`Replace credential of ${account.name}`}
+                  className="flex flex-col gap-2 sm:flex-row sm:items-end"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void update({ apiKey: Redacted.make(newKey.trim()) }).then((saved) => {
+                      if (saved) setNewKey("");
+                    });
+                  }}
+                >
+                  <label className="flex flex-1 flex-col gap-1 text-xs font-medium">
+                    New API key
+                    <Input
+                      aria-label={`New API key for ${account.name}`}
+                      nativeInput
+                      disabled={pending}
+                      value={newKey}
+                      onChange={(event) => setNewKey(event.currentTarget.value)}
+                      {...KEY_INPUT_PROPS}
+                    />
+                  </label>
+                  <Button size="sm" type="submit" disabled={pending || newKey.trim().length === 0}>
+                    Replace credential
+                  </Button>
+                </form>
+              )}
               <AllowancesForm
                 // Read again from the Hub after each change; a key replaced leaves them as they are.
                 key={JSON.stringify(details.allowances)}

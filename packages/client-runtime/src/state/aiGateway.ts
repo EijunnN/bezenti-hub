@@ -63,5 +63,19 @@ export function createAiGatewayEnvironmentAtoms<R, E>(
       label: "environment-data:ai-accounts:reorder",
       tag: WS_METHODS.aiAccountsReorder,
     }),
+    // Subscriptions (spec 4 ticket 03): the Owner signs in through the Hub's CLIProxyAPI, pasting
+    // the address the browser lands on; a Vertex service account is imported.
+    startAccountLogin: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ai-accounts:login-start",
+      tag: WS_METHODS.aiAccountsLoginStart,
+    }),
+    completeAccountLogin: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ai-accounts:login-complete",
+      tag: WS_METHODS.aiAccountsLoginComplete,
+    }),
+    importVertexAccount: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ai-accounts:import-vertex",
+      tag: WS_METHODS.aiAccountsImportVertex,
+    }),
   };
 }

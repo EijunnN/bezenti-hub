@@ -1097,9 +1097,18 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     for (const row of signedIn) {
       const name = tokenFileNameOf(row.accountId, row.credentialId ?? "");
       const entry = held.find((candidate) => candidate.name === name);
+      const limits = quotas.get(name);
       extras.set(row.accountId, {
         signedInAs: signedInAsOf(entry?.email),
-        usageLimits: quotas.get(name) ?? null,
+        // Its windows only: nothing derived from the credential.
+        usageLimits:
+          limits === undefined
+            ? null
+            : {
+                checkedAt: limits.checkedAt,
+                windows: limits.windows,
+                ...(limits.unavailable === undefined ? {} : { unavailable: limits.unavailable }),
+              },
       });
     }
     return extras;
