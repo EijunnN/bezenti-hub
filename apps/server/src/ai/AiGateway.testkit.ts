@@ -10,10 +10,15 @@ import * as NodePath from "node:path";
 import * as NodeZlib from "node:zlib";
 
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
+import { FetchHttpClient } from "effect/http";
 import { AiGatewayError } from "@t3tools/contracts";
 
+import * as AuditLog from "../audit/AuditLog.ts";
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
+import * as AiGateway from "./AiGateway.ts";
 import { type CliproxyPlatform, cliproxyAssetName } from "./cliproxyRelease.ts";
 import { CliproxyReleases } from "./CliproxyReleases.ts";
 
@@ -174,3 +179,57 @@ export const memorySecretStore = () => {
     }),
   };
 };
+
+/**
+ * A gateway as a Hub runs it, over a fake release, in the caller's scope: for tests of what else
+ * can reach it. Resolves with its loopback port once it answers.
+ */
+export const startFakeGateway = Effect.fn("AiGateway.testkit.startFakeGateway")(function* (input: {
+  readonly dir: string;
+  readonly os: NodeJS.Platform;
+  readonly platform: CliproxyPlatform;
+}) {
+  const release = fakeCliproxyRelease(input.dir, "1.0.0");
+  const stateDir = NodePath.join(input.dir, "state");
+  NodeFS.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const gateway = yield* AiGateway.make({
+    mode: "managed",
+    os: input.os,
+    stateDir,
+    platform: input.platform,
+    pinned: {
+      version: release.version,
+      sha256: {
+        "linux-amd64": release.sha256,
+        "linux-arm64": release.sha256,
+        "darwin-amd64": release.sha256,
+        "darwin-arm64": release.sha256,
+      },
+    },
+    runtimeFolder: { directory: NodePath.join(input.dir, "memory"), inMemory: true },
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.succeed(ServerSecretStore, memorySecretStore().service),
+        Layer.succeed(
+          CliproxyReleases,
+          fakeReleases({ platform: input.platform, releases: [release], latest: "1.0.0" }).service,
+        ),
+        Layer.succeed(
+          AuditLog.AuditLog,
+          AuditLog.AuditLog.of({ record: () => Effect.void, list: () => Effect.die("not used") }),
+        ),
+        FetchHttpClient.layer,
+      ),
+    ),
+  );
+  const running = yield* gateway.changes.pipe(
+    Stream.filter((status) => status.state === "running" || status.state === "failed"),
+    Stream.runHead,
+  );
+  const endpoint = yield* gateway.endpoint;
+  if (Option.isNone(running) || Option.isNone(endpoint)) {
+    return yield* Effect.die(new Error("The fake AI gateway did not start."));
+  }
+  return Number(new URL(endpoint.value.baseUrl).port);
+});
