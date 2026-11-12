@@ -607,6 +607,10 @@ it.effect(
         // vaults/EffectiveVaults.test.ts (spec 5 ticket 03)
         "vault.allow",
         "vault.choose",
+        // ai/AiGateway.test.ts (spec 4 ticket 01)
+        "ai_gateway.update",
+        "ai_gateway.rollback",
+        "ai_gateway.enable",
       ];
       assert.sameMembers(
         [...new Set([...expected.map((row) => row.action), ...recordedElsewhere])],
