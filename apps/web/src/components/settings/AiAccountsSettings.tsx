@@ -4,9 +4,11 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type {
+  AiAccountDetails,
   AiAccountProvider,
   AiAccountStatus,
   AiAccountSummary,
+  AiAccountUpdateInput,
   AiApiKeyProvider,
   EnvironmentId,
   InstallationUser,
@@ -15,6 +17,7 @@ import type {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
+import { useAtomValue } from "@effect/atom-react";
 import { useEffect, useEffectEvent, useState } from "react";
 
 import { PrimaryEnvironmentHttpClient } from "../../environments/primary/httpClient";
@@ -55,10 +58,19 @@ const providerLabel = (provider: AiAccountProvider) =>
 const STATUS_LABELS: Readonly<Record<AiAccountStatus, string>> = {
   pending: "Waiting for the AI gateway",
   working: "Working",
+  unverified: "In the gateway, unverified",
   error: "Error",
+  disabled: "Disabled",
+  removing: "Still live in the gateway",
   "needs-sign-in": "Needs sign-in again",
   "quota-exhausted": "Quota exhausted",
 };
+
+const splitModels = (text: string) =>
+  text
+    .split(/[\s,]+/u)
+    .map((model) => model.trim())
+    .filter((model) => model.length > 0);
 
 async function settle<A, E>(pending: Promise<AtomCommandResult<A, E>>): Promise<A> {
   const result = await pending;
@@ -103,26 +115,45 @@ interface Subject {
 function AiAccountsPage({ environmentId }: { readonly environmentId: EnvironmentId }) {
   const commands = useAccountCommands();
   const spaceView = useCurrentSpace((state) => state.view);
+  // The session may change the Hub's settings at all (settings:write); the Hub decides the rest.
+  const mayWrite = useAtomValue(aiGatewayEnvironment.createAccount.permissionAtom(environmentId));
   const [accounts, setAccounts] = useState<ReadonlyArray<AiAccountSummary> | null>(null);
   const [canManage, setCanManage] = useState(false);
   const [users, setUsers] = useState<ReadonlyArray<InstallationUser>>([]);
   const [error, setError] = useState<string | null>(null);
+  const [usersError, setUsersError] = useState<string | null>(null);
+  const [reordering, setReordering] = useState(false);
+  const manage = canManage && mayWrite;
 
-  const load = useEffectEvent(async (target: EnvironmentId) => {
-    const listed = await settle(commands.list({ environmentId: target, input: {} }));
-    const people = listed.canManage ? (await fetchUsers()).users : [];
-    return { listed, people };
-  });
+  const loadAccounts = useEffectEvent((target: EnvironmentId) =>
+    settle(commands.list({ environmentId: target, input: {} })),
+  );
 
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the AI accounts the signed-in User may see from the Hub when the page opens.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the AI accounts the signed-in User may see from the Hub when the page opens, then (for the Owner) the Users to allow them to.
   useEffect(() => {
     let cancelled = false;
-    void load(environmentId).then(
-      ({ listed, people }) => {
+    void loadAccounts(environmentId).then(
+      (listed) => {
         if (cancelled) return;
         setAccounts(listed.accounts);
         setCanManage(listed.canManage);
-        setUsers(people);
+        if (!listed.canManage) return;
+        // The accounts show even when the Users cannot be read.
+        void fetchUsers().then(
+          (list) => {
+            if (!cancelled) setUsers(list.users);
+          },
+          (cause: unknown) => {
+            if (!cancelled) {
+              setUsersError(
+                errorMessageOf(
+                  cause,
+                  "Could not read the Users: allowances to Users are not shown.",
+                ),
+              );
+            }
+          },
+        );
       },
       (cause: unknown) => {
         if (!cancelled) setError(errorMessageOf(cause, "Could not read the AI accounts."));
@@ -154,12 +185,17 @@ function AiAccountsPage({ environmentId }: { readonly environmentId: Environment
     .filter((user) => user.status !== "removed")
     .map((user) => ({ id: user.id, name: user.displayName }));
 
-  const move = async (index: number, by: -1 | 1) => {
-    if (accounts === null) return;
-    const order = accounts.map((account) => account.id);
-    const [moved] = order.splice(index, 1);
-    if (moved === undefined) return;
-    order.splice(index + by, 0, moved);
+  /** One move at a time, from the order the Hub last answered. */
+  const move = async (accountId: AiAccountSummary["id"], by: -1 | 1) => {
+    if (accounts === null || reordering) return;
+    const order = accounts
+      .filter((account) => account.status !== "removing")
+      .map((account) => account.id);
+    const index = order.indexOf(accountId);
+    if (index < 0 || index + by < 0 || index + by >= order.length) return;
+    order.splice(index, 1);
+    order.splice(index + by, 0, accountId);
+    setReordering(true);
     try {
       const listed = await settle(
         commands.reorder({ environmentId, input: { accountIds: order } }),
@@ -167,9 +203,13 @@ function AiAccountsPage({ environmentId }: { readonly environmentId: Environment
       setAccounts(listed.accounts);
     } catch (cause) {
       setError(errorMessageOf(cause, "Could not change the order."));
+      await refresh();
+    } finally {
+      setReordering(false);
     }
   };
 
+  const ordered = (accounts ?? []).filter((account) => account.status !== "removing");
   return (
     <>
       <SettingsSection id="ai-accounts" title="AI accounts">
@@ -181,14 +221,14 @@ function AiAccountsPage({ environmentId }: { readonly environmentId: Environment
               : "The AI accounts your agents may use in your Spaces. Only the Owner adds or changes them."
           }
           status={
-            error === null ? null : (
+            error === null && usersError === null ? null : (
               <span className="text-destructive" role="alert">
-                {error}
+                {[error, usersError].filter((part) => part !== null).join(" ")}
               </span>
             )
           }
         />
-        {canManage ? (
+        {manage ? (
           <NewAccountForm environmentId={environmentId} commands={commands} onAdded={refresh} />
         ) : null}
       </SettingsSection>
@@ -198,19 +238,20 @@ function AiAccountsPage({ environmentId }: { readonly environmentId: Environment
         </p>
       ) : (
         <ul aria-label="AI accounts" className="flex flex-col gap-4">
-          {accounts.map((account, index) => (
+          {accounts.map((account) => (
             <li key={account.id}>
               <AccountSection
                 environmentId={environmentId}
                 commands={commands}
                 account={account}
-                canManage={canManage}
+                canManage={manage}
                 spaces={spaces}
                 people={people}
                 spaceName={spaceName}
-                first={index === 0}
-                last={index === accounts.length - 1}
-                onMove={(by) => move(index, by)}
+                first={ordered[0]?.id === account.id}
+                last={ordered.at(-1)?.id === account.id}
+                reordering={reordering}
+                onMove={(by) => move(account.id, by)}
                 onChanged={refresh}
               />
             </li>
@@ -234,10 +275,7 @@ function NewAccountForm(props: {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const compatible = provider === "openai-compatible";
-  const modelList = models
-    .split(/[\s,]+/u)
-    .map((model) => model.trim())
-    .filter((model) => model.length > 0);
+  const modelList = splitModels(models);
   const ready =
     name.trim().length > 0 &&
     apiKey.trim().length > 0 &&
@@ -362,38 +400,41 @@ function AccountSection(props: {
   readonly spaceName: (spaceId: SpaceId) => string;
   readonly first: boolean;
   readonly last: boolean;
+  readonly reordering: boolean;
   readonly onMove: (by: -1 | 1) => Promise<void>;
   readonly onChanged: () => Promise<void>;
 }) {
   const { account, commands, environmentId } = props;
   const details = account.details;
+  const removing = account.status === "removing";
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [newKey, setNewKey] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [allowedSpaces, setAllowedSpaces] = useState<ReadonlyArray<string>>(
-    details?.allowances.spaceIds ?? [],
-  );
-  const [allowedUsers, setAllowedUsers] = useState<ReadonlyArray<string>>(
-    details?.allowances.userIds ?? [],
-  );
 
-  const act = async (work: () => Promise<unknown>) => {
+  /** Runs a change; whatever it answered, the list is read again (a key may be still live). */
+  const act = async (work: () => Promise<string | null>) => {
     setPending(true);
     setError(null);
+    setNotice(null);
     try {
-      await work();
-      await props.onChanged();
+      setNotice(await work());
       return true;
     } catch (cause) {
       setError(errorMessageOf(cause, "That did not work."));
       return false;
     } finally {
       setPending(false);
+      await props.onChanged();
     }
   };
-  const toggle = (list: ReadonlyArray<string>, id: string, on: boolean) =>
-    on ? [...new Set([...list, id])] : list.filter((item) => item !== id);
+  const update = (input: Omit<AiAccountUpdateInput, "accountId">) =>
+    act(() =>
+      settle(commands.update({ environmentId, input: { accountId: account.id, ...input } })).then(
+        () => null,
+      ),
+    );
 
   return (
     <SettingsSection id={`ai-account-${account.id}`} title={account.name}>
@@ -403,7 +444,7 @@ function AccountSection(props: {
           details === null
             ? `Usable in ${account.usableIn.map(props.spaceName).join(", ")}.`
             : [
-                `Priority ${account.priority}.`,
+                removing ? null : `Priority ${account.priority}.`,
                 details.keyHint === null ? null : `Key ending in …${details.keyHint}.`,
                 details.baseUrl === null
                   ? null
@@ -416,9 +457,13 @@ function AccountSection(props: {
           <span className="flex items-center gap-2">
             <Badge
               aria-label={`Status of ${account.name}`}
-              variant={account.status === "error" ? "destructive" : "secondary"}
+              variant={
+                account.status === "error" || account.status === "removing"
+                  ? "destructive"
+                  : "secondary"
+              }
             >
-              {account.disabled ? "Disabled" : STATUS_LABELS[account.status]}
+              {STATUS_LABELS[account.status]}
             </Badge>
           </span>
         }
@@ -427,6 +472,8 @@ function AccountSection(props: {
             <span className="text-destructive" role="alert">
               {error}
             </span>
+          ) : notice !== null ? (
+            <span role="status">{notice}</span>
           ) : account.statusMessage === null ? null : (
             <span>{account.statusMessage}</span>
           )
@@ -435,43 +482,38 @@ function AccountSection(props: {
       {props.canManage && details !== null ? (
         <div className="flex flex-col gap-3 px-4 pb-4">
           <div className="flex flex-wrap gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={pending || props.first}
-              aria-label={`Move ${account.name} up`}
-              onClick={() => void props.onMove(-1)}
-            >
-              Up
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={pending || props.last}
-              aria-label={`Move ${account.name} down`}
-              onClick={() => void props.onMove(1)}
-            >
-              Down
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={pending}
-              aria-label={`${account.disabled ? "Enable" : "Disable"} ${account.name}`}
-              onClick={() =>
-                void act(() =>
-                  settle(
-                    commands.update({
-                      environmentId,
-                      input: { accountId: account.id, disabled: !account.disabled },
-                    }),
-                  ),
-                )
-              }
-            >
-              {account.disabled ? "Enable" : "Disable"}
-            </Button>
-            {confirmDelete ? (
+            {removing ? null : (
+              <>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={pending || props.reordering || props.first}
+                  aria-label={`Move ${account.name} up`}
+                  onClick={() => void props.onMove(-1)}
+                >
+                  Up
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={pending || props.reordering || props.last}
+                  aria-label={`Move ${account.name} down`}
+                  onClick={() => void props.onMove(1)}
+                >
+                  Down
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={pending}
+                  aria-label={`${account.disabled ? "Enable" : "Disable"} ${account.name}`}
+                  onClick={() => void update({ disabled: !account.disabled })}
+                >
+                  {account.disabled ? "Enable" : "Disable"}
+                </Button>
+              </>
+            )}
+            {confirmDelete || removing ? (
               <Button
                 size="sm"
                 variant="destructive"
@@ -479,11 +521,17 @@ function AccountSection(props: {
                 aria-label={`Confirm delete ${account.name}`}
                 onClick={() =>
                   void act(() =>
-                    settle(commands.remove({ environmentId, input: { accountId: account.id } })),
+                    settle(
+                      commands.remove({ environmentId, input: { accountId: account.id } }),
+                    ).then((result) =>
+                      result.gateway === "not-running"
+                        ? "Deleted. The AI gateway is not running, so its key was live nowhere."
+                        : null,
+                    ),
                   )
                 }
               >
-                Delete for good
+                {removing ? "Try removing it again" : "Delete for good"}
               </Button>
             ) : (
               <Button
@@ -497,99 +545,221 @@ function AccountSection(props: {
               </Button>
             )}
           </div>
-          <form
-            aria-label={`Replace credential of ${account.name}`}
-            className="flex flex-col gap-2 sm:flex-row sm:items-end"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void act(() =>
-                settle(
-                  commands.update({
-                    environmentId,
-                    input: { accountId: account.id, apiKey: Redacted.make(newKey.trim()) },
-                  }),
-                ),
-              ).then((saved) => {
-                if (saved) setNewKey("");
-              });
-            }}
-          >
-            <label className="flex flex-1 flex-col gap-1 text-xs font-medium">
-              New API key
-              <Input
-                aria-label={`New API key for ${account.name}`}
-                nativeInput
-                disabled={pending}
-                value={newKey}
-                onChange={(event) => setNewKey(event.currentTarget.value)}
-                {...KEY_INPUT_PROPS}
+          {removing ? null : (
+            <>
+              <EditAccountForm
+                key={`${account.name}|${details.baseUrl}|${details.models.join(",")}`}
+                account={account}
+                details={details}
+                pending={pending}
+                onSave={(input) => update(input)}
               />
-            </label>
-            <Button size="sm" type="submit" disabled={pending || newKey.trim().length === 0}>
-              Replace credential
-            </Button>
-          </form>
-          <form
-            aria-label={`Who may use ${account.name}`}
-            className="flex flex-col gap-2"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void act(() =>
-                settle(
-                  commands.allow({
-                    environmentId,
-                    input: {
-                      accountId: account.id,
-                      spaceIds: allowedSpaces as ReadonlyArray<SpaceId>,
-                      userIds: allowedUsers as ReadonlyArray<UserId>,
-                    },
-                  }),
-                ),
-              );
-            }}
-          >
-            <fieldset className="flex flex-wrap gap-3 text-sm">
-              <legend className="text-xs font-medium">Spaces</legend>
-              {props.spaces.map((space) => (
-                <label key={space.id} className="flex items-center gap-1">
-                  <input
-                    type="checkbox"
-                    aria-label={`Allow ${account.name} in ${space.name}`}
-                    checked={allowedSpaces.includes(space.id)}
+              <form
+                aria-label={`Replace credential of ${account.name}`}
+                className="flex flex-col gap-2 sm:flex-row sm:items-end"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void update({ apiKey: Redacted.make(newKey.trim()) }).then((saved) => {
+                    if (saved) setNewKey("");
+                  });
+                }}
+              >
+                <label className="flex flex-1 flex-col gap-1 text-xs font-medium">
+                  New API key
+                  <Input
+                    aria-label={`New API key for ${account.name}`}
+                    nativeInput
                     disabled={pending}
-                    onChange={(event) =>
-                      setAllowedSpaces(toggle(allowedSpaces, space.id, event.currentTarget.checked))
-                    }
+                    value={newKey}
+                    onChange={(event) => setNewKey(event.currentTarget.value)}
+                    {...KEY_INPUT_PROPS}
                   />
-                  {space.name}
                 </label>
-              ))}
-            </fieldset>
-            <fieldset className="flex flex-wrap gap-3 text-sm">
-              <legend className="text-xs font-medium">Users</legend>
-              {props.people.map((person) => (
-                <label key={person.id} className="flex items-center gap-1">
-                  <input
-                    type="checkbox"
-                    aria-label={`Allow ${account.name} to ${person.name}`}
-                    checked={allowedUsers.includes(person.id)}
-                    disabled={pending}
-                    onChange={(event) =>
-                      setAllowedUsers(toggle(allowedUsers, person.id, event.currentTarget.checked))
-                    }
-                  />
-                  {person.name}
-                </label>
-              ))}
-            </fieldset>
-            <div>
-              <Button size="sm" type="submit" disabled={pending}>
-                Save who may use it
-              </Button>
-            </div>
-          </form>
+                <Button size="sm" type="submit" disabled={pending || newKey.trim().length === 0}>
+                  Replace credential
+                </Button>
+              </form>
+              <AllowancesForm
+                // Read again from the Hub after each change; a key replaced leaves them as they are.
+                key={JSON.stringify(details.allowances)}
+                account={account}
+                allowances={details.allowances}
+                spaces={props.spaces}
+                people={props.people}
+                pending={pending}
+                onSave={(allowances) =>
+                  act(() =>
+                    settle(
+                      commands.allow({
+                        environmentId,
+                        input: { accountId: account.id, ...allowances },
+                      }),
+                    ).then(() => null),
+                  )
+                }
+              />
+            </>
+          )}
         </div>
       ) : null}
     </SettingsSection>
+  );
+}
+
+/** Its name, and for an OpenAI-compatible account its base URL and models. */
+function EditAccountForm(props: {
+  readonly account: AiAccountSummary;
+  readonly details: AiAccountDetails;
+  readonly pending: boolean;
+  readonly onSave: (input: Omit<AiAccountUpdateInput, "accountId">) => Promise<boolean>;
+}) {
+  const { account, details } = props;
+  const compatible = account.provider === "openai-compatible";
+  const [name, setName] = useState(account.name);
+  const [baseUrl, setBaseUrl] = useState(details.baseUrl ?? "");
+  const [models, setModels] = useState(details.models.join(", "));
+  const modelList = splitModels(models);
+  const changed =
+    name.trim() !== account.name ||
+    (compatible &&
+      (baseUrl.trim() !== (details.baseUrl ?? "") ||
+        modelList.join(",") !== details.models.join(",")));
+  return (
+    <form
+      aria-label={`Edit ${account.name}`}
+      className="flex flex-col gap-2 sm:flex-row sm:items-end"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void props.onSave({
+          ...(name.trim() === account.name ? {} : { name: name.trim() }),
+          ...(compatible ? { baseUrl: baseUrl.trim(), models: modelList } : {}),
+        });
+      }}
+    >
+      <label className="flex flex-1 flex-col gap-1 text-xs font-medium">
+        Name
+        <Input
+          aria-label={`Name of ${account.name}`}
+          nativeInput
+          disabled={props.pending}
+          maxLength={80}
+          value={name}
+          onChange={(event) => setName(event.currentTarget.value)}
+        />
+      </label>
+      {compatible ? (
+        <>
+          <label className="flex flex-1 flex-col gap-1 text-xs font-medium">
+            Base URL
+            <Input
+              aria-label={`Base URL of ${account.name}`}
+              nativeInput
+              disabled={props.pending}
+              value={baseUrl}
+              onChange={(event) => setBaseUrl(event.currentTarget.value)}
+            />
+          </label>
+          <label className="flex flex-1 flex-col gap-1 text-xs font-medium">
+            Models
+            <Input
+              aria-label={`Models of ${account.name}`}
+              nativeInput
+              disabled={props.pending}
+              value={models}
+              onChange={(event) => setModels(event.currentTarget.value)}
+            />
+          </label>
+        </>
+      ) : null}
+      <Button
+        size="sm"
+        type="submit"
+        disabled={
+          props.pending ||
+          !changed ||
+          name.trim().length === 0 ||
+          (compatible && (baseUrl.trim().length === 0 || modelList.length === 0))
+        }
+      >
+        Save changes
+      </Button>
+    </form>
+  );
+}
+
+/**
+ * Who may use it. Users the page could not read stay as they were (they are sent back as is), and
+ * Spaces or Users that no longer exist are dropped by the Hub.
+ */
+function AllowancesForm(props: {
+  readonly account: AiAccountSummary;
+  readonly allowances: AiAccountDetails["allowances"];
+  readonly spaces: ReadonlyArray<Subject>;
+  readonly people: ReadonlyArray<Subject>;
+  readonly pending: boolean;
+  readonly onSave: (allowances: {
+    readonly spaceIds: ReadonlyArray<SpaceId>;
+    readonly userIds: ReadonlyArray<UserId>;
+  }) => Promise<boolean>;
+}) {
+  const { account } = props;
+  const [allowedSpaces, setAllowedSpaces] = useState<ReadonlyArray<string>>(
+    props.allowances.spaceIds,
+  );
+  const [allowedUsers, setAllowedUsers] = useState<ReadonlyArray<string>>(props.allowances.userIds);
+  const toggle = (list: ReadonlyArray<string>, id: string, on: boolean) =>
+    on ? [...new Set([...list, id])] : list.filter((item) => item !== id);
+  return (
+    <form
+      aria-label={`Who may use ${account.name}`}
+      className="flex flex-col gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void props.onSave({
+          spaceIds: allowedSpaces as ReadonlyArray<SpaceId>,
+          userIds: allowedUsers as ReadonlyArray<UserId>,
+        });
+      }}
+    >
+      <fieldset className="flex flex-wrap gap-3 text-sm">
+        <legend className="text-xs font-medium">Spaces</legend>
+        {props.spaces.map((space) => (
+          <label key={space.id} className="flex items-center gap-1">
+            <input
+              type="checkbox"
+              aria-label={`Allow ${account.name} in ${space.name}`}
+              checked={allowedSpaces.includes(space.id)}
+              disabled={props.pending}
+              onChange={(event) =>
+                setAllowedSpaces(toggle(allowedSpaces, space.id, event.currentTarget.checked))
+              }
+            />
+            {space.name}
+          </label>
+        ))}
+      </fieldset>
+      <fieldset className="flex flex-wrap gap-3 text-sm">
+        <legend className="text-xs font-medium">Users</legend>
+        {props.people.map((person) => (
+          <label key={person.id} className="flex items-center gap-1">
+            <input
+              type="checkbox"
+              aria-label={`Allow ${account.name} to ${person.name}`}
+              checked={allowedUsers.includes(person.id)}
+              disabled={props.pending}
+              onChange={(event) =>
+                setAllowedUsers(toggle(allowedUsers, person.id, event.currentTarget.checked))
+              }
+            />
+            {person.name}
+          </label>
+        ))}
+      </fieldset>
+      <div>
+        <Button size="sm" type="submit" disabled={props.pending}>
+          Save who may use it
+        </Button>
+      </div>
+    </form>
   );
 }
