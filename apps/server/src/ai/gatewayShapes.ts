@@ -109,6 +109,15 @@ export const parseRequestPath = (target: string): URL | undefined => {
   }
 };
 
+/** JSON text parsed, or undefined. */
+export const parseJsonText = (text: string): unknown => {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return undefined;
+  }
+};
+
 /** A request body that is a JSON object, or undefined. */
 export const parseJsonObject = (bytes: Uint8Array): Record<string, unknown> | undefined => {
   try {
@@ -192,9 +201,24 @@ export const parseRequestedModel = (raw: unknown): RequestedModel => {
   return { _tag: "plain", model: raw };
 };
 
+/**
+ * The upstream body for each account: written once with a marker for the model, so a failover
+ * only fills in another model instead of encoding the whole body again.
+ */
+export const bodyTemplate = (json: Record<string, unknown>) => {
+  const marker = "\u0000t3-gateway-model\u0000";
+  const [before, after] = JSON.stringify({ ...json, model: marker }).split(JSON.stringify(marker));
+  return (upstreamModel: string) =>
+    Buffer.from(`${before}${JSON.stringify(upstreamModel)}${after}`, "utf8");
+};
+
 /** What CLIProxyAPI is asked for: always one account's prefix, never the client's own text. */
 export const upstreamModelOf = (accountId: AiAccountId, model: string) =>
   `${aiAccountPrefixOf(accountId)}/${model}`;
+
+/** A Thread whose own AI account is not allowed in its Space now: every route says this. */
+export const CHOSEN_NOT_ALLOWED =
+  "This Thread's AI account is no longer allowed here. Switch AI account.";
 
 /** An AI account a request may go to, first to last by the Installation's priority. */
 export interface RoutableAccount {
@@ -220,6 +244,8 @@ export type RoutePlan =
 export const planRoute = (input: {
   readonly allowed: ReadonlyArray<RoutableAccount>;
   readonly chosenAccountId: string | null;
+  /** A Thread key routes only to its Thread's account; a User key may pin any allowed one. */
+  readonly keyKind: "thread" | "user";
   readonly requested: RequestedModel;
   readonly serves: (accountId: AiAccountId, model: string) => boolean;
 }): RoutePlan => {
@@ -229,6 +255,16 @@ export const planRoute = (input: {
   }
   const model = requested.model;
   let first: RoutableAccount | undefined;
+  if (requested._tag === "pinned" && input.keyKind === "thread") {
+    // An agent never moves its Thread to another account by naming it (a prompt could ask it to).
+    if (requested.accountId !== input.chosenAccountId) {
+      return {
+        _tag: "refused",
+        status: 403,
+        message: "This Thread uses its own AI account; switch AI account in the Thread.",
+      };
+    }
+  }
   if (requested._tag === "pinned") {
     first = allowed.find((account) => account.id === requested.accountId);
     if (first === undefined) {
@@ -244,7 +280,7 @@ export const planRoute = (input: {
       return {
         _tag: "refused",
         status: 403,
-        message: "This Thread's AI account is no longer allowed here. Switch AI account.",
+        message: CHOSEN_NOT_ALLOWED,
       };
     }
   } else {
@@ -373,7 +409,7 @@ const ANY_ACCOUNT_PREFIX = /\bacct-[A-Za-z0-9_-]+\//giu;
  * Upstream words made safe for a client: no credential, token, email, address or account prefix
  * (filterGatewayLine, plus emails, URLs and `acct-…/`), at most 400 characters.
  */
-const sanitizeUpstreamText = (text: string, secrets: ReadonlyArray<string> = []) =>
+export const sanitizeUpstreamText = (text: string, secrets: ReadonlyArray<string> = []) =>
   filterGatewayLine(
     text.replace(EMAIL, "[redacted]").replace(URL_TEXT, "[url]").replace(ANY_ACCOUNT_PREFIX, ""),
     secrets,
@@ -415,7 +451,7 @@ export interface GatewayUsage {
   readonly cacheWriteTokens: number | null;
 }
 
-const EMPTY_USAGE: GatewayUsage = {
+export const EMPTY_USAGE: GatewayUsage = {
   inputTokens: null,
   outputTokens: null,
   cacheReadTokens: null,
@@ -438,7 +474,7 @@ const larger = (a: number | null, b: number | null) =>
  * Merges what one JSON value (a whole answer, or one SSE event) says about tokens: OpenAI chat and
  * responses, Claude messages (start and delta), Gemini `usageMetadata`. Counts only grow.
  */
-const mergeUsage = (usage: GatewayUsage, value: unknown): GatewayUsage => {
+export const mergeUsage = (usage: GatewayUsage, value: unknown): GatewayUsage => {
   if (value === null || typeof value !== "object") return usage;
   const record = value as Record<string, unknown>;
   const sources = [
@@ -480,104 +516,4 @@ const mergeUsage = (usage: GatewayUsage, value: unknown): GatewayUsage => {
     };
   }
   return next;
-};
-
-/** How much of a non-streamed answer is kept aside to read its tokens; the rest is not read. */
-const USAGE_COPY_LIMIT = 1024 * 1024;
-
-/**
- * The tap a response streams through, chunk by chunk, holding back only what it must: in an SSE
- * answer the end of an unfinished line, elsewhere the last few characters that could start the
- * account's prefix. It strips the account's own prefix from what the client sees, filters an SSE
- * event that carries an error, and reads the tokens. Nothing waits for the end of the answer.
- */
-export const makeResponseTap = (input: { readonly sse: boolean; readonly prefix: string }) => {
-  const decoder = new TextDecoder();
-  const encoder = new TextEncoder();
-  const prefix = `${input.prefix}/`;
-  let pending = "";
-  let usage = EMPTY_USAGE;
-  let copy = "";
-  const strip = (text: string) => text.split(prefix).join("");
-  const readEvent = (line: string) => {
-    const data = /^data:\s?(.*)$/u.exec(line)?.[1];
-    if (data === undefined || !/usage/iu.test(data)) return;
-    try {
-      usage = mergeUsage(usage, JSON.parse(data));
-    } catch {
-      // Not JSON: no tokens to read.
-    }
-  };
-  /** An SSE event that carries an upstream error keeps its form, its words filtered. */
-  const safeLine = (line: string) => {
-    if (!/^data:/u.test(line) || !/"error"/u.test(line)) return line;
-    try {
-      const event = JSON.parse(line.slice(5)) as Record<string, unknown>;
-      if (event === null || typeof event !== "object" || !("error" in event)) return line;
-      const error = event.error;
-      const fields =
-        error !== null && typeof error === "object" ? (error as Record<string, unknown>) : {};
-      // Only the error's kind and its filtered words: nothing else it carried (metadata, ids).
-      const safe = {
-        ...(typeof fields.type === "string" ? { type: fields.type } : {}),
-        ...(typeof fields.code === "string" || typeof fields.code === "number"
-          ? { code: fields.code }
-          : {}),
-        ...(typeof fields.status === "string" ? { status: fields.status } : {}),
-        message: sanitizeUpstreamText(
-          String(typeof error === "string" ? error : (fields.message ?? "The AI gateway failed.")),
-        ),
-      };
-      return `data: ${JSON.stringify({ ...(typeof event.type === "string" ? { type: event.type } : {}), error: safe })}`;
-    } catch {
-      return `data: ${JSON.stringify({ error: { message: "The AI gateway failed." } })}`;
-    }
-  };
-  const take = (text: string, final: boolean) => {
-    pending += text;
-    if (input.sse) {
-      const end = final ? pending.length : pending.lastIndexOf("\n") + 1;
-      if (end <= 0) return "";
-      const ready = pending.slice(0, end);
-      pending = pending.slice(end);
-      return ready
-        .split("\n")
-        .map((line) => {
-          const clean = strip(line);
-          readEvent(clean.replace(/\r$/u, ""));
-          return safeLine(clean);
-        })
-        .join("\n");
-    }
-    pending = strip(pending);
-    // Only the end that could still become the prefix waits for the next chunk.
-    let hold = 0;
-    if (!final) {
-      for (let size = Math.min(prefix.length - 1, pending.length); size > 0; size -= 1) {
-        if (prefix.startsWith(pending.slice(-size))) {
-          hold = size;
-          break;
-        }
-      }
-    }
-    const ready = pending.slice(0, pending.length - hold);
-    pending = pending.slice(pending.length - hold);
-    if (copy.length < USAGE_COPY_LIMIT) copy += ready.slice(0, USAGE_COPY_LIMIT - copy.length);
-    return ready;
-  };
-  return {
-    chunk: (bytes: Uint8Array) =>
-      encoder.encode(take(decoder.decode(bytes, { stream: true }), false)),
-    end: () => encoder.encode(take(decoder.decode(), true)),
-    usage: (): GatewayUsage => {
-      if (!input.sse && copy.length > 0 && copy.length < USAGE_COPY_LIMIT) {
-        try {
-          return mergeUsage(usage, JSON.parse(copy));
-        } catch {
-          return usage;
-        }
-      }
-      return usage;
-    },
-  };
 };

@@ -26,6 +26,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Redacted from "effect/Redacted";
 import * as References from "effect/References";
 import * as Stream from "effect/Stream";
@@ -46,7 +47,9 @@ import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as AiAccounts from "./AiAccounts.ts";
 import * as AiGateway from "./AiGateway.ts";
 import * as AiGatewayActivity from "./AiGatewayActivity.ts";
+import * as AiGatewayKeyRevocation from "./AiGatewayKeyRevocation.ts";
 import * as AiGatewayKeys from "./AiGatewayKeys.ts";
+import * as AiGatewayProxy from "./AiGatewayProxy.ts";
 import * as AiGatewayRoute from "./AiGatewayRoute.ts";
 import { fakeCliproxyRelease, fakeReleases, pinsOf } from "./AiGateway.testkit.ts";
 import { cliproxyPlatformOf } from "./cliproxyRelease.ts";
@@ -57,11 +60,14 @@ const platform = cliproxyPlatformOf(os, HostProcess.Architecture.defaultValue())
 const posix = os === "linux" || os === "darwin";
 
 const PROMPT = "PROMPT-the-secret-plan-7f3a9";
-// A small body limit for this file, so the size test sends little.
-process.env.T3CODE_AI_GATEWAY_MAX_REQUEST_BYTES = String(256 * 1024);
+/** The Hub's limits in these tests: a small body limit, so the size test sends little. */
+const TEST_LIMITS: AiGatewayProxy.AiGatewayProxyLimits = {
+  ...AiGatewayProxy.DEFAULT_AI_GATEWAY_PROXY_LIMITS,
+  maxRequestBytes: 256 * 1024,
+};
 const PROVIDER_KEYS = ["sk-ant-acme-claude-a-0123456789", "sk-ant-acme-claude-b-0123456789"];
 
-const hub = Effect.gen(function* () {
+const hubWith = Effect.fn(function* (limits: Partial<AiGatewayProxy.AiGatewayProxyLimits> = {}) {
   const server = yield* serveAuthHttp;
   const authenticator = yield* makeAuthenticator();
   const { created } = yield* bootstrapOwner(server, authenticator);
@@ -135,7 +141,8 @@ const hub = Effect.gen(function* () {
     Stream.runHead,
   );
   const context = yield* Layer.build(
-    AiGatewayKeys.layer.pipe(
+    AiGatewayProxy.layerWith({ ...TEST_LIMITS, ...limits }).pipe(
+      Layer.provideMerge(AiGatewayKeys.layer),
       Layer.provideMerge(AiGatewayActivity.layer),
       Layer.provideMerge(AiAccounts.layer),
       Layer.provideMerge(AuditLog.layer),
@@ -273,6 +280,7 @@ const hub = Effect.gen(function* () {
   };
 });
 
+const hub = hubWith();
 type Hub = Effect.Success<typeof hub>;
 
 interface Answer {
@@ -313,7 +321,19 @@ const call = (
           : { body: init.rawBody as string }
         : { body: JSON.stringify(init.body) }),
     });
-    const text = await response.text();
+    // An answer the gateway cut ends early: what came is the text.
+    let text = "";
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    try {
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        text += decoder.decode(chunk.value, { stream: true });
+      }
+    } catch {
+      // Cut off.
+    }
     let json: Record<string, unknown> | null = null;
     try {
       json = JSON.parse(text) as Record<string, unknown>;
@@ -617,9 +637,21 @@ it.live.skipIf(!posix || platform === undefined)(
       assert.equal(nonsense.status, 400);
       assert.equal(setup.upstream().length, before, "a refused request reached CLIProxyAPI");
 
-      // An allowed account named by its prefix is served by that account.
-      const pinned = yield* call(setup, path, {
+      // A Thread key never moves its Thread to another allowed account by naming it (a prompt
+      // could ask the agent to); a User key (a local CLI) may pin any allowed account.
+      const threadPin = yield* call(setup, path, {
         key,
+        body: messages(`acct-${ids.claudeB}/claude-sonnet-5-5`),
+      });
+      assert.equal(threadPin.status, 403);
+      assert.equal(setup.upstream().length, before, "a Thread key's pin reached CLIProxyAPI");
+      const cliKey = yield* setup.keys.createForUser({
+        actorUserId: setup.people.member,
+        spaceId: setup.acmeId,
+        name: "Grace laptop",
+      });
+      const pinned = yield* call(setup, path, {
+        key: Redacted.value(cliKey.key),
         body: messages(`acct-${ids.claudeB}/claude-sonnet-5-5`),
       });
       assert.equal(pinned.status, 200);
@@ -990,9 +1022,13 @@ it.live.skipIf(!posix || platform === undefined)(
       const extra = yield* call(setup, path, { key, body: messages() });
       assert.equal(extra.status, 429);
       setup.flag("fake-stream-release");
-      yield* Effect.forEach(held, (response) => Effect.promise(() => response.text()), {
-        concurrency: "unbounded",
-      });
+      yield* Effect.forEach(
+        held,
+        (response) => Effect.promise(() => response.text().catch(() => "")),
+        {
+          concurrency: "unbounded",
+        },
+      );
       setup.flag("fake-stream-hold", false);
       setup.flag("fake-stream-release", false);
       assert.equal((yield* call(setup, path, { key, body: messages() })).status, 200);
@@ -1034,4 +1070,411 @@ it.live.skipIf(!posix || platform === undefined)(
       Effect.provideService(References.MinimumLogLevel, "All"),
     );
   },
+);
+
+/** Every request record from now on, one `take` per finished request. */
+const recordsOf = (setup: Hub) =>
+  Effect.gen(function* () {
+    const queue = yield* Queue.unbounded<AiGatewayActivity.GatewayRequestRecord>();
+    const stream = yield* setup.activity.subscribeRequests;
+    yield* stream.pipe(
+      Stream.runForEach((record) => Queue.offer(queue, record)),
+      Effect.forkScoped,
+    );
+    return queue;
+  });
+
+/** A raw request whose answer is read by hand: `pauseMs` after the first chunk, then the rest. */
+const slowReader = (setup: Hub, path: string, key: string, body: unknown, pauseMs: number) =>
+  Effect.promise(
+    () =>
+      new Promise<{ readonly status: number; readonly text: string; readonly ended: string }>(
+        (resolve) => {
+          let text = "";
+          const request = NodeHttp.request(
+            {
+              host: "127.0.0.1",
+              port: setup.port,
+              method: "POST",
+              path,
+              headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+            },
+            (response) => {
+              let paused = false;
+              response.on("data", (chunk) => {
+                text += String(chunk);
+                if (!paused) {
+                  paused = true;
+                  response.pause();
+                  setTimeout(() => response.resume(), pauseMs);
+                }
+              });
+              response.on("end", () =>
+                resolve({ status: response.statusCode ?? 0, text, ended: "end" }),
+              );
+              response.on("aborted", () =>
+                resolve({ status: response.statusCode ?? 0, text, ended: "aborted" }),
+              );
+              response.on("error", () =>
+                resolve({ status: response.statusCode ?? 0, text, ended: "error" }),
+              );
+            },
+          );
+          request.on("error", () => resolve({ status: 0, text, ended: "error" }));
+          request.end(JSON.stringify(body));
+        },
+      ),
+  );
+
+/** A request whose body starts and never finishes, as a slowloris sends it. */
+const slowBody = (setup: Hub, path: string, key: string) =>
+  Effect.promise(
+    () =>
+      new Promise<{ readonly status: number; readonly text: string }>((resolve) => {
+        const request = NodeHttp.request(
+          {
+            host: "127.0.0.1",
+            port: setup.port,
+            method: "POST",
+            path,
+            headers: {
+              authorization: `Bearer ${key}`,
+              "content-type": "application/json",
+              "content-length": "100000",
+            },
+          },
+          (response) => {
+            let text = "";
+            response.on("data", (chunk) => (text += String(chunk)));
+            response.on("end", () => {
+              request.destroy();
+              resolve({ status: response.statusCode ?? 0, text });
+            });
+          },
+        );
+        request.on("error", () => resolve({ status: 0, text: "" }));
+        request.write('{"model":"claude-sonnet-5-5","messages":[');
+      }),
+  );
+
+it.live.skipIf(!posix || platform === undefined)(
+  "one User cannot block the gateway: User key cap, per-User slots, slow bodies and slow readers are cut",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hubWith({
+        perKey: 2,
+        perUser: 3,
+        total: 4,
+        readersPerUser: 1,
+        bodyDeadlineMs: 1500,
+        bodyIdleMs: 700,
+        clientStallMs: 700,
+        upstreamIdleMs: 1500,
+        bufferedBytesTotal: 600 * 1024,
+      });
+      yield* acmeSetup(setup);
+      const path = "/api/ai/anthropic/v1/messages";
+      // At most five live User keys each.
+      const graceKeys: Array<string> = [];
+      for (let index = 0; index < 5; index += 1) {
+        const made = yield* setup.keys.createForUser({
+          actorUserId: setup.people.member,
+          spaceId: setup.acmeId,
+          name: `Laptop ${index}`,
+        });
+        graceKeys.push(Redacted.value(made.key));
+      }
+      const sixth = yield* Effect.flip(
+        setup.keys.createForUser({
+          actorUserId: setup.people.member,
+          spaceId: setup.acmeId,
+          name: "Laptop 6",
+        }),
+      );
+      assert.equal(sixth.reason, "limit");
+      const linus = Redacted.value(
+        (yield* setup.keys.createForUser({
+          actorUserId: setup.people.guest,
+          spaceId: setup.acmeId,
+          name: "Linus",
+        })).key,
+      );
+
+      // Grace holds three answers across her keys (her share); a fourth of hers waits, Linus does not.
+      setup.flag("fake-stream-hold");
+      const held = yield* Effect.forEach(
+        [graceKeys[0]!, graceKeys[0]!, graceKeys[1]!],
+        (key) =>
+          Effect.promise(() =>
+            fetch(`http://127.0.0.1:${setup.port}${path}`, {
+              method: "POST",
+              headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+              body: JSON.stringify(messages("claude-sonnet-5-5", { stream: true })),
+            }),
+          ),
+        // One body at a time: Grace may have only one being read (readersPerUser).
+        { concurrency: 1 },
+      );
+      assert.deepEqual(
+        held.map((response) => response.status),
+        [200, 200, 200],
+      );
+      const graceFourth = yield* call(setup, path, { key: graceKeys[2]!, body: messages() });
+      assert.equal(graceFourth.status, 429);
+      const linusOne = yield* call(setup, path, { key: linus, body: messages() });
+      assert.equal(linusOne.status, 200, "one User's requests blocked another User");
+      setup.flag("fake-stream-release");
+      yield* Effect.forEach(
+        held,
+        (response) => Effect.promise(() => response.text().catch(() => "")),
+        {
+          concurrency: "unbounded",
+        },
+      );
+      setup.flag("fake-stream-hold", false);
+      setup.flag("fake-stream-release", false);
+
+      // A body that never finishes is cut (408) and leaves no slot behind.
+      const before = setup.upstream().length;
+      const slow = yield* slowBody(setup, path, graceKeys[3]!);
+      assert.equal(slow.status, 408);
+      assert.equal(setup.upstream().length, before);
+      assert.equal(
+        (yield* call(setup, path, { key: graceKeys[3]!, body: messages() })).status,
+        200,
+      );
+
+      // A client that stops reading a long answer is cut, and its slot comes back.
+      setup.flag("fake-stream-big");
+      const stalled = yield* slowReader(
+        setup,
+        "/api/ai/openai/v1/chat/completions",
+        graceKeys[4]!,
+        { model: "deepseek-chat", stream: true, messages: [] },
+        2500,
+      );
+      setup.flag("fake-stream-big", false);
+      assert.equal(stalled.status, 200);
+      assert.notInclude(
+        stalled.text,
+        "[DONE]",
+        "a client that stopped reading got the whole answer",
+      );
+      // An upstream that goes quiet is cut too.
+      setup.flag("fake-stream-hold");
+      const quiet = yield* call(setup, path, {
+        key: graceKeys[4]!,
+        body: messages("claude-sonnet-5-5", { stream: true }),
+      });
+      setup.flag("fake-stream-hold", false);
+      assert.notInclude(quiet.text, "message_stop");
+      for (const key of graceKeys) {
+        assert.equal((yield* call(setup, path, { key, body: messages() })).status, 200);
+      }
+
+      // The Hub holds at most so many request bytes at once: a body that would pass it is 503.
+      const bulky = yield* call(setup, path, {
+        key: graceKeys[0]!,
+        rawBody: JSON.stringify(messages("claude-sonnet-5-5", { pad: "x".repeat(250 * 1024) })),
+      });
+      assert.equal(bulky.status, 503);
+    }).pipe(Effect.scoped),
+);
+
+it.live.skipIf(!posix || platform === undefined)(
+  "counts tokens in every shape and never changes what the client asked for",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub;
+      const ids = yield* acmeSetup(setup);
+      const records = yield* recordsOf(setup);
+      const { key, threadId } = yield* setup.thread(setup.people.member, setup.acmeId);
+      const chat = "/api/ai/openai/v1/chat/completions";
+
+      // An OpenAI stream without include_usage: the Hub asks for the tokens and hides that chunk.
+      const plain = yield* call(setup, chat, {
+        key,
+        body: {
+          model: "deepseek-chat",
+          stream: true,
+          messages: [{ role: "user", content: PROMPT }],
+        },
+      });
+      assert.include(plain.text, "data: [DONE]");
+      assert.notInclude(plain.text, '"usage"');
+      assert.equal((yield* Queue.take(records)).usage?.outputTokens, 7);
+      const asked = yield* call(setup, chat, {
+        key,
+        body: {
+          model: "deepseek-chat",
+          stream: true,
+          stream_options: { include_usage: true },
+          messages: [],
+        },
+      });
+      assert.include(asked.text, '"usage"');
+      assert.equal((yield* Queue.take(records)).usage?.inputTokens, 11);
+
+      // Gemini's stream without alt=sse (a JSON array), whole and with an error element filtered.
+      const array = yield* call(
+        setup,
+        "/api/ai/gemini/v1beta/models/gemini-3-pro:streamGenerateContent",
+        { key, keyHeader: "x-goog-api-key", body: { contents: [] } },
+      );
+      assert.equal(array.status, 200);
+      assert.lengthOf(JSON.parse(array.text) as ReadonlyArray<unknown>, 2);
+      assert.equal((yield* Queue.take(records)).usage?.outputTokens, 7);
+      setup.flag("fake-stream-error");
+      const arrayError = yield* call(
+        setup,
+        "/api/ai/gemini/v1beta/models/gemini-3-pro:streamGenerateContent",
+        { key, keyHeader: "x-goog-api-key", body: { contents: [] } },
+      );
+      setup.flag("fake-stream-error", false);
+      yield* Queue.take(records);
+      assert.lengthOf(JSON.parse(arrayError.text) as ReadonlyArray<unknown>, 3);
+      for (const leak of ["owner@example.com", "sk-ant-leaky", "acct-"]) {
+        assert.notInclude(arrayError.text, leak);
+      }
+      assert.include(arrayError.text, "upstream failure for [redacted]");
+
+      // A plain answer over 1 MiB still counts its tokens.
+      setup.flag("fake-big-json");
+      const big = yield* call(setup, chat, { key, body: { model: "deepseek-chat", messages: [] } });
+      setup.flag("fake-big-json", false);
+      assert.equal(big.status, 200);
+      assert.equal((yield* Queue.take(records)).usage?.outputTokens, 7);
+
+      // An upstream 3xx is the gateway's failure, said without its words.
+      setup.flag(`fake-redirect-${ids.router}`);
+      const redirected = yield* call(setup, chat, {
+        key,
+        body: { model: "deepseek-chat", messages: [] },
+      });
+      setup.flag(`fake-redirect-${ids.router}`, false);
+      yield* Queue.take(records);
+      assert.equal(redirected.status, 502);
+      assert.notInclude(redirected.text, "owner@example.com");
+
+      // Counting tokens does not move the Thread's account in use.
+      const counting = yield* setup.thread(setup.people.member, setup.acmeId);
+      yield* call(setup, "/api/ai/anthropic/v1/messages/count_tokens", {
+        key: counting.key,
+        body: messages(),
+      });
+      yield* Queue.take(records);
+      assert.isTrue(Option.isNone(yield* setup.activity.inUse(counting.threadId)));
+      assert.isTrue(Option.isSome(yield* setup.activity.inUse(threadId)));
+
+      // A Thread whose own account is no longer allowed lists nothing else either.
+      const pinned = yield* setup.thread(setup.people.member, setup.acmeId, ids.claudeB);
+      yield* setup.accounts
+        .allow({ accountId: ids.claudeB, spaceIds: [setup.globexId], userIds: [] })
+        .pipe(setup.asOwner);
+      const listed = yield* call(setup, "/api/ai/anthropic/v1/models", {
+        key: pinned.key,
+        keyHeader: "x-api-key",
+      });
+      assert.equal(listed.status, 403);
+      assert.include(listed.text, "Switch AI account");
+    }).pipe(Effect.scoped),
+);
+
+it.live.skipIf(!posix || platform === undefined)(
+  "a key is revoked when its session closes or detaches, its Thread is archived, deleted or moved, or its User leaves",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub;
+      yield* acmeSetup(setup);
+      const ask = (key: string) =>
+        call(setup, "/api/ai/openai/v1/chat/completions", {
+          key,
+          body: { model: "deepseek-chat", messages: [] },
+        }).pipe(Effect.map((answer) => answer.status));
+      const revoke = (change: Parameters<typeof AiGatewayKeyRevocation.revokeFor>[0]) =>
+        AiGatewayKeyRevocation.revokeFor(change).pipe(
+          Effect.provideService(AiGatewayKeys.AiGatewayKeys, setup.keys),
+          Effect.provideService(AiGatewayActivity.AiGatewayActivity, setup.activity),
+        );
+      const reasonOf = (threadId: ThreadId) =>
+        setup.server.sql<{ readonly reason: string | null }>`
+          SELECT revoked_reason AS reason FROM ai_gateway_keys WHERE thread_id = ${threadId}
+          ORDER BY rowid DESC LIMIT 1
+        `.pipe(Effect.map((rows) => rows[0]?.reason ?? null));
+      const event = (type: string, threadId: ThreadId, payload: unknown) =>
+        ({ _tag: "event", event: { type, threadId, payload } }) as never;
+
+      // The session the key was issued for stops: the key stops with it.
+      const session = yield* setup.thread(setup.people.member, setup.acmeId);
+      const sessionKey = Redacted.value(
+        (yield* setup.keys.issueForThread(session.threadId, { providerSessionId: "ps-1" })).key,
+      );
+      assert.equal(yield* ask(sessionKey), 200);
+      yield* revoke(
+        event("provider-session.updated", session.threadId, { id: "ps-2", status: "stopped" }),
+      );
+      assert.equal(yield* ask(sessionKey), 200, "another session's end revoked the key");
+      yield* revoke(
+        event("provider-session.updated", session.threadId, { id: "ps-1", status: "running" }),
+      );
+      assert.equal(yield* ask(sessionKey), 200);
+      yield* revoke(
+        event("provider-session.updated", session.threadId, { id: "ps-1", status: "stopped" }),
+      );
+      assert.equal(yield* ask(sessionKey), 401);
+      assert.equal(yield* reasonOf(session.threadId), "session-closed");
+      // Detached from one Thread: that Thread's key only.
+      const shared = yield* setup.thread(setup.people.member, setup.acmeId);
+      const other = yield* setup.thread(setup.people.member, setup.acmeId);
+      const sharedKey = Redacted.value(
+        (yield* setup.keys.issueForThread(shared.threadId, { providerSessionId: "ps-shared" })).key,
+      );
+      const otherKey = Redacted.value(
+        (yield* setup.keys.issueForThread(other.threadId, { providerSessionId: "ps-shared" })).key,
+      );
+      yield* revoke(
+        event("provider-session.detached", shared.threadId, { providerSessionId: "ps-shared" }),
+      );
+      assert.equal(yield* ask(sharedKey), 401);
+      assert.equal(yield* ask(otherKey), 200);
+
+      // Archived, deleted (its account in use forgotten too).
+      const archived = yield* setup.thread(setup.people.member, setup.acmeId);
+      yield* revoke(event("thread.archived", archived.threadId, {}));
+      assert.equal(yield* reasonOf(archived.threadId), "thread-archived");
+      assert.equal(yield* ask(archived.key), 401);
+      const deleted = yield* setup.thread(setup.people.member, setup.acmeId);
+      assert.equal(yield* ask(deleted.key), 200);
+      assert.isTrue(Option.isSome(yield* setup.activity.inUse(deleted.threadId)));
+      yield* revoke(event("thread.deleted", deleted.threadId, {}));
+      assert.equal(yield* reasonOf(deleted.threadId), "thread-deleted");
+      assert.isTrue(Option.isNone(yield* setup.activity.inUse(deleted.threadId)));
+
+      // Moved to Globex: refused, and its row says so from then on.
+      const moved = yield* setup.thread(setup.people.member, setup.acmeId);
+      yield* setup.server.sql`
+        UPDATE projection_projects SET space_id = ${setup.globexId} WHERE project_id = ${moved.projectId}
+      `;
+      assert.equal(yield* ask(moved.key), 403);
+      assert.equal(yield* reasonOf(moved.threadId), "thread-moved");
+      assert.equal(yield* ask(moved.key), 401);
+
+      // The User disabled or removed: every key of theirs, Thread and User keys alike.
+      const linusThread = yield* setup.thread(setup.people.guest, setup.acmeId);
+      const linusCli = yield* setup.keys.createForUser({
+        actorUserId: setup.people.guest,
+        spaceId: setup.acmeId,
+        name: "Linus",
+      });
+      yield* revoke({ _tag: "user", userId: setup.people.guest, active: false });
+      const linusRows = yield* setup.server.sql<{ readonly reason: string | null }>`
+        SELECT revoked_reason AS reason FROM ai_gateway_keys WHERE user_id = ${setup.people.guest}
+      `;
+      assert.deepEqual(
+        linusRows.map((row) => row.reason),
+        ["user-inactive", "user-inactive"],
+      );
+      assert.equal(yield* ask(linusThread.key), 401);
+      assert.equal(yield* ask(Redacted.value(linusCli.key)), 401);
+    }).pipe(Effect.scoped),
 );

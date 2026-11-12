@@ -282,10 +282,25 @@ if (mode === "decoy") {
         response.setHeader("X-Fake-Account", accountId);
         response.setHeader("Set-Cookie", "fake=1");
         if (fs.existsSync(path.join(dir, "fake-quota-" + accountId))) return send(response, 429, { error: { message: "Quota exceeded for owner@example.com with sk-ant-leaky_key_1234567890", type: "rate_limit_error" } });
+        if (fs.existsSync(path.join(dir, "fake-redirect-" + accountId))) { response.statusCode = 302; response.setHeader("location", "https://provider.test/owner@example.com"); response.end(); return; }
         if (fs.existsSync(path.join(dir, "fake-error-" + accountId))) return send(response, 400, { error: { message: "Bad request for owner@example.com on " + model + " with sk-ant-leaky_key_1234567890 see https://provider.test/x?key=AIzaSyLeaky_Google-Key1234567890" } });
         const text = "Hello from " + model;
         const route = geminiCall !== null ? "gemini" : aiUrl.pathname;
         const stream = body.stream === true || (geminiCall !== null && geminiCall[2] === "streamGenerateContent");
+        // Gemini's stream without alt=sse: one JSON array, an element at a time.
+        if (geminiCall !== null && stream && aiUrl.searchParams.get("alt") !== "sse") {
+          response.statusCode = 200;
+          response.setHeader("content-type", "application/json");
+          response.write("[" + JSON.stringify({ candidates: [{ content: { role: "model", parts: [{ text: "Hello " }] } }], modelVersion: model, usageMetadata: { promptTokenCount: 11, candidatesTokenCount: 1 } }));
+          if (fs.existsSync(path.join(dir, "fake-stream-error"))) response.write(",\r\n" + JSON.stringify({ error: { code: 500, message: "upstream failure for owner@example.com token sk-ant-leaky_key_1234567890", status: "INTERNAL" } }));
+          response.write(",\r\n" + JSON.stringify({ candidates: [{ content: { role: "model", parts: [{ text }] }, finishReason: "STOP" }], modelVersion: model, usageMetadata: { promptTokenCount: 11, candidatesTokenCount: 7 } }) + "]");
+          response.end();
+          return;
+        }
+        // A plain answer over 1 MiB, its tokens at the end.
+        if (!stream && fs.existsSync(path.join(dir, "fake-big-json"))) {
+          return send(response, 200, { id: "chat_1", object: "chat.completion", model, choices: [{ index: 0, message: { role: "assistant", content: text + " " + "x".repeat(1536 * 1024) }, finish_reason: "stop" }], usage: { prompt_tokens: 11, completion_tokens: 7 } });
+        }
         if (!stream) {
           if (route === "/v1/messages/count_tokens") return send(response, 200, { input_tokens: 11 });
           if (route === "/v1/messages") return send(response, 200, { id: "msg_1", type: "message", role: "assistant", model, content: [{ type: "text", text }], usage: { input_tokens: 11, output_tokens: 7, cache_read_input_tokens: 3 } });
@@ -304,6 +319,14 @@ if (mode === "decoy") {
               ? [{ type: "response.created", response: { id: "resp_1", model } }, "response.created"]
               : [{ id: "chat_1", object: "chat.completion.chunk", model, choices: [{ index: 0, delta: { role: "assistant", content: "Hello " } }] }];
         event(first[0], first[1]);
+        if (fs.existsSync(path.join(dir, "fake-stream-big"))) {
+          const filler = "y".repeat(16 * 1024);
+          for (let index = 0; index < 4096 && !response.destroyed; index += 1) {
+            if (!response.write("data: " + JSON.stringify({ id: "chat_1", object: "chat.completion.chunk", model, choices: [{ index: 0, delta: { content: filler } }] }) + String.fromCharCode(10, 10))) {
+              await new Promise((resolve) => { response.once("drain", resolve); response.once("close", resolve); });
+            }
+          }
+        }
         if (fs.existsSync(path.join(dir, "fake-stream-hold"))) {
           const until = Date.now() + 15000;
           while (!fs.existsSync(path.join(dir, "fake-stream-release")) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 25));
@@ -320,7 +343,8 @@ if (mode === "decoy") {
           event({ type: "response.completed", response: { id: "resp_1", model, usage: { input_tokens: 11, output_tokens: 7 } } }, "response.completed");
         } else {
           event({ id: "chat_1", object: "chat.completion.chunk", model, choices: [{ index: 0, delta: { content: text }, finish_reason: "stop" }] });
-          event({ id: "chat_1", object: "chat.completion.chunk", model, choices: [], usage: { prompt_tokens: 11, completion_tokens: 7 } });
+          // Like OpenAI: the usage chunk only for a client that asked for it.
+          if (body.stream_options?.include_usage === true) event({ id: "chat_1", object: "chat.completion.chunk", model, choices: [], usage: { prompt_tokens: 11, completion_tokens: 7 } });
           response.write("data: [DONE]" + String.fromCharCode(10, 10));
         }
         response.end();

@@ -70,6 +70,8 @@ export class AiGatewayActivity extends Context.Service<
     readonly subscribeAccountsInUse: Effect.Effect<Stream.Stream<AccountInUse>, never, Scope.Scope>;
     /** The account a Thread's requests went to last. */
     readonly inUse: (threadId: ThreadId) => Effect.Effect<Option.Option<AccountInUse>>;
+    /** Forgets a deleted Thread's account in use. */
+    readonly forgetThread: (threadId: ThreadId) => Effect.Effect<void>;
   }
 >()("t3/ai/AiGatewayActivity") {}
 
@@ -124,6 +126,15 @@ const make = Effect.gen(function* () {
     noteInUse,
     subscribeAccountsInUse: Effect.map(PubSub.subscribe(changes), Stream.fromSubscription),
     inUse,
+    forgetThread: Effect.fn("AiGatewayActivity.forgetThread")(function* (threadId: ThreadId) {
+      yield* sql`DELETE FROM ai_gateway_thread_accounts WHERE thread_id = ${threadId}`.pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("AiGatewayActivity: could not forget a Thread's AI account", {
+            cause,
+          }),
+        ),
+      );
+    }),
   });
 });
 

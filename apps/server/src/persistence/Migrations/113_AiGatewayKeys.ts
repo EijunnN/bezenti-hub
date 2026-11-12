@@ -14,6 +14,8 @@ export default Effect.gen(function* () {
       user_id TEXT NOT NULL,
       space_id TEXT NOT NULL,
       thread_id TEXT,
+      -- A Thread key's provider session: it stops when that session closes.
+      provider_session_id TEXT,
       name TEXT NOT NULL,
       created_at TEXT NOT NULL,
       expires_at TEXT,
@@ -25,6 +27,7 @@ export default Effect.gen(function* () {
   `;
   yield* sql`CREATE INDEX ai_gateway_keys_thread_idx ON ai_gateway_keys (thread_id)`;
   yield* sql`CREATE INDEX ai_gateway_keys_user_idx ON ai_gateway_keys (user_id)`;
+  yield* sql`CREATE INDEX ai_gateway_keys_session_idx ON ai_gateway_keys (provider_session_id)`;
   // The AI account a Thread's requests last went to (after a failover too), for its header.
   yield* sql`
     CREATE TABLE ai_gateway_thread_accounts (

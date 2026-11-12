@@ -40,7 +40,7 @@ export class AiGatewayRefusal extends Schema.TaggedError<AiGatewayRefusal>()("Ai
 export class AiGatewayKeyError extends Schema.TaggedError<AiGatewayKeyError>()(
   "AiGatewayKeyError",
   {
-    reason: Schema.Literals(["forbidden", "not-found", "invalid", "storage"]),
+    reason: Schema.Literals(["forbidden", "not-found", "invalid", "limit", "storage"]),
     message: Schema.String,
   },
 ) {}
@@ -85,12 +85,21 @@ export class AiGatewayKeys extends Context.Service<
      */
     readonly issueForThread: (
       threadId: ThreadId,
+      options?: { readonly providerSessionId?: string },
     ) => Effect.Effect<IssuedGatewayKey, AiGatewayKeyError>;
-    /** Revokes every live key of a Thread (moved, archived, deleted, its session closed). */
+    /** Revokes every live key of a Thread (moved, archived, deleted). */
     readonly revokeThread: (
       threadId: ThreadId,
       reason: string,
     ) => Effect.Effect<void, AiGatewayKeyError>;
+    /** Revokes the keys issued for one provider session (of one Thread, when it detaches). */
+    readonly revokeSession: (
+      providerSessionId: string,
+      reason: string,
+      threadId?: ThreadId,
+    ) => Effect.Effect<void, AiGatewayKeyError>;
+    /** Revokes every key of a User (disabled or removed). */
+    readonly revokeUser: (userId: UserId, reason: string) => Effect.Effect<void, AiGatewayKeyError>;
     /** A User's key for a local CLI, in a Space they work in (ticket 10 gives it a screen). */
     readonly createForUser: (input: {
       readonly actorUserId: UserId;
@@ -115,6 +124,8 @@ export class AiGatewayKeys extends Context.Service<
 
 /** A Thread key lives until its session's next one replaces it, or a week at most. */
 const THREAD_KEY_LIFETIME_DAYS = 7;
+/** Live User keys one User may hold (local CLIs). */
+const MAX_USER_KEYS = 5;
 const MAX_NAME_LENGTH = 80;
 
 /** The only form a key is kept in: its SHA-256, hex. */
@@ -184,7 +195,34 @@ const make = Effect.gen(function* () {
     `.pipe(Effect.catch(storage("revoke the Thread's AI gateway keys")));
   });
 
-  const issueForThread = Effect.fn("AiGatewayKeys.issueForThread")(function* (threadId: ThreadId) {
+  const revokeSession = Effect.fn("AiGatewayKeys.revokeSession")(function* (
+    providerSessionId: string,
+    reason: string,
+    threadId?: ThreadId,
+  ) {
+    const at = yield* nowIso;
+    yield* sql`
+      UPDATE ai_gateway_keys SET revoked_at = ${at}, revoked_reason = ${reason}
+      WHERE provider_session_id = ${providerSessionId} AND revoked_at IS NULL
+        AND ${threadId === undefined ? sql`1 = 1` : sql`thread_id = ${threadId}`}
+    `.pipe(Effect.catch(storage("revoke the session's AI gateway keys")));
+  });
+
+  const revokeUser = Effect.fn("AiGatewayKeys.revokeUser")(function* (
+    userId: UserId,
+    reason: string,
+  ) {
+    const at = yield* nowIso;
+    yield* sql`
+      UPDATE ai_gateway_keys SET revoked_at = ${at}, revoked_reason = ${reason}
+      WHERE user_id = ${userId} AND revoked_at IS NULL
+    `.pipe(Effect.catch(storage("revoke the User's AI gateway keys")));
+  });
+
+  const issueForThread = Effect.fn("AiGatewayKeys.issueForThread")(function* (
+    threadId: ThreadId,
+    options: { readonly providerSessionId?: string } = {},
+  ) {
     const space = yield* spaces
       .spaceOf({ kind: "thread", id: threadId })
       .pipe(Effect.catch(storage("read the Thread's Space")));
@@ -208,9 +246,10 @@ const make = Effect.gen(function* () {
           `;
           yield* sql`
             INSERT INTO ai_gateway_keys (key_id, key_hash, kind, user_id, space_id, thread_id,
-              name, created_at, expires_at)
+              provider_session_id, name, created_at, expires_at)
             VALUES (${keyId}, ${gatewayKeyHash(key)}, 'thread', ${owner.value}, ${space.value.id},
-              ${threadId}, ${`Thread ${threadId}`}, ${at}, ${expiresAt})
+              ${threadId}, ${options.providerSessionId ?? null}, ${`Thread ${threadId}`}, ${at},
+              ${expiresAt})
           `;
         }),
       )
@@ -242,9 +281,14 @@ const make = Effect.gen(function* () {
     const key = newKey();
     const keyId = newKeyId();
     const at = yield* nowIso;
-    yield* sql
+    const made = yield* sql
       .withTransaction(
         Effect.gen(function* () {
+          const live = yield* sql<{ readonly n: number }>`
+            SELECT COUNT(*) AS n FROM ai_gateway_keys
+            WHERE kind = 'user' AND user_id = ${input.actorUserId} AND revoked_at IS NULL
+          `;
+          if ((live[0]?.n ?? 0) >= MAX_USER_KEYS) return false;
           yield* sql`
             INSERT INTO ai_gateway_keys (key_id, key_hash, kind, user_id, space_id, thread_id,
               name, created_at)
@@ -257,9 +301,16 @@ const make = Effect.gen(function* () {
             target: { kind: "ai_gateway_key", id: keyId, name },
             detail: { kind: "user", space: input.spaceId },
           });
+          return true;
         }),
       )
       .pipe(Effect.catch(storage("make the AI gateway key")));
+    if (!made) {
+      return yield* new AiGatewayKeyError({
+        reason: "limit",
+        message: `You have ${MAX_USER_KEYS} keys already. Revoke one to make another.`,
+      });
+    }
     return { keyId, key: Redacted.make(key) } satisfies IssuedGatewayKey;
   });
 
@@ -335,8 +386,30 @@ const make = Effect.gen(function* () {
   ) {
     const raw = Redacted.value(key);
     if (!isGatewayKeyShaped(raw)) return yield* refused(401, UNKNOWN_KEY);
-    const rows = yield* sql<KeyRow>`
-      SELECT ${sql.literal(KEY_COLUMNS)} FROM ai_gateway_keys WHERE key_hash = ${gatewayKeyHash(raw)}
+    // One read: the key, its User's state and, for a Thread key, the Thread.
+    const rows = yield* sql<
+      KeyRow & {
+        readonly userStatus: "active" | "inactive" | "missing";
+        readonly threadFound: number;
+        readonly archivedAt: string | null;
+        readonly deletedAt: string | null;
+        readonly chosen: string | null;
+      }
+    >`
+      SELECT k.key_id AS "keyId", k.kind AS "kind", k.user_id AS "userId",
+        k.space_id AS "spaceId", k.thread_id AS "threadId", k.name AS "name",
+        k.created_at AS "createdAt", k.expires_at AS "expiresAt",
+        k.last_used_at AS "lastUsedAt", k.revoked_at AS "revokedAt",
+        CASE WHEN u.user_id IS NULL THEN 'missing'
+          WHEN u.disabled_at IS NOT NULL OR u.removed_at IS NOT NULL THEN 'inactive'
+          ELSE 'active' END AS "userStatus",
+        t.thread_id IS NOT NULL AS "threadFound", t.archived_at AS "archivedAt",
+        t.deleted_at AS "deletedAt",
+        json_extract(t.payload_json, '$.modelSelection.aiAccountId') AS "chosen"
+      FROM ai_gateway_keys k
+      LEFT JOIN users u ON u.user_id = k.user_id
+      LEFT JOIN orchestration_v2_projection_threads t ON t.thread_id = k.thread_id
+      WHERE k.key_hash = ${gatewayKeyHash(raw)}
     `.pipe(Effect.catch(unavailable));
     const row = rows[0];
     if (row === undefined || row.revokedAt !== null) return yield* refused(401, UNKNOWN_KEY);
@@ -347,44 +420,49 @@ const make = Effect.gen(function* () {
     const userId = UserId.make(row.userId);
     const spaceId = SpaceId.make(row.spaceId);
     // A User removed, disabled or gone: none of their keys work, whatever they are for.
-    const user = yield* spaces.installationUser(userId).pipe(Effect.catch(unavailable));
-    if (Option.isNone(user) || user.value.status !== "active") {
-      return yield* refused(401, UNKNOWN_KEY);
-    }
+    if (row.userStatus !== "active") return yield* refused(401, UNKNOWN_KEY);
     let threadId: ThreadId | null = null;
     let chosenAccountId: AiAccountId | null = null;
     if (row.kind === "thread") {
       threadId = ThreadId.make(row.threadId ?? "");
-      const threads = yield* sql<{
-        readonly archivedAt: string | null;
-        readonly deletedAt: string | null;
-        readonly chosen: string | null;
-      }>`
-        SELECT archived_at AS "archivedAt", deleted_at AS "deletedAt",
-          json_extract(payload_json, '$.modelSelection.aiAccountId') AS "chosen"
-        FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}
-      `.pipe(Effect.catch(unavailable));
-      const thread = threads[0];
-      if (thread === undefined || thread.deletedAt !== null || thread.archivedAt !== null) {
+      if (!row.threadFound || row.deletedAt !== null || row.archivedAt !== null) {
         return yield* refused(401, UNKNOWN_KEY);
       }
-      // The Thread's Space now (its own, else its Project's): a move ends the key.
-      const space = yield* spaces
-        .spaceOf({ kind: "thread", id: threadId })
-        .pipe(Effect.catch(unavailable));
+      // The Thread's Space now (SpaceDirectory's rule), its turn owner and any move, at once.
+      const [space, owner, blocked] = yield* Effect.all(
+        [
+          spaces.spaceOf({ kind: "thread", id: threadId }),
+          threadTurnOwner(sql, threadId),
+          spaces.workBlocked(threadId),
+        ],
+        { concurrency: "unbounded" },
+      ).pipe(Effect.catch(unavailable));
+      // Moved or handed over: the key is over for good, and its row says so.
+      const over = (reason: string, message: string) =>
+        nowIso.pipe(
+          Effect.flatMap(
+            (at) => sql`
+              UPDATE ai_gateway_keys SET revoked_at = ${at}, revoked_reason = ${reason}
+              WHERE key_id = ${row.keyId} AND revoked_at IS NULL
+            `,
+          ),
+          Effect.ignore,
+          Effect.andThen(refused(403, message)),
+        );
       if (Option.isNone(space) || space.value.id !== spaceId) {
-        return yield* refused(403, "This Thread is in another Space now; its key no longer works.");
+        return yield* over(
+          "thread-moved",
+          "This Thread is in another Space now; its key no longer works.",
+        );
       }
       // The key acts for the Thread's turn owner only: another owner, another key.
-      const owner = yield* threadTurnOwner(sql, threadId).pipe(Effect.catch(unavailable));
       if (Option.isNone(owner) || owner.value !== userId) {
-        return yield* refused(403, "This key is not for this Thread's owner.");
+        return yield* over("owner-changed", "This key is not for this Thread's owner.");
       }
-      const blocked = yield* spaces.workBlocked(threadId).pipe(Effect.catch(unavailable));
       if (blocked === "project-moving") {
         return yield* refused(503, "The Project is moving to another Space. Try again.");
       }
-      chosenAccountId = (thread.chosen ?? null) as AiAccountId | null;
+      chosenAccountId = (row.chosen ?? null) as AiAccountId | null;
     }
     // Evaluated now, never cached: an allowance removed a moment ago is gone here.
     const allowed = (yield* allowedAccounts
@@ -418,6 +496,8 @@ const make = Effect.gen(function* () {
   return AiGatewayKeys.of({
     issueForThread,
     revokeThread,
+    revokeSession,
+    revokeUser,
     createForUser,
     listUserKeys,
     revoke,

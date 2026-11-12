@@ -203,7 +203,9 @@ import * as MasterKeyBackup from "./auth/MasterKeyBackup.ts";
 import * as AiAccounts from "./ai/AiAccounts.ts";
 import * as AiGateway from "./ai/AiGateway.ts";
 import * as AiGatewayActivity from "./ai/AiGatewayActivity.ts";
+import * as AiGatewayKeyRevocation from "./ai/AiGatewayKeyRevocation.ts";
 import * as AiGatewayKeys from "./ai/AiGatewayKeys.ts";
+import * as AiGatewayProxy from "./ai/AiGatewayProxy.ts";
 import * as AiGatewayRoute from "./ai/AiGatewayRoute.ts";
 import * as CliproxyReleases from "./ai/CliproxyReleases.ts";
 import * as JoinedHub from "./environments/JoinedHub.ts";
@@ -627,7 +629,9 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   // CLIProxyAPI, run by the Hub on loopback (`T3CODE_AI_GATEWAY`), and the AI accounts it gets
   // at every start (spec 4 ticket 02).
   // The gateway layer's keys and what it did (spec 4 ticket 04), over the same AI accounts.
-  AiGatewayKeys.layer.pipe(
+  AiGatewayKeyRevocation.layer.pipe(
+    Layer.provideMerge(AiGatewayProxy.layer),
+    Layer.provideMerge(AiGatewayKeys.layer),
     Layer.provideMerge(AiGatewayActivity.layer),
     Layer.provideMerge(
       AiAccounts.layer.pipe(
