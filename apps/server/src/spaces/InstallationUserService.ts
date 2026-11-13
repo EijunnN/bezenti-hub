@@ -13,6 +13,7 @@ import * as AuditLog from "../audit/AuditLog.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as PairingGrantStore from "../auth/PairingGrantStore.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
+import * as VaultReachLoss from "../vaults/VaultReachLoss.ts";
 import * as SpaceDirectory from "./SpaceDirectory.ts";
 
 type StatusError =
@@ -67,6 +68,22 @@ const make = Effect.gen(function* () {
     yield* spaces.endAccessOf({ userId, removed: status === "removed" });
   }, Effect.mapError(storageError));
 
+  /** Every Vault allowed to the User is taken back, as the Owner would, in the caller's transaction. */
+  const forgetVaults = Effect.fn("InstallationUserService.forgetVaults")(function* (
+    actorUserId: UserId,
+    userId: UserId,
+  ) {
+    for (const vault of yield* VaultReachLoss.forgetUser(sql, userId)) {
+      yield* audit.record({
+        actor: AuditLog.userActor(actorUserId),
+        action: "vault.allow",
+        spaceId: null,
+        target: { kind: "vault", id: vault.vaultId, name: vault.name },
+        detail: { subjectKind: "user", subjectId: userId, allowed: false },
+      });
+    }
+  }, Effect.mapError(storageError));
+
   const setStatus: InstallationUserService["Service"]["setStatus"] = Effect.fn(
     "InstallationUserService.setStatus",
   )(function* ({ actorUserId, userId, status }) {
@@ -100,6 +117,9 @@ const make = Effect.gen(function* () {
             return { changed, announce: Effect.void };
           }
           if (changed && current.status !== "removed") yield* writeStatus(userId, status);
+          // A removed User's own Vault allowances go (spec 5 ticket 07); a disabled one keeps
+          // them, unused while they cannot sign in.
+          if (status === "removed") yield* forgetVaults(actorUserId, userId);
           // Their machines go with their sign-in, and stay revoked if they come back.
           const disconnect = yield* environments
             .revokeOwnedBy({ userId, actor: AuditLog.userActor(actorUserId) })

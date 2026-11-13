@@ -22,6 +22,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
+import type { SqlError } from "effect/sql/SqlError";
 
 import * as AuditLog from "../audit/AuditLog.ts";
 import { replayAndBufferProjectedLiveEvents } from "./LiveStreamBudget.ts";
@@ -175,6 +176,8 @@ export interface EventSinkV2Shape {
     readonly event: UnsequencedProjectEvent;
     /** Recorded as the fiber's actor in the same transaction; a replayed command records nothing. */
     readonly audit?: AuditLog.AuditDraft;
+    /** Other writes that commit with the event, or not at all; a replayed command runs none. */
+    readonly alsoCommit?: Effect.Effect<void, SqlError>;
   }) => Effect.Effect<
     { readonly receipt: CommandReceiptStore.ProjectCommandReceiptV2; readonly committed: boolean },
     EventSinkV2Error
@@ -777,6 +780,7 @@ const layerBase: Layer.Layer<
             }
             const event = yield* eventStore.appendProjectEvent(input.event);
             yield* projectStore.apply(event);
+            if (input.alsoCommit !== undefined) yield* input.alsoCommit;
             const receipt = { ...reserved, resultSequence: event.sequence };
             yield* commandReceipts.upsert(receipt);
             yield* recordAudit(input.audit);

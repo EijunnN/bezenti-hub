@@ -1,7 +1,9 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import { RepositoryIdentity, ThreadEnvMode } from "./environment.ts";
 import { ModelSelection } from "./modelSelection.ts";
+import { VaultId } from "./vaults.ts";
 import {
   CommandId,
   EnvironmentId,
@@ -273,6 +275,13 @@ export const ProjectMovePlanThread = Schema.Struct({
 });
 export type ProjectMovePlanThread = typeof ProjectMovePlanThread.Type;
 
+/** A Vault the Project's Threads stop receiving when it moves (spec 5 ticket 07). */
+export const ProjectMovePlanVault = Schema.Struct({
+  vaultId: VaultId,
+  name: Schema.String,
+});
+export type ProjectMovePlanVault = typeof ProjectMovePlanVault.Type;
+
 /** What moving the Project to `spaceId` does to its Threads. */
 export const ProjectMovePlan = Schema.Struct({
   projectId: ProjectId,
@@ -281,6 +290,14 @@ export const ProjectMovePlan = Schema.Struct({
   running: Schema.Array(ProjectMovePlanThread),
   /** On a machine that does not serve `spaceId`: they need an environment after the move. */
   needsEnvironment: Schema.Array(ProjectMovePlanThread),
+  /**
+   * The Vaults its Threads receive from the Space they leave and would not from `spaceId`'s
+   * (defaults and the Project's own choices; a User's own Vaults follow the User). Missing from
+   * a Hub before Vaults: none.
+   */
+  vaultsLost: Schema.Array(ProjectMovePlanVault).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed([])),
+  ),
 });
 export type ProjectMovePlan = typeof ProjectMovePlan.Type;
 

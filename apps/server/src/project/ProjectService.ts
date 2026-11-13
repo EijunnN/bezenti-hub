@@ -12,6 +12,7 @@ import {
   type EnvironmentId,
   type OrchestrationV2DomainEvent,
   HUB_MACHINE_ENVIRONMENT_ID,
+  type VaultId,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
@@ -25,6 +26,7 @@ import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+import type { SqlError } from "effect/sql/SqlError";
 
 import { withCommandMetrics } from "../observability/Metrics.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
@@ -58,6 +60,7 @@ import * as CommandActor from "../auth/CommandActor.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import type * as AuditLog from "../audit/AuditLog.ts";
 import { servesSpace } from "../sandboxes/sandboxSpace.ts";
+import * as EffectiveVaults from "../vaults/EffectiveVaults.ts";
 import * as ProjectMoveHooks from "./ProjectMoveHooks.ts";
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
@@ -114,6 +117,8 @@ export interface ProjectMovePlan {
   readonly running: ReadonlyArray<ProjectMovePlanThread>;
   /** On a machine that does not serve `spaceId`: they need an environment after the move. */
   readonly needsEnvironment: ReadonlyArray<ProjectMovePlanThread>;
+  /** The Vaults its Threads stop receiving (`EffectiveVaults.projectMove`). */
+  readonly vaultsLost: ReadonlyArray<{ readonly vaultId: VaultId; readonly name: string }>;
 }
 
 const encodeSessionIds = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
@@ -180,6 +185,7 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
       "dispatch-project-command",
       "check-environment",
       "check-folder",
+      "read-vaults",
     ]),
     projectId: Schema.optional(ProjectId),
     workspaceRoot: Schema.optional(Schema.String),
@@ -287,6 +293,8 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const directories = { path, fileSystem: yield* Effect.serviceOption(FileSystem.FileSystem) };
   const moveHooks = yield* Effect.serviceOption(ProjectMoveHooks.ProjectMoveHooks);
+  // Absent where there are no Vaults (an orchestration-only host): a move loses none.
+  const effectiveVaults = yield* Effect.serviceOption(EffectiveVaults.EffectiveVaults);
   const projectLocks = yield* KeyedLock.make<ProjectId>();
   const rootClaims = yield* KeyedLock.make<string>();
   const workspaceLocks = yield* KeyedLock.make<string>();
@@ -377,7 +385,11 @@ export const make = Effect.gen(function* () {
     return undefined;
   };
 
-  const commit = Effect.fn("ProjectService.commit")(function* (command: ProjectCommand) {
+  const commit = Effect.fn("ProjectService.commit")(function* (
+    command: ProjectCommand,
+    /** Committed with the command's event, never on a replay (a move's Vault choices). */
+    alsoCommit?: Effect.Effect<void, SqlError>,
+  ) {
     const { projectId } = command;
     const dispatchError = (cause: unknown) =>
       new ProjectOperationError({ operation: "dispatch-project-command", projectId, cause });
@@ -411,6 +423,7 @@ export const make = Effect.gen(function* () {
           acceptedAt: now,
           event: planned.success,
           ...(audit === undefined ? {} : { audit }),
+          ...(alsoCommit === undefined ? {} : { alsoCommit }),
         });
         return receipt;
       }
@@ -1071,6 +1084,25 @@ export const make = Effect.gen(function* () {
     return { running, changing };
   });
 
+  /**
+   * What the move does to the Project's Vaults (spec 5 ticket 07): the ones it loses, and the
+   * write that drops its choices of Vaults that do not reach the destination. Nothing between
+   * Spaces that are the same, or where there are no Vaults.
+   */
+  const vaultsOnMove = (
+    projectId: ProjectId,
+    route: { readonly from: SpaceId; readonly to: SpaceId },
+  ): Effect.Effect<EffectiveVaults.ProjectMoveVaults | undefined, ProjectOperationError> =>
+    route.from === route.to || Option.isNone(effectiveVaults)
+      ? Effect.succeed(undefined)
+      : effectiveVaults.value
+          .projectMove({ projectId, from: route.from, to: route.to })
+          .pipe(
+            Effect.mapError(
+              (cause) => new ProjectOperationError({ operation: "read-vaults", projectId, cause }),
+            ),
+          );
+
   const movePlan: ProjectService["Service"]["movePlan"] = Effect.fn("ProjectService.movePlan")(
     function* (input) {
       const { projectId } = input;
@@ -1100,7 +1132,9 @@ export const make = Effect.gen(function* () {
         if (plan.running) running.push(entry);
         if (plan.releasedFrom !== undefined) needsEnvironment.push(entry);
       }
-      return { projectId, spaceId: route.to, running, needsEnvironment };
+      const vaults = yield* vaultsOnMove(projectId, route);
+      const vaultsLost = (vaults?.lost ?? []).map(({ vaultId, name }) => ({ vaultId, name }));
+      return { projectId, spaceId: route.to, running, needsEnvironment, vaultsLost };
     },
   );
 
@@ -1155,13 +1189,19 @@ export const make = Effect.gen(function* () {
             projectId,
             cache,
           );
-          yield* commit({
-            type: "project.meta.update",
-            commandId: input.commandId,
-            projectId,
-            spaceId: route.to,
-            ...(preferred === undefined ? {} : { preferredEnvironmentId: null }),
-          });
+          // Its choices of Vaults that do not reach the new Space go with the same commit, so
+          // allowing one there later never brings an old choice back unseen.
+          const vaults = yield* vaultsOnMove(projectId, route);
+          yield* commit(
+            {
+              type: "project.meta.update",
+              commandId: input.commandId,
+              projectId,
+              spaceId: route.to,
+              ...(preferred === undefined ? {} : { preferredEnvironmentId: null }),
+            },
+            vaults?.dropChoices,
+          );
           yield* Ref.set(moved, true);
         }
         // Listed after the Project moved, so none created before it is left behind; legacy

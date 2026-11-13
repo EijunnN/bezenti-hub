@@ -230,6 +230,18 @@ export function ProjectMoveDialog({
                 {plan.running.length === 0 && plan.needsEnvironment.length === 0 ? (
                   <p>Every Thread keeps its Environment.</p>
                 ) : null}
+                {plan.vaultsLost.length > 0 ? (
+                  <section aria-label="Vaults it loses">
+                    <p className="font-medium">
+                      {`Its Threads stop receiving the secrets of ${plan.vaultsLost.length === 1 ? "this Vault" : "these Vaults"}:`}
+                    </p>
+                    <ul className="mt-1 list-disc pl-5">
+                      {plan.vaultsLost.map((vault) => (
+                        <li key={vault.vaultId}>{vault.name}</li>
+                      ))}
+                    </ul>
+                  </section>
+                ) : null}
               </>
             ) : null}
             {plan !== undefined && (step.status === "moved" || step.status === "moving-threads") ? (

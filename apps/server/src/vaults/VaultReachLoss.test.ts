@@ -1,0 +1,219 @@
+/**
+ * Spec 5 ticket 07, «Bajas»: an Organization deleted takes its own Vaults, their values and every
+ * row that names it; a User removed from the Installation loses the Vaults allowed to them. What
+ * is delivered needs no row to go (EffectiveVaults recomputes it); these keep nothing behind.
+ */
+import { ProjectId, SpaceId, UserId } from "@t3tools/contracts";
+import { assert, it } from "@effect/vitest";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Redacted from "effect/Redacted";
+import type { SqlError } from "effect/sql/SqlError";
+
+import * as CommandActor from "../auth/CommandActor.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import {
+  addMember,
+  bootstrapOwner,
+  joinOrganization,
+  makeAuthenticator,
+  serveAuthHttp,
+} from "../auth/UserAuth.testkit.ts";
+import * as InstallationUserService from "../spaces/InstallationUserService.ts";
+import * as OrganizationLifecycle from "../spaces/OrganizationLifecycle.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as Vaults from "./Vaults.ts";
+
+const hub = Effect.gen(function* () {
+  const server = yield* serveAuthHttp;
+  const { created } = yield* bootstrapOwner(server, yield* makeAuthenticator());
+  const owner = created.cookie ?? "";
+  const ownerId = UserId.make((created.body.user as { id: string }).id);
+  const organization = Effect.fn(function* (name: string) {
+    const made = yield* server.request("/api/spaces/organizations", {
+      body: { name },
+      cookie: owner,
+    });
+    return SpaceId.make(made.body.id as string);
+  });
+  const acmeId = yield* organization("Acme");
+  const globexId = yield* organization("Globex");
+  const vaults = Context.get(server.services, Vaults.Vaults);
+  const values = Context.get(server.services, ServerSecretStore.VaultValueStore);
+  const asOwner = CommandActor.actAs(ownerId);
+  const vault = Effect.fn(function* (
+    name: string,
+    spaceId: SpaceId | null,
+    secrets: ReadonlyArray<readonly [string, string]>,
+  ) {
+    const made = yield* vaults.create({ name, spaceId }).pipe(asOwner);
+    for (const [variable, value] of secrets) {
+      yield* vaults
+        .putEntry({ vaultId: made.id, name: variable, value: Redacted.make(value) })
+        .pipe(asOwner);
+    }
+    return made.id;
+  });
+  const project = Effect.fn(function* (id: string, spaceId: SpaceId) {
+    const made = yield* server.request("/api/projects/mutate", {
+      cookie: owner,
+      body: {
+        type: "project.create",
+        commandId: `create-${id}`,
+        projectId: id,
+        title: id,
+        workspaceRoot: server.newProjectFolder(id),
+        spaceId,
+      },
+    });
+    assert.equal(made.status, 200, JSON.stringify(made.body));
+    return ProjectId.make(id);
+  });
+  const count = (query: Effect.Effect<ReadonlyArray<{ readonly n: number }>, SqlError>) =>
+    query.pipe(
+      Effect.map((rows) => rows[0]?.n ?? 0),
+      Effect.orDie,
+    );
+  return { server, ownerId, acmeId, globexId, vaults, values, asOwner, vault, project, count };
+});
+
+it.effect("deleting an Organization deletes its Vaults, their values and every row naming it", () =>
+  Effect.gen(function* () {
+    const h = yield* hub;
+    const sql = h.server.sql;
+    const acmeVault = yield* h.vault("Acme keys", h.acmeId, [
+      ["ACME_TOKEN", "acme-token-value-0001"],
+      ["ACME_DEPLOY", "acme-deploy-value-0002"],
+    ]);
+    const globexVault = yield* h.vault("Globex keys", h.globexId, [
+      ["GLOBEX_TOKEN", "globex-token-value-0003"],
+    ]);
+    // One of the Owner's, allowed to both Organizations: it stays, without Acme.
+    const shared = yield* h.vault("Shared tools", null, [["SHARED", "shared-value-00004"]]);
+    for (const spaceId of [h.acmeId, h.globexId]) {
+      yield* h.vaults
+        .allow({ vaultId: shared, subject: { kind: "space", spaceId }, allowed: true })
+        .pipe(h.asOwner);
+    }
+    yield* h.vaults
+      .setSpaceDefaults({ spaceId: h.acmeId, vaultIds: [acmeVault, shared] })
+      .pipe(h.asOwner);
+    const web = yield* h.project("acme-web", h.acmeId);
+    yield* h.vaults
+      .setProjectChoice({ projectId: web, vaultId: acmeVault, choice: "remove" })
+      .pipe(h.asOwner);
+    const acmeValues = (yield* sql<{ readonly valueId: string }>`
+        SELECT value_id AS "valueId" FROM vault_entries WHERE vault_id = ${acmeVault}
+      `).map((row) => row.valueId);
+    assert.lengthOf(acmeValues, 2);
+
+    const lifecycle = Context.get(h.server.services, OrganizationLifecycle.OrganizationLifecycle);
+    yield* lifecycle.archive(h.ownerId, h.acmeId);
+    yield* lifecycle.delete(h.ownerId, h.acmeId);
+
+    assert.equal(
+      yield* h.count(sql`SELECT COUNT(*) AS n FROM vaults WHERE space_id = ${h.acmeId}`),
+      0,
+    );
+    assert.equal(
+      yield* h.count(sql`SELECT COUNT(*) AS n FROM vault_entries WHERE vault_id = ${acmeVault}`),
+      0,
+    );
+    assert.equal(
+      yield* h.count(sql`
+          SELECT COUNT(*) AS n FROM vault_allowances
+          WHERE vault_id = ${acmeVault} OR (subject_kind = 'space' AND subject_id = ${h.acmeId})
+        `),
+      0,
+    );
+    assert.equal(
+      yield* h.count(
+        sql`SELECT COUNT(*) AS n FROM space_default_vaults WHERE space_id = ${h.acmeId}`,
+      ),
+      0,
+    );
+    assert.equal(
+      yield* h.count(
+        sql`SELECT COUNT(*) AS n FROM project_vault_choices WHERE project_id = ${web}`,
+      ),
+      0,
+    );
+    const stored = new Set(yield* h.values.list);
+    for (const valueId of acmeValues) {
+      assert.isFalse(stored.has(valueId), "no value of Acme's is left in the store");
+    }
+    // The Owner's Vault and Globex's own stay as they were, Globex's allowance included.
+    assert.deepEqual(
+      (yield* sql<{ readonly vaultId: string }>`
+          SELECT vault_id AS "vaultId" FROM vaults WHERE vault_id IN (${shared}, ${globexVault})
+          ORDER BY name
+        `).map((row) => row.vaultId),
+      [globexVault, shared],
+    );
+    assert.equal(
+      yield* h.count(sql`
+          SELECT COUNT(*) AS n FROM vault_allowances
+          WHERE vault_id = ${shared} AND subject_kind = 'space' AND subject_id = ${h.globexId}
+        `),
+      1,
+    );
+    // Recorded without a value.
+    const audited = yield* sql<{ readonly targetName: string; readonly detail: string }>`
+        SELECT target_name AS "targetName", detail_json AS "detail" FROM audit_log
+        WHERE action = 'vault.delete'
+      `;
+    assert.deepEqual(
+      audited.map((row) => row.targetName),
+      ["Acme keys"],
+    );
+    assert.notInclude(audited[0]?.detail ?? "", "acme-token-value");
+  }),
+);
+
+it.effect("removing a User takes back every Vault allowed to them; disabling keeps them", () =>
+  Effect.gen(function* () {
+    const h = yield* hub;
+    const sql = h.server.sql;
+    for (const id of ["grace", "linus"]) {
+      yield* addMember(h.server, { id, displayName: id });
+      yield* joinOrganization(h.server, h.acmeId, id, "member");
+    }
+    const grace = UserId.make("grace");
+    const linus = UserId.make("linus");
+    yield* Context.get(h.server.services, SpaceDirectory.SpaceDirectory).membershipsChanged([
+      grace,
+      linus,
+    ]);
+    const own = Effect.fn(function* (name: string, userId: UserId) {
+      const vaultId = yield* h.vault(name, null, [["OWN_TOKEN", `${name}-value-000005`]]);
+      yield* h.vaults
+        .allow({ vaultId, subject: { kind: "user", userId }, allowed: true })
+        .pipe(h.asOwner);
+      return vaultId;
+    });
+    const gracesKeys = yield* own("graces-keys", grace);
+    yield* own("linus-keys", linus);
+    const allowances = (userId: UserId) =>
+      h.count(sql`
+        SELECT COUNT(*) AS n FROM vault_allowances WHERE subject_kind = 'user' AND subject_id = ${userId}
+      `);
+
+    const users = Context.get(h.server.services, InstallationUserService.InstallationUserService);
+    yield* users.setStatus({ actorUserId: h.ownerId, userId: linus, status: "disabled" });
+    assert.equal(yield* allowances(linus), 1, "a disabled User keeps theirs");
+
+    yield* users.setStatus({ actorUserId: h.ownerId, userId: grace, status: "removed" });
+    assert.equal(yield* allowances(grace), 0);
+    // The Vault itself stays the Owner's, with its secret.
+    assert.equal(
+      yield* h.count(sql`SELECT COUNT(*) AS n FROM vault_entries WHERE vault_id = ${gracesKeys}`),
+      1,
+    );
+    const audited = yield* sql<{ readonly targetId: string; readonly detail: string }>`
+      SELECT target_id AS "targetId", detail_json AS "detail" FROM audit_log
+      WHERE action = 'vault.allow' ORDER BY audit_id DESC LIMIT 1
+    `;
+    assert.equal(audited[0]?.targetId, gracesKeys);
+    assert.include(audited[0]?.detail ?? "", '"allowed":false');
+  }),
+);

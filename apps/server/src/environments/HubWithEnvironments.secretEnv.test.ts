@@ -271,6 +271,46 @@ describe("Hub con Environments: a Thread's secrets as environment variables", ()
     }).pipe(Effect.scoped),
   );
 
+  it.live("stop reaching the Space's next shell once its allowance is taken back (ticket 07)", () =>
+    Effect.gen(function* () {
+      const s = yield* sharedSandbox();
+      const tools = yield* s.vaults.create({ name: "Tools", spaceId: null }).pipe(s.asOwner);
+      yield* s.vaults
+        .putEntry({ vaultId: tools.id, name: "TOOLS_TOKEN", value: Redacted.make(OWNER_TOKEN) })
+        .pipe(s.asOwner);
+      yield* s.vaults
+        .allow({ vaultId: tools.id, subject: { kind: "space", spaceId: s.acme }, allowed: true })
+        .pipe(s.asOwner);
+      yield* s.vaults
+        .setSpaceDefaults({ spaceId: s.acme, vaultIds: [s.acmeVault, tools.id] })
+        .pipe(s.asOwner);
+      const open = (terminalId: string) =>
+        s.workspace.terminalOpen(
+          { threadId: s.adaThread, terminalId, cwd: s.acmeWeb.workspaceRoot },
+          { userId: s.ada },
+        );
+      yield* open("term-1");
+      assert.equal(lastShell(s.sandbox).TOOLS_TOKEN, OWNER_TOKEN);
+
+      yield* s.vaults
+        .allow({ vaultId: tools.id, subject: { kind: "space", spaceId: s.acme }, allowed: false })
+        .pipe(s.asOwner);
+      yield* open("term-2");
+      assert.isUndefined(
+        lastShell(s.sandbox).TOOLS_TOKEN,
+        "a taken-back Vault reaches no new shell",
+      );
+      assert.equal(lastShell(s.sandbox).ACME_TOKEN, ACME_TOKEN);
+      assert.isTrue((yield* open("term-1")).secretsStale, "the running shell says to reopen");
+      // Allowed again, it is no default until chosen again.
+      yield* s.vaults
+        .allow({ vaultId: tools.id, subject: { kind: "space", spaceId: s.acme }, allowed: true })
+        .pipe(s.asOwner);
+      yield* open("term-3");
+      assert.isUndefined(lastShell(s.sandbox).TOOLS_TOKEN);
+    }).pipe(Effect.scoped),
+  );
+
   it.live("never reach another Space's Sandbox", () =>
     Effect.gen(function* () {
       const s = yield* sharedSandbox();

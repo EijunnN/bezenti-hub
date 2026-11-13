@@ -57,9 +57,9 @@ import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
-import { projectSpaceSql } from "../spaces/SpaceDirectory.ts";
 import * as VaultKeyCheck from "./VaultKeyCheck.ts";
 import * as VaultReach from "./VaultReach.ts";
+import * as VaultReachLoss from "./VaultReachLoss.ts";
 
 const MAIN_VAULT_NAME = "Main vault";
 
@@ -760,25 +760,19 @@ const make = Effect.gen(function* () {
     const removed = yield* sql
       .withTransaction(
         Effect.gen(function* () {
-          const gone = yield* sql<{ readonly valueId: string | null }>`
-            DELETE FROM vault_entries WHERE vault_id = ${row.vaultId} RETURNING value_id AS "valueId"
-          `;
-          yield* sql`DELETE FROM vault_allowances WHERE vault_id = ${row.vaultId}`;
-          yield* sql`DELETE FROM space_default_vaults WHERE vault_id = ${row.vaultId}`;
-          yield* sql`DELETE FROM project_vault_choices WHERE vault_id = ${row.vaultId}`;
-          yield* sql`DELETE FROM vaults WHERE vault_id = ${row.vaultId}`;
+          const gone = yield* VaultReachLoss.forgetVault(sql, row.vaultId);
           yield* audit.record({
             actor: AuditLog.userActor(userId),
             action: "vault.delete",
             spaceId: row.spaceId as SpaceId | null,
             target: { kind: "vault", id: row.vaultId, name: row.name },
-            detail: { entries: gone.length },
+            detail: { entries: gone.entries },
           });
-          return gone;
+          return gone.valueIds;
         }),
       )
       .pipe(Effect.catch(storage("delete the Vault")));
-    for (const { valueId } of removed) yield* removeValue(valueId);
+    for (const valueId of removed) yield* removeValue(valueId);
     return { deleted: true };
   });
 
@@ -1059,23 +1053,11 @@ const make = Effect.gen(function* () {
               VALUES (${row.vaultId}, ${subject.kind}, ${subjectId}, ${at})
             `;
           } else {
-            yield* sql`
-              DELETE FROM vault_allowances
-              WHERE vault_id = ${row.vaultId} AND subject_kind = ${subject.kind} AND subject_id = ${subjectId}
-            `;
-            if (subject.kind === "space") {
-              // Taken back from a Space: its default and its Projects' choices go too, so allowing
-              // it again later does not bring them back unseen.
-              yield* sql`
-                DELETE FROM space_default_vaults WHERE space_id = ${subjectId} AND vault_id = ${row.vaultId}
-              `;
-              yield* sql`
-                DELETE FROM project_vault_choices WHERE vault_id = ${row.vaultId} AND project_id IN (
-                  SELECT project_id FROM projection_projects
-                  WHERE ${sql.literal(projectSpaceSql("space_id"))} = ${subjectId}
-                )
-              `;
-            }
+            // Taken back from a Space: its default and its Projects' choices go too, so allowing
+            // it again later does not bring them back unseen.
+            yield* subject.kind === "space"
+              ? VaultReachLoss.forgetSpaceAllowance(sql, row.vaultId, subjectId)
+              : VaultReachLoss.forgetUserAllowance(sql, row.vaultId, subjectId);
           }
           yield* audit.record({
             actor: AuditLog.userActor(userId),
