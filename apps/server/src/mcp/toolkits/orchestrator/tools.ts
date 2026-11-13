@@ -8,7 +8,6 @@ import {
   OrchestratorMcpDelegateTaskResult,
   OrchestratorMcpDeleteScheduledTaskInput,
   OrchestratorMcpDeleteScheduledTaskResult,
-  OrchestratorMcpListSecretNamesInput,
   OrchestratorMcpListSecretNamesResult,
   OrchestratorMcpRequestSecretInput,
   OrchestratorMcpRequestSecretResult,
@@ -195,7 +194,7 @@ const RequestSecretTool = Tool.make("request_secret", {
 const ListSecretNamesTool = Tool.make("list_secret_names", {
   description:
     "Names of the secrets this thread has as environment variables, with their Vault. Use $NAME in commands; never print a value. Values are never shown.",
-  parameters: OrchestratorMcpListSecretNamesInput,
+  // No `parameters`: Tool.EmptyParams (an empty Struct is not a valid MCP input schema).
   success: OrchestratorMcpListSecretNamesResult,
   failure: OrchestratorMcpFailure,
   failureMode: "return",

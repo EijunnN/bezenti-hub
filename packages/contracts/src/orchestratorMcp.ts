@@ -724,8 +724,6 @@ export const OrchestratorMcpRequestSecretResult = Schema.Union([
 export type OrchestratorMcpRequestSecretResult = typeof OrchestratorMcpRequestSecretResult.Type;
 
 /** `list_secret_names` (spec 5 ticket 06): what this Thread's turns receive. Never a value. */
-export const OrchestratorMcpListSecretNamesInput = Schema.Struct({});
-export type OrchestratorMcpListSecretNamesInput = typeof OrchestratorMcpListSecretNamesInput.Type;
 export const OrchestratorMcpListSecretNamesResult = Schema.Struct({
   secrets: Schema.Array(
     Schema.Struct({

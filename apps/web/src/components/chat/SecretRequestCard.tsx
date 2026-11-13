@@ -5,20 +5,28 @@ import {
   secretRequestDisplay,
   secretRequestFailureMessage,
   secretRequestPrivacyNote,
+  secretRequestVaultNameProblem,
   type SecretRequestItem,
 } from "@t3tools/client-runtime/secret-request";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId, OrchestrationV2ProjectedTurnItem } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  OrchestrationV2ProjectedTurnItem,
+  SecretRequestVaultTargets,
+  VaultId,
+} from "@t3tools/contracts";
 import { CheckIcon, LockIcon, MinusIcon, ShieldCheckIcon } from "lucide-react";
 import { useId, useRef, useState, type FormEvent } from "react";
 
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
 import { Input } from "../ui/input";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { WorkLogRow } from "./WorkLog";
 
 export function SecretRequestCard(props: {
@@ -64,6 +72,32 @@ function PendingSecretRequestForm(props: {
     reportFailure: false,
     reportDefect: false,
   });
+  // «Also save to Vault»: only the Vaults the Hub offers this User for this Thread (none for a
+  // Member or a Guest, who answer as before). The Hub checks the choice again.
+  const loadTargets = useAtomCommand(serverEnvironment.secretRequestVaultTargets, {
+    label: "list Vaults for a secret request",
+    reportFailure: false,
+    reportDefect: false,
+  });
+  const [targets, setTargets] = useState<SecretRequestVaultTargets["vaults"]>([]);
+  const [saveToVault, setSaveToVault] = useState(false);
+  const [vaultId, setVaultId] = useState<VaultId | null>(null);
+  const [vaultName, setVaultName] = useState(item.secretName ?? "");
+  // Asked once, when the User starts answering (focus enters the card).
+  const targetsAsked = useRef(false);
+  const askTargets = () => {
+    if (targetsAsked.current) return;
+    targetsAsked.current = true;
+    void loadTargets({
+      environmentId: props.environmentId,
+      input: { threadId: item.threadId },
+    }).then((result) => {
+      if (result._tag !== "Success") return;
+      setTargets(result.value.vaults);
+      setVaultId((current) => current ?? result.value.vaults[0]?.id ?? null);
+    });
+  };
+  const nameProblem = saveToVault ? secretRequestVaultNameProblem(vaultName) : null;
   const [secret, setSecret] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -71,7 +105,13 @@ function PendingSecretRequestForm(props: {
   const inFlight = useRef(false);
 
   const send = async (
-    reply: { readonly type: "save"; readonly secret: string } | { readonly type: "decline" },
+    reply:
+      | {
+          readonly type: "save";
+          readonly secret: string;
+          readonly saveToVault?: { readonly vaultId: VaultId; readonly name: string };
+        }
+      | { readonly type: "decline" },
   ) => {
     const input = secretRequestAnswerInput(item, reply);
     if (input === null || inFlight.current) return;
@@ -93,7 +133,12 @@ function PendingSecretRequestForm(props: {
 
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    void send({ type: "save", secret });
+    if (saveToVault && (vaultId === null || nameProblem !== null)) return;
+    void send(
+      saveToVault && vaultId !== null
+        ? { type: "save", secret, saveToVault: { vaultId, name: vaultName } }
+        : { type: "save", secret },
+    );
   };
 
   return (
@@ -102,6 +147,7 @@ function PendingSecretRequestForm(props: {
       className="flex min-w-0 flex-col gap-3 rounded-xl border border-border/60 bg-card p-4"
       onSubmit={onSubmit}
       autoComplete="off"
+      onFocus={askTargets}
       // On click, not pointerdown: the mousedown that follows a pointerdown
       // moves focus back off the input. A click that ends a text selection
       // leaves it alone so the reason can still be copied.
@@ -142,10 +188,68 @@ function PendingSecretRequestForm(props: {
             onChange={(event) => setSecret(event.currentTarget.value)}
           />
         </div>
-        <Button type="submit" disabled={submitting || secret.trim().length === 0}>
+        <Button
+          type="submit"
+          disabled={submitting || secret.trim().length === 0 || nameProblem !== null}
+        >
           Save securely
         </Button>
       </div>
+      {targets.length === 0 ? null : (
+        <div className="flex min-w-0 flex-col gap-2">
+          <label className="flex items-center gap-2 text-xs font-medium">
+            <Checkbox
+              aria-label="Also save to Vault"
+              checked={saveToVault}
+              disabled={submitting}
+              onCheckedChange={(checked) => setSaveToVault(checked === true)}
+            />
+            Also save to Vault
+          </label>
+          {saveToVault ? (
+            <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start">
+              <div className="min-w-0 sm:w-48">
+                <Select
+                  disabled={submitting}
+                  items={targets.map((target) => ({ value: target.id, label: target.name }))}
+                  value={vaultId}
+                  onValueChange={(value) => setVaultId(value)}
+                >
+                  <SelectTrigger aria-label="Vault">
+                    <SelectValue placeholder="Choose a Vault" />
+                  </SelectTrigger>
+                  <SelectPopup>
+                    {targets.map((target) => (
+                      <SelectItem key={target.id} value={target.id}>
+                        {target.name}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
+              </div>
+              <div className="flex min-w-0 flex-1 flex-col gap-1">
+                <Input
+                  aria-label="Secret name"
+                  placeholder="NAME"
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={vaultName}
+                  disabled={submitting}
+                  aria-invalid={nameProblem !== null || undefined}
+                  onChange={(event) => setVaultName(event.currentTarget.value.toUpperCase())}
+                />
+                {nameProblem === null ? (
+                  <p className="text-xs text-muted-foreground">
+                    Threads that receive this Vault get it as {vaultName.trim()}.
+                  </p>
+                ) : (
+                  <p className="text-xs text-destructive">{nameProblem}</p>
+                )}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      )}
       {error !== null ? (
         <p id={errorId} role="alert" className="text-xs text-destructive">
           {error}
