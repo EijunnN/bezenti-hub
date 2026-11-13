@@ -61,7 +61,8 @@ type Server = Effect.Success<typeof serveAuthHttp>;
 
 /**
  * The Hub's gateway (fake CLIProxyAPI) and AI accounts, in a scope of their own so a test can stop
- * them and start them again over the same store and memory folder, as a Hub restart does.
+ * them and start them again over the same store and memory folder, as a Hub restart does. The
+ * test's end stops whatever it left running.
  */
 const startStack = Effect.fn(function* (
   server: Server,
@@ -73,6 +74,9 @@ const startStack = Effect.fn(function* (
   },
 ) {
   const scope = yield* Scope.make();
+  // Closed with the test, before the Hub's database: a stack the test leaves running would
+  // otherwise keep its CLIProxyAPI and the accounts' background fibers past that database.
+  yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
   const release = fakeCliproxyRelease(input.dir, "1.0.0");
   const stateDir = NodePath.join(input.dir, "state");
   const memory = NodePath.join(input.dir, "memory");
