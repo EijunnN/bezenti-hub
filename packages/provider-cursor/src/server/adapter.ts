@@ -2285,6 +2285,9 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               options,
               threadId: openInput.threadId,
               providerSessionId: input.providerSessionId,
+              ...(input.secretEnv?.aiCredential === undefined
+                ? {}
+                : { aiAccountKey: true as const }),
             })
             .pipe(Effect.mapError(classifyCursorModelRejection(openInput.modelSelection)));
           const next = {
