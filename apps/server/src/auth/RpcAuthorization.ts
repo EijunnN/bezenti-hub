@@ -93,6 +93,8 @@ export const RPC_REQUIRED_SCOPES = {
   // Names, providers and status of what the User may use (AllowedAiAccounts); writes are
   // CLIENT_GUARDED_RPC_SCOPES' and the Owner's alone (INSTALLATION_RPC_METHODS).
   [WS_METHODS.aiAccountsList]: AuthOrchestrationReadScope,
+  // Counts of what passed through the gateway layer, narrowed to what the session may see.
+  [WS_METHODS.aiUsageSummary]: AuthOrchestrationReadScope,
   // Asks GitHub for the newest release, as the Owner opens Settings → AI gateway.
   [WS_METHODS.aiGatewayCheckForUpdates]: AuthSettingsWriteScope,
   [WS_METHODS.serverUpdateSettings]: AuthSettingsWriteScope,

@@ -93,6 +93,7 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as AiAccounts from "../ai/AiAccounts.ts";
 import * as AiGateway from "../ai/AiGateway.ts";
 import * as AiGatewayActivity from "../ai/AiGatewayActivity.ts";
+import * as AiUsage from "../ai/AiUsage.ts";
 import * as AiGatewayKeyRevocation from "../ai/AiGatewayKeyRevocation.ts";
 import * as AiGatewayKeys from "../ai/AiGatewayKeys.ts";
 import * as AiGatewayProxy from "../ai/AiGatewayProxy.ts";
@@ -269,6 +270,7 @@ const withAiAccounts = (memory: string) => (services: Context.Context<HubService
       AiGatewaySessions.layer.pipe(
         Layer.provideMerge(AiGatewayProxy.layer),
         Layer.provideMerge(AiGatewayKeys.layer),
+        Layer.provideMerge(AiUsage.layer),
         Layer.provideMerge(AiGatewayActivity.layer),
         Layer.provideMerge(AiAccounts.layer),
         Layer.provideMerge(AuditLog.layer),

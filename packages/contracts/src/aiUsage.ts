@@ -1,0 +1,95 @@
+/**
+ * AI usage (spec 4 ticket 05): what passed through the Hub's AI gateway layer, per day, User,
+ * Space and AI account (and model). No quotas or limits: it is recorded and shown, never enforced.
+ * Never a prompt, an answer or a key; tokens are counts read from the upstream's own `usage`.
+ */
+import * as Schema from "effect/Schema";
+
+import { AiAccountId, AiAccountProvider } from "./aiAccounts.ts";
+import { NonNegativeInt, SpaceId, ThreadId, UserId } from "./baseSchemas.ts";
+
+/** A UTC calendar day, `YYYY-MM-DD`. */
+export const AiUsageDay = Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/u));
+export type AiUsageDay = typeof AiUsageDay.Type;
+
+/** Every filter narrows what the session may already see; none widens it. */
+export const AiUsageSummaryInput = Schema.Struct({
+  /** First day, inclusive. Default: 29 days before `toDay` (30 days). */
+  fromDay: Schema.optionalKey(AiUsageDay),
+  /** Last day, inclusive. Default: today (UTC). */
+  toDay: Schema.optionalKey(AiUsageDay),
+  spaceId: Schema.optionalKey(SpaceId),
+  userId: Schema.optionalKey(UserId),
+  accountId: Schema.optionalKey(AiAccountId),
+  /** One Thread's usage (its per-request rows, kept 90 days). */
+  threadId: Schema.optionalKey(ThreadId),
+});
+export type AiUsageSummaryInput = typeof AiUsageSummaryInput.Type;
+
+export const AiUsageTotals = Schema.Struct({
+  requests: NonNegativeInt,
+  /** Requests that ended in an error (a refusal, no quota left, the gateway not answering). */
+  failedRequests: NonNegativeInt,
+  /** Answered requests whose answer carried no usage (or was cut off): their tokens are unknown. */
+  unknownRequests: NonNegativeInt,
+  inputTokens: NonNegativeInt,
+  outputTokens: NonNegativeInt,
+  cacheReadTokens: NonNegativeInt,
+  cacheWriteTokens: NonNegativeInt,
+});
+export type AiUsageTotals = typeof AiUsageTotals.Type;
+
+export const AiUsageRow = Schema.Struct({
+  day: AiUsageDay,
+  userId: UserId,
+  spaceId: SpaceId,
+  /** Null for a request that reached no account. */
+  accountId: Schema.NullOr(AiAccountId),
+  model: Schema.NullOr(Schema.String),
+  ...AiUsageTotals.fields,
+});
+export type AiUsageRow = typeof AiUsageRow.Type;
+
+/** Names for the ids in the rows (a name the session may not see is left out). */
+export const AiUsageLabels = Schema.Struct({
+  users: Schema.Array(Schema.Struct({ id: UserId, name: Schema.String })),
+  spaces: Schema.Array(Schema.Struct({ id: SpaceId, name: Schema.String })),
+  accounts: Schema.Array(
+    Schema.Struct({
+      id: AiAccountId,
+      /** Only the Owner and the accounts a User may use show their name. */
+      name: Schema.NullOr(Schema.String),
+      provider: AiAccountProvider,
+    }),
+  ),
+});
+export type AiUsageLabels = typeof AiUsageLabels.Type;
+
+/**
+ * `all`: the Owner, every User, Space and account. `spaces`: also an Organization's Admin, whole
+ * Spaces, plus the session's own usage. `own`: only the session's User's.
+ */
+export const AiUsageScope = Schema.Literals(["all", "spaces", "own"]);
+export type AiUsageScope = typeof AiUsageScope.Type;
+
+export const AiUsageSummary = Schema.Struct({
+  fromDay: AiUsageDay,
+  toDay: AiUsageDay,
+  scope: AiUsageScope,
+  rows: Schema.Array(AiUsageRow),
+  totals: AiUsageTotals,
+  labels: AiUsageLabels,
+  /** Whether the rows were cut at the most the answer carries. */
+  truncated: Schema.Boolean,
+  /** How long the per-request rows (a Thread's usage) are kept, in days. */
+  retentionDays: NonNegativeInt,
+});
+export type AiUsageSummary = typeof AiUsageSummary.Type;
+
+export const AiUsageErrorReason = Schema.Literals(["forbidden", "invalid", "storage"]);
+export type AiUsageErrorReason = typeof AiUsageErrorReason.Type;
+
+export class AiUsageError extends Schema.TaggedError<AiUsageError>()("AiUsageError", {
+  reason: AiUsageErrorReason,
+  message: Schema.String,
+}) {}

@@ -214,7 +214,13 @@ export type Action =
    * Use the AI accounts allowed to a Space or to oneself in that Space (AllowedAiAccounts): whoever
    * may start a Thread there, Guests included; decided on the Space.
    */
-  | "aiAccount.use";
+  | "aiAccount.use"
+  /**
+   * Read the AI usage of everyone who works in a Space (spec 4 ticket 05, decided on the Space):
+   * the Owner anywhere, an Organization's Admins in theirs, archived or not (it is history). A
+   * User's own usage needs no action: it is theirs.
+   */
+  | "aiUsage.viewSpace";
 
 /** Actions that read or manage rather than add something to the Space. */
 const NON_CREATING: ReadonlySet<Action> = new Set([
@@ -650,6 +656,13 @@ export function decide(principal: Principal, action: Action, resource: Resource)
     return isSpace(resource)
       ? decide(principal, "thread.create", resource)
       : deny("wrong-resource");
+  }
+  if (action === "aiUsage.viewSpace") {
+    if (!isSpace(resource)) return deny("wrong-resource");
+    if (principal.isOwner) return allow;
+    return resource.kind === "organization"
+      ? inOrganization(principal, resource, ADMIN_ONLY)
+      : deny("owner-only");
   }
   if (action === "environment.dedicate" || action === "masterKey.backup") {
     if (resource.kind !== "installation") return deny("wrong-resource");

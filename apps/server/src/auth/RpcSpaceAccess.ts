@@ -77,6 +77,11 @@ const AI_ACCOUNTS_LIST = {
   unscoped:
     "AI accounts: AiAccounts.list answers with what AllowedAiAccounts lets the session's User use in the Spaces SpaceDirectory.authorizer lets them act in (spaceLimit too); only the Owner, unlimited, sees every account and its details; no credential is returned",
 };
+/** AI usage names a Thread only to narrow its answer: AiUsage.summary decides what is seen. */
+const AI_USAGE_SUMMARY = {
+  unscoped:
+    "AI usage: AiUsage.summary answers the Owner (not limited to one Space) everything, an Organization's Admin (AccessPolicy `aiUsage.viewSpace`) their Spaces' plus their own, anyone else only their own rows, within spaceLimit; a filter (Space, User, account, Thread) only narrows that; counts only, never a prompt or a key",
+};
 const INSTALLATION_ACCESS = Object.fromEntries(
   INSTALLATION_RPC_METHODS.map((method) => [method, "installation"]),
 ) as Readonly<Record<InstallationRpcMethod, "installation">>;
@@ -117,6 +122,7 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.vaultsEntriesLink]: VAULTS,
   [WS_METHODS.vaultsEntriesCopy]: VAULTS,
   [WS_METHODS.aiAccountsList]: AI_ACCOUNTS_LIST,
+  [WS_METHODS.aiUsageSummary]: AI_USAGE_SUMMARY,
   // Spec 5 ticket 03. Allowances and a Space's defaults: AccessPolicy `vault.manage` and
   // `vault.choose` in Vaults. A Project's choices and a Thread's names: the named Project or
   // Thread must be visible first, then the same rules (EffectiveVaults for the Thread).

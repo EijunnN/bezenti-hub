@@ -1725,6 +1725,65 @@ const rows: ReadonlyArray<Row> = [
     AccessPolicy.installation,
     deny("wrong-resource"),
   ],
+  // AI usage (spec 4 ticket 05): the whole Space's usage is the Owner's and its Admins'.
+  ["the Owner reads an Organization's AI usage", owner, "aiUsage.viewSpace", organization, allow],
+  ["an Admin reads their Organization's AI usage", admin, "aiUsage.viewSpace", organization, allow],
+  [
+    "an Admin reads an archived Organization's AI usage (history)",
+    admin,
+    "aiUsage.viewSpace",
+    archivedOrganization,
+    allow,
+  ],
+  [
+    "a Member reads no one else's AI usage in their Organization",
+    member,
+    "aiUsage.viewSpace",
+    organization,
+    deny("role-not-allowed"),
+  ],
+  [
+    "a Guest reads no one else's AI usage in their Organization",
+    guest,
+    "aiUsage.viewSpace",
+    organization,
+    deny("role-not-allowed"),
+  ],
+  [
+    "nobody reads the AI usage of an Organization they are not in",
+    outsider,
+    "aiUsage.viewSpace",
+    organization,
+    deny("not-a-member"),
+  ],
+  [
+    "a disabled Member reads no AI usage",
+    disabledMember,
+    "aiUsage.viewSpace",
+    organization,
+    deny("user-inactive"),
+  ],
+  [
+    "the Owner reads another User's Personal space usage",
+    owner,
+    "aiUsage.viewSpace",
+    personalOf("grace"),
+    allow,
+  ],
+  [
+    "a User reads no whole-Space usage of a Personal space (their own rows are theirs)",
+    member,
+    "aiUsage.viewSpace",
+    personalOf("grace"),
+    deny("owner-only"),
+  ],
+  [
+    "AI usage is read by Space, not on the Installation",
+    owner,
+    "aiUsage.viewSpace",
+    AccessPolicy.installation,
+    deny("wrong-resource"),
+  ],
 ];
 
 describe("AccessPolicy.decide", () => {
