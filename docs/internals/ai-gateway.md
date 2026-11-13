@@ -315,6 +315,53 @@ rest, so any other door (ticket 06's relay included) reuses it.
   Hub socket, which forwards `/api/ai/…` (and still nothing of CLIProxyAPI, which listens on loopback
   only). The key is what decides.
 
+## Usage (spec 4 ticket 05)
+
+Decisions; the code is `ai/AiUsage.ts` (migration 114, `ai_usage`, `ai_usage_daily`). Recorded and
+shown, **never limited**: no quota, cap or block anywhere.
+
+- **One request, one row.** `AiGatewayProxy.forward` ends every request in one
+  `GatewayRequestRecord` (its `record` runs once: a retry on another account, a failover and a
+  stream the client left are still one). `AiUsage` subscribes to those records and writes each from
+  a fiber of its own, so the write is never on a response's path; a failed write is logged and the
+  request is already answered. The row and its day's summary are one transaction.
+  `count_tokens` is not a request of the log (it uses no model).
+- **What is stored:** time, day (UTC), User, Space, Thread (or null), gateway key id, AI account,
+  provider, model, shape, HTTP status, duration, failovers, and tokens (input, output, cache read,
+  cache write; null when unknown). No prompt, answer, header or key exists in the record to store
+  (`AiUsage.test.ts` greps both tables; `DoorRules.test.ts` keeps the tables to `AiUsage.ts`).
+- **Unknown tokens:** an answer without `usage`, or one that never finished (client left, cut),
+  is counted as a request with unknown tokens (`unknown_requests`), never as zero tokens used. A
+  failed request (status 400 or more) is counted as failed and carries no tokens.
+- **Daily summary** `(day, User, Space, AI account, model)`: kept for good. Per-request rows: 90
+  days, swept at start and every day (`AiUsage.sweep`; the Thread's usage reads them, so it covers
+  90 days). A request that reached no account (all out of quota) has account and model `''` in the
+  summary.
+- **Who sees what** (`AiUsage.summary`, WS `aiUsage.summary`, `RPC_SPACE_ACCESS` unscoped with the
+  reason): the Owner (not limited to one Space) everything; an Organization's Admin
+  (`AccessPolicy` `aiUsage.viewSpace`, decided on the Space, archived ones included) every row of
+  their Organizations plus their own; anyone else only their own rows. An agent bound to one Space
+  sees that Space only. A filter (Space, User, account, Thread) only narrows, never widens. Names:
+  a User's and a Space's come with the rows they appear in; an AI account's name only for the
+  Owner and for whoever may use it somewhere now (else `null`: «Claude account»).
+- **Doors:** WS only (`aiUsage.summary`, scope `orchestration:read`). No HttpApi endpoint, raw route
+  or MCP tool. Windows are at most 366 days (an impossible date is refused); at most 5000 rows answer (`truncated`, totals still whole).
+- **Settings → AI accounts → Usage** (Owner) and the Thread's panel («AI gateway usage») read it.
+- **Counted as failed (no tokens):** a refusal after authentication (gateway not running, 415, 429
+  limits, body too large or not JSON, no model served, all accounts out of quota) with the account
+  last tried or none (account and model `''` in the summary; the model is kept only once the plan
+  accepted it), and a request that never got an answer: status 499 when the client left, 502 when the Hub
+  itself failed. A limit refusal (429 on a body or request slot) is shed load: it only adds to the
+  daily summary (one upsert per key and day per batch), has no row of its own and is logged once,
+  by the route.
+- **Not counted here:** direct credentials never pass through the gateway (the Thread shows what
+  its provider reports); requests refused before authentication (bad key) have no row; model lists
+  and `count_tokens` are not requests of the log.
+- **The writer** queues at most 10 000 records (the newest beyond are dropped, logged), writes them
+  in batches of 200 per transaction, and writes what is still queued when the Hub stops. Token
+  counts that are fractions or unsafe integers are treated as unknown. The sweep deletes in
+  batches of 5000. `maxRows` cuts the rows, never the totals.
+
 ## Agents through the gateway (spec 4 ticket 06)
 
 Decisions; the code is `ai/AiGatewaySessions.ts` (the rule), `environments/AiGatewayRelay.ts`

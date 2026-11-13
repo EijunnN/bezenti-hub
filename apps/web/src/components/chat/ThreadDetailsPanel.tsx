@@ -24,6 +24,7 @@ import { ThreadAutomationsPanel } from "./ThreadAutomationsPanel";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
 import { ThreadServersPanel } from "./ThreadServersPanel";
 import { ThreadHubPreviewPanel } from "./ThreadHubPreviewPanel";
+import { ThreadAiUsagePanel } from "./ThreadAiUsagePanel";
 import {
   ThreadDetailsContext,
   ThreadDetailsUsage,
@@ -260,6 +261,10 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
                   showLineage={visible.lineage}
                   showSideChats={visible.sideChats}
                 />
+              ) : null}
+
+              {density === "full" && !props.draftId ? (
+                <ThreadAiUsagePanel threadId={props.threadId} />
               ) : null}
 
               {visible.usage ? <ThreadDetailsUsage {...props.usage} /> : null}

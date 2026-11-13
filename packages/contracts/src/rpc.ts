@@ -48,6 +48,7 @@ import {
   AiGatewayUpdateCheck,
   AiGatewayUpdateInput,
 } from "./aiGateway.ts";
+import { AiUsageError, AiUsageSummary, AiUsageSummaryInput } from "./aiUsage.ts";
 import * as RpcGroup from "effect/rpc/RpcGroup";
 import * as RpcMiddleware from "effect/rpc/RpcMiddleware";
 import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
@@ -651,6 +652,8 @@ export const WS_METHODS = {
   aiAccountsLoginStart: "aiAccounts.login.start",
   aiAccountsLoginComplete: "aiAccounts.login.complete",
   aiAccountsImportVertex: "aiAccounts.importVertex",
+  // AI usage (spec 4 ticket 05): per day, User, Space and AI account; no quotas.
+  aiUsageSummary: "aiUsage.summary",
   projectCloneStart: "projectClone.start",
   projectCloneCancel: "projectClone.cancel",
   projectCloneRetry: "projectClone.retry",
@@ -1295,6 +1298,12 @@ const WsAiAccountsListRpc = Rpc.make(WS_METHODS.aiAccountsList, {
   payload: AiAccountListInput,
   success: AiAccountListResult,
   error: AiAccountRpcError,
+});
+// Never a prompt or a key: counts only. What the session sees is decided in AiUsage.summary.
+const WsAiUsageSummaryRpc = Rpc.make(WS_METHODS.aiUsageSummary, {
+  payload: AiUsageSummaryInput,
+  success: AiUsageSummary,
+  error: Schema.Union([AiUsageError, EnvironmentAuthorizationError]),
 });
 const WsAiAccountsCreateRpc = Rpc.make(WS_METHODS.aiAccountsCreate, {
   payload: AiAccountCreateInput,
@@ -2286,6 +2295,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsAiAccountsLoginStartRpc,
   WsAiAccountsLoginCompleteRpc,
   WsAiAccountsImportVertexRpc,
+  WsAiUsageSummaryRpc,
   WsProjectCloneStartRpc,
   WsProjectCloneCancelRpc,
   WsProjectCloneRetryRpc,

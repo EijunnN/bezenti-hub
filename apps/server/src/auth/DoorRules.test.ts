@@ -300,6 +300,33 @@ describe("every door of the Hub declares its rule", () => {
     expect(relay).not.toMatch(/EnvironmentAuth|ServerSecretStore|joinedHubState|\.credential\b/u);
   });
 
+  it("reads AI usage over one WS RPC only, counts only: no HTTP, raw route or MCP door, tables read by AiUsage alone (spec 4 ticket 05)", () => {
+    const usageRpcs = [...WsRpcGroup.requests.values()].filter((rpc) =>
+      /^aiUsage\./u.test(rpc._tag),
+    );
+    expect(usageRpcs.map((rpc) => rpc._tag)).toEqual(["aiUsage.summary"]);
+    // Decided inside AiUsage.summary for the session (not the Owner's alone, so not `installation`).
+    expect(typeof spaceAccessForRpcMethod("aiUsage.summary")).toBe("object");
+    expect(
+      [
+        ...Object.keys(HTTP_ENDPOINT_RULES),
+        ...Object.keys(MCP_TOOL_RULES),
+        ...Object.keys(RAW_ROUTE_RULES),
+        ...rawRoutes,
+      ].filter((name) => /ai[-_ ]?usage/iu.test(name)),
+    ).toEqual([]);
+    // No answer has a field that could carry a prompt, an answer, a key or a header.
+    const fields = successFields(usageRpcs[0]!.successSchema.ast);
+    for (const content of ["prompt", "messages", "content", "text", "body", "key", "headers"]) {
+      expect(fields).not.toContain(content);
+    }
+    // The tables: written and read by AiUsage alone (and created by their migration).
+    const readers = files
+      .filter(({ text }) => /\bai_usage(_daily)?\b/u.test(text))
+      .map(({ file }) => file);
+    expect(readers.toSorted()).toEqual(["ai/AiUsage.ts", "persistence/Migrations/114_AiUsage.ts"]);
+  });
+
   it("signs in to subscriptions over the Owner's WS RPCs only: no callback route, tokens read by AiAccounts alone", () => {
     // Every sign-in door is the Owner's, on the Installation, whatever the session's scopes.
     const signIn = [...WsRpcGroup.requests.keys()].filter((tag) =>

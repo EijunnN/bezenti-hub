@@ -203,6 +203,7 @@ import * as MasterKeyBackup from "./auth/MasterKeyBackup.ts";
 import * as AiAccounts from "./ai/AiAccounts.ts";
 import * as AiGateway from "./ai/AiGateway.ts";
 import * as AiGatewayActivity from "./ai/AiGatewayActivity.ts";
+import * as AiUsage from "./ai/AiUsage.ts";
 import * as AiGatewayKeyRevocation from "./ai/AiGatewayKeyRevocation.ts";
 import * as AiGatewayKeys from "./ai/AiGatewayKeys.ts";
 import * as AiGatewayProxy from "./ai/AiGatewayProxy.ts";
@@ -516,6 +517,8 @@ const layerAuth = Layer.mergeAll(
   AiGatewaySessions.layer.pipe(
     Layer.provideMerge(AiGatewayProxy.layer),
     Layer.provideMerge(AiGatewayKeys.layer),
+    // The usage log: counts what the gateway layer ends, off its path (spec 4 ticket 05).
+    Layer.provideMerge(AiUsage.layer),
     Layer.provideMerge(AiGatewayActivity.layer),
     Layer.provideMerge(
       AiAccounts.layer.pipe(
