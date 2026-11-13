@@ -5,6 +5,7 @@
  */
 import {
   AI_DIRECT_CONTRACT_VERSION,
+  AI_DIRECT_VARIABLES,
   AI_GATEWAY_CONTRACT_VERSION,
   AI_GATEWAY_FIELD,
   AiGatewaySessionError,
@@ -865,6 +866,7 @@ const make = Effect.gen(function* () {
     // Carried to the machine, whose own adapter takes them or refuses the session.
     receivesSecretEnv: true,
     usesAiGateway: true,
+    acceptsAiCredential: AI_DIRECT_VARIABLES,
     openSession: Effect.fn("RemoteEnvironments.openSession")(function* (input) {
       yield* requireSandboxSpace(link, driver, input.threadId).pipe(
         Effect.mapError(

@@ -39,6 +39,11 @@ export const AI_DIRECT_DRIVERS: ReadonlyMap<string, Readonly<Record<string, stri
   ["grok", { xai: "XAI_API_KEY" }],
 ]);
 
+/** Every variable a direct credential may travel under (what a machine's link carries). */
+export const AI_DIRECT_VARIABLES: ReadonlyArray<string> = [
+  ...new Set([...AI_DIRECT_DRIVERS.values()].flatMap((row) => Object.values(row))),
+];
+
 /** The variable a direct account of `provider` reaches `driver`'s process under, if it can. */
 export const aiDirectVariableOf = (driver: string, provider: string): string | undefined =>
   AI_DIRECT_DRIVERS.get(driver)?.[provider];
