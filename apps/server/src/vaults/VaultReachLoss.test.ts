@@ -329,6 +329,15 @@ it.effect("removing a User takes back every Vault allowed to them; disabling kee
     yield* h.vaults
       .setSpaceDefaults({ spaceId: gracesSpace, vaultIds: [toPersonal] })
       .pipe(h.asOwner);
+    // A Project of hers in that Space, which chose it.
+    const at = "2026-11-01T00:00:00.000Z";
+    yield* sql`
+      INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at, space_id)
+      VALUES ('graces-web', 'graces-web', '/w/graces-web', '[]', ${at}, ${at}, ${gracesSpace})
+    `;
+    yield* sql`
+      INSERT INTO project_vault_choices (project_id, vault_id, choice) VALUES ('graces-web', ${toPersonal}, 'add')
+    `;
     const allowances = (userId: UserId) =>
       h.count(sql`
         SELECT COUNT(*) AS n FROM vault_allowances WHERE subject_kind = 'user' AND subject_id = ${userId}
@@ -350,6 +359,12 @@ it.effect("removing a User takes back every Vault allowed to them; disabling kee
     assert.equal(
       yield* h.count(
         sql`SELECT COUNT(*) AS n FROM space_default_vaults WHERE space_id = ${gracesSpace}`,
+      ),
+      0,
+    );
+    assert.equal(
+      yield* h.count(
+        sql`SELECT COUNT(*) AS n FROM project_vault_choices WHERE project_id = 'graces-web'`,
       ),
       0,
     );

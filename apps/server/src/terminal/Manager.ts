@@ -112,15 +112,6 @@ const PROCESS_TABLE_QUERY_TIMEOUT = "15 seconds";
 // closeIdle queries while holding the thread lock, so it keeps a short budget
 // rather than stalling other operations on that thread behind a slow table.
 const CLOSE_IDLE_QUERY_TIMEOUT = { posix: "1 second", win32: "1500 millis" } as const;
-
-/** SIGKILL to one process a shell started; one already gone (ESRCH) is nothing to end. */
-const killByPid = (pid: number) => {
-  try {
-    globalThis.process.kill(pid, "SIGKILL");
-  } catch {
-    // Already gone, or not ours.
-  }
-};
 // Discover children started without terminal input or output.
 const QUIET_SUBPROCESS_SNAPSHOT_EVERY_TICKS = 30;
 const DEFAULT_PROCESS_KILL_GRACE_MS = 1_000;
@@ -150,7 +141,7 @@ class TerminalSubprocessCheckError extends Schema.TaggedError<TerminalSubprocess
   "TerminalSubprocessCheckError",
   {
     cause: Schema.optional(Schema.Defect()),
-    command: Schema.Literals(["powershell", "ps", "proc", "resource-monitor"]),
+    command: Schema.Literals(["powershell", "ps", "resource-monitor"]),
     exitCode: Schema.optional(Schema.NullOr(Schema.Number)),
     timedOut: Schema.optional(Schema.Boolean),
     stdoutTruncated: Schema.optional(Schema.Boolean),
@@ -834,46 +825,6 @@ function deriveSubprocessInspectResult(
   };
 }
 
-/**
- * The process table from /proc, for a Linux host without a working `ps` (a slim container image):
- * `pid (comm) state ppid …` per process; comm may hold spaces or parentheses, so it ends at the
- * last `)`.
- */
-export function parseProcStat(stat: string): { pid: number; ppid: number; comm: string } | null {
-  const open = stat.indexOf("(");
-  const close = stat.lastIndexOf(")");
-  if (open < 0 || close < open) return null;
-  const pid = Number(stat.slice(0, open).trim());
-  const ppid = Number(
-    stat
-      .slice(close + 1)
-      .trim()
-      .split(/\s+/)[1],
-  );
-  if (!Number.isInteger(pid) || !Number.isInteger(ppid)) return null;
-  return { pid, ppid, comm: stat.slice(open + 1, close) };
-}
-
-const linuxProcProcessTableSnapshot = Effect.fn("terminal.linuxProcProcessTableSnapshot")(
-  function* (fileSystem: FileSystem.FileSystem) {
-    const entries = yield* fileSystem.readDirectory("/proc");
-    const lines: Array<string> = [];
-    for (const entry of entries) {
-      if (!/^\d+$/.test(entry)) continue;
-      // A process that ended since the listing has no stat any more.
-      const stat = yield* fileSystem
-        .readFileString(`/proc/${entry}/stat`)
-        .pipe(Effect.orElseSucceed(() => ""));
-      const parsed = parseProcStat(stat);
-      if (parsed !== null) lines.push(`${parsed.pid} ${parsed.ppid} ${parsed.comm}`);
-    }
-    if (lines.length === 0) {
-      return yield* new TerminalSubprocessCheckError({ command: "proc" });
-    }
-    return parsePosixProcessTable(lines.join("\n"));
-  },
-);
-
 const POSIX_PS_ABSOLUTE_PATHS = ["/bin/ps", "/usr/bin/ps"] as const;
 
 // Resolve ps once; bare-name spawns repeatedly probe long PATHs during one-second polling.
@@ -1513,8 +1464,6 @@ interface TerminalManagerOptions {
   >;
   subprocessPollIntervalMs?: number;
   processKillGraceMs?: number;
-  /** Ends one process a shell started, by pid (tests observe it). */
-  killStartedProcess?: (pid: number) => void;
   maxRetainedInactiveSessions?: number;
   registerTerminalProcesses?: (input: {
     readonly threadId: string;
@@ -1650,19 +1599,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   // Share one process table per poll; per-terminal scans can exhaust PIDs on busy hosts.
   // Timed on success and failure so the poll loop can pace the next query.
   const posixPsCommand = platform === "win32" ? undefined : yield* resolvePosixPsCommand();
-  const procFileSystem = yield* FileSystem.FileSystem;
   const fallbackProcessTableSnapshot = (timeout: Duration.Input) =>
     (posixPsCommand === undefined
       ? windowsProcessTableSnapshot(timeout)
-      : posixProcessTableSnapshot(posixPsCommand, timeout).pipe(
-          // Without a working ps (a slim Sandbox image), Linux still has /proc. A ps that timed
-          // out keeps its budget: the table is busy, not missing.
-          Effect.catchIf(
-            (psError) => platform === "linux" && psError.timedOut !== true,
-            (psError) =>
-              linuxProcProcessTableSnapshot(procFileSystem).pipe(Effect.mapError(() => psError)),
-          ),
-        )
+      : posixProcessTableSnapshot(posixPsCommand, timeout)
     ).pipe(
       Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
       Effect.result,
@@ -1730,7 +1670,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const subprocessPollIntervalMs =
     options.subprocessPollIntervalMs ?? DEFAULT_SUBPROCESS_POLL_INTERVAL_MS;
   const processKillGraceMs = options.processKillGraceMs ?? DEFAULT_PROCESS_KILL_GRACE_MS;
-  const killStartedProcess = options.killStartedProcess ?? killByPid;
   const maxRetainedInactiveSessions =
     options.maxRetainedInactiveSessions ?? DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS;
   const registerTerminalProcesses = options.registerTerminalProcesses ?? (() => Effect.void);
@@ -3559,47 +3498,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       }),
     );
 
-  /**
-   * Spec 5 ticket 07: every process the shells started (their whole tree, read now) ends with
-   * SIGKILL before the shells close, so a dev server left with old secrets does not outlive them.
-   */
-  const endStartedProcesses = Effect.fn("terminal.endStartedProcesses")(function* (
-    sessions: ReadonlyArray<TerminalSessionState>,
-  ) {
-    const running = sessions.filter(
-      (session): session is TerminalSessionState & { pid: number } =>
-        session.status === "running" && Number.isInteger(session.pid),
-    );
-    if (running.length === 0) return;
-    const { inspector: inspectorResult } = yield* acquireSubprocessInspector(
-      platform === "win32" ? CLOSE_IDLE_QUERY_TIMEOUT.win32 : CLOSE_IDLE_QUERY_TIMEOUT.posix,
-    );
-    const inspector = yield* Effect.fromResult(inspectorResult);
-    for (const session of running) {
-      const { processIds } = yield* inspector(session.pid);
-      for (const pid of processIds) {
-        if (pid !== session.pid) killStartedProcess(pid);
-      }
-    }
-  });
-
   const close: TerminalManager["Service"]["close"] = (input) =>
     withThreadLock(
       input.threadId,
       Effect.gen(function* () {
-        if (input.endProcesses === true) {
-          const sessions = (yield* sessionsForThread(input.threadId)).filter(
-            (session) => input.terminalId === undefined || session.terminalId === input.terminalId,
-          );
-          yield* endStartedProcesses(sessions).pipe(
-            Effect.catch((error) =>
-              Effect.logWarning("failed to end what a terminal started", {
-                threadId: input.threadId,
-                error: error.message,
-              }),
-            ),
-          );
-        }
         if (input.terminalId) {
           yield* closeSession(input.threadId, input.terminalId, input.deleteHistory === true);
           return;

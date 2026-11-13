@@ -273,7 +273,7 @@ describe("Hub con Environments: a Thread's secrets as environment variables", ()
   );
 
   it.live(
-    "a removed User's terminals in a shared Sandbox close, with what they started (ticket 07)",
+    "a removed User's terminals in a shared Sandbox close, and stay refused (ticket 07)",
     () =>
       Effect.gen(function* () {
         const s = yield* sharedSandbox();
@@ -282,14 +282,9 @@ describe("Hub con Environments: a Thread's secrets as environment variables", ()
           { threadId: s.graceThread, terminalId: "term-1", cwd },
           { userId: s.grace },
         );
-        yield* s.workspace.terminalWrite(
-          { threadId: s.graceThread, terminalId: "term-1", data: "npm run dev &\r" },
-          { userId: s.grace },
-        );
         const graces = s.sandbox.ptySpawns.at(-1);
         assert.isDefined(graces);
         assert.equal(graces.env.GRACE_TOKEN, GRACE_TOKEN);
-        assert.lengthOf(graces.started, 1);
         // Ada's terminal, in the same Sandbox, stays.
         yield* s.workspace.terminalOpen(
           { threadId: s.adaThread, terminalId: "term-1", cwd },
@@ -301,9 +296,16 @@ describe("Hub con Environments: a Thread's secrets as environment variables", ()
         yield* s.hub
           .service(InstallationUserService.InstallationUserService)
           .setStatus({ actorUserId: s.owner, userId: s.grace, status: "removed" });
-        assert.deepEqual([...s.sandbox.endedProcesses], [...graces.started]);
+        // Closed by who opened it, on the machine that holds it.
         assert.isNotEmpty(graces.signals, "her shell, with her own Vault's secret, ended");
         assert.isEmpty(adas.signals, "Ada's stays");
+        const left = yield* s.hub.server.sql<{ readonly openedBy: string }>`
+        SELECT opened_by AS "openedBy" FROM terminal_openings ORDER BY opened_by
+      `;
+        assert.deepEqual(
+          left.map((row) => row.openedBy),
+          [s.ada],
+        );
       }).pipe(Effect.scoped),
   );
 

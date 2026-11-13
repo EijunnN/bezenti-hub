@@ -1,9 +1,9 @@
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
-// Spec 5 ticket 07: drops the Vault rows earlier Hubs left naming a reach that is gone; from here on
-// each loss drops its own (vaults/VaultReachLoss.ts). Sealed values of deleted entries go at the
-// next start's sweep. Frozen SQL: the reach rule as VaultReach.reachesSpaceSql states it now.
+// Spec 5 ticket 07: drops Vault rows earlier Hubs left naming a lost reach (each loss now drops
+// its own, vaults/VaultReachLoss.ts); frozen SQL of VaultReach's rule. Creates `terminal_openings`,
+// where the Hub records each terminal's Space and opener (environment/TerminalOpenings.ts).
 const REACHES = (space: string) => `(
   (v.vault_id = 'vault-main' AND v.is_main = 1
     AND ${space} = 'personal:' || (SELECT user_id FROM users WHERE is_owner = 1))
@@ -30,6 +30,20 @@ export default Effect.gen(function* () {
       OR (subject_kind = 'user' AND subject_id IN (
         SELECT user_id FROM users WHERE removed_at IS NOT NULL))
   `;
+  // A removed User's frozen Personal space keeps no allowance, default or choice.
+  const removedPersonal = `SELECT 'personal:' || user_id FROM users WHERE removed_at IS NOT NULL`;
+  yield* sql`
+    DELETE FROM vault_allowances
+    WHERE subject_kind = 'space' AND subject_id IN (${sql.literal(removedPersonal)})
+  `;
+  yield* sql`DELETE FROM space_default_vaults WHERE space_id IN (${sql.literal(removedPersonal)})`;
+  yield* sql`
+    DELETE FROM project_vault_choices WHERE project_id IN (
+      SELECT project_id FROM projection_projects
+      WHERE COALESCE(space_id, 'personal:' || (SELECT user_id FROM users WHERE is_owner = 1))
+        IN (${sql.literal(removedPersonal)})
+    )
+  `;
   // Defaults and choices of a Vault that does not reach the Space they are in.
   yield* sql`
     DELETE FROM space_default_vaults
@@ -52,4 +66,17 @@ export default Effect.gen(function* () {
         )}
     )
   `;
+  yield* sql`
+    CREATE TABLE terminal_openings (
+      environment_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      terminal_id TEXT NOT NULL,
+      space_id TEXT NOT NULL,
+      opened_by TEXT,
+      opened_at TEXT NOT NULL,
+      close_pending_at TEXT,
+      PRIMARY KEY (environment_id, thread_id, terminal_id)
+    )
+  `;
+  yield* sql`CREATE INDEX terminal_openings_opened_by_idx ON terminal_openings(opened_by)`;
 });

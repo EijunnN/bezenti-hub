@@ -883,16 +883,19 @@ describe("Hub con Environments: a moved Project's Vaults", () => {
         yield* openTerminal("term-1");
         assert.equal(lastShell().ACME_TOKEN, ACME_TOKEN);
         assert.equal(lastShell().SHARED_TOKEN, SHARED_TOKEN);
-        // A dev server started from it holds Acme's secrets too.
-        yield* workspace
-          .terminalWrite(
-            { threadId, terminalId: "term-1", data: "npm run dev &\r" },
-            { userId: owner },
-          )
-          .pipe(Effect.orDie);
         const acmeShell = laptop.ptySpawns.at(-1);
         assert.isDefined(acmeShell);
-        assert.lengthOf(acmeShell.started, 1);
+        const openings = hub.server.sql<{
+          readonly terminalId: string;
+          readonly spaceId: string;
+          readonly pending: number;
+        }>`
+          SELECT terminal_id AS "terminalId", space_id AS "spaceId",
+            close_pending_at IS NOT NULL AS pending
+          FROM terminal_openings WHERE thread_id = ${threadId} ORDER BY terminal_id
+        `;
+        // The Hub records the Space it was opened under, and by whom.
+        assert.deepEqual(yield* openings, [{ terminalId: "term-1", spaceId: acme, pending: 0 }]);
 
         // Before confirming, the mover sees which Vaults the Project loses.
         const plan = yield* movePlan(hub, projectId, globex);
@@ -901,27 +904,36 @@ describe("Hub con Environments: a moved Project's Vaults", () => {
           (plan.body.vaultsLost ?? []).map((vault) => vault.name),
           ["Shared tools", "Acme keys"],
         );
+        // The laptop is away while the Project moves: its terminal cannot be closed yet.
+        yield* laptop.disconnect;
         assert.equal((yield* moveProject(hub, projectId, globex)).status, 200);
         // Its choice of a Vault that does not reach Globex went with the move.
         const choices = yield* hub.server.sql<{ readonly vaultId: string }>`
           SELECT vault_id AS "vaultId" FROM project_vault_choices WHERE project_id = ${projectId}
         `;
         assert.deepEqual(choices, []);
-        // Dropped as the mover, audited as a Project's choice gone back to inherit.
+        // Dropped as the mover, audited as a Project's choice gone back to inherit, in Acme: the
+        // Space whose Admins already saw that Vault.
         const audited = yield* hub.server.sql<{
           readonly targetName: string;
           readonly detail: string;
+          readonly spaceId: string;
         }>`
-          SELECT target_name AS "targetName", detail_json AS "detail" FROM audit_log
-          WHERE action = 'vault.choose' ORDER BY audit_id DESC LIMIT 1
+          SELECT target_name AS "targetName", detail_json AS "detail", space_id AS "spaceId"
+          FROM audit_log WHERE action = 'vault.choose' ORDER BY audit_id DESC LIMIT 1
         `;
         assert.equal(audited[0]?.targetName, "Shared tools");
         assert.include(audited[0]?.detail ?? "", '"choice":"inherit"');
+        assert.equal(audited[0]?.spaceId, acme);
 
-        // The terminal open in Acme closed with the dev server it started: neither keeps Acme's
-        // secrets in the Thread's new Space (its machine serves both).
-        assert.deepEqual([...laptop.endedProcesses], [...acmeShell.started]);
-        assert.isNotEmpty(acmeShell.signals, "the shell itself was ended");
+        // The close waits for the laptop, recorded; it happens as the laptop connects again.
+        assert.isEmpty(acmeShell.signals);
+        assert.deepEqual(yield* openings, [{ terminalId: "term-1", spaceId: acme, pending: 1 }]);
+        const sentBefore = laptop.requests.length;
+        yield* laptop.connect;
+        yield* laptop.awaitAnswered("terminal.close", sentBefore);
+        assert.isNotEmpty(acmeShell.signals, "closed once the laptop was back");
+
         // Opening term-1 again starts a new shell, with Globex's secrets alone.
         const spawnsBefore = laptop.ptySpawns.length;
         const reopened = yield* openTerminal("term-1");
@@ -929,6 +941,28 @@ describe("Hub con Environments: a moved Project's Vaults", () => {
         assert.isNotTrue(reopened.secretsStale);
         assert.isUndefined(lastShell().ACME_TOKEN);
         assert.equal(lastShell().GLOBEX_TOKEN, GLOBEX_TOKEN);
+        assert.deepEqual(yield* openings, [{ terminalId: "term-1", spaceId: globex, pending: 0 }]);
+        const globexShell = laptop.ptySpawns.at(-1);
+        assert.isDefined(globexShell);
+
+        // A shell the Hub still has under Acme (as one opened between a move's steps would be):
+        // typing into it is refused and it closes. One opened in Globex is left alone.
+        yield* openTerminal("term-3");
+        const missed = laptop.ptySpawns.at(-1);
+        assert.isDefined(missed);
+        yield* hub.server.sql`
+          UPDATE terminal_openings SET space_id = ${acme}
+          WHERE thread_id = ${threadId} AND terminal_id = 'term-3'
+        `;
+        const typed = yield* workspace
+          .terminalWrite(
+            { threadId, terminalId: "term-3", data: "echo $ACME_TOKEN\r" },
+            { userId: owner },
+          )
+          .pipe(Effect.flip);
+        assert.equal(typed._tag, "TerminalEnvironmentUnavailableError");
+        assert.isNotEmpty(missed.signals, "the shell under Acme was closed");
+        assert.isEmpty(globexShell.signals, "the one opened in Globex stays");
         // So does any other.
         yield* openTerminal("term-2");
         assert.isUndefined(lastShell().ACME_TOKEN);

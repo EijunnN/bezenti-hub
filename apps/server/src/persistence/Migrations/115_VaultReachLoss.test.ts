@@ -22,7 +22,8 @@ it.effect("drops the Vault rows a Hub before ticket 07 left naming a reach that 
     `;
     yield* sql`
       INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at, space_id)
-      VALUES ('web', 'web', '/w/web', '[]', ${AT}, ${AT}, 'org-globex')
+      VALUES ('web', 'web', '/w/web', '[]', ${AT}, ${AT}, 'org-globex'),
+        ('gone-web', 'gone-web', '/w/gone-web', '[]', ${AT}, ${AT}, 'personal:gone')
     `;
     const vault = (id: string, spaceId: string | null) => sql`
       INSERT INTO vaults (vault_id, name, space_id, is_main, created_at, updated_at)
@@ -44,6 +45,10 @@ it.effect("drops the Vault rows a Hub before ticket 07 left naming a reach that 
     yield* allow("space", "org-initech");
     yield* allow("user", "grace");
     yield* allow("user", "gone");
+    yield* allow("space", "personal:gone");
+    yield* sql`
+      INSERT INTO project_vault_choices (project_id, vault_id, choice) VALUES ('gone-web', 'tools', 'add')
+    `;
     // The Project moved from Acme to Globex: its choices of Acme's and Tools (Acme only) stayed.
     for (const vaultId of ["acme-keys", "tools", "globex-keys"]) {
       yield* sql`
@@ -52,11 +57,12 @@ it.effect("drops the Vault rows a Hub before ticket 07 left naming a reach that 
     }
     yield* sql`
       INSERT INTO space_default_vaults (space_id, vault_id, position) VALUES
-        ('org-globex', 'acme-keys', 0), ('org-globex', 'globex-keys', 1), ('org-acme', 'tools', 0)
+        ('org-globex', 'acme-keys', 0), ('org-globex', 'globex-keys', 1), ('org-acme', 'tools', 0),
+        ('personal:gone', 'tools', 0)
     `;
 
     assert.deepEqual(yield* runMigrations({ toMigrationInclusive: 115 }), [
-      [115, "VaultUnreachableRows"],
+      [115, "VaultReachLoss"],
     ]);
     const ids = (rows: ReadonlyArray<Record<string, unknown>>) =>
       rows.map((row) => Object.values(row).join(":"));
@@ -80,5 +86,7 @@ it.effect("drops the Vault rows a Hub before ticket 07 left naming a reach that 
       ),
       ["org-acme:tools", "org-globex:globex-keys"],
     );
+    // Where terminals were opened, for the Hub to refuse and close them after a move or removal.
+    assert.deepEqual(ids(yield* sql`SELECT COUNT(*) AS n FROM terminal_openings`), ["0"]);
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
