@@ -150,7 +150,7 @@ class TerminalSubprocessCheckError extends Schema.TaggedError<TerminalSubprocess
   "TerminalSubprocessCheckError",
   {
     cause: Schema.optional(Schema.Defect()),
-    command: Schema.Literals(["powershell", "ps", "resource-monitor"]),
+    command: Schema.Literals(["powershell", "ps", "proc", "resource-monitor"]),
     exitCode: Schema.optional(Schema.NullOr(Schema.Number)),
     timedOut: Schema.optional(Schema.Boolean),
     stdoutTruncated: Schema.optional(Schema.Boolean),
@@ -833,6 +833,46 @@ function deriveSubprocessInspectResult(
     processIds: [...processIds],
   };
 }
+
+/**
+ * The process table from /proc, for a Linux host without a working `ps` (a slim container image):
+ * `pid (comm) state ppid …` per process; comm may hold spaces or parentheses, so it ends at the
+ * last `)`.
+ */
+export function parseProcStat(stat: string): { pid: number; ppid: number; comm: string } | null {
+  const open = stat.indexOf("(");
+  const close = stat.lastIndexOf(")");
+  if (open < 0 || close < open) return null;
+  const pid = Number(stat.slice(0, open).trim());
+  const ppid = Number(
+    stat
+      .slice(close + 1)
+      .trim()
+      .split(/\s+/)[1],
+  );
+  if (!Number.isInteger(pid) || !Number.isInteger(ppid)) return null;
+  return { pid, ppid, comm: stat.slice(open + 1, close) };
+}
+
+const linuxProcProcessTableSnapshot = Effect.fn("terminal.linuxProcProcessTableSnapshot")(
+  function* (fileSystem: FileSystem.FileSystem) {
+    const entries = yield* fileSystem.readDirectory("/proc");
+    const lines: Array<string> = [];
+    for (const entry of entries) {
+      if (!/^\d+$/.test(entry)) continue;
+      // A process that ended since the listing has no stat any more.
+      const stat = yield* fileSystem
+        .readFileString(`/proc/${entry}/stat`)
+        .pipe(Effect.orElseSucceed(() => ""));
+      const parsed = parseProcStat(stat);
+      if (parsed !== null) lines.push(`${parsed.pid} ${parsed.ppid} ${parsed.comm}`);
+    }
+    if (lines.length === 0) {
+      return yield* new TerminalSubprocessCheckError({ command: "proc" });
+    }
+    return parsePosixProcessTable(lines.join("\n"));
+  },
+);
 
 const POSIX_PS_ABSOLUTE_PATHS = ["/bin/ps", "/usr/bin/ps"] as const;
 
@@ -1610,10 +1650,19 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   // Share one process table per poll; per-terminal scans can exhaust PIDs on busy hosts.
   // Timed on success and failure so the poll loop can pace the next query.
   const posixPsCommand = platform === "win32" ? undefined : yield* resolvePosixPsCommand();
+  const procFileSystem = yield* FileSystem.FileSystem;
   const fallbackProcessTableSnapshot = (timeout: Duration.Input) =>
     (posixPsCommand === undefined
       ? windowsProcessTableSnapshot(timeout)
-      : posixProcessTableSnapshot(posixPsCommand, timeout)
+      : posixProcessTableSnapshot(posixPsCommand, timeout).pipe(
+          // Without a working ps (a slim Sandbox image), Linux still has /proc. A ps that timed
+          // out keeps its budget: the table is busy, not missing.
+          Effect.catch((psError) =>
+            platform === "linux" && psError.timedOut !== true
+              ? linuxProcProcessTableSnapshot(procFileSystem).pipe(Effect.mapError(() => psError))
+              : Effect.fail(psError),
+          ),
+        )
     ).pipe(
       Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
       Effect.result,

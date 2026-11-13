@@ -1107,6 +1107,21 @@ it.layer(
       }),
   );
 
+  it("reads a process's parent from /proc when ps is missing (a slim Sandbox image)", () => {
+    expect(TerminalManager.parseProcStat("124 (sleep) S 119 124 119 34816 124 4194304")).toEqual({
+      pid: 124,
+      ppid: 119,
+      comm: "sleep",
+    });
+    // A command name with spaces and parentheses ends at the last one.
+    expect(TerminalManager.parseProcStat("77 (my (dev) server) R 1 77 77 0 -1")).toEqual({
+      pid: 77,
+      ppid: 1,
+      comm: "my (dev) server",
+    });
+    expect(TerminalManager.parseProcStat("")).toBeNull();
+  });
+
   it.effect("caps incrementally appended history without losing partial or empty lines", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager(3);
