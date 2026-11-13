@@ -9,12 +9,14 @@ import {
   type VaultEntryId,
   type VaultSummary,
 } from "@t3tools/contracts";
+import { entryActions, loadVaultOverview, vaultActions } from "@t3tools/client-runtime/vaults";
 import * as Redacted from "effect/Redacted";
 import { useEffect, useEffectEvent, useState } from "react";
 
 import { usePrimarySessionState } from "../../environments/primary";
 import { fetchAccount } from "../../environments/primary/userAccounts";
 import { revealVaultSecret } from "../../environments/primary/vaults";
+import { isElectron } from "../../env";
 import { errorMessageOf } from "../../lib/errorMessage";
 import { useCurrentSpace } from "../../state/currentSpace";
 import { usePrimaryEnvironmentId } from "../../state/environments";
@@ -43,6 +45,7 @@ const VALUE_INPUT_PROPS = {
 } as const;
 /** A revealed value stays on screen this long, at most. */
 const REVEAL_MS = 60_000;
+const VAULT_SURFACE = isElectron ? "desktop" : "web";
 const CONFIRM_DANGEROUS = "This value changes how tools run";
 
 const nameHint = (name: string, isOwner: boolean) => {
@@ -132,18 +135,12 @@ function VaultsPage({ environmentId }: { readonly environmentId: EnvironmentId }
     );
 
   /** Every Vault the User sees, their names read in parallel. */
-  const fetchAll = useEffectEvent(async (target: EnvironmentId) => {
-    const listed = await settle(commands.list({ environmentId: target, input: {} }));
-    const loaded = await Promise.all(
-      listed.vaults.map(async (vault) => {
-        const result = await settle(
-          commands.entries({ environmentId: target, input: { vaultId: vault.id } }),
-        );
-        return [vault.id, result.entries] as const;
-      }),
-    );
-    return { vaults: listed.vaults, entries: Object.fromEntries(loaded) };
-  });
+  const fetchAll = useEffectEvent((target: EnvironmentId) =>
+    loadVaultOverview({
+      list: () => settle(commands.list({ environmentId: target, input: {} })),
+      entries: (vaultId) => settle(commands.entries({ environmentId: target, input: { vaultId } })),
+    }),
+  );
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- loads the Vaults the signed-in User sees from the Hub when the page opens.
   useEffect(() => {
@@ -328,7 +325,7 @@ function VaultSection(props: {
   readonly onChanged: (all: boolean) => Promise<void>;
 }) {
   const { vault, commands, environmentId } = props;
-  const canEdit = vault.canEdit && props.mayWrite;
+  const canEdit = vaultActions(vault, { mayWrite: props.mayWrite, surface: VAULT_SURFACE }).add;
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const act: Act = async (work, all = false) => {
@@ -505,7 +502,12 @@ function EntryRow(props: {
   const [confirmed, setConfirmed] = useState(false);
   const dangerous = isDangerous(entry.name);
   // Someone else's dangerous name: replacing it is the Owner's alone.
-  const mayReplace = props.canEdit && entry.kind !== "link" && (!dangerous || props.isOwner);
+  const actions = entryActions(vault, entry, {
+    mayWrite: props.canEdit,
+    surface: VAULT_SURFACE,
+    isOwner: props.isOwner,
+  });
+  const mayReplace = actions.replace;
   return (
     <li className="flex flex-col gap-2 px-4 py-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -583,7 +585,7 @@ function EntryRow(props: {
           {dangerous ? <ConfirmDangerous checked={confirmed} onChange={setConfirmed} /> : null}
         </form>
       ) : null}
-      {vault.canReveal && !entry.broken ? (
+      {actions.reveal && !entry.broken ? (
         // A new version hides a value revealed before it.
         <RevealControl key={`${entry.id}:${entry.version}`} vault={vault} entry={entry} />
       ) : null}

@@ -1,4 +1,5 @@
 import { fetchInstallationUsers } from "@t3tools/client-runtime/spaces/space-directory";
+import { threadSecretLines } from "@t3tools/client-runtime/vaults";
 import type {
   EnvironmentId,
   InstallationUser,
@@ -7,7 +8,6 @@ import type {
   ThreadId,
   VaultChoices,
   VaultId,
-  VaultSource,
   VaultSubject,
   VaultSummary,
   VaultThreadEnvironment,
@@ -37,12 +37,6 @@ import { settle } from "./vaultCommands";
 const USER_ALLOWANCE_RISK =
   "Only this User's turns, terminals and scripts receive it, but in a shared Sandbox other agents of the same Space can read a running process's environment.";
 const UNDERSTOOD = "I understand other agents in a shared Sandbox can read it";
-
-const SOURCE_LABEL: Record<VaultSource, string> = {
-  user: "yours",
-  project: "added by the Project",
-  space: "Space default",
-};
 
 const subjectKey = (subject: VaultSubject) =>
   subject.kind === "space" ? `space:${subject.spaceId}` : `user:${subject.userId}`;
@@ -558,22 +552,15 @@ export function ThreadSecrets(props: {
             <p className="text-xs text-muted-foreground">This Thread receives no secrets.</p>
           ) : (
             <ul className="flex flex-col gap-1" aria-label="Secrets this Thread receives">
-              {shown.variables.map((variable) => (
-                <li key={variable.name} className="flex flex-col">
+              {threadSecretLines(shown).map((line) => (
+                <li key={line.name} className="flex flex-col">
                   <span>
-                    <code className="font-mono text-xs">{variable.name}</code>{" "}
-                    <span className="text-xs text-muted-foreground">
-                      from {variable.vaultName} ({SOURCE_LABEL[variable.source]})
-                    </span>
+                    <code className="font-mono text-xs">{line.name}</code>{" "}
+                    <span className="text-xs text-muted-foreground">from {line.from}</span>
                   </span>
-                  {variable.shadowed.length > 0 ? (
-                    <span className="text-xs text-muted-foreground">
-                      Wins over{" "}
-                      {variable.shadowed
-                        .map((other) => `${other.vaultName} (${SOURCE_LABEL[other.source]})`)
-                        .join(", ")}
-                    </span>
-                  ) : null}
+                  {line.winsOver === null ? null : (
+                    <span className="text-xs text-muted-foreground">Wins over {line.winsOver}</span>
+                  )}
                 </li>
               ))}
             </ul>

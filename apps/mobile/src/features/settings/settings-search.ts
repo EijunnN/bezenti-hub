@@ -66,6 +66,7 @@ const SETTINGS_SEARCH_TERMS = {
     "login",
     "auth",
   ],
+  SettingsVaults: ["vaults", "secrets", "api keys", "tokens", "environment variables"],
   SettingsEnvironmentSourceControl: [
     "git",
     "pull requests",

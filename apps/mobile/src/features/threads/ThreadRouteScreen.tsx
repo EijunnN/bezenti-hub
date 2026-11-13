@@ -1,4 +1,5 @@
 import { ThreadEnvironmentNotice } from "../environments/ThreadEnvironmentNotice";
+import { ThreadSecrets } from "../vaults/ThreadSecrets";
 import { useThreadEnvironment } from "../environments/useThreadEnvironment";
 import * as Dialog from "../../components/ui/Dialog";
 import { useRememberThreadProject } from "./useRememberThreadProject";
@@ -951,6 +952,7 @@ function ThreadRouteContent(
 
       <>
         <ThreadEnvironmentNotice thread={selectedThread} runsOn={runsOn} />
+        <ThreadSecrets environmentId={selectedThread.environmentId} threadId={selectedThread.id} />
         <ThreadScreenBinding
           header={
             props.inspectorPresentation ? null : (

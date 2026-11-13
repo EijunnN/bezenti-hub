@@ -5,14 +5,21 @@ import {
   secretRequestDisplay,
   secretRequestFailureMessage,
   secretRequestPrivacyNote,
+  secretRequestVaultNameProblem,
+  secretRequestVaultValueProblem,
   type SecretRequestItem,
 } from "@t3tools/client-runtime/secret-request";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import type { EnvironmentId, OrchestrationV2ProjectedTurnItem } from "@t3tools/contracts";
-import { useRef, useState } from "react";
+import type {
+  EnvironmentId,
+  OrchestrationV2ProjectedTurnItem,
+  SecretRequestVaultTargets,
+  VaultId,
+} from "@t3tools/contracts";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { View, type ColorValue } from "react-native";
 
 import { SymbolView, type AppSymbolName } from "../../components/ui/AppSymbol";
@@ -20,6 +27,7 @@ import { AppText as Text, AppTextInput as TextInput } from "../../components/ui/
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../../components/ui/Button";
+import { ListToggleRow } from "../../components/ui/ListToggleRow";
 
 const LOCK_SYMBOL: AppSymbolName = { ios: "lock", android: "lock" };
 const PRIVATE_SYMBOL: AppSymbolName = { ios: "checkmark.shield", android: "lock" };
@@ -69,14 +77,63 @@ function PendingSecretRequestForm(props: {
     reportFailure: false,
     reportDefect: false,
   });
+  // «Also save to Vault»: only the Vaults the Hub offers this User for this Thread (none for a
+  // Member or a Guest). The Hub checks the choice again.
+  const loadTargets = useAtomCommand(serverEnvironment.secretRequestVaultTargets, {
+    label: "list Vaults for a secret request",
+    reportFailure: false,
+    reportDefect: false,
+  });
+  const [targets, setTargets] = useState<SecretRequestVaultTargets["vaults"]>([]);
+  const [saveToVault, setSaveToVault] = useState(false);
+  const [vaultId, setVaultId] = useState<VaultId | null>(null);
+  const [vaultName, setVaultName] = useState(item.secretName ?? "");
+  const targetsAsked = useRef(false);
+  const askTargets = useEffectEvent(() => {
+    if (targetsAsked.current) return;
+    targetsAsked.current = true;
+    void loadTargets({
+      environmentId: props.environmentId,
+      input: { threadId: item.threadId },
+    }).then((result) => {
+      if (result._tag !== "Success") {
+        targetsAsked.current = false;
+        return;
+      }
+      setTargets(result.value.vaults);
+      setVaultId((current) => current ?? result.value.vaults[0]?.id ?? null);
+    });
+  });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- asks the Hub once which Vaults this card may save to.
+  useEffect(() => {
+    askTargets();
+  }, []);
   const [secret, setSecret] = useState("");
+  const saveProblem = saveToVault
+    ? (secretRequestVaultNameProblem(vaultName) ?? secretRequestVaultValueProblem(secret))
+    : null;
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Submit then a tap can both run before a re-render; this guard is synchronous.
   const inFlight = useRef(false);
 
+  const save = () => {
+    if (saveToVault && (vaultId === null || saveProblem !== null)) return;
+    void send(
+      saveToVault && vaultId !== null
+        ? { type: "save", secret, saveToVault: { vaultId, name: vaultName } }
+        : { type: "save", secret },
+    );
+  };
+
   const send = async (
-    reply: { readonly type: "save"; readonly secret: string } | { readonly type: "decline" },
+    reply:
+      | {
+          readonly type: "save";
+          readonly secret: string;
+          readonly saveToVault?: { readonly vaultId: VaultId; readonly name: string };
+        }
+      | { readonly type: "decline" },
   ) => {
     const input = secretRequestAnswerInput(item, reply);
     if (input === null || inFlight.current) return;
@@ -120,8 +177,52 @@ function PendingSecretRequestForm(props: {
         importantForAutofill="no"
         spellCheck={false}
         returnKeyType="done"
-        onSubmitEditing={() => void send({ type: "save", secret })}
+        onSubmitEditing={save}
       />
+      {targets.length === 0 ? null : (
+        <View className="gap-2">
+          <ListToggleRow
+            label="Also save to Vault"
+            value={saveToVault}
+            disabled={submitting}
+            onValueChange={setSaveToVault}
+          />
+          {saveToVault ? (
+            <View className="gap-2">
+              {targets.map((target) => (
+                <Button
+                  key={target.id}
+                  label={target.name}
+                  accessibilityLabel={`Vault ${target.name}`}
+                  tone={target.id === vaultId ? "primary" : "secondary"}
+                  size="compact"
+                  disabled={submitting}
+                  onPress={() => setVaultId(target.id)}
+                />
+              ))}
+              <TextInput
+                accessibilityLabel="Secret name"
+                placeholder="NAME"
+                value={vaultName}
+                onChangeText={(text) => setVaultName(text.toUpperCase())}
+                editable={!submitting}
+                autoCapitalize="characters"
+                autoCorrect={false}
+                spellCheck={false}
+              />
+              <Text
+                className={
+                  saveProblem === null
+                    ? "font-sans text-xs text-foreground-muted"
+                    : "font-sans text-xs text-danger-foreground"
+                }
+              >
+                {saveProblem ?? `Threads that receive this Vault get it as ${vaultName.trim()}.`}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+      )}
       {error !== null ? (
         <Text
           accessibilityRole="alert"
@@ -135,8 +236,8 @@ function PendingSecretRequestForm(props: {
         label="Save securely"
         tone="primary"
         fullWidth
-        disabled={submitting || secret.trim().length === 0}
-        onPress={() => void send({ type: "save", secret })}
+        disabled={submitting || secret.trim().length === 0 || saveProblem !== null}
+        onPress={save}
       />
       <View className="flex-row items-center justify-between gap-2">
         <View className="flex-1 flex-row items-center gap-1.5">
