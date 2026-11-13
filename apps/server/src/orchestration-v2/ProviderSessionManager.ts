@@ -15,6 +15,7 @@ import {
   OrchestrationV2RuntimeRequest,
   ProviderInstanceId,
   ProviderSessionId,
+  type ProviderSessionAiAccount,
   ThreadId,
   type ProviderThreadId,
 } from "@t3tools/contracts";
@@ -63,6 +64,7 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import { ProviderSessionReleasedDuringStartError } from "./ProviderSessionReleasedDuringStart.ts";
 import * as SecretDelivery from "../vaults/SecretDelivery.ts";
+import * as AiGatewaySessions from "../ai/AiGatewaySessions.ts";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_IDLE_PIN_MS = 4 * 60 * 60 * 1000;
@@ -236,6 +238,12 @@ interface LiveSessionEntry {
    * session, and no other Thread joins a process that holds secrets.
    */
   readonly secretFingerprint: string;
+  /**
+   * The Hub AI account its process was started on (spec 4 ticket 06), shown on the Thread; absent
+   * off the gateway. A Thread whose sessions now go through the gateway, or no longer do, opens a
+   * new process.
+   */
+  readonly aiAccount: ProviderSessionAiAccount | undefined;
   readonly runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
   readonly exposedRuntime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
   readonly eventSubscribers: Ref.Ref<
@@ -249,6 +257,13 @@ interface LiveSessionEntry {
   readonly pinnedSinceMs: number | null;
   readonly idleThreadUnloads: ReadonlyMap<ThreadId, IdleThreadUnload>;
 }
+
+/** A provider session as the Thread shows it, with the Hub AI account it runs on, if any. */
+const withAiAccount = (
+  providerSession: OrchestrationV2ProviderSession,
+  aiAccount: ProviderSessionAiAccount | undefined,
+): OrchestrationV2ProviderSession =>
+  aiAccount === undefined ? providerSession : { ...providerSession, aiAccount };
 
 interface IdleThreadUnload {
   readonly providerThread: OrchestrationV2ProviderThread;
@@ -365,16 +380,16 @@ export const layerWithOptions = (
       // Spec 5 ticket 04: a session's process gets its Thread owner's secrets. The plan (names and
       // value ids) decides; values are read only when a new process starts.
       const secretDelivery = yield* Effect.serviceOption(SecretDelivery.SecretDelivery);
-      const secretPlanFor = Effect.fn("ProviderSessionManagerV2.secretPlanFor")(function* (
-        threadId: ThreadId,
-      ) {
-        if (Option.isNone(secretDelivery)) return undefined;
-        const target = Option.isNone(environments)
-          ? {
+      // Spec 4 ticket 06: a session on the Hub's AI gateway gets the Thread's key in its process.
+      const aiGatewaySessions = yield* Effect.serviceOption(AiGatewaySessions.AiGatewaySessions);
+      /** The machine a Thread's process starts on, and its executor contract. */
+      const targetFor = (threadId: ThreadId) =>
+        Option.isNone(environments)
+          ? Effect.succeed({
               environmentId: HUB_MACHINE_ENVIRONMENT_ID,
               contractVersion: ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
-            }
-          : yield* environments.value.forThread(threadId).pipe(
+            })
+          : environments.value.forThread(threadId).pipe(
               Effect.map((executor) => ({
                 environmentId: executor.environmentId,
                 contractVersion: Option.match(executor.workspace.forward, {
@@ -383,8 +398,29 @@ export const layerWithOptions = (
                 }),
               })),
             );
+      const secretPlanFor = Effect.fn("ProviderSessionManagerV2.secretPlanFor")(function* (
+        threadId: ThreadId,
+      ) {
+        if (Option.isNone(secretDelivery)) return undefined;
+        const target = yield* targetFor(threadId);
         return yield* secretDelivery.value.planTurn({ threadId, target });
       });
+      /** Whether the Thread's sessions of this instance go through the AI gateway now. */
+      const gatewayWantedFor = (input: {
+        readonly threadId: ThreadId;
+        readonly instanceId: ProviderInstanceId;
+      }) =>
+        Option.isNone(aiGatewaySessions)
+          ? Effect.succeed(false)
+          : Effect.gen(function* () {
+              const adapter = yield* registry.get(input.instanceId);
+              const target = yield* targetFor(input.threadId);
+              return yield* aiGatewaySessions.value.applies({
+                threadId: input.threadId,
+                driver: adapter.driver,
+                environmentId: target.environmentId,
+              });
+            }).pipe(Effect.orElseSucceed(() => false));
       /** Unreadable settings must preserve explicit browser-access opt-outs. */
       const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
       const projectService = yield* Effect.serviceOption(ProjectService.ProjectService);
@@ -2011,7 +2047,7 @@ export const layerWithOptions = (
             runtime: entry.runtime,
             threadIds: current.attachedThreadIds,
             type: "provider-session.updated",
-            payload: event.providerSession,
+            payload: withAiAccount(event.providerSession, entry.aiAccount),
           });
         },
         (effect, entry, _event) =>
@@ -2206,6 +2242,7 @@ export const layerWithOptions = (
       const openLocked = (
         input: OpenInput,
         plan: SecretDelivery.SecretPlan | undefined,
+        gatewayWanted: boolean,
         openFailed: (cause: unknown) => ProviderSessionOpenError,
       ) =>
         sessionOpen.withLock(
@@ -2238,7 +2275,11 @@ export const layerWithOptions = (
             // change a live one's environment. Decided here, under the lock, so a concurrent open
             // never releases the session another just made.
             let existing = current;
-            if (current !== undefined && current.secretFingerprint !== secretFingerprint) {
+            if (
+              current !== undefined &&
+              (current.secretFingerprint !== secretFingerprint ||
+                (current.aiAccount !== undefined) !== gatewayWanted)
+            ) {
               const others = [...current.attachedThreadIds].some((id) => id !== input.threadId);
               // A process other Threads share is never released for one Thread's secrets.
               if (others || sharedId) return yield* shared(current.runtime.driver);
@@ -2251,7 +2292,7 @@ export const layerWithOptions = (
                 yield* releaseEntry({
                   providerSessionId: input.providerSessionId,
                   reason: "manual_shutdown",
-                  detail: "This Thread's secrets changed.",
+                  detail: "This Thread's secrets or AI gateway changed.",
                 }).pipe(Effect.mapError(openFailed));
                 existing = undefined;
               }
@@ -2301,6 +2342,29 @@ export const layerWithOptions = (
               plan === undefined || plan.variables.length === 0 || Option.isNone(secretDelivery)
                 ? undefined
                 : yield* secretDelivery.value.resolve(plan).pipe(Effect.mapError(openFailed));
+            // Spec 4 ticket 06: the Thread's key, issued now for this session (revoked with it),
+            // or the refusal: never a session on a login of the machine instead.
+            const gateway = Option.isNone(aiGatewaySessions)
+              ? Option.none<AiGatewaySessions.GatewaySession>()
+              : yield* aiGatewaySessions.value
+                  .forSession({
+                    threadId: input.threadId,
+                    providerSessionId: input.providerSessionId,
+                    driver: adapter.driver,
+                    modelSelection: input.modelSelection,
+                    target: yield* targetFor(input.threadId).pipe(Effect.mapError(openFailed)),
+                  })
+                  .pipe(Effect.mapError(openFailed));
+            const aiAccount = Option.isSome(gateway) ? gateway.value.account : undefined;
+            const releaseKey =
+              Option.isSome(gateway) && Option.isSome(aiGatewaySessions)
+                ? aiGatewaySessions.value.release(input.providerSessionId)
+                : Effect.void;
+            // A process every Thread of the instance shares never holds one Thread's key.
+            if (Option.isSome(gateway) && sharedId) {
+              yield* releaseKey;
+              return yield* shared(adapter.driver);
+            }
             const prepared = yield* prepareMcpSession(
               input.threadId,
               input.modelSelection.instanceId,
@@ -2333,6 +2397,7 @@ export const layerWithOptions = (
                       initialProviderItemIdentityVersion: input.initialProviderItemIdentityVersion,
                     }),
                 ...(secretEnv === undefined ? {} : { secretEnv }),
+                ...(Option.isSome(gateway) ? { aiGateway: gateway.value.access } : {}),
               })
               .pipe(
                 Effect.provideService(Scope.Scope, sessionScope),
@@ -2350,6 +2415,8 @@ export const layerWithOptions = (
                         reason: "open_failed",
                       }),
                     ),
+                    // The key of a session that never opened stops working now.
+                    Effect.ensuring(releaseKey),
                   ),
                 ),
                 Effect.mapError(
@@ -2380,6 +2447,7 @@ export const layerWithOptions = (
                 runtime.providerSession.capabilities.sessions
                   .supportsMultipleProviderThreadsPerSession,
               secretFingerprint,
+              aiAccount,
               runtime,
               exposedRuntime,
               eventSubscribers,
@@ -2403,7 +2471,7 @@ export const layerWithOptions = (
                 runtime,
                 threadIds: [input.threadId],
                 type: "provider-session.attached",
-                payload: runtime.providerSession,
+                payload: withAiAccount(runtime.providerSession, aiAccount),
               }),
             ).pipe(
               // Release on interruption too; no event pump or idle timer exists to clean up yet.
@@ -2439,7 +2507,11 @@ export const layerWithOptions = (
               cause,
             });
           const plan = yield* secretPlanFor(input.threadId).pipe(Effect.mapError(openFailed));
-          return yield* openLocked(input, plan, openFailed);
+          const gatewayWanted = yield* gatewayWantedFor({
+            threadId: input.threadId,
+            instanceId: input.modelSelection.instanceId,
+          });
+          return yield* openLocked(input, plan, gatewayWanted, openFailed);
         }),
         isLive: (providerSessionId) =>
           Ref.get(sessions).pipe(

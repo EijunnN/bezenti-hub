@@ -43,8 +43,13 @@ import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresen
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { parsePiCompactCommand, type PiCompactCommand } from "./commands.ts";
 import {
+  aiGatewayModelSlug,
+  aiGatewayProcessOf,
+  aiGatewayVariables,
+  applyAiGatewayEnv,
   applySecretEnv,
   mergeProviderInstanceEnvironment,
+  piGatewayModelsJson,
 } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -441,6 +446,8 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
   return ProviderAdapter.ProviderAdapterV2.of({
     // Spec 5: each session's `pi` process gets the Thread's secrets.
     receivesSecretEnv: true,
+    // Spec 4 ticket 06: on the Hub's AI gateway, in a Pi home of the Thread's own.
+    usesAiGateway: true,
     instanceId: options.instanceId,
     driver: PI_PROVIDER,
     getCapabilities: Effect.fn("PiAdapter.getCapabilities")(function () {
@@ -475,13 +482,29 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       if (!resolvedLaunchArgs.ok) {
         return yield* protocolError(resolvedLaunchArgs.message);
       }
+      // Spec 4 ticket 06: the Thread's Pi home holds only the gateway's provider (its key by name).
+      const gateway = yield* aiGatewayProcessOf(PI_PROVIDER, input);
+      if (gateway !== undefined) {
+        yield* provideCacheFs(
+          Effect.gen(function* () {
+            yield* fileSystem.makeDirectory(gateway.home, { recursive: true, mode: 0o700 });
+            yield* fileSystem.writeFileString(
+              `${gateway.home}/models.json`,
+              piGatewayModelsJson(gateway),
+              { mode: 0o600 },
+            );
+          }),
+        );
+      }
+      const platform = yield* HostProcess.Platform;
       const launch = buildPiRpcLaunch({
         launchArgs: resolvedLaunchArgs.args,
-        // Spec 5: the Thread's secrets, in this session's `pi` process alone.
-        environment: applySecretEnv(
-          options.environment,
-          input.secretEnv,
-          yield* HostProcess.Platform,
+        // Spec 5: the Thread's secrets, in this session's `pi` process alone; on the gateway, no
+        // ambient AI variable, and the gateway's over everything.
+        environment: applyAiGatewayEnv(
+          applySecretEnv(options.environment, input.secretEnv, platform),
+          gateway === undefined ? undefined : aiGatewayVariables("pi", gateway),
+          platform,
         ),
         mcpSession,
         extensionPath,
@@ -2413,7 +2436,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
             appliedThinking = null;
           }
         } else if (modelSelection.model !== appliedModel) {
-          const parsed = parsePiModelSlug(modelSelection.model);
+          // On the gateway every model is the gateway provider's.
+          const parsed = parsePiModelSlug(
+            gateway === undefined ? modelSelection.model : aiGatewayModelSlug(modelSelection.model),
+          );
           if (parsed === null) {
             return yield* protocolError(
               `Pi model '${modelSelection.model}' must use provider/model format`,

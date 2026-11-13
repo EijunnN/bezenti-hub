@@ -5,6 +5,16 @@ import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
+import {
+  AMBIENT_AI_VARIABLES,
+  type AiGatewayProcess,
+  aiGatewayModelSlug,
+  aiGatewayVariables,
+  applyAiGatewayEnv,
+  applySecretEnv,
+  codexGatewayConfigArgs,
+  piGatewayModelsJson,
+} from "./instanceEnvironment.ts";
 import { mergeProviderInstanceEnvironment } from "./instanceEnvironment.ts";
 
 describe("mergeProviderInstanceEnvironment", () => {
@@ -108,4 +118,84 @@ describe("mergeProviderInstanceEnvironment", () => {
       });
     }),
   );
+});
+
+const KEY = "t3gk_secret-thread-key-0123456789";
+const gateway: AiGatewayProcess = {
+  key: KEY,
+  aiAccountId: "acct-1" as AiGatewayProcess["aiAccountId"],
+  aiAccountName: "Acme DeepSeek",
+  provider: "openai-compatible",
+  model: "deepseek-chat",
+  baseUrl: "http://127.0.0.1:41000",
+  home: "/state/provider-homes/abc/claudeAgent",
+};
+
+describe("the AI gateway in a provider process (spec 4 ticket 06)", () => {
+  it("drops every ambient AI variable, from the machine or a Vault, and sets the gateway's last", () => {
+    const machine = {
+      PATH: "/bin",
+      HOME: "/home/owner",
+      ANTHROPIC_API_KEY: "sk-ant-owner",
+      CLAUDE_CODE_OAUTH_TOKEN: "owner-oauth",
+      OPENAI_API_KEY: "sk-owner",
+      CLAUDE_CONFIG_DIR: "/home/owner/.claude",
+    };
+    const withVault = applySecretEnv(
+      machine,
+      {
+        fingerprint: "f",
+        variables: [
+          { name: "ANTHROPIC_BASE_URL", value: "https://evil.example" },
+          { name: "APP_TOKEN", value: "app" },
+        ],
+      },
+      "linux",
+    );
+    const env = applyAiGatewayEnv(withVault, aiGatewayVariables("claudeAgent", gateway), "linux");
+    expect(env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:41000/api/ai/anthropic");
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe(KEY);
+    expect(env.CLAUDE_CONFIG_DIR).toBe(gateway.home);
+    expect(env.ANTHROPIC_MODEL).toBe("deepseek-chat");
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(env.APP_TOKEN).toBe("app");
+    expect(env.HOME).toBe("/home/owner");
+    for (const name of AMBIENT_AI_VARIABLES) {
+      if (!(name in aiGatewayVariables("claudeAgent", gateway))) expect(env[name]).toBeUndefined();
+    }
+    // Off the gateway nothing changes.
+    expect(applyAiGatewayEnv(machine, undefined, "linux")).toBe(machine);
+  });
+
+  it("names the key, never writes it, in Codex's arguments, Pi's models.json and OpenCode's config", () => {
+    const args = codexGatewayConfigArgs(gateway).join(" ");
+    expect(args).not.toContain(KEY);
+    expect(args).toContain('model_providers.t3.env_key="T3_AI_GATEWAY_KEY"');
+    expect(args).toContain('model_providers.t3.base_url="http://127.0.0.1:41000/api/ai/openai/v1"');
+    expect(args).toContain('model_providers.t3.wire_api="responses"');
+    expect(aiGatewayVariables("codex", gateway)).toEqual({
+      T3_AI_GATEWAY_KEY: KEY,
+      CODEX_HOME: gateway.home,
+    });
+    const models = piGatewayModelsJson(gateway);
+    expect(models).not.toContain(KEY);
+    expect(JSON.parse(models).providers.t3).toMatchObject({
+      baseUrl: "http://127.0.0.1:41000/api/ai/openai/v1",
+      apiKey: "$T3_AI_GATEWAY_KEY",
+      models: [{ id: "deepseek-chat" }],
+    });
+    const opencode = aiGatewayVariables("opencode", gateway);
+    expect(opencode.OPENCODE_CONFIG_CONTENT).not.toContain(KEY);
+    expect(JSON.parse(opencode.OPENCODE_CONFIG_CONTENT!)).toMatchObject({
+      enabled_providers: ["t3"],
+      model: "t3/deepseek-chat",
+      provider: { t3: { options: { apiKey: "{env:T3_AI_GATEWAY_KEY}" } } },
+    });
+    expect(opencode.XDG_CONFIG_HOME).toBe(`${gateway.home}/config`);
+    expect(aiGatewayVariables("pi", gateway).PI_CODING_AGENT_DIR).toBe(gateway.home);
+    expect(aiGatewayModelSlug("openai/gpt-5")).toBe("t3/gpt-5");
+    expect(aiGatewayModelSlug("deepseek-chat")).toBe("t3/deepseek-chat");
+  });
 });

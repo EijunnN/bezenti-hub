@@ -43,6 +43,7 @@ import {
   TurnItemId,
   UserId,
 } from "./baseSchemas.ts";
+import { ProviderSessionAiAccount } from "./aiGatewaySession.ts";
 import { ChatAttachment } from "./chatAttachment.ts";
 import { ThreadGuestShare } from "./guestShare.ts";
 import { StoredThreadTags, ThreadTag } from "./threadTags.ts";
@@ -994,6 +995,8 @@ export const OrchestrationV2ProviderSession = Schema.Struct({
   createdAt: Schema.DateTimeUtc,
   updatedAt: Schema.DateTimeUtc,
   lastError: Schema.NullOr(Schema.String),
+  /** The Hub AI account the session's requests go to (spec 4 ticket 06); absent off the gateway. */
+  aiAccount: Schema.optionalKey(ProviderSessionAiAccount),
 });
 export type OrchestrationV2ProviderSession = typeof OrchestrationV2ProviderSession.Type;
 

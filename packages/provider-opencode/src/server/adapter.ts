@@ -62,6 +62,10 @@ import {
   summarizeNativeProtocolPayload,
 } from "@t3tools/provider-core/server/nativeProtocolLogging";
 import {
+  aiGatewayModelSlug,
+  aiGatewayProcessOf,
+  aiGatewayVariables,
+  applyAiGatewayEnv,
   applySecretEnv,
   mergeProviderInstanceEnvironment,
 } from "@t3tools/provider-core/server/instanceEnvironment";
@@ -938,6 +942,8 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
     driver: OPENCODE_PROVIDER,
     // Spec 5: a session's own server gets the Thread's secrets; an external server cannot.
     ...(options.settings.serverUrl?.trim() ? {} : { receivesSecretEnv: true as const }),
+    // Spec 4 ticket 06: the same, for the Hub's AI gateway (its own server, its own XDG homes).
+    ...(options.settings.serverUrl?.trim() ? {} : { usesAiGateway: true as const }),
     getCapabilities: Effect.fn("OpencodeAdapter.getCapabilities")(function () {
       return Effect.succeed(OpenCodeProviderCapabilitiesV2);
     }),
@@ -948,6 +954,13 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
       function* (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) {
         const scope = yield* Effect.scope;
         const cwd = input.runtimePolicy.cwd ?? host.paths.cwd;
+        const gateway = yield* aiGatewayProcessOf(OPENCODE_PROVIDER, input);
+        const platform = yield* HostProcess.Platform;
+        // On the gateway every model is the gateway provider's (`t3/<model>`).
+        const parseModel = (model: string) =>
+          OpenCodeRuntime.parseOpenCodeModelSlug(
+            gateway === undefined ? model : aiGatewayModelSlug(model),
+          );
         const connection = yield* runtime.connectToOpenCodeServer({
           binaryPath: options.settings.binaryPath,
           directory: cwd,
@@ -955,11 +968,12 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
           ...(options.settings.serverPassword
             ? { serverPassword: options.settings.serverPassword }
             : {}),
-          // Spec 5: the Thread's secrets, in this session's own server alone.
-          environment: applySecretEnv(
-            options.environment,
-            input.secretEnv,
-            yield* HostProcess.Platform,
+          // Spec 5: the Thread's secrets, in this session's own server alone; on the gateway, no
+          // ambient AI variable nor config of the machine, and the gateway's over everything.
+          environment: applyAiGatewayEnv(
+            applySecretEnv(options.environment, input.secretEnv, platform),
+            gateway === undefined ? undefined : aiGatewayVariables("opencode", gateway),
+            platform,
           ),
         });
         const client = runtime.createOpenCodeSdkClient({
@@ -3185,9 +3199,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                   reason: "previous_turn_active",
                 });
               }
-              const parsedModel = OpenCodeRuntime.parseOpenCodeModelSlug(
-                turnInput.modelSelection.model,
-              );
+              const parsedModel = parseModel(turnInput.modelSelection.model);
               if (parsedModel === null) {
                 return yield* protocolError(
                   `OpenCode model '${turnInput.modelSelection.model}' must use provider/model format`,
@@ -3374,7 +3386,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
                   `OpenCode turn ${steerInput.providerTurnId} is not active`,
                 );
               }
-              const parsedModel = OpenCodeRuntime.parseOpenCodeModelSlug(turn.modelSelection.model);
+              const parsedModel = parseModel(turn.modelSelection.model);
               if (parsedModel === null) {
                 return yield* protocolError(
                   `OpenCode model '${turn.modelSelection.model}' must use provider/model format`,

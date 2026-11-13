@@ -1,4 +1,6 @@
 import {
+  AI_GATEWAY_KEY_VARIABLE,
+  AiGatewaySessionError,
   type ProviderInstanceEnvironment,
   SecretDeliveryError,
   type SecretEnv,
@@ -8,6 +10,7 @@ import * as Effect from "effect/Effect";
 
 import { expandHomePath } from "./pathExpansion.ts";
 import {
+  type AiGatewaySessionInput,
   ProviderAdapterOpenSessionError,
   type ProviderAdapterV2,
   type ProviderAdapterV2OpenSessionInput,
@@ -74,7 +77,8 @@ const hasSecretEnv = (secretEnv: SecretEnv | undefined): secretEnv is SecretEnv 
 
 /**
  * Opens a session; one with secrets only on an adapter that puts them in its processes
- * (`receivesSecretEnv`), never on one that would start without them.
+ * (`receivesSecretEnv`), one on the AI gateway only on an adapter that points its processes at it
+ * (`usesAiGateway`): never on one that would start without them, or on a login of the machine.
  */
 export const openSessionWithSecrets = (
   adapter: ProviderAdapterV2["Service"],
@@ -88,4 +92,229 @@ export const openSessionWithSecrets = (
           cause: new SecretDeliveryError({ reason: "provider", provider: adapter.driver }),
         }),
       )
-    : adapter.openSession(input);
+    : input.aiGateway !== undefined && adapter.usesAiGateway !== true
+      ? Effect.fail(
+          new ProviderAdapterOpenSessionError({
+            driver: adapter.driver,
+            providerSessionId: input.providerSessionId,
+            cause: new AiGatewaySessionError({ reason: "provider", provider: adapter.driver }),
+          }),
+        )
+      : adapter.openSession(input);
+
+/**
+ * A session's AI gateway, as its driver starts a process with it (spec 4 ticket 06): the Thread's
+ * key, account and model from the Hub, and the relay and provider home of this machine.
+ */
+export interface AiGatewayProcess extends AiGatewaySessionInput {
+  readonly baseUrl: string;
+  readonly home: string;
+}
+
+/**
+ * The session's gateway, complete, or the refusal: a session the Hub put on the gateway never
+ * starts without its relay and home (it would fall back to a login of the machine).
+ */
+export const aiGatewayProcessOf = (
+  driver: ProviderAdapterV2["Service"]["driver"],
+  input: Pick<ProviderAdapterV2OpenSessionInput, "aiGateway" | "providerSessionId">,
+): Effect.Effect<AiGatewayProcess | undefined, ProviderAdapterOpenSessionError> => {
+  const gateway = input.aiGateway;
+  if (gateway === undefined) return Effect.succeed(undefined);
+  if (gateway.baseUrl === undefined || gateway.home === undefined) {
+    return Effect.fail(
+      new ProviderAdapterOpenSessionError({
+        driver,
+        providerSessionId: input.providerSessionId,
+        cause: new AiGatewaySessionError({ reason: "unreachable" }),
+      }),
+    );
+  }
+  return Effect.succeed({ ...gateway, baseUrl: gateway.baseUrl, home: gateway.home });
+};
+
+/**
+ * What a gateway process never inherits, from the machine or a Vault: the AI providers' keys,
+ * base URLs, login tokens and config homes a CLI would use instead of the gateway.
+ */
+export const AMBIENT_AI_VARIABLES: ReadonlyArray<string> = [
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_MODEL",
+  "ANTHROPIC_SMALL_FAST_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_CUSTOM_HEADERS",
+  "ANTHROPIC_VERTEX_PROJECT_ID",
+  "ANTHROPIC_BEDROCK_BASE_URL",
+  "ANTHROPIC_VERTEX_BASE_URL",
+  "AWS_BEARER_TOKEN_BEDROCK",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+  "CLAUDE_CONFIG_DIR",
+  "OPENAI_API_KEY",
+  "OPENAI_BASE_URL",
+  "OPENAI_API_BASE",
+  "OPENAI_ORG_ID",
+  "OPENAI_PROJECT_ID",
+  "CODEX_API_KEY",
+  "CODEX_HOME",
+  "OPENCODE_CONFIG",
+  "OPENCODE_CONFIG_DIR",
+  "OPENCODE_CONFIG_CONTENT",
+  "PI_CODING_AGENT_DIR",
+  "PI_CODING_AGENT_SESSION_DIR",
+  "GEMINI_API_KEY",
+  "GOOGLE_API_KEY",
+  "GOOGLE_GENERATIVE_AI_API_KEY",
+  "XAI_API_KEY",
+  "OPENROUTER_API_KEY",
+  "DEEPSEEK_API_KEY",
+  "GROQ_API_KEY",
+  "MISTRAL_API_KEY",
+  "AZURE_OPENAI_API_KEY",
+  "AI_GATEWAY_API_KEY",
+];
+
+/** The provider id OpenCode, Pi and Codex know the gateway by. */
+const AI_GATEWAY_PROVIDER_ID = "t3";
+
+/** The OpenAI shape of the gateway, through the relay: what OpenCode, Pi and Codex call. */
+const aiGatewayOpenAiBaseUrl = (gateway: AiGatewayProcess) => `${gateway.baseUrl}/api/ai/openai/v1`;
+
+/** The model the gateway serves, from an OpenCode or Pi slug (`provider/model`) or a plain one. */
+const gatewayModelId = (model: string) => {
+  const separator = model.indexOf("/");
+  return separator <= 0 ? model : model.slice(separator + 1);
+};
+
+/**
+ * A model slug of OpenCode or Pi on the gateway: always the gateway's provider, with the model it
+ * serves (`t3/<model>`; another provider's prefix is dropped).
+ */
+export const aiGatewayModelSlug = (model: string) =>
+  `${AI_GATEWAY_PROVIDER_ID}/${gatewayModelId(model)}`;
+
+/**
+ * The variables a driver's process gets on the gateway (spec table, «Variables por provider»).
+ * The key is only ever a value here: never in arguments nor files.
+ */
+export const aiGatewayVariables = (
+  driver: "claudeAgent" | "codex" | "opencode" | "pi",
+  gateway: AiGatewayProcess,
+): Record<string, string> => {
+  const model = gateway.model ?? undefined;
+  switch (driver) {
+    case "claudeAgent":
+      return {
+        ANTHROPIC_BASE_URL: `${gateway.baseUrl}/api/ai/anthropic`,
+        ANTHROPIC_AUTH_TOKEN: gateway.key,
+        CLAUDE_CONFIG_DIR: gateway.home,
+        ...(model === undefined
+          ? {}
+          : {
+              ANTHROPIC_MODEL: model,
+              // Claude Code's background calls ask for a small model the account may not serve.
+              ANTHROPIC_SMALL_FAST_MODEL: model,
+              ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+            }),
+      };
+    case "codex":
+      return { [AI_GATEWAY_KEY_VARIABLE]: gateway.key, CODEX_HOME: gateway.home };
+    case "opencode": {
+      const id = model === undefined ? undefined : gatewayModelId(model);
+      return {
+        [AI_GATEWAY_KEY_VARIABLE]: gateway.key,
+        XDG_CONFIG_HOME: `${gateway.home}/config`,
+        XDG_DATA_HOME: `${gateway.home}/data`,
+        XDG_STATE_HOME: `${gateway.home}/state`,
+        XDG_CACHE_HOME: `${gateway.home}/cache`,
+        // The key by name: OpenCode reads `{env:…}` when it loads the provider.
+        OPENCODE_CONFIG_CONTENT: JSON.stringify({
+          enabled_providers: [AI_GATEWAY_PROVIDER_ID],
+          provider: {
+            [AI_GATEWAY_PROVIDER_ID]: {
+              npm: "@ai-sdk/openai-compatible",
+              name: "T3 Code AI gateway",
+              options: {
+                baseURL: aiGatewayOpenAiBaseUrl(gateway),
+                apiKey: `{env:${AI_GATEWAY_KEY_VARIABLE}}`,
+              },
+              models: id === undefined ? {} : { [id]: { name: id } },
+            },
+          },
+          ...(id === undefined ? {} : { model: `${AI_GATEWAY_PROVIDER_ID}/${id}` }),
+          autoupdate: false,
+          share: "disabled",
+        }),
+      };
+    }
+    case "pi":
+      return {
+        [AI_GATEWAY_KEY_VARIABLE]: gateway.key,
+        PI_CODING_AGENT_DIR: gateway.home,
+        PI_OFFLINE: "1",
+      };
+  }
+};
+
+/**
+ * Pi's `models.json` on the gateway, in the Thread's Pi home: the gateway's provider, with the key
+ * read from the environment by name (`$T3_AI_GATEWAY_KEY`), never written.
+ */
+export const piGatewayModelsJson = (gateway: AiGatewayProcess) => {
+  const model = gateway.model === null ? undefined : gatewayModelId(gateway.model);
+  return JSON.stringify(
+    {
+      providers: {
+        [AI_GATEWAY_PROVIDER_ID]: {
+          baseUrl: aiGatewayOpenAiBaseUrl(gateway),
+          api: "openai-completions",
+          apiKey: `$${AI_GATEWAY_KEY_VARIABLE}`,
+          models: model === undefined ? [] : [{ id: model, name: model }],
+        },
+      },
+    },
+    null,
+    2,
+  );
+};
+
+/** Codex's model provider on the gateway, as `-c` overrides: the key by name (`env_key`) only. */
+export const codexGatewayConfigArgs = (gateway: AiGatewayProcess): ReadonlyArray<string> => [
+  "-c",
+  `model_provider="${AI_GATEWAY_PROVIDER_ID}"`,
+  "-c",
+  `model_providers.${AI_GATEWAY_PROVIDER_ID}.name="T3 Code AI gateway"`,
+  "-c",
+  `model_providers.${AI_GATEWAY_PROVIDER_ID}.base_url="${aiGatewayOpenAiBaseUrl(gateway)}"`,
+  "-c",
+  `model_providers.${AI_GATEWAY_PROVIDER_ID}.env_key="${AI_GATEWAY_KEY_VARIABLE}"`,
+  "-c",
+  `model_providers.${AI_GATEWAY_PROVIDER_ID}.wire_api="responses"`,
+];
+
+/**
+ * `env` (the machine's, with the Thread's secrets over it) for a gateway process: every ambient AI
+ * variable gone, then the gateway's, which nothing overrides. Without a gateway, `env` unchanged.
+ */
+export const applyAiGatewayEnv = (
+  env: NodeJS.ProcessEnv,
+  variables: Record<string, string> | undefined,
+  platform: string,
+): NodeJS.ProcessEnv => {
+  if (variables === undefined) return env;
+  const windows = platform === "win32";
+  const fold = (name: string) => (windows ? name.toUpperCase() : name);
+  const drop = new Set([...AMBIENT_AI_VARIABLES, ...Object.keys(variables)].map(fold));
+  const next: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (!drop.has(fold(name))) next[name] = value;
+  }
+  for (const [name, value] of Object.entries(variables)) next[name] = value;
+  return next;
+};

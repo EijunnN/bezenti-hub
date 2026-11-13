@@ -20,11 +20,11 @@ import {
 } from "./environmentConnection.ts";
 
 /**
- * 8: previews through the Hub (`preview.proxy*`). 9: checkouts from the Hub's copy
- * (`WireCheckout.fromHub`, `subfolder`). 10: a Thread's secrets as environment variables
- * (`secretEnv`, `secretEnv.ts`); a machine before 10 gets none.
+ * 8: previews through the Hub. 9: checkouts from the Hub's copy. 10: a Thread's secrets as
+ * environment variables (`secretEnv`). 11: a session on the Hub's AI gateway (`aiGateway` in
+ * `provider.openSession`); a machine before 11 gets no gateway key.
  */
-export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 10;
+export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 11;
 
 /**
  * The Hub machine's Environment id. It is a constant so the `environments` table can seed the

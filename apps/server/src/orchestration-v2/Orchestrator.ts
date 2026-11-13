@@ -202,6 +202,7 @@ import { threadAccessOf } from "./commandAccess.ts";
 import * as DirectoryRoots from "../spaces/directoryRoots.ts";
 import * as ServerConfig from "../config.ts";
 import * as SecretDelivery from "../vaults/SecretDelivery.ts";
+import * as AiGatewaySessions from "../ai/AiGatewaySessions.ts";
 import { scratchRootOf } from "../environment/ScratchWorkspace.ts";
 import { effectiveOwner } from "../spaces/SpaceVisibility.ts";
 
@@ -1084,6 +1085,26 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ? Effect.succeed(false)
       : // Unreadable: a process of its own, the side that never shares secrets.
         secretDelivery.value.mayReceiveSecrets(threadId).pipe(Effect.orElseSucceed(() => true));
+  // Spec 4 ticket 06: so does a Thread on the AI gateway (its process holds the Thread's key).
+  const aiGatewaySessions = yield* Effect.serviceOption(AiGatewaySessions.AiGatewaySessions);
+  const usesAiGateway = (input: {
+    readonly threadId: ThreadId;
+    readonly providerInstanceId: ProviderInstanceId;
+    readonly environmentId?: EnvironmentId | undefined;
+  }) =>
+    Option.isNone(aiGatewaySessions)
+      ? Effect.succeed(false)
+      : providerAdapters.get(input.providerInstanceId).pipe(
+          Effect.flatMap((adapter) =>
+            aiGatewaySessions.value.applies({
+              threadId: input.threadId,
+              driver: adapter.driver,
+              environmentId: input.environmentId,
+            }),
+          ),
+          // Unreadable: a process of its own, the side that never shares a key.
+          Effect.orElseSucceed(() => true),
+        );
   const serverConfig = yield* Effect.serviceOption(ServerConfig.ServerConfig);
   const sqlClient = yield* Effect.serviceOption(SqlClient.SqlClient);
   const nextTurnItemOrdinal = (
@@ -1202,7 +1223,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     capabilitiesFor(input.threadId, input.providerInstanceId, input.environmentId).pipe(
       Effect.flatMap((capabilities) =>
         capabilities.sessions.supportsMultipleProviderThreadsPerSession
-          ? receivesSecrets(input.threadId)
+          ? receivesSecrets(input.threadId).pipe(
+              Effect.flatMap((secrets) => (secrets ? Effect.succeed(true) : usesAiGateway(input))),
+            )
           : Effect.succeed(true),
       ),
       Effect.flatMap((ownProcess) =>

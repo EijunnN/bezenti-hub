@@ -75,6 +75,7 @@ import {
 import { captureRecoveredChanges } from "../environment/MovedWorkspace.ts";
 import { makePreviewProxyTarget } from "../preview/PreviewProxy.ts";
 import { terminalOutputStream } from "../terminal/OutputProtocol.ts";
+import * as AiGatewayRelay from "./AiGatewayRelay.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as JoinedWorkspaceRoots from "../workspace/JoinedWorkspaceRoots.ts";
 import { makeWorkspaceRpcCalls } from "../workspace/WorkspaceRpcCalls.ts";
@@ -167,6 +168,8 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
   const roots = yield* JoinedWorkspaceRoots.JoinedWorkspaceRoots;
   const workspaceRoot = NodePath.resolve(config.baseDir, "projects");
   const mcpEndpoint = new URL("/mcp", input.hubUrl).toString();
+  // Spec 4 ticket 06: this machine's agents reach the Hub's AI gateway at a loopback address.
+  const aiGatewayRelay = yield* AiGatewayRelay.make(input.hubUrl);
 
   const sessions = new Map<string, LocalSession>();
   const answered = new Map<
@@ -498,6 +501,15 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
         capabilities: new Set(request.mcp.capabilities),
       });
     }
+    // Spec 4 ticket 06: the Thread's gateway key goes the same way as its secrets, with this
+    // machine's relay and the Thread's own provider home (no login of this machine is used).
+    const aiGateway = yield* AiGatewayRelay.prepareGatewaySession({
+      access: request.aiGateway,
+      threadId: request.threadId,
+      driver: adapter.driver,
+      stateDir: config.stateDir,
+      baseUrl: aiGatewayRelay.baseUrl,
+    }).pipe(Effect.provideService(FileSystem.FileSystem, fileSystem), Effect.mapError(openError));
     const scope = yield* Scope.fork(agentScope);
     // Spec 5: the Thread's secrets go into the provider process's environment and nowhere else:
     // never logged, written or kept here once the session opened (the adapter refuses them if it
@@ -517,6 +529,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
         ? {}
         : { initialProviderItemIdentityVersion: request.initialProviderItemIdentityVersion }),
       ...(request.secretEnv === undefined ? {} : { secretEnv: request.secretEnv }),
+      ...(aiGateway === undefined ? {} : { aiGateway }),
     }).pipe(
       Effect.provideService(Scope.Scope, scope),
       Effect.onError(() => Scope.close(scope, Exit.void)),

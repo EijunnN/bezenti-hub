@@ -5,6 +5,7 @@
  * own schemas, which live beside the adapters, so both halves of the server share them here.
  */
 import {
+  AiGatewayAccess,
   CheckpointId,
   CheckpointRef,
   EnvironmentExecutorUnavailableError,
@@ -156,6 +157,11 @@ const OpenSessionInput = Schema.Struct({
   checkout: Schema.optionalKey(WireCheckout),
   /** Contract 10: the Thread owner's secrets, for the provider process's environment alone. */
   secretEnv: Schema.optionalKey(SecretEnv),
+  /**
+   * Contract 11: the Thread's session on the Hub's AI gateway (key, account, model). The machine
+   * adds its own relay and provider home; never logged, kept or answered back.
+   */
+  aiGateway: Schema.optionalKey(AiGatewayAccess),
 });
 
 /** Which optional session methods the Environment's runtime has. */

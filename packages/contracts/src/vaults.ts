@@ -9,6 +9,7 @@ import {
   TrimmedNonEmptyString,
   UserId,
 } from "./baseSchemas.ts";
+import { AI_GATEWAY_ENV_NAMES } from "./aiGatewaySession.ts";
 import { AuthReauth } from "./userAccounts.ts";
 
 /** The master key that encrypts the Hub's secrets, as the Owner sees it in Settings. */
@@ -61,18 +62,8 @@ export const SECRET_VALUE_MAX_BYTES = 64 * 1024;
  */
 export const SECRET_MASK_MIN_LENGTH = 6;
 
-/**
- * What the AI gateway (spec 4) sets in the agent's environment: a Vault never overrides it, not
- * even the Owner's. The list both specs share (spec 4 exports it when its drivers set them).
- */
-const AI_GATEWAY_ENV_NAMES: ReadonlySet<string> = new Set([
-  "ANTHROPIC_BASE_URL",
-  "ANTHROPIC_AUTH_TOKEN",
-  "ANTHROPIC_MODEL",
-  "OPENAI_BASE_URL",
-  "CLAUDE_CONFIG_DIR",
-  "CODEX_HOME",
-]);
+// What the AI gateway (spec 4) sets in the agent's environment: a Vault never overrides it, not
+// even the Owner's (the list both specs share, `AI_GATEWAY_ENV_NAMES`).
 const GATEWAY_PREFIXES = ["T3_", "T3CODE_"] as const;
 
 /**

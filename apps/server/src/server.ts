@@ -207,6 +207,7 @@ import * as AiGatewayKeyRevocation from "./ai/AiGatewayKeyRevocation.ts";
 import * as AiGatewayKeys from "./ai/AiGatewayKeys.ts";
 import * as AiGatewayProxy from "./ai/AiGatewayProxy.ts";
 import * as AiGatewayRoute from "./ai/AiGatewayRoute.ts";
+import * as AiGatewaySessions from "./ai/AiGatewaySessions.ts";
 import * as CliproxyReleases from "./ai/CliproxyReleases.ts";
 import * as JoinedHub from "./environments/JoinedHub.ts";
 import type { JoinedHubState } from "./environments/joinedHubState.ts";
@@ -509,6 +510,20 @@ const layerAuth = Layer.mergeAll(
   SecretDelivery.layer.pipe(Layer.provideMerge(EffectiveVaults.layer)),
   // The Sandboxes' base image: built on this Hub, one build at a time.
   SandboxImage.layer,
+  // CLIProxyAPI, run by the Hub on loopback (`T3CODE_AI_GATEWAY`), and the AI accounts it gets
+  // at every start (spec 4 ticket 02); the gateway layer's keys and what it did (ticket 04); the
+  // gateway of each provider session (ticket 06), under the orchestration that opens them.
+  AiGatewaySessions.layer.pipe(
+    Layer.provideMerge(AiGatewayProxy.layer),
+    Layer.provideMerge(AiGatewayKeys.layer),
+    Layer.provideMerge(AiGatewayActivity.layer),
+    Layer.provideMerge(
+      AiAccounts.layer.pipe(
+        Layer.provideMerge(AiGateway.layerFromConfig.pipe(Layer.provide(CliproxyReleases.layer))),
+      ),
+    ),
+    Layer.provide(AuditLog.layer),
+  ),
   // Sandboxes only with a runtime that runs them (`T3CODE_SANDBOX_RUNTIME`, or rootless Podman);
   // the Owner's SSH installs register machines with it.
   SshInstall.layer.pipe(Layer.provideMerge(EnvironmentRegistry.layerFromConfig)),
@@ -626,20 +641,8 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
     }),
   ).pipe(Layer.provide(DelegatedTaskQuestionReactor.layer), Layer.provide(ProjectionStoreV2.layer)),
   ProviderUsageLimitsIngestion.layer,
-  // CLIProxyAPI, run by the Hub on loopback (`T3CODE_AI_GATEWAY`), and the AI accounts it gets
-  // at every start (spec 4 ticket 02).
-  // The gateway layer's keys and what it did (spec 4 ticket 04), over the same AI accounts.
-  AiGatewayKeyRevocation.layer.pipe(
-    Layer.provideMerge(AiGatewayProxy.layer),
-    Layer.provideMerge(AiGatewayKeys.layer),
-    Layer.provideMerge(AiGatewayActivity.layer),
-    Layer.provideMerge(
-      AiAccounts.layer.pipe(
-        Layer.provideMerge(AiGateway.layerFromConfig.pipe(Layer.provide(CliproxyReleases.layer))),
-      ),
-    ),
-    Layer.provide(AuditLog.layer),
-  ),
+  // Gateway keys revoked as their sessions and Threads end (spec 4 ticket 04).
+  AiGatewayKeyRevocation.layer,
   layerProviderInstallationRefresh,
   ReplayMarkers.layer,
   Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),

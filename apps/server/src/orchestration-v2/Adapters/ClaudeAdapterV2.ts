@@ -219,7 +219,12 @@ import {
 import { turnScopedSelectionTransition } from "@t3tools/provider-core/server/selectionTransition";
 import { providerMessageTextWithAttachmentPaths } from "@t3tools/provider-core/server/attachmentPrompt";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
-import { applySecretEnv } from "@t3tools/provider-core/server/instanceEnvironment";
+import {
+  aiGatewayProcessOf,
+  aiGatewayVariables,
+  applyAiGatewayEnv,
+  applySecretEnv,
+} from "@t3tools/provider-core/server/instanceEnvironment";
 import {
   ProviderAdapterDriverCreateError,
   type ProviderAdapterDriverCreateInput,
@@ -5026,6 +5031,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
     driver: CLAUDE_PROVIDER,
     // Spec 5: each Claude process the session starts gets the Thread's secrets in its environment.
     receivesSecretEnv: true,
+    // Spec 4 ticket 06: and the Hub's AI gateway, with a CLAUDE_CONFIG_DIR of the Thread's own.
+    usesAiGateway: true,
     getCapabilities: Effect.fn("ClaudeAdapterV2.getCapabilities")(function () {
       return Effect.succeed(ClaudeProviderCapabilitiesV2);
     }),
@@ -5036,6 +5043,12 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
       function* (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) {
         // Spec 5: only into the Claude process's environment (a changed set opens a new session).
         const sessionSecretEnv = input.secretEnv;
+        // Spec 4 ticket 06: on the gateway, no login nor setting of the machine's own ~/.claude.
+        const sessionGateway = yield* aiGatewayProcessOf(CLAUDE_PROVIDER, input);
+        const sessionGatewayVariables =
+          sessionGateway === undefined
+            ? undefined
+            : aiGatewayVariables("claudeAgent", sessionGateway);
         const sessionScope = yield* Effect.scope;
         const now = yield* DateTime.now;
         const session = providerSession({
@@ -10859,15 +10872,19 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ...(launchArgSettings === undefined
               ? {}
               : { sdkSettings: claudeSdkLaunchArgSettings(launchArgSettings) }),
-            environment: applySecretEnv(
-              claudeQueryEnvironment(
-                adapterOptions.environment,
-                turnInput.appThread,
-                turnInput.appThread.lineage.relationshipToParent === "subagent"
-                  ? yield* resolveSubagentPromptCacheTtl(turnInput.runtimePolicy.cwd)
-                  : undefined,
+            environment: applyAiGatewayEnv(
+              applySecretEnv(
+                claudeQueryEnvironment(
+                  adapterOptions.environment,
+                  turnInput.appThread,
+                  turnInput.appThread.lineage.relationshipToParent === "subagent"
+                    ? yield* resolveSubagentPromptCacheTtl(turnInput.runtimePolicy.cwd)
+                    : undefined,
+                ),
+                sessionSecretEnv,
+                hostPlatform,
               ),
-              sessionSecretEnv,
+              sessionGatewayVariables,
               hostPlatform,
             ),
             tools: queryPolicy.tools ?? CLAUDE_CODE_PRESET_TOOLS,

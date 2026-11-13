@@ -4,6 +4,9 @@
  * drops what it already has. See docs/internals/overview.md, «Environment executors».
  */
 import {
+  AI_GATEWAY_CONTRACT_VERSION,
+  AI_GATEWAY_FIELD,
+  AiGatewaySessionError,
   CheckpointRef,
   type ChatAttachment,
   ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
@@ -403,14 +406,16 @@ const make = Effect.gen(function* () {
     link: Link,
     operation: RemoteOperation,
     input: object,
+    what: "secrets" | "aiGateway" = "secrets",
   ) {
     const [row] = yield* sql<{ readonly name: string }>`
       SELECT name FROM environments WHERE environment_id = ${link.environmentId}
     `.pipe(Effect.orElseSucceed(() => []));
-    const refusal = new SecretDeliveryError({
-      reason: "outdated-machine",
-      ...(row === undefined ? {} : { environmentName: row.name }),
-    });
+    const named = row === undefined ? {} : { environmentName: row.name };
+    const refusal =
+      what === "aiGateway"
+        ? new AiGatewaySessionError({ reason: "outdated-machine", ...named })
+        : new SecretDeliveryError({ reason: "outdated-machine", ...named });
     if (operation.startsWith("provider.")) {
       return new ProviderAdapter.ProviderAdapterProtocolError({
         driver: ((input as { readonly instanceId?: string }).instanceId ??
@@ -455,6 +460,19 @@ const make = Effect.gen(function* () {
       SECRET_ENV_FIELD in input
     ) {
       return { _tag: "failed", error: yield* outdatedRefusal(link, operation, input) };
+    }
+    // Spec 4 ticket 06: a gateway key only to a machine of contract 11 (`AiGatewaySessions`
+    // decides first); this guard refuses the call, never sends the key to an older one.
+    if (
+      link.contractVersion < AI_GATEWAY_CONTRACT_VERSION &&
+      typeof input === "object" &&
+      input !== null &&
+      AI_GATEWAY_FIELD in input
+    ) {
+      return {
+        _tag: "failed",
+        error: yield* outdatedRefusal(link, operation, input, "aiGateway"),
+      };
     }
     const payload = yield* encodeJson(spec.input, input).pipe(Effect.orDie);
     const idempotencyKey = yield* EnvironmentExecutor.nextIdempotencyKey(operation);
@@ -831,6 +849,7 @@ const make = Effect.gen(function* () {
     planSelectionTransition: () => Effect.succeed({ type: "restart_session" }),
     // Carried to the machine, whose own adapter takes them or refuses the session.
     receivesSecretEnv: true,
+    usesAiGateway: true,
     openSession: Effect.fn("RemoteEnvironments.openSession")(function* (input) {
       yield* requireSandboxSpace(link, driver, input.threadId).pipe(
         Effect.mapError(

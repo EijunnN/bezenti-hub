@@ -122,7 +122,12 @@ import {
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "../../provider/codexLaunchArgs.ts";
 import {
+  type AiGatewayProcess,
+  aiGatewayProcessOf,
+  aiGatewayVariables,
+  applyAiGatewayEnv,
   applySecretEnv,
+  codexGatewayConfigArgs,
   mergeProviderInstanceEnvironment,
 } from "@t3tools/provider-core/server/instanceEnvironment";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
@@ -1357,6 +1362,8 @@ export interface CodexAppServerClientFactoryShape {
     readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
     readonly settings: CodexSettings;
     readonly environment: NodeJS.ProcessEnv;
+    /** Spec 4 ticket 06: the app-server's model provider is the Hub's AI gateway. */
+    readonly aiGateway?: AiGatewayProcess;
   }) => Effect.Effect<
     CodexClient.CodexAppServerClient["Service"],
     ProviderAdapter.ProviderAdapterOpenSessionError,
@@ -1573,15 +1580,23 @@ export const layerAppServerClientFactory: Layer.Layer<
     return CodexAppServerClientFactory.of({
       open: Effect.fn("CodexAdapterV2.open")(function* (input) {
         const scope = yield* Scope.Scope;
-        const environment = {
-          ...codexAppServerEnvironment(input.environment),
-          ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
-        };
+        // On the gateway: the Thread's own CODEX_HOME, no ambient AI variable, the key by name.
+        const environment = applyAiGatewayEnv(
+          {
+            ...codexAppServerEnvironment(input.environment),
+            ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
+          },
+          input.aiGateway === undefined ? undefined : aiGatewayVariables("codex", input.aiGateway),
+          yield* HostProcess.Platform,
+        );
         const command = yield* makeCodexAppServerSpawnCommand({
           command: input.settings.binaryPath || "codex",
-          args: codexAppServerArgs(
-            resolveCodexLaunchArgs(input.settings.launchArgs, input.environment),
-          ),
+          args: [
+            ...codexAppServerArgs(
+              resolveCodexLaunchArgs(input.settings.launchArgs, input.environment),
+            ),
+            ...(input.aiGateway === undefined ? [] : codexGatewayConfigArgs(input.aiGateway)),
+          ],
           env: environment,
           threadId: input.threadId,
         }).pipe(Effect.provideService(AgentScope, agentScope));
@@ -1714,6 +1729,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
     // Spec 5: a session's app-server gets the Thread's secrets in its environment; one with
     // secrets serves that Thread alone (ProviderSessionManager).
     receivesSecretEnv: true,
+    // Spec 4 ticket 06: and the Hub's AI gateway as its model provider, in a CODEX_HOME of its own.
+    usesAiGateway: true,
     getCapabilities: Effect.fn("CodexAdapterV2.getCapabilities")(function () {
       return Effect.succeed(CodexProviderCapabilitiesV2);
     }),
@@ -1736,6 +1753,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     }),
                 ),
               );
+        const aiGateway = yield* aiGatewayProcessOf(CODEX_PROVIDER, input);
         const client = yield* clientFactory.open({
           instanceId: adapterOptions.instanceId,
           threadId: input.threadId,
@@ -1747,6 +1765,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             input.secretEnv,
             yield* HostProcess.Platform,
           ),
+          ...(aiGateway === undefined ? {} : { aiGateway }),
         });
         const additionalContextByThread = yield* Ref.make(
           new Map<

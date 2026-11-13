@@ -1,4 +1,8 @@
-import type { OrchestrationV2HistoricalMessage, SecretEnv } from "@t3tools/contracts";
+import type {
+  AiGatewayAccess,
+  OrchestrationV2HistoricalMessage,
+  SecretEnv,
+} from "@t3tools/contracts";
 import {
   ChatAttachment,
   CheckpointId,
@@ -469,6 +473,21 @@ export interface ProviderAdapterV2OpenSessionInput {
    * get a non-empty one.
    */
   readonly secretEnv?: SecretEnv;
+  /**
+   * The Thread's session on the Hub's AI gateway (spec 4 ticket 06). The Hub sends the key, the
+   * AI account and the model; the machine that runs the process adds its relay's address and the
+   * Thread's provider home (`baseUrl`, `home`). Only adapters with `usesAiGateway` take one, and
+   * they never start without it: no fallback to a login of the machine.
+   */
+  readonly aiGateway?: AiGatewaySessionInput;
+}
+
+/** `aiGateway` of a session: what the Hub sent, and what the machine adds before the driver runs. */
+export interface AiGatewaySessionInput extends AiGatewayAccess {
+  /** The machine's local relay to the Hub's gateway, `http://127.0.0.1:<port>` (no path). */
+  readonly baseUrl?: string;
+  /** The Thread's own provider home on the machine: no login nor config of the machine's user. */
+  readonly home?: string;
 }
 
 export interface ProviderAdapterV2EnsureThreadInput {
@@ -717,5 +736,7 @@ export class ProviderAdapterV2 extends Context.Service<
     ) => Effect.Effect<ProviderAdapterV2SessionRuntime, ProviderAdapterV2Error, Scope.Scope>;
     /** Puts `secretEnv` into the environment of each process its sessions start. */
     readonly receivesSecretEnv?: true;
+    /** Points each process its sessions start at the Hub's AI gateway (`aiGateway`). */
+    readonly usesAiGateway?: true;
   }
 >()("@t3tools/provider-core/server/ProviderAdapter/ProviderAdapterV2") {}

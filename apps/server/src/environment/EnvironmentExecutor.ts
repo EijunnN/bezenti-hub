@@ -4,6 +4,7 @@
  * Thread's Environment on each call (`docs/internals/overview.md`, «Environment executors»).
  */
 import {
+  AiGatewaySessionError,
   ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
   EnvironmentExecutorUnavailableError,
   VcsUnsupportedOperationError,
@@ -58,6 +59,9 @@ import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { prepareGatewaySession } from "../environments/AiGatewayRelay.ts";
+import { sandboxHubLoopbackUrl } from "../sandboxes/ProcessSandboxRuntime.ts";
+import { SandboxHubAddress } from "../sandboxes/SandboxRuntime.ts";
 import * as MovedWorkspace from "./MovedWorkspace.ts";
 import * as ProjectCheckouts from "./ProjectCheckouts.ts";
 import type * as RemoteExecutorWire from "./RemoteExecutorWire.ts";
@@ -926,16 +930,61 @@ export const layerProviderAdapterRegistry: Layer.Layer<
     const registry = yield* EnvironmentExecutorRegistry;
     const hubMachine = yield* registry.get(registry.hubMachineEnvironmentId).pipe(Effect.orDie);
     const local = hubMachine.provider.adapters;
+    // Spec 4 ticket 06: on the Hub machine the gateway is the Hub's own loopback route.
+    const config = yield* Effect.serviceOption(ServerConfig.ServerConfig);
+    const hubAddress = yield* Effect.serviceOption(SandboxHubAddress);
+    const fileSystem = yield* Effect.serviceOption(FileSystem.FileSystem);
+    const hubLoopbackUrl = Option.isSome(hubAddress)
+      ? hubAddress.value.loopbackUrl
+      : Effect.succeed(Option.isSome(config) ? sandboxHubLoopbackUrl(config.value) : undefined);
+    /** The session's gateway completed here, for a process on the Hub machine. */
+    const onHubMachine = (
+      adapter: ProviderAdapter.ProviderAdapterV2["Service"],
+      input: ProviderAdapter.ProviderAdapterV2OpenSessionInput,
+    ) =>
+      input.aiGateway === undefined || Option.isNone(config) || Option.isNone(fileSystem)
+        ? Effect.succeed(input)
+        : prepareGatewaySession({
+            access: input.aiGateway,
+            threadId: input.threadId,
+            driver: adapter.driver,
+            stateDir: config.value.stateDir,
+            baseUrl: hubLoopbackUrl.pipe(
+              Effect.filterOrFail(
+                (url): url is string => url !== undefined,
+                () => new AiGatewaySessionError({ reason: "unreachable" }),
+              ),
+            ),
+          }).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem.value),
+            Effect.map((aiGateway) => ({
+              ...input,
+              ...(aiGateway === undefined ? {} : { aiGateway }),
+            })),
+          );
     const routed = (
       adapter: ProviderAdapter.ProviderAdapterV2["Service"],
     ): ProviderAdapter.ProviderAdapterV2["Service"] => ({
       ...adapter,
       openSession: (input) =>
         registry.forThread(input.threadId).pipe(
-          Effect.flatMap((executor) =>
-            executor.environmentId === hubMachine.environmentId
-              ? Effect.succeed(adapter)
-              : executor.provider.adapters.get(adapter.instanceId),
+          Effect.flatMap(
+            (
+              executor,
+            ): Effect.Effect<
+              {
+                readonly target: ProviderAdapter.ProviderAdapterV2["Service"];
+                readonly input: ProviderAdapter.ProviderAdapterV2OpenSessionInput;
+              },
+              unknown
+            > =>
+              executor.environmentId === hubMachine.environmentId
+                ? onHubMachine(adapter, input).pipe(
+                    Effect.map((completed) => ({ target: adapter, input: completed })),
+                  )
+                : executor.provider.adapters
+                    .get(adapter.instanceId)
+                    .pipe(Effect.map((target) => ({ target, input }))),
           ),
           Effect.mapError(
             (cause) =>
@@ -945,7 +994,9 @@ export const layerProviderAdapterRegistry: Layer.Layer<
                 cause,
               }),
           ),
-          Effect.flatMap((target) => openSessionWithSecrets(target, input)),
+          Effect.flatMap(({ target, input: completed }) =>
+            openSessionWithSecrets(target, completed),
+          ),
         ),
     });
     // An instance the Hub machine lacks is still reachable on an Environment that has it.
