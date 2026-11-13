@@ -49,6 +49,17 @@ export class AllowedAiAccounts extends Context.Service<
       userId: UserId,
       spaceIds: ReadonlyArray<SpaceId>,
     ) => Effect.Effect<ReadonlyMap<SpaceId, { readonly name: string }>, AllowedAiAccountsError>;
+    /**
+     * `for`, saying also whether the User works in the Space at all (the gateway's one check of
+     * a request: no access and no allowance are different refusals).
+     */
+    readonly accessIn: (
+      userId: UserId,
+      spaceId: SpaceId,
+    ) => Effect.Effect<
+      { readonly works: boolean; readonly accounts: ReadonlyArray<AllowedAiAccount> },
+      AllowedAiAccountsError
+    >;
     /** The same rule for several Spaces at once, one answer per Space asked about. */
     readonly forSpaces: (
       userId: UserId,
@@ -111,6 +122,18 @@ const make = Effect.gen(function* () {
     for (const spaceId of asked) answer.set(spaceId, []);
     // Only the Spaces the User works in: elsewhere nothing, not even what is allowed to them.
     const working = [...(yield* workingSpaces(userId, asked)).keys()];
+    for (const [spaceId, accounts] of yield* accountsIn(userId, working)) {
+      answer.set(spaceId, accounts);
+    }
+    return answer;
+  });
+
+  /** The enabled accounts allowed to each of these Spaces (all worked in) or to the User. */
+  const accountsIn = Effect.fn("AllowedAiAccounts.accountsIn")(function* (
+    userId: UserId,
+    working: ReadonlyArray<SpaceId>,
+  ) {
+    const answer = new Map<SpaceId, ReadonlyArray<AllowedAiAccount>>();
     if (working.length === 0) return answer;
     const rows = yield* sql<AllowedRow>`
       SELECT a.account_id AS "accountId", a.name AS "name", a.type AS "type",
@@ -145,12 +168,23 @@ const make = Effect.gen(function* () {
     return answer;
   });
 
+  const accessIn = Effect.fn("AllowedAiAccounts.accessIn")(function* (
+    userId: UserId,
+    spaceId: SpaceId,
+  ) {
+    const works = (yield* workingSpaces(userId, [spaceId])).has(spaceId);
+    if (!works) return { works, accounts: [] as ReadonlyArray<AllowedAiAccount> };
+    const accounts = (yield* accountsIn(userId, [spaceId])).get(spaceId) ?? [];
+    return { works, accounts };
+  });
+
   return AllowedAiAccounts.of({
     for: Effect.fn("AllowedAiAccounts.for")(function* (userId: UserId, spaceId: SpaceId) {
       const answer = yield* forSpaces(userId, [spaceId]);
       return answer.get(spaceId) ?? [];
     }),
     forSpaces,
+    accessIn,
     workingSpaces,
   });
 });

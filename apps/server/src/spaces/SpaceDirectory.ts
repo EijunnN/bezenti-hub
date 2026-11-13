@@ -288,7 +288,8 @@ export interface CreationClaim {
 }
 
 // Created with the User by a trigger (migration 085).
-const personalSpaceIdOf = (userId: UserId) => SpaceId.make(`personal:${userId}`);
+/** A User's Personal space id: the one rule, also for whoever must name it in a transaction. */
+export const personalSpaceIdOf = (userId: UserId) => SpaceId.make(`personal:${userId}`);
 
 const SpaceRow = Schema.Struct({
   spaceId: SpaceId,

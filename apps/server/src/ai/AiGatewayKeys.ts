@@ -178,10 +178,8 @@ const KEY_COLUMNS = `key_id AS "keyId", kind, user_id AS "userId", space_id AS "
 
 const UNKNOWN_KEY = "This AI gateway key is not valid. It may have been revoked or expired.";
 const SPACE_LOST = "You no longer work in this key's Space: it was revoked. Make a new key.";
-const THREAD_SPACE_LOST = "You no longer work in this Thread's Space; its key no longer works.";
-/** What a key revoked for a lost Space answers: a local CLI's User makes a new one. */
-const spaceLostMessage = (kind: AiGatewayKeyKind) =>
-  kind === "user" ? SPACE_LOST : THREAD_SPACE_LOST;
+/** A Thread key is refused, never revoked, here: archive and restore, the key works again. */
+const THREAD_SPACE_LOST = "You cannot work in this Thread's Space now, so its key is refused.";
 /** SQLite takes at most 32766 parameters per statement: revocations go in batches. */
 const REVOKE_BATCH = 500;
 /** Why a key was revoked when its User stopped working in its Space. */
@@ -212,8 +210,6 @@ const make = Effect.gen(function* () {
   /** The Spaces among these the User may work in, with names: AllowedAiAccounts' own rule. */
   const worksInSpaces = (userId: UserId, spaceIds: ReadonlyArray<SpaceId>) =>
     allowedAccounts.workingSpaces(userId, spaceIds);
-  const worksIn = (userId: UserId, spaceId: SpaceId) =>
-    worksInSpaces(userId, [spaceId]).pipe(Effect.map((working) => working.has(spaceId)));
 
   const checkedName = (raw: string) => {
     const name = raw.trim();
@@ -314,7 +310,27 @@ const make = Effect.gen(function* () {
     userId: UserId,
     reason: string,
   ) {
-    yield* revokeRows(yield* liveKeysOf(userId), reason);
+    const at = yield* nowIso;
+    yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const revoked = yield* sql<KeyRow>`
+            UPDATE ai_gateway_keys SET revoked_at = ${at}, revoked_reason = ${reason}
+            WHERE user_id = ${userId} AND revoked_at IS NULL
+            RETURNING ${sql.literal(KEY_COLUMNS)}
+          `;
+          for (const row of revoked) {
+            if (row.kind !== "user") continue;
+            yield* audit.record({
+              actor: { source: "system" },
+              action: "ai_gateway_key.revoke",
+              target: { kind: "ai_gateway_key", id: row.keyId, name: row.name },
+              detail: { kind: row.kind, space: row.spaceId, reason },
+            });
+          }
+        }),
+      )
+      .pipe(Effect.catch(storage("revoke the User's AI gateway keys")));
   });
 
   /** Whether the User exists and is neither disabled nor removed. */
@@ -330,9 +346,9 @@ const make = Effect.gen(function* () {
   const revokeLostSpaces = Effect.fn("AiGatewayKeys.revokeLostSpaces")(function* (userId: UserId) {
     // A disabled, removed or missing User's keys go for that reason, whichever watch runs first.
     if (!(yield* isActiveUser(userId))) return yield* revokeUser(userId, "user-inactive");
-    // Every live key for a Space they no longer work in: User keys (audited) and Thread keys,
-    // which a rejoin must not bring back (the next provider session gets a new one).
-    const live = yield* liveKeysOf(userId);
+    // Only User keys: a Thread key is refused while its owner cannot work in the Thread's Space
+    // and works again once they can (an Organization archived, then restored).
+    const live = (yield* liveKeysOf(userId)).filter((row) => row.kind === "user");
     if (live.length === 0) return;
     const working = yield* worksInSpaces(userId, [
       ...new Set(live.map((row) => SpaceId.make(row.spaceId))),
@@ -382,8 +398,8 @@ const make = Effect.gen(function* () {
   });
 
   /**
-   * Makes a User key. The Space check and the insert are one write transaction (`BEGIN
-   * IMMEDIATE`): a Membership that ends commits either before it (refused here) or after it (the
+   * Makes a User key. The Space check and the insert are one write transaction (the Hub's SQLite
+   * client begins every writing transaction `IMMEDIATE`, nodeSqliteClient.ts): a Membership that ends commits either before it (refused here) or after it (the
    * Membership watch then sees the key). Without a Space, the User's Personal space. The answer is
    * built from what this call read and stored, so no read after the commit can lose the key.
    */
@@ -399,7 +415,7 @@ const make = Effect.gen(function* () {
     const outcome = yield* sql
       .withTransaction(
         Effect.gen(function* () {
-          const spaceId = input.spaceId ?? (yield* spaces.view(input.actorUserId)).personalSpaceId;
+          const spaceId = input.spaceId ?? SpaceDirectory.personalSpaceIdOf(input.actorUserId);
           const working = yield* worksInSpaces(input.actorUserId, [spaceId]);
           const space = working.get(spaceId);
           if (space === undefined) {
@@ -438,10 +454,7 @@ const make = Effect.gen(function* () {
           return { _tag: "made", shown } as const;
         }),
       )
-      .pipe(
-        Effect.provideService(SqlClient.BeginTransaction, "BEGIN IMMEDIATE"),
-        Effect.catch(storage("make the AI gateway key")),
-      );
+      .pipe(Effect.catch(storage("make the AI gateway key")));
     switch (outcome._tag) {
       case "no-personal":
         return yield* new AiGatewayKeyError({
@@ -638,20 +651,14 @@ const make = Effect.gen(function* () {
       return yield* refused(401, UNKNOWN_KEY);
     }
     if (row.revokedAt !== null) {
-      // A key whose User left its Space says so (its holder has it already).
+      // A User key whose User left its Space says so (its holder has it already).
       return yield* row.revokedReason === SPACE_LOST_REASON
-        ? refused(403, spaceLostMessage(row.kind))
+        ? refused(403, SPACE_LOST)
         : refused(401, UNKNOWN_KEY);
     }
     const now = yield* DateTime.now;
     if (row.expiresAt !== null && Date.parse(row.expiresAt) <= DateTime.toEpochMillis(now)) {
       return yield* refused(401, UNKNOWN_KEY);
-    }
-    // A key whose User no longer works in its Space is over for good, recorded here.
-    const works = yield* worksIn(userId, spaceId).pipe(Effect.catch(unavailable));
-    if (!works) {
-      yield* revokeRows([row], SPACE_LOST_REASON).pipe(Effect.ignore);
-      return yield* refused(403, spaceLostMessage(row.kind));
     }
     let threadId: ThreadId | null = null;
     let chosenAccountId: AiAccountId | null = null;
@@ -687,10 +694,18 @@ const make = Effect.gen(function* () {
       }
       chosenAccountId = (row.chosen ?? null) as AiAccountId | null;
     }
-    // Evaluated now, never cached: an allowance removed a moment ago is gone here.
-    const allowed = (yield* allowedAccounts
-      .for(userId, spaceId)
-      .pipe(Effect.catch(unavailable))).filter((account) => account.type !== "direct");
+    // Evaluated now, never cached, in one call: access to the Space (for a Thread key, the one
+    // its Thread is in now, checked above to be the key's) and the accounts allowed there.
+    const access = yield* allowedAccounts.accessIn(userId, spaceId).pipe(Effect.catch(unavailable));
+    if (!access.works) {
+      // A User key is over for good, recorded here; a Thread key is only refused.
+      if (row.kind === "user") {
+        yield* revokeRows([row], SPACE_LOST_REASON).pipe(Effect.ignore);
+        return yield* refused(403, SPACE_LOST);
+      }
+      return yield* refused(403, THREAD_SPACE_LOST);
+    }
+    const allowed = access.accounts.filter((account) => account.type !== "direct");
     if (allowed.length === 0) {
       return yield* refused(403, "No AI account is allowed to you in this Space.");
     }

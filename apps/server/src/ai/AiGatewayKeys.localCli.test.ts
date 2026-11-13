@@ -9,7 +9,9 @@ import * as NodeCrypto from "node:crypto";
 import { assert, it } from "@effect/vitest";
 import { SpaceId, UserId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
@@ -335,50 +337,137 @@ it.live.skipIf(!posix || platform === undefined)(
 );
 
 it.live.skipIf(!posix || platform === undefined)(
-  "a lost Space revokes the User's Thread keys too, with the Thread's words, and they stay revoked",
+  "a Thread key is refused, never revoked, while its owner cannot work in the Thread's Space: archive, then restore",
   () =>
     Effect.gen(function* () {
       const setup = yield* hub;
       yield* acmeSetup(setup);
       const thread = yield* setup.thread(setup.people.member, setup.acmeId);
+      const ask = () => call(setup, MESSAGES, { key: thread.key, body: messages() });
       const reasonOf = () =>
         setup.server.sql<{ readonly reason: string | null }>`
           SELECT revoked_reason AS reason FROM ai_gateway_keys WHERE thread_id = ${thread.threadId}
         `.pipe(Effect.map((rows) => rows[0]?.reason ?? null));
-      yield* setup.server.sql`
-        DELETE FROM space_memberships WHERE space_id = ${setup.acmeId} AND user_id = ${setup.people.member}
-      `;
+      assert.equal((yield* ask()).status, 200);
+      // The Owner archives Acme: the running agent's key is refused, in the Thread's words.
+      const archived = yield* setup.server.request(`/api/spaces/${setup.acmeId}/archive`, {
+        body: {},
+        cookie: setup.ownerCookie,
+      });
+      assert.equal(archived.status, 200, JSON.stringify(archived.body));
+      // The Membership watch runs (here, its call), then a request.
       yield* setup.keys.revokeLostSpaces(setup.people.member);
-      assert.equal(yield* reasonOf(), "space-lost");
-      const answer = yield* call(setup, MESSAGES, { key: thread.key, body: messages() });
-      assert.equal(answer.status, 403);
-      assert.notInclude(answer.text, "Make a new key");
-      assert.include(answer.text, "Thread's Space");
+      const refused = yield* ask();
+      assert.equal(refused.status, 403);
+      assert.include(refused.text, "Thread's Space");
+      assert.notInclude(refused.text, "Make a new key");
+      assert.isNull(yield* reasonOf());
+      // Restored: the same key works again, with no new session.
+      const restored = yield* setup.server.request(`/api/spaces/${setup.acmeId}/restore`, {
+        body: {},
+        cookie: setup.ownerCookie,
+      });
+      assert.equal(restored.status, 200, JSON.stringify(restored.body));
+      yield* setup.keys.revokeLostSpaces(setup.people.member);
+      assert.equal((yield* ask()).status, 200);
+      assert.isNull(yield* reasonOf());
       // Not a local CLI key: no ai_gateway_key audit for it.
       const audits = yield* setup.server.sql<{ readonly n: number }>`
         SELECT COUNT(*) AS n FROM audit_log WHERE action LIKE 'ai_gateway_key.%'
       `;
       assert.equal(audits[0]!.n, 0);
-      // Back in Acme: still refused (the next provider session gets a new key).
+    }).pipe(Effect.scoped),
+);
+
+it.live.skipIf(!posix || platform === undefined)(
+  "a Thread key keeps the Thread's own reasons first: moved (403 thread-moved), deleted (401)",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub;
+      yield* acmeSetup(setup);
+      // Grace's Thread moved to Globex, where she does not work.
+      const moved = yield* setup.thread(setup.people.member, setup.acmeId);
       yield* setup.server.sql`
-        INSERT INTO space_memberships (space_id, user_id, role, created_at)
-        VALUES (${setup.acmeId}, ${setup.people.member}, 'member', '2026-11-02T00:00:00.000Z')
+        UPDATE projection_projects SET space_id = ${setup.globexId} WHERE project_id = ${moved.projectId}
       `;
-      yield* setup.directory.membershipsChanged([setup.people.member]);
-      const again = yield* call(setup, MESSAGES, { key: thread.key, body: messages() });
-      assert.equal(again.status, 403);
-      // Unused by any request, a Thread key the watch did not see is refused and revoked the same.
-      const other = yield* setup.thread(setup.people.guest, setup.acmeId);
+      const movedAnswer = yield* call(setup, MESSAGES, { key: moved.key, body: messages() });
+      assert.equal(movedAnswer.status, 403);
+      assert.include(movedAnswer.text, "another Space");
+      const movedRow = yield* setup.server.sql<{ readonly reason: string | null }>`
+        SELECT revoked_reason AS reason FROM ai_gateway_keys WHERE thread_id = ${moved.threadId}
+      `;
+      assert.equal(movedRow[0]?.reason, "thread-moved");
+      // Grace left Acme and her Thread was deleted: the deletion speaks (401).
+      const deleted = yield* setup.thread(setup.people.member, setup.acmeId);
       yield* setup.server.sql`
-        DELETE FROM space_memberships WHERE space_id = ${setup.acmeId} AND user_id = ${setup.people.guest}
+        DELETE FROM space_memberships WHERE space_id = ${setup.acmeId} AND user_id = ${setup.people.member}
       `;
-      const unseen = yield* call(setup, MESSAGES, { key: other.key, body: messages() });
-      assert.equal(unseen.status, 403);
-      assert.include(unseen.text, "Thread's Space");
-      const otherReason = yield* setup.server.sql<{ readonly reason: string | null }>`
-        SELECT revoked_reason AS reason FROM ai_gateway_keys WHERE thread_id = ${other.threadId}
+      yield* setup.server.sql`
+        UPDATE orchestration_v2_projection_threads SET deleted_at = '2026-11-02T00:00:00.000Z'
+        WHERE thread_id = ${deleted.threadId}
       `;
-      assert.equal(otherReason[0]?.reason, "space-lost");
+      const deletedAnswer = yield* call(setup, MESSAGES, { key: deleted.key, body: messages() });
+      assert.equal(deletedAnswer.status, 401);
+    }).pipe(Effect.scoped),
+);
+
+it.live.skipIf(!posix || platform === undefined)(
+  "a Membership that ends while a key is being made never leaves a live key",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub;
+      yield* acmeSetup(setup);
+      // At the create's Space check, a concurrent removal of Grace from Acme starts: it removes
+      // the Membership, then runs what the Membership watch runs.
+      const real = Context.get(setup.server.services, SpaceDirectory.SpaceDirectory);
+      const removal = yield* Deferred.make<Fiber.Fiber<void>>();
+      const watched = SpaceDirectory.SpaceDirectory.of({
+        ...real,
+        spacesById: (spaceIds) =>
+          Effect.gen(function* () {
+            if (!(yield* Deferred.isDone(removal))) {
+              const fiber = yield* Effect.gen(function* () {
+                yield* setup.server.sql`
+                  DELETE FROM space_memberships
+                  WHERE space_id = ${setup.acmeId} AND user_id = ${setup.people.member}
+                `;
+                yield* setup.keys.revokeLostSpaces(setup.people.member);
+              }).pipe(Effect.orDie, Effect.forkDetach);
+              yield* Deferred.succeed(removal, fiber);
+            }
+            return yield* real.spacesById(spaceIds);
+          }),
+      });
+      const keys = yield* Layer.build(
+        AiGatewayKeys.layer.pipe(
+          Layer.provide(AllowedAiAccounts.layer),
+          Layer.provide(
+            Layer.succeedContext(
+              Context.add(
+                Context.merge(setup.server.services, setup.context),
+                SpaceDirectory.SpaceDirectory,
+                watched,
+              ),
+            ),
+          ),
+        ),
+      ).pipe(Effect.map((context) => Context.get(context, AiGatewayKeys.AiGatewayKeys)));
+      const made = yield* keys
+        .createForSession({ name: "Racing", spaceId: setup.acmeId })
+        .pipe(CommandActor.actAs(setup.people.member), Effect.exit);
+      yield* Fiber.join(yield* Deferred.await(removal));
+      const live = yield* setup.server.sql<{ readonly n: number }>`
+        SELECT COUNT(*) AS n FROM ai_gateway_keys WHERE user_id = ${setup.people.member}
+          AND kind = 'user' AND revoked_at IS NULL
+      `;
+      assert.equal(live[0]!.n, 0, `create ended ${made._tag}`);
+      if (made._tag === "Success") {
+        const answer = yield* call(setup, MESSAGES, {
+          key: Redacted.value(made.value.key),
+          body: messages(),
+        });
+        assert.equal(answer.status, 403);
+      }
     }).pipe(Effect.scoped),
 );
 
