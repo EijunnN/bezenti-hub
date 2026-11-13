@@ -337,22 +337,106 @@ const make = Effect.fn("AiGatewayProxy.make")(function* (limits: AiGatewayProxyL
         } satisfies ProxyAnswer;
       }
 
+      let recorded = false;
+      // Only a model the plan accepted is kept: a refused name is the client's, never stored.
+      let model: string | null = null;
+      let failovers = 0;
+      let lastAccount: RoutableAccount | null = null;
+      const record = Effect.fn("AiGatewayProxy.record")(
+        function* (input: {
+          readonly account: RoutableAccount | null;
+          readonly status: number;
+          readonly failovers: number;
+          readonly usage: AiGatewayActivity.GatewayRequestRecord["usage"];
+        }) {
+          if (recorded) return;
+          recorded = true;
+          const endedAt = yield* DateTime.now;
+          const entry: AiGatewayActivity.GatewayRequestRecord = {
+            at: DateTime.formatIso(startedAt),
+            keyId: caller.keyId,
+            keyKind: caller.kind,
+            userId: caller.userId,
+            spaceId: caller.spaceId,
+            threadId: caller.threadId,
+            shape,
+            route: route.route,
+            accountId: input.account?.id ?? null,
+            provider: input.account?.provider ?? null,
+            model: model,
+            status: input.status,
+            durationMs: DateTime.toEpochMillis(endedAt) - DateTime.toEpochMillis(startedAt),
+            failovers: input.failovers,
+            usage: input.usage,
+          };
+          // Method, route, account, model, status and tokens: never a key, a header or a body.
+          yield* Effect.logInfo("AI gateway request").pipe(
+            Effect.annotateLogs({
+              method: request.method,
+              route: route.route,
+              account: entry.accountId ?? "none",
+              model: model,
+              status: input.status,
+              failovers: input.failovers,
+              inputTokens: input.usage?.inputTokens ?? null,
+              outputTokens: input.usage?.outputTokens ?? null,
+            }),
+          );
+          yield* activity.record(entry);
+        },
+        (effect, input) =>
+          effect.pipe(
+            Effect.withSpan("AiGateway.request", {
+              attributes: {
+                "http.request.method": request.method,
+                "t3.ai.route": route.route,
+                "t3.ai.account": input.account?.id ?? "none",
+                "t3.ai.model": model,
+                "http.response.status_code": input.status,
+                "t3.ai.failovers": input.failovers,
+                "t3.ai.input_tokens": input.usage?.inputTokens ?? -1,
+                "t3.ai.output_tokens": input.usage?.outputTokens ?? -1,
+              },
+            }),
+          ),
+      );
+
+      /** A refusal after authentication is still a request: counted as failed, no tokens. */
+      const refuseRecorded = (status: number, message: string) =>
+        record({ account: lastAccount, status, failovers, usage: null }).pipe(
+          Effect.as(refuse(shape, status, message)),
+        );
+      // A request cut off before it was answered (the client left, the hold timed out) is counted
+      // too, as 499, unless an answer already recorded it.
+      yield* Effect.addFinalizer(() =>
+        record({ account: lastAccount, status: 499, failovers, usage: null }),
+      );
+
       const endpoint = yield* gateway.endpoint;
-      if (Option.isNone(endpoint)) return refuse(shape, 503, "The AI gateway is not running.");
+      if (Option.isNone(endpoint)) {
+        return yield* refuseRecorded(503, "The AI gateway is not running.");
+      }
       if (request.headers["content-encoding"] !== undefined) {
-        return refuse(shape, 415, "Send the request body uncompressed.");
+        return yield* refuseRecorded(415, "Send the request body uncompressed.");
       }
       // The body first, in a small pool of its own: a slow sender holds no request slot.
       if (!readers.take(caller.keyId, caller.userId)) {
-        return refuse(shape, 429, "Too many requests to the AI gateway at once. Try again.");
+        return yield* refuseRecorded(
+          429,
+          "Too many requests to the AI gateway at once. Try again.",
+        );
       }
       const body = yield* readBody(request).pipe(
         Effect.ensuring(Effect.sync(() => readers.give(caller.keyId, caller.userId))),
         Effect.result,
       );
-      if (body._tag === "Failure") return refuse(shape, body.failure.status, body.failure.message);
+      if (body._tag === "Failure") {
+        return yield* refuseRecorded(body.failure.status, body.failure.message);
+      }
       const json = parseJsonObject(body.success);
-      if (json === undefined) return refuse(shape, 400, "The request body must be a JSON object.");
+      if (json === undefined) {
+        return yield* refuseRecorded(400, "The request body must be a JSON object.");
+      }
       const requested = parseRequestedModel(route.pathModel ?? json.model);
       const served = new Map(
         yield* Effect.forEach(
@@ -369,9 +453,13 @@ const make = Effect.fn("AiGatewayProxy.make")(function* (limits: AiGatewayProxyL
         requested,
         serves: (accountId, model) => served.get(accountId)?.has(model) === true,
       });
-      if (plan._tag === "refused") return refuse(shape, plan.status, plan.message);
+      if (plan._tag === "refused") return yield* refuseRecorded(plan.status, plan.message);
+      model = plan.model;
       if (!(yield* hold(slots, caller))) {
-        return refuse(shape, 429, "Too many requests to the AI gateway at once. Try again.");
+        return yield* refuseRecorded(
+          429,
+          "Too many requests to the AI gateway at once. Try again.",
+        );
       }
 
       // OpenAI streams carry their tokens only when asked: the Hub asks, and hides that chunk
@@ -417,68 +505,8 @@ const make = Effect.fn("AiGatewayProxy.make")(function* (limits: AiGatewayProxyL
           );
       };
 
-      let recorded = false;
-      const record = Effect.fn("AiGatewayProxy.record")(
-        function* (input: {
-          readonly account: RoutableAccount | null;
-          readonly status: number;
-          readonly failovers: number;
-          readonly usage: AiGatewayActivity.GatewayRequestRecord["usage"];
-        }) {
-          if (recorded) return;
-          recorded = true;
-          const endedAt = yield* DateTime.now;
-          const entry: AiGatewayActivity.GatewayRequestRecord = {
-            at: DateTime.formatIso(startedAt),
-            keyId: caller.keyId,
-            keyKind: caller.kind,
-            userId: caller.userId,
-            spaceId: caller.spaceId,
-            threadId: caller.threadId,
-            shape,
-            route: route.route,
-            accountId: input.account?.id ?? null,
-            provider: input.account?.provider ?? null,
-            model: plan.model,
-            status: input.status,
-            durationMs: DateTime.toEpochMillis(endedAt) - DateTime.toEpochMillis(startedAt),
-            failovers: input.failovers,
-            usage: input.usage,
-          };
-          // Method, route, account, model, status and tokens: never a key, a header or a body.
-          yield* Effect.logInfo("AI gateway request").pipe(
-            Effect.annotateLogs({
-              method: request.method,
-              route: route.route,
-              account: entry.accountId ?? "none",
-              model: plan.model,
-              status: input.status,
-              failovers: input.failovers,
-              inputTokens: input.usage?.inputTokens ?? null,
-              outputTokens: input.usage?.outputTokens ?? null,
-            }),
-          );
-          yield* activity.record(entry);
-        },
-        (effect, input) =>
-          effect.pipe(
-            Effect.withSpan("AiGateway.request", {
-              attributes: {
-                "http.request.method": request.method,
-                "t3.ai.route": route.route,
-                "t3.ai.account": input.account?.id ?? "none",
-                "t3.ai.model": plan.model,
-                "http.response.status_code": input.status,
-                "t3.ai.failovers": input.failovers,
-                "t3.ai.input_tokens": input.usage?.inputTokens ?? -1,
-                "t3.ai.output_tokens": input.usage?.outputTokens ?? -1,
-              },
-            }),
-          ),
-      );
-
-      let failovers = 0;
       for (const [index, account] of plan.candidates.entries()) {
+        lastAccount = account;
         const sent = yield* send(account);
         if (sent._tag === "Failure") {
           yield* Effect.logWarning("AI gateway: CLIProxyAPI did not answer").pipe(
@@ -556,7 +584,7 @@ const make = Effect.fn("AiGatewayProxy.make")(function* (limits: AiGatewayProxyL
           body: answer,
         } satisfies ProxyAnswer;
       }
-      return refuse(shape, 503, "No AI account could serve this request.");
+      return yield* refuseRecorded(503, "No AI account could serve this request.");
     });
 
     return AiGatewayProxy.of({ forward });

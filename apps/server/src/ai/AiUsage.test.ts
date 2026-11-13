@@ -3,7 +3,7 @@
  * counted once (failover, cut-off streams), tokens read in every shape, nothing stored but counts,
  * and who may read what: the Owner everything, an Admin their Organization, a Member only theirs.
  */
-// @effect-diagnostics nodeBuiltinImport:off globalFetchInEffect:off globalTimers:off - a client on the real port, aborting a stream.
+// @effect-diagnostics nodeBuiltinImport:off globalFetchInEffect:off globalTimers:off globalTimersInEffect:off - a client on the real port, aborting a stream.
 import { assert, it } from "@effect/vitest";
 import {
   type AiUsageSummary,
@@ -483,5 +483,129 @@ live("the retention and sweep schedule come from the layer", () =>
     const setup = yield* hubWith({}, { usage: { retentionDays: 7, sweepEveryMs: 3_600_000 } });
     const owner = yield* summaryAs(setup, setup.ownerId);
     assert.equal(owner.retentionDays, 7);
+  }),
+);
+
+/** A request the client abandons after `ms`, while the upstream still holds its answer. */
+const leaveAfter = (setup: Hub, key: string, ms: number) =>
+  Effect.promise(async () => {
+    const controller = new AbortController();
+    const pending = fetch(`http://127.0.0.1:${setup.port}/api/ai/anthropic/v1/messages`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+      body: JSON.stringify(messages()),
+      signal: controller.signal,
+    }).catch(() => undefined);
+    setTimeout(() => controller.abort(), ms);
+    await pending;
+  });
+
+live("a request cancelled before any answer is still one counted request", () =>
+  Effect.gen(function* () {
+    const setup = yield* hub;
+    yield* acmeSetup(setup);
+    const { key } = yield* setup.thread(setup.people.member, setup.acmeId);
+    setup.flag("fake-hang");
+    yield* leaveAfter(setup, key, 400);
+    yield* stored(setup, 1);
+    setup.flag("fake-hang", false);
+    const rows = yield* setup.server.sql<{
+      readonly status: number;
+      readonly inputTokens: number | null;
+    }>`SELECT status, input_tokens AS "inputTokens" FROM ai_usage`;
+    assert.deepEqual(rows, [{ status: 499, inputTokens: null }]);
+    const owner = yield* summaryAs(setup, setup.ownerId);
+    assert.equal(owner.totals.failedRequests, 1);
+  }),
+);
+
+live("refusals after authentication are counted as failed requests with no account", () =>
+  Effect.gen(function* () {
+    const setup = yield* hub;
+    yield* acmeSetup(setup);
+    const { key } = yield* setup.thread(setup.people.member, setup.acmeId);
+    const path = "/api/ai/anthropic/v1/messages";
+    assert.equal((yield* call(setup, path, { key, rawBody: "not json" })).status, 400);
+    assert.equal((yield* call(setup, path, { key, body: messages("no-such-model") })).status, 404);
+    yield* stored(setup, 2);
+    const rows = yield* setup.server.sql<{
+      readonly status: number;
+      readonly accountId: string | null;
+    }>`SELECT status, account_id AS "accountId" FROM ai_usage ORDER BY at, usage_id`;
+    assert.deepEqual(
+      rows.map((row) => [row.status, row.accountId]),
+      [
+        [400, null],
+        [404, null],
+      ],
+    );
+    const owner = yield* summaryAs(setup, setup.ownerId);
+    assert.equal(owner.totals.failedRequests, 2);
+    assert.equal(owner.rows[0]!.accountId, null);
+  }),
+);
+
+live("impossible days are refused, not thrown", () =>
+  Effect.gen(function* () {
+    const setup = yield* hub;
+    for (const input of [
+      { toDay: "2026-13-45" },
+      { fromDay: "2026-02-31", toDay: "2026-03-05" },
+      { fromDay: "2026-11-01", toDay: "2026-02-30" },
+    ] satisfies ReadonlyArray<AiUsageSummaryInput>) {
+      const refused = yield* summaryAs(setup, setup.ownerId, input).pipe(Effect.flip);
+      assert.equal(refused.reason, "invalid", JSON.stringify(input));
+    }
+  }),
+);
+
+live("an Admin's scope comes from their rights, not from traffic in the window", () =>
+  Effect.gen(function* () {
+    const setup = yield* hub;
+    const empty = yield* summaryAs(setup, setup.people.admin);
+    assert.equal(empty.scope, "spaces");
+    assert.equal((yield* summaryAs(setup, setup.people.member)).scope, "own");
+    assert.equal((yield* summaryAs(setup, setup.ownerId)).scope, "all");
+  }),
+);
+
+live("a Space the viewer left shows no name, not even a new one", () =>
+  Effect.gen(function* () {
+    const setup = yield* hub;
+    yield* threeUsers(setup);
+    yield* setup.server.sql`DELETE FROM space_memberships WHERE user_id = ${setup.people.member}`;
+    yield* setup.directory.membershipsChanged([setup.people.member]);
+    const view = yield* summaryAs(setup, setup.people.member);
+    assert.equal(view.totals.requests, 1);
+    assert.notInclude(JSON.stringify(view.labels.spaces), "Acme");
+  }),
+);
+
+live("totals count every request even when the rows are cut", () =>
+  Effect.gen(function* () {
+    const setup = yield* hubWith(
+      {},
+      { usage: { retentionDays: 90, sweepEveryMs: 86_400_000, maxRows: 1 } },
+    );
+    yield* threeUsers(setup);
+    const owner = yield* summaryAs(setup, setup.ownerId);
+    assert.equal(owner.rows.length, 1);
+    assert.equal(owner.truncated, true);
+    assert.equal(owner.totals.requests, 3);
+    assert.equal(owner.totals.inputTokens, 33);
+  }),
+);
+
+live("the sweep deletes old rows in batches", () =>
+  Effect.gen(function* () {
+    const setup = yield* hub;
+    yield* setup.server.sql`
+      WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 12000)
+      INSERT INTO ai_usage (usage_id, at, day, user_id, space_id, key_id, shape, status,
+        duration_ms, failovers)
+      SELECT 'old-' || i, '2020-01-01T00:00:00.000Z', '2020-01-01', 'u', 's', 'k', 'claude', 200,
+        1, 0 FROM n`;
+    assert.equal(yield* setup.usage.sweep, 12000);
+    assert.equal(yield* setup.usage.sweep, 0);
   }),
 );

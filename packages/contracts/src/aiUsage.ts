@@ -93,3 +93,23 @@ export class AiUsageError extends Schema.TaggedError<AiUsageError>()("AiUsageErr
   reason: AiUsageErrorReason,
   message: Schema.String,
 }) {}
+
+export const AI_USAGE_NO_TOTALS: AiUsageTotals = {
+  requests: 0,
+  failedRequests: 0,
+  unknownRequests: 0,
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+};
+
+export const addAiUsageTotals = (sum: AiUsageTotals, row: AiUsageTotals): AiUsageTotals => ({
+  requests: sum.requests + row.requests,
+  failedRequests: sum.failedRequests + row.failedRequests,
+  unknownRequests: sum.unknownRequests + row.unknownRequests,
+  inputTokens: sum.inputTokens + row.inputTokens,
+  outputTokens: sum.outputTokens + row.outputTokens,
+  cacheReadTokens: sum.cacheReadTokens + row.cacheReadTokens,
+  cacheWriteTokens: sum.cacheWriteTokens + row.cacheWriteTokens,
+});

@@ -2,6 +2,7 @@ import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useState } from "react";
 
 import { aiGatewayEnvironment } from "../../state/aiGateway";
+import { usePrimaryEnvironmentId } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
 import { dayBefore, formatTokens, usageNotes } from "../settings/aiUsageView";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
@@ -19,11 +20,16 @@ export function ThreadAiUsagePanel(props: {
   readonly threadId: ThreadId;
 }) {
   const [today] = useState(() => new Date());
+  // The usage tables live on the Hub, which is the primary environment: a Thread running on a
+  // joined machine is still counted there.
+  const hubId = usePrimaryEnvironmentId();
   const query = useEnvironmentQuery(
-    aiGatewayEnvironment.usageSummary({
-      environmentId: props.environmentId,
-      input: { threadId: props.threadId, fromDay: dayBefore(today, THREAD_USAGE_DAYS) },
-    }),
+    hubId === null
+      ? null
+      : aiGatewayEnvironment.usageSummary({
+          environmentId: hubId,
+          input: { threadId: props.threadId, fromDay: dayBefore(today, THREAD_USAGE_DAYS) },
+        }),
   );
   const totals = query.data?.totals;
   if (totals === undefined || totals.requests === 0) return null;

@@ -464,7 +464,8 @@ const numberAt = (value: unknown, ...path: ReadonlyArray<string>): number | null
     if (at === null || typeof at !== "object") return null;
     at = (at as Record<string, unknown>)[key];
   }
-  return typeof at === "number" && Number.isFinite(at) && at >= 0 ? at : null;
+  // Counts are whole and safe; anything else (a fraction, 1e300) is unknown, not stored.
+  return typeof at === "number" && Number.isSafeInteger(at) && at >= 0 ? at : null;
 };
 
 const larger = (a: number | null, b: number | null) =>

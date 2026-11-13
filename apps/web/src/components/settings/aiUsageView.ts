@@ -1,4 +1,9 @@
-import type { AiUsageSummary, AiUsageTotals } from "@t3tools/contracts";
+import {
+  addAiUsageTotals,
+  AI_USAGE_NO_TOTALS,
+  type AiUsageSummary,
+  type AiUsageTotals,
+} from "@t3tools/contracts";
 
 /** What the Usage tab can total by. */
 export type UsageGrouping = "day" | "user" | "space" | "account";
@@ -16,16 +21,6 @@ export interface UsageGroup {
   readonly totals: AiUsageTotals;
 }
 
-const EMPTY_TOTALS: AiUsageTotals = {
-  requests: 0,
-  failedRequests: 0,
-  unknownRequests: 0,
-  inputTokens: 0,
-  outputTokens: 0,
-  cacheReadTokens: 0,
-  cacheWriteTokens: 0,
-};
-
 const PROVIDER_NAMES: Readonly<Record<string, string>> = {
   claude: "Claude",
   codex: "Codex",
@@ -39,16 +34,23 @@ const PROVIDER_NAMES: Readonly<Record<string, string>> = {
   "openai-compatible": "OpenAI-compatible",
 };
 
-const add = (sum: AiUsageTotals, row: AiUsageTotals): AiUsageTotals => ({
-  requests: sum.requests + row.requests,
-  failedRequests: sum.failedRequests + row.failedRequests,
-  unknownRequests: sum.unknownRequests + row.unknownRequests,
-  inputTokens: sum.inputTokens + row.inputTokens,
-  outputTokens: sum.outputTokens + row.outputTokens,
-  cacheReadTokens: sum.cacheReadTokens + row.cacheReadTokens,
-  cacheWriteTokens: sum.cacheWriteTokens + row.cacheWriteTokens,
-});
+function accountLabel(
+  accountId: string | null,
+  accounts: ReadonlyMap<string, { readonly name: string | null; readonly provider: string }>,
+): string {
+  if (accountId === null) return "No account reached";
+  const account = accounts.get(accountId);
+  if (account === undefined) return "Deleted account";
+  return account.name ?? `${PROVIDER_NAMES[account.provider] ?? account.provider} account`;
+}
 
+/** 1 234 → «1.2k», 3 400 000 → «3.4M»; small counts as they are. */
+export function formatTokens(count: number): string {
+  if (count < 1_000) return String(count);
+  if (count < 1_000_000) return `${trim(count / 1_000)}k`;
+  if (count < 1_000_000_000) return `${trim(count / 1_000_000)}M`;
+  return `${trim(count / 1_000_000_000)}B`;
+}
 /** The summary's rows added up by one dimension; days newest first, the rest by most requests. */
 export function groupUsage(summary: AiUsageSummary, by: UsageGrouping): ReadonlyArray<UsageGroup> {
   const users = new Map(summary.labels.users.map((user) => [user.id, user.name]));
@@ -68,7 +70,7 @@ export function groupUsage(summary: AiUsageSummary, by: UsageGrouping): Readonly
     groups.set(key, {
       key,
       label,
-      totals: add(previous?.totals ?? EMPTY_TOTALS, row),
+      totals: addAiUsageTotals(previous?.totals ?? AI_USAGE_NO_TOTALS, row),
     });
   }
   const list = [...groups.values()];
@@ -79,23 +81,6 @@ export function groupUsage(summary: AiUsageSummary, by: UsageGrouping): Readonly
       );
 }
 
-function accountLabel(
-  accountId: string | null,
-  accounts: ReadonlyMap<string, { readonly name: string | null; readonly provider: string }>,
-): string {
-  if (accountId === null) return "No account reached";
-  const account = accounts.get(accountId);
-  if (account === undefined) return "Deleted account";
-  return account.name ?? `${PROVIDER_NAMES[account.provider] ?? account.provider} account`;
-}
-
-/** 1 234 → «1.2k», 3 400 000 → «3.4M»; small counts as they are. */
-export function formatTokens(count: number): string {
-  if (count < 1_000) return String(count);
-  if (count < 1_000_000) return `${trim(count / 1_000)}k`;
-  if (count < 1_000_000_000) return `${trim(count / 1_000_000)}M`;
-  return `${trim(count / 1_000_000_000)}B`;
-}
 const trim = (value: number) =>
   (value >= 100 ? value.toFixed(0) : value.toFixed(1)).replace(/\.0$/u, "");
 

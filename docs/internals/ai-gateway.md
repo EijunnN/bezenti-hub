@@ -345,10 +345,19 @@ shown, **never limited**: no quota, cap or block anywhere.
   a User's and a Space's come with the rows they appear in; an AI account's name only for the
   Owner and for whoever may use it somewhere now (else `null`: «Claude account»).
 - **Doors:** WS only (`aiUsage.summary`, scope `orchestration:read`). No HttpApi endpoint, raw route
-  or MCP tool. Windows are at most 366 days; at most 5000 rows answer (`truncated`).
+  or MCP tool. Windows are at most 366 days (an impossible date is refused); at most 5000 rows answer (`truncated`, totals still whole).
 - **Settings → AI accounts → Usage** (Owner) and the Thread's panel («AI gateway usage») read it.
+- **Counted as failed (no tokens):** a refusal after authentication (gateway not running, 415, 429
+  limits, body too large or not JSON, no model served, all accounts out of quota) with the account
+  last tried or none (account and model `''` in the summary; the model is kept only once the plan
+  accepted it), and a request cut off before any answer (the client left, a hold timed out): status 499.
 - **Not counted here:** direct credentials never pass through the gateway (the Thread shows what
-  its provider reports); requests refused before routing (bad key, not allowed) have no row.
+  its provider reports); requests refused before authentication (bad key) have no row; model lists
+  and `count_tokens` are not requests of the log.
+- **The writer** queues at most 10 000 records (the newest beyond are dropped, logged), writes them
+  in batches of 200 per transaction, and writes what is still queued when the Hub stops. Token
+  counts that are fractions or unsafe integers are treated as unknown. The sweep deletes in
+  batches of 5000. `maxRows` cuts the rows, never the totals.
 
 ## Agents through the gateway (spec 4 ticket 06)
 
