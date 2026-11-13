@@ -39,6 +39,8 @@ import {
   type ProviderChangeRequest,
   type PullRequestProviderApi,
 } from "@t3tools/source-control-core/server/PullRequestProvider";
+import { makeSecretPatterns } from "@t3tools/shared/secretMasking";
+import * as SecretMasker from "../vaults/SecretMasker.ts";
 import * as PullRequestProviderRegistry from "./PullRequestProviderRegistry.ts";
 import * as PullRequestService from "./PullRequestService.ts";
 import * as PullRequestReadCache from "./PullRequestReadCache.ts";
@@ -151,6 +153,43 @@ it.effect("reads maintainer edits and changes them through the update command", 
   }),
 );
 
+it.effect(
+  "answers a change request with the asking User's secrets as [NAME], and refuses an edit carrying one (spec 5 ticket 09)",
+  () =>
+    Effect.gen(function* () {
+      const value = "pr-secret-value-9999";
+      const updates: Array<unknown> = [];
+      const service = yield* makeService({
+        projects: [
+          project({ id: "p1", title: "web", workspaceRoot: "/w", repository: "acme/web" }),
+        ],
+        providers: [
+          fakePullRequestProvider(SourceControlProviderKind.make("github"), {
+            getChangeRequest: () =>
+              Effect.succeed(hostedChangeRequest(`Deploy with ${value} set.`)),
+            updateChangeRequest: (input) => Effect.sync(() => updates.push(input)),
+          }),
+        ],
+        secretMasker: {
+          forViewer: Effect.succeed(
+            SecretMasker.threadMaskerOf(makeSecretPatterns([{ name: "PR_TOKEN", value }])),
+          ),
+        } as never,
+      });
+      const ref = { projectId: "p1" as ProjectId, repository: "acme/web", number: 1 };
+      // The real service, over its host: the answer the client gets is masked.
+      const detail = JSON.stringify(yield* service.detail(ref));
+      expect(detail).toContain("Deploy with [PR_TOKEN] set.");
+      expect(detail).not.toContain(value);
+      // Saving what was shown masked would write `[PR_TOKEN]` over the value on the host.
+      const edit = yield* Effect.exit(
+        service.update({ ...ref, body: "Deploy with [PR_TOKEN] set." }),
+      );
+      expect(Exit.isFailure(edit)).toBe(true);
+      expect(updates).toEqual([]);
+    }),
+);
+
 it.effect("refuses maintainer edits on a host without the capability", () =>
   Effect.gen(function* () {
     let writes = 0;
@@ -261,11 +300,16 @@ function makeService(input: {
   readonly resolveHandle?: SourceControlProviderRegistry.SourceControlProviderRegistry["Service"]["resolveHandle"];
   readonly resolveRepositoryIdentity?: RepositoryIdentityResolver.RepositoryIdentityResolver["Service"]["resolve"];
   readonly onProjectRead?: () => void;
+  /** The Hub's masker, as the server provides it (spec 5). */
+  readonly secretMasker?: SecretMasker.SecretMasker["Service"];
 }) {
   // Build in the test scope; per-call Effect.provide would close the marks database on service acquisition.
   return Effect.flatMap(
     Layer.build(
       Layer.mergeAll(
+        input.secretMasker === undefined
+          ? Layer.empty
+          : Layer.succeed(SecretMasker.SecretMasker, input.secretMasker),
         Layer.mock(ServerSettingsService.ServerSettingsService)({
           getSettings: Effect.succeed(input.settings ?? DEFAULT_SERVER_SETTINGS),
         }),

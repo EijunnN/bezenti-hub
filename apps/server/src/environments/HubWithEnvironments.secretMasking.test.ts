@@ -120,8 +120,8 @@ describe("Hub con Environments: a Thread's secret values are masked in its histo
           GuestShareService.layer.pipe(
             Layer.provide(
               Layer.succeed(PublicHubUrl, {
-                publicHubHost: Effect.succeed(Option.some("hub.t3.test")),
-                publicHubOrigin: Effect.succeed(Option.some("https://hub.t3.test")),
+                publicHubHost: Effect.succeedSome("hub.t3.test"),
+                publicHubOrigin: Effect.succeedSome("https://hub.t3.test"),
               }),
             ),
             // The model label only.

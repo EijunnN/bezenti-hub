@@ -64,6 +64,9 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { makeSecretPatterns } from "@t3tools/shared/secretMasking";
+
+import * as SecretMasker from "../vaults/SecretMasker.ts";
 import * as GitManager from "./GitManager.ts";
 
 /** A change request the fake host reports. Omitted fields read as an open, undated request. */
@@ -610,6 +613,8 @@ function makeManager(input?: {
     ProjectionStore.ProjectionStoreV2Error | ProjectStore.ProjectStoreV2Error,
     ProjectionStore.ProjectionStoreV2 | ProjectStore.ProjectStoreV2
   >;
+  /** The Hub's masker, as the server provides it (spec 5). */
+  secretMasker?: SecretMasker.SecretMasker["Service"];
 }) {
   const { service: fakeProvider, calls: providerCalls } = createFakeSourceControlProvider(
     input?.providerScenario,
@@ -729,6 +734,9 @@ function makeManager(input?: {
     const manager = yield* GitManager.make.pipe(
       Effect.provide(layerManager),
       Effect.provideContext(stores),
+      input?.secretMasker === undefined
+        ? (effect) => effect
+        : Effect.provideService(SecretMasker.SecretMasker, input.secretMasker),
     );
     return { manager, providerCalls };
   });
@@ -2838,6 +2846,55 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         ),
       ).toBe("Implement stacked git actions");
     }),
+  );
+
+  it.effect(
+    "shows a commit hook's output and failure with the asking User's secrets as [NAME] (spec 5 ticket 09)",
+    () =>
+      Effect.gen(function* () {
+        const value = "hook-secret-value-8888";
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        yield* initRepo(repoDir);
+        const hook = NodePath.join(repoDir, ".git", "hooks", "pre-commit");
+        const masker = SecretMasker.threadMaskerOf(
+          makeSecretPatterns([{ name: "HOOK_TOKEN", value }]),
+        );
+        const { manager } = yield* makeManager({
+          secretMasker: { forViewer: Effect.succeed(masker) } as never,
+        });
+        const published: Array<unknown> = [];
+        const progressReporter = {
+          publish: (event: unknown) => Effect.sync(() => published.push(event)),
+        };
+
+        // A hook that prints the value: the real action, the real hook, its output masked.
+        NodeFS.writeFileSync(hook, `#!/bin/sh\necho "checking ${value}"\n`, { mode: 0o755 });
+        NodeFS.writeFileSync(NodePath.join(repoDir, "notes.md"), "first\n");
+        yield* runStackedAction(
+          manager,
+          { cwd: repoDir, action: "commit", commitMessage: "Update readme" },
+          { progressReporter } as never,
+        );
+        const shown = JSON.stringify(published);
+        expect(shown).toContain("checking [HOOK_TOKEN]");
+        expect(shown).not.toContain(value);
+
+        // A hook that fails with it: the failure the client gets is masked too.
+        NodeFS.writeFileSync(hook, `#!/bin/sh\necho "denied: ${value}" >&2\nexit 1\n`, {
+          mode: 0o755,
+        });
+        NodeFS.writeFileSync(NodePath.join(repoDir, "notes.md"), "second\n");
+        const failed = yield* runStackedAction(
+          manager,
+          { cwd: repoDir, action: "commit", commitMessage: "Update readme again" },
+          { progressReporter } as never,
+        ).pipe(Effect.flip);
+        const failure = `${JSON.stringify(failed)} ${String((failed as Error).message)}`;
+        expect(failure).not.toContain(value);
+        // Its stderr went to the client as hook output, masked.
+        expect(JSON.stringify(published)).toContain("denied: [HOOK_TOKEN]");
+        expect(JSON.stringify(published)).not.toContain(value);
+      }),
   );
 
   it.effect("includes CLAUDE.md for Claude writers only when it differs from AGENTS.md", () =>
