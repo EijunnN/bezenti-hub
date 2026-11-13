@@ -92,6 +92,8 @@ export function VaultAllowances(props: {
       label: `User: ${user.displayName}`,
     })),
   ].filter((option) => !allowed.has(option.key));
+  const allowItems = options.map((option) => ({ value: option.key, label: option.label }));
+  // An option that dropped out (allowed elsewhere meanwhile) leaves the placeholder.
   const picked = options.find((option) => option.key === choice);
   const toUser = picked?.subject.kind === "user";
 
@@ -147,8 +149,8 @@ export function VaultAllowances(props: {
           Allow to
           <Select
             disabled={pending}
-            items={options.map((option) => ({ value: option.key, label: option.label }))}
-            value={choice === "" ? null : choice}
+            items={allowItems}
+            value={picked === undefined ? null : choice}
             onValueChange={(value) => {
               setChoice(value ?? "");
               setUnderstood(false);
@@ -158,9 +160,9 @@ export function VaultAllowances(props: {
               <SelectValue placeholder="Choose a Space or a User…" />
             </SelectTrigger>
             <SelectPopup>
-              {options.map((option) => (
-                <SelectItem key={option.key} value={option.key}>
-                  {option.label}
+              {allowItems.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
                 </SelectItem>
               ))}
             </SelectPopup>
@@ -257,6 +259,8 @@ export function SpaceDefaultVaults(props: { readonly environmentId: EnvironmentI
   const save = useAtomCommand(serverEnvironment.setVaultSpaceDefaults, "set default Vaults");
   const [pending, setPending] = useState(false);
   if (spaces.length === 0) return null;
+  const spaceItems = spaces.map((space) => ({ value: space.id as string, label: space.name }));
+  const shownListed = spaces.some((space) => space.id === shown);
   const spaceName = spaces.find((space) => space.id === shown)?.name ?? "this Space";
 
   const setDefaults = async (vaultIds: ReadonlyArray<VaultId>) => {
@@ -294,24 +298,26 @@ export function SpaceDefaultVaults(props: { readonly environmentId: EnvironmentI
           )
         }
         control={
-          <Select
-            items={spaces.map((space) => ({ value: space.id, label: space.name }))}
-            value={shown ?? null}
-            onValueChange={(value) => {
-              if (value !== null) setSpaceId(value as SpaceId);
-            }}
-          >
-            <SelectTrigger aria-label="Space for default Vaults" className="sm:w-56">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectPopup>
-              {spaces.map((space) => (
-                <SelectItem key={space.id} value={space.id}>
-                  {space.name}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
+          <div className="w-full sm:w-56">
+            <Select
+              items={spaceItems}
+              value={shownListed ? shown : null}
+              onValueChange={(value) => {
+                if (value !== null) setSpaceId(value as SpaceId);
+              }}
+            >
+              <SelectTrigger aria-label="Space for default Vaults">
+                <SelectValue placeholder="Choose a Space" />
+              </SelectTrigger>
+              <SelectPopup>
+                {spaceItems.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          </div>
         }
       />
       {choices === null ? null : choices.allowed.length === 0 ? (
@@ -430,55 +436,56 @@ export function ProjectVaults(props: {
           const current =
             choices.projectChoices.find((choice) => choice.vaultId === option.vaultId)?.choice ??
             "inherit";
+          const choiceItems = [
+            {
+              value: "inherit",
+              label: isDefault(option.vaultId)
+                ? "As the Space (default)"
+                : "As the Space (not a default)",
+            },
+            { value: "add", label: "Add" },
+            { value: "remove", label: "Remove" },
+          ];
           return (
             <li key={option.vaultId} className="flex items-center gap-3 px-4 py-2 text-sm">
               <span className="flex-1 font-medium">{option.name}</span>
               {choices.fixedDefaults.includes(option.vaultId) ? (
                 <span className="text-xs text-muted-foreground">Always (Personal space)</span>
               ) : (
-                <Select
-                  disabled={pending || !choices.canChoose}
-                  items={[
-                    {
-                      value: "inherit",
-                      label: isDefault(option.vaultId)
-                        ? "As the Space (default)"
-                        : "As the Space (not a default)",
-                    },
-                    { value: "add", label: "Add" },
-                    { value: "remove", label: "Remove" },
-                  ]}
-                  value={current}
-                  onValueChange={(value) => {
-                    if (value === null) return;
-                    const choice = value as "add" | "remove" | "inherit";
-                    setPending(true);
-                    setError(null);
-                    void settle(
-                      save({
-                        environmentId,
-                        input: { projectId, vaultId: option.vaultId, choice },
-                      }),
-                    )
-                      .then(setChoices, (cause: unknown) =>
-                        setError(errorMessageOf(cause, "Could not change the Project's Vaults.")),
+                <div className="w-full sm:w-56">
+                  <Select
+                    disabled={pending || !choices.canChoose}
+                    items={choiceItems}
+                    value={current}
+                    onValueChange={(value) => {
+                      if (value === null) return;
+                      const choice = value as "add" | "remove" | "inherit";
+                      setPending(true);
+                      setError(null);
+                      void settle(
+                        save({
+                          environmentId,
+                          input: { projectId, vaultId: option.vaultId, choice },
+                        }),
                       )
-                      .finally(() => setPending(false));
-                  }}
-                >
-                  <SelectTrigger aria-label={`${option.name} in this Project`} className="sm:w-56">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectPopup>
-                    <SelectItem value="inherit">
-                      {isDefault(option.vaultId)
-                        ? "As the Space (default)"
-                        : "As the Space (not a default)"}
-                    </SelectItem>
-                    <SelectItem value="add">Add</SelectItem>
-                    <SelectItem value="remove">Remove</SelectItem>
-                  </SelectPopup>
-                </Select>
+                        .then(setChoices, (cause: unknown) =>
+                          setError(errorMessageOf(cause, "Could not change the Project's Vaults.")),
+                        )
+                        .finally(() => setPending(false));
+                    }}
+                  >
+                    <SelectTrigger aria-label={`${option.name} in this Project`}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectPopup>
+                      {choiceItems.map((item) => (
+                        <SelectItem key={item.value} value={item.value}>
+                          {item.label}
+                        </SelectItem>
+                      ))}
+                    </SelectPopup>
+                  </Select>
+                </div>
               )}
             </li>
           );

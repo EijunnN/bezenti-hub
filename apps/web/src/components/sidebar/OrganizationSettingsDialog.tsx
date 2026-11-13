@@ -305,6 +305,7 @@ function MemberRow({
   const roles = assignableRoles.includes(member.role)
     ? assignableRoles
     : [member.role, ...assignableRoles];
+  const memberRoleItems = roleItems(roles);
   return (
     <li className="flex items-center justify-between gap-2 text-sm">
       <span className="min-w-0 truncate">
@@ -316,29 +317,27 @@ function MemberRow({
       </span>
       <span className="flex shrink-0 items-center gap-1">
         {member.canChangeRole ? (
-          <Select
-            disabled={busy}
-            items={roleItems(roles)}
-            value={member.role}
-            onValueChange={(value) => {
-              if (value !== null) onChangeRole(value as SpaceRole);
-            }}
-          >
-            <SelectTrigger
-              aria-label={`Role for ${member.displayName}`}
-              size="xs"
-              className="w-auto min-w-0"
+          <div className="w-28">
+            <Select
+              disabled={busy}
+              items={memberRoleItems}
+              value={member.role}
+              onValueChange={(value) => {
+                if (value !== null) onChangeRole(value as SpaceRole);
+              }}
             >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectPopup>
-              {roles.map((role) => (
-                <SelectItem key={role} value={role}>
-                  {SPACE_ROLE_LABELS[role]}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
+              <SelectTrigger aria-label={`Role for ${member.displayName}`} size="xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectPopup>
+                {memberRoleItems.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          </div>
         ) : (
           <span className="text-xs text-muted-foreground">
             {SPACE_ROLE_LABELS[member.role]}
@@ -566,6 +565,7 @@ function InvitationsSection({
     setBusy(false);
   };
 
+  const inviteRoleItems = roleItems(assignableRoles);
   return (
     <section className="flex flex-col gap-4" aria-labelledby={`${id}-heading`}>
       <div className="flex flex-col gap-1">
@@ -581,7 +581,7 @@ function InvitationsSection({
           <Label htmlFor={`${id}-role`}>Role</Label>
           <Select
             disabled={busy}
-            items={roleItems(assignableRoles)}
+            items={inviteRoleItems}
             value={role}
             onValueChange={(value) => {
               if (value !== null) setRole(value as SpaceRole);
@@ -591,9 +591,9 @@ function InvitationsSection({
               <SelectValue />
             </SelectTrigger>
             <SelectPopup>
-              {assignableRoles.map((option) => (
-                <SelectItem key={option} value={option}>
-                  {SPACE_ROLE_LABELS[option]}
+              {inviteRoleItems.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
                 </SelectItem>
               ))}
             </SelectPopup>

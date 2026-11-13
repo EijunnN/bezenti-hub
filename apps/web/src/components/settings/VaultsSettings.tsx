@@ -232,6 +232,9 @@ function VaultsPage({ environmentId }: { readonly environmentId: EnvironmentId }
   );
 }
 
+/** Stands for «no Organization»: the Vault is the Owner's own. */
+const ONLY_YOU = "only-you";
+
 function NewVaultForm(props: {
   readonly organizations: ReadonlyArray<{ readonly id: SpaceId; readonly name: string }>;
   readonly onCreate: (input: {
@@ -243,6 +246,12 @@ function NewVaultForm(props: {
   const [spaceId, setSpaceId] = useState<string>("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // An Organization that is gone (archived) falls back to «Only you».
+  const chosenSpace = props.organizations.some((space) => space.id === spaceId) ? spaceId : "";
+  const organizationItems = [
+    { value: ONLY_YOU, label: "Only you (not an Organization's)" },
+    ...props.organizations.map((space) => ({ value: space.id as string, label: space.name })),
+  ];
   return (
     <form
       className="flex flex-col gap-2 px-4 pb-4 sm:flex-row sm:items-end"
@@ -251,7 +260,10 @@ function NewVaultForm(props: {
         setPending(true);
         setError(null);
         void props
-          .onCreate({ name: name.trim(), spaceId: spaceId === "" ? null : (spaceId as SpaceId) })
+          .onCreate({
+            name: name.trim(),
+            spaceId: chosenSpace === "" ? null : (chosenSpace as SpaceId),
+          })
           .then(
             () => setName(""),
             (cause: unknown) => setError(errorMessageOf(cause, "Could not create the Vault.")),
@@ -274,21 +286,17 @@ function NewVaultForm(props: {
         Organization
         <Select
           disabled={pending}
-          items={[
-            { value: "", label: "Only you (not an Organization's)" },
-            ...props.organizations.map((space) => ({ value: space.id, label: space.name })),
-          ]}
-          value={spaceId}
-          onValueChange={(value) => setSpaceId(value ?? "")}
+          items={organizationItems}
+          value={chosenSpace === "" ? ONLY_YOU : chosenSpace}
+          onValueChange={(value) => setSpaceId(value === null || value === ONLY_YOU ? "" : value)}
         >
           <SelectTrigger aria-label="Organization">
             <SelectValue />
           </SelectTrigger>
           <SelectPopup>
-            <SelectItem value="">Only you (not an Organization's)</SelectItem>
-            {props.organizations.map((space) => (
-              <SelectItem key={space.id} value={space.id}>
-                {space.name}
+            {organizationItems.map((item) => (
+              <SelectItem key={item.value} value={item.value}>
+                {item.label}
               </SelectItem>
             ))}
           </SelectPopup>
@@ -784,11 +792,16 @@ function FromMainForm(props: {
   const [name, setName] = useState("");
   const [confirmed, setConfirmed] = useState(false);
   const [pending, setPending] = useState(false);
-  const effectiveName =
-    name.length > 0 ? name : (props.mainEntries.find((entry) => entry.id === source)?.name ?? "");
+  // A secret that was deleted meanwhile is no longer a source.
+  const sourceEntry = props.mainEntries.find((entry) => entry.id === source);
+  const sourceItems = props.mainEntries.map((entry) => ({
+    value: entry.id as string,
+    label: entry.name,
+  }));
+  const effectiveName = name.length > 0 ? name : (sourceEntry?.name ?? "");
   const dangerous = isDangerous(effectiveName);
   const add = (kind: "link" | "copy") => {
-    if (source === "") return;
+    if (sourceEntry === undefined) return;
     setPending(true);
     void props
       .onAdd(kind, source as VaultEntryId, name, dangerous && confirmed)
@@ -799,7 +812,7 @@ function FromMainForm(props: {
       })
       .finally(() => setPending(false));
   };
-  const disabled = pending || source === "" || (dangerous && !confirmed);
+  const disabled = pending || sourceEntry === undefined || (dangerous && !confirmed);
   return (
     <div
       role="group"
@@ -811,17 +824,17 @@ function FromMainForm(props: {
           Main vault secret
           <Select
             disabled={pending}
-            items={props.mainEntries.map((entry) => ({ value: entry.id, label: entry.name }))}
-            value={source}
+            items={sourceItems}
+            value={sourceEntry === undefined ? null : source}
             onValueChange={(value) => setSource(value ?? "")}
           >
             <SelectTrigger aria-label="Main vault secret">
-              <SelectValue />
+              <SelectValue placeholder="Choose a secret" />
             </SelectTrigger>
             <SelectPopup>
-              {props.mainEntries.map((entry) => (
-                <SelectItem key={entry.id} value={entry.id}>
-                  {entry.name}
+              {sourceItems.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
                 </SelectItem>
               ))}
             </SelectPopup>

@@ -315,6 +315,7 @@ function NewAccountForm(props: {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const compatible = provider === "openai-compatible";
+  const providerItems = API_KEY_PROVIDERS.map(([value, label]) => ({ value, label }));
   const modelList = splitModels(models);
   const ready =
     name.trim().length > 0 &&
@@ -366,7 +367,7 @@ function NewAccountForm(props: {
           Provider
           <Select
             disabled={pending}
-            items={API_KEY_PROVIDERS.map(([value, label]) => ({ value, label }))}
+            items={providerItems}
             value={provider}
             onValueChange={(value) => {
               if (value !== null) setProvider(value as AiApiKeyProvider);
@@ -376,9 +377,9 @@ function NewAccountForm(props: {
               <SelectValue />
             </SelectTrigger>
             <SelectPopup>
-              {API_KEY_PROVIDERS.map(([value, label]) => (
-                <SelectItem key={value} value={value}>
-                  {label}
+              {providerItems.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
                 </SelectItem>
               ))}
             </SelectPopup>
@@ -605,6 +606,7 @@ function NewSubscriptionForm(props: {
 }) {
   const [name, setName] = useState("");
   const [provider, setProvider] = useState<AiSubscriptionProvider>("claude");
+  const subscriptionItems = SUBSCRIPTION_PROVIDERS.map(([value, label]) => ({ value, label }));
   return (
     <section aria-label="Add subscription" className="flex flex-col gap-2 border-t px-4 py-4">
       <h3 className="text-sm font-medium">Add subscription</h3>
@@ -622,7 +624,7 @@ function NewSubscriptionForm(props: {
         <label className="flex flex-col gap-1 text-xs font-medium sm:w-72">
           Subscription provider
           <Select
-            items={SUBSCRIPTION_PROVIDERS.map(([value, label]) => ({ value, label }))}
+            items={subscriptionItems}
             value={provider}
             onValueChange={(value) => {
               if (value !== null) setProvider(value as AiSubscriptionProvider);
@@ -632,9 +634,9 @@ function NewSubscriptionForm(props: {
               <SelectValue />
             </SelectTrigger>
             <SelectPopup>
-              {SUBSCRIPTION_PROVIDERS.map(([value, label]) => (
-                <SelectItem key={value} value={value}>
-                  {label}
+              {subscriptionItems.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
                 </SelectItem>
               ))}
             </SelectPopup>

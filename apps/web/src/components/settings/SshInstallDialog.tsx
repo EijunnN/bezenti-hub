@@ -67,6 +67,13 @@ const isFinished = (run: SshInstallRun) =>
  * process, shows the host key to confirm, then runs each step with its output here. The key goes
  * only into the request that starts the run, and is forgotten here once the run starts.
  */
+const AUTH_ITEMS = [
+  { value: "key", label: "A private key" },
+  { value: "agent", label: "The Hub's SSH agent" },
+];
+/** Stands for «no Organization yet»: never sent, the connect button stays off. */
+const NO_ORGANIZATION = "no-organization";
+
 export function SshInstallDialog(props: {
   readonly organizations: ReadonlyArray<{ readonly id: SpaceId; readonly name: string }>;
   readonly onClose: () => void;
@@ -85,6 +92,18 @@ export function SshInstallDialog(props: {
     hubUrl: window.location.origin,
     keepForUpdates: false,
   }));
+  // The Organizations may load after the dialog opens: the choice is the one made while it is
+  // still listed, else the first one.
+  const spaceId = props.organizations.some((space) => space.id === form.spaceId)
+    ? form.spaceId
+    : (props.organizations[0]?.id ?? "");
+  const spaceItems =
+    props.organizations.length === 0
+      ? [{ value: NO_ORGANIZATION, label: "Create an Organization first" }]
+      : props.organizations.map((space) => ({
+          value: space.id as string,
+          label: `Everyone in ${space.name}`,
+        }));
   const [run, setRun] = useState<SshInstallRun | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -150,7 +169,7 @@ export function SshInstallDialog(props: {
             form.authKind === "agent"
               ? { kind: "agent" }
               : { kind: "key", privateKey: form.privateKey, passphrase: form.passphrase },
-          spaceId: form.spaceId as SpaceId,
+          spaceId: spaceId as SpaceId,
           name: form.name.trim() || defaultMachineName(form.host),
           hubUrl: form.hubUrl.trim(),
           keepForUpdates: form.keepForUpdates,
@@ -183,7 +202,7 @@ export function SshInstallDialog(props: {
     form.host.trim() !== "" &&
     form.username.trim() !== "" &&
     /^\d+$/u.test(form.port) &&
-    form.spaceId !== "" &&
+    spaceId !== "" &&
     (form.authKind === "agent" || form.privateKey.trim() !== "");
 
   return (
@@ -250,22 +269,24 @@ export function SshInstallDialog(props: {
                 <label className={fieldClass} htmlFor="ssh-install-auth">
                   Sign in with
                 </label>
-                <Select
-                  items={[
-                    { value: "key", label: "A private key" },
-                    { value: "agent", label: "The Hub's SSH agent" },
-                  ]}
-                  value={form.authKind}
-                  onValueChange={(value) => set("authKind", value === "agent" ? "agent" : "key")}
-                >
-                  <SelectTrigger id="ssh-install-auth">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectPopup>
-                    <SelectItem value="key">A private key</SelectItem>
-                    <SelectItem value="agent">The Hub's SSH agent</SelectItem>
-                  </SelectPopup>
-                </Select>
+                <div className="mt-1">
+                  <Select
+                    items={AUTH_ITEMS}
+                    value={form.authKind}
+                    onValueChange={(value) => set("authKind", value === "agent" ? "agent" : "key")}
+                  >
+                    <SelectTrigger id="ssh-install-auth">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectPopup>
+                      {AUTH_ITEMS.map((item) => (
+                        <SelectItem key={item.value} value={item.value}>
+                          {item.label}
+                        </SelectItem>
+                      ))}
+                    </SelectPopup>
+                  </Select>
+                </div>
               </div>
               {form.authKind === "key" ? (
                 <>
@@ -310,32 +331,27 @@ export function SshInstallDialog(props: {
                 <label className={fieldClass} htmlFor="ssh-install-space">
                   Dedicated to
                 </label>
-                <Select
-                  items={
-                    props.organizations.length === 0
-                      ? [{ value: "", label: "Create an Organization first" }]
-                      : props.organizations.map((space) => ({
-                          value: space.id,
-                          label: `Everyone in ${space.name}`,
-                        }))
-                  }
-                  value={form.spaceId}
-                  onValueChange={(value) => set("spaceId", value ?? "")}
-                >
-                  <SelectTrigger id="ssh-install-space">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectPopup>
-                    {props.organizations.length === 0 ? (
-                      <SelectItem value="">Create an Organization first</SelectItem>
-                    ) : null}
-                    {props.organizations.map((space) => (
-                      <SelectItem key={space.id} value={space.id}>
-                        {`Everyone in ${space.name}`}
-                      </SelectItem>
-                    ))}
-                  </SelectPopup>
-                </Select>
+                <div className="mt-1">
+                  <Select
+                    disabled={props.organizations.length === 0}
+                    items={spaceItems}
+                    value={props.organizations.length === 0 ? NO_ORGANIZATION : spaceId}
+                    onValueChange={(value) => {
+                      if (value !== null && value !== NO_ORGANIZATION) set("spaceId", value);
+                    }}
+                  >
+                    <SelectTrigger id="ssh-install-space">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectPopup>
+                      {spaceItems.map((item) => (
+                        <SelectItem key={item.value} value={item.value}>
+                          {item.label}
+                        </SelectItem>
+                      ))}
+                    </SelectPopup>
+                  </Select>
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>

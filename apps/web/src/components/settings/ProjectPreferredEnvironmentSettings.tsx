@@ -89,6 +89,23 @@ export function ProjectPreferredEnvironmentSettings({
     }
   };
 
+  // Someone else's machine, chosen by them, stays named but can't be picked again.
+  const environmentItems = [
+    ...(usable.some((environment) => environment.id === current)
+      ? []
+      : [
+          {
+            value: current as string,
+            label: currentListed?.name ?? "An Environment you can't use",
+            disabled: true,
+          },
+        ]),
+    ...usable.map((environment) => ({
+      value: environment.id as string,
+      label: environment.name,
+      disabled: false,
+    })),
+  ];
   return (
     <SettingsSection title="Environment">
       <SettingsRow
@@ -102,41 +119,27 @@ export function ProjectPreferredEnvironmentSettings({
           )
         }
         control={
-          <Select
-            disabled={saving || !canEdit}
-            items={[
-              ...(usable.some((environment) => environment.id === current)
-                ? []
-                : [
-                    {
-                      value: current,
-                      label: currentListed?.name ?? "An Environment you can't use",
-                    },
-                  ]),
-              ...usable.map((environment) => ({ value: environment.id, label: environment.name })),
-            ]}
-            value={current}
-            onValueChange={(value) => {
-              if (value !== null) void choose(value as EnvironmentId);
-            }}
-          >
-            <SelectTrigger aria-label="Preferred environment" className="sm:w-64">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectPopup>
-              {/* Someone else's machine, chosen by them, stays named but can't be picked again. */}
-              {usable.some((environment) => environment.id === current) ? null : (
-                <SelectItem value={current} disabled>
-                  {currentListed?.name ?? "An Environment you can't use"}
-                </SelectItem>
-              )}
-              {usable.map((environment) => (
-                <SelectItem key={environment.id} value={environment.id}>
-                  {environment.name}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
+          <div className="w-full sm:w-64">
+            <Select
+              disabled={saving || !canEdit}
+              items={environmentItems}
+              value={current}
+              onValueChange={(value) => {
+                if (value !== null) void choose(value as EnvironmentId);
+              }}
+            >
+              <SelectTrigger aria-label="Preferred environment">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectPopup>
+                {environmentItems.map((item) => (
+                  <SelectItem key={item.value} value={item.value} disabled={item.disabled}>
+                    {item.label}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          </div>
         }
       />
     </SettingsSection>

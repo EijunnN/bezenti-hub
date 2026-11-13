@@ -191,39 +191,43 @@ function ProjectSpaceSettings({ group }: { group: SidebarProjectSnapshot }) {
   const originId = project.spaceId ?? view.personalSpaceId;
   const originName = view.spaces.find((space) => space.id === originId)?.name ?? "its Space";
 
+  const destinationItems = destinations.map((space) => ({ value: space.id, label: space.name }));
+
   return (
     <SettingsSection title="Space">
       <SettingsRow
         title="Move to another Space"
         description={`In ${originName}. Its Threads move with it; running ones stop.`}
         control={
-          <Select
-            disabled={moving !== null}
-            items={destinations.map((space) => ({ value: space.id, label: space.name }))}
-            value={null}
-            onValueChange={(value) => {
-              const destination = destinations.find((space) => space.id === value);
-              if (destination === undefined) return;
-              const opened = { projectId: project.id, projectTitle: project.title, destination };
-              setMoving({ ...opened, planned: { status: "planning" } });
-              void loadProjectMovePlan(project.id, destination.id).then((planned) =>
-                setMoving((current) =>
-                  current?.destination.id === destination.id ? { ...opened, planned } : current,
-                ),
-              );
-            }}
-          >
-            <SelectTrigger aria-label="Move to…" className="sm:w-64">
-              <SelectValue placeholder="Move to…" />
-            </SelectTrigger>
-            <SelectPopup>
-              {destinations.map((space) => (
-                <SelectItem key={space.id} value={space.id}>
-                  {space.name}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
+          <div className="w-full sm:w-64">
+            <Select
+              disabled={moving !== null}
+              items={destinationItems}
+              value={null}
+              onValueChange={(value) => {
+                const destination = destinations.find((space) => space.id === value);
+                if (destination === undefined) return;
+                const opened = { projectId: project.id, projectTitle: project.title, destination };
+                setMoving({ ...opened, planned: { status: "planning" } });
+                void loadProjectMovePlan(project.id, destination.id).then((planned) =>
+                  setMoving((current) =>
+                    current?.destination.id === destination.id ? { ...opened, planned } : current,
+                  ),
+                );
+              }}
+            >
+              <SelectTrigger aria-label="Move to…">
+                <SelectValue placeholder="Move to…" />
+              </SelectTrigger>
+              <SelectPopup>
+                {destinationItems.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          </div>
         }
       />
       {dialog}

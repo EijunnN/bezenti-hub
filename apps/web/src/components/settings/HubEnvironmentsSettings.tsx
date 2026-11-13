@@ -16,7 +16,6 @@ import { errorMessageOf } from "../../lib/errorMessage";
 import { useCurrentSpace } from "../../state/currentSpace";
 import { EnvironmentStatusBadge } from "../EnvironmentStatusDot";
 import { Button } from "../ui/button";
-import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import {
   Dialog,
   DialogDescription,
@@ -29,6 +28,7 @@ import {
 import { Input } from "../ui/input";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 import { SshInstallDialog } from "./SshInstallDialog";
+import { UsedBySelect } from "./UsedBySelect";
 
 // The list's status is computed on the Hub from heartbeats; polling keeps it current while open.
 const REFRESH_MS = 5_000;
@@ -353,36 +353,17 @@ export function HubEnvironmentsSettings() {
                 <label className="text-xs font-medium" htmlFor="hub-environment-use">
                   Used by
                 </label>
-                <Select<string>
-                  disabled={pending}
-                  items={[
-                    { value: "personal", label: "Only me (personal machine)" },
-                    ...organizations.map((space) => ({
-                      value: space.id,
-                      label: `Everyone in ${space.name} (dedicated)`,
-                    })),
-                  ]}
-                  value={changingMode.use}
-                  onValueChange={(value) => {
-                    if (value === null) return;
-                    setChangingMode({
-                      environment: changingMode.environment,
-                      use: value === "personal" ? "personal" : (value as SpaceId),
-                    });
-                  }}
-                >
-                  <SelectTrigger id="hub-environment-use">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectPopup>
-                    <SelectItem value="personal">Only me (personal machine)</SelectItem>
-                    {organizations.map((space) => (
-                      <SelectItem key={space.id} value={space.id}>
-                        {`Everyone in ${space.name} (dedicated)`}
-                      </SelectItem>
-                    ))}
-                  </SelectPopup>
-                </Select>
+                <div className="mt-1">
+                  <UsedBySelect
+                    disabled={pending}
+                    id="hub-environment-use"
+                    onChange={(use) =>
+                      setChangingMode({ environment: changingMode.environment, use })
+                    }
+                    spaces={organizations}
+                    value={changingMode.use}
+                  />
+                </div>
                 {leavesSpace(changingMode) ? (
                   <p className="mt-2 text-sm text-warning-foreground">
                     {`Work files on ${changingMode.environment.name} for ${spaceName(changingMode.environment.spaceId) ?? "a Space"} will be deleted: its Sandbox's home goes, so no other Space or owner ever sees them.`}
