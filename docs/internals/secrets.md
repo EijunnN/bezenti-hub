@@ -409,39 +409,54 @@ shell keeps its environment and says `secretsStale`). What `VaultReachLoss` adds
 keeps naming a reach that is gone, so nothing comes back unseen and nothing of what was deleted
 remains. Every way to lose reach, and where it goes:
 
-| How reach is lost                                         | Delivery (next process)                               | Live processes                                                              | Rows dropped (same transaction)                                                                                                                                                                                                                       |
-| --------------------------------------------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A Project moves to another Space                          | `forThread` reads the new Space                       | its Threads' terminals opened under the old Space are refused and closed    | its choices of Vaults that do not reach the new Space, each audited `vault.choose` `inherit` under the old Space (`keepProjectChoicesReaching`, one `DELETE … RETURNING`, with the commit of the move: `EventSink.commitProjectCommand` `alsoCommit`) |
-| A Project is deleted                                      | its Threads are deleted first                         | —                                                                           | its choices (`forgetProject`, with the commit of the delete)                                                                                                                                                                                          |
-| A Vault is taken back from a Space                        | not allowed to the Space                              | stale flag (ticket 04)                                                      | the allowance, that Space's default, its Projects' choices (`forgetSpaceAllowance`)                                                                                                                                                                   |
-| A Vault is taken back from a User                         | not allowed to the User                               | stale flag                                                                  | the allowance (`forgetUserAllowance`)                                                                                                                                                                                                                 |
-| A User is removed from the Installation                   | `forbidden` (no Space of theirs)                      | every terminal they opened is refused and closed, shared Sandboxes included | every allowance to them and to their (frozen) Personal space, that Space's defaults and its Projects' choices; each allowance audited `vault.allow` `allowed: false` with `subjectName` (`forgetUser`, `InstallationUserService`)                     |
-| An Organization is deleted                                | its Threads are deleted first                         | ended with its Threads                                                      | its own Vaults, their entries and values (audited `vault.delete`), allowances to it (audited `vault.allow` `allowed: false`), its defaults, its Projects' choices (`forgetOrganization`, `OrganizationLifecycle.delete`, before its row)              |
-| A Vault is deleted                                        | gone                                                  | stale flag                                                                  | entries, values, allowances, defaults, choices (`forgetVault`)                                                                                                                                                                                        |
-| A Vault is archived, a link broken                        | skipped by `forThread`                                | stale flag                                                                  | none: restoring brings it back as the Owner left it                                                                                                                                                                                                   |
-| A Membership ends, a User is disabled                     | `forbidden`                                           | stale flag                                                                  | none: a disabled User's allowances wait for them                                                                                                                                                                                                      |
-| A Member becomes a Guest, or back                         | unchanged: a Guest's Threads receive the defaults too | —                                                                           | none: no reach is lost                                                                                                                                                                                                                                |
-| A credential or agent bound to one Space (`spaceLimit`)   | `forThread` answers nothing outside that Space        | —                                                                           | none: the limit is the caller's, not a row                                                                                                                                                                                                            |
-| A Thread moves to a machine that does not serve its Space | `servesSpace`: the plan is empty                      | —                                                                           | none                                                                                                                                                                                                                                                  |
+| How reach is lost                                         | Delivery (next process)                               | Live processes                                                           | Rows dropped (same transaction)                                                                                                                                                                                                                       |
+| --------------------------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A Project moves to another Space                          | `forThread` reads the new Space                       | its Threads' shells started for the old Space are refused and closed     | its choices of Vaults that do not reach the new Space, each audited `vault.choose` `inherit` under the old Space (`keepProjectChoicesReaching`, one `DELETE … RETURNING`, with the commit of the move: `EventSink.commitProjectCommand` `alsoCommit`) |
+| A Project is deleted                                      | its Threads are deleted first                         | —                                                                        | its choices (`forgetProject`, with the commit of the delete)                                                                                                                                                                                          |
+| A Vault is taken back from a Space                        | not allowed to the Space                              | stale flag (ticket 04)                                                   | the allowance, that Space's default, its Projects' choices (`forgetSpaceAllowance`)                                                                                                                                                                   |
+| A Vault is taken back from a User                         | not allowed to the User                               | stale flag                                                               | the allowance (`forgetUserAllowance`)                                                                                                                                                                                                                 |
+| A User is removed from the Installation                   | `forbidden` (no Space of theirs)                      | every shell started with their set is refused and closed, in any Sandbox | every allowance to them and to their (frozen) Personal space, that Space's defaults and its Projects' choices; each allowance audited `vault.allow` `allowed: false` with `subjectName` (`forgetUser`, `InstallationUserService`)                     |
+| An Organization is deleted                                | its Threads are deleted first                         | ended with its Threads                                                   | its own Vaults, their entries and values (audited `vault.delete`), allowances to it (audited `vault.allow` `allowed: false`), its defaults, its Projects' choices (`forgetOrganization`, `OrganizationLifecycle.delete`, before its row)              |
+| A Vault is deleted                                        | gone                                                  | stale flag                                                               | entries, values, allowances, defaults, choices (`forgetVault`)                                                                                                                                                                                        |
+| A Vault is archived, a link broken                        | skipped by `forThread`                                | stale flag                                                               | none: restoring brings it back as the Owner left it                                                                                                                                                                                                   |
+| A Membership ends, a User is disabled                     | `forbidden`                                           | stale flag                                                               | none: a disabled User's allowances wait for them                                                                                                                                                                                                      |
+| A Member becomes a Guest, or back                         | unchanged: a Guest's Threads receive the defaults too | —                                                                        | none: no reach is lost                                                                                                                                                                                                                                |
+| A credential or agent bound to one Space (`spaceLimit`)   | `forThread` answers nothing outside that Space        | —                                                                        | none: the limit is the caller's, not a row                                                                                                                                                                                                            |
+| A Thread moves to a machine that does not serve its Space | `servesSpace`: the plan is empty                      | —                                                                        | none                                                                                                                                                                                                                                                  |
 
-**Closing terminals** (`environment/TerminalOpenings.ts`). A move and a removal close terminals
+**Closing terminals: each shell carries its own facts.** A move and a removal close terminals
 rather than flag them, because the new Space's Members (or, in a shared Sandbox, the other Users)
-could drive them. The Hub enforces it, not each machine: `ThreadWorkspace` records every terminal it
-opens or attaches (`terminal_openings`: machine, Thread, terminal, the Thread's Space then, the
-opener). A terminal whose Thread is no longer in that Space, whose opener was removed, or that waits
-to close is refused for typing, resizing, clearing and watching (`outside_thread_workspace`) and
-closed; an open or attach of that id closes it first and starts a new shell, recorded anew. A move
-marks its Threads' terminals opened under another Space (`close_pending_at`, in the commit of the
-move; again on a rerun, never one opened in the new Space), a removal marks every terminal its User
-opened (in the removal's transaction). `ProjectMoveHooks.closePendingTerminals`
-(`ProjectMoveThreads`) then closes each on its machine if connected, and the record goes; a machine
-that is away, older or no longer the Thread's gets them when it connects (on every executor change).
+could drive them. Every door that starts a shell passes `TerminalManager.open` /
+`attachOutputStream` a required `TerminalStart`: its secrets and its facts, the Space its set was
+planned for and the User whose set it is (`SecretPlan.spaceId`/`userId`, the same `forThread` read;
+the WS terminal open and attach in `ThreadWorkspace`, setup and settle scripts in
+`ProjectSetupScriptRunner`). The machine keeps them with the session and reports them in its
+snapshot (`facts`, executor contract 12: `facts` in `terminal.open`/`terminal.stream`).
+
+The Hub (`ThreadWorkspace`) admits a shell only while its facts hold: it reports facts, its User is
+not removed, and its Space (when it was planned for one) is its Thread's now. The verdict is cached
+per session until the Space directory's `revision` changes (a move, a removal), so typing costs no
+query; any failure to read counts as stale. A stale shell is closed with `deleteHistory` (its
+scrollback may show the old secrets) and refused (`outside_thread_workspace`); an open or attach of
+that id then starts a new shell, once. Typing, resizing or clearing a shell the Hub never admitted
+(another door's, or from before this Hub started) is refused until it is attached or opened. A
+machine before contract 12 reports no facts: its terminals are refused with «<machine> needs an
+update to open this Thread's terminals».
+
+After a move commits (and after a User's removal), `ProjectMoveHooks.reconcileTerminals`
+(`ProjectMoveThreads`) sends each connected machine every Thread's Space and the removed Users
+(`terminal.reconcile`); `TerminalManager.reconcile` closes, with their history, the shells started
+for another Space or a removed User, and listed Threads' shells without facts, checking each again
+under its Thread's lock (a shell reopened for the new Space stays). It is fired and forgotten: the
+move and the removal do not wait, failures are logged, and it runs again for each machine as it
+connects (a new socket), so a machine that was away, older or no longer the Thread's is covered.
+
 Closing is the terminal's normal close: the shell and its PTY end. A background job (`npm run dev &`:
 the live recheck saw one outlive its shell) or a process that left the session (`setsid`, `nohup`,
 a daemon) keeps its environment: the same accepted risk as `/proc/<pid>/environ` in a shared
-Sandbox. Terminals opened before migration 115 have no record and
-are not refused. The move dialog says «Open terminals of its Threads close». After a revocation,
-live processes keep the ticket 04 rule (stale flag): nobody new gains control of them.
+Sandbox (follow-up ticket: the machine ends the session's process groups). The move dialog says
+«Open terminals of its Threads close». After a revocation, live processes keep the ticket 04 rule
+(stale flag): nobody new gains control of them.
 
 **Granting clears too.** Allowing one of the Owner's Vaults to a Space drops, in the same
 transaction, that Space's default of it and its Projects' choices of it (`clearForGrant`): any such
@@ -449,7 +464,7 @@ row can only be left from before, so a grant never brings it back unseen. Migrat
 (`VaultReachLoss`) drops once what earlier Hubs left: Vaults of Organizations that are gone
 (their values go at the next start's sweep), allowances to Spaces that are gone or to removed Users, a
 removed User's Personal-space allowances, defaults and Project choices,
-and defaults and choices of Vaults that do not reach their Space. It also creates `terminal_openings`.
+and defaults and choices of Vaults that do not reach their Space.
 
 **Checks inside the write.** `Vaults.create`, `putEntry` (adding or changing a secret), `linkEntry`,
 `copyEntry`, `allow`, `setSpaceDefaults` and `setProjectChoice` check again, inside the transaction that writes,
