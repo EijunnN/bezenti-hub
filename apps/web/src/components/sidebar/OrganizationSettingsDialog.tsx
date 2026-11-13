@@ -317,7 +317,7 @@ function MemberRow({
       </span>
       <span className="flex shrink-0 items-center gap-1">
         {member.canChangeRole ? (
-          <div className="w-28">
+          <div className="w-36">
             <Select
               disabled={busy}
               items={memberRoleItems}
