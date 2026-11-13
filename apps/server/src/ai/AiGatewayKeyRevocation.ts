@@ -1,8 +1,7 @@
 /**
- * Gateway keys revoked when what they were for ends (spec 4 ticket 04): a Thread archived or
- * deleted (a deleted one's account in use goes too), a User disabled or removed. Each request is
- * checked anyway (AiGatewayKeys.authorize); this keeps the record true. A provider session that
- * stops or detaches takes its keys with it; a move is recorded by authorize when it sees it.
+ * Gateway keys revoked when what they were for ends: a Thread archived or deleted, a provider
+ * session stopped or detached, a User disabled or removed or no longer working in a key's Space.
+ * Each request is checked anyway (AiGatewayKeys.authorize); this keeps the record true.
  */
 import type { OrchestrationV2DomainEvent, UserId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -18,12 +17,17 @@ import * as AiGatewayKeys from "./AiGatewayKeys.ts";
 export const revokeFor = Effect.fn("AiGatewayKeyRevocation.revokeFor")(function* (
   change:
     | { readonly _tag: "event"; readonly event: OrchestrationV2DomainEvent }
-    | { readonly _tag: "user"; readonly userId: UserId; readonly active: boolean },
+    | { readonly _tag: "user"; readonly userId: UserId; readonly active: boolean }
+    | { readonly _tag: "memberships"; readonly userId: UserId },
 ) {
   const keys = yield* AiGatewayKeys.AiGatewayKeys;
   const activity = yield* AiGatewayActivity.AiGatewayActivity;
   if (change._tag === "user") {
     if (!change.active) yield* keys.revokeUser(change.userId, "user-inactive");
+    return;
+  }
+  if (change._tag === "memberships") {
+    yield* keys.revokeLostSpaces(change.userId);
     return;
   }
   const { event } = change;
@@ -42,17 +46,20 @@ export const revokeFor = Effect.fn("AiGatewayKeyRevocation.revokeFor")(function*
   }
 });
 
-export const layer = Layer.effectDiscard(
+const logged = Effect.catchCause((cause) =>
+  Effect.logWarning("Could not revoke AI gateway keys", { cause }),
+);
+
+/** A User disabled or removed, or whose Memberships changed: what their keys may still reach. */
+export const layerUserChanges = Layer.effectDiscard(
   Effect.gen(function* () {
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
     const spaces = yield* SpaceDirectory.SpaceDirectory;
     const context = yield* Effect.context<
       AiGatewayKeys.AiGatewayKeys | AiGatewayActivity.AiGatewayActivity
     >();
+    // Subscribed before this layer is up, so no change made after it is missed.
     const statuses = yield* spaces.subscribeUserStatusChanges;
-    const logged = Effect.catchCause((cause) =>
-      Effect.logWarning("Could not revoke AI gateway keys", { cause }),
-    );
+    const memberships = yield* spaces.subscribeMembershipChanges;
     yield* statuses.pipe(
       Stream.runForEach((change) =>
         revokeFor({ _tag: "user", userId: change.userId, active: change.active }).pipe(
@@ -62,6 +69,21 @@ export const layer = Layer.effectDiscard(
       ),
       Effect.forkScoped,
     );
+    yield* memberships.pipe(
+      Stream.runForEach((userId) =>
+        revokeFor({ _tag: "memberships", userId }).pipe(Effect.provide(context), logged),
+      ),
+      Effect.forkScoped,
+    );
+  }),
+);
+
+const layerDomainEvents = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const context = yield* Effect.context<
+      AiGatewayKeys.AiGatewayKeys | AiGatewayActivity.AiGatewayActivity
+    >();
     yield* orchestrator.streamDomainEvents.pipe(
       Stream.filter(
         (event) =>
@@ -78,3 +100,5 @@ export const layer = Layer.effectDiscard(
     );
   }),
 );
+
+export const layer = Layer.mergeAll(layerUserChanges, layerDomainEvents);

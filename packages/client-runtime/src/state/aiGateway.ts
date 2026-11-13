@@ -71,6 +71,20 @@ export function createAiGatewayEnvironmentAtoms<R, E>(
       idleTtlMs: 0,
       refreshIntervalMs: 30_000,
     }),
+    // A User's own local CLI keys (spec 4 ticket 10); the Owner's list holds everyone's. Only
+    // `createKey` answers with a key, once.
+    listKeys: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ai-gateway-keys:list",
+      tag: WS_METHODS.aiGatewayKeysList,
+    }),
+    createKey: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ai-gateway-keys:create",
+      tag: WS_METHODS.aiGatewayKeysCreate,
+    }),
+    revokeKey: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ai-gateway-keys:revoke",
+      tag: WS_METHODS.aiGatewayKeysRevoke,
+    }),
     // Subscriptions (spec 4 ticket 03): the Owner signs in through the Hub's CLIProxyAPI, pasting
     // the address the browser lands on; a Vertex service account is imported.
     startAccountLogin: createEnvironmentRpcCommand(runtime, {

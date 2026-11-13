@@ -43,6 +43,11 @@ import {
 } from "./aiAccounts.ts";
 import {
   AiGatewayError,
+  AiGatewayKeyCreateInput,
+  AiGatewayKeyCreateResult,
+  AiGatewayKeyListResult,
+  AiGatewayKeyRevokeInput,
+  AiGatewayKeyError,
   AiGatewaySetEnabledInput,
   AiGatewayStatus,
   AiGatewayUpdateCheck,
@@ -654,6 +659,10 @@ export const WS_METHODS = {
   aiAccountsImportVertex: "aiAccounts.importVertex",
   // AI usage (spec 4 ticket 05): per day, User, Space and AI account; no quotas.
   aiUsageSummary: "aiUsage.summary",
+  // A User's own gateway keys for local CLIs (spec 4 ticket 10); the Owner sees and revokes all.
+  aiGatewayKeysList: "aiGatewayKeys.list",
+  aiGatewayKeysCreate: "aiGatewayKeys.create",
+  aiGatewayKeysRevoke: "aiGatewayKeys.revoke",
   projectCloneStart: "projectClone.start",
   projectCloneCancel: "projectClone.cancel",
   projectCloneRetry: "projectClone.retry",
@@ -1304,6 +1313,23 @@ const WsAiUsageSummaryRpc = Rpc.make(WS_METHODS.aiUsageSummary, {
   payload: AiUsageSummaryInput,
   success: AiUsageSummary,
   error: Schema.Union([AiUsageError, EnvironmentAuthorizationError]),
+});
+// Local CLI keys: only `create` answers with a key, once (Redacted); the Hub keeps its hash.
+const AiGatewayKeyErrors = Schema.Union([AiGatewayKeyError, EnvironmentAuthorizationError]);
+const WsAiGatewayKeysListRpc = Rpc.make(WS_METHODS.aiGatewayKeysList, {
+  payload: Schema.Struct({}),
+  success: AiGatewayKeyListResult,
+  error: AiGatewayKeyErrors,
+});
+const WsAiGatewayKeysCreateRpc = Rpc.make(WS_METHODS.aiGatewayKeysCreate, {
+  payload: AiGatewayKeyCreateInput,
+  success: AiGatewayKeyCreateResult,
+  error: AiGatewayKeyErrors,
+});
+const WsAiGatewayKeysRevokeRpc = Rpc.make(WS_METHODS.aiGatewayKeysRevoke, {
+  payload: AiGatewayKeyRevokeInput,
+  success: AiGatewayKeyListResult,
+  error: AiGatewayKeyErrors,
 });
 const WsAiAccountsCreateRpc = Rpc.make(WS_METHODS.aiAccountsCreate, {
   payload: AiAccountCreateInput,
@@ -2296,6 +2322,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsAiAccountsLoginCompleteRpc,
   WsAiAccountsImportVertexRpc,
   WsAiUsageSummaryRpc,
+  WsAiGatewayKeysListRpc,
+  WsAiGatewayKeysCreateRpc,
+  WsAiGatewayKeysRevokeRpc,
   WsProjectCloneStartRpc,
   WsProjectCloneCancelRpc,
   WsProjectCloneRetryRpc,

@@ -1385,24 +1385,15 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
    * Anyone else: the accounts AllowedAiAccounts lets them use in the Spaces they may act in now
    * (a session limited to one Space: that one), with where; name, provider and status only.
    */
-  const usableList = Effect.fn("AiAccounts.usableList")(function* (
-    userId: UserId,
-    can: (action: AccessPolicy.Action, resource: AccessPolicy.Resource) => boolean,
-  ) {
+  const usableList = Effect.fn("AiAccounts.usableList")(function* (userId: UserId) {
     const limit = yield* CommandActor.spaceLimit;
     const viewable = yield* spaces
       .viewableSpaces(userId)
       .pipe(Effect.catch(storage("read your Spaces")));
     const candidates = limit !== undefined ? [limit] : viewable === "all" ? [] : [...viewable];
-    const known = yield* spaces
-      .spacesById(candidates)
-      .pipe(Effect.catch(storage("read your Spaces")));
-    const working = candidates.filter((spaceId) => {
-      const space = known.get(spaceId);
-      return space !== undefined && can("aiAccount.use", space.resource);
-    });
+    // AllowedAiAccounts keeps to the Spaces the User works in (its one rule).
     const bySpace = yield* allowed
-      .forSpaces(userId, working)
+      .forSpaces(userId, candidates)
       .pipe(Effect.catch(storage("read the AI accounts you may use")));
     const usableIn = new Map<string, Array<SpaceId>>();
     for (const [spaceId, accounts] of bySpace) {
@@ -1425,8 +1416,8 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
   });
 
   const list = Effect.gen(function* () {
-    const { userId, manages, can } = yield* caller;
-    const accounts = manages ? yield* ownerAccounts(userId) : yield* usableList(userId, can);
+    const { userId, manages } = yield* caller;
+    const accounts = manages ? yield* ownerAccounts(userId) : yield* usableList(userId);
     return { accounts, canManage: manages } satisfies AiAccountListResult;
   }).pipe(Effect.withSpan("AiAccounts.list"));
 

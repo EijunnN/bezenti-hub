@@ -1,5 +1,7 @@
 import * as Schema from "effect/Schema";
 
+import { SpaceId, TrimmedNonEmptyString, UserId } from "./baseSchemas.ts";
+
 /**
  * What the Hub's AI gateway (the CLIProxyAPI it runs, docs/internals/ai-gateway.md) is doing:
  * `off` (`T3CODE_AI_GATEWAY=off`), `unsupported` (no release for this platform), `installing`,
@@ -75,3 +77,59 @@ export const AI_GATEWAY_KEY_PREFIX = "t3gk_";
 /** `thread`: issued for one Thread's provider session; `user`: a User's key for a local CLI. */
 export const AiGatewayKeyKind = Schema.Literals(["thread", "user"]);
 export type AiGatewayKeyKind = typeof AiGatewayKeyKind.Type;
+
+/**
+ * Spec 4 ticket 10: a User's own gateway keys for local CLIs (Claude Code, Codex on their machine),
+ * each for one Space they work in. Made, listed and revoked in Settings only (WS `aiGatewayKeys.*`):
+ * no agent, MCP tool or HTTP endpoint makes or lists one.
+ */
+export const AiGatewayKeyName = TrimmedNonEmptyString.check(Schema.isMaxLength(80));
+
+export const AiGatewayKeyCreateInput = Schema.Struct({
+  name: AiGatewayKeyName,
+  /** A Space the User works in. Default: their Personal space. */
+  spaceId: Schema.optionalKey(SpaceId),
+});
+export type AiGatewayKeyCreateInput = typeof AiGatewayKeyCreateInput.Type;
+
+/** A User key as the Hub lists it: never the key, nor its hash. */
+export const AiGatewayUserKey = Schema.Struct({
+  keyId: TrimmedNonEmptyString,
+  name: Schema.String,
+  userId: UserId,
+  /** The User's name, for the Owner's list of everyone's keys. */
+  userName: Schema.NullOr(Schema.String),
+  spaceId: SpaceId,
+  /** Null for a Space that no longer exists (the Owner lists every User's keys). */
+  spaceName: Schema.NullOr(Schema.String),
+  createdAt: Schema.String,
+  /** Written at most once a minute per key. */
+  lastUsedAt: Schema.NullOr(Schema.String),
+});
+export type AiGatewayUserKey = typeof AiGatewayUserKey.Type;
+
+export const AiGatewayKeyListResult = Schema.Struct({
+  keys: Schema.Array(AiGatewayUserKey),
+  /** True for the Owner, who sees and may revoke every User's keys. */
+  everyone: Schema.Boolean,
+});
+export type AiGatewayKeyListResult = typeof AiGatewayKeyListResult.Type;
+
+/** The one answer that carries a key: right after it is made, shown once, never stored. */
+export const AiGatewayKeyCreateResult = Schema.Struct({
+  created: AiGatewayUserKey,
+  key: Schema.RedactedFromValue(Schema.String),
+});
+export type AiGatewayKeyCreateResult = typeof AiGatewayKeyCreateResult.Type;
+
+export const AiGatewayKeyRevokeInput = Schema.Struct({ keyId: TrimmedNonEmptyString });
+export type AiGatewayKeyRevokeInput = typeof AiGatewayKeyRevokeInput.Type;
+
+/** Why making, listing or revoking a key failed, in words for its User; never a key. */
+export class AiGatewayKeyError extends Schema.TaggedError<AiGatewayKeyError>()(
+  "AiGatewayKeyError",
+  {
+    reason: Schema.Literals(["forbidden", "not-found", "invalid", "limit", "storage"]),
+    message: Schema.String,
+  },
+) {}

@@ -214,6 +214,41 @@ describe("command permissions", () => {
     ),
   );
 
+  it.effect("requires the destination access:write grant to make or revoke a local CLI key", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const create = createCommandPermissions(runtime, WS_METHODS.aiGatewayKeysCreate);
+        const revoke = createCommandPermissions(runtime, WS_METHODS.aiGatewayKeysRevoke);
+        // Every other scope a browser session holds, but not access:write.
+        registry.set(
+          sessions(env),
+          AsyncResult.success({
+            ...grant(true),
+            scopes: [AuthOrchestrationOperateScope, AuthSettingsWriteScope],
+            permissions: [AuthOrchestrationOperateScope, AuthSettingsWriteScope],
+          }),
+        );
+        for (const permissions of [create, revoke]) {
+          expect(registry.get(permissions.permissionAtom(env))).toBe(false);
+          yield* permissions.authorize(registry, env).pipe(Effect.flip);
+        }
+        registry.set(
+          sessions(env),
+          AsyncResult.success({
+            ...grant(false),
+            scopes: [AuthAccessWriteScope],
+            permissions: [AuthAccessWriteScope],
+          }),
+        );
+        for (const permissions of [create, revoke]) {
+          expect(registry.get(permissions.permissionAtom(env))).toBe(true);
+          yield* permissions.authorize(registry, env);
+        }
+      }),
+    ),
+  );
+
   it.effect("requires the destination settings grant to check OTLP endpoints", () =>
     Effect.scoped(
       Effect.gen(function* () {

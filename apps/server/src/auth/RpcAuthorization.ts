@@ -95,6 +95,9 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.aiAccountsList]: AuthOrchestrationReadScope,
   // Counts of what passed through the gateway layer, narrowed to what the session may see.
   [WS_METHODS.aiUsageSummary]: AuthOrchestrationReadScope,
+  // The session's own local CLI keys (no key in the answer); making and revoking one is
+  // CLIENT_GUARDED_RPC_SCOPES' (access:write).
+  [WS_METHODS.aiGatewayKeysList]: AuthAccessReadScope,
   // Asks GitHub for the newest release, as the Owner opens Settings → AI gateway.
   [WS_METHODS.aiGatewayCheckForUpdates]: AuthSettingsWriteScope,
   [WS_METHODS.serverUpdateSettings]: AuthSettingsWriteScope,

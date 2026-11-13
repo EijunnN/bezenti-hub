@@ -305,6 +305,55 @@ describe("every door of the Hub declares its rule", () => {
     expect(relay).not.toMatch(/EnvironmentAuth|ServerSecretStore|joinedHubState|\.credential\b/u);
   });
 
+  it("makes, lists and revokes local CLI keys over the session's WS RPCs only: no HTTP, raw route or MCP door, the key in one answer (spec 4 ticket 10)", () => {
+    const keyRpcs = [...WsRpcGroup.requests.values()].filter((rpc) =>
+      /^aiGatewayKeys\./u.test(rpc._tag),
+    );
+    expect(keyRpcs.map((rpc) => rpc._tag).toSorted()).toEqual([
+      "aiGatewayKeys.create",
+      "aiGatewayKeys.list",
+      "aiGatewayKeys.revoke",
+    ]);
+    // Decided in AiGatewayKeys for the session's own person (not the Owner's alone).
+    for (const rpc of keyRpcs) {
+      expect(typeof spaceAccessForRpcMethod(rpc._tag), rpc._tag).toBe("object");
+    }
+    expect(
+      [
+        ...Object.keys(HTTP_ENDPOINT_RULES),
+        ...Object.keys(MCP_TOOL_RULES),
+        ...Object.keys(RAW_ROUTE_RULES),
+        ...rawRoutes,
+        ...mcpTools,
+        ...endpoints,
+      ].filter((name) => /gateway[-_ ]?key/iu.test(name)),
+    ).toEqual([]);
+    // Only `create` answers with the key; no answer carries a hash.
+    for (const rpc of keyRpcs) {
+      const fields = successFields(rpc.successSchema.ast);
+      expect(fields.has("key"), rpc._tag).toBe(rpc._tag === "aiGatewayKeys.create");
+      for (const secret of ["hash", "keyHash", "secret", "token"]) {
+        expect(fields, rpc._tag).not.toContain(secret);
+      }
+    }
+    // The session doors are reached from the WS RPCs alone: no MCP tool module, HTTP API or
+    // other door makes, lists or revokes a User's key.
+    expect(
+      files
+        .filter(({ text }) =>
+          /\.(createForSession|listForSession|revokeForSession|createForUser|listUserKeys)\(|\.listForSession\b/u.test(
+            text,
+          ),
+        )
+        .map(({ file }) => file)
+        .filter((file) => file !== "ai/AiGatewayKeys.ts")
+        .toSorted(),
+    ).toEqual(["ws.ts"]);
+    for (const { file, text } of toolModules) {
+      expect(text, file).not.toMatch(/AiGatewayKeys/u);
+    }
+  });
+
   it("reads AI usage over one WS RPC only, counts only: no HTTP, raw route or MCP door, tables read by AiUsage alone (spec 4 ticket 05)", () => {
     const usageRpcs = [...WsRpcGroup.requests.values()].filter((rpc) =>
       /^aiUsage\./u.test(rpc._tag),
