@@ -181,7 +181,7 @@ function makeFxAcpAdapterFlavor(options: FxAdapterV2Options): AcpAdapterV2Flavor
     // Spec 5: its own runtime starts fx with `processEnvironment` (a Thread's secrets in it).
     ...(options.makeRuntime === undefined ? { receivesSecretEnv: true as const } : {}),
     // Spec 4 ticket 07: on a Hub turn it runs on a direct AI account's key, never a login.
-    acceptsAiCredential: ["AI_GATEWAY_API_KEY"],
+    ...(options.makeRuntime === undefined ? { acceptsAiCredential: ["AI_GATEWAY_API_KEY"] } : {}),
     applyModelSelection: ({ runtime, modelSelection }) =>
       applyFxModelSelection(runtime, modelSelection, options.defaultModel).pipe(
         Effect.tap(() => applyFxEffortDefault(runtime, modelSelection)),

@@ -4,8 +4,12 @@ import { expect, it } from "@effect/vitest";
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
   ProviderInstanceId,
+  ProviderSessionId,
+  ThreadId,
   type AntigravitySettings,
 } from "@t3tools/contracts";
+import { openSessionWithSecrets } from "@t3tools/provider-core/server/instanceEnvironment";
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -373,6 +377,77 @@ it.layer(layerTest)("AntigravityDriver", (it) => {
       expect(h.acquisitions).toHaveLength(2);
       expect(h.releases).toEqual([h.first.version]);
       yield* h.assertClosed;
+    }).pipe(Effect.scoped),
+  );
+
+  const DIRECT_GEMINI_KEY = "direct-gemini-key-0123456789abcdef";
+  const openHubTurn = (
+    h: Effect.Success<ReturnType<typeof makeHarness>>,
+    credential: { readonly name: string; readonly value: string },
+  ) =>
+    openSessionWithSecrets(h.instance.orchestrationAdapter, {
+      threadId: ThreadId.make("thread-antigravity-direct"),
+      providerSessionId: ProviderSessionId.make("provider-session-antigravity-direct"),
+      modelSelection: { instanceId: h.instance.instanceId, model: "gemini-test-low" },
+      runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: process.cwd(),
+      }),
+      secretEnv: { fingerprint: "direct", variables: [credential], aiCredential: credential.name },
+    });
+
+  it.effect.skipIf(windowsHost)(
+    "runs a Hub turn on its direct Gemini key, in a profile that never held a Google sign-in",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness({ config: { authMethod: "gemini-api-key" } });
+        yield* openHubTurn(h, { name: "GEMINI_API_KEY", value: DIRECT_GEMINI_KEY });
+        const native = h.launches.filter((launch) => launch.harnessPath !== undefined);
+        expect(native).toHaveLength(1);
+        // The AI account's key, never the instance's (`must-not-be-used`).
+        expect(native[0]?.geminiApiKey).toBe(DIRECT_GEMINI_KEY);
+        expect(native[0]?.credentialKeys).toEqual(["GEMINI_API_KEY"]);
+        expect(native[0]?.profileDirectory).toBe(`${h.profileDirectory}-ai-account`);
+        expect(native[0]?.args.join(" ")).not.toContain(DIRECT_GEMINI_KEY);
+        const requests = yield* h.readRequests;
+        expect(
+          requests
+            .filter((request) => request.method === "auth/login")
+            .map((request) => request.params?.methodId),
+        ).toEqual(["gemini-api-key"]);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect.skipIf(windowsHost)(
+    "never starts a Hub turn on an instance set to sign in with a Google account",
+    () =>
+      Effect.gen(function* () {
+        for (const authMethod of ["oauth-personal", "oauth-business"] as const) {
+          const h = yield* makeHarness({
+            config: { authMethod, gcpProject: "p", gcpLocation: "l" },
+          });
+          const error = yield* openHubTurn(h, {
+            name: "GEMINI_API_KEY",
+            value: DIRECT_GEMINI_KEY,
+          }).pipe(Effect.flip);
+          expect(String(error.message) + JSON.stringify(error)).toContain(
+            "Use the Owner's Google account through the AI gateway",
+          );
+          expect(h.launches.filter((launch) => launch.harnessPath !== undefined)).toEqual([]);
+        }
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect.skipIf(windowsHost)("refuses a direct credential it does not run on", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({ config: { authMethod: "gemini-api-key" } });
+      const error = yield* openHubTurn(h, {
+        name: "CURSOR_API_KEY",
+        value: "crsr-not-for-antigravity-0123456789",
+      }).pipe(Effect.flip);
+      expect(JSON.stringify(error)).toContain("AiGatewaySessionError");
+      expect(h.launches).toEqual([]);
     }).pipe(Effect.scoped),
   );
 

@@ -547,7 +547,7 @@ function makeKiroAcpAdapterFlavor(options: KiroAdapterV2Options): AcpAdapterV2Fl
     // Spec 5: its own runtime starts Kiro with `processEnvironment` (a Thread's secrets in it).
     ...(options.makeRuntime === undefined ? { receivesSecretEnv: true as const } : {}),
     // Spec 4 ticket 07: on a Hub turn it runs on a direct AI account's key, never a login.
-    acceptsAiCredential: ["KIRO_API_KEY"],
+    ...(options.makeRuntime === undefined ? { acceptsAiCredential: ["KIRO_API_KEY"] } : {}),
     promptFailure: kiroPromptFailure,
     ignoreSessionUpdate: makeKiroCloudConfigFilter(),
     normalizeSessionUpdate: (notification) =>

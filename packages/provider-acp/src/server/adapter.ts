@@ -353,7 +353,7 @@ export interface AcpAdapterV2Flavor {
   readonly receivesSecretEnv?: true;
   /**
    * Spec 4 ticket 07: the variables of a direct AI account credential the agent runs on (its
-   * process drops every ambient AI credential, `applySecretEnv`). Needs `receivesSecretEnv`.
+   * process drops every ambient AI credential, `applySecretEnv`), from `processEnvironment`.
    */
   readonly acceptsAiCredential?: ReadonlyArray<string>;
   readonly makeRuntime: (
@@ -1693,7 +1693,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
     instanceId: options.instanceId,
     driver,
     ...(flavor.receivesSecretEnv === true ? { receivesSecretEnv: true as const } : {}),
-    ...(flavor.receivesSecretEnv === true && flavor.acceptsAiCredential !== undefined
+    ...(flavor.acceptsAiCredential !== undefined
       ? { acceptsAiCredential: flavor.acceptsAiCredential }
       : {}),
     getCapabilities: Effect.fn("AcpAdapter.getCapabilities")(function () {

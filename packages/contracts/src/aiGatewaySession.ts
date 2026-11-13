@@ -146,7 +146,7 @@ export class AiGatewaySessionError extends Schema.TaggedError<AiGatewaySessionEr
       case "insecure-hub":
         return "This machine reaches the Hub over plain HTTP, so it can't use the Hub's AI accounts. Join it to the Hub's https:// address.";
       case "login-method":
-        return `${this.provider ?? "This provider"} is set to sign in with an account, which Hub turns never use. Pick «Gemini API key» or «Agent Platform (Vertex AI)» in its settings; use the Owner's Google account through the AI gateway.`;
+        return `${this.provider ?? "This provider"} is set to sign in with an account, which Hub turns never use. Pick «Gemini API key» or «Agent Platform (Vertex AI)» in its settings. Use the Owner's Google account through the AI gateway.`;
     }
   }
 }
