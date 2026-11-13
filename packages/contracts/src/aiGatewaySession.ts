@@ -29,7 +29,10 @@ export const AI_GATEWAY_DRIVERS: ReadonlySet<string> = new Set([
  * its credential reaches the process under. Antigravity never gets the Owner's Google account;
  * Grok ignores `GROK_CLI_CHAT_PROXY_BASE_URL` with an API key; ACP Registry is Devin only.
  */
-export const AI_DIRECT_DRIVERS: ReadonlyMap<string, Readonly<Record<string, string>>> = new Map([
+export const AI_DIRECT_DRIVERS: ReadonlyMap<string, Readonly<Record<string, string>>> = new Map<
+  string,
+  Readonly<Record<string, string>>
+>([
   ["antigravity", { gemini: "GEMINI_API_KEY", vertex: "GOOGLE_API_KEY" }],
   ["cursor", { cursor: "CURSOR_API_KEY" }],
   ["kiro", { kiro: "KIRO_API_KEY" }],
