@@ -40,6 +40,10 @@ const messageOf = (cause: unknown) =>
  * stay on web and desktop (spec 5, «Clientes»). The Hub decides again on every call.
  */
 export function VaultsList(props: { readonly environmentId: EnvironmentId }) {
+  return <VaultsPage key={props.environmentId} environmentId={props.environmentId} />;
+}
+
+function VaultsPage(props: { readonly environmentId: EnvironmentId }) {
   const { environmentId } = props;
   const selections = useSpaceSelections();
   const isOwner = selections.get(environmentId)?.view?.isOwner === true;
@@ -176,7 +180,7 @@ function VaultCard(props: {
       ) : null}
       {props.entries.map((entry) => (
         <EntryRow
-          key={entry.id}
+          key={`${entry.id}:${entryActions(vault, entry, context).replace}`}
           entry={entry}
           canReplace={entryActions(vault, entry, context).replace}
           onReplace={(value) =>

@@ -52,8 +52,11 @@ export function entryActions(
   },
 ): VaultActions {
   const base = vaultActions(vault, context);
+  const dangerousOnPhone =
+    context.surface === "mobile" && secretNameRisk(entry.name) === "dangerous";
   const mayReplace =
     base.replace &&
+    !dangerousOnPhone &&
     entry.kind !== "link" &&
     (secretNameRisk(entry.name) !== "dangerous" || context.isOwner);
   return { ...base, replace: mayReplace };

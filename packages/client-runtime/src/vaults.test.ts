@@ -73,6 +73,13 @@ describe("entryActions", () => {
     expect(entryActions(vault(), entry({ name: "NODE_OPTIONS" }), ctx).replace).toBe(false);
     expect(
       entryActions(vault(), entry({ name: "NODE_OPTIONS" }), { ...ctx, isOwner: true }).replace,
+    ).toBe(false);
+    expect(
+      entryActions(vault(), entry({ name: "NODE_OPTIONS" }), {
+        ...ctx,
+        surface: "web",
+        isOwner: true,
+      }).replace,
     ).toBe(true);
     expect(entryActions(vault(), entry(), ctx).replace).toBe(true);
   });

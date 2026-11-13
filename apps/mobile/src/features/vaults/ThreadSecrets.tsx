@@ -14,6 +14,19 @@ export function ThreadSecrets(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
 }) {
+  return (
+    <ThreadSecretsPanel
+      key={props.threadId}
+      environmentId={props.environmentId}
+      threadId={props.threadId}
+    />
+  );
+}
+
+function ThreadSecretsPanel(props: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+}) {
   const read = useAtomCommand(serverEnvironment.threadVaultEnvironment, "read a Thread's secrets");
   const [open, setOpen] = useState(false);
   const [shown, setShown] = useState<{

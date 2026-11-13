@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 const { mocks } = vi.hoisted(() => ({
   mocks: {
     mayWrite: true,
+    listeners: new Set<() => void>(),
     isOwner: false,
     commands: {} as Record<string, ReturnType<typeof vi.fn>>,
   },
@@ -20,7 +21,19 @@ vi.mock("../../components/ui/Button", async () => (await import("./testkit")).na
 vi.mock("../../components/ui/ListSection", async () =>
   (await import("./testkit")).nativeMocks.listSection(),
 );
-vi.mock("@effect/atom-react", () => ({ useAtomValue: () => mocks.mayWrite }));
+vi.mock("@effect/atom-react", async () => {
+  const { useSyncExternalStore } = await import("react");
+  return {
+    useAtomValue: () =>
+      useSyncExternalStore(
+        (listener) => {
+          mocks.listeners.add(listener);
+          return () => mocks.listeners.delete(listener);
+        },
+        () => mocks.mayWrite,
+      ),
+  };
+});
 vi.mock("../../state/server", () => ({
   serverEnvironment: {
     listVaults: { id: "list" },
@@ -129,7 +142,7 @@ describe("Settings → Vaults on mobile", () => {
 
   it("hides the edit controls from an Admin whose session lacks the write grant", async () => {
     mocks.mayWrite = false;
-    await setup(vault({ canEdit: true }));
+    await act(async () => mocks.listeners.forEach((listener) => listener()));
     expect(text()).not.toContain("Replace value");
     expect(text()).not.toContain("Add secret");
   });
@@ -181,6 +194,27 @@ describe("Settings → Vaults on mobile", () => {
     expect((byLabel("Save secret") as HTMLButtonElement).disabled).toBe(true);
     expect(text()).toContain("The Hub reserves this name.");
     expect(mocks.commands.put).not.toHaveBeenCalled();
+  });
+
+  it("offers the Owner no Replace on a name that changes how tools run", async () => {
+    mocks.isOwner = true;
+    const dangerous = { ...entries[0], id: "e3", name: "NODE_OPTIONS" } as unknown as VaultEntry;
+    mocks.commands.list = vi.fn(() => ok({ vaults: [vault({ canEdit: true })] }));
+    mocks.commands.entries = vi.fn(() => ok({ entries: [entries[0], dangerous] }));
+    mocks.commands.put = vi.fn(() => ok({ entry: entries[0], warnings: [] }));
+    await act(async () => root?.render(<VaultsList environmentId={hub} />));
+    await act(async () => {});
+    expect(byLabel("Replace value of GITHUB_TOKEN")).not.toBeNull();
+    expect(byLabel("Replace value of NODE_OPTIONS")).toBeNull();
+  });
+
+  it("closes an open Replace form when the write grant goes away", async () => {
+    await setup(vault({ canEdit: true }));
+    await click("Replace value of GITHUB_TOKEN");
+    expect(byLabel("New value for GITHUB_TOKEN")).not.toBeNull();
+    mocks.mayWrite = false;
+    await act(async () => mocks.listeners.forEach((listener) => listener()));
+    expect(byLabel("New value for GITHUB_TOKEN")).toBeNull();
   });
 
   it("shows the server's refusal and keeps the typed value out of the page", async () => {
