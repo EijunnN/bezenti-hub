@@ -3425,6 +3425,39 @@ describe("Space visibility", () => {
     ),
   );
 
+  it.effect("a copy read (unmasked) needs what a save needs, not only what a read does", () =>
+    withTeam(({ server, ada, gus }) =>
+      Effect.gen(function* () {
+        const outcome = <A, E, R>(call: Effect.Effect<A, E, R>) =>
+          call.pipe(
+            Effect.flip,
+            Effect.map((error) => (error as { readonly _tag: string })._tag),
+            Effect.catchCause(() => Effect.succeed("reached")),
+          );
+        const asGus = yield* connectWriter(server, gus.userId);
+        const asAda = yield* connectWriter(server, ada.userId);
+        const read = (client: Writer, input: Record<string, unknown>) =>
+          outcome(
+            client[WS_METHODS.projectsReadFile]({ relativePath: "README.md", ...input } as never),
+          );
+        // A Guest reads the team's Project, but works only in their own Threads' folders.
+        assert.notEqual(
+          yield* read(asGus, { cwd: "/work/acme-app" }),
+          "SpaceResourceNotFoundError",
+        );
+        assert.equal(
+          yield* read(asGus, { cwd: "/work/acme-app", forCopy: true }),
+          "SpaceResourceNotFoundError",
+        );
+        // An Admin who sees another User's Thread reads it, but copies only from her own.
+        assert.equal(
+          yield* read(asAda, { cwd: "/work/acme-app", threadId: "grace-thread", forCopy: true }),
+          "SpaceActionDeniedError",
+        );
+      }),
+    ),
+  );
+
   it.effect(
     "a file call with no Thread, or a draft's, keeps to folders of Spaces the User sees",
     () =>

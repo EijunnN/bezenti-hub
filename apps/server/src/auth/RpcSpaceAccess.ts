@@ -455,7 +455,12 @@ export const guardRpcPayload = Effect.fn("RpcSpaceAccess.guardRpcPayload")(funct
     ]);
     return !visible.has(threadId as ThreadId) && !hidden.has(threadId);
   });
-  const access = spaceAccessForRpcMethod(method);
+  // Spec 5 ticket 05: a copy read answers the file unmasked, so it keeps to what a save does.
+  const access =
+    method === WS_METHODS.projectsReadFile &&
+    (payload as { readonly forCopy?: unknown } | null)?.forCopy === true
+      ? "workIfThread"
+      : spaceAccessForRpcMethod(method);
   // An RPC that does not say how it keeps to what the session may see runs for nobody.
   if (access === undefined) return yield* notFound();
   // The Owner sees everything (as does a session from before any Owner); no one else, not even

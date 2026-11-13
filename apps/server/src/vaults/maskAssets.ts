@@ -21,10 +21,22 @@ const NOT_STORED: Record<string, string> = {
   "x-content-type-options": "nosniff",
 };
 
-/** Types served as they are: never text a process printed into. */
-const isMedia = (contentType: string) =>
-  /^(image|audio|video|font)\//.test(contentType) ||
-  /^application\/(pdf|zip|gzip|x-tar|octet-stream|wasm)/.test(contentType);
+/**
+ * Binary media and archives, served as they are, by extension: never by a MIME table, which calls
+ * TypeScript (`.ts`, `.mts`) video and SVG an image. Everything else is sniffed.
+ */
+const MEDIA_EXTENSIONS = new Set(
+  [
+    "png jpg jpeg gif webp avif bmp ico tif tiff heic",
+    "mp3 wav ogg oga flac aac m4a opus",
+    "mp4 m4v mov webm mkv avi ogv",
+    "zip gz tgz tar bz2 xz 7z rar zst",
+    "pdf woff woff2 ttf otf wasm",
+  ].flatMap((group) => group.split(" ")),
+);
+
+const isMedia = (filePath: string) =>
+  MEDIA_EXTENSIONS.has(filePath.slice(filePath.lastIndexOf(".") + 1).toLowerCase());
 
 /** Masked files, by file, revision and User: a range request reads them once. */
 const maskedCache = new Map<string, Uint8Array>();
@@ -51,8 +63,10 @@ export const maskedAssetText = Effect.fn("SecretMasker.maskedAssetText")(functio
 ) {
   const masker = yield* Effect.serviceOption(SecretMasker.SecretMasker);
   if (Option.isNone(masker)) return undefined;
-  const contentType = Option.getOrElse(Mime.getType(filePath), () => "text/plain");
-  if (isMedia(contentType)) return undefined;
+  if (isMedia(filePath)) return undefined;
+  // Served as text: its own type, unless a MIME table would call it media.
+  const known = Option.getOrElse(Mime.getType(filePath), () => "text/plain");
+  const contentType = /^(video|audio|image)\//.test(known) ? "text/plain" : known;
   const fileSystem = yield* FileSystem.FileSystem;
   const info = yield* Effect.option(fileSystem.stat(filePath));
   if (Option.isNone(info)) return undefined;

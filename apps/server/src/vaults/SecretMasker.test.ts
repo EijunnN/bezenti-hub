@@ -46,6 +46,7 @@ import * as CommandOutputHub from "../orchestration-v2/CommandOutputHub.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as PullRequestReviewGuides from "../persistence/PullRequestReviewGuides.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import { maskingCheckoutReads } from "./maskCheckoutReads.ts";
@@ -820,6 +821,52 @@ describe("SecretMasker: a checkout file served by URL", () => {
       yield* fileSystem.writeFile(binary, new Uint8Array([1, 0, 2, 3]));
       assert.isUndefined(yield* maskedAssetText(binary, Option.none()));
       assert.equal((yield* maskedAssetText(secretFile, Option.none()))?.status, 403);
+      // Text whose type a MIME table calls media (TypeScript as MPEG-TS, SVG as an image) is text.
+      for (const name of ["config.ts", "module.mts", "logo.svg"]) {
+        const file = `${dir}/${name}`;
+        yield* fileSystem.writeFileString(file, `const t = "${TOKEN}";\n`);
+        assert.equal((yield* maskedAssetText(file, Option.none()))?.status, 403, name);
+        const masked = yield* maskedAssetText(file, Option.some(viewer));
+        const body = masked?.body;
+        assert.include(
+          body?._tag === "Uint8Array" ? new TextDecoder().decode(body.body) : "",
+          "[API_TOKEN]",
+          name,
+        );
+      }
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(layerMasker, NodeServices.layer))),
+  );
+});
+
+describe("SecretMasker: a review guide as stored", () => {
+  it.effect("is not stored when its generator's values cannot be read", () =>
+    Effect.gen(function* () {
+      const repository = yield* PullRequestReviewGuides.PullRequestReviewGuideRepository;
+      const key = { host: "github.com", repository: "acme/web", number: 7 } as never;
+      const stored = yield* Effect.exit(
+        repository.put(
+          key,
+          {
+            headSha: `sha-${TOKEN}`,
+            generatedAt: "2026-11-13T00:00:00.000Z",
+            modelSelection: { instanceId: "codex", model: "gpt-5" },
+            stops: [],
+          } as never,
+          Option.some(UserId.make("generator")),
+        ),
+      );
+      assert.isTrue(Exit.isFailure(stored), "the generation fails");
+      const sql = yield* SqlClient.SqlClient;
+      const rows = yield* sql`SELECT * FROM pull_request_review_guides`;
+      assert.lengthOf(rows, 0);
+    }).pipe(
+      Effect.provide(
+        PullRequestReviewGuides.layer.pipe(
+          Layer.provideMerge(
+            Layer.merge(layerDatabase, Layer.succeed(SecretMasker.SecretMasker, failingMasker)),
+          ),
+        ),
+      ),
+    ),
   );
 });

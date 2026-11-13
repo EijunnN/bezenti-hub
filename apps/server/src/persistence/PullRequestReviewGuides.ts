@@ -6,9 +6,6 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { hideErrorText } from "@t3tools/shared/secretMasking";
-
-import { HIDDEN_CONTENT } from "../vaults/maskWorkspace.ts";
 import * as SecretMasker from "../vaults/SecretMasker.ts";
 import * as SqlSchema from "effect/sql/SqlSchema";
 
@@ -80,9 +77,10 @@ const make = Effect.gen(function* () {
       return (
         Option.isNone(masker) || Option.isNone(user)
           ? Effect.succeed(unmasked)
-          : masker.value.forUser(user.value).pipe(
+          : // Values that cannot be read: not stored (the generation fails, and can be run again).
+            masker.value.forUser(user.value).pipe(
               Effect.map((found) => found.maskDeep(unmasked)),
-              Effect.orElseSucceed(() => hideErrorText(unmasked, HIDDEN_CONTENT)),
+              Effect.orDie,
             )
       ).pipe(
         Effect.flatMap(encodeGuide),

@@ -1291,7 +1291,8 @@ export const make = Effect.gen(function* () {
               failure: "operation_failed",
               message: FILE_HOLDS_SECRETS,
             });
-            // The file as it is now, read as the write would be (this read never leaves the Hub).
+            // The file as it is now, read as the write would be (acting: a stopped Sandbox starts;
+            // this read never leaves the Hub).
             const current = yield* calls
               .readFile(
                 {
@@ -1300,7 +1301,7 @@ export const make = Effect.gen(function* () {
                   ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
                   allowMissing: true,
                 },
-                caller,
+                acting(caller),
               )
               .pipe(Effect.option);
             // Fails closed: a file that cannot be read or checked whole is not written over.
