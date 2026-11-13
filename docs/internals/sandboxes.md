@@ -569,8 +569,9 @@ Spec 1's `project.move` (the Project and every Thread in it) adds what Sandboxes
   in that Space with any Role, Guests included (`owner-left`). The executor's check before a turn
   uses it, with one message per refusal.
 - **The plan first.** `POST /api/projects/move-plan {projectId, spaceId}` answers `running`
-  (Threads the move stops) and `needsEnvironment` (Threads whose Active environment does not serve
-  the destination). `POST /api/projects/move` moves and answers `{ project, released }`, the
+  (Threads the move stops), `needsEnvironment` (Threads whose Active environment does not serve
+  the destination) and `vaultsLost` (spec 5 ticket 07: the Vaults its Threads stop receiving,
+  `EffectiveVaults.projectMove`; see secrets.md, «Losing reach»). `POST /api/projects/move` moves and answers `{ project, released }`, the
   Threads it actually released. Both (DoorRules) follow the rule of `projects.mutate`, checked as
   the move is (`project.move` on both Spaces; a hidden Project answers like a missing one), and run
   once the Hub is ready, as `projects.mutate` does.
