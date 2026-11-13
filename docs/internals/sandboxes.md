@@ -485,8 +485,12 @@ the same tags and versions; the machine's Sandbox runs it from its next start. A
 15 seconds, `awaitDedicatedRuntime`; a failed `podman info` then is waited out too), and starts
 its Sandbox once it is built, without a restart.
 
-**Provider logins** live in the Sandbox's home (`~/.claude`, `~/.codex`, …), its volume, not in the
-image: they outlive every new image.
+**Provider logins** in the Sandbox's home (`~/.claude`, `~/.codex`, …) are no longer used by Hub
+turns (spec 4 ticket 06): Claude Code, Codex, OpenCode and Pi run on the Hub's AI gateway with a
+provider home of the Thread's own (`<home>/userdata/provider-homes/<thread>/<driver>`), and a Sandbox
+turn without an allowed AI account fails with «No AI account is allowed to you in this Space»
+instead of falling back to a login. See [ai-gateway.md](./ai-gateway.md), «Agents through the
+gateway».
 
 **Tests.** The testkit runs Sandboxes from no image; a runtime that reports versions
 (`sandboxImageVersion`) and a fake builder (`sandboxImageBuilder`) test the policy

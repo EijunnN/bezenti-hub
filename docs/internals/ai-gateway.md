@@ -315,6 +315,51 @@ rest, so any other door (ticket 06's relay included) reuses it.
   Hub socket, which forwards `/api/ai/…` (and still nothing of CLIProxyAPI, which listens on loopback
   only). The key is what decides.
 
+## Agents through the gateway (spec 4 ticket 06)
+
+- **When:** `AiGatewaySessions.applies`: a driver that takes a base URL (`claudeAgent`, `codex`,
+  `opencode`, `pi`; `AI_GATEWAY_DRIVERS`), on a Hub with any AI account, or in a Sandbox or
+  dedicated machine always (their logins are retired). Such a Thread gets a provider process of its
+  own (`Orchestrator.providerSessionIdFor`), never Codex's shared app-server.
+- **One rule** (`ai/AiGatewaySessions.forSession`, called by `ProviderSessionManager` only when a
+  process starts): the machine's executor contract must be 11 (else «<machine> needs an update to use
+  the Hub's AI accounts», no key issued); the account is the Thread's (`modelSelection.aiAccountId`,
+  never another in its place: «no longer allowed») or the highest-priority allowed one, of the
+  driver's own provider first; none → «No AI account is allowed to you in this Space». Then
+  `AiGatewayKeys.issueForThread(threadId, { providerSessionId })`: for the Thread's turn owner (the
+  acting-User rule of SecretDelivery), rotating earlier keys. The session's key is revoked when the
+  session is released (`ProviderSessionManager.releaseEntry`, before its process stops), when it fails
+  to open, and by `AiGatewayKeyRevocation` on the session events.
+- **Wire:** `aiGateway` (key, account id and name, provider, model) only in `provider.openSession`;
+  `RemoteEnvironments.invoke` refuses it to a machine before contract 11. Never logged nor kept.
+- **Relay** (`environments/AiGatewayRelay.ts`): each joined server opens, on first use, an HTTP
+  listener on `127.0.0.1:<random>` that forwards only the gateway's routes (`matchGatewayRoute`) to the
+  Hub's URL — in a Sandbox or dedicated machine that is the Hub's socket — with only the key and wire
+  headers; it refuses other paths, absolute or protocol-relative targets, another Host, an `Origin`,
+  CONNECT and upgrades, follows no redirect, and adds, keeps and logs nothing. On the Hub machine the
+  base URL is the Hub's own loopback address.
+- **Provider homes:** `<stateDir>/provider-homes/<sha256(thread)>/<driver>` (0700): Claude Code's
+  `CLAUDE_CONFIG_DIR`, Codex's `CODEX_HOME`, OpenCode's `XDG_*` homes, Pi's `PI_CODING_AGENT_DIR`. No
+  login or setting of the machine's user is read; transcripts stay for the Thread's next session.
+- **Drivers** (`provider-core/server/instanceEnvironment.ts`, `aiGatewayVariables`): Claude Code
+  `ANTHROPIC_BASE_URL` (relay `/api/ai/anthropic`), `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL` (and the
+  small-model variables); Codex `-c model_provider="t3"` with `base_url` (relay `/api/ai/openai/v1`),
+  `env_key = "T3_AI_GATEWAY_KEY"`, `wire_api = "responses"`; OpenCode `OPENCODE_CONFIG_CONTENT` with
+  provider `t3` (`@ai-sdk/openai-compatible`, `apiKey: {env:T3_AI_GATEWAY_KEY}`, only that provider
+  enabled); Pi a `models.json` in its home with provider `t3` and `apiKey: "$T3_AI_GATEWAY_KEY"`. The
+  key is only ever an environment value: never in arguments or files. `applyAiGatewayEnv` drops every
+  ambient AI variable (`AMBIENT_AI_VARIABLES`, from the machine or a Vault) and sets the gateway's
+  last, so nothing overrides it; a Vault cannot hold those names (`AI_GATEWAY_ENV_NAMES`).
+- **The Thread** shows the account its live session runs on (`providerSession.aiAccount`, header
+  badge «AI account in use: <name>»).
+- **Doors decided:** terminals and setup scripts get no key (a User's shell would carry the Thread's
+  key; local CLIs get User keys, ticket 10); sub-agent and delegated Threads open their own sessions
+  through the same rule, for their root's owner. Accepted risk: `/proc/<pid>/environ` of the agent is
+  readable by other processes of the same Sandbox (ADR 0004).
+- **Gaps for later tickets:** the composer's provider readiness still comes from a machine's own
+  login probe (ticket 08's selector); text generation (titles) on a machine still uses its provider's
+  own configuration; mobile does not show the account yet (ticket 12).
+
 ## Known exception to «no upstream services»
 
 CLIProxyAPI 8.0.67, even with `-local-model`, asks the internet for the latest Antigravity client
