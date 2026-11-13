@@ -28,6 +28,7 @@ import {
   type EnvironmentOrchestrationCapabilities,
   ProviderDriverKind,
   type ProviderInstanceId,
+  type SecretEnv,
   TextGenerationError,
   type ThreadId,
   VcsProcessExitError,
@@ -35,6 +36,7 @@ import {
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { openSessionWithSecrets } from "@t3tools/provider-core/server/instanceEnvironment";
+import { rememberKnownSecrets } from "@t3tools/shared/secretMasking";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
@@ -79,6 +81,14 @@ import * as AiGatewayRelay from "./AiGatewayRelay.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as JoinedWorkspaceRoots from "../workspace/JoinedWorkspaceRoots.ts";
 import { makeWorkspaceRpcCalls } from "../workspace/WorkspaceRpcCalls.ts";
+
+/**
+ * Spec 5 ticket 05: values this machine receives are shown as `[NAME]` in its own logs, spans
+ * and provider event logs from then on (the Hub masks what it stores and shows).
+ */
+const knowSecrets = (secretEnv: SecretEnv | undefined) => {
+  if (secretEnv?.variables !== undefined) rememberKnownSecrets(secretEnv.variables);
+};
 
 /** Calls answered, by idempotency key, so a resend gets the first answer instead of a rerun. */
 const IDEMPOTENCY_MEMORY = 512;
@@ -501,6 +511,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
         capabilities: new Set(request.mcp.capabilities),
       });
     }
+    knowSecrets(request.secretEnv);
     // Spec 4 ticket 06: the Thread's gateway key goes the same way as its secrets, with this
     // machine's relay and the Thread's own provider home (no login of this machine is used).
     const aiGateway = yield* AiGatewayRelay.prepareGatewaySession({
@@ -652,6 +663,7 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
     origin: ExecutorChannel | undefined,
   ) {
     const { terminals } = yield* workspaceRpc;
+    knowSecrets(request.secretEnv);
     const input = yield* roots
       .withRoot(request.root, (workspace) => terminalFoldersIn(workspace, request.input))
       .pipe(
@@ -1053,7 +1065,10 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
                 WorkspaceRootEscapeError: () => Effect.fail(terminalOutside(rooted.input.threadId)),
               }),
               // Spec 5: the opening User's secrets, for this shell's environment alone.
-              Effect.flatMap((input) => terminals.open(input, rooted.secretEnv)),
+              Effect.flatMap((input) => {
+                knowSecrets(rooted.secretEnv);
+                return terminals.open(input, rooted.secretEnv);
+              }),
             ),
         );
       }

@@ -14,6 +14,7 @@ import * as Tracer from "effect/Tracer";
 import { OtlpResource, OtlpTracer, OtlpSerialization } from "effect/observability";
 
 import { makeAsyncRotatingFileSink } from "./logging.ts";
+import { redactKnownSecrets, redactKnownSecretsDeep } from "./secretMasking.ts";
 
 export const OtlpProtocol = Schema.Literals(["http/json", "http/protobuf"]);
 export type OtlpProtocol = typeof OtlpProtocol.Type;
@@ -407,8 +408,9 @@ function spanToTraceRecord(span: SerializableSpan): EffectTraceRecord {
 // WebSocket tickets and their DPoP proofs ride in URL queries and stay valid after the request.
 const URL_CREDENTIAL_PARAMS = /(^|[?&"\s])(wsTicket|dpop)=[^&#"\\\s]*/g;
 
+// Also every secret value this process knows (Vaults, spec 5 ticket 05) as `[NAME]`.
 const redactUrlCredentials = (text: string) =>
-  text.replace(URL_CREDENTIAL_PARAMS, "$1$2=<redacted>");
+  redactKnownSecrets(text.replace(URL_CREDENTIAL_PARAMS, "$1$2=<redacted>"));
 
 export const makeTraceSink = Effect.fn("makeTraceSink")(function* (options: TraceSinkOptions) {
   const sink = yield* makeAsyncRotatingFileSink({
@@ -626,17 +628,18 @@ class LocalFileSpan implements Tracer.Span {
     const recorded =
       (key === "url.full" || key === "url.query") && typeof value === "string"
         ? redactUrlCredentials(value)
-        : value;
+        : redactKnownSecretsDeep(value);
     this.attributes.set(key, recorded);
     this.delegate.attribute(key, recorded);
   }
 
   event(name: string, startTime: bigint, attributes?: Record<string, unknown>): void {
     const cause = attributes?.["effect.cause"];
-    const nextAttributes =
+    const nextAttributes = redactKnownSecretsDeep(
       typeof cause === "string"
         ? { ...attributes, "effect.cause": redactUrlCredentials(cause) }
-        : (attributes ?? {});
+        : (attributes ?? {}),
+    );
     this.events.push([name, startTime, nextAttributes]);
     this.delegate.event(name, startTime, nextAttributes);
   }

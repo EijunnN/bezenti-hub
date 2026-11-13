@@ -44,6 +44,7 @@ import * as VaultsHttp from "../vaults/http.ts";
 import * as Vaults from "../vaults/Vaults.ts";
 import * as EffectiveVaults from "../vaults/EffectiveVaults.ts";
 import * as SecretDelivery from "../vaults/SecretDelivery.ts";
+import * as SecretMasker from "../vaults/SecretMasker.ts";
 import * as MasterKeyBackup from "./MasterKeyBackup.ts";
 import * as SandboxImageHttp from "../sandboxes/http.ts";
 import * as SandboxImage from "../sandboxes/SandboxImage.ts";
@@ -213,7 +214,11 @@ const makeLayerServices = (
           SpaceVisibility.layer,
           AuditLog.layer,
           Vaults.layer.pipe(Layer.provide(AuditLog.layer)),
-          SecretDelivery.layer.pipe(Layer.provideMerge(EffectiveVaults.layer)),
+          // As server.ts: delivery, and the masking of what was delivered (spec 5 ticket 05).
+          SecretDelivery.layer.pipe(
+            Layer.provideMerge(SecretMasker.layer),
+            Layer.provideMerge(EffectiveVaults.layer),
+          ),
           // The Hub machine runs Threads here unless a test says otherwise (the dev setting). The
           // Owner's SSH installs register machines with it, by the test's policy if it has one.
           SshInstall.layer.pipe(

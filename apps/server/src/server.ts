@@ -199,6 +199,7 @@ import * as VaultsHttp from "./vaults/http.ts";
 import * as Vaults from "./vaults/Vaults.ts";
 import * as EffectiveVaults from "./vaults/EffectiveVaults.ts";
 import * as SecretDelivery from "./vaults/SecretDelivery.ts";
+import * as SecretMasker from "./vaults/SecretMasker.ts";
 import * as MasterKeyBackup from "./auth/MasterKeyBackup.ts";
 import * as AiAccounts from "./ai/AiAccounts.ts";
 import * as AiGateway from "./ai/AiGateway.ts";
@@ -506,8 +507,12 @@ const layerAuth = Layer.mergeAll(
   // Vaults: their start checks the database against the master key and sweeps orphaned values.
   Vaults.layer.pipe(Layer.provide(AuditLog.layer)),
   // What a Thread's turns, terminals and scripts receive (spec 5 ticket 03), delivered as
-  // environment variables by SecretDelivery (ticket 04).
-  SecretDelivery.layer.pipe(Layer.provideMerge(EffectiveVaults.layer)),
+  // environment variables by SecretDelivery (ticket 04), whose values SecretMasker shows as
+  // `[NAME]` in everything the Hub stores or sends (ticket 05).
+  SecretDelivery.layer.pipe(
+    Layer.provideMerge(SecretMasker.layer),
+    Layer.provideMerge(EffectiveVaults.layer),
+  ),
   // The Sandboxes' base image: built on this Hub, one build at a time.
   SandboxImage.layer,
   // CLIProxyAPI, run by the Hub on loopback (`T3CODE_AI_GATEWAY`), and the AI accounts it gets

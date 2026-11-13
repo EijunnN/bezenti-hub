@@ -72,6 +72,8 @@ import * as ProjectCheckouts from "./ProjectCheckouts.ts";
 import * as RemoteEnvironments from "./RemoteEnvironments.ts";
 import { locateInCheckout } from "./WorkspaceLocation.ts";
 import * as SecretDelivery from "../vaults/SecretDelivery.ts";
+import * as SecretMasker from "../vaults/SecretMasker.ts";
+import { maskTerminalSnapshot, maskTerminalStream } from "../vaults/maskTerminal.ts";
 
 /** Who asks: the session's User, whose rules a forwarded call keeps to. */
 export interface WorkspaceCaller {
@@ -148,6 +150,8 @@ export const make = Effect.gen(function* () {
   const runsAgents = yield* HubRunsAgents.HubRunsAgents;
   // Spec 5 ticket 04: a shell gets the secrets of the User who opens it, read as it opens.
   const secretDelivery = yield* Effect.serviceOption(SecretDelivery.SecretDelivery);
+  // Spec 5 ticket 05: and what comes back from the Thread's machine is masked.
+  const secretMasker = yield* Effect.serviceOption(SecretMasker.SecretMasker);
   const hubMachine = Option.isSome(registry)
     ? yield* Effect.option(registry.value.get(registry.value.hubMachineEnvironmentId))
     : Option.none();
@@ -702,7 +706,7 @@ export const make = Effect.gen(function* () {
       }),
     );
 
-  return {
+  const calls = {
     searchEntries: (input: ProjectSearchEntriesInput, caller: WorkspaceCaller) =>
       routed(
         input,
@@ -991,6 +995,54 @@ export const make = Effect.gen(function* () {
         onSome: (remote) => remote.previewEvents,
       }),
     ),
+  };
+
+  // Spec 5 ticket 05: what a machine answers about a Thread's files and terminals reaches a client
+  // masked, on the Hub machine and on any other. Search drops a match on a line holding a value:
+  // searching for parts of it would otherwise tell it, a character at a time.
+  if (Option.isNone(secretMasker)) return calls;
+  const masker = secretMasker.value;
+  const maskerOf = (threadId: string | undefined) => masker.forThread(threadId);
+  return {
+    ...calls,
+    readFile: (input: ProjectReadFileInput, caller: WorkspaceCaller) =>
+      calls.readFile(input, caller).pipe(
+        Effect.flatMap((result) =>
+          Effect.map(maskerOf(input.threadId), (threadMasker) => {
+            const contents = threadMasker.mask(result.contents);
+            return contents === result.contents ? result : { ...result, contents };
+          }),
+        ),
+      ),
+    searchContents: (input: ProjectSearchContentsInput, caller: WorkspaceCaller) =>
+      calls.searchContents(input, caller).pipe(
+        Effect.flatMap((result) =>
+          Effect.map(maskerOf(input.threadId), (threadMasker) =>
+            threadMasker.isEmpty
+              ? result
+              : {
+                  ...result,
+                  matches: result.matches.filter(
+                    (match) => !threadMasker.matches(match.lineContent),
+                  ),
+                },
+          ),
+        ),
+      ),
+    terminalOpen: (input: TerminalOpenInput, caller: WorkspaceCaller) =>
+      calls
+        .terminalOpen(input, caller)
+        .pipe(
+          Effect.flatMap((snapshot) =>
+            Effect.map(maskerOf(input.threadId), (threadMasker) =>
+              maskTerminalSnapshot(threadMasker, snapshot),
+            ),
+          ),
+        ),
+    terminalAttach: (input: TerminalAttachInput, viewerId: string, caller: WorkspaceCaller) =>
+      maskTerminalStream(masker, input.threadId, calls.terminalAttach(input, viewerId, caller)),
+    terminalObserve: (input: TerminalObserveInput, caller: WorkspaceCaller) =>
+      maskTerminalStream(masker, input.threadId, calls.terminalObserve(input, caller)),
   };
 });
 

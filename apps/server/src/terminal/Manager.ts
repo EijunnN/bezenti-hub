@@ -42,6 +42,7 @@ import { makeKeyedCoalescingWorker } from "@t3tools/shared/KeyedCoalescingWorker
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { redactKnownSecrets } from "@t3tools/shared/secretMasking";
 import { mergePathEntries } from "@t3tools/shared/shell";
 
 import { acpRegistryManagedBinaryDirectories } from "@t3tools/provider-acp-registry/server";
@@ -1991,8 +1992,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         return;
       }
 
+      // Spec 5 ticket 05: the secret values this process knows are stored as `[NAME]`; the whole
+      // history at once, so a value split between two chunks is caught too.
       yield* fileSystem
-        .writeFileString(historyPath(threadId, terminalId), request.history.value())
+        .writeFileString(
+          historyPath(threadId, terminalId),
+          redactKnownSecrets(request.history.value()),
+        )
         .pipe(
           Effect.catch((error) =>
             Effect.logWarning("failed to persist terminal history", {

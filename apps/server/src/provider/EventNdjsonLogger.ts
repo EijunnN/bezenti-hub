@@ -18,6 +18,7 @@ import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as SynchronizedRef from "effect/SynchronizedRef";
+import { redactKnownSecrets } from "@t3tools/shared/secretMasking";
 
 import {
   ATTACHMENT_ID_THREAD_SEGMENT_MAX_CHARS,
@@ -732,7 +733,8 @@ export const makeEventNdjsonLogStore = Effect.fnUntraced(function* (
       }
 
       const observedAt = yield* DateTime.now.pipe(Effect.map(DateTime.formatIso));
-      const line = `[${observedAt}] ${resolveStreamLabel(stream)}: ${payload}\n`;
+      // Spec 5 ticket 05: the secret values this process knows go to disk as `[NAME]`.
+      const line = `[${observedAt}] ${resolveStreamLabel(stream)}: ${redactKnownSecrets(payload)}\n`;
       const bytes = Buffer.byteLength(line);
       const threadSegment = resolveThreadSegment(threadId);
       const action = yield* SynchronizedRef.modifyEffect(stateRef, (state) => {

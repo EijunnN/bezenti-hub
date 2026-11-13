@@ -44,6 +44,7 @@ import type { MoveFetchInput } from "../environment/MovedWorkspace.ts";
 import * as ProjectCheckouts from "../environment/ProjectCheckouts.ts";
 import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as SecretMasker from "../vaults/SecretMasker.ts";
 import { visibleConversationItems } from "./ContextHandoffService.ts";
 import * as EventSink from "./EventSink.ts";
 import { interruptRunsOnHub } from "./HubRunInterrupt.ts";
@@ -166,6 +167,8 @@ export const layer: Layer.Layer<
     const settings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
     // A Thread without a Project moves its scratch workspace through its own repository.
     const repositories = yield* Effect.serviceOption(HubRepository.HubRepositories);
+    // Spec 5 ticket 05: a handoff is stored with the Thread's secret values as `[NAME]`.
+    const secretMasker = yield* Effect.serviceOption(SecretMasker.SecretMasker);
     const scratchOf = (thread: OrchestrationV2AppThread) =>
       Option.isNone(repositories)
         ? Effect.succeed(undefined)
@@ -926,8 +929,11 @@ export const layer: Layer.Layer<
     const storeHandoff = Effect.fn("ThreadMoves.storeHandoff")(function* (
       threadId: ThreadId,
       moveId: string,
-      handoff: MoveHandoff.StoredHandoff,
+      unmasked: MoveHandoff.StoredHandoff,
     ) {
+      const handoff = Option.isNone(secretMasker)
+        ? unmasked
+        : (yield* secretMasker.value.forThread(threadId)).maskDeep(unmasked);
       const payload = yield* MoveHandoff.encodeStoredHandoff(handoff).pipe(Effect.orDie);
       const now = DateTime.formatIso(yield* DateTime.now);
       yield* sql`

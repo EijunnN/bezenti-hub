@@ -31,6 +31,7 @@ import {
 } from "./Errors.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
 import * as HubRepository from "./HubRepository.ts";
+import * as SecretMasker from "../vaults/SecretMasker.ts";
 import { isGitImport, parseTurnDiffFilesFromNumstat, type TurnDiffFileSummary } from "./Diffs.ts";
 
 // Windows limits a command line to 32,767 characters. Leave room for the rest of git's arguments.
@@ -95,6 +96,7 @@ export const make = Effect.gen(function* () {
   // Absent on hosts without Environments or a Hub repository (orchestration-only tests).
   const hubRepositories = yield* Effect.serviceOption(HubRepository.HubRepositories);
   const environments = yield* Effect.serviceOption(EnvironmentExecutor.EnvironmentExecutorRegistry);
+  const masker = yield* Effect.serviceOption(SecretMasker.SecretMasker);
 
   type CheckpointReads = Pick<
     CheckpointStore.CheckpointStore["Service"],
@@ -376,9 +378,24 @@ export const make = Effect.gen(function* () {
     return turnDiff satisfies OrchestrationGetFullThreadDiffResult;
   });
 
+  // Spec 5 ticket 05: a diff reaches a client with the Thread's secret values as `[NAME]`.
+  const masked = <A extends { readonly threadId: ThreadId; readonly diff: string }>(result: A) =>
+    Option.isNone(masker)
+      ? Effect.succeed(result)
+      : masker.value.forThread(result.threadId).pipe(
+          Effect.map((threadMasker): A => {
+            const diff = threadMasker.mask(result.diff);
+            return diff === result.diff ? result : { ...result, diff };
+          }),
+        );
+
   return CheckpointDiffQuery.of({
-    getTurnDiff,
-    getFullThreadDiff,
+    getTurnDiff: Effect.fn("CheckpointDiffQuery.getTurnDiff.masked")(function* (input) {
+      return yield* masked(yield* getTurnDiff(input));
+    }),
+    getFullThreadDiff: Effect.fn("CheckpointDiffQuery.getFullThreadDiff.masked")(function* (input) {
+      return yield* masked(yield* getFullThreadDiff(input));
+    }),
   });
 });
 

@@ -58,6 +58,7 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import { projectSpaceSql } from "../spaces/SpaceDirectory.ts";
+import * as ThreadSecretValues from "./ThreadSecretValues.ts";
 import * as VaultKeyCheck from "./VaultKeyCheck.ts";
 import * as VaultReach from "./VaultReach.ts";
 
@@ -543,11 +544,16 @@ const make = Effect.gen(function* () {
     return valueId;
   });
 
-  /** Removes a value no row points at; one left behind by a failure is swept at the next start. */
+  /**
+   * Removes a value no row points at; one left behind by a failure is swept at the next start. A
+   * value a living Thread received stays, so it is still masked there (ticket 05); the start
+   * removes it once those Threads are gone.
+   */
   const removeValue = (valueId: string | null) =>
     valueId === null
       ? Effect.void
-      : values.remove(valueId).pipe(
+      : ThreadSecretValues.heldByThread(sql, valueId).pipe(
+          Effect.flatMap((held) => (held ? Effect.void : values.remove(valueId))),
           Effect.catch((cause) =>
             Effect.logWarning("Vaults: could not remove a value; the next start removes it", {
               valueId,
@@ -1379,6 +1385,8 @@ const sweepOrphanValues = Effect.gen(function* () {
       SELECT value_id AS "valueId" FROM vault_entries WHERE value_id IS NOT NULL
     `).map((row) => row.valueId),
   );
+  // Values living Threads received stay masked there (ticket 05); gone Threads' are dropped.
+  for (const valueId of yield* ThreadSecretValues.pruneAndListHeld(sql)) held.add(valueId);
   let removed = 0;
   for (const valueId of stored) {
     if (held.has(valueId)) continue;

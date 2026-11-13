@@ -27,6 +27,7 @@ import { machineNameOf } from "../environments/machineName.ts";
 import { threadTurnOwner } from "../orchestration-v2/threadTurnOwner.ts";
 import { servesSpace } from "../sandboxes/sandboxSpace.ts";
 import * as EffectiveVaults from "./EffectiveVaults.ts";
+import * as SecretMasker from "./SecretMasker.ts";
 
 /** The machine a process starts on: the Thread's Active environment, and its executor contract. */
 export interface SecretTarget {
@@ -38,6 +39,8 @@ export interface SecretTarget {
 export interface SecretPlan {
   readonly fingerprint: string;
   readonly target: SecretTarget;
+  /** The Thread whose process receives it: what it receives is masked there (ticket 05). */
+  readonly threadId?: ThreadId;
   readonly variables: ReadonlyArray<{ readonly name: string; readonly valueId: string }>;
 }
 
@@ -98,6 +101,7 @@ const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const effective = yield* EffectiveVaults.EffectiveVaults;
   const values = yield* ServerSecretStore.VaultValueStore;
+  const masker = yield* Effect.serviceOption(SecretMasker.SecretMasker);
 
   const storage = (what: string) => (cause: unknown) =>
     Effect.logError(`SecretDelivery: could not ${what}`, { cause }).pipe(
@@ -166,6 +170,7 @@ const make = Effect.gen(function* () {
     return {
       fingerprint: fingerprintOf(input.actingUserId, variables),
       target: input.target,
+      threadId: input.threadId,
       variables,
     } satisfies SecretPlan;
   });
@@ -193,16 +198,27 @@ const make = Effect.gen(function* () {
         ...(environmentName === undefined ? {} : { environmentName }),
       });
     }
-    const delivered: Array<{ name: string; value: string }> = [];
+    const delivered: Array<SecretMasker.DeliveredSecret> = [];
     for (const variable of planned.variables) {
       const bytes = yield* values
         .get(variable.valueId)
         .pipe(Effect.catch(storage("read the Thread's secrets")));
       // A value gone from the store (a race with a delete) is left out, never sent empty.
       if (Option.isNone(bytes)) continue;
-      delivered.push({ name: variable.name, value: new TextDecoder().decode(bytes.value) });
+      delivered.push({
+        name: variable.name,
+        value: new TextDecoder().decode(bytes.value),
+        valueId: variable.valueId,
+      });
     }
-    return { fingerprint: planned.fingerprint, variables: delivered } satisfies SecretEnv;
+    // Masked in the Thread before the process that gets them can print anything (ticket 05).
+    if (planned.threadId !== undefined && Option.isSome(masker)) {
+      yield* masker.value.remember(planned.threadId, delivered);
+    }
+    return {
+      fingerprint: planned.fingerprint,
+      variables: delivered.map(({ name, value }) => ({ name, value })),
+    } satisfies SecretEnv;
   });
 
   const mayReceiveSecrets = Effect.fn("SecretDelivery.mayReceiveSecrets")(function* (

@@ -24,6 +24,8 @@ import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as AuditLog from "../audit/AuditLog.ts";
+import { maskingEventWrites } from "../vaults/maskEvents.ts";
+import * as SecretMasker from "../vaults/SecretMasker.ts";
 import { replayAndBufferProjectedLiveEvents } from "./LiveStreamBudget.ts";
 import type { UnsequencedProjectEvent } from "../persistence/OrchestrationEventStore.ts";
 import { projectDomainEventForWire } from "./WireProjection.ts";
@@ -232,6 +234,7 @@ const layerBase: Layer.Layer<
     const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
     const projectStore = yield* ProjectStore.ProjectStoreV2;
     const turnItemPositions = yield* TurnItemPositionStore.TurnItemPositionStoreV2;
+    const masker = yield* Effect.serviceOption(SecretMasker.SecretMasker);
     const liveEvents = yield* PubSub.unbounded<OrchestrationV2StoredEvent>();
     const liveEventsByType = new Map<
       OrchestrationV2DomainEvent["type"],
@@ -891,7 +894,8 @@ const layerBase: Layer.Layer<
       );
     };
 
-    return EventSinkV2.of({
+    // Spec 5 ticket 05: secret values become `[NAME]` before any event is stored or published.
+    return maskingEventWrites(masker, {
       write: (input) =>
         writeEffect({ ...input, effects: [] }).pipe(
           Effect.mapError(

@@ -133,17 +133,29 @@ export interface PtySpawn {
 /**
  * A shell that answers each line typed with the folder it started in, as `pwd` would, so a test
  * sees which machine and folder a terminal runs in without a real shell. Each start is recorded.
+ * `echo $NAME` prints the variable from its environment; `split $NAME` prints it in two writes, cut
+ * in the middle, as a value split between two frames would arrive.
  */
 const echoingPty = (spawns: Array<PtySpawn>): PtyAdapter.PtyAdapter["Service"] => ({
   spawn: (input) =>
     Effect.sync(() => {
       spawns.push({ cwd: input.cwd, env: { ...input.env } });
       const listeners = new Set<(data: string) => void>();
+      const emit = (text: string) => {
+        for (const listener of listeners) listener(text);
+      };
       return {
         pid: 4242,
         write: (data: string) => {
-          for (const listener of listeners) listener(`${input.cwd}\r\n`);
-          void data;
+          const variable = /^(echo|split) \$([A-Z_][A-Z0-9_]*)/.exec(data);
+          if (variable === null) return emit(`${input.cwd}\r\n`);
+          const value = input.env[variable[2]!] ?? "";
+          if (variable[1] === "echo") return emit(`${value}\r\n`);
+          const half = Math.floor(value.length / 2);
+          emit(`out: ${value.slice(0, half)}`);
+          // A later write of the PTY, as a real shell's second half would arrive.
+          // @effect-diagnostics-next-line globalTimers:off
+          setTimeout(() => emit(`${value.slice(half)}\r\n`), 20);
         },
         resize: () => undefined,
         kill: () => undefined,

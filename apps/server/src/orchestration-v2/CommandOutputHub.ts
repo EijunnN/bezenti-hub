@@ -23,8 +23,14 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
+import * as SecretMasker from "../vaults/SecretMasker.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+
+/** How long output that could end in the start of a secret waits for the rest. */
+const SECRET_HOLD_MS = 150;
+/** Output kept waiting beyond this is masked and sent as it is. */
+const SECRET_HOLD_MAX_CHARS = 128 * 1024;
 
 /** Output bypasses orchestration events; expanded rows receive tails, coalesced appends, then persisted output. */
 
@@ -121,6 +127,7 @@ function setBounded<V>(
 export const make = Effect.gen(function* () {
   const eventSink = yield* EventSink.EventSinkV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const masker = yield* Effect.serviceOption(SecretMasker.SecretMasker);
   const tails = new Map<string, TerminalOutputState>();
   const finished = new Map<string, TerminalOutputState>();
   const subscribers = new Map<string, Set<Subscriber>>();
@@ -142,7 +149,7 @@ export const make = Effect.gen(function* () {
       { discard: true },
     );
 
-  const append: CommandOutputHubShape["append"] = ({ chunk, ...target }) =>
+  const appendMasked: CommandOutputHubShape["append"] = ({ chunk, ...target }) =>
     Effect.suspend(() => {
       if (chunk.length === 0) return Effect.void;
       const key = commandKey(target);
@@ -157,7 +164,61 @@ export const make = Effect.gen(function* () {
       return wakeAll(key, chunk);
     });
 
+  /**
+   * Spec 5 ticket 05: output is masked before anyone sees it. A chunk whose end could be the start
+   * of a secret value waits for the next one (or {@link SECRET_HOLD_MS}, or the end of the
+   * command), so a value split between two chunks is still masked.
+   */
+  const held = new Map<
+    string,
+    {
+      readonly text: string;
+      readonly generation: number;
+      readonly target: CommandOutputTarget;
+      readonly masker: SecretMasker.ThreadMasker;
+    }
+  >();
+  let holdGeneration = 0;
+  const release = (key: string) =>
+    Effect.suspend(() => {
+      const entry = held.get(key);
+      if (entry === undefined) return Effect.void;
+      held.delete(key);
+      return appendMasked({ ...entry.target, chunk: entry.masker.mask(entry.text) });
+    });
+  const append: CommandOutputHubShape["append"] = ({ chunk, ...target }) =>
+    Option.isNone(masker)
+      ? appendMasked({ chunk, ...target })
+      : Effect.gen(function* () {
+          if (chunk.length === 0) return;
+          const key = commandKey(target);
+          const threadMasker = yield* masker.value.forThread(target.threadId);
+          const text = (held.get(key)?.text ?? "") + chunk;
+          if (
+            !threadMasker.isEmpty &&
+            text.length <= SECRET_HOLD_MAX_CHARS &&
+            threadMasker.pendingSuffix(text) > 0
+          ) {
+            const generation = ++holdGeneration;
+            held.set(key, { text, generation, target, masker: threadMasker });
+            yield* Effect.sleep(SECRET_HOLD_MS).pipe(
+              Effect.andThen(
+                Effect.suspend(() =>
+                  held.get(key)?.generation === generation ? release(key) : Effect.void,
+                ),
+              ),
+              Effect.forkDetach,
+            );
+            return;
+          }
+          held.delete(key);
+          yield* appendMasked({ ...target, chunk: threadMasker.mask(text) });
+        });
+
   const finish: CommandOutputHubShape["finish"] = (target) =>
+    release(commandKey(target)).pipe(Effect.andThen(finishTail(target)));
+
+  const finishTail: CommandOutputHubShape["finish"] = (target) =>
     Effect.sync(() => {
       const key = commandKey(target);
       const tail = tails.get(key);

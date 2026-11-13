@@ -157,7 +157,7 @@ export const loadFixture = Effect.fn(function* (name: string) {
   return { fixture, variant, transcript, materialized, replayGate, adapters };
 });
 
-type LoadedFixture = Effect.Success<ReturnType<typeof loadFixture>>;
+export type LoadedFixture = Effect.Success<ReturnType<typeof loadFixture>>;
 
 const placeOn =
   (environmentId: EnvironmentId, worktreePath?: string, ownerUserId?: UserId) =>

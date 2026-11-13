@@ -119,6 +119,10 @@
       "types": "./src/toolActivity.ts",
       "import": "./src/toolActivity.ts"
     },
+    "./secretMasking": {
+      "types": "./src/secretMasking.ts",
+      "import": "./src/secretMasking.ts"
+    },
     "./terminalOutput": {
       "types": "./src/terminalOutput.ts",
       "import": "./src/terminalOutput.ts"

@@ -18,6 +18,7 @@ import * as TestConsole from "effect/testing/TestConsole";
 
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
+import { forgetKnownSecretsForTest, rememberKnownSecrets } from "@t3tools/shared/secretMasking";
 
 import * as ServerConfig from "./config.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
@@ -194,6 +195,24 @@ describe("ServerLoggerLive", () => {
       assert.include(body, "wsTicket=<redacted>&dpop=<redacted>");
       assert.notInclude(body, "ticket-secret");
       assert.notInclude(body, "proof-secret");
+    }),
+  );
+
+  it.effect("exports and prints a secret value this process knows as [NAME] (spec 5)", () =>
+    Effect.gen(function* () {
+      const value = "vault-value-in-a-log-9876";
+      rememberKnownSecrets([{ name: "LOGGED_TOKEN", value }]);
+      const { requests } = yield* logInSpanThrough(
+        { otlpLogsUrl: "https://collector.example.com/v1/logs" },
+        Effect.logError(`tool printed ${value}`, { output: `x=${value}` }, Cause.fail(value)),
+      );
+      const body = requests.map((request) => request.body).join("\n");
+      assert.include(body, "[LOGGED_TOKEN]");
+      assert.notInclude(body, value);
+      const printed = yield* printThroughConsole({ output: `x=${value}` });
+      assert.include(printed, "[LOGGED_TOKEN]");
+      assert.notInclude(printed, value);
+      forgetKnownSecretsForTest();
     }),
   );
 

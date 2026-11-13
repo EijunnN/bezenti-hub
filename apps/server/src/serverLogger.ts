@@ -1,5 +1,6 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as SharedObservability from "@t3tools/shared/observability";
+import { redactKnownSecretsDeep } from "@t3tools/shared/secretMasking";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -11,10 +12,16 @@ import * as OtlpLogger from "effect/observability/OtlpLogger";
 
 import * as ServerConfig from "./config.ts";
 
-// HTTP errors logged with --log-ws-events carry the request URL and its connection ticket.
+// HTTP errors logged with --log-ws-events carry the request URL and its connection ticket. Every
+// secret value this process knows (Vaults, spec 5 ticket 05) shows as `[NAME]`, in the message
+// and in its cause, on the console and in OTLP, on the Hub and on a joined machine.
 const redactingCredentials = <Output>(logger: Logger.Logger<unknown, Output>) =>
   Logger.make<unknown, Output>((options) =>
-    logger.log({ ...options, cause: SharedObservability.redactCauseCredentials(options.cause) }),
+    logger.log({
+      ...options,
+      message: redactKnownSecretsDeep(options.message),
+      cause: SharedObservability.redactCauseCredentials(options.cause),
+    }),
   );
 
 // consolePretty collapses Cause fields via util.inspect; render them with Cause.pretty like standalone arguments.
