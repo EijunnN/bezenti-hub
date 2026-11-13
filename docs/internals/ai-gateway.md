@@ -255,14 +255,15 @@ rest, so any other door (ticket 06's relay included) reuses it.
   bytes, stored only as SHA-256, revocable. A **Thread key** is for (the Thread's turn owner, its
   Space, the Thread); `issueForThread` revokes the Thread's earlier keys (one per provider session,
   ticket 06 hands it to the agent, with its `providerSessionId`) and it expires after 7 days at
-  most. A **User key** is for one Space the User works in (local CLIs; ticket 10 gives it a
-  screen), at most five live per User; `revoke` by its User or the Owner, audited
-  `ai_gateway_key.create|revoke`.
+  most. A **User key** is for one Space the User works in (local CLIs, ticket 10, below), at most
+  five live per User; `revoke` by its User or the Owner, audited `ai_gateway_key.create|revoke`.
 - **Revocation recorded** (`ai/AiGatewayKeyRevocation.ts`, from the domain events and User status
   changes): a provider session that stops or fails (`provider-session.updated`) takes its keys, a
   detach takes that Thread's; a Thread archived or deleted (its account in use forgotten too); a
-  User disabled or removed, every key of theirs. A move or a new owner is recorded by `authorize`
-  the first time it sees it. The request-time check stays the guard.
+  User disabled or removed, every key of theirs; a User whose Memberships changed, every key for a
+  Space they no longer work in (`space-lost`). A move or a new owner, a removed User and a lost
+  Space are also recorded by `authorize` the first time it sees them. The request-time check stays
+  the guard.
 - **Authentication:** only the key, in `Authorization: Bearer` (every shape), `x-api-key`
   (Claude) or `x-goog-api-key` (Gemini). Two different keys, a key in the query, a session cookie
   or any other credential: 401. The route reads no cookie at all (`AMBIENT_COOKIE_RULES`: refused).
@@ -314,6 +315,42 @@ rest, so any other door (ticket 06's relay included) reuses it.
 - **Who reaches it:** whoever reaches the Hub's URL: joined machines by it, Sandboxes through their
   Hub socket, which forwards `/api/ai/…` (and still nothing of CLIProxyAPI, which listens on loopback
   only). The key is what decides.
+
+## Local CLI keys (spec 4 ticket 10)
+
+A User points Claude Code or Codex on their own machine at the Hub with a **User key**: Settings →
+AI accounts → «Local CLI keys» (web and desktop; every User, not only the Owner).
+
+- **Doors:** WS only, `aiGatewayKeys.list|create|revoke` (`RPC_SPACE_ACCESS` unscoped: decided in
+  `AiGatewayKeys` for the session; `list` needs `access:read`, `create` and `revoke`
+  `access:write`). They answer only a person's own session: an agent (MCP, `via: agent`), the
+  Hub's shell or a session limited to one Space gets `forbidden`, so no agent makes, lists or
+  revokes a key. No HTTP endpoint or MCP tool touches them (`DoorRules.test.ts`).
+- **Create:** a name (80 characters) and a Space the User works in (AccessPolicy `aiAccount.use`:
+  where they may start a Thread; Guests included); without one, their Personal space if they may
+  work there, else «Choose a Space». The answer is the only one that carries the key (Redacted on
+  the wire's both ends); the Hub keeps its SHA-256. At most five live keys per User.
+- **List:** a User's own; the Owner's holds everyone's (`everyone: true`), with each key's User
+  and Space names, created and last used (written at most once a minute). Never a key or a hash.
+- **Revoke:** its User or the Owner; anyone else's answers `not-found`, as a missing one. The next
+  request is refused (401). Audited `ai_gateway_key.revoke` (`revoked`); the Hub's own revocations
+  (`space-lost`, `user-inactive`) are audited as `system`.
+- **Routing:** with no account named, the first allowed account by global priority that serves the
+  requested model (`planRoute`); `acct-<id>/<model>` pins one, only if allowed. Only accounts
+  AllowedAiAccounts gives the User in the key's Space, evaluated per request.
+- **Leaving the Space:** the next request answers 403 («You no longer work in this key's Space»)
+  and the key is revoked for good (`space-lost`), also when the User comes back; the Membership
+  watch revokes the unused ones too. A removed or disabled User's keys are revoked (401).
+- **Usage:** counted like a Thread's (`ai_usage` with the key's User and Space, no Thread).
+- **Setup** (`@t3tools/shared/aiGatewayLocalCli`, the Hub's public URL, else the address the
+  client reaches it on): Claude Code `~/.claude/settings.json` with `env.ANTHROPIC_BASE_URL =
+  <hub>/api/ai/anthropic` and `env.ANTHROPIC_AUTH_TOKEN = <key>`; Codex `~/.codex/config.toml` with
+  `model_provider = "t3"` and `[model_providers.t3]` (`base_url = <hub>/api/ai/openai/v1`,
+  `env_key = "T3_AI_GATEWAY_KEY"`, `wire_api = "responses"`), the key exported in the shell. Right
+  after «Create key» the setup holds the key; «Copy setup» on a listed key holds a placeholder.
+- **Accepted risk:** a key lives in the User's files on their own machine, readable by whatever
+  runs as them there. It reaches only that User's allowed accounts in one Space, and its use shows
+  under them; revoke it from any device.
 
 ## Usage (spec 4 ticket 05)
 
