@@ -85,7 +85,7 @@ import { extractBranchNameFromRemoteRef } from "./remoteRefs.ts";
 import { detachStackFrame } from "./detachStackFrame.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SecretMasker from "../vaults/SecretMasker.ts";
-import { maskGitProgress } from "../vaults/maskGitProgress.ts";
+import { maskGitProgress, maskingGitErrors } from "../vaults/maskGitProgress.ts";
 import type { GitManagerServiceError } from "@t3tools/contracts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
@@ -3142,7 +3142,7 @@ export const make = Effect.gen(function* () {
 
   const runStackedAction: GitManager["Service"]["runStackedAction"] = Effect.fn("runStackedAction")(
     function* (input, unmaskedOptions) {
-      const options = yield* maskGitProgress(secretMasker, input, unmaskedOptions);
+      const options = yield* maskGitProgress(secretMasker, unmaskedOptions);
       const progress = yield* createProgressEmitter(input, options);
       const currentPhase = yield* Ref.make<Option.Option<GitActionProgressPhase>>(Option.none());
 
@@ -3354,7 +3354,7 @@ export const make = Effect.gen(function* () {
     invalidateStatus,
     resolvePullRequest,
     preparePullRequestThread,
-    runStackedAction,
+    runStackedAction: maskingGitErrors(secretMasker, runStackedAction),
     subscribePullRequestStateChanges: PubSub.subscribe(pullRequestStateChanges).pipe(
       Effect.map((subscription) => Stream.fromSubscription(subscription)),
     ),

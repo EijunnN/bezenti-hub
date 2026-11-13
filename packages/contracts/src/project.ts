@@ -529,6 +529,9 @@ export const ProjectReadFileResult = Schema.Struct({
   truncated: Schema.Boolean,
   // Omitted by older servers; false only for an absent optional file.
   exists: Schema.optional(Schema.Boolean),
+  // Spec 5: true when a secret value shows as `[NAME]`. The editor opens it read-only (a save
+  // over it is refused): saving what was shown would write `[NAME]` over the value.
+  masked: Schema.optional(Schema.Boolean),
 });
 export type ProjectReadFileResult = typeof ProjectReadFileResult.Type;
 

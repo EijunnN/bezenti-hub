@@ -34,6 +34,8 @@ export interface SecretPatterns {
    * one: what the next chunk of a stream could complete. 0 when nothing could.
    */
   readonly pendingSuffix: (text: string) => number;
+  /** The name of the value whose form the end of `text` starts ({@link pendingSuffix}), if any. */
+  readonly pendingName: (text: string) => string | undefined;
   /**
    * The length of the longest start of `text` that is the end of a value's form, but not a whole
    * one: what is left of a value when text was cut before it (a trimmed history). 0 when none.
@@ -103,6 +105,7 @@ const EMPTY: SecretPatterns = {
   mask: (text) => text,
   intervals: () => [],
   pendingSuffix: () => 0,
+  pendingName: () => undefined,
   pendingPrefix: () => 0,
   matches: () => false,
   maxFormLength: 0,
@@ -224,14 +227,21 @@ export const makeSecretPatterns = (secrets: Iterable<MaskableSecret>): SecretPat
     return out + text.slice(cursor);
   };
 
-  const pendingSuffix = (text: string): number => {
+  const pending = (
+    text: string,
+  ): { readonly length: number; readonly form: string } | undefined => {
     for (let at = Math.max(0, text.length - maxLength + 1); at < text.length; at += 1) {
       const rest = text.length - at;
       for (const form of byFirst.get(text.charCodeAt(at)) ?? []) {
-        if (form.length > rest && form.startsWith(text.slice(at))) return rest;
+        if (form.length > rest && form.startsWith(text.slice(at))) return { length: rest, form };
       }
     }
-    return 0;
+    return undefined;
+  };
+  const pendingSuffix = (text: string): number => pending(text)?.length ?? 0;
+  const pendingName = (text: string): string | undefined => {
+    const found = pending(text);
+    return found === undefined ? undefined : nameOf.get(found.form);
   };
 
   const pendingPrefix = (text: string): number => {
@@ -249,6 +259,7 @@ export const makeSecretPatterns = (secrets: Iterable<MaskableSecret>): SecretPat
     mask,
     intervals,
     pendingSuffix,
+    pendingName,
     pendingPrefix,
     matches: (text) => intervals(text).length > 0,
     maxFormLength: maxLength,
@@ -257,17 +268,40 @@ export const makeSecretPatterns = (secrets: Iterable<MaskableSecret>): SecretPat
 };
 
 /**
- * Masks text that arrives in pieces (terminal frames, command output). A piece whose end could
- * start a value is held ({@link SecretStreamGuard.push} answers `hold`); once released, a value
- * that turns out to continue in the next piece still has that continuation masked, so at most
- * the part released before the pause is ever seen.
+ * `text` masked, its end too: a trailing start of a value at least
+ * {@link MIN_MASKED_SECRET_LENGTH} long shows as `[NAME]`, never raw. With `cutAtStart` (text whose
+ * beginning was cut off: a trimmed history) what is left of a value at its start is dropped.
+ */
+export const maskWhole = (
+  patterns: SecretPatterns,
+  text: string,
+  options?: { readonly cutAtStart?: boolean },
+): string => {
+  if (patterns.isEmpty) return text;
+  const body = options?.cutAtStart === true ? text.slice(patterns.pendingPrefix(text)) : text;
+  const partial = patterns.pendingSuffix(body);
+  if (partial < MIN_MASKED_SECRET_LENGTH) return patterns.mask(body);
+  return `${patterns.mask(body.slice(0, body.length - partial))}[${patterns.pendingName(body)}]`;
+};
+
+/**
+ * Masks a stream's pieces. One whose end could start a value is held; sent anyway, that start shows
+ * as `[NAME]` (from {@link MIN_MASKED_SECRET_LENGTH} characters) and the value's rest is dropped.
+ * One guard per stream for its life: new values and screen resets keep what was sent in view.
  */
 export class SecretStreamGuard {
   private held = "";
   private emitted = "";
-  private readonly patterns: SecretPatterns;
+  /** The end of what was sent started a value and was sent as `[NAME]`: its rest is dropped. */
+  private open = false;
+  private patterns: SecretPatterns;
 
   constructor(patterns: SecretPatterns) {
+    this.patterns = patterns;
+  }
+
+  /** A new set of values (a reload, a value delivered): what was sent and held stays. */
+  setPatterns(patterns: SecretPatterns): void {
     this.patterns = patterns;
   }
 
@@ -278,9 +312,14 @@ export class SecretStreamGuard {
   push(chunk: string, maxHeld: number): { readonly text: string; readonly hold: boolean } {
     let text = this.held + chunk;
     this.held = "";
-    if (this.patterns.isEmpty) return { text, hold: false };
+    if (this.patterns.isEmpty) {
+      this.open = false;
+      this.remember(text);
+      return { text, hold: false };
+    }
     let prefix = "";
-    // A value begun in what was already sent: its continuation here is masked.
+    // A value begun in what was already sent: its continuation here is masked (or dropped, when
+    // its start was already sent as `[NAME]`).
     const boundary = this.emitted.length;
     if (boundary > 0 && text.length > 0) {
       let cut = 0;
@@ -293,32 +332,48 @@ export class SecretStreamGuard {
       }
       if (name !== undefined) {
         this.remember(text.slice(0, cut));
-        prefix = `[${name}]`;
+        prefix = this.open ? "" : `[${name}]`;
         text = text.slice(cut);
       }
     }
+    this.open = false;
     if (text.length > 0 && text.length <= maxHeld && this.patterns.pendingSuffix(text) > 0) {
       this.held = text;
       return { text: prefix, hold: true };
     }
-    this.remember(text);
-    return { text: prefix + this.patterns.mask(text), hold: false };
+    return { text: prefix + this.send(text), hold: false };
   }
 
-  /** What was held, masked: sent when nothing followed in time. */
+  /** What was held, masked (a start of a value as `[NAME]`): sent when nothing followed in time. */
   release(): string {
     const text = this.held;
     this.held = "";
+    return this.send(text);
+  }
+
+  /** Drops what is held, unsent: the screen was reset to `text` (a snapshot), now in view. */
+  seed(text: string): void {
+    this.held = "";
+    this.emitted = "";
+    this.open = false;
     this.remember(text);
-    return this.patterns.mask(text);
+    this.open = this.patterns.pendingSuffix(text) >= MIN_MASKED_SECRET_LENGTH;
   }
 
   get holding(): boolean {
     return this.held.length > 0;
   }
 
+  private send(text: string): string {
+    this.remember(text);
+    const masked = maskWhole(this.patterns, text);
+    this.open = this.patterns.pendingSuffix(text) >= MIN_MASKED_SECRET_LENGTH;
+    return masked;
+  }
+
   private remember(raw: string) {
-    this.emitted = (this.emitted + raw).slice(-(this.patterns.maxFormLength - 1));
+    const keep = Math.max(this.patterns.maxFormLength - 1, 0);
+    this.emitted = keep === 0 ? "" : (this.emitted + raw).slice(-keep);
   }
 }
 
@@ -360,6 +415,29 @@ export const maskDeep = <A>(value: A, mask: (text: string) => string): A => {
     return node;
   };
   return walk(value) as A;
+};
+
+/**
+ * An error (a class instance, which {@link maskDeep} leaves alone) with every string field masked,
+ * its own `message` and `cause` too, keeping its class. Other values: {@link maskDeep}.
+ */
+export const maskError = <E>(error: E, mask: (text: string) => string): E => {
+  if (typeof error !== "object" || error === null || isPlainObject(error) || Array.isArray(error)) {
+    return maskDeep(error, mask);
+  }
+  let changed = false;
+  const descriptors = Object.getOwnPropertyDescriptors(error);
+  for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (!("value" in descriptor)) continue;
+    const next =
+      key === "cause" ? maskError(descriptor.value, mask) : maskDeep(descriptor.value, mask);
+    if (next !== descriptor.value) {
+      descriptor.value = next;
+      changed = true;
+    }
+  }
+  if (!changed) return error;
+  return Object.create(Object.getPrototypeOf(error), descriptors) as E;
 };
 
 // ── The values this process knows, for its own logs, spans and files ─────────────────────────

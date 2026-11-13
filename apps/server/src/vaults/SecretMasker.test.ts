@@ -45,21 +45,29 @@ import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import { maskingCheckoutReads } from "./maskCheckoutReads.ts";
-import { maskGitProgress } from "./maskGitProgress.ts";
+import { HIDDEN_OUTPUT } from "./heldText.ts";
+import { maskGitProgress, maskingGitErrors } from "./maskGitProgress.ts";
 import { maskingPullRequestReads } from "./maskPullRequests.ts";
 import { maskTerminalStream } from "./maskTerminal.ts";
-import { maskReadFile, maskSearchContents, restorePlaceholders } from "./maskWorkspace.ts";
+import { maskReadFile, maskSearchContents } from "./maskWorkspace.ts";
 import * as SecretMasker from "./SecretMasker.ts";
+import * as ThreadSecretValues from "./ThreadSecretValues.ts";
 
 const TOKEN = "sk-live-7f3a9c2e1b";
 
+const PEM =
+  "-----BEGIN KEY-----\nMIIBOgIBAAJBAKj34GkxFhD9\nq3x9Zk2LmN8pQrStUvWx\n-----END KEY-----";
+
 const tokenMasker = SecretMasker.threadMaskerOf(
-  makeSecretPatterns([{ name: "API_TOKEN", value: TOKEN }]),
+  makeSecretPatterns([
+    { name: "API_TOKEN", value: TOKEN },
+    { name: "PEM_KEY", value: PEM },
+  ]),
 );
 const fakeMasker = SecretMasker.SecretMasker.of({
   forThread: () => Effect.succeed(tokenMasker),
-  forCheckout: () => Effect.succeed(tokenMasker),
-  forPullRequest: () => Effect.succeed(tokenMasker),
+  forUser: () => Effect.succeed(tokenMasker),
+  forViewer: Effect.succeed(tokenMasker),
   remember: () => Effect.void,
 });
 
@@ -314,8 +322,8 @@ describe("SecretMasker: stored events and live command output", () => {
         yield* hub.append({ threadId, itemId: ITEM_ID, chunk: `out ${TOKEN.slice(0, 6)}` });
         let client = EMPTY_TERMINAL_OUTPUT;
         const seen: Array<string> = [];
-        // Nothing followed within the hold: the start goes out on its own.
-        while (!client.text.includes(TOKEN.slice(0, 6))) {
+        // Nothing followed within the hold: the start goes out as [NAME], never raw.
+        while (!client.text.includes("[API_TOKEN]")) {
           const frame = yield* Queue.take(frames);
           seen.push(frame.text);
           client = applyFrame(client, frame);
@@ -326,8 +334,9 @@ describe("SecretMasker: stored events and live command output", () => {
           seen.push(frame.text);
           client = applyFrame(client, frame);
         }
-        // At most the start sent before the pause; the rest, and the whole value, never.
-        assert.equal(client.text, `out ${TOKEN.slice(0, 6)}[API_TOKEN] done\n`);
+        // Neither the start sent before the pause, nor the rest.
+        assert.equal(client.text, "out [API_TOKEN] done\n");
+        assert.notInclude(seen.join(""), TOKEN.slice(0, 6));
         assert.notInclude(seen.join(""), TOKEN.slice(6));
         // A late subscriber gets the tail as one 'replace' frame: the same, never the value.
         const late = yield* hub
@@ -344,8 +353,8 @@ describe("SecretMasker: stored events and live command output", () => {
 
 const failingMasker = SecretMasker.SecretMasker.of({
   forThread: (threadId) => Effect.fail(new SecretMasker.SecretMaskingError({ threadId })),
-  forCheckout: () => Effect.fail(new SecretMasker.SecretMaskingError({})),
-  forPullRequest: () => Effect.fail(new SecretMasker.SecretMaskingError({})),
+  forUser: () => Effect.fail(new SecretMasker.SecretMaskingError({})),
+  forViewer: Effect.fail(new SecretMasker.SecretMaskingError({})),
   remember: () => Effect.void,
 });
 
@@ -419,7 +428,7 @@ describe("SecretMasker: the doors that are not events", () => {
     }),
   );
 
-  it.effect("masks setup-script output before a client sees it", () =>
+  it.effect("masks setup-script output over its tail, a value written across lines too", () =>
     Effect.gen(function* () {
       const tracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
       const threadId = ThreadId.make("thread:setup");
@@ -435,40 +444,67 @@ describe("SecretMasker: the doors that are not events", () => {
       const snapshot = JSON.stringify(yield* tracker.get(threadId));
       assert.include(snapshot, "export TOKEN=[API_TOKEN]");
       assert.notInclude(snapshot, TOKEN);
+      // A key printed one line at a time: no line of it is ever shown.
+      for (const line of PEM.split("\n")) yield* tracker.appendTail(threadId, "setup-script", line);
+      const withKey = JSON.stringify(yield* tracker.get(threadId));
+      assert.include(withKey, "[PEM_KEY]");
+      for (const line of PEM.split("\n")) assert.notInclude(withKey, line);
     }).pipe(Effect.provide(WorktreeSetupTracker.layer.pipe(Layer.provide(layerMasker)))),
   );
 
-  it.effect("masks every answer about a change request with its linked Threads' values", () =>
-    Effect.gen(function* () {
-      const service = maskingPullRequestReads(Option.some(fakeMasker), {
-        diffFileContents: (_input: { readonly repository: string; readonly number: number }) =>
-          Effect.succeed({ oldContents: "", newContents: `TOKEN=${TOKEN}\n` }),
-      });
-      const answer = yield* service.diffFileContents({ repository: "acme/web", number: 7 });
-      assert.deepEqual(answer, { oldContents: "", newContents: "TOKEN=[API_TOKEN]\n" });
-      const failing = maskingPullRequestReads(Option.some(failingMasker), {
-        diff: (_input: { readonly repository: string; readonly number: number }) =>
-          Effect.succeed(TOKEN),
-      });
-      const refused = yield* Effect.exit(failing.diff({ repository: "acme/web", number: 7 }));
-      assert.isTrue(Exit.isFailure(refused), "nothing unmasked when the values cannot be read");
-    }),
-  );
-
   it.effect(
-    "masks a checkout's diffs and commits with the values of the Threads that run there",
+    "masks a change request's answers and failures for the viewer; refuses a masked edit",
     () =>
       Effect.gen(function* () {
-        const service = maskingCheckoutReads(Option.some(fakeMasker), {
-          getDiffPreview: (_input: { readonly cwd: string }) =>
-            Effect.succeed({ sources: [{ diff: `+TOKEN=${TOKEN}` }] }),
+        const service = maskingPullRequestReads(Option.some(fakeMasker), {
+          diffFileContents: (_input: { readonly repository: string; readonly number: number }) =>
+            Effect.succeed({ oldContents: "", newContents: `TOKEN=${TOKEN}\n` }),
+          update: (_input: {
+            readonly repository: string;
+            readonly number: number;
+            readonly body?: string;
+          }) => Effect.succeed("updated"),
+          checks: (_input: { readonly repository: string; readonly number: number }) =>
+            Effect.fail(new Error(`hook said ${TOKEN}`)),
         });
-        const answer = yield* service.getDiffPreview({ cwd: "/work/acme" });
-        assert.deepEqual(answer, { sources: [{ diff: "+TOKEN=[API_TOKEN]" }] });
+        const answer = yield* service.diffFileContents({ repository: "acme/web", number: 7 });
+        assert.deepEqual(answer, { oldContents: "", newContents: "TOKEN=[API_TOKEN]\n" });
+        const failed = yield* Effect.flip(service.checks({ repository: "acme/web", number: 7 }));
+        assert.equal(failed.message, "hook said [API_TOKEN]");
+        // A body shown masked, saved back: refused, so `[API_TOKEN]` never replaces the value.
+        const edit = yield* Effect.exit(
+          service.update({ repository: "acme/web", number: 7, body: "uses [API_TOKEN]" }),
+        );
+        assert.isTrue(Exit.isFailure(edit));
+        assert.equal(
+          yield* service.update({ repository: "acme/web", number: 7, body: "no secret" }),
+          "updated",
+        );
+        const failing = maskingPullRequestReads(Option.some(failingMasker), {
+          diff: (_input: { readonly repository: string; readonly number: number }) =>
+            Effect.succeed(TOKEN),
+        });
+        const refused = yield* Effect.exit(failing.diff({ repository: "acme/web", number: 7 }));
+        assert.isTrue(Exit.isFailure(refused), "nothing unmasked when the values cannot be read");
       }),
   );
 
-  it.effect("masks git hook output with the Thread's values, or sends none", () =>
+  it.effect("masks a checkout's diffs and commits, and their failures, for the viewer", () =>
+    Effect.gen(function* () {
+      const service = maskingCheckoutReads(Option.some(fakeMasker), {
+        getDiffPreview: (_input: { readonly cwd: string }) =>
+          Effect.succeed({ sources: [{ diff: `+TOKEN=${TOKEN}` }] }),
+        getBranchCommits: (_input: { readonly cwd: string }) =>
+          Effect.fail(new Error(`fatal: ${TOKEN}`)),
+      });
+      const answer = yield* service.getDiffPreview({ cwd: "/work/acme" });
+      assert.deepEqual(answer, { sources: [{ diff: "+TOKEN=[API_TOKEN]" }] });
+      const failed = yield* Effect.flip(service.getBranchCommits({ cwd: "/work/acme" }));
+      assert.equal(failed.message, "fatal: [API_TOKEN]");
+    }),
+  );
+
+  it.effect("masks git hook output for the viewer, or hides it", () =>
     Effect.gen(function* () {
       const published: Array<unknown> = [];
       const reporter = {
@@ -486,20 +522,24 @@ describe("SecretMasker: the doors that are not events", () => {
         stream: "stdout",
         text: `checking ${TOKEN}`,
       } as unknown as GitActionProgressEvent;
-      const masked = yield* maskGitProgress(
-        Option.some(fakeMasker),
-        { cwd: "/work/acme", threadId: ThreadId.make("thread:git") },
-        { progressReporter: reporter },
-      );
+      const masked = yield* maskGitProgress(Option.some(fakeMasker), {
+        progressReporter: reporter,
+      });
       yield* masked!.progressReporter!.publish(hookLine);
-      const closed = yield* maskGitProgress(
-        Option.some(failingMasker),
-        { cwd: "/work/acme" },
-        { progressReporter: reporter },
-      );
+      const closed = yield* maskGitProgress(Option.some(failingMasker), {
+        progressReporter: reporter,
+      });
       yield* closed!.progressReporter!.publish(hookLine);
-      assert.lengthOf(published, 1);
+      assert.lengthOf(published, 2);
       assert.include(JSON.stringify(published[0]), "checking [API_TOKEN]");
+      assert.include(JSON.stringify(published[1]), HIDDEN_OUTPUT);
+      assert.notInclude(JSON.stringify(published), TOKEN);
+      // A failed action's error (git's or a hook's stderr): masked too.
+      const run = maskingGitErrors(Option.some(fakeMasker), (_input: string, _options: undefined) =>
+        Effect.fail(new Error(`hook failed: ${TOKEN}`)),
+      );
+      const failed = yield* Effect.flip(run("commit", undefined));
+      assert.equal(failed.message, "hook failed: [API_TOKEN]");
     }),
   );
 
@@ -511,87 +551,156 @@ describe("SecretMasker: the doors that are not events", () => {
         "thread-1",
         Stream.fromQueue(frames),
       ).pipe(Stream.runCollect, Effect.forkScoped);
+      // A start shorter than the shortest value masked goes out raw; the rest never does.
       yield* Queue.offer(frames, output(`out: ${TOKEN.slice(0, 5)}`));
       yield* TestClock.adjust("1 second");
       yield* Queue.offer(frames, output(`${TOKEN.slice(5)}\r\n`));
+      // A longer start goes out as [NAME]; the rest is dropped.
+      yield* Queue.offer(frames, output(`again: ${TOKEN.slice(0, 9)}`));
+      yield* TestClock.adjust("1 second");
+      yield* Queue.offer(frames, output(`${TOKEN.slice(9)}\r\n`));
       yield* Queue.end(frames);
       const sent = outputsOf([...(yield* Fiber.join(collected))]);
-      assert.deepEqual(sent, [`out: ${TOKEN.slice(0, 5)}`, "[API_TOKEN]\r\n"]);
+      assert.deepEqual(sent, [
+        `out: ${TOKEN.slice(0, 5)}`,
+        "[API_TOKEN]\r\n",
+        "again: [API_TOKEN]",
+        "\r\n",
+      ]);
       assert.notInclude(sent.join(""), TOKEN.slice(5));
     }).pipe(Effect.scoped),
   );
 
-  it.effect(
-    "drops a search match that could spell a value out, and says nothing more matched",
-    () =>
-      Effect.sync(() => {
-        const cut = `${"x".repeat(512 - 4)}${TOKEN.slice(0, 4)}`;
-        const result = maskSearchContents(tokenMasker, {
-          matches: [
-            { path: "a.txt", lineNumber: 1, lineContent: `k=${TOKEN}`, matchRanges: [] },
-            { path: "b.txt", lineNumber: 1, lineContent: cut, matchRanges: [] },
-            {
-              path: "c.txt",
-              lineNumber: 1,
-              lineContent: "ordinary",
-              matchRanges: [{ start: 0, end: 8 }],
+  it.live("keeps one guard across a reload of the values and a snapshot", () =>
+    Effect.gen(function* () {
+      // Every read gives a new masker (a reload): a value split between frames is still whole.
+      const reloading = SecretMasker.SecretMasker.of({
+        ...fakeMasker,
+        forThread: () =>
+          Effect.sync(() =>
+            SecretMasker.threadMaskerOf(makeSecretPatterns([{ name: "API_TOKEN", value: TOKEN }])),
+          ),
+      });
+      const events = yield* maskTerminalStream(
+        reloading,
+        "thread-1",
+        Stream.make(
+          output(`a ${TOKEN.slice(0, 5)}`),
+          output(`${TOKEN.slice(5)} b`),
+          // A screen reset that ends in the start of a value: shown as [NAME], the rest dropped.
+          {
+            type: "snapshot",
+            snapshot: {
+              threadId: "thread-1",
+              terminalId: "term-1",
+              cwd: "/work",
+              worktreePath: null,
+              status: "running",
+              pid: 1,
+              history: `$ cat key\r\n${TOKEN.slice(0, 9)}`,
+              exitCode: null,
+              exitSignal: null,
+              label: "shell",
+              updatedAt: "2026-11-13T00:00:00.000Z",
             },
-            // A hit past the 512-byte cap (no ranges), or one running into it: the value may
-            // be past what the line shows, and the hit alone would tell it.
-            { path: "d.txt", lineNumber: 1, lineContent: "x".repeat(512), matchRanges: [] },
-            {
-              path: "e.txt",
-              lineNumber: 1,
-              lineContent: "y".repeat(512),
-              matchRanges: [{ start: 500, end: 512 }],
-            },
-          ],
-          truncated: true,
-        } as never);
-        assert.deepEqual(
-          result.matches.map((match) => match.path),
-          ["c.txt"],
-        );
-        assert.isFalse(result.truncated);
-        const read = maskReadFile(tokenMasker, {
-          relativePath: "big.txt",
-          contents: `head\n${TOKEN.slice(0, 6)}`,
-          byteLength: 9_000_000,
-          truncated: true,
-        } as never);
-        assert.equal(read.contents, "head\n");
-      }),
+          } satisfies TerminalAttachStreamEvent,
+          output(`${TOKEN.slice(9)}\r\n$ `),
+        ),
+      ).pipe(Stream.runCollect);
+      const all = [...events];
+      assert.deepEqual(outputsOf(all), ["a [API_TOKEN] b", "\r\n$ "]);
+      const snapshot = all.find((event) => event.type === "snapshot");
+      assert.equal(
+        snapshot?.type === "snapshot" ? snapshot.snapshot.history : undefined,
+        "$ cat key\r\n[API_TOKEN]",
+      );
+      assert.notInclude(JSON.stringify(all), TOKEN.slice(0, 6));
+    }),
   );
 
-  it.effect("a save puts back only the values the file held at that place", () =>
-    Effect.sync(() => {
-      const OLD = "sk-live-old-1a2b3c4d";
-      const masker = SecretMasker.threadMaskerOf(
-        makeSecretPatterns([
-          { name: "API_TOKEN", value: TOKEN },
-          { name: "API_TOKEN", value: OLD },
-        ]),
-      );
-      const onDisk = `A=${TOKEN}\nB=plain\nC=${OLD}\nD=[API_TOKEN] (literal)\n`;
-      const shown = masker.mask(onDisk);
-      assert.equal(shown, "A=[API_TOKEN]\nB=plain\nC=[API_TOKEN]\nD=[API_TOKEN] (literal)\n");
-      // Another line edited: every value stays where it was, a rotated one too.
-      assert.equal(
-        restorePlaceholders(masker, onDisk, shown.replace("B=plain", "B=edited")),
-        onDisk.replace("B=plain", "B=edited"),
-      );
-      // A placeholder typed or copied elsewhere stays as typed: it never copies a value.
-      assert.equal(
-        restorePlaceholders(masker, onDisk, `${shown}E=[API_TOKEN]\n`),
-        `${onDisk}E=[API_TOKEN]\n`,
-      );
-      // The line holding the value edited around it keeps the value.
-      assert.equal(
-        restorePlaceholders(masker, onDisk, shown.replace("A=[API_TOKEN]", "AA=[API_TOKEN] #")),
-        onDisk.replace(`A=${TOKEN}`, `AA=${TOKEN} #`),
-      );
-      // A file that could not be read whole: refused, never written with a placeholder.
-      assert.isUndefined(restorePlaceholders(masker, undefined, shown));
+  it.effect("hides a terminal's output when the Thread's values cannot be read", () =>
+    Effect.gen(function* () {
+      const events = yield* maskTerminalStream(
+        failingMasker,
+        "thread-1",
+        Stream.make(output(`one ${TOKEN}`), output(`two ${TOKEN}`)),
+      ).pipe(Stream.runCollect);
+      assert.deepEqual(outputsOf([...events]), [`${HIDDEN_OUTPUT}\r\n`]);
     }),
+  );
+
+  it.effect("filters a search first and limits after: what it says never depends on a value", () =>
+    Effect.sync(() => {
+      const line = (path: string, lineContent: string, end = lineContent.length) => ({
+        path,
+        lineNumber: 1,
+        lineContent,
+        matchRanges: [{ start: 0, end }],
+      });
+      const result = maskSearchContents(
+        tokenMasker,
+        {
+          matches: [
+            line("a.txt", `k=${TOKEN}`),
+            line("b.txt", "ordinary"),
+            // A hit past the 512-byte cap (no ranges), or one running into it.
+            { path: "c.txt", lineNumber: 1, lineContent: "x".repeat(512), matchRanges: [] },
+            line("d.txt", "y".repeat(512), 512),
+            // A line that only ends like the start of a value is an ordinary line.
+            line("e.txt", `prefix ${TOKEN.slice(0, 4)}`),
+            line("f.txt", "another"),
+          ],
+          truncated: false,
+        } as never,
+        2,
+      );
+      assert.deepEqual(
+        result.matches.map((match) => match.path),
+        ["b.txt", "e.txt"],
+      );
+      assert.isTrue(result.truncated, "f.txt matched past the limit");
+      const read = maskReadFile(tokenMasker, {
+        relativePath: "big.txt",
+        contents: `head\n${TOKEN.slice(0, 6)}`,
+        byteLength: 9_000_000,
+        truncated: true,
+      } as never);
+      assert.equal(read.contents, "head\n[API_TOKEN]");
+      assert.isTrue(read.masked);
+    }),
+  );
+});
+
+// ── The real SecretMasker over a database: fails closed, and forgets gone Threads' values ──────
+
+describe("SecretMasker: its own reads", () => {
+  it.live("never masks with only what was delivered when the Thread's set cannot be read", () =>
+    Effect.gen(function* () {
+      const threadId = yield* seedThread;
+      const masker = yield* SecretMasker.SecretMasker;
+      // Delivered before any full read: held in memory, not a read set.
+      yield* masker.remember(threadId, [{ name: "API_TOKEN", value: TOKEN, valueId: "value-1" }]);
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`DROP TABLE thread_secret_values`;
+      const read = yield* Effect.exit(masker.forThread(threadId));
+      assert.isTrue(Exit.isFailure(read), "a partial set is never used as the Thread's");
+    }).pipe(Effect.provide(Layer.provideMerge(SecretMasker.layer, layerTest))),
+  );
+
+  it.live("forgets the values of deleted Threads and of Threads gone for a day", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const living = yield* seedThread;
+      const old = "2020-01-01T00:00:00.000Z";
+      const recent = DateTime.formatIso(yield* DateTime.now);
+      yield* sql`
+        INSERT INTO thread_secret_values (thread_id, value_id, name, remembered_at) VALUES
+          (${living}, 'value-living', 'A', ${old}),
+          ('thread:never-projected', 'value-gone', 'B', ${old}),
+          ('thread:being-created', 'value-new', 'C', ${recent})
+      `;
+      const held = yield* ThreadSecretValues.pruneAndListHeld(sql);
+      assert.deepEqual([...held].sort(), ["value-living", "value-new"]);
+    }).pipe(Effect.provide(layerTest)),
   );
 });

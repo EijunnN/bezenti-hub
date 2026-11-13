@@ -22,10 +22,13 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
 
+import { maskWhole } from "@t3tools/shared/secretMasking";
+
+import { HIDDEN_OUTPUT } from "../vaults/heldText.ts";
 import * as SecretMasker from "../vaults/SecretMasker.ts";
 
-/** Output not shown because the Thread's secrets could not be read to hide them. */
-const HIDDEN_OUTPUT = "(output hidden: this Thread's secrets could not be read)";
+/** Raw output lines kept per stage, so a value written across lines (a key) is masked whole. */
+const RAW_TAIL_LINES = 64;
 
 export class WorktreeSetupTracker extends Context.Service<
   WorktreeSetupTracker,
@@ -118,6 +121,29 @@ export const make = Effect.gen(function* () {
           Effect.map((threadMasker) => threadMasker.mask(text)),
           Effect.orElseSucceed(() => HIDDEN_OUTPUT),
         );
+  /** The stage's tail, masked over its last raw lines together (never line by line). */
+  const rawTails = new Map<string, Array<string>>();
+  const maskedTail = Effect.fnUntraced(function* (
+    threadId: ThreadId,
+    stageId: string,
+    line: string,
+  ) {
+    const key = `${threadId}\u0000${stageId}`;
+    const lines = rawTails.get(key) ?? [];
+    lines.push(line);
+    const cut = lines.length > RAW_TAIL_LINES;
+    if (cut) lines.splice(0, lines.length - RAW_TAIL_LINES);
+    rawTails.set(key, lines);
+    if (Option.isNone(masker)) return lines.slice(-TAIL_LINE_LIMIT);
+    return yield* masker.value.forThread(threadId).pipe(
+      Effect.map((threadMasker) =>
+        maskWhole(threadMasker, lines.join("\n"), { cutAtStart: cut })
+          .split("\n")
+          .slice(-TAIL_LINE_LIMIT),
+      ),
+      Effect.orElseSucceed(() => [HIDDEN_OUTPUT]),
+    );
+  });
 
   const publish = (threadId: ThreadId, snapshot: WorktreeSetupSnapshot | null) =>
     PubSub.publish(changes, { threadId, snapshot }).pipe(Effect.asVoid);
@@ -245,16 +271,14 @@ export const make = Effect.gen(function* () {
     );
 
   const appendTail: WorktreeSetupTracker["Service"]["appendTail"] = (threadId, stageId, raw) =>
-    Effect.flatMap(masked(threadId, raw), (line) =>
+    Effect.flatMap(maskedTail(threadId, stageId, raw), (lines) =>
       update(threadId, (snapshot) => ({
         ...snapshot,
         stages: snapshot.stages.map((entry) =>
           entry.id === stageId
             ? {
                 ...entry,
-                tail: [...entry.tail, clampText(line, WORKTREE_SETUP_TAIL_LINE_MAX_LENGTH)].slice(
-                  -TAIL_LINE_LIMIT,
-                ),
+                tail: lines.map((line) => clampText(line, WORKTREE_SETUP_TAIL_LINE_MAX_LENGTH)),
               }
             : entry,
         ),
@@ -265,6 +289,9 @@ export const make = Effect.gen(function* () {
     "WorktreeSetupTracker.finish",
   )(function* (threadId, phase, rawError) {
     const error = typeof rawError === "string" ? yield* masked(threadId, rawError) : rawError;
+    for (const key of rawTails.keys()) {
+      if (key.startsWith(`${threadId}\u0000`)) rawTails.delete(key);
+    }
     const endedAt = yield* nowIso;
     const snapshot = yield* modify(threadId, (tracked) => ({
       fiber: null,

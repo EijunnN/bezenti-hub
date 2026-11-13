@@ -4,6 +4,7 @@ import {
   forgetKnownSecretsForTest,
   makeSecretPatterns,
   maskDeep,
+  maskWhole,
   MIN_MASKED_SECRET_LENGTH,
   redactKnownSecrets,
   rememberKnownSecrets,
@@ -144,6 +145,36 @@ describe("secretMasking", () => {
       text: "[API_TOKEN]\r\n",
       hold: false,
     });
+  });
+
+  it("never sends a start of a value raw: released, held too long or seeded", () => {
+    const patterns = makeSecretPatterns([{ name: "API_TOKEN", value: TOKEN }]);
+    const guard = new SecretStreamGuard(patterns);
+    // Released after the hold: a start of 6 or more characters goes out as [NAME]...
+    assert.deepEqual(guard.push(`a ${TOKEN.slice(0, 10)}`, 1024), { text: "", hold: true });
+    assert.equal(guard.release(), "a [API_TOKEN]");
+    // ...and the rest of the value, when it comes, is dropped (no second [NAME]).
+    assert.deepEqual(guard.push(`${TOKEN.slice(10)} b`, 1024), { text: " b", hold: false });
+    // More than may be held: the same.
+    assert.deepEqual(guard.push(`${"x".repeat(20)}${TOKEN.slice(0, 8)}`, 16), {
+      text: `${"x".repeat(20)}[API_TOKEN]`,
+      hold: false,
+    });
+    assert.deepEqual(guard.push(TOKEN.slice(8), 16), { text: "", hold: false });
+    // New values (a reload) keep what is held: the value split across it is masked whole.
+    assert.deepEqual(guard.push(`c ${TOKEN.slice(0, 7)}`, 1024), { text: "", hold: true });
+    guard.setPatterns(makeSecretPatterns([{ name: "API_TOKEN", value: TOKEN }]));
+    assert.deepEqual(guard.push(`${TOKEN.slice(7)} d`, 1024), {
+      text: "c [API_TOKEN] d",
+      hold: false,
+    });
+    // A screen reset to text ending in a start: the rest, when it comes, is dropped.
+    guard.seed(`$ cat key\r\n${TOKEN.slice(0, 9)}`);
+    assert.deepEqual(guard.push(`${TOKEN.slice(9)}\r\n$ `, 1024), { text: "\r\n$ ", hold: false });
+    assert.equal(
+      maskWhole(patterns, `${TOKEN.slice(4)} and ${TOKEN.slice(0, 7)}`, { cutAtStart: true }),
+      " and [API_TOKEN]",
+    );
   });
 
   it("matches among thousands of values", () => {

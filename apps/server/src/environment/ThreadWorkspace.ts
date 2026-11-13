@@ -73,8 +73,17 @@ import * as RemoteEnvironments from "./RemoteEnvironments.ts";
 import { locateInCheckout } from "./WorkspaceLocation.ts";
 import * as SecretDelivery from "../vaults/SecretDelivery.ts";
 import * as SecretMasker from "../vaults/SecretMasker.ts";
-import { maskTerminalSnapshot, maskTerminalStream } from "../vaults/maskTerminal.ts";
-import { maskReadFile, maskSearchContents, restorePlaceholders } from "../vaults/maskWorkspace.ts";
+import {
+  hiddenTerminalSnapshot,
+  maskTerminalSnapshot,
+  maskTerminalStream,
+} from "../vaults/maskTerminal.ts";
+import {
+  FILE_HOLDS_SECRETS,
+  maskReadFile,
+  maskSearchContents,
+  searchOverFetchLimit,
+} from "../vaults/maskWorkspace.ts";
 
 /** Who asks: the session's User, whose rules a forwarded call keeps to. */
 export interface WorkspaceCaller {
@@ -998,69 +1007,86 @@ export const make = Effect.gen(function* () {
     ),
   };
 
-  // Spec 5 ticket 05: a Thread's files and terminals reach a client masked with its own values; a
-  // save puts placeholders back. A call naming no Thread reads the Hub machine's checkout as it is
-  // (clients relay such reads to copy files). Values that cannot be read fail the call.
+  // Spec 5 ticket 05: files, search and errors masked with the asking User's own values (never a
+  // named Thread's); a file holding one is not written over. Terminals: the Thread's values, or
+  // hidden when they cannot be read.
   if (Option.isNone(secretMasker)) return calls;
   const masker = secretMasker.value;
-  const maskerOf = (threadId: string) => Effect.orDie(masker.forThread(threadId));
+  const viewerOf = (caller: WorkspaceCaller) =>
+    caller.userId === undefined ? masker.forViewer : masker.forUser(caller.userId);
+  /** A call, with whatever a machine says in its error masked for the caller. */
+  const maskingErrors = <A, E, R>(caller: WorkspaceCaller, call: Effect.Effect<A, E, R>) =>
+    call.pipe(
+      Effect.catch((error: E) =>
+        Effect.flatMap(Effect.orDie(viewerOf(caller)), (found) =>
+          Effect.fail(found.maskError(error)),
+        ),
+      ),
+    );
   return {
     ...calls,
     readFile: (input: ProjectReadFileInput, caller: WorkspaceCaller) =>
-      input.threadId === undefined
-        ? calls.readFile(input, caller)
-        : Effect.flatMap(calls.readFile(input, caller), (result) =>
-            Effect.map(maskerOf(input.threadId!), (threadMasker) =>
-              maskReadFile(threadMasker, result),
-            ),
-          ),
+      maskingErrors(
+        caller,
+        Effect.flatMap(calls.readFile(input, caller), (result) =>
+          Effect.map(Effect.orDie(viewerOf(caller)), (found) => maskReadFile(found, result)),
+        ),
+      ),
     searchContents: (input: ProjectSearchContentsInput, caller: WorkspaceCaller) =>
-      input.threadId === undefined
-        ? calls.searchContents(input, caller)
-        : Effect.flatMap(calls.searchContents(input, caller), (result) =>
-            Effect.map(maskerOf(input.threadId!), (threadMasker) =>
-              maskSearchContents(threadMasker, result),
-            ),
-          ),
+      maskingErrors(
+        caller,
+        Effect.gen(function* () {
+          const found = yield* Effect.orDie(viewerOf(caller));
+          if (found.isEmpty) return yield* calls.searchContents(input, caller);
+          // Filtered first, limited after: what a search shows never depends on a value.
+          const result = yield* calls.searchContents(
+            { ...input, limit: searchOverFetchLimit(input.limit) },
+            caller,
+          );
+          return maskSearchContents(found, result, input.limit);
+        }),
+      ),
     writeFile: (input: ProjectWriteFileInput, caller: WorkspaceCaller) =>
-      input.threadId === undefined || !input.contents.includes("[")
-        ? calls.writeFile(input, caller)
-        : Effect.gen(function* () {
-            const threadMasker = yield* maskerOf(input.threadId!);
-            if (threadMasker.isEmpty) return yield* calls.writeFile(input, caller);
-            // The file as it is now, unmasked (this read never leaves the Hub).
+      maskingErrors(
+        caller,
+        Effect.gen(function* () {
+          const found = yield* Effect.orDie(viewerOf(caller));
+          if (!found.isEmpty) {
+            // The file as it is now (this read never leaves the Hub): one that holds a value was
+            // shown masked, and saving what was shown would write `[NAME]` over the value.
             const current = yield* calls
               .readFile(
                 {
                   cwd: input.cwd,
                   relativePath: input.relativePath,
-                  threadId: input.threadId,
+                  ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
                   allowMissing: true,
                 },
                 caller,
               )
-              .pipe(
-                Effect.map((read) =>
-                  read.truncated ? undefined : read.exists === false ? "" : read.contents,
-                ),
-                Effect.orElseSucceed(() => undefined),
-              );
-            const contents = restorePlaceholders(threadMasker, current, input.contents);
-            if (contents === undefined) {
+              .pipe(Effect.option);
+            // (One too large to read whole is refused too: it cannot be checked.)
+            if (
+              Option.isSome(current) &&
+              current.value.exists !== false &&
+              (current.value.truncated || found.matches(current.value.contents))
+            ) {
               return yield* new ProjectWriteFileError({
                 cwd: input.cwd,
                 relativePath: input.relativePath,
                 failure: "operation_failed",
-                message:
-                  "This file shows a secret as [NAME] and could not be saved without losing it. Edit it in a terminal.",
+                message: FILE_HOLDS_SECRETS,
               });
             }
-            return yield* calls.writeFile({ ...input, contents }, caller);
-          }),
+          }
+          return yield* calls.writeFile(input, caller);
+        }),
+      ),
     terminalOpen: (input: TerminalOpenInput, caller: WorkspaceCaller) =>
       Effect.flatMap(calls.terminalOpen(input, caller), (snapshot) =>
-        Effect.map(maskerOf(input.threadId), (threadMasker) =>
-          maskTerminalSnapshot(threadMasker, snapshot),
+        masker.forThread(input.threadId).pipe(
+          Effect.map((threadMasker) => maskTerminalSnapshot(threadMasker, snapshot)),
+          Effect.orElseSucceed(() => hiddenTerminalSnapshot(snapshot)),
         ),
       ),
     terminalAttach: (input: TerminalAttachInput, viewerId: string, caller: WorkspaceCaller) =>

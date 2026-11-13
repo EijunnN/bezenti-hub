@@ -25,7 +25,9 @@ import type * as McpProviderSessions from "@t3tools/provider-core/server/McpProv
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { forgetKnownSecretsForTest, maskDeep } from "@t3tools/shared/secretMasking";
 import * as Deferred from "effect/Deferred";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Queue from "effect/Queue";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -333,7 +335,7 @@ describe("Hub con Environments: a Thread's secret values are masked in its histo
       assert.notInclude(yield* databaseText(hub), OWNER_TOKEN);
     }).pipe(Effect.scoped),
   );
-  it.live("an editor save puts each [NAME] back to the value the file held", () =>
+  it.live("an editor save over a file that shows a secret is refused; the file keeps it", () =>
     Effect.gen(function* () {
       const { hub, laptop, owner, threadId } = yield* turnThatPrintsTheSecret();
       const workspace = yield* threadWorkspaceOf(hub);
@@ -341,10 +343,18 @@ describe("Hub con Environments: a Thread's secret values are masked in its histo
       const caller = { userId: owner };
       const shown = yield* workspace.readFile({ cwd, relativePath: "notes.md", threadId }, caller);
       assert.equal(shown.contents, "TOKEN=[OWNER_TOKEN] (turn 1)\n");
-      // The editor saves what it was shown, with a line added.
-      yield* workspace.writeFile(
-        { cwd, relativePath: "notes.md", contents: `${shown.contents}reviewed\n`, threadId },
-        caller,
+      assert.isTrue(shown.masked, "the editor opens it read-only");
+      // The editor saves what it was shown, with a line added: refused.
+      const saved = yield* Effect.exit(
+        workspace.writeFile(
+          { cwd, relativePath: "notes.md", contents: `${shown.contents}reviewed\n`, threadId },
+          caller,
+        ),
+      );
+      assert.isTrue(Exit.isFailure(saved));
+      assert.include(
+        String(Cause.squash((saved as Exit.Failure<never, unknown>).cause)),
+        "secrets",
       );
       const projection = yield* hub
         .service(Orchestrator.OrchestratorV2)
@@ -357,7 +367,16 @@ describe("Hub con Environments: a Thread's secret values are masked in its histo
       const onDisk = yield* Effect.promise(() =>
         NodeFSP.readFile(NodePath.join(laptopCheckout, "notes.md"), "utf8"),
       );
-      assert.equal(onDisk, `TOKEN=${OWNER_TOKEN} (turn 1)\nreviewed\n`);
+      assert.equal(onDisk, `TOKEN=${OWNER_TOKEN} (turn 1)\n`);
+      // A file without one saves as before.
+      yield* workspace.writeFile(
+        { cwd, relativePath: "plain.md", contents: "nothing secret\n", threadId },
+        caller,
+      );
+      const plain = yield* Effect.promise(() =>
+        NodeFSP.readFile(NodePath.join(laptopCheckout, "plain.md"), "utf8"),
+      );
+      assert.equal(plain, "nothing secret\n");
     }).pipe(Effect.scoped),
   );
 
@@ -407,7 +426,7 @@ describe("Hub con Environments: a Thread's secret values are masked in its histo
     }).pipe(Effect.scoped),
   );
 
-  it.live("masks a checkout or a change request only with the viewer's own Threads' values", () =>
+  it.live("what a User reads is masked with their own values only, as the request's User", () =>
     Effect.gen(function* () {
       const hub = yield* makeHub();
       const owner = yield* ownerIdOf(hub);
@@ -448,15 +467,6 @@ describe("Hub con Environments: a Thread's secret values are masked in its histo
       const adaThread = ThreadId.make("thread:ada-shared");
       yield* create(ownerThread, owner);
       yield* create(adaThread, ada);
-      const cwd = yield* hubCheckoutOf(hub, ownerThread);
-      // Both run in the Hub machine's checkout and are linked to one change request.
-      yield* hub.server.sql`
-        UPDATE orchestration_v2_projection_threads
-        SET active_environment_id = NULL,
-            payload_json = json_set(payload_json, '$.pullRequests',
-              json('[{"repository":"acme/web","number":7}]'))
-        WHERE thread_id IN (${ownerThread}, ${adaThread})
-      `;
       const masker = hub.service(SecretMasker.SecretMasker);
       const OWNER_VALUE = "owner-shared-value-5151";
       const ADA_VALUE = "ada-shared-value-6262";
@@ -467,22 +477,20 @@ describe("Hub con Environments: a Thread's secret values are masked in its histo
         { name: "ADA_SECRET", value: ADA_VALUE, valueId: "value-ada-shared" },
       ]);
       const text = `${OWNER_VALUE} ${ADA_VALUE}`;
+      // What a User reads (files, search, diffs, change requests, Git output) is masked with their
+      // own values: Ada's never confirm the Owner's, whatever Thread or folder a client names.
+      assert.equal((yield* masker.forUser(ada)).mask(text), `${OWNER_VALUE} [ADA_SECRET]`);
+      assert.equal((yield* masker.forUser(owner)).mask(text), `[OWNER_SECRET] ${ADA_VALUE}`);
+      // The same for a checkout's diffs, change requests and Git output (the request's User).
       const as = (userId: UserId) =>
         Effect.provideService(EnvironmentAuthenticatedPrincipal, {
           userId,
         } as unknown as EnvironmentSessionPrincipalShape);
-      const viewedBy = Effect.fn(function* (
-        found: Effect.Effect<SecretMasker.ThreadMasker, SecretMasker.SecretMaskingError>,
-      ) {
-        return (yield* found).mask(text);
-      });
-      const key = { repository: "acme/web", number: 7 };
-      for (const read of [masker.forCheckout(cwd), masker.forPullRequest(key)]) {
-        assert.equal(yield* viewedBy(read).pipe(as(ada)), `${OWNER_VALUE} [ADA_SECRET]`);
-        assert.equal(yield* viewedBy(read).pipe(as(owner)), `[OWNER_SECRET] ${ADA_VALUE}`);
-        // No User asks (an internal call): no one's values, so no one's guess is confirmed.
-        assert.equal(yield* viewedBy(read), text);
-      }
+      const viewed = masker.forViewer.pipe(Effect.map((found) => found.mask(text)));
+      assert.equal(yield* viewed.pipe(as(ada)), `${OWNER_VALUE} [ADA_SECRET]`);
+      assert.equal(yield* viewed.pipe(as(owner)), `[OWNER_SECRET] ${ADA_VALUE}`);
+      // No User asks (an internal call): no one's values, so no one's guess is confirmed.
+      assert.equal(yield* viewed, text);
     }).pipe(Effect.scoped),
   );
 });

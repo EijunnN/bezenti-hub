@@ -1385,7 +1385,7 @@ const sweepOrphanValues = Effect.gen(function* () {
       SELECT value_id AS "valueId" FROM vault_entries WHERE value_id IS NOT NULL
     `).map((row) => row.valueId),
   );
-  // Values living Threads received stay masked there (ticket 05); gone Threads' are dropped.
+  // Values living Threads received stay masked there (ticket 05); deleted and gone ones go.
   for (const valueId of yield* ThreadSecretValues.pruneAndListHeld(sql)) held.add(valueId);
   let removed = 0;
   for (const valueId of stored) {

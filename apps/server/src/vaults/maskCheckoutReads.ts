@@ -1,7 +1,7 @@
 /**
- * Spec 5 ticket 05: a checkout's diffs and commits (the Changes panel) name no Thread: each answer
- * of a method whose input names a `cwd` is masked with the values of the Threads that run in that
- * checkout on the Hub machine (the Owner's). A masker that cannot be read fails the call.
+ * Spec 5 ticket 05: a checkout's diffs and commits (the Changes panel) masked with the asking
+ * User's own values (the request's principal; never another User's), answers and failures. A
+ * masker that cannot be read fails the call.
  */
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -13,19 +13,21 @@ export const maskingCheckoutReads = <S extends object>(
   service: S,
 ): S => {
   if (Option.isNone(masker)) return service;
+  const viewer = Effect.orDie(masker.value.forViewer);
   const wrapped: Record<string, unknown> = {};
   for (const [name, method] of Object.entries(service)) {
     wrapped[name] =
       typeof method !== "function"
         ? method
-        : (input: unknown, ...rest: ReadonlyArray<unknown>) => {
-            const answer = (method as (...args: ReadonlyArray<unknown>) => unknown)(input, ...rest);
-            const cwd = (input as { readonly cwd?: unknown } | null)?.cwd;
-            if (typeof cwd !== "string" || !Effect.isEffect(answer)) return answer;
+        : (...args: ReadonlyArray<unknown>) => {
+            const answer = (method as (...args: ReadonlyArray<unknown>) => unknown)(...args);
+            if (!Effect.isEffect(answer)) return answer;
             // @effect-diagnostics-next-line anyUnknownInErrorContext:off -- any method's own answer.
-            return Effect.flatMap(answer as Effect.Effect<unknown, unknown, unknown>, (value) =>
-              Effect.map(Effect.orDie(masker.value.forCheckout(cwd)), (found) =>
-                found.maskDeep(value),
+            return (answer as Effect.Effect<unknown, unknown, unknown>).pipe(
+              Effect.flatMap((value) => Effect.map(viewer, (found) => found.maskDeep(value))),
+              // @effect-diagnostics-next-line anyUnknownInErrorContext:off -- any method's own error.
+              Effect.catch((error: unknown) =>
+                Effect.flatMap(viewer, (found) => Effect.fail(found.maskError(error))),
               ),
             );
           };

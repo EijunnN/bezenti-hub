@@ -23,15 +23,10 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
-import { SecretStreamGuard } from "@t3tools/shared/secretMasking";
+import { type HeldText, HIDDEN_OUTPUT, makeHeldText } from "../vaults/heldText.ts";
 import * as SecretMasker from "../vaults/SecretMasker.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
-
-/** How long output that could end in the start of a secret waits for the rest. */
-const SECRET_HOLD_MS = 150;
-/** Output kept waiting beyond this is masked and sent as it is. */
-const SECRET_HOLD_MAX_CHARS = 128 * 1024;
 
 /** Output bypasses orchestration events; expanded rows receive tails, coalesced appends, then persisted output. */
 
@@ -166,75 +161,52 @@ export const make = Effect.gen(function* () {
     });
 
   /**
-   * Spec 5 ticket 05: output is masked before anyone sees it, through the shared
-   * `SecretStreamGuard` (one per command): a value split between chunks is masked whole, or its
-   * continuation is. A Thread whose values cannot be read sends nothing.
+   * Spec 5 ticket 05: output is masked before anyone sees it, through the shared `makeHeldText`
+   * (one per command, for its life): a value split between chunks is never seen. A Thread whose
+   * values cannot be read shows `HIDDEN_OUTPUT` instead of its output.
    */
-  const guards = new Map<
+  const streams = new Map<
     string,
-    {
-      readonly masker: SecretMasker.ThreadMasker;
-      readonly guard: SecretStreamGuard;
-      readonly target: CommandOutputTarget;
-      generation: number;
-    }
+    { readonly held: HeldText<CommandOutputTarget>; hidden: boolean }
   >();
-  const release = (key: string) =>
-    Effect.suspend(() => {
-      const state = guards.get(key);
-      if (state === undefined || !state.guard.holding) return Effect.void;
-      state.generation += 1;
-      return appendMasked({ ...state.target, chunk: state.guard.release() });
-    });
+  const streamOf = Effect.fnUntraced(function* (key: string) {
+    const known = streams.get(key);
+    if (known !== undefined) return known;
+    const created = {
+      held: yield* makeHeldText<CommandOutputTarget>((chunk, target) =>
+        appendMasked({ ...target, chunk }),
+      ),
+      hidden: false,
+    };
+    setBounded(streams, key, created, MAX_LIVE_COMMANDS * 2);
+    return created;
+  });
   const append: CommandOutputHubShape["append"] = Effect.fnUntraced(function* ({
     chunk,
     ...target
   }) {
     if (Option.isNone(masker)) return yield* appendMasked({ chunk, ...target });
     if (chunk.length === 0) return;
-    const key = commandKey(target);
-    const threadMasker = yield* masker.value.forThread(target.threadId).pipe(
-      Effect.catch((cause) =>
-        Effect.logWarning("command output dropped: the Thread's secrets could not be read", {
-          threadId: target.threadId,
-          cause,
-        }).pipe(Effect.as(undefined)),
-      ),
-    );
-    if (threadMasker === undefined) return;
-    let state = guards.get(key);
-    if (state?.masker !== threadMasker) {
-      yield* release(key);
-      state = {
-        masker: threadMasker,
-        guard: new SecretStreamGuard(threadMasker),
-        target,
-        generation: 0,
-      };
-      setBounded(guards, key, state, MAX_LIVE_COMMANDS * 2);
+    const stream = yield* streamOf(commandKey(target));
+    const threadMasker = yield* Effect.option(masker.value.forThread(target.threadId));
+    if (Option.isNone(threadMasker)) {
+      if (!stream.hidden) yield* appendMasked({ ...target, chunk: `${HIDDEN_OUTPUT}\n` });
+      stream.hidden = true;
+      return;
     }
-    const pushed = state.guard.push(chunk, SECRET_HOLD_MAX_CHARS);
-    if (pushed.text.length > 0) yield* appendMasked({ ...target, chunk: pushed.text });
-    if (!pushed.hold) return;
-    const generation = ++state.generation;
-    const holding = state;
-    yield* Effect.sleep(SECRET_HOLD_MS).pipe(
-      Effect.andThen(
-        Effect.suspend(() =>
-          guards.get(key) === holding && holding.generation === generation
-            ? release(key)
-            : Effect.void,
-        ),
-      ),
-      Effect.forkDetach,
-    );
+    stream.hidden = false;
+    yield* stream.held.push(threadMasker.value, chunk, target);
   });
 
   const finish: CommandOutputHubShape["finish"] = (target) =>
-    release(commandKey(target)).pipe(
-      Effect.andThen(Effect.sync(() => guards.delete(commandKey(target)))),
-      Effect.andThen(finishTail(target)),
-    );
+    Effect.suspend(() => {
+      const key = commandKey(target);
+      const stream = streams.get(key);
+      streams.delete(key);
+      return (stream === undefined ? Effect.void : stream.held.flush).pipe(
+        Effect.andThen(finishTail(target)),
+      );
+    });
 
   const finishTail: CommandOutputHubShape["finish"] = (target) =>
     Effect.sync(() => {

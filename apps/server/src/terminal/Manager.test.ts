@@ -457,6 +457,39 @@ it.layer(
     }),
   );
 
+  it.effect("spec 5: its history file masks every value its shells were given, over respawns", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, logsDir } = yield* createManager(50);
+      const exited = yield* Deferred.make<void>();
+      const unsubscribeEvents = yield* manager.subscribe((event) =>
+        event.type === "exited"
+          ? Deferred.succeed(exited, undefined).pipe(Effect.asVoid)
+          : Effect.void,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribeEvents));
+      yield* manager.open(openInput(), {
+        fingerprint: "set-1",
+        variables: [{ name: "FIRST_TOKEN", value: "first-value-1111" }],
+      });
+      ptyAdapter.processes[0]!.emitData("one=first-value-1111\r\n");
+      ptyAdapter.processes[0]!.emitExit({ exitCode: 0, signal: 0 });
+      yield* Deferred.await(exited);
+      // A new shell with another value prints both (the first one left it in a file).
+      yield* manager.open(openInput(), {
+        fingerprint: "set-2",
+        variables: [{ name: "SECOND_TOKEN", value: "second-value-2222" }],
+      });
+      expect(ptyAdapter.spawnInputs).toHaveLength(2);
+      ptyAdapter.processes[1]!.emitData("one=first-value-1111\r\ntwo=second-value-2222\r\n");
+      yield* manager.close({ threadId: "thread-1" });
+      const history = yield* readFileString(yield* historyLogPath(logsDir));
+      expect(history).toContain("one=[FIRST_TOKEN]");
+      expect(history).toContain("two=[SECOND_TOKEN]");
+      expect(history).not.toContain("first-value-1111");
+      expect(history).not.toContain("second-value-2222");
+    }),
+  );
+
   it.effect("spec 5: never starts a shell without the values it should have", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager();

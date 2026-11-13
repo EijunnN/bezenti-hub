@@ -42,7 +42,12 @@ import { makeKeyedCoalescingWorker } from "@t3tools/shared/KeyedCoalescingWorker
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { makeSecretPatterns, type SecretPatterns } from "@t3tools/shared/secretMasking";
+import {
+  type MaskableSecret,
+  makeSecretPatterns,
+  maskWhole,
+  type SecretPatterns,
+} from "@t3tools/shared/secretMasking";
 import { mergePathEntries } from "@t3tools/shared/shell";
 
 import { acpRegistryManagedBinaryDirectories } from "@t3tools/provider-acp-registry/server";
@@ -1972,8 +1977,23 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     yield* registerKillFiber(process, fiber);
   });
 
-  /** Per shell (thread and terminal): the values it started with, to mask its history file. */
-  const historySecrets = new Map<string, SecretPatterns>();
+  /**
+   * Per terminal (thread and terminal): every value its shells were given over its life (a
+   * respawn adds, never replaces: the history still holds what earlier shells printed), to mask
+   * its history file. Dropped when the terminal closes.
+   */
+  const historySecrets = new Map<
+    string,
+    { readonly secrets: ReadonlyArray<MaskableSecret>; readonly patterns: SecretPatterns }
+  >();
+  const addHistorySecrets = (key: string, added: ReadonlyArray<MaskableSecret>) => {
+    const known = historySecrets.get(key)?.secrets ?? [];
+    const secrets = [
+      ...added.map(({ name, value }) => ({ name, value })),
+      ...known.filter((secret) => !added.some((next) => next.value === secret.value)),
+    ];
+    historySecrets.set(key, { secrets, patterns: makeSecretPatterns(secrets) });
+  };
   const persistWorker = yield* makeKeyedCoalescingWorker<
     string,
     PersistHistoryRequest,
@@ -1997,9 +2017,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       // Spec 5 ticket 05: the shell's own secrets are stored as `[NAME]`, over the whole history
       // (a value split between chunks too), without what is left of one cut off at its start.
       const raw = request.history.value();
-      const patterns = historySecrets.get(sessionKey);
-      const history =
-        patterns === undefined ? raw : patterns.mask(raw.slice(patterns.pendingPrefix(raw)));
+      const patterns = historySecrets.get(sessionKey)?.patterns;
+      const history = patterns === undefined ? raw : maskWhole(patterns, raw, { cutAtStart: true });
       yield* fileSystem.writeFileString(historyPath(threadId, terminalId), history).pipe(
         Effect.catch((error) =>
           Effect.logWarning("failed to persist terminal history", {
@@ -2543,9 +2562,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             session.pendingSecretEnv = null;
             // Its history file masks the values the shell got (none of another User's).
             if (secrets?.variables !== undefined && secrets.variables.length > 0) {
-              historySecrets.set(
+              addHistorySecrets(
                 toSessionKey(session.threadId, session.terminalId),
-                makeSecretPatterns(secrets.variables),
+                secrets.variables,
               );
             }
             session.secretFingerprint = secrets?.fingerprint ?? NO_SECRETS_FINGERPRINT;
@@ -2665,6 +2684,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
 
     yield* flushPersist(threadId, terminalId);
+    historySecrets.delete(key);
 
     const removed = yield* modifyManagerState((state) => {
       closedSessionKeys.add(key);

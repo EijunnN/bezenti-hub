@@ -5,6 +5,8 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
+
+import * as SecretMasker from "../vaults/SecretMasker.ts";
 import * as SqlSchema from "effect/sql/SqlSchema";
 
 import { PullRequestReviewGuide, ThreadPullRequestKey } from "@t3tools/contracts";
@@ -37,6 +39,7 @@ export class PullRequestReviewGuideRepository extends Context.Service<
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const masker = yield* Effect.serviceOption(SecretMasker.SecretMasker);
 
   const findGuide = SqlSchema.findOneOption({
     Request: ThreadPullRequestKey,
@@ -62,8 +65,15 @@ const make = Effect.gen(function* () {
         ),
       );
     }),
-    put: Effect.fn("PullRequestReviewGuideRepository.put")(function (key, guide) {
-      return encodeGuide(guide).pipe(
+    put: Effect.fn("PullRequestReviewGuideRepository.put")(function (key, unmasked) {
+      // Spec 5 ticket 05: stored with the generating User's values as `[NAME]` (and masked again
+      // for each viewer when read).
+      return (
+        Option.isNone(masker)
+          ? Effect.succeed(unmasked)
+          : Effect.map(Effect.orDie(masker.value.forViewer), (found) => found.maskDeep(unmasked))
+      ).pipe(
+        Effect.flatMap(encodeGuide),
         Effect.mapError((cause) =>
           PersistenceDecodeError.fromSchemaError("PullRequestReviewGuide", cause),
         ),
