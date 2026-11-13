@@ -167,8 +167,13 @@ describe("every door of the Hub declares its rule", () => {
     const effectiveUsers = files
       .filter(({ text }) => /vaults\/EffectiveVaults\.ts"/u.test(text))
       .map(({ file }) => file);
-    expect(effectiveUsers.toSorted()).toEqual(["project/ProjectService.ts", "server.ts", "ws.ts"]);
-    for (const file of ["ws.ts", "project/ProjectService.ts"]) {
+    expect(effectiveUsers.toSorted()).toEqual([
+      "orchestration-v2/runtimeLayer.ts",
+      "project/ProjectService.ts",
+      "server.ts",
+      "ws.ts",
+    ]);
+    for (const file of ["ws.ts", "project/ProjectService.ts", "orchestration-v2/runtimeLayer.ts"]) {
       const text = files.find((candidate) => candidate.file === file)?.text ?? "";
       expect(text, file).not.toMatch(/\.forThread\b/u);
     }

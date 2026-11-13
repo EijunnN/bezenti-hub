@@ -38,6 +38,7 @@ import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as InstallationUserService from "../spaces/InstallationUserService.ts";
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as SecretDelivery from "../vaults/SecretDelivery.ts";
 import * as Vaults from "../vaults/Vaults.ts";
@@ -269,6 +270,41 @@ describe("Hub con Environments: a Thread's secrets as environment variables", ()
       assert.equal(s.sandbox.ptySpawns.length, spawnsBefore + 1, "no new shell for term-1");
       assert.isTrue(reopened.secretsStale);
     }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "a removed User's terminals in a shared Sandbox close, with what they started (ticket 07)",
+    () =>
+      Effect.gen(function* () {
+        const s = yield* sharedSandbox();
+        const cwd = s.acmeWeb.workspaceRoot;
+        yield* s.workspace.terminalOpen(
+          { threadId: s.graceThread, terminalId: "term-1", cwd },
+          { userId: s.grace },
+        );
+        yield* s.workspace.terminalWrite(
+          { threadId: s.graceThread, terminalId: "term-1", data: "npm run dev &\r" },
+          { userId: s.grace },
+        );
+        const graces = s.sandbox.ptySpawns.at(-1);
+        assert.isDefined(graces);
+        assert.equal(graces.env.GRACE_TOKEN, GRACE_TOKEN);
+        assert.lengthOf(graces.started, 1);
+        // Ada's terminal, in the same Sandbox, stays.
+        yield* s.workspace.terminalOpen(
+          { threadId: s.adaThread, terminalId: "term-1", cwd },
+          { userId: s.ada },
+        );
+        const adas = s.sandbox.ptySpawns.at(-1);
+        assert.isDefined(adas);
+
+        yield* s.hub
+          .service(InstallationUserService.InstallationUserService)
+          .setStatus({ actorUserId: s.owner, userId: s.grace, status: "removed" });
+        assert.deepEqual([...s.sandbox.endedProcesses], [...graces.started]);
+        assert.isNotEmpty(graces.signals, "her shell, with her own Vault's secret, ended");
+        assert.isEmpty(adas.signals, "Ada's stays");
+      }).pipe(Effect.scoped),
   );
 
   it.live("stop reaching the Space's next shell once its allowance is taken back (ticket 07)", () =>

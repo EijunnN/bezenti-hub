@@ -129,25 +129,40 @@ const layerNoProviders = Layer.succeed(ProviderInstanceRegistry.ProviderInstance
 export interface PtySpawn {
   readonly cwd: string;
   readonly env: Readonly<Record<string, string | undefined>>;
+  readonly pid: number;
+  /** The processes a line ending in `&` started from it (a dev server), by pid. */
+  readonly started: Array<number>;
+  /** The signals the shell got. */
+  readonly signals: Array<string>;
 }
 
 /**
  * A shell that answers each line typed with the folder it started in, as `pwd` would, so a test
- * sees which machine and folder a terminal runs in without a real shell. Each start is recorded.
+ * sees which machine and folder a terminal runs in without a real shell. Each start is recorded;
+ * a line ending in `&` starts a pretend background process the shell's tree then holds.
  */
 const echoingPty = (spawns: Array<PtySpawn>): PtyAdapter.PtyAdapter["Service"] => ({
   spawn: (input) =>
     Effect.sync(() => {
-      spawns.push({ cwd: input.cwd, env: { ...input.env } });
+      const spawn: PtySpawn = {
+        cwd: input.cwd,
+        env: { ...input.env },
+        pid: 4242 + spawns.length * 100,
+        started: [],
+        signals: [],
+      };
+      spawns.push(spawn);
       const listeners = new Set<(data: string) => void>();
       return {
-        pid: 4242,
+        pid: spawn.pid,
         write: (data: string) => {
+          if (data.trim().endsWith("&")) spawn.started.push(spawn.pid + 1 + spawn.started.length);
           for (const listener of listeners) listener(`${input.cwd}\r\n`);
-          void data;
         },
         resize: () => undefined,
-        kill: () => undefined,
+        kill: (signal?: string) => {
+          spawn.signals.push(signal ?? "SIGHUP");
+        },
         onData: (callback: (data: string) => void) => {
           listeners.add(callback);
           return () => listeners.delete(callback);
@@ -161,7 +176,7 @@ const echoingPty = (spawns: Array<PtySpawn>): PtyAdapter.PtyAdapter["Service"] =
  * The workspace services a joined machine answers files, search and terminals with. As in joined
  * mode, it knows only the workspace roots of the calls its Hub is running.
  */
-const layerMachineWorkspace = (spawns: Array<PtySpawn>) =>
+const layerMachineWorkspace = (spawns: Array<PtySpawn>, ended: Array<number>) =>
   Layer.mergeAll(
     WorkspaceFileSystem.layer.pipe(Layer.provide(KnownWorkspaces.layerJoined)),
     Layer.effect(
@@ -172,6 +187,21 @@ const layerMachineWorkspace = (spawns: Array<PtySpawn>) =>
           ptyAdapter: echoingPty(spawns),
           processKillGraceMs: 1,
           subprocessPollIntervalMs: 60_000,
+          // A shell's tree: itself and what it started, until ended.
+          subprocessInspector: (pid) =>
+            Effect.sync(() => {
+              const started = (spawns.find((spawn) => spawn.pid === pid)?.started ?? []).filter(
+                (child) => !ended.includes(child),
+              );
+              return {
+                hasRunningSubprocess: started.length > 0,
+                childCommand: started.length > 0 ? "node" : null,
+                processIds: started.length > 0 ? [pid, ...started] : [],
+              };
+            }),
+          killStartedProcess: (pid) => {
+            ended.push(pid);
+          },
         }),
       ),
     ).pipe(Layer.provide(ProcessRunner.layer)),
@@ -334,6 +364,8 @@ export interface TestEnvironment {
   readonly workspaceRoot: string;
   /** Every shell its terminals started, in order, with the environment each got. */
   readonly ptySpawns: ReadonlyArray<PtySpawn>;
+  /** The processes its terminals started that were ended by pid (a close with endProcesses). */
+  readonly endedProcesses: ReadonlyArray<number>;
   /** The method of each request the Hub sent this machine, in order. */
   readonly requests: ReadonlyArray<string>;
   /** Resolves once the Hub sent `method`, counting from request number `from`. */
@@ -387,6 +419,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
 }) {
   const scope = yield* Effect.scope;
   const ptySpawns: Array<PtySpawn> = [];
+  const endedProcesses: Array<number> = [];
   const mcpConfigs: Array<McpProviderSessionConfig> = [];
   const requests: Array<string> = [];
   const requested = yield* PubSub.unbounded<string>();
@@ -442,7 +475,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
         layerCheckpoints,
         layerNoProviders,
         ProjectStore.layer,
-        layerMachineWorkspace(ptySpawns),
+        layerMachineWorkspace(ptySpawns, endedProcesses),
         layerTextGeneration(input.textGeneration),
       ),
     ),
@@ -577,6 +610,7 @@ const startEnvironment = Effect.fn("HubWithEnvironments.startEnvironment")(funct
     mcpConfigs,
     workspaceRoot: (yield* report).workspaceRoot,
     ptySpawns,
+    endedProcesses,
     requests,
     awaitRequest,
     awaitAnswered,

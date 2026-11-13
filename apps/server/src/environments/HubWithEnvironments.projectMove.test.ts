@@ -883,6 +883,16 @@ describe("Hub con Environments: a moved Project's Vaults", () => {
         yield* openTerminal("term-1");
         assert.equal(lastShell().ACME_TOKEN, ACME_TOKEN);
         assert.equal(lastShell().SHARED_TOKEN, SHARED_TOKEN);
+        // A dev server started from it holds Acme's secrets too.
+        yield* workspace
+          .terminalWrite(
+            { threadId, terminalId: "term-1", data: "npm run dev &\r" },
+            { userId: owner },
+          )
+          .pipe(Effect.orDie);
+        const acmeShell = laptop.ptySpawns.at(-1);
+        assert.isDefined(acmeShell);
+        assert.lengthOf(acmeShell.started, 1);
 
         // Before confirming, the mover sees which Vaults the Project loses.
         const plan = yield* movePlan(hub, projectId, globex);
@@ -897,13 +907,33 @@ describe("Hub con Environments: a moved Project's Vaults", () => {
           SELECT vault_id AS "vaultId" FROM project_vault_choices WHERE project_id = ${projectId}
         `;
         assert.deepEqual(choices, []);
+        // Dropped as the mover, audited as a Project's choice gone back to inherit.
+        const audited = yield* hub.server.sql<{
+          readonly targetName: string;
+          readonly detail: string;
+        }>`
+          SELECT target_name AS "targetName", detail_json AS "detail" FROM audit_log
+          WHERE action = 'vault.choose' ORDER BY audit_id DESC LIMIT 1
+        `;
+        assert.equal(audited[0]?.targetName, "Shared tools");
+        assert.include(audited[0]?.detail ?? "", '"choice":"inherit"');
 
-        // The next terminal has Globex's secrets alone; the one still open says to reopen.
+        // The terminal open in Acme closed with the dev server it started: neither keeps Acme's
+        // secrets in the Thread's new Space (its machine serves both).
+        assert.deepEqual([...laptop.endedProcesses], [...acmeShell.started]);
+        assert.isNotEmpty(acmeShell.signals, "the shell itself was ended");
+        // Opening term-1 again starts a new shell, with Globex's secrets alone.
+        const spawnsBefore = laptop.ptySpawns.length;
+        const reopened = yield* openTerminal("term-1");
+        assert.equal(laptop.ptySpawns.length, spawnsBefore + 1);
+        assert.isNotTrue(reopened.secretsStale);
+        assert.isUndefined(lastShell().ACME_TOKEN);
+        assert.equal(lastShell().GLOBEX_TOKEN, GLOBEX_TOKEN);
+        // So does any other.
         yield* openTerminal("term-2");
         assert.isUndefined(lastShell().ACME_TOKEN);
         assert.isUndefined(lastShell().SHARED_TOKEN);
         assert.equal(lastShell().GLOBEX_TOKEN, GLOBEX_TOKEN);
-        assert.isTrue((yield* openTerminal("term-1")).secretsStale);
         const names = yield* threadNames;
         assert.deepEqual(namesIn(names.variables), ["GLOBEX_TOKEN"]);
         assert.deepEqual(

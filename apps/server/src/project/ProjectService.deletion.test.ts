@@ -36,17 +36,20 @@ import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
 import * as ProjectService from "./ProjectService.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as EffectiveVaults from "../vaults/EffectiveVaults.ts";
 
 const layerEventPersistence = EventSink.layer.pipe(
   Layer.provideMerge(Layer.merge(EventStore.layer, ProjectionStore.layer)),
 );
+const layerSpaces = SpaceDirectory.layer.pipe(Layer.provide(NodeCrypto.layer));
 const layerServices = Layer.mergeAll(
   LegacyV1ThreadImporter.layer.pipe(Layer.provideMerge(layerEventPersistence)),
   ProjectionReplay.layer.pipe(Layer.provide(layerEventPersistence)),
   ProjectStore.layer,
   IdAllocator.layer,
   ThreadCommandExecutor.layer,
-  SpaceDirectory.layer.pipe(Layer.provide(NodeCrypto.layer)),
+  layerSpaces,
+  EffectiveVaults.layer.pipe(Layer.provide(layerSpaces)),
   Layer.succeed(WorkspacePaths.WorkspacePaths, {
     normalizeWorkspaceRoot: (workspaceRoot) => Effect.succeed(workspaceRoot),
     resolveRelativePathWithinRoot: ({ workspaceRoot, relativePath }) =>

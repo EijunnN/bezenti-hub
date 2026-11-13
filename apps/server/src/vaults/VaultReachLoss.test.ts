@@ -3,7 +3,7 @@
  * row that names it; a User removed from the Installation loses the Vaults allowed to them. What
  * is delivered needs no row to go (EffectiveVaults recomputes it); these keep nothing behind.
  */
-import { ProjectId, SpaceId, UserId } from "@t3tools/contracts";
+import { ProjectId, SpaceId, UserId, type VaultError } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -74,7 +74,19 @@ const hub = Effect.gen(function* () {
       Effect.map((rows) => rows[0]?.n ?? 0),
       Effect.orDie,
     );
-  return { server, ownerId, acmeId, globexId, vaults, values, asOwner, vault, project, count };
+  return {
+    server,
+    owner,
+    ownerId,
+    acmeId,
+    globexId,
+    vaults,
+    values,
+    asOwner,
+    vault,
+    project,
+    count,
+  };
 });
 
 it.effect("deleting an Organization deletes its Vaults, their values and every row naming it", () =>
@@ -167,6 +179,115 @@ it.effect("deleting an Organization deletes its Vaults, their values and every r
       ["Acme keys"],
     );
     assert.notInclude(audited[0]?.detail ?? "", "acme-token-value");
+    // The Owner's Vault lost Acme: recorded as taken back from it.
+    const takenBack = yield* sql<{ readonly targetId: string; readonly detail: string }>`
+        SELECT target_id AS "targetId", detail_json AS "detail" FROM audit_log
+        WHERE action = 'vault.allow' ORDER BY audit_id DESC LIMIT 1
+      `;
+    assert.equal(takenBack[0]?.targetId, shared);
+    assert.include(takenBack[0]?.detail ?? "", '"allowed":false');
+    assert.include(takenBack[0]?.detail ?? "", '"subjectName":"Acme"');
+  }),
+);
+
+it.effect("deleting a Project deletes its Vault choices", () =>
+  Effect.gen(function* () {
+    const h = yield* hub;
+    const acmeKeys = yield* h.vault("Acme keys", h.acmeId, [
+      ["ACME_TOKEN", "acme-token-value-0001"],
+    ]);
+    const web = yield* h.project("acme-web", h.acmeId);
+    yield* h.vaults
+      .setProjectChoice({ projectId: web, vaultId: acmeKeys, choice: "add" })
+      .pipe(h.asOwner);
+    const deleted = yield* h.server.request("/api/projects/mutate", {
+      cookie: h.owner,
+      body: { type: "project.delete", commandId: "delete-acme-web", projectId: web, force: true },
+    });
+    assert.equal(deleted.status, 200, JSON.stringify(deleted.body));
+    assert.equal(
+      yield* h.count(
+        h.server.sql`SELECT COUNT(*) AS n FROM project_vault_choices WHERE project_id = ${web}`,
+      ),
+      0,
+    );
+  }),
+);
+
+it.effect(
+  "allowing a Vault to a Space never brings back a default or choice of it left from before",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* hub;
+      const sql = h.server.sql;
+      const tools = yield* h.vault("Tools", null, [["TOOLS_TOKEN", "tools-token-value-0006"]]);
+      const web = yield* h.project("globex-web", h.globexId);
+      // Rows a Hub before ticket 07 left behind (a Project moved here, an earlier allowance).
+      yield* sql`
+        INSERT INTO project_vault_choices (project_id, vault_id, choice) VALUES (${web}, ${tools}, 'add')
+      `;
+      yield* sql`
+        INSERT INTO space_default_vaults (space_id, vault_id, position) VALUES (${h.globexId}, ${tools}, 0)
+      `;
+      yield* h.vaults
+        .allow({ vaultId: tools, subject: { kind: "space", spaceId: h.globexId }, allowed: true })
+        .pipe(h.asOwner);
+      assert.equal(
+        yield* h.count(
+          sql`SELECT COUNT(*) AS n FROM project_vault_choices WHERE vault_id = ${tools}`,
+        ),
+        0,
+      );
+      assert.equal(
+        yield* h.count(
+          sql`SELECT COUNT(*) AS n FROM space_default_vaults WHERE vault_id = ${tools}`,
+        ),
+        0,
+      );
+    }),
+);
+
+it.effect("nothing new is written for an Organization once its deletion began", () =>
+  Effect.gen(function* () {
+    const h = yield* hub;
+    const acmeKeys = yield* h.vault("Acme keys", h.acmeId, [
+      ["ACME_TOKEN", "acme-token-value-0001"],
+    ]);
+    const tools = yield* h.vault("Tools", null, [["TOOLS_TOKEN", "tools-token-value-0006"]]);
+    const directory = Context.get(h.server.services, SpaceDirectory.SpaceDirectory);
+    yield* directory.setOrganizationArchived({
+      actor: h.ownerId,
+      spaceId: h.acmeId,
+      archived: true,
+    });
+    // What the Organization's deletion marks first; its rows go after.
+    yield* directory.beginOrganizationDeletion({ actor: h.ownerId, spaceId: h.acmeId });
+    const reasonOf = <A, R>(effect: Effect.Effect<A, VaultError, R>) =>
+      Effect.map(Effect.flip(effect), (error) => error.reason);
+    assert.equal(
+      yield* reasonOf(h.vaults.create({ name: "Late", spaceId: h.acmeId }).pipe(h.asOwner)),
+      "not-found",
+    );
+    assert.equal(
+      yield* reasonOf(
+        h.vaults
+          .putEntry({ vaultId: acmeKeys, name: "LATE", value: Redacted.make("late-value-0007") })
+          .pipe(h.asOwner),
+      ),
+      "not-found",
+    );
+    assert.equal(
+      yield* reasonOf(
+        h.vaults
+          .allow({ vaultId: tools, subject: { kind: "space", spaceId: h.acmeId }, allowed: true })
+          .pipe(h.asOwner),
+      ),
+      "not-found",
+    );
+    assert.equal(
+      yield* h.count(h.server.sql`SELECT COUNT(*) AS n FROM vaults WHERE name = 'Late'`),
+      0,
+    );
   }),
 );
 
@@ -193,6 +314,21 @@ it.effect("removing a User takes back every Vault allowed to them; disabling kee
     });
     const gracesKeys = yield* own("graces-keys", grace);
     yield* own("linus-keys", linus);
+    // A Vault allowed to Grace's Personal space, a default there.
+    const gracesSpace = SpaceId.make("personal:grace");
+    const toPersonal = yield* h.vault("graces-space-keys", null, [
+      ["SPACE_TOKEN", "space-value-0008"],
+    ]);
+    yield* h.vaults
+      .allow({
+        vaultId: toPersonal,
+        subject: { kind: "space", spaceId: gracesSpace },
+        allowed: true,
+      })
+      .pipe(h.asOwner);
+    yield* h.vaults
+      .setSpaceDefaults({ spaceId: gracesSpace, vaultIds: [toPersonal] })
+      .pipe(h.asOwner);
     const allowances = (userId: UserId) =>
       h.count(sql`
         SELECT COUNT(*) AS n FROM vault_allowances WHERE subject_kind = 'user' AND subject_id = ${userId}
@@ -204,6 +340,19 @@ it.effect("removing a User takes back every Vault allowed to them; disabling kee
 
     yield* users.setStatus({ actorUserId: h.ownerId, userId: grace, status: "removed" });
     assert.equal(yield* allowances(grace), 0);
+    // Her frozen Personal space keeps no allowance nor default either.
+    assert.equal(
+      yield* h.count(sql`
+        SELECT COUNT(*) AS n FROM vault_allowances WHERE subject_kind = 'space' AND subject_id = ${gracesSpace}
+      `),
+      0,
+    );
+    assert.equal(
+      yield* h.count(
+        sql`SELECT COUNT(*) AS n FROM space_default_vaults WHERE space_id = ${gracesSpace}`,
+      ),
+      0,
+    );
     // The Vault itself stays the Owner's, with its secret.
     assert.equal(
       yield* h.count(sql`SELECT COUNT(*) AS n FROM vault_entries WHERE vault_id = ${gracesKeys}`),
@@ -211,9 +360,19 @@ it.effect("removing a User takes back every Vault allowed to them; disabling kee
     );
     const audited = yield* sql<{ readonly targetId: string; readonly detail: string }>`
       SELECT target_id AS "targetId", detail_json AS "detail" FROM audit_log
-      WHERE action = 'vault.allow' ORDER BY audit_id DESC LIMIT 1
+      WHERE action = 'vault.allow' AND detail_json LIKE '%"allowed":false%' ORDER BY audit_id
     `;
-    assert.equal(audited[0]?.targetId, gracesKeys);
-    assert.include(audited[0]?.detail ?? "", '"allowed":false');
+    assert.deepEqual(
+      audited.map((row) => row.targetId).toSorted(),
+      [gracesKeys, toPersonal].toSorted(),
+    );
+    for (const row of audited) assert.include(row.detail, '"subjectName":"grace"');
+    // Allowing her anything now is refused.
+    const refused = yield* Effect.flip(
+      h.vaults
+        .allow({ vaultId: gracesKeys, subject: { kind: "user", userId: grace }, allowed: true })
+        .pipe(h.asOwner),
+    );
+    assert.equal(refused.reason, "not-found");
   }),
 );
