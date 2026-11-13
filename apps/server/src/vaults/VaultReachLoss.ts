@@ -103,6 +103,12 @@ export const forgetUser = Effect.fn("VaultReachLoss.forgetUser")(function* (
       OR (subject_kind = 'space' AND subject_id = ${personal})
   `;
   yield* sql`DELETE FROM space_default_vaults WHERE space_id = ${personal}`;
+  yield* sql`
+    DELETE FROM project_vault_choices WHERE project_id IN (
+      SELECT project_id FROM projection_projects
+      WHERE ${sql.literal(projectSpaceSql("space_id"))} = ${personal}
+    )
+  `;
   const write = AuditLog.write(sql);
   for (const row of allowed) {
     yield* write({
@@ -186,7 +192,7 @@ export const forgetOrganization = Effect.fn("VaultReachLoss.forgetOrganization")
 export const keepProjectChoicesReaching = Effect.fn("VaultReachLoss.keepProjectChoicesReaching")(
   function* (
     sql: SqlClient.SqlClient,
-    input: { readonly projectId: ProjectId; readonly spaceId: SpaceId },
+    input: { readonly projectId: ProjectId; readonly from: SpaceId; readonly spaceId: SpaceId },
   ) {
     const dropped = yield* VaultReach.dropChoicesNotReaching(sql, input.projectId, input.spaceId);
     if (dropped.length === 0) return;
@@ -199,7 +205,8 @@ export const keepProjectChoicesReaching = Effect.fn("VaultReachLoss.keepProjectC
       yield* write({
         actor,
         action: "vault.choose",
-        spaceId: input.spaceId,
+        // Under the Space it left: only those who saw the choice there see it went.
+        spaceId: input.from,
         target: {
           kind: "vault",
           id: row.vaultId,

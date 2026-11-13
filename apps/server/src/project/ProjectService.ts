@@ -61,6 +61,7 @@ import type * as AuditLog from "../audit/AuditLog.ts";
 import { servesSpace } from "../sandboxes/sandboxSpace.ts";
 import * as EffectiveVaults from "../vaults/EffectiveVaults.ts";
 import * as VaultReachLoss from "../vaults/VaultReachLoss.ts";
+import * as TerminalOpenings from "../environment/TerminalOpenings.ts";
 import * as ProjectMoveHooks from "./ProjectMoveHooks.ts";
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
@@ -1178,19 +1179,6 @@ export const make = Effect.gen(function* () {
         if (cutting) {
           yield* spaces.projectAccessEnds(projectId);
         }
-        // Its terminals and what they started hold the old Space's secrets: they close now, and
-        // once more after the Threads moved, for one opened in between (spec 5 ticket 07). Best
-        // effort: nothing here stops a move whose machines were already cut off.
-        const endTerminals = Effect.flatMap(listProjectThreads(projectId), (threads) =>
-          work === undefined
-            ? Effect.void
-            : work.endTerminals(threads.map((thread) => thread.threadId)),
-        ).pipe(
-          Effect.catch((cause) =>
-            Effect.logWarning("Could not close a moved Project's terminals", { projectId, cause }),
-          ),
-        );
-        if (cutting) yield* endTerminals;
         if (route.from !== route.to) {
           // A preferred machine that does not serve the new Space is no preference there.
           const preferred = yield* machineLeft(
@@ -1209,7 +1197,16 @@ export const make = Effect.gen(function* () {
               spaceId: route.to,
               ...(preferred === undefined ? {} : { preferredEnvironmentId: null }),
             },
-            VaultReachLoss.keepProjectChoicesReaching(sql, { projectId, spaceId: route.to }).pipe(
+            VaultReachLoss.keepProjectChoicesReaching(sql, {
+              projectId,
+              from: route.from,
+              spaceId: route.to,
+            }).pipe(
+              // Its terminals opened under the old Space hold its secrets: the Hub refuses them
+              // from now on and closes them (spec 5 ticket 07).
+              Effect.andThen(
+                TerminalOpenings.markProjectMoved(sql, { projectId, spaceId: route.to }),
+              ),
               Effect.mapError(
                 (cause) =>
                   new ProjectOperationError({ operation: "read-vaults", projectId, cause }),
@@ -1250,9 +1247,21 @@ export const make = Effect.gen(function* () {
         }
         // Out of the Threads' locks: each machine left is cut off, this move's and any release
         // an earlier one did not finish.
-        if (cutting) yield* endTerminals;
         if (work !== undefined) {
           yield* work.drainReleases(threads.map((thread) => thread.threadId));
+          // Each machine connected now closes them; one away does when it connects. A rerun
+          // marks again what an earlier attempt left (never those opened in the new Space).
+          if (cutting) {
+            yield* TerminalOpenings.markProjectMoved(sql, { projectId, spaceId: route.to }).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("Could not mark a moved Project's terminals", {
+                  projectId,
+                  cause,
+                }),
+              ),
+            );
+            yield* work.closePendingTerminals;
+          }
         }
       });
       yield* spaces.whileProjectMoves(projectId, relocate).pipe(

@@ -2,12 +2,7 @@
  * The Owner disables, re-enables or removes a User. Every write commits in one transaction; once
  * it has, every session and pending link of theirs ends and their open connections close.
  */
-import type {
-  InstallationUser,
-  InstallationUserStatus,
-  ThreadId,
-  UserId,
-} from "@t3tools/contracts";
+import type { InstallationUser, InstallationUserStatus, UserId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -17,6 +12,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import * as AuditLog from "../audit/AuditLog.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
+import * as TerminalOpenings from "../environment/TerminalOpenings.ts";
 import * as PairingGrantStore from "../auth/PairingGrantStore.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import * as ProjectMoveHooks from "../project/ProjectMoveHooks.ts";
@@ -77,23 +73,11 @@ const make = Effect.gen(function* () {
     yield* spaces.endAccessOf({ userId, removed: status === "removed" });
   }, Effect.mapError(storageError));
 
-  /**
-   * A removed User's Threads' terminals, and what they started, end on every machine: they hold
-   * the User's secrets (spec 5 ticket 07). After the commit, as the orchestration's work.
-   */
-  const endTerminalsOf = Effect.fn("InstallationUserService.endTerminalsOf")(function* (
-    userId: UserId,
-  ) {
+  /** The terminals waiting to close, on the machines connected now: the orchestration's work. */
+  const closePendingTerminals = Effect.gen(function* () {
     if (Option.isNone(moveHooks)) return;
     const work = yield* moveHooks.value.current;
-    if (work === undefined) return;
-    const threads = yield* sql<{ readonly threadId: ThreadId }>`
-      SELECT t.thread_id AS "threadId" FROM orchestration_v2_projection_threads t
-      LEFT JOIN orchestration_v2_projection_threads root
-        ON root.thread_id = json_extract(t.payload_json, '$.lineage.rootThreadId')
-      WHERE t.deleted_at IS NULL AND COALESCE(t.owner_user_id, root.owner_user_id) = ${userId}
-    `;
-    yield* work.endTerminals(threads.map((row) => row.threadId));
+    if (work !== undefined) yield* work.closePendingTerminals;
   });
 
   const setStatus: InstallationUserService["Service"]["setStatus"] = Effect.fn(
@@ -136,6 +120,9 @@ const make = Effect.gen(function* () {
               userId,
               displayName: current.displayName,
             }).pipe(Effect.mapError(storageError));
+            // Every terminal they opened holds their secrets, in whoever's Thread: the Hub
+            // refuses it from now on and closes it, now or when its machine connects.
+            yield* TerminalOpenings.markOpener(sql, userId).pipe(Effect.mapError(storageError));
           }
           // Their machines go with their sign-in, and stay revoked if they come back.
           const disconnect = yield* environments
@@ -164,13 +151,7 @@ const make = Effect.gen(function* () {
       yield* outcome.announce;
       yield* spaces.membershipsChanged([userId]);
     }
-    if (status === "removed") {
-      yield* endTerminalsOf(userId).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("Could not end a removed User's terminals", { userId, cause }),
-        ),
-      );
-    }
+    if (status === "removed") yield* closePendingTerminals;
     yield* spaces.userStatusChanged({ userId, active: status === "active" });
     return yield* spaces.installationUser(userId).pipe(
       Effect.flatMap(Effect.fromOption),

@@ -55,6 +55,7 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -72,6 +73,8 @@ import * as ProjectCheckouts from "./ProjectCheckouts.ts";
 import * as RemoteEnvironments from "./RemoteEnvironments.ts";
 import { locateInCheckout } from "./WorkspaceLocation.ts";
 import * as SecretDelivery from "../vaults/SecretDelivery.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as TerminalOpenings from "./TerminalOpenings.ts";
 
 /** Who asks: the session's User, whose rules a forwarded call keeps to. */
 export interface WorkspaceCaller {
@@ -148,6 +151,9 @@ export const make = Effect.gen(function* () {
   const runsAgents = yield* HubRunsAgents.HubRunsAgents;
   // Spec 5 ticket 04: a shell gets the secrets of the User who opens it, read as it opens.
   const secretDelivery = yield* Effect.serviceOption(SecretDelivery.SecretDelivery);
+  // Spec 5 ticket 07: where each terminal was opened, to refuse one whose Thread left that Space.
+  const openingsSql = yield* Effect.serviceOption(SqlClient.SqlClient);
+  const spaceDirectory = yield* Effect.serviceOption(SpaceDirectory.SpaceDirectory);
   const hubMachine = Option.isSome(registry)
     ? yield* Effect.option(registry.value.get(registry.value.hubMachineEnvironmentId))
     : Option.none();
@@ -512,6 +518,97 @@ export const make = Effect.gen(function* () {
     };
   };
 
+  type TerminalRef = { readonly threadId: string; readonly terminalId: string };
+  type StaleClose = Effect.Effect<
+    unknown,
+    TerminalError | EnvironmentExecutor.EnvironmentExecutorUnavailableError
+  >;
+  const openingKey = (
+    environmentId: EnvironmentId,
+    input: TerminalRef,
+  ): TerminalOpenings.TerminalKey => ({
+    environmentId,
+    threadId: input.threadId,
+    terminalId: input.terminalId,
+  });
+  /** The Space the Thread's terminals open under now (its own, else its Project's). */
+  const spaceNow = (threadId: string) =>
+    Option.isNone(spaceDirectory)
+      ? Effect.succeed(undefined)
+      : spaceDirectory.value.placementOf(ThreadId.make(threadId)).pipe(
+          Effect.map((placement) => Option.getOrUndefined(placement)?.space.id),
+          Effect.orElseSucceed(() => undefined),
+        );
+  /**
+   * Spec 5 ticket 07: whether the Hub recorded this terminal under a Space its Thread left, or for
+   * an opener since removed, or already has it waiting to close. Its shell holds secrets that no
+   * longer reach the Thread: the Hub never lets it be used again.
+   */
+  const isStale = Effect.fn("ThreadWorkspace.isStale")(function* (
+    key: TerminalOpenings.TerminalKey,
+  ) {
+    if (Option.isNone(openingsSql)) return false;
+    const opening = yield* TerminalOpenings.find(openingsSql.value, key).pipe(
+      Effect.orElseSucceed(() => undefined),
+    );
+    if (opening === undefined) return false;
+    if (opening.pending || opening.openerRemoved) return true;
+    const space = yield* spaceNow(key.threadId);
+    return space !== undefined && space !== opening.spaceId;
+  });
+  /** Closes a stale terminal on its machine, then forgets it; kept to close later if that fails. */
+  const closeStale = (key: TerminalOpenings.TerminalKey, close: StaleClose) =>
+    Option.isNone(openingsSql)
+      ? Effect.void
+      : TerminalOpenings.markOne(openingsSql.value, key).pipe(
+          Effect.andThen(close),
+          Effect.andThen(TerminalOpenings.forget(openingsSql.value, key)),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("A terminal left from another Space waits to close", {
+              ...key,
+              cause,
+            }),
+          ),
+        );
+  /** Before an open or attach: a stale shell of that id closes first, so a new one starts. */
+  const closeIfStale = (key: TerminalOpenings.TerminalKey, close: StaleClose) =>
+    Effect.flatMap(isStale(key), (stale) => (stale ? closeStale(key, close) : Effect.void));
+  /** Before typing, resizing, clearing or watching: a stale terminal is refused, and closed. */
+  const refuseIfStale = (
+    key: TerminalOpenings.TerminalKey,
+    close: StaleClose,
+  ): Effect.Effect<void, TerminalError> =>
+    Effect.flatMap(isStale(key), (stale) =>
+      stale
+        ? closeStale(key, close).pipe(
+            Effect.andThen(Effect.fail(terminalUnavailable(key.threadId)(REFUSED))),
+          )
+        : Effect.void,
+    );
+  /** A terminal opened or attached: recorded under the Thread's Space now, with its opener. */
+  const recordOpening = (key: TerminalOpenings.TerminalKey, caller: WorkspaceCaller) =>
+    Option.isNone(openingsSql)
+      ? Effect.void
+      : Effect.flatMap(spaceNow(key.threadId), (spaceId) =>
+          spaceId === undefined
+            ? Effect.void
+            : TerminalOpenings.record(openingsSql.value, {
+                ...key,
+                spaceId,
+                openedBy: caller.userId,
+              }),
+        ).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Could not record where a terminal was opened", { ...key, cause }),
+          ),
+        );
+  const closeLocal = (terminals: TerminalManager.TerminalManager["Service"], input: TerminalRef) =>
+    terminals.close({ threadId: input.threadId, terminalId: input.terminalId });
+  const closeRemote = (
+    forward: EnvironmentExecutor.EnvironmentWorkspaceForward,
+    input: TerminalRef,
+  ) => forward.call("terminal.close", { threadId: input.threadId, terminalId: input.terminalId });
+
   /**
    * Terminals a caller opened or attached on another machine, by (User, Thread, terminal): typing
    * and resizing skip the full route and only check the Thread is still on that machine's socket.
@@ -570,6 +667,10 @@ export const make = Effect.gen(function* () {
           if (Option.isSome(demand) && caller.startsSandbox === true) {
             yield* demand.value.touch(known.environmentId);
           }
+          yield* refuseIfStale(
+            openingKey(known.environmentId, input),
+            closeRemote(known.forward, input),
+          );
           return yield* runRemote(known.forward).pipe(
             Effect.catchTags({
               EnvironmentExecutorUnavailableError: () =>
@@ -582,7 +683,19 @@ export const make = Effect.gen(function* () {
         // It moved, or its machine reconnected or left: authorize it again.
         openTerminals.delete(key);
       }
-      return yield* terminalCall(input, caller, runLocal, (forward) => runRemote(forward));
+      return yield* terminalCall(
+        input,
+        caller,
+        (terminals) =>
+          refuseIfStale(
+            openingKey(HUB_MACHINE_ENVIRONMENT_ID, input),
+            closeLocal(terminals, input),
+          ).pipe(Effect.andThen(runLocal(terminals))),
+        (forward, where) =>
+          refuseIfStale(openingKey(where.environmentId, input), closeRemote(forward, input)).pipe(
+            Effect.andThen(runRemote(forward)),
+          ),
+      );
     }
   });
 
@@ -646,13 +759,21 @@ export const make = Effect.gen(function* () {
                 ),
               );
         if (where._tag === "local") {
+          const terminals = (yield* local).terminals;
+          const key = openingKey(HUB_MACHINE_ENVIRONMENT_ID, input);
+          // An attach may start a new shell: a stale one closes first. Watching one is refused.
+          if (attach) yield* closeIfStale(key, closeLocal(terminals, input));
+          else yield* refuseIfStale(key, closeLocal(terminals, input));
           const plan = attach
             ? yield* terminalPlan(input.threadId, caller, LOCAL_TARGET)
             : undefined;
-          const terminals = (yield* local).terminals;
+          if (attach) yield* recordOpening(key, caller);
           return withSecrets(plan, (secrets) => runLocal(terminals, secrets));
         }
         if (where._tag !== "remote") return Stream.fail(refuse(where));
+        const key = openingKey(where.environmentId, input);
+        if (attach) yield* closeIfStale(key, closeRemote(where.forward, input));
+        else yield* refuseIfStale(key, closeRemote(where.forward, input));
         const target = remoteTarget(where);
         const plan = attach ? yield* terminalPlan(input.threadId, caller, target) : undefined;
         const outdated = outdatedWith(target, plan);
@@ -661,6 +782,7 @@ export const make = Effect.gen(function* () {
         const resolved = terminalFolders(where, outdated ? attachOnly : input);
         if (resolved === undefined) return Stream.fail(refuse(REFUSED));
         yield* remember(input, caller, where);
+        if (attach) yield* recordOpening(key, caller);
         // An open terminal keeps its Sandbox from idling, for as long as the stream lives.
         if (Option.isSome(demand)) yield* demand.value.hold(where.environmentId);
         const open = (secrets: SecretEnv | undefined) =>
@@ -845,20 +967,26 @@ export const make = Effect.gen(function* () {
         input,
         acting(caller),
         // Spec 5: the shell gets the opening User's secrets.
-        (terminals) =>
-          terminalPlan(input.threadId, caller, LOCAL_TARGET).pipe(
+        (terminals) => {
+          const key = openingKey(HUB_MACHINE_ENVIRONMENT_ID, input);
+          return closeIfStale(key, closeLocal(terminals, input)).pipe(
+            Effect.andThen(terminalPlan(input.threadId, caller, LOCAL_TARGET)),
             Effect.flatMap((plan) =>
               withTerminalSecrets(input.threadId, plan, (secrets) =>
                 terminals.open(input, secrets),
               ),
             ),
-          ),
+            Effect.tap(() => recordOpening(key, acting(caller))),
+          );
+        },
         (forward, where) => {
           const resolved = terminalFolders(where, input);
           const target = remoteTarget(where);
+          const key = openingKey(where.environmentId, input);
           return resolved === undefined
             ? undefined
-            : terminalPlan(input.threadId, caller, target).pipe(
+            : closeIfStale(key, closeRemote(forward, input)).pipe(
+                Effect.andThen(terminalPlan(input.threadId, caller, target)),
                 Effect.flatMap((plan) => {
                   const open = (secrets: SecretEnv | undefined) =>
                     forward.call("terminal.open", {
@@ -880,6 +1008,7 @@ export const make = Effect.gen(function* () {
                   return withTerminalSecrets(input.threadId, plan, open);
                 }),
                 Effect.tap(() => remember(input, caller, where)),
+                Effect.tap(() => recordOpening(key, acting(caller))),
               );
         },
       ),

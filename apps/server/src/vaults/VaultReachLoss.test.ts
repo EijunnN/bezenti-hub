@@ -211,6 +211,13 @@ it.effect("deleting a Project deletes its Vault choices", () =>
       ),
       0,
     );
+    // And none is written for it once deleted.
+    const refused = yield* Effect.flip(
+      h.vaults
+        .setProjectChoice({ projectId: web, vaultId: acmeKeys, choice: "add" })
+        .pipe(h.asOwner),
+    );
+    assert.equal(refused.reason, "not-found");
   }),
 );
 

@@ -26,11 +26,11 @@ export interface ProjectMoveWork {
    */
   readonly drainReleases: (threadIds: ReadonlyArray<ThreadId> | "all") => Effect.Effect<void>;
   /**
-   * Closes every terminal of these Threads on their Active environment, and ends what each one
-   * started (dev servers, scripts): they hold secrets of a Space or User the Threads no longer
-   * reach (spec 5 ticket 07: a Project's move, a User's removal). Best effort per Thread.
+   * Closes the terminals the Hub has waiting to close (`terminal_openings`, spec 5 ticket 07: a
+   * Project's move, a User's removal) on each machine connected now; the rest close when their
+   * machine connects. Best effort per terminal.
    */
-  readonly endTerminals: (threadIds: ReadonlyArray<ThreadId>) => Effect.Effect<void>;
+  readonly closePendingTerminals: Effect.Effect<void>;
 }
 
 export interface ProjectMoveHooksShape {

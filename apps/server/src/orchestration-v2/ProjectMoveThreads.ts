@@ -16,12 +16,15 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
+import * as TerminalOpenings from "../environment/TerminalOpenings.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as ProjectMoveHooks from "../project/ProjectMoveHooks.ts";
 import * as EventSink from "./EventSink.ts";
@@ -253,34 +256,44 @@ export const layer: Layer.Layer<
       (effect) => effect.pipe(logged("Could not read a moved Project's releases", {})),
     );
 
-    /** Every terminal of the Thread on its Active environment closes, with what it started. */
-    const endTerminalsOf = Effect.fn("ProjectMoveThreads.endTerminalsOf")(
-      function* (threadId: ThreadId) {
-        const read = yield* projections.getThreadRecords(threadId, []).pipe(Effect.option);
-        if (Option.isNone(read)) return;
-        const environmentId = read.value.thread.activeEnvironmentId;
-        // A Thread that needs an environment has no machine to hold its terminals any more.
-        if (environmentId === null) return;
-        const executor = yield* executors
-          .get(environmentId ?? HUB_MACHINE_ENVIRONMENT_ID)
-          .pipe(Effect.option);
-        if (Option.isNone(executor)) return;
-        const input = { threadId, endProcesses: true } as const;
-        const { rpc, forward } = executor.value.workspace;
-        if (Option.isSome(rpc)) yield* rpc.value.terminals.close(input);
-        else if (Option.isSome(forward)) yield* forward.value.call("terminal.close", input);
-      },
-      (effect, threadId) =>
-        effect.pipe(logged("Could not close a Thread's terminals", { threadId })),
+    /**
+     * The terminals the Hub has waiting to close (spec 5 ticket 07): each closes on its machine
+     * if that machine is connected now, and its record goes; the others wait for their machine.
+     */
+    const closing = yield* Semaphore.make(1);
+    const closePendingTerminals = closing.withPermits(1)(
+      Effect.gen(function* () {
+        for (const row of yield* TerminalOpenings.pending(sql)) {
+          const executor = yield* executors.get(row.environmentId).pipe(Effect.option);
+          if (Option.isNone(executor)) continue;
+          const input = { threadId: ThreadId.make(row.threadId), terminalId: row.terminalId };
+          const { rpc, forward } = executor.value.workspace;
+          const close = Option.isSome(rpc)
+            ? rpc.value.terminals.close(input)
+            : Option.isSome(forward)
+              ? forward.value.call("terminal.close", input)
+              : undefined;
+          if (close === undefined) continue;
+          yield* close.pipe(
+            Effect.andThen(TerminalOpenings.forget(sql, row)),
+            logged("Could not close a terminal left from another Space", { ...row }),
+          );
+        }
+      }).pipe(logged("Could not read the terminals waiting to close", {})),
     );
 
-    const endTerminals = Effect.fn("ProjectMoveThreads.endTerminals")(function* (
-      threadIds: ReadonlyArray<ThreadId>,
-    ) {
-      yield* Effect.forEach(threadIds, endTerminalsOf, { concurrency: 8, discard: true });
-    });
-
-    yield* hooks.register({ stopThreads, drainReleases, endTerminals });
+    yield* hooks.register({ stopThreads, drainReleases, closePendingTerminals });
+    // A machine that connects gets the closes that waited for it.
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const changes = yield* executors.changes;
+        yield* closePendingTerminals;
+        while (true) {
+          yield* PubSub.take(changes);
+          yield* closePendingTerminals;
+        }
+      }),
+    ).pipe(Effect.forkIn(scope));
     // Releases a Hub stopped in the middle of are finished as it starts.
     yield* drainReleases("all").pipe(Effect.forkIn(scope));
   }),

@@ -1343,7 +1343,8 @@ const make = Effect.gen(function* () {
             // Checked again here: the Project may have moved, or the Vault been taken back.
             const [placed] = yield* sql<{ readonly spaceId: string }>`
               SELECT ${sql.literal(projectSpaceSql("space_id"))} AS "spaceId"
-              FROM projection_projects WHERE project_id = ${input.projectId}
+              FROM projection_projects
+              WHERE project_id = ${input.projectId} AND deleted_at IS NULL
             `;
             if (placed === undefined || placed.spaceId !== space.id) {
               return yield* fail("not-found", "That Space or Project does not exist.");
