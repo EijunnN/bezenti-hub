@@ -239,8 +239,10 @@ keys; `type: subscription`. Pure parts in `ai/subscriptionLogin.ts`.
 
 ## The gateway layer: `/api/ai/*`
 
-Spec 4 ticket 04. Every AI request from an agent or a local CLI goes through the Hub's own layer
-(`ai/AiGatewayRoute.ts`), never to CLIProxyAPI directly; the Hub's client key never leaves the Hub.
+Spec 4 ticket 04. Every AI request from an agent or a local CLI goes through the Hub's own layer,
+never to CLIProxyAPI directly; the Hub's client key never leaves the Hub. `ai/AiGatewayRoute.ts` is
+the HTTP door and stays thin (route, key, `authorize`); `ai/AiGatewayProxy.ts` (`forward`) does the
+rest, so any other door (ticket 06's relay included) reuses it.
 
 - **Routes** (`gatewayShapes.matchGatewayRoute`, the only paths that exist): OpenAI
   `/api/ai/openai/v1/{chat/completions,responses,models}`, Claude
@@ -252,9 +254,15 @@ Spec 4 ticket 04. Every AI request from an agent or a local CLI goes through the
 - **Gateway keys** (`ai/AiGatewayKeys.ts`, migration 113 `ai_gateway_keys`): `t3gk_` + 32 random
   bytes, stored only as SHA-256, revocable. A **Thread key** is for (the Thread's turn owner, its
   Space, the Thread); `issueForThread` revokes the Thread's earlier keys (one per provider session,
-  ticket 06 hands it to the agent) and it expires after 7 days at most. A **User key** is for one
-  Space the User works in (local CLIs; ticket 10 gives it a screen); `revoke` by its User or the
-  Owner, audited `ai_gateway_key.create|revoke`.
+  ticket 06 hands it to the agent, with its `providerSessionId`) and it expires after 7 days at
+  most. A **User key** is for one Space the User works in (local CLIs; ticket 10 gives it a
+  screen), at most five live per User; `revoke` by its User or the Owner, audited
+  `ai_gateway_key.create|revoke`.
+- **Revocation recorded** (`ai/AiGatewayKeyRevocation.ts`, from the domain events and User status
+  changes): a provider session that stops or fails (`provider-session.updated`) takes its keys, a
+  detach takes that Thread's; a Thread archived or deleted (its account in use forgotten too); a
+  User disabled or removed, every key of theirs. A move or a new owner is recorded by `authorize`
+  the first time it sees it. The request-time check stays the guard.
 - **Authentication:** only the key, in `Authorization: Bearer` (every shape), `x-api-key`
   (Claude) or `x-goog-api-key` (Gemini). Two different keys, a key in the query, a session cookie
   or any other credential: 401. The route reads no cookie at all (`AMBIENT_COOKIE_RULES`: refused).
@@ -264,8 +272,10 @@ Spec 4 ticket 04. Every AI request from an agent or a local CLI goes through the
   owned by the key's User (403), its Project not moving (503); then `AllowedAiAccounts.for(User,
   Space)` now, gateway accounts only (none → 403). Nothing is cached: an allowance removed, a
   membership ended or an account disabled or deleted fails the next request.
-- **Routing** (`gatewayShapes.planRoute`): the account the client pinned with `acct-<id>/<model>`
-  (must be allowed: else 403), else the Thread's (`modelSelection.aiAccountId`; no longer allowed →
+- **Routing** (`gatewayShapes.planRoute`): with a User key, the account the client pinned with
+  `acct-<id>/<model>` (must be allowed: else 403); a Thread key may name only its Thread's own
+  account (anything else 403: an agent, perhaps prompted to, never moves its Thread to another
+  account); else the Thread's (`modelSelection.aiAccountId`; no longer allowed →
   403 «Switch AI account», never a silent fallback), else the first allowed account by global
   priority that serves the model (`AiAccounts.modelsOf`; none → 404). Then the failovers: every
   other allowed account of the **same provider** that serves the same model, by priority. The Hub
@@ -274,20 +284,29 @@ Spec 4 ticket 04. Every AI request from an agent or a local CLI goes through the
   switch AI account» in the client's shape.
 - **What crosses:** to CLIProxyAPI the rewritten body, the Hub's client key and only `accept`,
   `anthropic-version`, `anthropic-beta`, `user-agent` (no `X-*`, cookie or forwarding header), and
-  for Gemini only `alt=sse`. Back: the status, `content-type` and the Hub's own `cache-control:
-  no-cache, no-transform` (so compression never holds SSE back), the body streamed chunk by chunk
-  through `makeResponseTap`, which strips the account's prefix, filters an SSE error event's words
-  and reads the tokens. An upstream error is answered in the client's shape: the provider's words
+  for Gemini only `alt=sse`; an upstream redirect is never followed (1xx/3xx answer 502). Back: the
+  status, `content-type` and the Hub's own `cache-control: no-cache, no-transform` (so compression
+  never holds SSE back), the body streamed chunk by chunk through `gatewayTap.makeResponseTap`,
+  which holds back at most 1 MiB: it strips the account's prefix, filters the words of an error in
+  an SSE event or a JSON-array element (Gemini's stream without `alt=sse`), and reads the tokens
+  (SSE events, array elements, a plain answer whole up to 1 MiB, past that its tail). An OpenAI
+  chat stream without `stream_options.include_usage` gets it from the Hub, and the usage chunk the
+  client did not ask for is dropped. An upstream error is answered in the client's shape: the provider's words
   for a 4xx (emails, URLs, keys, token shapes and `acct-…/` removed), a fixed sentence for auth,
   quota and 5xx.
 - **Account in use:** `AiGatewayActivity.noteInUse` keeps each Thread's last account and model
   (`ai_gateway_thread_accounts`) and publishes a change (`subscribeAccountsInUse`) for the Thread's
-  header; every request ends in one `GatewayRequestRecord` (`subscribeRequests`: User, Space,
-  Thread, key, account, provider, model, status, duration, failovers, tokens), which ticket 05
-  stores as usage.
-- **Limits:** a body over 32 MiB (`T3CODE_AI_GATEWAY_MAX_REQUEST_BYTES`) is 413 before anything is
-  sent; a compressed body 415; 16 requests at once per key and 256 per Hub (429 beyond); 10 minutes
-  to the first byte and 60 for a whole answer. No quotas.
+  header (`count_tokens` does not move it); every request ends in one `GatewayRequestRecord`
+  (`subscribeRequests`: User, Space, Thread, key, account, provider, model, status, duration,
+  failovers, tokens), also one whose answer was never read, which ticket 05 stores as usage.
+- **Limits** (`AiGatewayProxyLimits`; no quotas): the body is read first, in its own pool (8 per
+  User, 64 per Hub), within 60 s and never 15 s without bytes (408), at most 32 MiB
+  (`T3CODE_AI_GATEWAY_MAX_REQUEST_BYTES`, 413), uncompressed (415), and within the Hub's 512 MiB
+  of held request bytes, counted three times over for its copies (503). Only then a request slot:
+  16 per key, 32 per User, 256 per Hub (429), so one User never takes them all. The answer: 10
+  minutes to its first byte, 60 in all, 5 without a byte from upstream, and 2 with a client that
+  does not read (bounded backpressure: the next chunk is pulled only once the client took the
+  last). Upstream error and 429 bodies are read for at most 10 s and 64 KiB.
 - **Logs and spans:** one line and one span (`AiGateway.request`) per request with method, route,
   account, model, status, failovers and tokens; a refusal logs method, matched route and status.
   Never a header, a key, a body or a prompt. The HTTP server's own span is off for `/api/ai/*`
