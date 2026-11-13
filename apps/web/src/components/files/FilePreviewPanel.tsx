@@ -1496,7 +1496,9 @@ export default function FilePreviewPanel({
                 threadRef={threadRef}
                 contents={file.data.contents}
                 workspaceMutationId={workspaceMutationId}
-                readOnly={file.data.truncated || isHostFile || !canWriteFiles}
+                readOnly={
+                  file.data.truncated || file.data.masked === true || isHostFile || !canWriteFiles
+                }
                 onPendingChange={onPendingChange}
               />
             ) : tableDelimiter && renderTable ? (
@@ -1506,6 +1508,23 @@ export default function FilePreviewPanel({
                 text={file.data.contents}
                 delimiter={tableDelimiter}
               />
+            ) : file.data.masked === true ? (
+              // Spec 5: it shows a secret as [NAME]; saving what is shown would replace the secret.
+              <div className="flex min-h-0 flex-1 flex-col">
+                <p
+                  role="note"
+                  className="shrink-0 border-b px-3 py-2 text-muted-foreground text-xs"
+                >
+                  This file contains secrets; edit it in a terminal.
+                </p>
+                <SourceFilePreview
+                  name={relativePath}
+                  text={file.data.contents}
+                  cacheKey={projectFileCacheKey(cwd, relativePath, file.data.contents)}
+                  onPostRender={onFilePostRender}
+                  wordWrap={wordWrap}
+                />
+              </div>
             ) : file.data.truncated || isHostFile || !canWriteFiles ? (
               <SourceFilePreview
                 name={relativePath}

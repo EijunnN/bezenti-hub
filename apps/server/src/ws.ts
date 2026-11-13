@@ -3056,12 +3056,13 @@ export const layerWsRpc = (
                 path.isAbsolute(input.resource.path) &&
                 !isNetworkPath(input.resource.path))
             ) {
-              return yield* issueAssetUrl({ resource: input.resource });
+              return yield* issueAssetUrl({ resource: input.resource, viewer: principal.userId });
             }
             if (input.resource._tag === "draft-workspace-file") {
               return yield* issueAssetUrl({
                 resource: input.resource,
                 workspaceRoot: input.resource.cwd,
+                viewer: principal.userId,
               });
             }
             if (input.resource._tag === "project-favicon") {
@@ -3138,6 +3139,7 @@ export const layerWsRpc = (
             return yield* issueAssetUrl({
               resource: input.resource,
               workspaceRoot: thread.thread.worktreePath ?? project.value.workspaceRoot,
+              viewer: principal.userId,
             });
           }),
         [WS_METHODS.assetsPersistChatAttachments]: (input) =>

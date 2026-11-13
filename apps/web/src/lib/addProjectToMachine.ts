@@ -116,6 +116,10 @@ export async function addProjectToMachine(input: AddProjectToMachineInput): Prom
       );
       if (result._tag === "Failure") return { relativePath, error: failureMessage(result) };
       if (result.value.truncated) return { relativePath, error: "Too large to copy." };
+      // Spec 5: read with secrets shown as [NAME]; copied, it would write [NAME] in their place.
+      if (result.value.masked === true) {
+        return { relativePath, error: "Holds secrets; copy it in a terminal." };
+      }
       return { relativePath, contents: result.value.contents };
     }),
   );

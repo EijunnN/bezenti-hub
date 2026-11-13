@@ -109,6 +109,7 @@ const AssetClaimsSchema = Schema.Union([
     workspaceRoot: Schema.String,
     baseRelativePath: Schema.String,
     expiresAt: Schema.Number,
+    viewer: Schema.optionalKey(Schema.String),
   }),
   Schema.Struct({
     version: Schema.Literal(1),
@@ -116,6 +117,7 @@ const AssetClaimsSchema = Schema.Union([
     workspaceRoot: Schema.String,
     relativePath: Schema.String,
     expiresAt: Schema.Number,
+    viewer: Schema.optionalKey(Schema.String),
   }),
   Schema.Struct({
     version: Schema.Literal(1),
@@ -125,6 +127,7 @@ const AssetClaimsSchema = Schema.Union([
     device: Schema.String,
     inode: Schema.String,
     expiresAt: Schema.Number,
+    viewer: Schema.optionalKey(Schema.String),
   }),
   Schema.Struct({
     version: Schema.Literal(1),
@@ -187,6 +190,8 @@ export type ResolvedAsset =
       readonly mimeType?: string;
       readonly file?: OpenMediaFile;
       readonly renderIntent?: "mcp-app";
+      /** Spec 5: the User the URL was issued to; a text file is served masked for them. */
+      readonly viewer?: string;
     }
   | {
       readonly kind: "bytes";
@@ -533,6 +538,8 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
   readonly projectFaviconPath?: string;
   /** Where a cloned project's checkout stands, while the clone tracker still knows it. */
   readonly projectCheckout?: "pending" | "cloned";
+  /** Spec 5: the User asking; a checkout file is served to them masked with their values. */
+  readonly viewer?: string | undefined;
 }) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -855,6 +862,14 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
       Math.ceil(expiresAt / HTML_ATTACHMENT_TOKEN_BUCKET_MS) * HTML_ATTACHMENT_TOKEN_BUCKET_MS;
     claims = { ...claims, expiresAt };
   }
+  if (
+    input.viewer !== undefined &&
+    (claims.kind === "workspace-file" ||
+      claims.kind === "workspace-file-exact" ||
+      claims.kind === "media-file-exact")
+  ) {
+    claims = { ...claims, viewer: input.viewer };
+  }
   const encodedPayload = base64UrlEncode(encodeAssetClaims(claims));
   const signer = yield* AssetSigner.AssetSigner;
   const signature = yield* signer
@@ -1004,6 +1019,7 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
           mimeType,
           file,
           ...(claims.download ? { download: true, fileName: path.basename(canonicalFile) } : {}),
+          ...(claims.viewer === undefined ? {} : { viewer: claims.viewer }),
         } satisfies ResolvedAsset)
       : null;
   }
@@ -1014,7 +1030,11 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
       relativePath: claims.relativePath,
     });
     return exactWorkspaceFile
-      ? ({ kind: "file", path: exactWorkspaceFile } satisfies ResolvedAsset)
+      ? ({
+          kind: "file",
+          path: exactWorkspaceFile,
+          ...(claims.viewer === undefined ? {} : { viewer: claims.viewer }),
+        } satisfies ResolvedAsset)
       : null;
   }
   const segments = decodedPath.split(/[\\/]/);
@@ -1032,5 +1052,11 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
     workspaceRoot: claims.workspaceRoot,
     relativePath: joinedRelativePath,
   });
-  return workspaceFile ? ({ kind: "file", path: workspaceFile } satisfies ResolvedAsset) : null;
+  return workspaceFile
+    ? ({
+        kind: "file",
+        path: workspaceFile,
+        ...(claims.viewer === undefined ? {} : { viewer: claims.viewer }),
+      } satisfies ResolvedAsset)
+    : null;
 });

@@ -29,6 +29,32 @@ const placeholdersIn = (input: unknown, names: ReadonlySet<string>) => {
   );
 };
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * `masked` with what was shown masked made read-only: a comment whose body changed can no longer
+ * be edited (`canEdit`), nor a change request whose title or body did (`editChangeRequest`).
+ */
+const readOnlyWhereMasked = (original: unknown, masked: unknown): unknown => {
+  if (original === masked) return masked;
+  if (Array.isArray(original) && Array.isArray(masked)) {
+    return masked.map((item, index) => readOnlyWhereMasked(original[index], item));
+  }
+  if (!isRecord(original) || !isRecord(masked)) return masked;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(masked)) {
+    out[key] = readOnlyWhereMasked(original[key], value);
+  }
+  const textChanged = (key: string) =>
+    typeof original[key] === "string" && original[key] !== masked[key];
+  if (textChanged("body") && typeof out.canEdit === "boolean") out.canEdit = false;
+  if ((textChanged("body") || textChanged("title")) && isRecord(out.viewerPermissions)) {
+    out.viewerPermissions = { ...out.viewerPermissions, editChangeRequest: false };
+  }
+  return out;
+};
+
 /** The service, with every answer about a change request masked for the asking User. */
 export const maskingPullRequestReads = <S extends object>(
   masker: Option.Option<SecretMasker.SecretMasker["Service"]>,
@@ -58,7 +84,7 @@ export const maskingPullRequestReads = <S extends object>(
               if (!Effect.isEffect(answer)) return answer;
               // @effect-diagnostics-next-line anyUnknownInErrorContext:off -- any method's own answer.
               return yield* (answer as Effect.Effect<unknown, unknown, unknown>).pipe(
-                Effect.map((value) => found.maskDeep(value)),
+                Effect.map((value) => readOnlyWhereMasked(value, found.maskDeep(value))),
                 // @effect-diagnostics-next-line anyUnknownInErrorContext:off -- its own error.
                 Effect.catch((error: unknown) => Effect.fail(found.maskError(error))),
               );

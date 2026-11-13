@@ -25,8 +25,8 @@ export const maskingCheckoutReads = <S extends object>(
             // @effect-diagnostics-next-line anyUnknownInErrorContext:off -- any method's own answer.
             return (answer as Effect.Effect<unknown, unknown, unknown>).pipe(
               Effect.flatMap((value) => Effect.map(viewer, (found) => found.maskDeep(value))),
-              // @effect-diagnostics-next-line anyUnknownInErrorContext:off -- any method's own error.
               Effect.catch((error: unknown) =>
+                // @effect-diagnostics-next-line anyUnknownInErrorContext:off -- its own error.
                 Effect.flatMap(viewer, (found) => Effect.fail(found.maskError(error))),
               ),
             );

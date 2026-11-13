@@ -18,6 +18,7 @@ import {
   type TerminalAttachStreamEvent,
   ThreadId,
   TurnItemId,
+  UserId,
 } from "@t3tools/contracts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { makeSecretPatterns } from "@t3tools/shared/secretMasking";
@@ -27,13 +28,16 @@ import {
   type TerminalOutputState,
 } from "@t3tools/shared/terminalOutput";
 import type * as Cause from "effect/Cause";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -50,6 +54,7 @@ import { maskGitProgress, maskingGitErrors } from "./maskGitProgress.ts";
 import { maskingPullRequestReads } from "./maskPullRequests.ts";
 import { maskTerminalStream } from "./maskTerminal.ts";
 import { maskReadFile, maskSearchContents } from "./maskWorkspace.ts";
+import { maskedAssetText } from "./maskAssets.ts";
 import * as SecretMasker from "./SecretMasker.ts";
 import * as ThreadSecretValues from "./ThreadSecretValues.ts";
 
@@ -351,6 +356,13 @@ describe("SecretMasker: stored events and live command output", () => {
 
 // ── Doors that are not events: each called with a secret, as MaskedPaths.ts names them ───────
 
+/** A failure that carries process text, as git's or a host's errors do. */
+class Failed extends Schema.TaggedError<Failed>()("Failed", { detail: Schema.String }) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
 const failingMasker = SecretMasker.SecretMasker.of({
   forThread: (threadId) => Effect.fail(new SecretMasker.SecretMaskingError({ threadId })),
   forUser: () => Effect.fail(new SecretMasker.SecretMaskingError({})),
@@ -465,10 +477,32 @@ describe("SecretMasker: the doors that are not events", () => {
             readonly body?: string;
           }) => Effect.succeed("updated"),
           checks: (_input: { readonly repository: string; readonly number: number }) =>
-            Effect.fail(new Error(`hook said ${TOKEN}`)),
+            Effect.fail(new Failed({ detail: `hook said ${TOKEN}` })),
         });
         const answer = yield* service.diffFileContents({ repository: "acme/web", number: 7 });
         assert.deepEqual(answer, { oldContents: "", newContents: "TOKEN=[API_TOKEN]\n" });
+        // What was shown masked is read-only: the change request's body, a comment.
+        const shown = maskingPullRequestReads(Option.some(fakeMasker), {
+          detail: (_input: { readonly repository: string; readonly number: number }) =>
+            Effect.succeed({
+              title: "Deploy",
+              body: `uses ${TOKEN}`,
+              viewerPermissions: { editChangeRequest: true },
+              comments: [
+                { body: `token ${TOKEN}`, canEdit: true },
+                { body: "plain", canEdit: true },
+              ],
+            }),
+        });
+        assert.deepEqual(yield* shown.detail({ repository: "acme/web", number: 7 }), {
+          title: "Deploy",
+          body: "uses [API_TOKEN]",
+          viewerPermissions: { editChangeRequest: false },
+          comments: [
+            { body: "token [API_TOKEN]", canEdit: false },
+            { body: "plain", canEdit: true },
+          ],
+        });
         const failed = yield* Effect.flip(service.checks({ repository: "acme/web", number: 7 }));
         assert.equal(failed.message, "hook said [API_TOKEN]");
         // A body shown masked, saved back: refused, so `[API_TOKEN]` never replaces the value.
@@ -495,7 +529,7 @@ describe("SecretMasker: the doors that are not events", () => {
         getDiffPreview: (_input: { readonly cwd: string }) =>
           Effect.succeed({ sources: [{ diff: `+TOKEN=${TOKEN}` }] }),
         getBranchCommits: (_input: { readonly cwd: string }) =>
-          Effect.fail(new Error(`fatal: ${TOKEN}`)),
+          Effect.fail(new Failed({ detail: `fatal: ${TOKEN}` })),
       });
       const answer = yield* service.getDiffPreview({ cwd: "/work/acme" });
       assert.deepEqual(answer, { sources: [{ diff: "+TOKEN=[API_TOKEN]" }] });
@@ -536,7 +570,7 @@ describe("SecretMasker: the doors that are not events", () => {
       assert.notInclude(JSON.stringify(published), TOKEN);
       // A failed action's error (git's or a hook's stderr): masked too.
       const run = maskingGitErrors(Option.some(fakeMasker), (_input: string, _options: undefined) =>
-        Effect.fail(new Error(`hook failed: ${TOKEN}`)),
+        Effect.fail(new Failed({ detail: `hook failed: ${TOKEN}` })),
       );
       const failed = yield* Effect.flip(run("commit", undefined));
       assert.equal(failed.message, "hook failed: [API_TOKEN]");
@@ -702,5 +736,27 @@ describe("SecretMasker: its own reads", () => {
       const held = yield* ThreadSecretValues.pruneAndListHeld(sql);
       assert.deepEqual([...held].sort(), ["value-living", "value-new"]);
     }).pipe(Effect.provide(layerTest)),
+  );
+});
+
+describe("SecretMasker: a checkout file served by URL", () => {
+  it.effect("is served to its User masked when it is text that holds their value", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const dir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-mask-asset-" });
+      const secretFile = `${dir}/big.env`;
+      const plainFile = `${dir}/plain.txt`;
+      yield* fileSystem.writeFileString(secretFile, `TOKEN=${TOKEN}\n`);
+      yield* fileSystem.writeFileString(plainFile, "nothing here\n");
+      const viewer = UserId.make("viewer");
+      const masked = yield* maskedAssetText(secretFile, viewer);
+      assert.isDefined(masked);
+      const body = masked!.body;
+      assert.equal(
+        body._tag === "Uint8Array" ? new TextDecoder().decode(body.body) : "",
+        "TOKEN=[API_TOKEN]\n",
+      );
+      assert.isUndefined(yield* maskedAssetText(plainFile, viewer), "served as it is");
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(layerMasker, NodeServices.layer))),
   );
 });

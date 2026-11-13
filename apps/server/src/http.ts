@@ -5,6 +5,7 @@ import {
   AuthDiagnosticsReadScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  UserId,
 } from "@t3tools/contracts";
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
 import { injectMcpAppCookieBootstrap, injectMcpAppThemeBootstrap } from "@t3tools/shared/mcpApp";
@@ -60,6 +61,7 @@ import {
   DESKTOP_RENDERER_ORIGINS,
 } from "./httpCors.ts";
 import { requestUrl } from "./requestUrl.ts";
+import { maskedAssetText } from "./vaults/maskAssets.ts";
 
 const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
@@ -483,6 +485,11 @@ export const layerAssetRoute = HttpRouter.add(
           }),
         ),
       );
+    }
+    // Spec 5 ticket 05: a checkout's text file, masked for the User the URL was issued to.
+    if (asset.kind === "file" && "viewer" in asset && typeof asset.viewer === "string") {
+      const masked = yield* maskedAssetText(asset.path, UserId.make(asset.viewer));
+      if (masked !== undefined) return masked;
     }
     return yield* assetFileResponse(
       asset,
