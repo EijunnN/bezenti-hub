@@ -253,8 +253,10 @@ const makeLayerServices = (
         ).pipe(
           Layer.provideMerge(EnvironmentAuth.layer.pipe(Layer.provideMerge(SpaceDirectory.layer))),
         ),
-        layerProjects,
-        layerThreads,
+        // As server.ts: Projects and Threads (their event sink) are built over the masker (spec 5
+        // ticket 05), never beside it.
+      ).pipe((below) =>
+        Layer.mergeAll(layerProjects, layerThreads).pipe(Layer.provideMerge(below)),
       ),
     ),
     Layer.provide(ManagedPolicy.layerTest()),
