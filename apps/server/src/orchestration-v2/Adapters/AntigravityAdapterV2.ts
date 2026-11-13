@@ -74,7 +74,13 @@ export interface AntigravityAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
   readonly selfInvocation: SelfInvocation;
   readonly makeRuntime: (
-    input: Omit<AntigravityAcpRuntimeInput, "spawn" | "childProcessSpawner">,
+    input: Omit<AntigravityAcpRuntimeInput, "spawn" | "childProcessSpawner"> & {
+      /**
+       * Spec 4 ticket 07: a Hub turn's direct AI account credential (`GEMINI_API_KEY` or
+       * `GOOGLE_API_KEY`): the session signs in with it, never with an account.
+       */
+      readonly aiCredential?: { readonly name: string; readonly value: string };
+    },
   ) => Effect.Effect<
     AcpSessionRuntime.AcpSessionRuntime["Service"],
     EffectAcpErrors.AcpError | ProviderSetupError,
@@ -123,6 +129,9 @@ const extractAntigravitySubagentUpdate: NonNullable<AcpAdapterV2Flavor["extractS
   };
 };
 
+/** A Gemini API key, or a Vertex AI express key («Agent Platform»): never a Google account. */
+const ANTIGRAVITY_AI_CREDENTIALS: ReadonlyArray<string> = ["GEMINI_API_KEY", "GOOGLE_API_KEY"];
+
 interface AntigravityFlavorServices {
   readonly random: SecureRandom.SecureRandom["Service"];
   readonly fileSystem: FileSystem.FileSystem;
@@ -139,11 +148,21 @@ export function makeAntigravityAcpAdapterFlavor(
   const makeRuntime = Effect.fn("AntigravityAdapterV2.makeRuntime")(
     function* (input: AcpAdapterV2RuntimeInput) {
       const scope = yield* Scope.fork(yield* Effect.scope);
+      // Only a direct credential reaches it (`acceptsAiCredential`; no Vault secret: it does not
+      // take `receivesSecretEnv`), set over the unset ambient ones by `applySecretEnv`.
+      const aiCredential = ANTIGRAVITY_AI_CREDENTIALS.map((name) => ({
+        name,
+        value: input.processEnvironment?.[name],
+      })).find(
+        (entry): entry is { name: string; value: string } =>
+          typeof entry.value === "string" && entry.value.length > 0,
+      );
       const runtime = yield* options
         .withProcess(
           Scope.close(scope, Exit.void),
           options.makeRuntime({
             ...input,
+            ...(aiCredential === undefined ? {} : { aiCredential }),
             clientFileReads: true,
             sessionSystemPromptAppend: PULL_REQUEST_LINKING_INSTRUCTIONS,
             additionalDirectories: [options.host.paths.attachmentsDir],
@@ -207,6 +226,7 @@ export function makeAntigravityAcpAdapterFlavor(
   return {
     driver: ANTIGRAVITY_PROVIDER,
     runtimeHarness: "Antigravity",
+    acceptsAiCredential: ANTIGRAVITY_AI_CREDENTIALS,
     capabilities: AntigravityProviderCapabilitiesV2,
     // Agents that advertise HTTP MCP skip the stdio bridge process; others keep stdio.
     mcpOverHttp: true,

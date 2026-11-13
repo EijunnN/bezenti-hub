@@ -30,6 +30,7 @@ import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { credentialIdOfValueId } from "../ai/aiCredentialValue.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { McpInvocationContext } from "../mcp/McpInvocationContext.ts";
 import * as EffectiveVaults from "./EffectiveVaults.ts";
@@ -145,6 +146,7 @@ export const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const effective = yield* Effect.serviceOption(EffectiveVaults.EffectiveVaults);
   const values = yield* Effect.serviceOption(ServerSecretStore.VaultValueStore);
+  const aiCredentials = yield* Effect.serviceOption(ServerSecretStore.AiAccountCredentialStore);
   const cache = new Map<string, Entry>();
   const roots = new Map<string, string>();
   // A value id names one value for good (a replace writes a new id): read once.
@@ -171,6 +173,16 @@ export const make = Effect.gen(function* () {
   const readValue = Effect.fnUntraced(function* (valueId: string) {
     const known = decrypted.get(valueId);
     if (known !== undefined) return Option.some(known);
+    // Spec 4 ticket 07: a direct AI account's credential a process of the Thread received.
+    const credentialId = credentialIdOfValueId(valueId);
+    if (credentialId !== undefined) {
+      if (Option.isNone(aiCredentials)) return Option.none<string>();
+      const bytes = yield* aiCredentials.value.get(credentialId);
+      if (Option.isNone(bytes)) return Option.none<string>();
+      const value = new TextDecoder().decode(bytes.value);
+      setBounded(decrypted, valueId, value);
+      return Option.some(value);
+    }
     if (Option.isNone(values)) return Option.none<string>();
     const bytes = yield* values.value.get(valueId);
     if (Option.isNone(bytes)) return Option.none<string>();

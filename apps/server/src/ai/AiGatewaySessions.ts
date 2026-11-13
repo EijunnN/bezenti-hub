@@ -1,18 +1,23 @@
 /**
- * Spec 4 ticket 06: the one rule for a provider session on the Hub's AI gateway: whether it goes
- * through it, its AI account, and its key for the Thread's turn owner (SecretDelivery's rule),
- * revoked with the session. docs/internals/ai-gateway.md, «Agents through the gateway».
+ * Spec 4 tickets 06 and 07: the one rule for a Hub provider session's AI account: the gateway and
+ * its key for the turn owner, or (no base URL) a direct account's credential as one masked
+ * variable. docs/internals/ai-gateway.md, «Agents through the gateway», «Direct credentials».
  */
 import {
+  AI_DIRECT_CONTRACT_VERSION,
+  AI_DIRECT_DRIVERS,
   AI_GATEWAY_CONTRACT_VERSION,
   AI_GATEWAY_DRIVERS,
+  type AiAccountId,
   type AiGatewayAccess,
   AiGatewaySessionError,
+  aiDirectVariableOf,
   type EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
   type ModelSelection,
   type ProviderDriverKind,
   type ProviderSessionAiAccount,
+  type SecretEnvVariable,
   type ThreadId,
   type UserId,
 } from "@t3tools/contracts";
@@ -26,9 +31,11 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { machineNameOf } from "../environments/machineName.ts";
 import { threadTurnOwner } from "../orchestration-v2/threadTurnOwner.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as SecretMasker from "../vaults/SecretMasker.ts";
 import * as AiAccounts from "./AiAccounts.ts";
 import * as AiGatewayActivity from "./AiGatewayActivity.ts";
 import * as AiGatewayKeys from "./AiGatewayKeys.ts";
+import { aiCredentialValueId } from "./aiCredentialValue.ts";
 import * as AllowedAiAccounts from "./AllowedAiAccounts.ts";
 
 /** The machine a session's process starts on, and its executor contract. */
@@ -38,8 +45,9 @@ export interface GatewayTarget {
 }
 
 /**
- * What a session of the Thread gets now, decided once per open and without a key: off the
- * gateway, refused (never a fallback to a login), or on it for this owner and account.
+ * What a session of the Thread gets now, decided once per open and without a key or credential:
+ * off AI accounts, refused (never a fallback to a login), on the gateway for this owner and
+ * account, or (ticket 07) with this direct account's credential under `variable`.
  */
 export type GatewayPlan =
   | { readonly _tag: "off" }
@@ -50,6 +58,15 @@ export type GatewayPlan =
       readonly account: ProviderSessionAiAccount;
       /** Names who the process acts for and on what: a session with another is not reused. */
       readonly fingerprint: string;
+    }
+  | {
+      readonly _tag: "direct";
+      readonly ownerUserId: UserId;
+      readonly account: ProviderSessionAiAccount;
+      /** The variable the credential reaches the process under (`AI_DIRECT_DRIVERS`). */
+      readonly variable: string;
+      /** Owner, Space, account and credential id (a replaced credential is a new process). */
+      readonly fingerprint: string;
     };
 
 /** A session on the gateway: what its process gets, and the account the Thread shows. */
@@ -58,19 +75,26 @@ export interface GatewaySession {
   readonly account: ProviderSessionAiAccount;
 }
 
+/** A session with a direct credential: the one variable its process gets, already masked. */
+export interface DirectSession {
+  readonly variable: SecretEnvVariable;
+  readonly account: ProviderSessionAiAccount;
+}
+
 /** The fingerprint of a session off the gateway. */
 export const NO_GATEWAY = "none";
 
 export const fingerprintOf = (plan: GatewayPlan) =>
-  plan._tag === "on" ? plan.fingerprint : NO_GATEWAY;
+  plan._tag === "on" || plan._tag === "direct" ? plan.fingerprint : NO_GATEWAY;
 
 export class AiGatewaySessions extends Context.Service<
   AiGatewaySessions,
   {
     /**
-     * Whether `driver`'s sessions of the Thread go through the gateway: a driver that takes a base
-     * URL, on a Hub with a usable AI account, or always in a Sandbox or dedicated machine (whose
-     * logins are no longer used). Such a Thread gets a provider process of its own.
+     * Whether `driver`'s sessions of the Thread run on AI accounts: a driver that takes a base URL
+     * (the gateway) or one that takes a direct credential, on a Hub with a usable AI account, or
+     * always in a Sandbox or dedicated machine (whose logins are no longer used). Such a Thread
+     * gets a provider process of its own.
      */
     readonly applies: (input: {
       readonly driver: ProviderDriverKind;
@@ -89,6 +113,14 @@ export class AiGatewaySessions extends Context.Service<
       readonly providerSessionId: string;
       readonly plan: Extract<GatewayPlan, { readonly _tag: "on" }>;
     }) => Effect.Effect<GatewaySession, AiGatewayKeys.AiGatewayKeyError>;
+    /**
+     * The direct credential of a session about to start its process, read now and masked in the
+     * Thread before the process can print it. Fails (never an empty value) when it is gone.
+     */
+    readonly issueDirect: (input: {
+      readonly threadId: ThreadId;
+      readonly plan: Extract<GatewayPlan, { readonly _tag: "direct" }>;
+    }) => Effect.Effect<DirectSession, AiGatewaySessionError>;
     /** Revokes a session's key: it closed, or never opened (its process never started). */
     readonly release: (
       providerSessionId: string,
@@ -107,6 +139,7 @@ const make = Effect.gen(function* () {
   const accounts = yield* AiAccounts.AiAccounts;
   const keys = yield* AiGatewayKeys.AiGatewayKeys;
   const activity = yield* Effect.serviceOption(AiGatewayActivity.AiGatewayActivity);
+  const masker = yield* Effect.serviceOption(SecretMasker.SecretMasker);
 
   // No session survives a Hub restart (each machine drops what the Hub no longer knows): the keys
   // issued for them stop working now.
@@ -131,11 +164,13 @@ const make = Effect.gen(function* () {
     return rows[0] === undefined || rows[0].isolated === 1;
   });
 
-  /** An account the gateway can route to: not deleted, not disabled, not a direct credential. */
+  /**
+   * A usable AI account on the Hub (not deleted, not disabled), of any type: once the Owner set
+   * one up, every Hub turn runs on AI accounts, never on a login of the machine.
+   */
   const hasAccounts = sql<{ readonly found: number }>`
     SELECT EXISTS (
-      SELECT 1 FROM ai_accounts
-      WHERE deleted_at IS NULL AND disabled = 0 AND type <> 'direct'
+      SELECT 1 FROM ai_accounts WHERE deleted_at IS NULL AND disabled = 0
     ) AS found
   `.pipe(
     Effect.map((rows) => rows[0]?.found === 1),
@@ -146,12 +181,62 @@ const make = Effect.gen(function* () {
     readonly driver: ProviderDriverKind;
     readonly environmentId?: EnvironmentId | undefined;
   }) {
-    if (!AI_GATEWAY_DRIVERS.has(input.driver)) return false;
+    if (!AI_GATEWAY_DRIVERS.has(input.driver) && !AI_DIRECT_DRIVERS.has(input.driver)) {
+      return false;
+    }
     if (yield* hasAccounts) return true;
     return yield* isolatedMachine(input.environmentId);
   });
 
   const refused = (error: AiGatewaySessionError): GatewayPlan => ({ _tag: "refused", error });
+
+  /** Ticket 07: a direct driver's plan, from the accounts allowed to the owner in the Space. */
+  const planDirect = Effect.fn("AiGatewaySessions.planDirect")(function* (input: {
+    readonly driver: ProviderDriverKind;
+    readonly modelSelection: ModelSelection;
+    readonly ownerUserId: UserId;
+    readonly spaceId: string;
+    readonly allowed: ReadonlyArray<AllowedAiAccounts.AllowedAiAccount>;
+  }) {
+    const usable = input.allowed.filter(
+      (account) =>
+        account.type === "direct" &&
+        aiDirectVariableOf(input.driver, account.provider) !== undefined,
+    );
+    const chosen = input.modelSelection.aiAccountId;
+    // The Thread's choice, or the first allowed by global priority; never another in its place.
+    const account =
+      chosen === undefined ? usable[0] : usable.find((candidate) => candidate.id === chosen);
+    if (account === undefined) {
+      return refused(
+        new AiGatewaySessionError({
+          reason: chosen === undefined ? "no-ai-account" : "not-allowed",
+        }),
+      );
+    }
+    const variable = aiDirectVariableOf(input.driver, account.provider);
+    const rows = yield* sql<{ readonly credentialId: string | null }>`
+      SELECT credential_id AS "credentialId" FROM ai_accounts
+      WHERE account_id = ${account.id} AND deleted_at IS NULL AND disabled = 0 AND type = 'direct'
+    `.pipe(Effect.orElseSucceed(() => []));
+    const credentialId = rows[0]?.credentialId ?? null;
+    if (variable === undefined || credentialId === null) {
+      return refused(new AiGatewaySessionError({ reason: "no-ai-account" }));
+    }
+    const model = input.modelSelection.model.trim();
+    return {
+      _tag: "direct",
+      ownerUserId: input.ownerUserId,
+      account: {
+        id: account.id,
+        name: account.name,
+        provider: account.provider,
+        model: model.length > 0 ? model : null,
+      },
+      variable,
+      fingerprint: `direct\u0000${input.ownerUserId}\u0000${input.spaceId}\u0000${account.id}\u0000${credentialId}`,
+    } satisfies GatewayPlan;
+  });
 
   const plan = Effect.fn("AiGatewaySessions.plan")(function* (input: {
     readonly threadId: ThreadId;
@@ -162,8 +247,12 @@ const make = Effect.gen(function* () {
     if (!(yield* applies({ driver: input.driver, environmentId: input.target.environmentId }))) {
       return { _tag: "off" } satisfies GatewayPlan;
     }
-    // A machine too old for the gateway gets nothing, and says why.
-    if (input.target.contractVersion < AI_GATEWAY_CONTRACT_VERSION) {
+    const direct = AI_DIRECT_DRIVERS.has(input.driver);
+    // A machine too old for the gateway (or for a direct credential) gets nothing, and says why.
+    if (
+      input.target.contractVersion <
+      (direct ? AI_DIRECT_CONTRACT_VERSION : AI_GATEWAY_CONTRACT_VERSION)
+    ) {
       const environmentName = yield* machineNameOf(sql, input.target.environmentId);
       return refused(
         new AiGatewaySessionError({
@@ -182,10 +271,20 @@ const make = Effect.gen(function* () {
     if (Option.isNone(space) || Option.isNone(owner)) {
       return refused(new AiGatewaySessionError({ reason: "no-ai-account" }));
     }
-    // Through the gateway only, by global priority: what the gateway itself routes to.
-    const allowed = (yield* allowedAccounts
+    const everyAllowed = yield* allowedAccounts
       .for(owner.value, space.value.id)
-      .pipe(Effect.orElseSucceed(() => []))).filter((account) => account.type !== "direct");
+      .pipe(Effect.orElseSucceed(() => []));
+    if (direct) {
+      return yield* planDirect({
+        driver: input.driver,
+        modelSelection: input.modelSelection,
+        ownerUserId: owner.value,
+        spaceId: space.value.id,
+        allowed: everyAllowed,
+      });
+    }
+    // Through the gateway only, by global priority: what the gateway itself routes to.
+    const allowed = everyAllowed.filter((account) => account.type !== "direct");
     if (allowed.length === 0) {
       return refused(new AiGatewaySessionError({ reason: "no-ai-account" }));
     }
@@ -260,6 +359,30 @@ const make = Effect.gen(function* () {
     } satisfies GatewaySession;
   });
 
+  const issueDirect = Effect.fn("AiGatewaySessions.issueDirect")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly plan: Extract<GatewayPlan, { readonly _tag: "direct" }>;
+  }) {
+    const credential = yield* accounts
+      .directCredential(input.plan.account.id as AiAccountId)
+      .pipe(Effect.mapError(() => new AiGatewaySessionError({ reason: "no-ai-account" })));
+    const value = Redacted.value(credential.value);
+    // Masked in the Thread before the process that gets it can print anything (spec 5, 05).
+    if (Option.isSome(masker)) {
+      yield* masker.value.remember(input.threadId, [
+        {
+          name: input.plan.variable,
+          value,
+          valueId: aiCredentialValueId(credential.credentialId),
+        },
+      ]);
+    }
+    return {
+      variable: { name: input.plan.variable, value },
+      account: input.plan.account,
+    } satisfies DirectSession;
+  });
+
   const release = Effect.fn("AiGatewaySessions.release")(function* (
     providerSessionId: string,
     reason: "session-closed" | "session-not-opened" = "session-not-opened",
@@ -273,7 +396,7 @@ const make = Effect.gen(function* () {
       );
   });
 
-  return AiGatewaySessions.of({ applies, plan, issue, release });
+  return AiGatewaySessions.of({ applies, plan, issue, issueDirect, release });
 });
 
 export const layer = Layer.effect(AiGatewaySessions, make);

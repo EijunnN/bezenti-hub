@@ -12,9 +12,11 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Function from "effect/Function";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
 
+import * as AiGatewaySessions from "../ai/AiGatewaySessions.ts";
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
@@ -69,6 +71,7 @@ export const makeProviderAuthService = Effect.gen(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
   const credentialChanges = yield* Semaphore.make(1);
+  const aiGatewaySessions = yield* Effect.serviceOption(AiGatewaySessions.AiGatewaySessions);
 
   const getController = Effect.fn("ProviderAuthService.getController")(function* (
     instanceId: ProviderInstanceId,
@@ -194,6 +197,25 @@ export const makeProviderAuthService = Effect.gen(function* () {
     }
   });
 
+  /**
+   * Spec 4 ticket 07: once the Hub runs Antigravity turns on AI accounts, its Google sign-in is
+   * not offered: the Owner's Google account enters the AI gateway as an AI account, never `agy`.
+   */
+  const refuseGoogleSignIn = Effect.fn("ProviderAuthService.refuseGoogleSignIn")(function* (
+    instanceId: ProviderInstanceId,
+  ) {
+    if (Option.isNone(aiGatewaySessions)) return;
+    const instance = yield* registry.getInstance(instanceId);
+    if (instance?.driverKind !== "antigravity") return;
+    if (!(yield* aiGatewaySessions.value.applies({ driver: instance.driverKind }))) return;
+    return yield* new ProviderSetupError({
+      instanceId,
+      operation: "start",
+      detail:
+        "Hub turns never sign in to Antigravity with a Google account. Use the Owner's Google account through the AI gateway (Settings → AI accounts), or a Gemini API key or Vertex AI direct credential.",
+    });
+  });
+
   return ProviderAuthService.of({
     reconnectProfile: Effect.fnUntraced(function* (input) {
       const auth = yield* getController(input.instanceId, "export");
@@ -227,6 +249,7 @@ export const makeProviderAuthService = Effect.gen(function* () {
       return yield* credentialChanges.withPermit(
         Effect.gen(function* () {
           const auth = yield* getController(input.instanceId, "start");
+          yield* refuseGoogleSignIn(input.instanceId);
           yield* checkSharedBinding(input.instanceId, "start", auth);
           return yield* auth.start(
             ownerSessionId,

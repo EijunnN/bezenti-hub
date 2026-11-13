@@ -284,6 +284,8 @@ export const makeMuseAdapterV2 = Effect.fn("makeMuseAdapterV2")(function* (
     driver: MUSE_PROVIDER,
     // Spec 5: each session's host process gets the Thread's secrets.
     receivesSecretEnv: true,
+    // Spec 4 ticket 07: on a Hub turn it runs on a direct AI account's key, never a login.
+    acceptsAiCredential: ["META_API_KEY"],
     getCapabilities: Effect.fn("MuseAdapter.getCapabilities")(function () {
       return Effect.succeed(MuseProviderCapabilitiesV2);
     }),

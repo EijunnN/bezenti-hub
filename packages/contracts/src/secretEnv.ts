@@ -21,6 +21,12 @@ export const NO_SECRETS_FINGERPRINT = "none";
 export const SecretEnv = Schema.Struct({
   fingerprint: TrimmedNonEmptyString,
   variables: Schema.optionalKey(Schema.Array(SecretEnvVariable)),
+  /**
+   * Spec 4 ticket 07: the variable among `variables` that holds the Thread's direct AI account
+   * credential. Its process drops every ambient AI credential first and starts only on a provider
+   * that takes it (`acceptsAiCredential`). Machines of contract 13 and later only.
+   */
+  aiCredential: Schema.optionalKey(Schema.String),
 });
 export type SecretEnv = typeof SecretEnv.Type;
 

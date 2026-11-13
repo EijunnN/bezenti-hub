@@ -24,6 +24,31 @@ export const AI_GATEWAY_DRIVERS: ReadonlySet<string> = new Set([
   "pi",
 ]);
 
+/**
+ * Spec 4 ticket 07: drivers whose CLI takes no base URL → direct account provider → the variable
+ * its credential reaches the process under. Antigravity never gets the Owner's Google account;
+ * Grok ignores `GROK_CLI_CHAT_PROXY_BASE_URL` with an API key; ACP Registry is Devin only.
+ */
+export const AI_DIRECT_DRIVERS: ReadonlyMap<string, Readonly<Record<string, string>>> = new Map([
+  ["antigravity", { gemini: "GEMINI_API_KEY", vertex: "GOOGLE_API_KEY" }],
+  ["cursor", { cursor: "CURSOR_API_KEY" }],
+  ["kiro", { kiro: "KIRO_API_KEY" }],
+  ["fx", { fx: "AI_GATEWAY_API_KEY" }],
+  ["muse", { meta: "META_API_KEY" }],
+  ["acpRegistry", { devin: "DEVIN_TOKEN" }],
+  ["grok", { xai: "XAI_API_KEY" }],
+]);
+
+/** The variable a direct account of `provider` reaches `driver`'s process under, if it can. */
+export const aiDirectVariableOf = (driver: string, provider: string): string | undefined =>
+  AI_DIRECT_DRIVERS.get(driver)?.[provider];
+
+/**
+ * The executor contract from which a machine receives a direct credential (`secretEnv` with
+ * `aiCredential`): before it, a machine would put the key in the process beside its own logins.
+ */
+export const AI_DIRECT_CONTRACT_VERSION = 13;
+
 /** The variable every gateway process reads its key from (Codex's `env_key`, Pi's `$NAME`). */
 export const AI_GATEWAY_KEY_VARIABLE = "T3_AI_GATEWAY_KEY";
 
@@ -92,6 +117,7 @@ export class AiGatewaySessionError extends Schema.TaggedError<AiGatewaySessionEr
       "unreachable",
       "model-not-served",
       "insecure-hub",
+      "login-method",
     ]),
     environmentName: Schema.optional(Schema.String),
     provider: Schema.optional(Schema.String),
@@ -114,6 +140,8 @@ export class AiGatewaySessionError extends Schema.TaggedError<AiGatewaySessionEr
         return `No AI account allowed to you in this Space serves ${this.model ?? "this model"}. Switch model or AI account.`;
       case "insecure-hub":
         return "This machine reaches the Hub over plain HTTP, so it can't use the Hub's AI accounts. Join it to the Hub's https:// address.";
+      case "login-method":
+        return `${this.provider ?? "This provider"} is set to sign in with an account, which Hub turns never use. Pick «Gemini API key» or «Agent Platform (Vertex AI)» in its settings; use the Owner's Google account through the AI gateway.`;
     }
   }
 }

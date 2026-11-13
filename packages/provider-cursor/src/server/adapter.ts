@@ -62,6 +62,7 @@ import {
   providerMessageTextWithAttachmentPaths,
 } from "@t3tools/provider-core/server/attachmentPrompt";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { aiCredentialOf } from "@t3tools/provider-core/server/instanceEnvironment";
 import {
   makeSubagentChildThread,
   makeSubagentConversationArtifacts,
@@ -979,6 +980,9 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
   return ProviderAdapter.ProviderAdapterV2.of({
     instanceId: adapterOptions.instanceId,
     driver: CursorAgentSdk.CURSOR_PROVIDER,
+    // Spec 4 ticket 07: on a Hub turn the agent runs on a direct AI account's key, passed to the
+    // SDK for this session only (never the instance's key, never the machine's Cursor login).
+    acceptsAiCredential: ["CURSOR_API_KEY"],
     getCapabilities: Effect.fn("CursorAdapter.getCapabilities")(function () {
       return Effect.succeed(CursorProviderCapabilitiesV2);
     }),
@@ -988,6 +992,19 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
     openSession: Effect.fn("CursorAdapterV2.openSession")(
       function* (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) {
         const sessionScope = yield* Effect.scope;
+        // A session with a direct credential uses it and nothing else; `openSessionWithSecrets`
+        // refused one without its value.
+        const sessionApiKey =
+          input.secretEnv?.aiCredential === undefined
+            ? apiKey
+            : aiCredentialOf(input.secretEnv)?.value;
+        if (input.secretEnv?.aiCredential !== undefined && sessionApiKey === undefined) {
+          return yield* new ProviderAdapter.ProviderAdapterOpenSessionError({
+            driver: CursorAgentSdk.CURSOR_PROVIDER,
+            providerSessionId: input.providerSessionId,
+            cause: "This session's AI account credential is missing.",
+          });
+        }
         const createdAt = yield* DateTime.now;
         const session = providerSession({
           providerSessionId: input.providerSessionId,
@@ -2243,7 +2260,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             yield* Ref.set(liveAgent, null);
           }
           const options = makeCursorAgentOptions({
-            ...(apiKey === undefined ? {} : { apiKey }),
+            ...(sessionApiKey === undefined ? {} : { apiKey: sessionApiKey }),
             modelSelection: openInput.modelSelection,
             runtimePolicy: openInput.runtimePolicy,
             platform,

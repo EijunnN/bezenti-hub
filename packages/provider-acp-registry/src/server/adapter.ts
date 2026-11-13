@@ -261,6 +261,9 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
     makeRuntime: options.makeRuntime ?? makeAcpRegistryRuntime(runtimeOptions, catalog),
     // Its own runtime starts the agent with `processEnvironment` (and so a Thread's secrets).
     ...(options.makeRuntime === undefined ? { receivesSecretEnv: true as const } : {}),
+    // Spec 4 ticket 07: of the registry's agents only Devin has a known API credential; every
+    // other agent is refused a Hub turn's direct credential (so never runs on a Hub turn).
+    ...(isDevin ? { acceptsAiCredential: ["DEVIN_TOKEN"] } : {}),
     ...(runtimeCoordinator === undefined
       ? {}
       : {
