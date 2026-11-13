@@ -317,48 +317,45 @@ rest, so any other door (ticket 06's relay included) reuses it.
 
 ## Agents through the gateway (spec 4 ticket 06)
 
-- **When:** `AiGatewaySessions.applies`: a driver that takes a base URL (`claudeAgent`, `codex`,
-  `opencode`, `pi`; `AI_GATEWAY_DRIVERS`), on a Hub with any AI account, or in a Sandbox or
-  dedicated machine always (their logins are retired). Such a Thread gets a provider process of its
-  own (`Orchestrator.providerSessionIdFor`), never Codex's shared app-server.
-- **One rule** (`ai/AiGatewaySessions.forSession`, called by `ProviderSessionManager` only when a
-  process starts): the machine's executor contract must be 11 (else «<machine> needs an update to use
-  the Hub's AI accounts», no key issued); the account is the Thread's (`modelSelection.aiAccountId`,
-  never another in its place: «no longer allowed») or the highest-priority allowed one, of the
-  driver's own provider first; none → «No AI account is allowed to you in this Space». Then
-  `AiGatewayKeys.issueForThread(threadId, { providerSessionId })`: for the Thread's turn owner (the
-  acting-User rule of SecretDelivery), rotating earlier keys. The session's key is revoked when the
-  session is released (`ProviderSessionManager.releaseEntry`, before its process stops), when it fails
-  to open, and by `AiGatewayKeyRevocation` on the session events.
-- **Wire:** `aiGateway` (key, account id and name, provider, model) only in `provider.openSession`;
-  `RemoteEnvironments.invoke` refuses it to a machine before contract 11. Never logged nor kept.
-- **Relay** (`environments/AiGatewayRelay.ts`): each joined server opens, on first use, an HTTP
-  listener on `127.0.0.1:<random>` that forwards only the gateway's routes (`matchGatewayRoute`) to the
-  Hub's URL — in a Sandbox or dedicated machine that is the Hub's socket — with only the key and wire
-  headers; it refuses other paths, absolute or protocol-relative targets, another Host, an `Origin`,
-  CONNECT and upgrades, follows no redirect, and adds, keeps and logs nothing. On the Hub machine the
-  base URL is the Hub's own loopback address.
-- **Provider homes:** `<stateDir>/provider-homes/<sha256(thread)>/<driver>` (0700): Claude Code's
-  `CLAUDE_CONFIG_DIR`, Codex's `CODEX_HOME`, OpenCode's `XDG_*` homes, Pi's `PI_CODING_AGENT_DIR`. No
-  login or setting of the machine's user is read; transcripts stay for the Thread's next session.
-- **Drivers** (`provider-core/server/instanceEnvironment.ts`, `aiGatewayVariables`): Claude Code
-  `ANTHROPIC_BASE_URL` (relay `/api/ai/anthropic`), `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL` (and the
-  small-model variables); Codex `-c model_provider="t3"` with `base_url` (relay `/api/ai/openai/v1`),
-  `env_key = "T3_AI_GATEWAY_KEY"`, `wire_api = "responses"`; OpenCode `OPENCODE_CONFIG_CONTENT` with
-  provider `t3` (`@ai-sdk/openai-compatible`, `apiKey: {env:T3_AI_GATEWAY_KEY}`, only that provider
-  enabled); Pi a `models.json` in its home with provider `t3` and `apiKey: "$T3_AI_GATEWAY_KEY"`. The
-  key is only ever an environment value: never in arguments or files. `applyAiGatewayEnv` drops every
-  ambient AI variable (`AMBIENT_AI_VARIABLES`, from the machine or a Vault) and sets the gateway's
-  last, so nothing overrides it; a Vault cannot hold those names (`AI_GATEWAY_ENV_NAMES`).
-- **The Thread** shows the account its live session runs on (`providerSession.aiAccount`, header
-  badge «AI account in use: <name>»).
-- **Doors decided:** terminals and setup scripts get no key (a User's shell would carry the Thread's
-  key; local CLIs get User keys, ticket 10); sub-agent and delegated Threads open their own sessions
-  through the same rule, for their root's owner. Accepted risk: `/proc/<pid>/environ` of the agent is
-  readable by other processes of the same Sandbox (ADR 0004).
-- **Gaps for later tickets:** the composer's provider readiness still comes from a machine's own
-  login probe (ticket 08's selector); text generation (titles) on a machine still uses its provider's
-  own configuration; mobile does not show the account yet (ticket 12).
+Decisions; the code is `ai/AiGatewaySessions.ts` (the rule), `environments/AiGatewayRelay.ts`
+(the machine's side) and `provider-core/server/instanceEnvironment.ts` (what each driver sets).
+
+- **Who goes through it.** Claude Code, Codex, OpenCode and Pi, on a Hub with a usable AI account
+  (not deleted, not disabled, not direct), and always in Sandboxes and dedicated machines, whose
+  logins are retired. Never a fallback to a login: no allowed account, an account no longer
+  allowed, no allowed account serving the model, a machine before contract 11 or plain HTTP to a
+  remote Hub all refuse the session. Unreadable state refuses too.
+- **One plan per open, one key per process.** The plan (owner, Space, account) is decided once per
+  open, without a key; a running session for another owner or account is not reused, and a busy
+  one never serves a turn that must go through the gateway. The key is issued only when a process
+  starts, after the shared-process refusal, for the Thread's turn owner; it is revoked when the
+  session is released, on any failure or interruption of the open, and at every Hub start (no
+  session survives one). A gateway session never serves another Thread.
+- **The account shown is the account routed**: the Thread's, else the first allowed by global
+  priority that serves the model, as the gateway's `planRoute` picks it. A failover is not shown
+  yet (ticket 08's header).
+- **The key travels like a secret** (`provider.openSession` only, environment only: never
+  arguments, files, logs or the event store). Ambient AI variables are dropped and the gateway's
+  set last, so neither the machine nor a Vault overrides them; Vaults refuse those names
+  (`AI_GATEWAY_ENV_NAMES`, checked against what the drivers set). Loopback is added to `NO_PROXY`.
+- **Project configuration cannot redirect it.** Claude Code gets the base URL and model as flag
+  settings, which outrank a project's `.claude/settings*.json` (the key itself never goes there);
+  OpenCode runs with `OPENCODE_DISABLE_PROJECT_CONFIG`. Pi loads a project's settings and
+  extensions only in a folder the User trusted.
+- **The relay** listens on loopback only and forwards the gateway's own routes to the Hub (by the
+  Sandbox's socket, or the Hub's https URL), adding, keeping and following nothing.
+- **Provider homes** are per Thread and driver, under the machine's state directory: no login or
+  setting of the machine's user.
+- **Terminals and setup scripts get no key**: a User's shell would carry the Thread's key; local
+  CLIs use User keys (ticket 10).
+
+**Accepted risks.** The agent's own process holds the key: anything it runs can read
+`/proc/<pid>/environ`, and in a shared Sandbox so can the Space's other processes (ADR 0004).
+Claude Code scrubs its Bash tool's environment (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`) and Codex's
+default shell policy drops `*KEY*` names; OpenCode's and Pi's tools inherit the key, and a Pi
+extension of a trusted project runs with it. A key is worth only its Thread's allowed accounts
+while its session lives. Provider homes stay on the machine after a Thread is deleted (transcripts,
+never the key): removing them needs an executor operation, left for a later ticket.
 
 ## Known exception to «no upstream services»
 
