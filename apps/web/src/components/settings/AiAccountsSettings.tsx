@@ -34,6 +34,8 @@ import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+import { Toggle, ToggleGroup } from "../ui/toggle-group";
+import { AiUsageTab } from "./AiUsageSettings";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 
 /** Hidden as typed, and no password manager prompt: it is not a login. */
@@ -153,6 +155,7 @@ function AiAccountsPage({ environmentId }: { readonly environmentId: Environment
   const [error, setError] = useState<string | null>(null);
   const [usersError, setUsersError] = useState<string | null>(null);
   const [reordering, setReordering] = useState(false);
+  const [tab, setTab] = useState<"accounts" | "usage">("accounts");
   const manage = canManage && mayWrite;
 
   const loadAccounts = useEffectEvent((target: EnvironmentId) =>
@@ -240,8 +243,18 @@ function AiAccountsPage({ environmentId }: { readonly environmentId: Environment
   };
 
   const ordered = (accounts ?? []).filter((account) => account.status !== "removing");
+  // The Owner's second tab: what went through the AI gateway (spec 4 ticket 05).
+  if (canManage && tab === "usage") {
+    return (
+      <>
+        <AiAccountsTabs tab={tab} onTab={setTab} />
+        <AiUsageTab environmentId={environmentId} />
+      </>
+    );
+  }
   return (
     <>
+      {canManage ? <AiAccountsTabs tab={tab} onTab={setTab} /> : null}
       <SettingsSection id="ai-accounts" title="AI accounts">
         <SettingsRow
           title={canManage ? "Your AI accounts" : "AI accounts you may use"}
@@ -299,6 +312,25 @@ function AiAccountsPage({ environmentId }: { readonly environmentId: Environment
         </ul>
       )}
     </>
+  );
+}
+
+function AiAccountsTabs(props: {
+  readonly tab: "accounts" | "usage";
+  readonly onTab: (tab: "accounts" | "usage") => void;
+}) {
+  return (
+    <ToggleGroup
+      aria-label="AI accounts sections"
+      value={[props.tab]}
+      onValueChange={(next) => {
+        const value = next[0];
+        if (value === "accounts" || value === "usage") props.onTab(value);
+      }}
+    >
+      <Toggle value="accounts">Accounts</Toggle>
+      <Toggle value="usage">Usage</Toggle>
+    </ToggleGroup>
   );
 }
 

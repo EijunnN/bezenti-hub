@@ -113,6 +113,7 @@ import Migration0110 from "./Migrations/110_EnvironmentSshHosts.ts";
 import Migration0111 from "./Migrations/111_Vaults.ts";
 import Migration0112 from "./Migrations/112_AiAccounts.ts";
 import Migration0113 from "./Migrations/113_AiGatewayKeys.ts";
+import Migration0114 from "./Migrations/114_AiUsage.ts";
 import Migration0116 from "./Migrations/116_ThreadSecretValues.ts";
 
 const migrationEntries = [
@@ -229,6 +230,7 @@ const migrationEntries = [
   [111, "Vaults", Migration0111],
   [112, "AiAccounts", Migration0112],
   [113, "AiGatewayKeys", Migration0113],
+  [114, "AiUsage", Migration0114],
   [116, "ThreadSecretValues", Migration0116],
 ] as const;
 

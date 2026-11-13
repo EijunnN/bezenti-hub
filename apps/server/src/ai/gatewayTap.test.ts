@@ -70,4 +70,19 @@ describe("the AI gateway's response tap", () => {
     );
     assert.deepEqual([tap.usage().inputTokens, tap.usage().outputTokens], [8, 6]);
   });
+
+  it("reads token counts only as whole, safe, non-negative numbers", () => {
+    const tap = makeResponseTap({ sse: false, prefix: "acct-abc" });
+    run(
+      tap,
+      JSON.stringify({
+        usage: { prompt_tokens: 12.5, completion_tokens: 1e300, cache_read_input_tokens: 3 },
+      }),
+      1024,
+    );
+    assert.deepEqual(
+      [tap.usage().inputTokens, tap.usage().outputTokens, tap.usage().cacheReadTokens],
+      [null, null, 3],
+    );
+  });
 });

@@ -153,6 +153,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.aiGatewayRollback]: "server",
   [WS_METHODS.aiGatewaySetEnabled]: "server",
   [WS_METHODS.aiAccountsList]: "server",
+  [WS_METHODS.aiUsageSummary]: "server",
   [WS_METHODS.aiAccountsCreate]: "server",
   [WS_METHODS.aiAccountsUpdate]: "server",
   [WS_METHODS.aiAccountsDelete]: "server",

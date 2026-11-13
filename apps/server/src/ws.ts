@@ -253,6 +253,7 @@ import * as SourceControlRepositoryService from "./sourceControl/SourceControlRe
 import * as SourceControlSignIn from "./sourceControl/SourceControlSignIn.ts";
 import * as AiAccounts from "./ai/AiAccounts.ts";
 import * as AiGateway from "./ai/AiGateway.ts";
+import * as AiUsage from "./ai/AiUsage.ts";
 import * as SourceControlBuiltInDrivers from "./sourceControl/builtInDrivers.ts";
 import * as SourceControlProviderRegistry from "./sourceControl/SourceControlProviderRegistry.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
@@ -1376,6 +1377,7 @@ export const layerWsRpc = (
       const sourceControlSignIn = yield* SourceControlSignIn.SourceControlSignIn;
       const aiGateway = yield* AiGateway.AiGateway;
       const aiAccounts = yield* AiAccounts.AiAccounts;
+      const aiUsage = yield* AiUsage.AiUsage;
       const withPullRequestViewer = pullRequests.withRoutingCredential;
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const triage = yield* TriageService.TriageService;
@@ -2862,6 +2864,8 @@ export const layerWsRpc = (
         [WS_METHODS.aiAccountsLoginComplete]: (input) =>
           aiAccounts.loginComplete(input, principal.sessionId),
         [WS_METHODS.aiAccountsImportVertex]: (input) => aiAccounts.importVertex(input),
+        // Counts only; AiUsage.summary keeps each session to what it may see (spec 4 ticket 05).
+        [WS_METHODS.aiUsageSummary]: (input) => aiUsage.summary(input),
         [WS_METHODS.projectCloneStart]: (input) =>
           requireCloneDestination(input.destinationPath, { asProject: true }).pipe(
             Effect.andThen(

@@ -63,6 +63,14 @@ export function createAiGatewayEnvironmentAtoms<R, E>(
       label: "environment-data:ai-accounts:reorder",
       tag: WS_METHODS.aiAccountsReorder,
     }),
+    // AI usage (spec 4 ticket 05): counts per day, User, Space and AI account, narrowed by the Hub
+    // to what the session may see. Fetched while a screen shows it, again every 30 s.
+    usageSummary: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:ai-usage:summary",
+      tag: WS_METHODS.aiUsageSummary,
+      idleTtlMs: 0,
+      refreshIntervalMs: 30_000,
+    }),
     // Subscriptions (spec 4 ticket 03): the Owner signs in through the Hub's CLIProxyAPI, pasting
     // the address the browser lands on; a Vertex service account is imported.
     startAccountLogin: createEnvironmentRpcCommand(runtime, {
