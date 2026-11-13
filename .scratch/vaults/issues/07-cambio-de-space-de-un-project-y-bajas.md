@@ -15,7 +15,7 @@
 - [x] Tests en `HubWithEnvironments.projectMove.test.ts` y en el flujo de borrado de Organization.
 - [x] Prueba real: mover un Project con un Vault de Acme a Globex; el diálogo lo avisa; un turno en el destino hace `printenv` y no lo tiene.
 
-**Hecho** (rama `impl/vlt-07`, sin migración):
+**Hecho** (rama `impl/vlt-07`, migración 115 `VaultUnreachableRows`):
 
 - Una regla para las bajas: `vaults/VaultReachLoss.ts`. La entrega ya se recalcula en cada turno, terminal y script (`EffectiveVaults`/`VaultReach`), y los procesos vivos siguen la regla de huella del ticket 04 (la sesión del provider se reabre en el siguiente turno; la terminal abierta dice «Secrets changed»). `VaultReachLoss` borra las filas que nombran un alcance perdido: mover un Project (`keepProjectChoicesReaching`, dentro del commit del movimiento con el nuevo `EventSink.commitProjectCommand` `alsoCommit`), quitar una allowance de un Space o de un User (`Vaults.allow` pasa por aquí), quitar un User (`InstallationUserService`, auditado `vault.allow` false), borrar una Organization (`OrganizationLifecycle.delete`: sus Vaults, entradas, valores, allowances, defectos y elecciones; auditado `vault.delete`) y borrar un Vault. Tabla completa en `docs/internals/secrets.md`, «Losing reach».
 - `EffectiveVaults.projectMove` (misma parte de Space que `forThread`, extraída a `spaceSide`) da `vaultsLost` (solo nombres) y el borrado de elecciones. `ProjectService` es el único llamador nuevo; DoorRules comprueba que no llama a `forThread`.
@@ -23,3 +23,4 @@
 - Testkit: Vaults/EffectiveVaults/SecretDelivery van bajo los Projects en `UserAuth.testkit.ts`, como en el servidor.
 - `list_secret_names` aún no existe (ticket 06); lo comprobado es `vaults.threadEnvironment` y `forThread`, de donde saldrá.
 - Prueba real (`makita-livepass-s5-07`, Podman): todo PASS.
+- Revisión 1: mover un Project y quitar un User cierran las terminales de sus Threads con lo que arrancaron (`terminal.close` `endProcesses`; el diálogo lo avisa); tras quitar una allowance sigue la marca «Secrets changed» del ticket 04. Permitir un Vault a un Space borra defectos y elecciones viejos suyos allí; la migración 115 limpia los que dejaron Hubs anteriores. `create`, `putEntry`, `linkEntry`/`copyEntry`, `allow`, `setSpaceDefaults` y `setProjectChoice` vuelven a comprobar dentro de su transacción. `ProjectService` exige `EffectiveVaults`. Auditadas las elecciones que borra un movimiento y las allowances que pierde una Organization borrada; borrar un Project borra sus elecciones; quitar un User borra también lo permitido a su Personal space.

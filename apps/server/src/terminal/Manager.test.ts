@@ -234,6 +234,7 @@ interface CreateManagerOptions {
   >;
   subprocessPollIntervalMs?: number;
   processKillGraceMs?: number;
+  killStartedProcess?: (pid: number) => void;
   registerTerminalProcesses?: Parameters<
     typeof TerminalManager.makeWithOptions
   >[0]["registerTerminalProcesses"];
@@ -287,6 +288,9 @@ const createManager = (
           ? { subprocessPollIntervalMs: options.subprocessPollIntervalMs }
           : {}),
         processKillGraceMs: options.processKillGraceMs ?? 1,
+        ...(options.killStartedProcess !== undefined
+          ? { killStartedProcess: options.killStartedProcess }
+          : {}),
         ...(options.registerTerminalProcesses !== undefined
           ? { registerTerminalProcesses: options.registerTerminalProcesses }
           : {}),
@@ -1058,6 +1062,49 @@ it.layer(
 
       expect(ptyAdapter.processes.map((process) => process.killed)).toEqual([false, false]);
     }),
+  );
+
+  it.effect(
+    "a close with endProcesses ends what the Thread's shells started, then the shells",
+    () =>
+      Effect.gen(function* () {
+        const ptyAdapter = new FakePtyAdapter();
+        const ended: Array<number> = [];
+        // Each shell's tree: itself, a dev server it started and that server's own child.
+        const { manager } = yield* createManager(5, {
+          ptyAdapter,
+          subprocessPollIntervalMs: 60_000,
+          subprocessInspector: (pid) =>
+            Effect.succeed({
+              hasRunningSubprocess: true,
+              childCommand: "node",
+              processIds: [pid, pid + 1_000, pid + 2_000],
+            }),
+          killStartedProcess: (pid) => {
+            ended.push(pid);
+          },
+        });
+        yield* manager.open(openInput({ terminalId: "term-1" }));
+        yield* manager.open(openInput({ terminalId: "term-2" }));
+        yield* manager.open(openInput({ threadId: "thread-2", terminalId: "term-1" }));
+        const [first, second, other] = ptyAdapter.processes;
+
+        // A plain close leaves what the shell started to the shell.
+        yield* manager.close({ threadId: "thread-2" });
+        expect(ended).toEqual([]);
+        expect(other!.killed).toBe(true);
+
+        yield* manager.close({ threadId: "thread-1", endProcesses: true });
+        expect(ended.toSorted((a, b) => a - b)).toEqual(
+          [
+            first!.pid + 1_000,
+            first!.pid + 2_000,
+            second!.pid + 1_000,
+            second!.pid + 2_000,
+          ].toSorted((a, b) => a - b),
+        );
+        expect([first!.killed, second!.killed]).toEqual([true, true]);
+      }),
   );
 
   it.effect("caps incrementally appended history without losing partial or empty lines", () =>

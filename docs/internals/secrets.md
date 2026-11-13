@@ -291,8 +291,9 @@ terminal.
 1. The Thread's Space (`SpaceDirectory.placementOf`: the Thread's own, else its Project's) must
    be one the acting User works in, else `forbidden`: nothing is computed for a removed Member.
 2. Space side: the Space's defaults, plus the Project's `add`s, minus its `remove`s, all limited to
-   the Vaults allowed to that Space now. A stray choice or default (one a Hub wrote before such
-   rows were dropped, «Losing reach») changes nothing.
+   the Vaults allowed to that Space now. No choice or default naming a Vault that does not reach
+   its Space is kept («Losing reach»: dropped at every loss, again when the Vault is allowed there,
+   and once by migration 115 for rows earlier Hubs left).
 3. User side: the Vaults allowed to the acting User, whichever Space the Thread is in. Never
    another User's, even in the same Thread or Sandbox.
 4. Without archived Vaults, broken Secret links (a link's value and length are its original's),
@@ -309,8 +310,9 @@ allowed: it never lets a name in that rule 4 keeps out.
 It returns value ids (`VaultValueStore` entries; a link's is its original's), never values: only
 delivery reads them. `vaults.threadEnvironment` (WS, the Thread must be visible) computes it for the
 caller and strips value and entry ids: each User sees what their own turns would receive.
-`DoorRules.test.ts` checks that only `server.ts`, `ws.ts` and `SecretDelivery` reach the service
-and that no Vault RPC answers a `value` or a `valueId`.
+`DoorRules.test.ts` checks that only `server.ts`, `ws.ts`, `SecretDelivery` and the Project service
+(with its layer in `orchestration-v2/runtimeLayer.ts`, move plan only) reach the service and that no
+Vault RPC answers a `value` or a `valueId`.
 
 ## Delivery as environment variables (`vaults/SecretDelivery.ts`, spec 5 ticket 04)
 
@@ -388,7 +390,7 @@ requests).
 **What it does not cover (accepted):**
 
 - processes already running keep their environment after a revocation or rotation, until they end
-  or are reopened;
+  or are reopened (a Project's move and a User's removal close terminals instead: «Losing reach»);
 - in a shared Sandbox any process of the Space can read another's environment
   (`/proc/<pid>/environ`, ADR 0004): per-process delivery keeps one User's secrets out of another's
   processes, not out of reach of a determined agent in the same Space;
@@ -407,27 +409,60 @@ shell keeps its environment and says `secretsStale`). What `VaultReachLoss` adds
 keeps naming a reach that is gone, so nothing comes back unseen and nothing of what was deleted
 remains. Every way to lose reach, and where it goes:
 
-| How reach is lost                                         | Delivery (next process)          | Rows dropped (same transaction)                                                                                                                                                                |
-| --------------------------------------------------------- | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A Project moves to another Space                          | `forThread` reads the new Space  | its choices of Vaults that do not reach the new Space (`keepProjectChoicesReaching`, with the commit of the move: `EventSink.commitProjectCommand` `alsoCommit`)                               |
-| A Vault is taken back from a Space                        | not allowed to the Space         | the allowance, that Space's default, its Projects' choices (`forgetSpaceAllowance`)                                                                                                            |
-| A Vault is taken back from a User                         | not allowed to the User          | the allowance (`forgetUserAllowance`)                                                                                                                                                          |
-| A User is removed from the Installation                   | `forbidden` (no Space of theirs) | every allowance to them, audited `vault.allow` `allowed: false` (`forgetUser`, `InstallationUserService`)                                                                                      |
-| An Organization is deleted                                | its Threads are deleted first    | its own Vaults, their entries and values, allowances to it, its defaults, its Projects' choices; audited `vault.delete` (`forgetOrganization`, `OrganizationLifecycle.delete`, before its row) |
-| A Vault is deleted                                        | gone                             | entries, values, allowances, defaults, choices (`forgetVault`)                                                                                                                                 |
-| A Vault is archived, a link broken                        | skipped by `forThread`           | none: restoring brings it back as the Owner left it                                                                                                                                            |
-| A Membership ends, a User is disabled                     | `forbidden`                      | none: a disabled User's allowances wait for them                                                                                                                                               |
-| A Thread moves to a machine that does not serve its Space | `servesSpace`: the plan is empty | none                                                                                                                                                                                           |
+| How reach is lost                                         | Delivery (next process)                               | Live processes                                                             | Rows dropped (same transaction)                                                                                                                                                                                                          |
+| --------------------------------------------------------- | ----------------------------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A Project moves to another Space                          | `forThread` reads the new Space                       | its Threads' terminals close, with what they started                       | its choices of Vaults that do not reach the new Space, each audited `vault.choose` `inherit` (`keepProjectChoicesReaching`, one `DELETE … RETURNING`, with the commit of the move: `EventSink.commitProjectCommand` `alsoCommit`)        |
+| A Project is deleted                                      | its Threads are deleted first                         | —                                                                          | its choices (`forgetProject`, with the commit of the delete)                                                                                                                                                                             |
+| A Vault is taken back from a Space                        | not allowed to the Space                              | stale flag (ticket 04)                                                     | the allowance, that Space's default, its Projects' choices (`forgetSpaceAllowance`)                                                                                                                                                      |
+| A Vault is taken back from a User                         | not allowed to the User                               | stale flag                                                                 | the allowance (`forgetUserAllowance`)                                                                                                                                                                                                    |
+| A User is removed from the Installation                   | `forbidden` (no Space of theirs)                      | their Threads' terminals close on every machine, shared Sandboxes included | every allowance to them and to their (frozen) Personal space, that Space's defaults; each allowance audited `vault.allow` `allowed: false` with `subjectName` (`forgetUser`, `InstallationUserService`)                                  |
+| An Organization is deleted                                | its Threads are deleted first                         | ended with its Threads                                                     | its own Vaults, their entries and values (audited `vault.delete`), allowances to it (audited `vault.allow` `allowed: false`), its defaults, its Projects' choices (`forgetOrganization`, `OrganizationLifecycle.delete`, before its row) |
+| A Vault is deleted                                        | gone                                                  | stale flag                                                                 | entries, values, allowances, defaults, choices (`forgetVault`)                                                                                                                                                                           |
+| A Vault is archived, a link broken                        | skipped by `forThread`                                | stale flag                                                                 | none: restoring brings it back as the Owner left it                                                                                                                                                                                      |
+| A Membership ends, a User is disabled                     | `forbidden`                                           | stale flag                                                                 | none: a disabled User's allowances wait for them                                                                                                                                                                                         |
+| A Member becomes a Guest, or back                         | unchanged: a Guest's Threads receive the defaults too | —                                                                          | none: no reach is lost                                                                                                                                                                                                                   |
+| A credential or agent bound to one Space (`spaceLimit`)   | `forThread` answers nothing outside that Space        | —                                                                          | none: the limit is the caller's, not a row                                                                                                                                                                                               |
+| A Thread moves to a machine that does not serve its Space | `servesSpace`: the plan is empty                      | —                                                                          | none                                                                                                                                                                                                                                     |
 
-**The move plan.** `EffectiveVaults.projectMove({ projectId, from, to })` runs the Space side of
-the rule (`spaceSide`, the same code `forThread` runs) for the Project in each Space and answers
+**Closing terminals.** A move and a removal close terminals rather than flag them, because the new
+Space's Members (or, in a shared Sandbox, the other Users) can drive them: `ProjectMoveHooks`'
+`endTerminals` (`ProjectMoveThreads`) sends `terminal.close` with `endProcesses` to each Thread's
+Active environment, and `TerminalManager` first ends with SIGKILL every process in the shell's tree
+(read from the process table at that moment), then closes the shell. A move does it after cutting
+the machines off and once more after the Threads moved, for one opened in between; a removal after
+its commit. Best effort per Thread (logged); a machine that predates `endProcesses` closes the
+shell alone, and a process that left the shell's tree (`setsid`, `nohup … &` reparented) is not
+found. The move dialog says «Open terminals of its Threads close, with the dev servers and scripts
+started from them». After a revocation, live processes keep the ticket 04 rule (stale flag): which
+running shells hold the revoked Vault is not known without reading every Thread's set again, and
+nobody new gains control of them.
+
+**Granting clears too.** Allowing one of the Owner's Vaults to a Space drops, in the same
+transaction, that Space's default of it and its Projects' choices of it (`clearForGrant`): any such
+row can only be left from before, so a grant never brings it back unseen. Migration 115
+(`VaultUnreachableRows`) drops once what earlier Hubs left: Vaults of Organizations that are gone
+(their values go at the next start's sweep), allowances to Spaces that are gone or to removed Users,
+and defaults and choices of Vaults that do not reach their Space.
+
+**Checks inside the write.** `Vaults.create`, `putEntry` (adding or changing a secret), `linkEntry`,
+`copyEntry`, `allow`, `setSpaceDefaults` and `setProjectChoice` check again, inside the transaction that writes,
+what they checked before it: the Vault's Organization is not being deleted or frozen, the Space
+still exists and takes Vaults, the User is not removed, the Project is still in that Space and each
+Vault still reaches it. A move, a removal or an Organization's deletion that commits between the two
+wins (`not-found` or `not-allowed`).
+
+**The move plan.** `EffectiveVaults.projectMoveLoss({ projectId, from, to })` runs the Space side
+of the rule (`spaceSide`, the same code `forThread` runs) for the Project in each Space and answers
 the Vaults received in `from` and not in `to` (`vaultsLost` in `/api/projects/move-plan`, names
-only; a User's own Vaults follow the User and are never listed), and the write that drops the
-choices. The dialog lists them under «Vaults it loses». The Project service is the only caller
-outside `server.ts` and `ws.ts`, and never calls `forThread` (`DoorRules.test.ts`).
+only; a User's own Vaults follow the User and are never listed). The move itself reads nothing
+more: its choices go with the commit, by SQL. The dialog lists them under «Vaults it loses». The
+Project service requires `EffectiveVaults` (a host without it fails to build, never moves without
+the warning); it is the only caller outside `server.ts` and `ws.ts`, and never calls `forThread`
+(`DoorRules.test.ts`).
 
-Values of deleted entries are removed from `VaultValueStore` once the transaction commits; one a
-failure leaves behind is removed at the next start (`sweepOrphanValues`).
+Values of deleted entries are removed from `VaultValueStore` once the transaction commits
+(`removeValues`, also what `Vaults.delete` uses); one a failure leaves behind is removed at the
+next start (`sweepOrphanValues`).
 
 ## What is not covered here
 
