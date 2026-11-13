@@ -21,6 +21,8 @@ import * as ServerConfig from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as KnownWorkspaces from "../workspace/KnownWorkspaces.ts";
+import * as SecretMasker from "../vaults/SecretMasker.ts";
+import { maskingCheckoutReads } from "../vaults/maskCheckoutReads.ts";
 
 const WORKSPACE_BOUND_SUBJECTS = {
   "ReviewService.getBranchCommits": "commit list",
@@ -144,11 +146,13 @@ export const make = Effect.gen(function* () {
     return yield* git.getReviewDiffFileContents(input);
   });
 
-  return ReviewService.of({
+  // Spec 5 ticket 05: a checkout's diffs and commits, masked with the values of the Threads that
+  // run there (on the Hub machine: the Owner's).
+  return maskingCheckoutReads(yield* Effect.serviceOption(SecretMasker.SecretMasker), {
     getBranchCommits,
     getDiffPreview,
     getDiffFileContents,
-  });
+  } satisfies ReviewService["Service"]);
 });
 
 export const layer = Layer.effect(ReviewService, make);

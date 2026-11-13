@@ -1,10 +1,10 @@
 /**
- * Spec 5 ticket 05: a terminal's output, masked on the Hub before a client sees it. Output whose
- * end could be the start of a secret value waits for the next chunk (at most
- * {@link TERMINAL_SECRET_HOLD_MS}), and the two go out as one: a value split between two frames is
- * still masked. Snapshots (a terminal's history) are masked whole.
+ * Spec 5 ticket 05: a terminal's output, masked on the Hub before a client sees it, through the
+ * shared {@link SecretStreamGuard} (a value split between frames is masked whole, or its
+ * continuation is). Snapshots are masked whole, without what is left of a value cut at the start.
  */
 import type { TerminalAttachStreamEvent, TerminalSessionSnapshot } from "@t3tools/contracts";
+import { SecretStreamGuard } from "@t3tools/shared/secretMasking";
 import type * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -15,16 +15,20 @@ import * as Stream from "effect/Stream";
 
 import type * as SecretMasker from "./SecretMasker.ts";
 
-const TERMINAL_SECRET_HOLD_MS = 150;
+/** How long output that could end in the start of a value waits for the rest. */
+const HOLD_MS = 150;
 /** Output held beyond this is masked and sent as it is. */
 const MAX_HELD_CHARS = 128 * 1024;
+
+/** Text cut before its start (a trimmed history) masked, without a value's leftover end. */
+const maskCutText = (masker: SecretMasker.ThreadMasker, text: string): string =>
+  masker.isEmpty ? text : masker.mask(text.slice(masker.pendingPrefix(text)));
 
 export const maskTerminalSnapshot = (
   masker: SecretMasker.ThreadMasker,
   snapshot: TerminalSessionSnapshot,
 ): TerminalSessionSnapshot => {
-  if (masker.isEmpty) return snapshot;
-  const history = masker.mask(snapshot.history);
+  const history = maskCutText(masker, snapshot.history);
   return history === snapshot.history ? snapshot : { ...snapshot, history };
 };
 
@@ -38,8 +42,6 @@ const maskEvent = (
     case "snapshot":
     case "restarted":
       return { ...event, snapshot: maskTerminalSnapshot(masker, event.snapshot) };
-    case "output":
-      return { ...event, data: masker.mask(event.data) };
     case "error":
       return { ...event, message: masker.mask(event.message) };
     default:
@@ -47,7 +49,10 @@ const maskEvent = (
   }
 };
 
-/** The stream a client receives: every event masked with the Thread's masker at that moment. */
+/**
+ * The stream a client receives, masked with the Thread's masker at each event. A masker that
+ * cannot be read ends the stream (nothing unmasked is sent).
+ */
 export const maskTerminalStream = <E, R>(
   masker: SecretMasker.SecretMasker["Service"],
   threadId: string,
@@ -58,17 +63,21 @@ export const maskTerminalStream = <E, R>(
       const scope = yield* Effect.scope;
       const output = yield* Queue.unbounded<TerminalAttachStreamEvent, E | Cause.Done>();
       const mutex = yield* Semaphore.make(1);
-      let held: { readonly event: Output; readonly masker: SecretMasker.ThreadMasker } | undefined;
+      let current:
+        | { readonly masker: SecretMasker.ThreadMasker; readonly guard: SecretStreamGuard }
+        | undefined;
+      let heldEvent: Output | undefined;
       let timer: Fiber.Fiber<void, never> | undefined;
       let generation = 0;
 
-      const flushHeld = Effect.suspend(() => {
-        const pending = held;
-        held = undefined;
+      const release = Effect.suspend(() => {
         generation += 1;
-        return pending === undefined
-          ? Effect.void
-          : Queue.offer(output, maskEvent(pending.masker, pending.event)).pipe(Effect.asVoid);
+        const held = heldEvent;
+        heldEvent = undefined;
+        if (current === undefined || !current.guard.holding || held === undefined) {
+          return Effect.void;
+        }
+        return Queue.offer(output, { ...held, data: current.guard.release() }).pipe(Effect.asVoid);
       });
       const cancelTimer = Effect.suspend(() => {
         const fiber = timer;
@@ -79,39 +88,32 @@ export const maskTerminalStream = <E, R>(
       const handle = (event: TerminalAttachStreamEvent) =>
         mutex.withPermits(1)(
           Effect.gen(function* () {
-            const current = yield* masker.forThread(threadId);
+            const threadMasker = yield* Effect.orDie(masker.forThread(threadId));
+            yield* cancelTimer;
+            // A new set of values, or a reset of the screen: what was held goes, a new guard starts.
+            if (current?.masker !== threadMasker || event.type !== "output") {
+              yield* release;
+              current = { masker: threadMasker, guard: new SecretStreamGuard(threadMasker) };
+            }
             if (event.type !== "output") {
-              yield* cancelTimer;
-              yield* flushHeld;
-              yield* Queue.offer(output, maskEvent(current, event));
+              yield* Queue.offer(output, maskEvent(threadMasker, event));
               return;
             }
-            // The later frame carries the pair: its sequence covers both.
-            const merged: Output =
-              held === undefined ? event : { ...event, data: held.event.data + event.data };
-            yield* cancelTimer;
-            held = undefined;
-            if (
-              !current.isEmpty &&
-              merged.data.length <= MAX_HELD_CHARS &&
-              current.pendingSuffix(merged.data) > 0
-            ) {
-              held = { event: merged, masker: current };
-              const mine = ++generation;
-              timer = yield* Effect.forkIn(
-                Effect.sleep(TERMINAL_SECRET_HOLD_MS).pipe(
-                  Effect.andThen(
-                    mutex.withPermits(1)(
-                      Effect.suspend(() => (mine === generation ? flushHeld : Effect.void)),
-                    ),
+            const pushed = current.guard.push(event.data, MAX_HELD_CHARS);
+            if (pushed.text.length > 0) yield* Queue.offer(output, { ...event, data: pushed.text });
+            if (!pushed.hold) return;
+            heldEvent = event;
+            const mine = ++generation;
+            timer = yield* Effect.forkIn(
+              Effect.sleep(HOLD_MS).pipe(
+                Effect.andThen(
+                  mutex.withPermits(1)(
+                    Effect.suspend(() => (mine === generation ? release : Effect.void)),
                   ),
                 ),
-                scope,
-              );
-              return;
-            }
-            generation += 1;
-            yield* Queue.offer(output, maskEvent(current, merged));
+              ),
+              scope,
+            );
           }),
         );
 
@@ -122,7 +124,7 @@ export const maskTerminalStream = <E, R>(
           mutex.withPermits(1)(
             Effect.gen(function* () {
               yield* cancelTimer;
-              yield* flushHeld;
+              yield* release;
               if (Exit.isFailure(exit)) yield* Queue.failCause(output, exit.cause);
               else yield* Queue.end(output);
             }),

@@ -35,6 +35,8 @@ import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { PATCH_RENDER_PREFIX_ARGS } from "../vcs/GitVcsDriverCore.ts";
 import * as PullRequestService from "./PullRequestService.ts";
+import * as SecretMasker from "../vaults/SecretMasker.ts";
+import { maskingPullRequestReads } from "../vaults/maskPullRequests.ts";
 import { pullRequestSyncKey } from "./pullRequestSyncKey.ts";
 import { reviewGuideInputFromPullRequest } from "./pullRequestReviewGuideInput.ts";
 import { normalizeReviewGuide, parseReviewGuideChange } from "./pullRequestReviewGuideNormalize.ts";
@@ -530,7 +532,11 @@ const make = Effect.gen(function* () {
     return { guide: stored, run: running, currentHeadSha, started: true };
   });
 
-  return PullRequestReviewGuideService.of({ get, generate });
+  // Spec 5 ticket 05: a guide is shown with the linked Threads' secret values as `[NAME]`.
+  return maskingPullRequestReads(yield* Effect.serviceOption(SecretMasker.SecretMasker), {
+    get,
+    generate,
+  } satisfies PullRequestReviewGuideService["Service"]);
 });
 
 export const layer = Layer.effect(PullRequestReviewGuideService, make);

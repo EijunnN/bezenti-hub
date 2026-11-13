@@ -8,6 +8,7 @@ import {
   redactKnownSecrets,
   rememberKnownSecrets,
   secretForms,
+  SecretStreamGuard,
 } from "./secretMasking.ts";
 
 const TOKEN = "sk-live-7f3a9c2e1b";
@@ -97,6 +98,63 @@ describe("secretMasking", () => {
       count: 3,
     });
     assert.strictEqual(masked.date, date);
+  });
+
+  it("masks base64url, wrapped base64, hex, \\u escapes, lower-case URL escapes and CRLF", () => {
+    const value = "pässwörd/+?&=sk-0123456789";
+    const patterns = makeSecretPatterns([{ name: "P", value }]);
+    const bytes = Buffer.from(value);
+    const base64url = bytes.toString("base64url");
+    assert.include(patterns.mask(`t=${base64url}`), "[P]");
+    assert.notInclude(patterns.mask(`t=${base64url}`), base64url.slice(4, 20));
+    const wrapped = Buffer.from(`header:${value}:trailer`)
+      .toString("base64")
+      .replace(/(.{12})/g, "$1\n");
+    assert.include(patterns.mask(wrapped), "[P]");
+    assert.equal(patterns.mask(`x ${bytes.toString("hex")} y`), "x [P] y");
+    assert.equal(patterns.mask(`x ${bytes.toString("hex").toUpperCase()} y`), "x [P] y");
+    assert.equal(patterns.mask(`{"v":"p\\u00e4ssw\\u00f6rd/+?&=sk-0123456789"}`), `{"v":"[P]"}`);
+    assert.equal(
+      patterns.mask(encodeURIComponent(value).replace(/%[0-9A-F]{2}/g, (e) => e.toLowerCase())),
+      "[P]",
+    );
+    const pem = "-----BEGIN KEY-----\nMIIBOgIBAAJBAKj34GkxFhD9\n-----END KEY-----";
+    const multi = makeSecretPatterns([{ name: "PEM", value: pem }]);
+    assert.equal(multi.mask(`key:\r\n${pem.replace(/\n/g, "\r\n")}\r\n`), "key:\r\n[PEM]\r\n");
+  });
+
+  it("finds what is left of a value at the start of cut text", () => {
+    const patterns = makeSecretPatterns([{ name: "API_TOKEN", value: TOKEN }]);
+    assert.equal(patterns.pendingPrefix(`${TOKEN.slice(5)}\nnext`), TOKEN.length - 5);
+    assert.equal(patterns.pendingPrefix("nothing here"), 0);
+  });
+
+  it("guards a stream: a held piece completes, a released one still masks its continuation", () => {
+    const patterns = makeSecretPatterns([{ name: "API_TOKEN", value: TOKEN }]);
+    const guard = new SecretStreamGuard(patterns);
+    assert.deepEqual(guard.push(`out ${TOKEN.slice(0, 5)}`, 1024), { text: "", hold: true });
+    assert.deepEqual(guard.push(`${TOKEN.slice(5)} done`, 1024), {
+      text: "out [API_TOKEN] done",
+      hold: false,
+    });
+    // Nothing followed in time: the start goes out, and the rest of the value never does.
+    assert.deepEqual(guard.push(`next ${TOKEN.slice(0, 5)}`, 1024), { text: "", hold: true });
+    assert.equal(guard.release(), `next ${TOKEN.slice(0, 5)}`);
+    assert.deepEqual(guard.push(`${TOKEN.slice(5)}\r\n`, 1024), {
+      text: "[API_TOKEN]\r\n",
+      hold: false,
+    });
+  });
+
+  it("matches among thousands of values", () => {
+    const many = Array.from({ length: 4000 }, (_, index) => ({
+      name: `S${index}`,
+      value: `value-${index.toString(36)}-${"x".repeat(12)}`,
+    }));
+    const patterns = makeSecretPatterns(many);
+    const text = "an ordinary log line about nothing secret at all ".repeat(20);
+    assert.equal(patterns.mask(text), text);
+    assert.equal(patterns.mask(`a ${many[3999]!.value} b`), "a [S3999] b");
   });
 
   it("redacts the values this process was given, for logs and spans", () => {

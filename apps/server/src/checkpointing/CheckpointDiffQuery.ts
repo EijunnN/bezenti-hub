@@ -382,7 +382,7 @@ export const make = Effect.gen(function* () {
   const masked = <A extends { readonly threadId: ThreadId; readonly diff: string }>(result: A) =>
     Option.isNone(masker)
       ? Effect.succeed(result)
-      : masker.value.forThread(result.threadId).pipe(
+      : Effect.orDie(masker.value.forThread(result.threadId)).pipe(
           Effect.map((threadMasker): A => {
             const diff = threadMasker.mask(result.diff);
             return diff === result.diff ? result : { ...result, diff };

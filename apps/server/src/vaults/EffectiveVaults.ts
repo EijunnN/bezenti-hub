@@ -26,6 +26,7 @@ import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
+import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as VaultReach from "./VaultReach.ts";
 
@@ -72,6 +73,16 @@ export class EffectiveVaults extends Context.Service<
      */
     readonly forThread: (input: {
       readonly threadId: ThreadId;
+      readonly actingUserId: UserId;
+    }) => Effect.Effect<EffectiveSet, VaultError>;
+    /**
+     * `forThread` for a Thread whose creation is being written (no row to read its Space from):
+     * its own Space, else its Project's. SecretMasker masks its first events with it.
+     */
+    readonly forPlacement: (input: {
+      readonly threadId: ThreadId;
+      readonly spaceId: SpaceId | undefined;
+      readonly projectId: ProjectId | null;
       readonly actingUserId: UserId;
     }) => Effect.Effect<EffectiveSet, VaultError>;
     /**
@@ -133,15 +144,43 @@ const make = Effect.gen(function* () {
       .placementOf(input.threadId)
       .pipe(Effect.catch(storage("read the Thread's Space")));
     if (Option.isNone(placement)) return yield* fail("not-found", NOT_FOUND);
-    const { space } = placement.value;
+    return yield* compute({ ...input, ...placement.value });
+  });
+
+  const forPlacement = Effect.fn("EffectiveVaults.forPlacement")(
+    function* (input: {
+      readonly threadId: ThreadId;
+      readonly spaceId: SpaceId | undefined;
+      readonly projectId: ProjectId | null;
+      readonly actingUserId: UserId;
+    }) {
+      const space =
+        input.spaceId !== undefined
+          ? Option.map(yield* spaces.spaceById(input.spaceId), (found) => found.resource)
+          : input.projectId === null
+            ? Option.none()
+            : yield* spaces.spaceOf({ kind: "project", id: input.projectId });
+      if (Option.isNone(space)) return yield* fail("not-found", NOT_FOUND);
+      return yield* compute({ ...input, space: space.value });
+    },
+    Effect.catchTags({ SpaceDirectoryStorageError: storage("read the Thread's Space") }),
+  );
+
+  const compute = Effect.fn("EffectiveVaults.compute")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly actingUserId: UserId;
+    readonly space: AccessPolicy.SpaceResource;
+    readonly projectId: ProjectId | null;
+  }) {
+    const { space } = input;
     // A Thread without a Project (the scratch Project's) takes no Project's choices.
     const projectId =
-      placement.value.projectId === null ||
-      (yield* VaultReach.isScratchProject(sql, path, baseDir, placement.value.projectId).pipe(
+      input.projectId === null ||
+      (yield* VaultReach.isScratchProject(sql, path, baseDir, input.projectId).pipe(
         Effect.catch(storage("read the Thread's Project")),
       ))
         ? null
-        : placement.value.projectId;
+        : input.projectId;
     // Whoever no longer works in the Space (a removed Membership, a disabled User) starts
     // nothing there: nothing is computed for them, their own Vaults included.
     const can = yield* spaces
@@ -283,7 +322,7 @@ const make = Effect.gen(function* () {
     } satisfies VaultThreadEnvironment;
   });
 
-  return EffectiveVaults.of({ forThread, threadEnvironment });
+  return EffectiveVaults.of({ forThread, forPlacement, threadEnvironment });
 });
 
 export const layer = Layer.effect(EffectiveVaults, make);

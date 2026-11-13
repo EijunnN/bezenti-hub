@@ -1,54 +1,104 @@
 /**
- * Spec 5 ticket 05: domain events are masked before they are stored, projected or published.
- * `maskingEventWrites` wraps every method of the event sink whose input carries `events`, so a
- * write method added later is masked without anyone remembering to.
+ * Spec 5 ticket 05: what the event sink stores is masked first: every method whose input carries
+ * `events`, `effects` (the outbox's payloads) or a Thread's `error` (a rejected command's receipt).
+ * A method added later is wrapped too. A Thread whose set cannot be read stores nothing.
  */
+import type { ProjectId, SpaceId, UserId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 
 import type * as SecretMasker from "./SecretMasker.ts";
 
-interface WithEvents {
-  readonly events: ReadonlyArray<unknown>;
+interface Masked {
+  readonly events?: ReadonlyArray<unknown>;
+  readonly effects?: ReadonlyArray<unknown>;
+  readonly error?: string;
+  readonly threadId?: string;
 }
 
-const hasEvents = (input: unknown): input is WithEvents =>
-  typeof input === "object" &&
-  input !== null &&
-  Array.isArray((input as { readonly events?: unknown }).events);
-
-const threadOf = (event: unknown): string | undefined => {
-  const threadId = (event as { readonly threadId?: unknown } | null)?.threadId;
+const threadOf = (item: unknown): string | undefined => {
+  const threadId = (item as { readonly threadId?: unknown } | null)?.threadId;
   return typeof threadId === "string" ? threadId : undefined;
 };
 
-/** Each event with every string masked by its own Thread's masker. */
-const maskEvents: <E>(
-  masker: SecretMasker.SecretMasker["Service"],
-  events: ReadonlyArray<E>,
-) => Effect.Effect<ReadonlyArray<E>> = Effect.fn("SecretMasker.maskEvents")(function* <E>(
-  masker: SecretMasker.SecretMasker["Service"],
-  events: ReadonlyArray<E>,
-) {
-  if (events.length === 0) return events;
-  const byThread = new Map<string | undefined, SecretMasker.ThreadMasker>();
+/** Where a Thread created in this write will be, and whose it is: from its `thread.created`. */
+const hintFor = (
+  events: ReadonlyArray<unknown>,
+  threadId: string,
+): SecretMasker.ThreadPlacementHint | undefined => {
   for (const event of events) {
-    const threadId = threadOf(event);
-    if (!byThread.has(threadId)) byThread.set(threadId, yield* masker.forThread(threadId));
+    const created = event as {
+      readonly type?: unknown;
+      readonly threadId?: unknown;
+      readonly payload?: {
+        readonly ownerUserId?: UserId;
+        readonly spaceId?: SpaceId;
+        readonly projectId?: ProjectId | null;
+      };
+    };
+    if (created.type === "thread.created" && created.threadId === threadId) {
+      return {
+        ownerUserId: created.payload?.ownerUserId,
+        spaceId: created.payload?.spaceId,
+        projectId: created.payload?.projectId ?? null,
+      };
+    }
   }
-  let changed = false;
-  const masked = events.map((event) => {
-    const next = byThread.get(threadOf(event))!.maskDeep(event);
-    if (next !== event) changed = true;
-    return next;
+  return undefined;
+};
+
+const maskInput = Effect.fnUntraced(function* <I extends Masked>(
+  masker: SecretMasker.SecretMasker["Service"],
+  input: I,
+) {
+  const events = input.events ?? [];
+  const maskers = new Map<string, SecretMasker.ThreadMasker>();
+  const maskerFor = Effect.fnUntraced(function* (threadId: string | undefined) {
+    if (threadId === undefined) return undefined;
+    const known = maskers.get(threadId);
+    if (known !== undefined) return known;
+    const found = yield* masker.forThread(threadId, hintFor(events, threadId));
+    maskers.set(threadId, found);
+    return found;
   });
-  return changed ? masked : events;
+  const maskEach = Effect.fnUntraced(function* (items: ReadonlyArray<unknown> | undefined) {
+    if (items === undefined) return undefined;
+    const out: Array<unknown> = [];
+    for (const item of items) {
+      const found = yield* maskerFor(threadOf(item) ?? input.threadId);
+      out.push(found === undefined ? item : found.maskDeep(item));
+    }
+    return out;
+  });
+  const maskedEvents = yield* maskEach(input.events);
+  const maskedEffects = yield* maskEach(input.effects);
+  const errorMasker =
+    typeof input.error === "string" ? yield* maskerFor(input.threadId) : undefined;
+  return {
+    ...input,
+    ...(maskedEvents === undefined ? {} : { events: maskedEvents }),
+    ...(maskedEffects === undefined ? {} : { effects: maskedEffects }),
+    ...(errorMasker === undefined || input.error === undefined
+      ? {}
+      : { error: errorMasker.mask(input.error) }),
+  } as I;
 });
 
-/** The sink, with every write of `events` masked first. Without a masker, the sink as is. */
+const carriesText = (input: unknown): input is Masked =>
+  typeof input === "object" &&
+  input !== null &&
+  (Array.isArray((input as Masked).events) ||
+    Array.isArray((input as Masked).effects) ||
+    typeof (input as Masked).error === "string");
+
+/**
+ * The sink, with every write masked first. A masking failure becomes `toError` (the sink's own
+ * write error), so nothing is stored unmasked. Without a masker, the sink as is.
+ */
 export const maskingEventWrites = <S extends object>(
   masker: Option.Option<SecretMasker.SecretMasker["Service"]>,
   sink: S,
+  toError: (error: SecretMasker.SecretMaskingError, input: unknown) => unknown,
 ): S => {
   if (Option.isNone(masker)) return sink;
   const wrapped: Record<string, unknown> = {};
@@ -57,11 +107,15 @@ export const maskingEventWrites = <S extends object>(
       typeof method !== "function"
         ? method
         : (input: unknown, ...rest: ReadonlyArray<unknown>) =>
-            hasEvents(input)
-              ? Effect.flatMap(maskEvents(masker.value, input.events), (events) =>
-                  (method as (...args: ReadonlyArray<unknown>) => Effect.Effect<unknown>)(
-                    { ...input, events },
-                    ...rest,
+            carriesText(input)
+              ? // @effect-diagnostics-next-line anyUnknownInErrorContext:off -- the sink's own error.
+                maskInput(masker.value, input).pipe(
+                  Effect.mapError((error) => toError(error, input)),
+                  Effect.flatMap((masked) =>
+                    (method as (...args: ReadonlyArray<unknown>) => Effect.Effect<unknown>)(
+                      masked,
+                      ...rest,
+                    ),
                   ),
                 )
               : (method as (...args: ReadonlyArray<unknown>) => unknown)(input, ...rest);

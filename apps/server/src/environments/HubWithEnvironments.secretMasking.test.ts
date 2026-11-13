@@ -16,7 +16,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
-  type UserId,
+  UserId,
   type VaultEntryId,
 } from "@t3tools/contracts";
 import type * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
@@ -30,20 +30,24 @@ import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Stream from "effect/Stream";
 
+import { addMember, joinOrganization } from "../auth/UserAuth.testkit.ts";
 import * as CommandActor from "../auth/CommandActor.ts";
 import * as CheckpointDiffQuery from "../checkpointing/CheckpointDiffQuery.ts";
 import * as ServerConfig from "../config.ts";
+import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as ProjectCheckouts from "../environment/ProjectCheckouts.ts";
 import * as ThreadWorkspace from "../environment/ThreadWorkspace.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as SecretMasker from "../vaults/SecretMasker.ts";
 import * as Vaults from "../vaults/Vaults.ts";
 import { type Hub, makeHub, seedProject } from "./HubWithEnvironments.testkit.ts";
 import {
   awaitUploaded,
+  createOrganization,
   loadFixture,
   ownerIdOf,
   replayOn,
@@ -325,6 +329,79 @@ describe("Hub con Environments: a Thread's secret values are masked in its histo
         .getThreadProjection(threadId);
       assert.equal(projection.thread.title, "My token is [OWNER_TOKEN]");
       assert.notInclude(yield* databaseText(hub), OWNER_TOKEN);
+    }).pipe(Effect.scoped),
+  );
+  it.live("an editor save puts each [NAME] back to the value the file held", () =>
+    Effect.gen(function* () {
+      const { hub, laptop, owner, threadId } = yield* turnThatPrintsTheSecret();
+      const workspace = yield* threadWorkspaceOf(hub);
+      const cwd = yield* hubCheckoutOf(hub, threadId);
+      const caller = { userId: owner };
+      const shown = yield* workspace.readFile({ cwd, relativePath: "notes.md", threadId }, caller);
+      assert.equal(shown.contents, "TOKEN=[OWNER_TOKEN] (turn 1)\n");
+      // The editor saves what it was shown, with a line added.
+      yield* workspace.writeFile(
+        { cwd, relativePath: "notes.md", contents: `${shown.contents}reviewed\n`, threadId },
+        caller,
+      );
+      const projection = yield* hub
+        .service(Orchestrator.OrchestratorV2)
+        .getThreadProjection(threadId);
+      const laptopCheckout = Option.getOrThrow(
+        yield* (yield* hub
+          .service(EnvironmentExecutor.EnvironmentExecutorRegistry)
+          .get(laptop.environmentId)).workspace.paths.checkout(projection.thread.projectId),
+      );
+      const onDisk = yield* Effect.promise(() =>
+        NodeFSP.readFile(NodePath.join(laptopCheckout, "notes.md"), "utf8"),
+      );
+      assert.equal(onDisk, `TOKEN=${OWNER_TOKEN} (turn 1)\nreviewed\n`);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("never masks a Thread with another User's values", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub();
+      const owner = yield* ownerIdOf(hub);
+      yield* putOwnerToken(hub, owner, OWNER_TOKEN);
+      const acme = yield* createOrganization(hub, "Acme");
+      yield* addMember(hub.server, { id: "ada", displayName: "ada" });
+      yield* joinOrganization(hub.server, acme, "ada", "member");
+      const ada = UserId.make("ada");
+      yield* hub.service(SpaceDirectory.SpaceDirectory).membershipsChanged([ada]);
+      const projectId = ProjectId.make("project:acme-guess");
+      yield* seedProject(hub.server, {
+        projectId,
+        title: "Acme",
+        defaultModelSelection: null,
+        spaceId: acme,
+      });
+      // Ada types the Owner's value (a guess) into her own Thread: it stays as she typed it, so
+      // masking never confirms another User's secret or its name.
+      const threadId = ThreadId.make("thread:ada-guess");
+      yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("command:ada-guess"),
+        threadId,
+        projectId,
+        title: `Is it ${OWNER_TOKEN}?`,
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-sonnet-4-6",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        spaceId: acme,
+        ownerUserId: ada,
+      });
+      const projection = yield* hub
+        .service(Orchestrator.OrchestratorV2)
+        .getThreadProjection(threadId);
+      assert.equal(projection.thread.title, `Is it ${OWNER_TOKEN}?`);
     }).pipe(Effect.scoped),
   );
 });

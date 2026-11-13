@@ -933,7 +933,7 @@ export const layer: Layer.Layer<
     ) {
       const handoff = Option.isNone(secretMasker)
         ? unmasked
-        : (yield* secretMasker.value.forThread(threadId)).maskDeep(unmasked);
+        : (yield* Effect.orDie(secretMasker.value.forThread(threadId))).maskDeep(unmasked);
       const payload = yield* MoveHandoff.encodeStoredHandoff(handoff).pipe(Effect.orDie);
       const now = DateTime.formatIso(yield* DateTime.now);
       yield* sql`

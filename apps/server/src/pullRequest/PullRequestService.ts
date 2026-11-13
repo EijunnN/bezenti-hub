@@ -94,6 +94,8 @@ import {
   PullRequestProviderError,
 } from "@t3tools/source-control-core/server/PullRequestProvider";
 import * as PullRequestReadCache from "./PullRequestReadCache.ts";
+import * as SecretMasker from "../vaults/SecretMasker.ts";
+import { maskingPullRequestReads } from "../vaults/maskPullRequests.ts";
 import * as PullRequestProviderRegistry from "./PullRequestProviderRegistry.ts";
 import * as ViewedFiles from "./pullRequestViewedFiles.ts";
 import { toChangeBreakdown } from "./pullRequestChangeBreakdown.ts";
@@ -3762,7 +3764,8 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  return PullRequestService.of({
+  // Spec 5 ticket 05: what a change request shows is masked with its linked Threads' values.
+  return maskingPullRequestReads(yield* Effect.serviceOption(SecretMasker.SecretMasker), {
     withSharedProjectReads,
     routing,
     routingIdentity,
@@ -3817,7 +3820,7 @@ export const make = Effect.gen(function* () {
     labelCandidates,
     setLabels: invalidatedByMutation(setLabels),
     invalidate,
-  });
+  } satisfies PullRequestService["Service"]);
 });
 
 export const layer = Layer.effect(PullRequestService, make);

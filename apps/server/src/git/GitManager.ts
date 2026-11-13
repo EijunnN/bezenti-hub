@@ -84,6 +84,8 @@ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { extractBranchNameFromRemoteRef } from "./remoteRefs.ts";
 import { detachStackFrame } from "./detachStackFrame.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as SecretMasker from "../vaults/SecretMasker.ts";
+import { maskGitProgress } from "../vaults/maskGitProgress.ts";
 import type { GitManagerServiceError } from "@t3tools/contracts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
@@ -658,6 +660,8 @@ export const make = Effect.gen(function* () {
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
   const random = yield* SecureRandom.SecureRandom;
+  // Spec 5 ticket 05: hook output and errors a client watches are masked with the Thread's values.
+  const secretMasker = yield* Effect.serviceOption(SecretMasker.SecretMasker);
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
 
@@ -3137,7 +3141,8 @@ export const make = Effect.gen(function* () {
   });
 
   const runStackedAction: GitManager["Service"]["runStackedAction"] = Effect.fn("runStackedAction")(
-    function* (input, options) {
+    function* (input, unmaskedOptions) {
+      const options = yield* maskGitProgress(secretMasker, input, unmaskedOptions);
       const progress = yield* createProgressEmitter(input, options);
       const currentPhase = yield* Ref.make<Option.Option<GitActionProgressPhase>>(Option.none());
 

@@ -20,6 +20,12 @@ import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as Option from "effect/Option";
+
+import * as SecretMasker from "../vaults/SecretMasker.ts";
+
+/** Output not shown because the Thread's secrets could not be read to hide them. */
+const HIDDEN_OUTPUT = "(output hidden: this Thread's secrets could not be read)";
 
 export class WorktreeSetupTracker extends Context.Service<
   WorktreeSetupTracker,
@@ -102,6 +108,16 @@ export const make = Effect.gen(function* () {
   const retentionFibers = new Map<ThreadId, Fiber.Fiber<void, never>>();
   // Keep sequences increasing across setups so existing subscribers accept the next setup's first snapshot.
   const lastSequenceByThread = new Map<ThreadId, number>();
+
+  // Spec 5 ticket 05: a setup script runs with the Thread's secrets; its output is masked.
+  const masker = yield* Effect.serviceOption(SecretMasker.SecretMasker);
+  const masked = (threadId: ThreadId, text: string) =>
+    Option.isNone(masker)
+      ? Effect.succeed(text)
+      : masker.value.forThread(threadId).pipe(
+          Effect.map((threadMasker) => threadMasker.mask(text)),
+          Effect.orElseSucceed(() => HIDDEN_OUTPUT),
+        );
 
   const publish = (threadId: ThreadId, snapshot: WorktreeSetupSnapshot | null) =>
     PubSub.publish(changes, { threadId, snapshot }).pipe(Effect.asVoid);
@@ -195,6 +211,18 @@ export const make = Effect.gen(function* () {
     status,
     detail,
   ) =>
+    typeof detail === "string"
+      ? Effect.flatMap(masked(threadId, detail), (text) =>
+          stageStatusRaw(threadId, stageId, status, text),
+        )
+      : stageStatusRaw(threadId, stageId, status, detail);
+
+  const stageStatusRaw: WorktreeSetupTracker["Service"]["stageStatus"] = (
+    threadId,
+    stageId,
+    status,
+    detail,
+  ) =>
     nowIso.pipe(
       Effect.flatMap((at) =>
         update(threadId, (snapshot) => ({
@@ -216,24 +244,27 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-  const appendTail: WorktreeSetupTracker["Service"]["appendTail"] = (threadId, stageId, line) =>
-    update(threadId, (snapshot) => ({
-      ...snapshot,
-      stages: snapshot.stages.map((entry) =>
-        entry.id === stageId
-          ? {
-              ...entry,
-              tail: [...entry.tail, clampText(line, WORKTREE_SETUP_TAIL_LINE_MAX_LENGTH)].slice(
-                -TAIL_LINE_LIMIT,
-              ),
-            }
-          : entry,
-      ),
-    }));
+  const appendTail: WorktreeSetupTracker["Service"]["appendTail"] = (threadId, stageId, raw) =>
+    Effect.flatMap(masked(threadId, raw), (line) =>
+      update(threadId, (snapshot) => ({
+        ...snapshot,
+        stages: snapshot.stages.map((entry) =>
+          entry.id === stageId
+            ? {
+                ...entry,
+                tail: [...entry.tail, clampText(line, WORKTREE_SETUP_TAIL_LINE_MAX_LENGTH)].slice(
+                  -TAIL_LINE_LIMIT,
+                ),
+              }
+            : entry,
+        ),
+      })),
+    );
 
   const finish: WorktreeSetupTracker["Service"]["finish"] = Effect.fn(
     "WorktreeSetupTracker.finish",
-  )(function* (threadId, phase, error) {
+  )(function* (threadId, phase, rawError) {
+    const error = typeof rawError === "string" ? yield* masked(threadId, rawError) : rawError;
     const endedAt = yield* nowIso;
     const snapshot = yield* modify(threadId, (tracked) => ({
       fiber: null,

@@ -1,11 +1,17 @@
 /**
- * Spec 5 ticket 05: a Thread's secret values as `[NAME]` in what the Hub stores or shows: every
- * value its processes received (kept in `thread_secret_values` for the Thread's life, rotated ones
- * too) and its owner's effective set now. Where it applies: `MaskedPaths.ts`.
+ * Spec 5 ticket 05: a Thread's secret values as `[NAME]` in what the Hub stores or shows: what its
+ * processes received (`thread_secret_values`, for the Thread's life) and its owner's effective set.
+ * Never another User's values, and never unmasked when the set cannot be read. See `MaskedPaths.ts`.
  */
-import { type ThreadId, UserId } from "@t3tools/contracts";
 import {
-  knownSecretPatterns,
+  HUB_MACHINE_ENVIRONMENT_ID,
+  type ProjectId,
+  type SpaceId,
+  type ThreadId,
+  UserId,
+  type VaultError,
+} from "@t3tools/contracts";
+import {
   type MaskableSecret,
   makeSecretPatterns,
   maskDeep,
@@ -15,9 +21,11 @@ import {
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -33,8 +41,21 @@ export const threadMaskerOf = (patterns: SecretPatterns): ThreadMasker => ({
   maskDeep: (value) => (patterns.isEmpty ? value : maskDeep(value, patterns.mask)),
 });
 
-/** The values this process knows: for text that names no Thread. */
-const processMasker = (): ThreadMasker => threadMaskerOf(knownSecretPatterns());
+const maskerOf = (secrets: ReadonlyArray<MaskableSecret>) =>
+  threadMaskerOf(makeSecretPatterns(secrets));
+
+/** A masker that masks nothing: text that no Thread's values can be in. */
+const noSecrets: ThreadMasker = maskerOf([]);
+
+/** A Thread's values could not be read: what would have been stored or sent is not. */
+export class SecretMaskingError extends Schema.TaggedError<SecretMaskingError>()(
+  "SecretMaskingError",
+  { threadId: Schema.optional(Schema.String), cause: Schema.optional(Schema.Defect()) },
+) {
+  override get message(): string {
+    return "Could not read this Thread's secrets to hide them, so this was not stored or shown. Try again.";
+  }
+}
 
 /** A value a process of the Thread received, as SecretDelivery hands it out. */
 export interface DeliveredSecret {
@@ -43,15 +64,36 @@ export interface DeliveredSecret {
   readonly valueId: string;
 }
 
+/** A Thread whose creation is being written: where it will be, and whose it is. */
+export interface ThreadPlacementHint {
+  readonly ownerUserId: UserId | undefined;
+  readonly spaceId: SpaceId | undefined;
+  readonly projectId: ProjectId | null;
+}
+
 export class SecretMasker extends Context.Service<
   SecretMasker,
   {
     /**
-     * The masker of a Thread (its root's: a child Thread's tools run in its root's process). Never
-     * fails: when its values cannot be read, every value this process knows masks instead.
-     * Without a Thread, the values this process knows.
+     * The masker of a Thread (its root's: a child Thread's tools run in its root's process). A
+     * Thread not written yet uses `hint` (its owner's set where it will be), else masks nothing:
+     * no process of it ran. Fails rather than mask with too little.
      */
-    readonly forThread: (threadId: ThreadId | string | undefined) => Effect.Effect<ThreadMasker>;
+    readonly forThread: (
+      threadId: ThreadId | string,
+      hint?: ThreadPlacementHint,
+    ) => Effect.Effect<ThreadMasker, SecretMaskingError>;
+    /** The Threads' maskers together: text several of them could have written. */
+    readonly forThreads: (
+      threadIds: ReadonlyArray<ThreadId | string>,
+    ) => Effect.Effect<ThreadMasker, SecretMaskingError>;
+    /** A checkout on the Hub machine: the Threads that run there (the Owner's). */
+    readonly forCheckout: (cwd: string) => Effect.Effect<ThreadMasker, SecretMaskingError>;
+    /** A change request: the Threads linked to it, whose agents pushed what it shows. */
+    readonly forPullRequest: (key: {
+      readonly repository: string;
+      readonly number: number;
+    }) => Effect.Effect<ThreadMasker, SecretMaskingError>;
     /** Values handed to a process of the Thread: masked from now on, for the Thread's life. */
     readonly remember: (
       threadId: ThreadId,
@@ -60,11 +102,9 @@ export class SecretMasker extends Context.Service<
   }
 >()("t3/vaults/SecretMasker") {}
 
-/** How long a Thread's masker is reused before its owner's effective set is read again. */
+/** How long a Thread's set is reused before its owner's effective set is read again. */
 const MASKER_TTL_MS = 30_000;
-/** How long every Vault value (the masker of a Thread not projected yet) is reused. */
-const EVERY_VALUE_TTL_MS = 10_000;
-const MAX_CACHED_THREADS = 2048;
+const MAX_CACHED = 2048;
 
 interface Entry {
   readonly loadedAt: number;
@@ -74,14 +114,23 @@ interface Entry {
 }
 
 const entryOf = (loadedAt: number, secrets: ReadonlyArray<MaskableSecret>): Entry => {
+  // This process's own logs and spans mask them too (never what a client sees).
   rememberKnownSecrets(secrets);
-  return { loadedAt, secrets, masker: threadMaskerOf(makeSecretPatterns(secrets)) };
+  return { loadedAt, secrets, masker: maskerOf(secrets) };
 };
+
+const union = (
+  first: ReadonlyArray<MaskableSecret>,
+  second: ReadonlyArray<MaskableSecret>,
+): ReadonlyArray<MaskableSecret> => [
+  ...first,
+  ...second.filter((secret) => !first.some((s) => s.value === secret.value)),
+];
 
 const setBounded = <K, V>(map: Map<K, V>, key: K, value: V) => {
   map.delete(key);
   map.set(key, value);
-  if (map.size > MAX_CACHED_THREADS) {
+  if (map.size > MAX_CACHED) {
     const oldest = map.keys().next().value;
     if (oldest !== undefined) map.delete(oldest);
   }
@@ -93,117 +142,204 @@ export const make = Effect.gen(function* () {
   const values = yield* Effect.serviceOption(ServerSecretStore.VaultValueStore);
   const cache = new Map<string, Entry>();
   const roots = new Map<string, string>();
+  // A value id names one value for good (a replace writes a new id): read once.
+  const decrypted = new Map<string, string>();
+  const loading = new Map<string, Deferred.Deferred<Entry | undefined, SecretMaskingError>>();
 
-  const rootOf = Effect.fn("SecretMasker.rootOf")(function* (threadId: string) {
+  const failed = (threadId: string | undefined) => (cause: unknown) =>
+    new SecretMaskingError({ ...(threadId === undefined ? {} : { threadId }), cause });
+
+  /** The Thread's root, or undefined while it is not projected (never cached then). */
+  const rootOf = Effect.fnUntraced(function* (threadId: string) {
     const known = roots.get(threadId);
     if (known !== undefined) return known;
     const rows = yield* sql<{ readonly root: string | null }>`
       SELECT json_extract(payload_json, '$.lineage.rootThreadId') AS root
       FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}
     `;
-    // A Thread not projected yet (its creation is being written) is its own root for now.
-    if (rows.length === 0) return threadId;
+    if (rows.length === 0) return undefined;
     const root = rows[0]?.root ?? threadId;
     setBounded(roots, threadId, root);
     return root;
   });
 
-  const readValue = (valueId: string) =>
-    Option.isNone(values)
-      ? Effect.succeed(Option.none<string>())
-      : values.value
-          .get(valueId)
-          .pipe(Effect.map(Option.map((bytes) => new TextDecoder().decode(bytes))));
-
-  let everyValue: { readonly loadedAt: number; readonly masker: ThreadMasker } | undefined;
-  /**
-   * Every value the Vaults hold: the masker of a Thread whose creation is being written (its first
-   * message and title come with it, before the Thread has a Space or an owner to read).
-   */
-  const everyVaultValue = Effect.fn("SecretMasker.everyVaultValue")(function* (now: number) {
-    if (everyValue !== undefined && now - everyValue.loadedAt < EVERY_VALUE_TTL_MS) {
-      return everyValue.masker;
-    }
-    const rows = yield* sql<{ readonly name: string; readonly valueId: string }>`
-      SELECT name, value_id AS "valueId" FROM vault_entries
-      WHERE value_id IS NOT NULL AND unmasked = 0 ORDER BY vault_id, name
-    `;
-    const secrets: Array<MaskableSecret> = [];
-    for (const row of rows) {
-      const value = yield* readValue(row.valueId);
-      if (Option.isSome(value)) secrets.push({ name: row.name, value: value.value });
-    }
-    rememberKnownSecrets(secrets);
-    everyValue = { loadedAt: now, masker: threadMaskerOf(makeSecretPatterns(secrets)) };
-    return everyValue.masker;
+  const readValue = Effect.fnUntraced(function* (valueId: string) {
+    const known = decrypted.get(valueId);
+    if (known !== undefined) return Option.some(known);
+    if (Option.isNone(values)) return Option.none<string>();
+    const bytes = yield* values.value.get(valueId);
+    if (Option.isNone(bytes)) return Option.none<string>();
+    const value = new TextDecoder().decode(bytes.value);
+    setBounded(decrypted, valueId, value);
+    return Option.some(value);
   });
 
-  /** What the Thread's processes received, and its owner's effective set now. */
-  const load = Effect.fn("SecretMasker.load")(function* (root: string) {
-    const secrets: Array<MaskableSecret> = [];
-    const seen = new Set<string>();
+  const valuesOf = Effect.fnUntraced(function* (
+    variables: ReadonlyArray<{ readonly name: string; readonly valueId: string }>,
+    into: Array<MaskableSecret>,
+  ) {
+    for (const variable of variables) {
+      const value = yield* readValue(variable.valueId);
+      if (Option.isSome(value) && !into.some((s) => s.value === value.value)) {
+        into.push({ name: variable.name, value: value.value });
+      }
+    }
+  });
+
+  /** An owner's effective set: nothing for a User no longer in the Space; storage fails. */
+  const effectiveSet = (compute: Effect.Effect<EffectiveVaults.EffectiveSet, VaultError>) =>
+    compute.pipe(
+      Effect.map((set) => set.variables.filter((variable) => !variable.unmasked)),
+      Effect.catchIf(
+        (error) => error.reason !== "storage",
+        () => Effect.succeed([]),
+      ),
+    );
+
+  /** What the root Thread's processes received, and its owner's effective set now. */
+  const load = Effect.fnUntraced(function* (root: string) {
     const threads = yield* sql<{ readonly ownerUserId: string | null }>`
       SELECT owner_user_id AS "ownerUserId" FROM orchestration_v2_projection_threads
       WHERE thread_id = ${root}
     `;
-    if (threads.length === 0) return undefined;
+    const secrets: Array<MaskableSecret> = [];
     const owner = threads[0]?.ownerUserId ?? null;
     if (owner !== null && Option.isSome(effective)) {
-      const set = yield* effective.value
-        .forThread({ threadId: root as ThreadId, actingUserId: UserId.make(owner) })
-        .pipe(
-          Effect.map((set) => set.variables),
-          // A User no longer in the Space receives nothing more; what they received stays below.
-          Effect.orElseSucceed(() => []),
-        );
-      for (const variable of set) {
-        if (variable.unmasked || seen.has(variable.valueId)) continue;
-        const value = yield* readValue(variable.valueId);
-        if (Option.isNone(value)) continue;
-        seen.add(variable.valueId);
-        secrets.push({ name: variable.name, value: value.value });
-      }
+      const set = yield* effectiveSet(
+        effective.value.forThread({
+          threadId: root as ThreadId,
+          actingUserId: UserId.make(owner),
+        }),
+      );
+      yield* valuesOf(set, secrets);
     }
+    // Delivered to the root or to a child of it (rows written before the child had a root).
     const remembered = yield* sql<{ readonly valueId: string; readonly name: string }>`
       SELECT value_id AS "valueId", name FROM thread_secret_values
-      WHERE thread_id = ${root} ORDER BY remembered_at DESC
+      WHERE thread_id = ${root} OR thread_id IN (
+        SELECT thread_id FROM orchestration_v2_projection_threads
+        WHERE json_extract(payload_json, '$.lineage.rootThreadId') = ${root}
+      )
+      ORDER BY remembered_at DESC
     `;
-    for (const row of remembered) {
-      if (seen.has(row.valueId)) continue;
-      const value = yield* readValue(row.valueId);
-      if (Option.isNone(value)) continue;
-      seen.add(row.valueId);
-      secrets.push({ name: row.name, value: value.value });
-    }
+    yield* valuesOf(remembered, secrets);
     return secrets;
   });
 
-  const forThread = Effect.fn("SecretMasker.forThread")(function* (
-    threadId: ThreadId | string | undefined,
+  /** One load per root at a time; the others wait for it. */
+  const loadEntry = (root: string, now: number) =>
+    Effect.suspend(() => {
+      const running = loading.get(root);
+      if (running !== undefined) return Deferred.await(running);
+      return Effect.uninterruptible(
+        Effect.gen(function* () {
+          const done = yield* Deferred.make<Entry | undefined, SecretMaskingError>();
+          loading.set(root, done);
+          const exit = yield* Effect.exit(
+            load(root).pipe(
+              Effect.map((loaded) => {
+                // What was delivered before (or while this loaded) stays.
+                const entry = entryOf(now, union(loaded, cache.get(root)?.secrets ?? []));
+                setBounded(cache, root, entry);
+                return entry as Entry | undefined;
+              }),
+              Effect.mapError(failed(root)),
+            ),
+          );
+          loading.delete(root);
+          yield* Deferred.done(done, exit);
+          return yield* exit;
+        }),
+      );
+    });
+
+  const secretsFor = Effect.fnUntraced(function* (
+    threadId: string,
+    hint: ThreadPlacementHint | undefined,
   ) {
-    if (threadId === undefined) return processMasker();
-    return yield* Effect.gen(function* () {
-      const root = yield* rootOf(threadId);
-      const now = yield* Clock.currentTimeMillis;
-      const cached = cache.get(root);
-      if (cached !== undefined && now - cached.loadedAt < MASKER_TTL_MS) return cached.masker;
-      const loaded = yield* load(root);
-      if (loaded === undefined) return yield* everyVaultValue(now);
-      // What was delivered before (or while this loaded) stays, even if its row is not written.
-      const latest = cache.get(root)?.secrets ?? [];
-      const merged = entryOf(now, [
-        ...loaded,
-        ...latest.filter((secret) => !loaded.some((s) => s.value === secret.value)),
-      ]);
-      setBounded(cache, root, merged);
-      return merged.masker;
-    }).pipe(
-      Effect.catchCause((cause) =>
-        Effect.logWarning("SecretMasker: could not read a Thread's secrets; masking every known", {
-          threadId,
-          cause,
-        }).pipe(Effect.andThen(Effect.sync(processMasker))),
+    const now = yield* Clock.currentTimeMillis;
+    const root = yield* rootOf(threadId).pipe(Effect.mapError(failed(threadId)));
+    if (root === undefined) {
+      // Being created: its owner's set where it will be (its first message and title come now).
+      const delivered = cache.get(threadId)?.secrets ?? [];
+      if (hint?.ownerUserId === undefined || Option.isNone(effective)) return delivered;
+      const set = yield* effectiveSet(
+        effective.value.forPlacement({
+          threadId: threadId as ThreadId,
+          spaceId: hint.spaceId,
+          projectId: hint.projectId,
+          actingUserId: hint.ownerUserId,
+        }),
+      ).pipe(Effect.mapError(failed(threadId)));
+      const secrets: Array<MaskableSecret> = [];
+      yield* valuesOf(set, secrets).pipe(Effect.mapError(failed(threadId)));
+      return union(secrets, delivered);
+    }
+    const cached = cache.get(root);
+    if (cached !== undefined && now - cached.loadedAt < MASKER_TTL_MS) return cached.secrets;
+    const loaded = yield* loadEntry(root, now).pipe(
+      // Fails closed: a set read before (the Thread's own, a little old) or nothing at all.
+      Effect.catch((error) =>
+        cached === undefined
+          ? Effect.fail(error)
+          : Effect.logWarning("SecretMasker: using the Thread's last read secrets", {
+              threadId,
+              cause: error,
+            }).pipe(Effect.as(cached)),
       ),
+    );
+    return loaded?.secrets ?? [];
+  });
+
+  const forThread = Effect.fnUntraced(function* (
+    threadId: ThreadId | string,
+    hint?: ThreadPlacementHint,
+  ) {
+    const root = roots.get(threadId);
+    if (root !== undefined) {
+      const cached = cache.get(root);
+      const now = yield* Clock.currentTimeMillis;
+      if (cached !== undefined && now - cached.loadedAt < MASKER_TTL_MS) return cached.masker;
+    }
+    const secrets = yield* secretsFor(threadId, hint);
+    const fresh = cache.get(roots.get(threadId) ?? threadId);
+    return fresh !== undefined && fresh.secrets === secrets ? fresh.masker : maskerOf(secrets);
+  });
+
+  const forThreads = Effect.fn("SecretMasker.forThreads")(function* (
+    threadIds: ReadonlyArray<ThreadId | string>,
+  ) {
+    let secrets: ReadonlyArray<MaskableSecret> = [];
+    for (const threadId of new Set(threadIds)) {
+      secrets = union(secrets, yield* secretsFor(threadId, undefined));
+    }
+    return secrets.length === 0 ? noSecrets : maskerOf(secrets);
+  });
+
+  const forCheckout = Effect.fn("SecretMasker.forCheckout")(function* (cwd: string) {
+    const rows = yield* sql<{ readonly threadId: string }>`
+      SELECT t.thread_id AS "threadId" FROM orchestration_v2_projection_threads t
+      LEFT JOIN projection_projects p ON p.project_id = t.project_id
+      WHERE t.deleted_at IS NULL
+        AND COALESCE(t.active_environment_id, ${HUB_MACHINE_ENVIRONMENT_ID}) = ${HUB_MACHINE_ENVIRONMENT_ID}
+        AND COALESCE(json_extract(t.payload_json, '$.worktreePath'), p.workspace_root) = ${cwd}
+    `.pipe(Effect.mapError(failed(undefined)));
+    return yield* forThreads(rows.map((row) => row.threadId));
+  });
+
+  const forPullRequest = Effect.fn("SecretMasker.forPullRequest")(function* (key: {
+    readonly repository: string;
+    readonly number: number;
+  }) {
+    const rows = yield* sql<{ readonly threadId: string; readonly repository: string | null }>`
+      SELECT t.thread_id AS "threadId", json_extract(link.value, '$.repository') AS repository
+      FROM orchestration_v2_projection_threads AS t
+      JOIN json_each(t.payload_json, '$.pullRequests') AS link
+      WHERE json_extract(link.value, '$.number') = ${key.number} AND t.deleted_at IS NULL
+    `.pipe(Effect.mapError(failed(undefined)));
+    const repository = key.repository.toLowerCase();
+    return yield* forThreads(
+      rows.filter((row) => row.repository?.toLowerCase() === repository).map((row) => row.threadId),
     );
   });
 
@@ -212,23 +348,13 @@ export const make = Effect.gen(function* () {
     delivered: ReadonlyArray<DeliveredSecret>,
   ) {
     if (delivered.length === 0) return;
-    // Masked in memory first: output can arrive before the row is written.
-    rememberKnownSecrets(delivered);
-    const root = yield* rootOf(threadId).pipe(Effect.orElseSucceed(() => threadId as string));
+    for (const secret of delivered) setBounded(decrypted, secret.valueId, secret.value);
+    const root = (yield* rootOf(threadId).pipe(Effect.orElseSucceed(() => undefined))) ?? threadId;
+    // Masked in memory first: output can arrive before the row is written. Without a read set
+    // (loadedAt 0) the next use still reads the rest.
     const current = cache.get(root);
-    const kept = current?.secrets ?? [];
-    const added = delivered.filter((secret) => !kept.some((s) => s.value === secret.value));
-    if (added.length > 0 || current === undefined) {
-      // Without a loaded entry (loadedAt 0) the next use still reads what came before.
-      setBounded(
-        cache,
-        root,
-        entryOf(current?.loadedAt ?? 0, [
-          ...added.map(({ name, value }) => ({ name, value })),
-          ...kept,
-        ]),
-      );
-    }
+    const added = delivered.map(({ name, value }) => ({ name, value }));
+    setBounded(cache, root, entryOf(current?.loadedAt ?? 0, union(added, current?.secrets ?? [])));
     const at = DateTime.formatIso(yield* DateTime.now);
     yield* Effect.forEach(
       delivered,
@@ -248,7 +374,24 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  return SecretMasker.of({ forThread, remember });
+  // After a restart this process's own logs and spans mask every value at once (not only once a
+  // Thread's masker is read). Never used for what a client sees.
+  yield* Effect.gen(function* () {
+    const rows = yield* sql<{ readonly name: string; readonly valueId: string }>`
+      SELECT name, value_id AS "valueId" FROM vault_entries
+      WHERE value_id IS NOT NULL AND unmasked = 0
+      UNION SELECT name, value_id AS "valueId" FROM thread_secret_values
+    `;
+    const secrets: Array<MaskableSecret> = [];
+    yield* valuesOf(rows, secrets);
+    rememberKnownSecrets(secrets);
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Effect.logWarning("SecretMasker: could not read the values for log masking", { cause }),
+    ),
+  );
+
+  return SecretMasker.of({ forThread, forThreads, forCheckout, forPullRequest, remember });
 });
 
 export const layer = Layer.effect(SecretMasker, make);

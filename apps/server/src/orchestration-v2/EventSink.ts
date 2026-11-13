@@ -895,126 +895,141 @@ const layerBase: Layer.Layer<
     };
 
     // Spec 5 ticket 05: secret values become `[NAME]` before any event is stored or published.
-    return maskingEventWrites(masker, {
-      write: (input) =>
-        writeEffect({ ...input, effects: [] }).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventSinkWriteError({
-                eventCount: input.events.length,
-                ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
-                cause,
-              }),
+    return maskingEventWrites(
+      masker,
+      {
+        write: (input) =>
+          writeEffect({ ...input, effects: [] }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new EventSinkWriteError({
+                  eventCount: input.events.length,
+                  ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+                  cause,
+                }),
+            ),
           ),
-        ),
-      writeWithEffects: (input) =>
-        writeEffect(input).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventSinkWriteError({
-                eventCount: input.events.length,
-                ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
-                cause,
-              }),
+        writeWithEffects: (input) =>
+          writeEffect(input).pipe(
+            Effect.mapError(
+              (cause) =>
+                new EventSinkWriteError({
+                  eventCount: input.events.length,
+                  ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+                  cause,
+                }),
+            ),
           ),
-        ),
-      writeIfRunCurrent: (input) =>
-        writeIfRunCurrentEffect(input).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventSinkWriteError({
-                eventCount: input.events.length,
-                ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
-                cause,
-              }),
+        writeIfRunCurrent: (input) =>
+          writeIfRunCurrentEffect(input).pipe(
+            Effect.mapError(
+              (cause) =>
+                new EventSinkWriteError({
+                  eventCount: input.events.length,
+                  ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+                  cause,
+                }),
+            ),
           ),
-        ),
-      writeIfProviderThreadOwner: (input) =>
-        writeIfProviderThreadOwnerEffect(input).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventSinkWriteError({
-                eventCount: input.events.length,
-                ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
-                cause,
-              }),
+        writeIfProviderThreadOwner: (input) =>
+          writeIfProviderThreadOwnerEffect(input).pipe(
+            Effect.mapError(
+              (cause) =>
+                new EventSinkWriteError({
+                  eventCount: input.events.length,
+                  ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
+                  cause,
+                }),
+            ),
           ),
-        ),
-      writeIfProviderThreadUnchanged: (input) =>
-        writeIfProviderThreadUnchangedEffect(input).pipe(
-          Effect.mapError(
-            (cause) => new EventSinkWriteError({ eventCount: input.events.length, cause }),
+        writeIfProviderThreadUnchanged: (input) =>
+          writeIfProviderThreadUnchangedEffect(input).pipe(
+            Effect.mapError(
+              (cause) => new EventSinkWriteError({ eventCount: input.events.length, cause }),
+            ),
           ),
-        ),
-      commitCommand: (input) =>
-        commitCommandEffect(input).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventSinkWriteError({
-                commandId: input.commandId,
-                eventCount: input.events.length,
-                cause,
-              }),
+        commitCommand: (input) =>
+          commitCommandEffect(input).pipe(
+            Effect.mapError(
+              (cause) =>
+                new EventSinkWriteError({
+                  commandId: input.commandId,
+                  eventCount: input.events.length,
+                  cause,
+                }),
+            ),
           ),
-        ),
-      commitRejectedCommand: (input) =>
-        commitRejectedCommandEffect(input).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventSinkWriteError({
-                commandId: input.commandId,
-                eventCount: 0,
-                cause,
-              }),
+        commitRejectedCommand: (input) =>
+          commitRejectedCommandEffect(input).pipe(
+            Effect.mapError(
+              (cause) =>
+                new EventSinkWriteError({
+                  commandId: input.commandId,
+                  eventCount: 0,
+                  cause,
+                }),
+            ),
           ),
-        ),
-      commitProjectCommand: (input) =>
-        commitProjectCommandEffect(input).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventSinkWriteError({ commandId: input.commandId, eventCount: 1, cause }),
+        commitProjectCommand: (input) =>
+          commitProjectCommandEffect(input).pipe(
+            Effect.mapError(
+              (cause) =>
+                new EventSinkWriteError({ commandId: input.commandId, eventCount: 1, cause }),
+            ),
           ),
-        ),
-      commitRejectedProjectCommand: (input) =>
-        commitRejectedProjectCommandEffect(input).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventSinkWriteError({ commandId: input.commandId, eventCount: 0, cause }),
+        commitRejectedProjectCommand: (input) =>
+          commitRejectedProjectCommandEffect(input).pipe(
+            Effect.mapError(
+              (cause) =>
+                new EventSinkWriteError({ commandId: input.commandId, eventCount: 0, cause }),
+            ),
           ),
-        ),
-      stream: (input) =>
-        stream(input).pipe(
-          Stream.mapError(
-            (cause) =>
-              new EventSinkStreamError({
-                ...(input?.threadId === undefined ? {} : { threadId: input.threadId }),
-                ...(input?.afterSequence === undefined
-                  ? {}
-                  : { afterSequence: input.afterSequence }),
-                cause,
-              }),
+        stream: (input) =>
+          stream(input).pipe(
+            Stream.mapError(
+              (cause) =>
+                new EventSinkStreamError({
+                  ...(input?.threadId === undefined ? {} : { threadId: input.threadId }),
+                  ...(input?.afterSequence === undefined
+                    ? {}
+                    : { afterSequence: input.afterSequence }),
+                  cause,
+                }),
+            ),
           ),
-        ),
-      latestSequence: (input) =>
-        eventStore.latestSequence(input).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventSinkStreamError({
-                ...(input?.threadId === undefined ? {} : { threadId: input.threadId }),
-                cause,
-              }),
+        latestSequence: (input) =>
+          eventStore.latestSequence(input).pipe(
+            Effect.mapError(
+              (cause) =>
+                new EventSinkStreamError({
+                  ...(input?.threadId === undefined ? {} : { threadId: input.threadId }),
+                  cause,
+                }),
+            ),
           ),
-        ),
-      readByCommandId: (input) =>
-        eventStore.readByCommandId(input).pipe(
-          Stream.mapError(
-            (cause) =>
-              new EventSinkStreamError({
-                cause,
-              }),
+        readByCommandId: (input) =>
+          eventStore.readByCommandId(input).pipe(
+            Stream.mapError(
+              (cause) =>
+                new EventSinkStreamError({
+                  cause,
+                }),
+            ),
           ),
-        ),
-    } satisfies EventSinkV2Shape);
+      } satisfies EventSinkV2Shape,
+      // Nothing is stored when a Thread's secrets cannot be read to hide them.
+      (cause, input) => {
+        const { events, commandId } = input as {
+          readonly events?: ReadonlyArray<unknown>;
+          readonly commandId?: CommandId;
+        };
+        return new EventSinkWriteError({
+          eventCount: events?.length ?? 0,
+          ...(commandId === undefined ? {} : { commandId }),
+          cause,
+        });
+      },
+    );
   }),
 );
 

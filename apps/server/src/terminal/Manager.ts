@@ -42,7 +42,7 @@ import { makeKeyedCoalescingWorker } from "@t3tools/shared/KeyedCoalescingWorker
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import { redactKnownSecrets } from "@t3tools/shared/secretMasking";
+import { makeSecretPatterns, type SecretPatterns } from "@t3tools/shared/secretMasking";
 import { mergePathEntries } from "@t3tools/shared/shell";
 
 import { acpRegistryManagedBinaryDirectories } from "@t3tools/provider-acp-registry/server";
@@ -1972,6 +1972,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     yield* registerKillFiber(process, fiber);
   });
 
+  /** Per shell (thread and terminal): the values it started with, to mask its history file. */
+  const historySecrets = new Map<string, SecretPatterns>();
   const persistWorker = yield* makeKeyedCoalescingWorker<
     string,
     PersistHistoryRequest,
@@ -1992,22 +1994,21 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         return;
       }
 
-      // Spec 5 ticket 05: the secret values this process knows are stored as `[NAME]`; the whole
-      // history at once, so a value split between two chunks is caught too.
-      yield* fileSystem
-        .writeFileString(
-          historyPath(threadId, terminalId),
-          redactKnownSecrets(request.history.value()),
-        )
-        .pipe(
-          Effect.catch((error) =>
-            Effect.logWarning("failed to persist terminal history", {
-              threadId,
-              terminalId,
-              error,
-            }),
-          ),
-        );
+      // Spec 5 ticket 05: the shell's own secrets are stored as `[NAME]`, over the whole history
+      // (a value split between chunks too), without what is left of one cut off at its start.
+      const raw = request.history.value();
+      const patterns = historySecrets.get(sessionKey);
+      const history =
+        patterns === undefined ? raw : patterns.mask(raw.slice(patterns.pendingPrefix(raw)));
+      yield* fileSystem.writeFileString(historyPath(threadId, terminalId), history).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("failed to persist terminal history", {
+            threadId,
+            terminalId,
+            error,
+          }),
+        ),
+      );
     }),
   });
 
@@ -2540,6 +2541,13 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             // Spec 5: the secrets go into this shell's environment and are then dropped here.
             const secrets = session.pendingSecretEnv;
             session.pendingSecretEnv = null;
+            // Its history file masks the values the shell got (none of another User's).
+            if (secrets?.variables !== undefined && secrets.variables.length > 0) {
+              historySecrets.set(
+                toSessionKey(session.threadId, session.terminalId),
+                makeSecretPatterns(secrets.variables),
+              );
+            }
             session.secretFingerprint = secrets?.fingerprint ?? NO_SECRETS_FINGERPRINT;
             session.secretsStale = false;
             const spawnResult = yield* trySpawn(

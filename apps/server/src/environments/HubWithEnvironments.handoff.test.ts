@@ -36,6 +36,7 @@ import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as SecretMasker from "../vaults/SecretMasker.ts";
 import { type Hub, type TestEnvironment } from "./HubWithEnvironments.testkit.ts";
 import {
   CLAUDE,
@@ -246,6 +247,40 @@ describe("Hub con Environments: the agent's memory after a move", () => {
       assert.equal(item.writtenBy, "hub");
       assert.equal(item.summary, "Written on the Hub from the history.");
       assert.equal(moved.move?.handoff?.preview, "Written on the Hub from the history.");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a summary that names a secret value is stored and shown as [NAME] (spec 5)", () =>
+    Effect.gen(function* () {
+      const value = "handoff-secret-value-7777";
+      const laptopAsked: Array<ThreadHandoffGenerationInput> = [];
+      const { hub, desktop, threadId, owner } = yield* turnOnLaptop({
+        desktop: true,
+        laptopTextGeneration: recordingTextGeneration(laptopAsked, {
+          summary: `The deploy used ${value} from the environment.`,
+        }),
+        hubTextGeneration: recordingTextGeneration([], { summary: "unused" }),
+      });
+      assert.isDefined(desktop);
+      // A process of the Thread received the value (as SecretDelivery records it).
+      yield* hub
+        .service(SecretMasker.SecretMasker)
+        .remember(threadId, [{ name: "DEPLOY_TOKEN", value, valueId: "value-handoff" }]);
+      yield* dispatchMove(hub, {
+        commandId: "command:move-secret-summary",
+        threadId,
+        target: desktop.environmentId,
+        actor: owner,
+      });
+      const moved = yield* settledMove(hub, threadId);
+      assert.equal(moved.move?.status, "switched", moved.move?.failure?.message);
+      const { item } = yield* handoffItemOf(hub, threadId);
+      assert.equal(item.summary, "The deploy used [DEPLOY_TOKEN] from the environment.");
+      assert.notInclude(item.context, value);
+      const stored = yield* hub.server.sql<{ readonly payload: string }>`
+        SELECT payload_json AS payload FROM orchestration_v2_move_handoffs
+      `;
+      for (const row of stored) assert.notInclude(row.payload, value);
     }).pipe(Effect.scoped),
   );
 
