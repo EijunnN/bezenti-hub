@@ -59,6 +59,10 @@
       "types": "./src/promptLinks.ts",
       "default": "./src/promptLinks.ts"
     },
+    "./vaults": {
+      "types": "./src/vaults.ts",
+      "default": "./src/vaults.ts"
+    },
     "./secret-request": {
       "types": "./src/secretRequest.ts",
       "default": "./src/secretRequest.ts"
