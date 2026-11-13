@@ -48,7 +48,7 @@ import { maskingCheckoutReads } from "./maskCheckoutReads.ts";
 import { maskGitProgress } from "./maskGitProgress.ts";
 import { maskingPullRequestReads } from "./maskPullRequests.ts";
 import { maskTerminalStream } from "./maskTerminal.ts";
-import { maskReadFile, maskSearchContents } from "./maskWorkspace.ts";
+import { maskReadFile, maskSearchContents, restorePlaceholders } from "./maskWorkspace.ts";
 import * as SecretMasker from "./SecretMasker.ts";
 
 const TOKEN = "sk-live-7f3a9c2e1b";
@@ -58,7 +58,6 @@ const tokenMasker = SecretMasker.threadMaskerOf(
 );
 const fakeMasker = SecretMasker.SecretMasker.of({
   forThread: () => Effect.succeed(tokenMasker),
-  forThreads: () => Effect.succeed(tokenMasker),
   forCheckout: () => Effect.succeed(tokenMasker),
   forPullRequest: () => Effect.succeed(tokenMasker),
   remember: () => Effect.void,
@@ -306,7 +305,6 @@ describe("SecretMasker: stored events and live command output", () => {
 
 const failingMasker = SecretMasker.SecretMasker.of({
   forThread: (threadId) => Effect.fail(new SecretMasker.SecretMaskingError({ threadId })),
-  forThreads: () => Effect.fail(new SecretMasker.SecretMaskingError({})),
   forCheckout: () => Effect.fail(new SecretMasker.SecretMaskingError({})),
   forPullRequest: () => Effect.fail(new SecretMasker.SecretMaskingError({})),
   remember: () => Effect.void,
@@ -493,7 +491,21 @@ describe("SecretMasker: the doors that are not events", () => {
           matches: [
             { path: "a.txt", lineNumber: 1, lineContent: `k=${TOKEN}`, matchRanges: [] },
             { path: "b.txt", lineNumber: 1, lineContent: cut, matchRanges: [] },
-            { path: "c.txt", lineNumber: 1, lineContent: "ordinary", matchRanges: [] },
+            {
+              path: "c.txt",
+              lineNumber: 1,
+              lineContent: "ordinary",
+              matchRanges: [{ start: 0, end: 8 }],
+            },
+            // A hit past the 512-byte cap (no ranges), or one running into it: the value may
+            // be past what the line shows, and the hit alone would tell it.
+            { path: "d.txt", lineNumber: 1, lineContent: "x".repeat(512), matchRanges: [] },
+            {
+              path: "e.txt",
+              lineNumber: 1,
+              lineContent: "y".repeat(512),
+              matchRanges: [{ start: 500, end: 512 }],
+            },
           ],
           truncated: true,
         } as never);
@@ -510,5 +522,37 @@ describe("SecretMasker: the doors that are not events", () => {
         } as never);
         assert.equal(read.contents, "head\n");
       }),
+  );
+
+  it.effect("a save puts back only the values the file held at that place", () =>
+    Effect.sync(() => {
+      const OLD = "sk-live-old-1a2b3c4d";
+      const masker = SecretMasker.threadMaskerOf(
+        makeSecretPatterns([
+          { name: "API_TOKEN", value: TOKEN },
+          { name: "API_TOKEN", value: OLD },
+        ]),
+      );
+      const onDisk = `A=${TOKEN}\nB=plain\nC=${OLD}\nD=[API_TOKEN] (literal)\n`;
+      const shown = masker.mask(onDisk);
+      assert.equal(shown, "A=[API_TOKEN]\nB=plain\nC=[API_TOKEN]\nD=[API_TOKEN] (literal)\n");
+      // Another line edited: every value stays where it was, a rotated one too.
+      assert.equal(
+        restorePlaceholders(masker, onDisk, shown.replace("B=plain", "B=edited")),
+        onDisk.replace("B=plain", "B=edited"),
+      );
+      // A placeholder typed or copied elsewhere stays as typed: it never copies a value.
+      assert.equal(
+        restorePlaceholders(masker, onDisk, `${shown}E=[API_TOKEN]\n`),
+        `${onDisk}E=[API_TOKEN]\n`,
+      );
+      // The line holding the value edited around it keeps the value.
+      assert.equal(
+        restorePlaceholders(masker, onDisk, shown.replace("A=[API_TOKEN]", "AA=[API_TOKEN] #")),
+        onDisk.replace(`A=${TOKEN}`, `AA=${TOKEN} #`),
+      );
+      // A file that could not be read whole: refused, never written with a placeholder.
+      assert.isUndefined(restorePlaceholders(masker, undefined, shown));
+    }),
   );
 });

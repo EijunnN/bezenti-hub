@@ -11,6 +11,8 @@ import * as NodePath from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
 import {
+  EnvironmentAuthenticatedPrincipal,
+  type EnvironmentSessionPrincipalShape,
   MAIN_VAULT_ID,
   CommandId,
   ProjectId,
@@ -402,6 +404,85 @@ describe("Hub con Environments: a Thread's secret values are masked in its histo
         .service(Orchestrator.OrchestratorV2)
         .getThreadProjection(threadId);
       assert.equal(projection.thread.title, `Is it ${OWNER_TOKEN}?`);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("masks a checkout or a change request only with the viewer's own Threads' values", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub();
+      const owner = yield* ownerIdOf(hub);
+      const acme = yield* createOrganization(hub, "Acme");
+      yield* addMember(hub.server, { id: "ada", displayName: "ada" });
+      yield* joinOrganization(hub.server, acme, "ada", "member");
+      const ada = UserId.make("ada");
+      yield* hub.service(SpaceDirectory.SpaceDirectory).membershipsChanged([ada]);
+      const projectId = ProjectId.make("project:acme-shared");
+      yield* seedProject(hub.server, {
+        projectId,
+        title: "Acme",
+        defaultModelSelection: null,
+        spaceId: acme,
+      });
+      const orchestrator = hub.service(Orchestrator.OrchestratorV2);
+      const create = (threadId: ThreadId, ownerUserId: UserId) =>
+        orchestrator.dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make(`command:${threadId}`),
+          threadId,
+          projectId,
+          title: "Shared checkout",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("claudeAgent"),
+            model: "claude-sonnet-4-6",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          spaceId: acme,
+          ownerUserId,
+        });
+      const ownerThread = ThreadId.make("thread:owner-shared");
+      const adaThread = ThreadId.make("thread:ada-shared");
+      yield* create(ownerThread, owner);
+      yield* create(adaThread, ada);
+      const cwd = yield* hubCheckoutOf(hub, ownerThread);
+      // Both run in the Hub machine's checkout and are linked to one change request.
+      yield* hub.server.sql`
+        UPDATE orchestration_v2_projection_threads
+        SET active_environment_id = NULL,
+            payload_json = json_set(payload_json, '$.pullRequests',
+              json('[{"repository":"acme/web","number":7}]'))
+        WHERE thread_id IN (${ownerThread}, ${adaThread})
+      `;
+      const masker = hub.service(SecretMasker.SecretMasker);
+      const OWNER_VALUE = "owner-shared-value-5151";
+      const ADA_VALUE = "ada-shared-value-6262";
+      yield* masker.remember(ownerThread, [
+        { name: "OWNER_SECRET", value: OWNER_VALUE, valueId: "value-owner-shared" },
+      ]);
+      yield* masker.remember(adaThread, [
+        { name: "ADA_SECRET", value: ADA_VALUE, valueId: "value-ada-shared" },
+      ]);
+      const text = `${OWNER_VALUE} ${ADA_VALUE}`;
+      const as = (userId: UserId) =>
+        Effect.provideService(EnvironmentAuthenticatedPrincipal, {
+          userId,
+        } as unknown as EnvironmentSessionPrincipalShape);
+      const viewedBy = Effect.fn(function* (
+        found: Effect.Effect<SecretMasker.ThreadMasker, SecretMasker.SecretMaskingError>,
+      ) {
+        return (yield* found).mask(text);
+      });
+      const key = { repository: "acme/web", number: 7 };
+      for (const read of [masker.forCheckout(cwd), masker.forPullRequest(key)]) {
+        assert.equal(yield* viewedBy(read).pipe(as(ada)), `${OWNER_VALUE} [ADA_SECRET]`);
+        assert.equal(yield* viewedBy(read).pipe(as(owner)), `[OWNER_SECRET] ${ADA_VALUE}`);
+        // No User asks (an internal call): no one's values, so no one's guess is confirmed.
+        assert.equal(yield* viewedBy(read), text);
+      }
     }).pipe(Effect.scoped),
   );
 });
