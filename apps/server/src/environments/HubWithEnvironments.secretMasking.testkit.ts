@@ -12,6 +12,7 @@ import { assert } from "@effect/vitest";
 import {
   MAIN_VAULT_ID,
   type ProviderInstanceId,
+  type SpaceId,
   type ThreadId,
   type UserId,
   type VaultEntryId,
@@ -37,6 +38,7 @@ import * as Vaults from "../vaults/Vaults.ts";
 import { type Hub, makeHub } from "./HubWithEnvironments.testkit.ts";
 import {
   awaitUploaded,
+  createOrganization,
   loadFixture,
   ownerIdOf,
   replayOn,
@@ -145,11 +147,33 @@ export const hubCheckoutOf = Effect.fn(function* (hub: Hub, threadId: ThreadId) 
 });
 
 /** The Owner's Thread on the Laptop: its agent printed OWNER_TOKEN and wrote it to notes.md. */
-export const turnThatPrintsTheSecret = Effect.fn(function* () {
+export const turnThatPrintsTheSecret = Effect.fn(function* (
+  options: {
+    /** The Thread in an Organization «Acme», OWNER_TOKEN in its default «Acme secrets». */
+    readonly inOrganization?: boolean;
+  } = {},
+) {
   const loaded = yield* loadFixture("simple");
   const hub = yield* makeHub();
   const owner = yield* ownerIdOf(hub);
-  const { entry } = yield* putOwnerToken(hub, owner, OWNER_TOKEN);
+  let spaceId: SpaceId | undefined;
+  let entry: { readonly id: VaultEntryId };
+  if (options.inOrganization === true) {
+    spaceId = yield* createOrganization(hub, "Acme");
+    const vaults = hub.service(Vaults.Vaults);
+    const acme = yield* vaults
+      .create({ name: "Acme secrets", spaceId })
+      .pipe(CommandActor.actAs(owner));
+    const put = yield* vaults
+      .putEntry({ vaultId: acme.id, name: "OWNER_TOKEN", value: Redacted.make(OWNER_TOKEN) })
+      .pipe(CommandActor.actAs(owner));
+    entry = put.entry;
+    yield* vaults
+      .setSpaceDefaults({ spaceId, vaultIds: [acme.id] })
+      .pipe(CommandActor.actAs(owner));
+  } else {
+    entry = (yield* putOwnerToken(hub, owner, OWNER_TOKEN)).entry;
+  }
   const laptop = yield* hub.join({
     name: "Laptop",
     adapters: printingSecret(
@@ -157,7 +181,10 @@ export const turnThatPrintsTheSecret = Effect.fn(function* () {
       OWNER_TOKEN,
     ),
   });
-  yield* replayOn(hub, laptop, loaded, { ownerUserId: owner });
+  yield* replayOn(hub, laptop, loaded, {
+    ownerUserId: owner,
+    ...(spaceId === undefined ? {} : { spaceId }),
+  });
   const [threadId] = loaded.materialized.projectionThreadIds;
   assert.isDefined(threadId);
   yield* awaitUploaded(hub, threadId, 1);

@@ -23,11 +23,17 @@ import * as Deferred from "effect/Deferred";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
+import * as CommandActor from "../auth/CommandActor.ts";
 import { addMember, joinOrganization } from "../auth/UserAuth.testkit.ts";
+import { PublicHubUrl } from "../environment/PublicHubUrl.ts";
+import * as GuestShareService from "../guest/GuestShareService.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as CheckpointDiffQuery from "../checkpointing/CheckpointDiffQuery.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
@@ -96,6 +102,55 @@ describe("Hub con Environments: a Thread's secret values are masked in its histo
 
       // No file of the Hub's state outside its sealed store holds it.
       assert.deepEqual(yield* hubFilesHolding(hub, OWNER_TOKEN), []);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a guest link shows the Thread masked: its stream, its items (spec 5 ticket 09)", () =>
+    Effect.gen(function* () {
+      // Guest links are for Organizations' Threads: OWNER_TOKEN is Acme's default there.
+      const { hub, owner, threadId } = yield* turnThatPrintsTheSecret({ inOrganization: true });
+      yield* hub
+        .service(ServerSettings.ServerSettingsService)
+        .updateSettings({ guestSharingEnabled: true });
+      // The guest routes' service, as the server builds it, over the Hub's own services.
+      const guests = (yield* Effect.service(GuestShareService.GuestShareService).pipe(
+        Effect.provide(
+          GuestShareService.layer.pipe(
+            Layer.provide(
+              Layer.succeed(PublicHubUrl, {
+                publicHubHost: Effect.succeed(Option.some("hub.t3.test")),
+                publicHubOrigin: Effect.succeed(Option.some("https://hub.t3.test")),
+              }),
+            ),
+            // The model label only.
+            Layer.provide(
+              Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+            ),
+          ),
+        ),
+        Effect.provideContext(hub.server.services as never),
+      )) as GuestShareService.GuestShareService["Service"];
+      const { url } = yield* guests.create({ threadId }).pipe(CommandActor.actAs(owner));
+      const { token } = yield* guests.redeem({
+        credential: url.slice(url.indexOf("#") + 1),
+        name: "Sam",
+      });
+      // What the guest page gets first: the share and the Thread's snapshot.
+      const events = yield* (yield* guests.stream(token)).pipe(
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.timeout("20 seconds"),
+      );
+      const stream = JSON.stringify(events);
+      assert.include(stream, "the token is [OWNER_TOKEN], ok");
+      assert.notInclude(stream, OWNER_TOKEN);
+      // Each item as an expanded row loads it.
+      const itemIds = [...new Set([...stream.matchAll(/"(turn-item:[^"]+)"/gu)].map((m) => m[1]!))];
+      assert.isNotEmpty(itemIds);
+      for (const itemId of itemIds) {
+        const item = yield* guests.item(token, itemId).pipe(Effect.option);
+        assert.notInclude(JSON.stringify(item), OWNER_TOKEN, itemId);
+      }
     }).pipe(Effect.scoped),
   );
 
