@@ -148,7 +148,7 @@ export const HTTP_ENDPOINT_RULES: Readonly<Record<string, DoorRule>> = {
 
 /** Spec 4 ticket 04: a gateway key in a header only, never a cookie or another credential. */
 const AI_GATEWAY = own(
-  "AiGatewayKeys.authorize on every request (key live, User active, Thread in the key's Space and owned by its User), then AllowedAiAccounts now; planRoute pins the model to an allowed account; only fixed CLIProxyAPI paths",
+  "AiGatewayKeys.authorize on every request (key live, User active, Thread in the key's Space and owned by its User; a User key whose User left its Space: 403), then AllowedAiAccounts now; planRoute pins the model to an allowed account; only fixed CLIProxyAPI paths",
 );
 
 export const RAW_ROUTE_RULES: Readonly<Record<string, DoorRule>> = {

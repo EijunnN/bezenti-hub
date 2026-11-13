@@ -214,7 +214,7 @@ export const AUDIT_DETAIL_KEYS = {
   "ai_account.login": ["provider", "kind", "outcome", "reason"],
   /** The key's kind and Space; never the key, nor any part of it. */
   "ai_gateway_key.create": ["kind", "space"],
-  /** Why: `revoked` by a person (its User or the Owner). */
+  /** Why: `revoked` by a person (its User or the Owner); `space-lost` or `user-inactive` by the Hub. */
   "ai_gateway_key.revoke": ["kind", "space", "reason"],
 } as const satisfies Record<AuditAction, ReadonlyArray<string>>;
 

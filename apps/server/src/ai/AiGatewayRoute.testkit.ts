@@ -39,6 +39,7 @@ import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as AiAccounts from "./AiAccounts.ts";
 import * as AiGateway from "./AiGateway.ts";
 import * as AiGatewayActivity from "./AiGatewayActivity.ts";
+import * as AiGatewayKeyRevocation from "./AiGatewayKeyRevocation.ts";
 import * as AiGatewayKeys from "./AiGatewayKeys.ts";
 import * as AiGatewayProxy from "./AiGatewayProxy.ts";
 import * as AiGatewayRoute from "./AiGatewayRoute.ts";
@@ -137,6 +138,8 @@ export const hubWith = Effect.fn(function* (
   );
   const context = yield* Layer.build(
     AiGatewayProxy.layerWith({ ...TEST_LIMITS, ...limits }).pipe(
+      // A User removed or leaving a Space: their keys are revoked, as on the Hub (ticket 10).
+      Layer.provideMerge(AiGatewayKeyRevocation.layerUserChanges),
       Layer.provideMerge(AiGatewayKeys.layer),
       Layer.provideMerge(
         AiUsage.layerWith(options.usage ?? { retentionDays: 90, sweepEveryMs: 86_400_000 }),
@@ -268,6 +271,8 @@ export const hubWith = Effect.fn(function* (
 
   return {
     server,
+    /** The AI layers built over the Hub's services (to build a variant of one in a test). */
+    context,
     ownerId,
     ownerCookie,
     cookies,

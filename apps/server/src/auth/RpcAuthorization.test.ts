@@ -4,6 +4,8 @@ import {
   INSTALLATION_RPC_METHODS,
   UserId,
   type AuthEnvironmentScope,
+  AuthAccessReadScope,
+  AuthAccessWriteScope,
   AuthEnvironmentMaintainScope,
   AuthDiagnosticsReadScope,
   AuthFilesystemReadScope,
@@ -314,6 +316,64 @@ describe("RPC scope middleware", () => {
       });
       expect(handled).toEqual([]);
     }).pipe(Effect.scoped),
+  );
+});
+
+describe("local CLI keys (spec 4 ticket 10)", () => {
+  const tested = [
+    WS_METHODS.aiGatewayKeysList,
+    WS_METHODS.aiGatewayKeysCreate,
+    WS_METHODS.aiGatewayKeysRevoke,
+  ] as const;
+  const group = WsRpcGroup.omit(
+    ...[...WsRpcGroup.requests.keys()].filter(
+      (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, (typeof tested)[number]> =>
+        !(tested as ReadonlyArray<string>).includes(tag),
+    ),
+  );
+  const listed = { keys: [], everyone: false };
+
+  it.effect(
+    "lists with access:read; makes and revokes only with access:write, before the handler runs",
+    () =>
+      Effect.gen(function* () {
+        const handled: Array<string> = [];
+        const clientWith = (scopes: ReadonlyArray<AuthEnvironmentScope>) =>
+          RpcTest.makeClient(group).pipe(
+            Effect.provide(
+              Layer.mergeAll(
+                group.toLayerHandler(WS_METHODS.aiGatewayKeysList, () => Effect.succeed(listed)),
+                group.toLayerHandler(WS_METHODS.aiGatewayKeysCreate, () =>
+                  Effect.sync(() => handled.push("create")).pipe(Effect.andThen(Effect.never)),
+                ),
+                group.toLayerHandler(WS_METHODS.aiGatewayKeysRevoke, () =>
+                  Effect.sync(() => handled.push("revoke")).pipe(Effect.andThen(Effect.never)),
+                ),
+                scopeAuthorization(scopes),
+              ),
+            ),
+          );
+        const reader = yield* clientWith([AuthAccessReadScope]);
+        expect(yield* reader[WS_METHODS.aiGatewayKeysList]({})).toEqual(listed);
+        expect(
+          yield* reader[WS_METHODS.aiGatewayKeysCreate]({ name: "Laptop" }).pipe(Effect.flip),
+        ).toMatchObject({
+          _tag: "EnvironmentAuthorizationError",
+          requiredPermission: AuthAccessWriteScope,
+        });
+        expect(
+          yield* reader[WS_METHODS.aiGatewayKeysRevoke]({ keyId: "gk_1" }).pipe(Effect.flip),
+        ).toMatchObject({
+          _tag: "EnvironmentAuthorizationError",
+          requiredPermission: AuthAccessWriteScope,
+        });
+        const noRead = yield* clientWith([AuthOrchestrationReadScope]);
+        expect(yield* noRead[WS_METHODS.aiGatewayKeysList]({}).pipe(Effect.flip)).toMatchObject({
+          _tag: "EnvironmentAuthorizationError",
+          requiredPermission: AuthAccessReadScope,
+        });
+        expect(handled).toEqual([]);
+      }).pipe(Effect.scoped),
   );
 });
 

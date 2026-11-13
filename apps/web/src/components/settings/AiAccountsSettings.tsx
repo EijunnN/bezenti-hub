@@ -36,6 +36,7 @@ import { Input } from "../ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { AiUsageTab } from "./AiUsageSettings";
+import { LocalCliKeysSection } from "./LocalCliKeysSettings";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 
 /** Hidden as typed, and no password manager prompt: it is not a login. */
@@ -155,7 +156,7 @@ function AiAccountsPage({ environmentId }: { readonly environmentId: Environment
   const [error, setError] = useState<string | null>(null);
   const [usersError, setUsersError] = useState<string | null>(null);
   const [reordering, setReordering] = useState(false);
-  const [tab, setTab] = useState<"accounts" | "usage">("accounts");
+  const [tab, setTab] = useState<AiAccountsTab>("accounts");
   const manage = canManage && mayWrite;
 
   const loadAccounts = useEffectEvent((target: EnvironmentId) =>
@@ -243,18 +244,27 @@ function AiAccountsPage({ environmentId }: { readonly environmentId: Environment
   };
 
   const ordered = (accounts ?? []).filter((account) => account.status !== "removing");
-  // The Owner's second tab: what went through the AI gateway (spec 4 ticket 05).
+  // Everyone's own keys for local CLIs (spec 4 ticket 10).
+  if (tab === "keys") {
+    return (
+      <>
+        <AiAccountsTabs tab={tab} onTab={setTab} usage={canManage} />
+        <LocalCliKeysSection environmentId={environmentId} />
+      </>
+    );
+  }
+  // The Owner's tab: what went through the AI gateway (spec 4 ticket 05).
   if (canManage && tab === "usage") {
     return (
       <>
-        <AiAccountsTabs tab={tab} onTab={setTab} />
+        <AiAccountsTabs tab={tab} onTab={setTab} usage={canManage} />
         <AiUsageTab environmentId={environmentId} />
       </>
     );
   }
   return (
     <>
-      {canManage ? <AiAccountsTabs tab={tab} onTab={setTab} /> : null}
+      <AiAccountsTabs tab={tab} onTab={setTab} usage={canManage} />
       <SettingsSection id="ai-accounts" title="AI accounts">
         <SettingsRow
           title={canManage ? "Your AI accounts" : "AI accounts you may use"}
@@ -315,9 +325,13 @@ function AiAccountsPage({ environmentId }: { readonly environmentId: Environment
   );
 }
 
+type AiAccountsTab = "accounts" | "keys" | "usage";
+
 function AiAccountsTabs(props: {
-  readonly tab: "accounts" | "usage";
-  readonly onTab: (tab: "accounts" | "usage") => void;
+  readonly tab: AiAccountsTab;
+  readonly onTab: (tab: AiAccountsTab) => void;
+  /** The Owner's Usage tab. */
+  readonly usage: boolean;
 }) {
   return (
     <ToggleGroup
@@ -325,11 +339,14 @@ function AiAccountsTabs(props: {
       value={[props.tab]}
       onValueChange={(next) => {
         const value = next[0];
-        if (value === "accounts" || value === "usage") props.onTab(value);
+        if (value === "accounts" || value === "keys" || (value === "usage" && props.usage)) {
+          props.onTab(value);
+        }
       }}
     >
       <Toggle value="accounts">Accounts</Toggle>
-      <Toggle value="usage">Usage</Toggle>
+      <Toggle value="keys">Local CLI keys</Toggle>
+      {props.usage ? <Toggle value="usage">Usage</Toggle> : null}
     </ToggleGroup>
   );
 }

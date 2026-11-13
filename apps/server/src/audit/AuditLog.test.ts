@@ -618,7 +618,8 @@ it.effect(
         "ai_account.allow",
         // ai/AiAccounts.subscriptions.test.ts (spec 4 ticket 03)
         "ai_account.login",
-        // ai/AiGatewayRoute.test.ts (spec 4 ticket 04)
+        // ai/AiGatewayRoute.test.ts (spec 4 ticket 04), ai/AiGatewayKeys.localCli.test.ts
+        // (ticket 10: local CLI keys, revoked by their User, the Owner or a lost Space)
         "ai_gateway_key.create",
         "ai_gateway_key.revoke",
       ];

@@ -57,6 +57,9 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.aiAccountsLoginStart]: AuthSettingsWriteScope,
   [WS_METHODS.aiAccountsLoginComplete]: AuthSettingsWriteScope,
   [WS_METHODS.aiAccountsImportVertex]: AuthSettingsWriteScope,
+  // A User's local CLI keys (spec 4 ticket 10): a credential to the Hub, as a pairing link is.
+  [WS_METHODS.aiGatewayKeysCreate]: AuthAccessWriteScope,
+  [WS_METHODS.aiGatewayKeysRevoke]: AuthAccessWriteScope,
   [WS_METHODS.projectCloneStart]: AuthSourceControlWriteScope,
   [WS_METHODS.projectCloneCancel]: AuthSourceControlWriteScope,
   [WS_METHODS.projectCloneRetry]: AuthSourceControlWriteScope,

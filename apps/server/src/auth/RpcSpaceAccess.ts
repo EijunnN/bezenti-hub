@@ -82,6 +82,11 @@ const AI_USAGE_SUMMARY = {
   unscoped:
     "AI usage: AiUsage.summary answers the Owner (not limited to one Space) everything, an Organization's Admin (AccessPolicy `aiUsage.viewSpace`) their Spaces' plus their own, anyone else only their own rows, within spaceLimit; a filter (Space, User, account, Thread) only narrows that; counts only, never a prompt or a key",
 };
+/** Local CLI keys name no Thread or Project: each is its User's, the Owner's to see and revoke. */
+const AI_GATEWAY_KEYS = {
+  unscoped:
+    "Local CLI keys: AiGatewayKeys answers the session's own person only (never an agent, the Hub's shell or a one-Space session); a User lists and revokes their own keys, the Owner everyone's (another's answers like a missing one); a key is made only for a Space the User works in (AccessPolicy `aiAccount.use`); only `create` returns the key, once",
+};
 const INSTALLATION_ACCESS = Object.fromEntries(
   INSTALLATION_RPC_METHODS.map((method) => [method, "installation"]),
 ) as Readonly<Record<InstallationRpcMethod, "installation">>;
@@ -123,6 +128,9 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.vaultsEntriesCopy]: VAULTS,
   [WS_METHODS.aiAccountsList]: AI_ACCOUNTS_LIST,
   [WS_METHODS.aiUsageSummary]: AI_USAGE_SUMMARY,
+  [WS_METHODS.aiGatewayKeysList]: AI_GATEWAY_KEYS,
+  [WS_METHODS.aiGatewayKeysCreate]: AI_GATEWAY_KEYS,
+  [WS_METHODS.aiGatewayKeysRevoke]: AI_GATEWAY_KEYS,
   // Spec 5 ticket 03. Allowances and a Space's defaults: AccessPolicy `vault.manage` and
   // `vault.choose` in Vaults. A Project's choices and a Thread's names: the named Project or
   // Thread must be visible first, then the same rules (EffectiveVaults for the Thread).
