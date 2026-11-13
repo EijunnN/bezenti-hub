@@ -1,8 +1,11 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { describe, expect, it } from "@effect/vitest";
 import {
+  HUB_MACHINE_ENVIRONMENT_ID,
   ProjectId,
+  SpaceId,
   TerminalNotRunningError,
+  UserId,
   type TerminalEvent,
   type TerminalSessionSnapshot,
 } from "@t3tools/contracts";
@@ -16,6 +19,7 @@ import { TestClock } from "effect/testing";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as SecretDelivery from "../vaults/SecretDelivery.ts";
 import * as ProjectService from "./ProjectService.ts";
 import * as ProjectSetupScriptRunner from "./ProjectSetupScriptRunner.ts";
 
@@ -41,16 +45,21 @@ const makeHarness = Effect.fn(function* (options: {
   readonly history?: string;
   readonly opening?: Deferred.Deferred<void>;
   readonly shell?: string | null;
+  readonly starts?: Array<TerminalManager.TerminalStart>;
+  readonly secretDelivery?: Layer.Layer<SecretDelivery.SecretDelivery>;
 }) {
   const listeners = new Set<(event: TerminalEvent) => Effect.Effect<void>>();
   const writes = yield* Queue.unbounded<string>();
   const outputLines = yield* Queue.unbounded<string>();
   const terminals = Layer.mock(TerminalManager.TerminalManager)({
-    open: () =>
-      (options.opening
-        ? Deferred.succeed(options.opening, undefined).pipe(Effect.andThen(Effect.never))
-        : Effect.void
-      ).pipe(Effect.as(openSnapshot(options.history ?? ""))),
+    open: (_input, start) => {
+      options.starts?.push(start);
+      return (
+        options.opening
+          ? Deferred.succeed(options.opening, undefined).pipe(Effect.andThen(Effect.never))
+          : Effect.void
+      ).pipe(Effect.as(openSnapshot(options.history ?? "")));
+    },
     getShell: () =>
       options.shell === null
         ? Effect.fail(new TerminalNotRunningError({ threadId, terminalId }))
@@ -73,6 +82,7 @@ const makeHarness = Effect.fn(function* (options: {
         }),
         ServerSettings.layerTest(),
         NodeCrypto.layer,
+        options.secretDelivery ?? Layer.empty,
       ),
     ),
   );
@@ -113,6 +123,32 @@ const setup = Effect.fn(function* (
 });
 
 describe("ProjectSetupScriptRunner", () => {
+  it.effect(
+    "starts its shell with the Space and User its secrets were planned for (ticket 07)",
+    () =>
+      Effect.gen(function* () {
+        const starts: Array<TerminalManager.TerminalStart> = [];
+        const planned = {
+          fingerprint: "none",
+          target: { environmentId: HUB_MACHINE_ENVIRONMENT_ID, contractVersion: 12 },
+          variables: [],
+          spaceId: SpaceId.make("org-acme"),
+          userId: UserId.make("grace"),
+        };
+        const harness = yield* makeHarness({
+          starts,
+          secretDelivery: Layer.mock(SecretDelivery.SecretDelivery)({
+            planTurn: () => Effect.succeed(planned),
+            resolve: () => Effect.succeed({ fingerprint: "none", variables: [] }),
+          }),
+        });
+        yield* harness.start;
+        expect(starts.map((start) => start.facts)).toEqual([
+          { spaceId: "org-acme", userId: "grace" },
+        ]);
+      }),
+  );
+
   it.effect("writes immediately when the spawned fallback is PowerShell", () =>
     Effect.gen(function* () {
       const { writes } = yield* setup({

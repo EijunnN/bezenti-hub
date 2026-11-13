@@ -4076,6 +4076,8 @@ const fakeSecretDelivery = (
           fingerprint: set.fingerprint,
           target,
           variables: (set.variables ?? []).map((v) => ({ name: v.name, valueId: set.fingerprint })),
+          spaceId: null,
+          userId: null,
         };
       }),
     resolve: (plan) =>

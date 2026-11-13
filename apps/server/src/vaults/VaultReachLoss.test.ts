@@ -375,6 +375,13 @@ it.effect("removing a User takes back every Vault allowed to them; disabling kee
       ),
       0,
     );
+    const chose = yield* sql<{ readonly detail: string }>`
+      SELECT detail_json AS "detail" FROM audit_log
+      WHERE action = 'vault.choose' AND target_id = ${toPersonal}
+        AND detail_json LIKE '%"scope":"project"%'
+    `;
+    assert.lengthOf(chose, 1, "the dropped choice is audited");
+    assert.include(chose[0]?.detail ?? "", '"choice":"inherit"');
     // The Vault itself stays the Owner's, with its secret.
     assert.equal(
       yield* h.count(sql`SELECT COUNT(*) AS n FROM vault_entries WHERE vault_id = ${gracesKeys}`),

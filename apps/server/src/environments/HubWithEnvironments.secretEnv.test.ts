@@ -293,19 +293,14 @@ describe("Hub con Environments: a Thread's secrets as environment variables", ()
         const adas = s.sandbox.ptySpawns.at(-1);
         assert.isDefined(adas);
 
+        const sentBefore = s.sandbox.requests.length;
         yield* s.hub
           .service(InstallationUserService.InstallationUserService)
           .setStatus({ actorUserId: s.owner, userId: s.grace, status: "removed" });
-        // Closed by who opened it, on the machine that holds it.
+        // The machine closes the shells started with her set, whoever's Thread they are in.
+        yield* s.sandbox.awaitAnswered("terminal.reconcile", sentBefore);
         assert.isNotEmpty(graces.signals, "her shell, with her own Vault's secret, ended");
         assert.isEmpty(adas.signals, "Ada's stays");
-        const left = yield* s.hub.server.sql<{ readonly openedBy: string }>`
-        SELECT opened_by AS "openedBy" FROM terminal_openings ORDER BY opened_by
-      `;
-        assert.deepEqual(
-          left.map((row) => row.openedBy),
-          [s.ada],
-        );
       }).pipe(Effect.scoped),
   );
 
@@ -392,89 +387,73 @@ describe("Hub con Environments: a Thread's secrets as environment variables", ()
     }).pipe(Effect.scoped),
   );
 
-  it.live("never reach a machine before executor contract 10, which says to update", () =>
-    Effect.gen(function* () {
-      const instanceId = "claudeAgent" as ProviderInstanceId;
-      const hub = yield* makeHub();
-      const owner = yield* ownerIdOf(hub);
-      const old = yield* hub.join({
-        name: "Old laptop",
-        adapters: idleAdapters(instanceId),
-        executorContractVersion: 9,
-      });
-      const projectId = ProjectId.make("project:old");
-      const { workspaceRoot } = yield* seedProject(hub.server, {
-        projectId,
-        title: "Old",
-        defaultModelSelection: null,
-      });
-      const threadId = ThreadId.make("thread:old");
-      yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
-        type: "thread.create",
-        createdBy: "user",
-        creationSource: "web",
-        commandId: CommandId.make("command:old"),
-        threadId,
-        projectId,
-        title: "Old",
-        modelSelection: { instanceId, model: "claude-sonnet-4-6" },
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        branch: null,
-        worktreePath: null,
-        ownerUserId: owner,
-        activeEnvironmentId: old.environmentId,
-      });
-      yield* checkoutOnMachine(hub, old.environmentId, projectId);
-      const workspace = yield* threadWorkspaceOf(hub);
-      const open = (terminalId: string) =>
-        workspace.terminalOpen({ threadId, terminalId, cwd: workspaceRoot }, { userId: owner });
-
-      // Without secrets it works as before.
-      yield* open("term-1");
-      assert.equal(old.ptySpawns.length, 1);
-
-      yield* hub
-        .service(Vaults.Vaults)
-        .putEntry({
-          vaultId: MAIN_VAULT_ID,
-          name: "OWNER_TOKEN",
-          value: Redacted.make(OWNER_TOKEN),
-        })
-        .pipe(CommandActor.actAs(owner));
-      const refused = yield* Effect.exit(open("term-2"));
-      assert.isTrue(Exit.isFailure(refused));
-      if (Exit.isFailure(refused)) {
-        assert.include(
-          Cause.pretty(refused.cause),
-          "Old laptop needs an update to receive this Thread's secrets",
+  it.live(
+    "refuse the terminals of a machine before executor contract 12, which says to update",
+    () =>
+      Effect.gen(function* () {
+        const instanceId = "claudeAgent" as ProviderInstanceId;
+        const hub = yield* makeHub();
+        const owner = yield* ownerIdOf(hub);
+        // Its shells would report no facts: the Hub could not tell which Space they belong to.
+        const old = yield* hub.join({
+          name: "Old laptop",
+          adapters: idleAdapters(instanceId),
+          executorContractVersion: 11,
+        });
+        const projectId = ProjectId.make("project:old");
+        const { workspaceRoot } = yield* seedProject(hub.server, {
+          projectId,
+          title: "Old",
+          defaultModelSelection: null,
+        });
+        const threadId = ThreadId.make("thread:old");
+        yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:old"),
+          threadId,
+          projectId,
+          title: "Old",
+          modelSelection: { instanceId, model: "claude-sonnet-4-6" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          ownerUserId: owner,
+          activeEnvironmentId: old.environmentId,
+        });
+        yield* checkoutOnMachine(hub, old.environmentId, projectId);
+        const workspace = yield* threadWorkspaceOf(hub);
+        const opened = yield* Effect.exit(
+          workspace.terminalOpen(
+            { threadId, terminalId: "term-1", cwd: workspaceRoot },
+            {
+              userId: owner,
+            },
+          ),
         );
-      }
-      assert.equal(old.ptySpawns.length, 1, "no shell started without its secrets");
-      // An attach that would make a new terminal says the same; the running one still reattaches.
-      const attached = yield* Effect.exit(
-        workspace
-          .terminalAttach({ threadId, terminalId: "term-3", cwd: workspaceRoot }, "viewer-1", {
-            userId: owner,
-          })
-          .pipe(Stream.take(1), Stream.runDrain),
-      );
-      assert.isTrue(Exit.isFailure(attached));
-      if (Exit.isFailure(attached)) {
-        assert.include(Cause.pretty(attached.cause), "Old laptop needs an update");
-      }
-      const reattached = yield* workspace
-        .terminalAttach({ threadId, terminalId: "term-1", cwd: workspaceRoot }, "viewer-2", {
-          userId: owner,
-        })
-        .pipe(Stream.take(1), Stream.runCollect);
-      assert.equal(reattached.length, 1, "the running shell reattaches, nothing is read");
-      assert.equal(old.ptySpawns.length, 1);
-      assert.isTrue(
-        old.ptySpawns.every((spawn) => spawn.env.OWNER_TOKEN === undefined),
-        "the value never reached the old machine",
-      );
-    }).pipe(Effect.scoped),
+        assert.isTrue(Exit.isFailure(opened));
+        if (Exit.isFailure(opened)) {
+          assert.include(
+            Cause.pretty(opened.cause),
+            "Old laptop needs an update to open this Thread's terminals",
+          );
+        }
+        const attached = yield* Effect.exit(
+          workspace
+            .terminalAttach({ threadId, terminalId: "term-2", cwd: workspaceRoot }, "viewer-1", {
+              userId: owner,
+            })
+            .pipe(Stream.take(1), Stream.runDrain),
+        );
+        assert.isTrue(Exit.isFailure(attached));
+        if (Exit.isFailure(attached)) {
+          assert.include(Cause.pretty(attached.cause), "Old laptop needs an update");
+        }
+        assert.isEmpty(old.ptySpawns, "no shell started on it");
+        assert.isFalse(old.requests.includes("terminal.open"), "nothing was sent");
+      }).pipe(Effect.scoped),
   );
 
   it.live("say a running shell is stale once the User's set became empty", () =>

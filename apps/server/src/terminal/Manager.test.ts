@@ -247,11 +247,39 @@ interface CreateManagerOptions {
   managedBinaryToolsDir?: string;
 }
 
+type ManagerService = TerminalManager.TerminalManager["Service"];
+/** What a test opens with: a start, or only secrets (no facts), or nothing. */
+type TestStart = TerminalManager.TerminalStart | TerminalManager.TerminalSecrets | undefined;
+const asStart = (start: TestStart): TerminalManager.TerminalStart =>
+  start === undefined
+    ? TerminalManager.NO_START
+    : "fingerprint" in start
+      ? { secrets: start, facts: null }
+      : start;
+/** The manager as these tests drive it: a start is optional and may be secrets alone. */
+type TestManager = Omit<ManagerService, "open" | "attachOutputStream"> & {
+  readonly open: (
+    input: Parameters<ManagerService["open"]>[0],
+    start?: TestStart,
+  ) => ReturnType<ManagerService["open"]>;
+  readonly attachOutputStream: (
+    input: Parameters<ManagerService["attachOutputStream"]>[0],
+    viewerId: string,
+    start?: TestStart,
+  ) => ReturnType<ManagerService["attachOutputStream"]>;
+};
+const forTests = (manager: ManagerService): TestManager => ({
+  ...manager,
+  open: (input, start) => manager.open(input, asStart(start)),
+  attachOutputStream: (input, viewerId, start) =>
+    manager.attachOutputStream(input, viewerId, asStart(start)),
+});
+
 interface ManagerFixture {
   readonly baseDir: string;
   readonly logsDir: string;
   readonly ptyAdapter: FakePtyAdapter;
-  readonly manager: TerminalManager.TerminalManager["Service"];
+  readonly manager: TestManager;
   readonly getEvents: Effect.Effect<ReadonlyArray<TerminalEvent>>;
 }
 
@@ -314,7 +342,7 @@ const createManager = (
         logsDir,
         join,
         ptyAdapter,
-        manager,
+        manager: forTests(manager),
         getEvents: Ref.get(eventsRef),
       };
     }),

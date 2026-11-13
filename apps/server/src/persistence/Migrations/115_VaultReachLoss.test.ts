@@ -86,7 +86,5 @@ it.effect("drops the Vault rows a Hub before ticket 07 left naming a reach that 
       ),
       ["org-acme:tools", "org-globex:globex-keys"],
     );
-    // Where terminals were opened, for the Hub to refuse and close them after a move or removal.
-    assert.deepEqual(ids(yield* sql`SELECT COUNT(*) AS n FROM terminal_openings`), ["0"]);
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );

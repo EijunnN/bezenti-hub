@@ -880,22 +880,13 @@ describe("Hub con Environments: a moved Project's Vaults", () => {
           .threadEnvironment({ threadId })
           .pipe(asOwner, Effect.orDie);
 
-        yield* openTerminal("term-1");
+        const opened = yield* openTerminal("term-1");
         assert.equal(lastShell().ACME_TOKEN, ACME_TOKEN);
         assert.equal(lastShell().SHARED_TOKEN, SHARED_TOKEN);
         const acmeShell = laptop.ptySpawns.at(-1);
         assert.isDefined(acmeShell);
-        const openings = hub.server.sql<{
-          readonly terminalId: string;
-          readonly spaceId: string;
-          readonly pending: number;
-        }>`
-          SELECT terminal_id AS "terminalId", space_id AS "spaceId",
-            close_pending_at IS NOT NULL AS pending
-          FROM terminal_openings WHERE thread_id = ${threadId} ORDER BY terminal_id
-        `;
-        // The Hub records the Space it was opened under, and by whom.
-        assert.deepEqual(yield* openings, [{ terminalId: "term-1", spaceId: acme, pending: 0 }]);
+        // The machine keeps what the shell started with: Acme's set, the Owner's.
+        assert.deepEqual(opened.facts, { spaceId: acme, userId: owner });
 
         // Before confirming, the mover sees which Vaults the Project loses.
         const plan = yield* movePlan(hub, projectId, globex);
@@ -926,12 +917,11 @@ describe("Hub con Environments: a moved Project's Vaults", () => {
         assert.include(audited[0]?.detail ?? "", '"choice":"inherit"');
         assert.equal(audited[0]?.spaceId, acme);
 
-        // The close waits for the laptop, recorded; it happens as the laptop connects again.
+        // The laptop was away: its shell closes as it connects again (the Hub's word on Spaces).
         assert.isEmpty(acmeShell.signals);
-        assert.deepEqual(yield* openings, [{ terminalId: "term-1", spaceId: acme, pending: 1 }]);
         const sentBefore = laptop.requests.length;
         yield* laptop.connect;
-        yield* laptop.awaitAnswered("terminal.close", sentBefore);
+        yield* laptop.awaitAnswered("terminal.reconcile", sentBefore);
         assert.isNotEmpty(acmeShell.signals, "closed once the laptop was back");
 
         // Opening term-1 again starts a new shell, with Globex's secrets alone.
@@ -941,28 +931,70 @@ describe("Hub con Environments: a moved Project's Vaults", () => {
         assert.isNotTrue(reopened.secretsStale);
         assert.isUndefined(lastShell().ACME_TOKEN);
         assert.equal(lastShell().GLOBEX_TOKEN, GLOBEX_TOKEN);
-        assert.deepEqual(yield* openings, [{ terminalId: "term-1", spaceId: globex, pending: 0 }]);
+        assert.deepEqual(reopened.facts, { spaceId: globex, userId: owner });
         const globexShell = laptop.ptySpawns.at(-1);
         assert.isDefined(globexShell);
+        // A reconcile that lands now (one the move fired) leaves the shell reopened in Globex.
+        const machine = Option.getOrThrow(
+          (yield* hub
+            .service(EnvironmentExecutor.EnvironmentExecutorRegistry)
+            .get(laptop.environmentId)
+            .pipe(Effect.orDie)).workspace.forward,
+        );
+        yield* machine
+          .call("terminal.reconcile", {
+            threads: [{ threadId, spaceId: globex }],
+            removedUserIds: [],
+          })
+          .pipe(Effect.orDie);
+        assert.isEmpty(globexShell.signals, "the shell opened in Globex stays");
 
-        // A shell the Hub still has under Acme (as one opened between a move's steps would be):
-        // typing into it is refused and it closes. One opened in Globex is left alone.
-        yield* openTerminal("term-3");
+        // A shell another door started for Acme (a setup script's, one no reconcile reached),
+        // with output in its history: typing into it through the Hub is refused...
+        yield* machine
+          .call("terminal.open", {
+            root: checkout,
+            input: { threadId, terminalId: "term-3", cwd: "." },
+            facts: { spaceId: acme, userId: owner },
+          })
+          .pipe(Effect.orDie);
         const missed = laptop.ptySpawns.at(-1);
         assert.isDefined(missed);
-        yield* hub.server.sql`
-          UPDATE terminal_openings SET space_id = ${acme}
-          WHERE thread_id = ${threadId} AND terminal_id = 'term-3'
-        `;
+        yield* machine
+          .call("terminal.write", { threadId, terminalId: "term-3", data: "printenv\r" })
+          .pipe(Effect.orDie);
         const typed = yield* workspace
-          .terminalWrite(
-            { threadId, terminalId: "term-3", data: "echo $ACME_TOKEN\r" },
-            { userId: owner },
-          )
+          .terminalWrite({ threadId, terminalId: "term-3", data: "printenv\r" }, { userId: owner })
           .pipe(Effect.flip);
         assert.equal(typed._tag, "TerminalEnvironmentUnavailableError");
-        assert.isNotEmpty(missed.signals, "the shell under Acme was closed");
-        assert.isEmpty(globexShell.signals, "the one opened in Globex stays");
+        // ...and opening that id again closes it with its history, for a new shell in Globex.
+        const reused = yield* openTerminal("term-3");
+        assert.isNotEmpty(missed.signals, "the shell started for Acme was closed");
+        assert.equal(reused.history, "", "none of its old output comes back");
+        assert.deepEqual(reused.facts, { spaceId: globex, userId: owner });
+        assert.equal(lastShell().GLOBEX_TOKEN, GLOBEX_TOKEN);
+
+        // A shell that reports nothing (from before the upgrade): an attach closes it and starts
+        // a new one.
+        yield* machine
+          .call("terminal.open", {
+            root: checkout,
+            input: { threadId, terminalId: "term-4", cwd: "." },
+          })
+          .pipe(Effect.orDie);
+        const factless = laptop.ptySpawns.at(-1);
+        assert.isDefined(factless);
+        const attached = yield* workspace
+          .terminalAttach({ threadId, terminalId: "term-4", cwd: workspaceRoot }, "viewer-1", {
+            userId: owner,
+          })
+          .pipe(Stream.take(1), Stream.runCollect);
+        assert.isNotEmpty(factless.signals, "the shell without facts was closed");
+        const first = [...attached][0];
+        assert.equal(first?.type, "snapshot");
+        if (first?.type === "snapshot") {
+          assert.deepEqual(first.snapshot.facts, { spaceId: globex, userId: owner });
+        }
         // So does any other.
         yield* openTerminal("term-2");
         assert.isUndefined(lastShell().ACME_TOKEN);
