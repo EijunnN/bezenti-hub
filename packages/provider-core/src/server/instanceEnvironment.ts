@@ -65,7 +65,7 @@ export const applySecretEnv = (
   // instance's environment, and a spawn skips undefined values.
   if (secretEnv.aiCredential !== undefined) {
     const fold = (name: string) => (windows ? name.toUpperCase() : name);
-    const drop = new Set(AMBIENT_AI_VARIABLES.map(fold));
+    const drop = new Set(AMBIENT_DIRECT_AI_VARIABLES.map(fold));
     for (const name of Object.keys(next)) {
       if (drop.has(fold(name))) delete next[name];
     }
@@ -220,7 +220,15 @@ export const AMBIENT_AI_VARIABLES: ReadonlyArray<string> = [
   "AI_GATEWAY_API_KEY",
   "OPENCODE_API_KEY",
   "OPENCODE_AUTH_CONTENT",
-  // Ticket 07: the keys and sign-in hooks of the drivers without a base URL.
+];
+
+/**
+ * Ticket 07: what a direct-credential process never inherits from the machine or its instance,
+ * besides the gateway's list: the other drivers' keys and sign-in hooks. Only ambient values: a
+ * Vault's of the same name (`GOOGLE_APPLICATION_CREDENTIALS` for gcloud) is set back after.
+ */
+const AMBIENT_DIRECT_AI_VARIABLES: ReadonlyArray<string> = [
+  ...AMBIENT_AI_VARIABLES,
   "CURSOR_API_KEY",
   "KIRO_API_KEY",
   "META_API_KEY",

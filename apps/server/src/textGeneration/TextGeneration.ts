@@ -15,8 +15,15 @@ import {
 } from "@t3tools/shared/serverSettings";
 import * as ServerSettings from "../serverSettings.ts";
 import type { ProviderTextGeneration } from "@t3tools/provider-core/server/textGeneration";
-import { HUB_RUNS_NO_AGENTS_MESSAGE, TextGenerationError } from "@t3tools/contracts";
+import {
+  AI_DIRECT_DRIVERS,
+  HUB_RUNS_NO_AGENTS_MESSAGE,
+  ProviderDriverKind,
+  TextGenerationError,
+} from "@t3tools/contracts";
+import * as Option from "effect/Option";
 
+import * as AiGatewaySessions from "../ai/AiGatewaySessions.ts";
 import * as HubRunsAgents from "../environment/HubRunsAgents.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
@@ -78,6 +85,11 @@ export const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   // A Hub that runs no agents runs no provider CLI either: its callers ask the Thread's machine.
   const runsAgents = yield* HubRunsAgents.HubRunsAgents;
+  const aiGatewaySessions = yield* Effect.serviceOption(AiGatewaySessions.AiGatewaySessions);
+  const refusesLogin = (driver: string) =>
+    Option.isNone(aiGatewaySessions) || !AI_DIRECT_DRIVERS.has(driver)
+      ? Effect.succeed(false)
+      : aiGatewaySessions.value.applies({ driver: ProviderDriverKind.make(driver) });
   const generate = Effect.fn("TextGeneration.generate")(function* <A>(
     operation: TextGenerationOp,
     selection: ModelSelection,
@@ -100,7 +112,13 @@ export const make = Effect.gen(function* () {
       now,
       selection.model,
     );
-    if (limited) {
+    // Spec 4 ticket 07: on a Hub running on AI accounts, a driver without a base URL never writes
+    // titles, commit messages or summaries: it would sign in with the machine's login (the
+    // Owner's Google account, for Antigravity). Another model writes them, or none does.
+    const selected = yield* registry.getInstance(selection.instanceId);
+    const loginRefused =
+      selected !== undefined && (yield* refusesLogin(String(selected.driverKind)));
+    if (limited || loginRefused) {
       const settings = yield* serverSettings.getSettings.pipe(
         Effect.mapError(
           (cause) =>
@@ -111,25 +129,33 @@ export const make = Effect.gen(function* () {
             }),
         ),
       );
-      selection =
-        fallbackTextGenerationModelSelection(
-          settings.providerInstances,
-          (instanceId, driver) => {
-            const provider = snapshots.find((candidate) => candidate.instanceId === instanceId);
-            return (
-              instanceId !== selection.instanceId &&
-              provider?.enabled === true &&
-              resolveProjectProviderInstanceEnabled(settings, null, instanceId) &&
-              provider.installed &&
-              provider.auth.status !== "unauthenticated" &&
-              isProviderAvailable(provider) &&
-              isProviderTextGenerationCapable(provider) &&
-              (operation !== "generateReviewGuide" || INVESTIGATING_DRIVERS.has(driver)) &&
-              !exhaustedUsageWindow(provider, now, defaultTextGenerationModel(driver))
-            );
-          },
-          { includeConfiguredInstances: true },
-        ) ?? selection;
+      const fallback = fallbackTextGenerationModelSelection(
+        settings.providerInstances,
+        (instanceId, driver) => {
+          const provider = snapshots.find((candidate) => candidate.instanceId === instanceId);
+          return (
+            instanceId !== selection.instanceId &&
+            !(loginRefused && AI_DIRECT_DRIVERS.has(driver)) &&
+            provider?.enabled === true &&
+            resolveProjectProviderInstanceEnabled(settings, null, instanceId) &&
+            provider.installed &&
+            provider.auth.status !== "unauthenticated" &&
+            isProviderAvailable(provider) &&
+            isProviderTextGenerationCapable(provider) &&
+            (operation !== "generateReviewGuide" || INVESTIGATING_DRIVERS.has(driver)) &&
+            !exhaustedUsageWindow(provider, now, defaultTextGenerationModel(driver))
+          );
+        },
+        { includeConfiguredInstances: true },
+      );
+      if (fallback === null && loginRefused) {
+        return yield* new TextGenerationError({
+          operation,
+          detail:
+            "This Hub runs on AI accounts, so this provider writes no titles, messages or summaries (it would sign in with the machine's account). Pick another text generation model in Settings.",
+        });
+      }
+      selection = fallback ?? selection;
     }
     return yield* resolveInstance(registry, operation, selection.instanceId).pipe(
       Effect.flatMap((service) => invoke(service, selection)),

@@ -130,6 +130,18 @@ export function acpRegistryPromptFailure(agentId: string, cause: unknown) {
   });
 }
 
+/**
+ * The sign-in method the agent is asked for. A Hub turn on a direct AI account signs in with its
+ * token (`DEVIN_TOKEN`), never with the method the instance stored (spec 4 ticket 07).
+ */
+export const registryAuthMethod = (
+  settings: Pick<AcpRegistryAdapterV2Options["settings"], "authMethodId">,
+  input: Pick<AcpAdapterV2RuntimeInput, "aiCredential">,
+): { readonly authMethodId?: string } =>
+  settings.authMethodId && input.aiCredential === undefined
+    ? { authMethodId: settings.authMethodId }
+    : {};
+
 function makeAcpRegistryRuntime(
   options: AcpRegistryAdapterV2Options,
   catalog: AcpRegistrySupport.AcpRegistryCatalog["Service"],
@@ -142,7 +154,12 @@ function makeAcpRegistryRuntime(
     ChildProcessSpawner.ChildProcessSpawner | SecureRandom.SecureRandom | Scope.Scope
   > =>
     Effect.gen(function* () {
-      const { processEnvironment, ...runtimeInput } = input;
+      const {
+        processEnvironment,
+        threadId: _threadId,
+        aiCredential: _aiCredential,
+        ...runtimeInput
+      } = input;
       const resolved = yield* catalog
         .resolve(options.settings, input.cwd, options.environment)
         .pipe(
@@ -164,7 +181,7 @@ function makeAcpRegistryRuntime(
                   ...resolved.spawn,
                   env: { ...resolved.spawn.env, ...processEnvironment },
                 },
-          ...(options.settings.authMethodId ? { authMethodId: options.settings.authMethodId } : {}),
+          ...registryAuthMethod(options.settings, input),
           customModels: readCustomModelEntries(options.settings.customModels).map(
             (entry) => entry.slug,
           ),

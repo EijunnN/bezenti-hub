@@ -218,3 +218,39 @@ describe("the AI gateway in a provider process (spec 4 ticket 06)", () => {
     );
   });
 });
+
+describe("a direct AI account credential in a provider process (spec 4 ticket 07)", () => {
+  it("keeps a Vault's Google credentials in a gateway process (gcloud, terraform)", () => {
+    const env = applyAiGatewayEnv(
+      { PATH: "/bin", GOOGLE_APPLICATION_CREDENTIALS: "/vault/sa.json", CURSOR_API_KEY: "c" },
+      { ANTHROPIC_BASE_URL: "http://127.0.0.1:1/api/ai/anthropic" },
+      "linux",
+    );
+    expect(env.GOOGLE_APPLICATION_CREDENTIALS).toBe("/vault/sa.json");
+    expect(env.CURSOR_API_KEY).toBe("c");
+  });
+
+  it("unsets the machine's AI credentials, then sets the Thread's set back, a Vault's included", () => {
+    const env = applySecretEnv(
+      {
+        PATH: "/bin",
+        GOOGLE_APPLICATION_CREDENTIALS: "/machine/sa.json",
+        CURSOR_API_KEY: "machine-key",
+        GEMINI_API_KEY: "machine-gemini",
+      },
+      {
+        fingerprint: "f",
+        variables: [
+          { name: "GOOGLE_APPLICATION_CREDENTIALS", value: "/vault/sa.json" },
+          { name: "CURSOR_API_KEY", value: "account-key" },
+        ],
+        aiCredential: "CURSOR_API_KEY",
+      },
+      "linux",
+    );
+    expect(env.CURSOR_API_KEY).toBe("account-key");
+    expect(env.GOOGLE_APPLICATION_CREDENTIALS).toBe("/vault/sa.json");
+    expect("GEMINI_API_KEY" in env && env.GEMINI_API_KEY === undefined).toBe(true);
+    expect(env.PATH).toBe("/bin");
+  });
+});

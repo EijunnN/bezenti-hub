@@ -158,6 +158,13 @@ export interface AcpAdapterV2RuntimeInput {
   readonly acpMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly httpMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly processEnvironment?: NodeJS.ProcessEnv;
+  /** The Thread the process serves (a per-Thread home, spec 4 ticket 07). */
+  readonly threadId?: string;
+  /**
+   * Spec 4 ticket 07: the variable of `processEnvironment` holding the Thread's direct AI account
+   * credential: the agent signs in with it, never with a login the instance stored.
+   */
+  readonly aiCredential?: string;
   readonly resumeSessionId?: string;
   readonly interruptPromptOnCancel?: boolean;
   readonly clientCapabilities: EffectAcpSchema.InitializeRequest["clientCapabilities"];
@@ -2333,6 +2340,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     hostPlatform,
                   ),
                 }),
+            threadId: input.threadId,
+            ...(input.secretEnv?.aiCredential === undefined
+              ? {}
+              : { aiCredential: input.secretEnv.aiCredential }),
             ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
             interruptPromptOnCancel: flavor.interruptPromptOnCancel ?? false,
             clientCapabilities: {

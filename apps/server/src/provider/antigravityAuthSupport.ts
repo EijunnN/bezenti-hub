@@ -102,6 +102,17 @@ const ANTIGRAVITY_PERSONAL_AUTH: AntigravityAuthConfig = {
   gcpLocation: "",
 };
 
+/**
+ * Spec 4 ticket 07: the profile (GEMINI_HOME) of a Hub turn on a direct AI account: one per
+ * Thread (its conversations and settings are no other Thread's), never one that held a Google
+ * sign-in. The Thread id is hex-encoded, so two ids never share one.
+ */
+export const antigravityAiAccountProfile = (
+  path: Pick<Path.Path, "join">,
+  profileDirectory: string,
+  threadId: string,
+) => path.join(`${profileDirectory}-ai-account`, Buffer.from(threadId, "utf8").toString("hex"));
+
 export function antigravityAuthUsesBrowser(authMethod: AntigravityAuthMethod): boolean {
   return authMethod === "oauth-personal" || authMethod === "oauth-business";
 }

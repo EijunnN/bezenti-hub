@@ -42,6 +42,7 @@ import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterReg
 import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as EffectiveVaults from "../vaults/EffectiveVaults.ts";
+import * as SecretMasker from "../vaults/SecretMasker.ts";
 import {
   type Hub,
   makeHub,
@@ -301,6 +302,32 @@ describe("Hub con Environments: providers without a base URL use a direct AI acc
       const refusedNamed = yield* Effect.exit(openSession(s.hub, named, "session:gil-named"));
       assert.include(failureText(refusedNamed), "no longer allowed to you here");
       assert.equal(seen.length, before, "Acme's key never reached a process of Globex's");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("mask the key in the Thread's history masker the moment its process starts", () =>
+    Effect.gen(function* () {
+      const seen: Array<SecretEnv | undefined> = [];
+      const s = yield* twoSpaces(seen);
+      const adaThread = yield* threadOn(s.hub, {
+        id: "ada",
+        spaceId: s.acme,
+        ownerUserId: s.ada,
+        environmentId: sandboxEnvironmentIdOf(s.acme),
+      });
+      // The history's masker has this Thread loaded (cached) before the session opens.
+      const masker = s.hub.service(SecretMasker.SecretMasker);
+      assert.equal(
+        (yield* masker.forThread(adaThread.threadId)).mask(`k ${ACME_CURSOR_KEY}`),
+        `k ${ACME_CURSOR_KEY}`,
+      );
+      yield* Effect.exit(openSession(s.hub, adaThread, "session:ada"));
+      assert.equal(valueOf(seen.at(-1), "CURSOR_API_KEY"), ACME_CURSOR_KEY);
+      // Right after: the same masker (one instance, shared with the sessions' rule) hides it.
+      assert.equal(
+        (yield* masker.forThread(adaThread.threadId)).mask(`k ${ACME_CURSOR_KEY}`),
+        "k [CURSOR_API_KEY]",
+      );
     }).pipe(Effect.scoped),
   );
 

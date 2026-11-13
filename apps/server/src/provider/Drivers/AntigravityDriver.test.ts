@@ -26,6 +26,7 @@ import * as ServerSettings from "../../serverSettings.ts";
 import * as AntigravityInstallation from "../AntigravityInstallation.ts";
 import {
   ANTIGRAVITY_AUTH_STDOUT_PREFIX,
+  antigravityAiAccountProfile,
   resolveAntigravityInstanceDirectories,
 } from "../antigravityAuthSupport.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
@@ -384,10 +385,11 @@ it.layer(layerTest)("AntigravityDriver", (it) => {
   const openHubTurn = (
     h: Effect.Success<ReturnType<typeof makeHarness>>,
     credential: { readonly name: string; readonly value: string },
+    thread = "thread-antigravity-direct",
   ) =>
     openSessionWithSecrets(h.instance.orchestrationAdapter, {
-      threadId: ThreadId.make("thread-antigravity-direct"),
-      providerSessionId: ProviderSessionId.make("provider-session-antigravity-direct"),
+      threadId: ThreadId.make(thread),
+      providerSessionId: ProviderSessionId.make(`provider-session-${thread}`),
       modelSelection: { instanceId: h.instance.instanceId, model: "gemini-test-low" },
       runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
         runtimeMode: "full-access",
@@ -408,14 +410,28 @@ it.layer(layerTest)("AntigravityDriver", (it) => {
         // The AI account's key, never the instance's (`must-not-be-used`).
         expect(native[0]?.geminiApiKey).toBe(DIRECT_GEMINI_KEY);
         expect(native[0]?.credentialKeys).toEqual(["GEMINI_API_KEY"]);
-        expect(native[0]?.profileDirectory).toBe(`${h.profileDirectory}-ai-account`);
+        expect(native[0]?.profileDirectory).toBe(
+          antigravityAiAccountProfile(h.path, h.profileDirectory, "thread-antigravity-direct"),
+        );
         expect(native[0]?.args.join(" ")).not.toContain(DIRECT_GEMINI_KEY);
+        // Another Thread (another Space's, say) gets a profile of its own, never this one's
+        // conversations; nor does any session share the instance's.
+        yield* openHubTurn(
+          h,
+          { name: "GEMINI_API_KEY", value: "other-gemini-key-0123456789" },
+          "other",
+        );
+        const profiles = h.launches
+          .filter((launch) => launch.harnessPath !== undefined)
+          .map((launch) => launch.profileDirectory);
+        expect(new Set(profiles).size).toBe(2);
+        expect(profiles).not.toContain(h.profileDirectory);
         const requests = yield* h.readRequests;
         expect(
           requests
             .filter((request) => request.method === "auth/login")
             .map((request) => request.params?.methodId),
-        ).toEqual(["gemini-api-key"]);
+        ).toEqual(["gemini-api-key", "gemini-api-key"]);
       }).pipe(Effect.scoped),
   );
 

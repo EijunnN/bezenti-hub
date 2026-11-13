@@ -34,6 +34,7 @@ import { makeAntigravityAuth, type AntigravityAuth } from "../AntigravityAuth.ts
 import * as AntigravityInstallation from "../AntigravityInstallation.ts";
 import * as AntigravityUsage from "./AntigravityUsage.ts";
 import {
+  antigravityAiAccountProfile,
   antigravityAuthConfigIssue,
   antigravityAuthLabel,
   antigravityAuthUsesBrowser,
@@ -186,14 +187,21 @@ export const AntigravityDriver: ProviderDriver<
 
     const makeRuntime = Effect.fn("AntigravityDriver.makeRuntime")(function* (
       input: Omit<AntigravityAcpRuntimeInput, "spawn" | "childProcessSpawner"> & {
-        readonly aiCredential?: { readonly name: string; readonly value: string };
+        readonly directCredential?: { readonly name: string; readonly value: string };
+        readonly threadId?: string;
+        readonly aiCredential?: string;
       },
     ): Effect.fn.Return<
       AcpSessionRuntime.AcpSessionRuntime["Service"],
       AcpError | ProviderSetupError,
       Scope.Scope
     > {
-      const { aiCredential, ...runtimeInput } = input;
+      const {
+        directCredential: aiCredential,
+        aiCredential: _credentialName,
+        threadId,
+        ...runtimeInput
+      } = input;
       // Spec 4 ticket 07: a Hub turn runs on its direct AI account (a Gemini API key, or a Vertex
       // AI express key), in a profile of its own that never held a Google sign-in. An instance
       // set to sign in with an account never starts one: the Owner's Google account is the
@@ -216,8 +224,18 @@ export const AntigravityDriver: ProviderDriver<
               gcpProject: settings.gcpProject,
               gcpLocation: settings.gcpLocation,
             };
+      // Per Thread: one Thread's conversations (what its agent printed) are never another's.
+      if (aiCredential !== undefined && threadId === undefined) {
+        return yield* new ProviderSetupError({
+          instanceId,
+          operation: "configure",
+          detail: "An AI account session of Antigravity needs its Thread.",
+        });
+      }
       const sessionProfileDirectory =
-        aiCredential === undefined ? profileDirectory : `${profileDirectory}-ai-account`;
+        aiCredential === undefined || threadId === undefined
+          ? profileDirectory
+          : antigravityAiAccountProfile(path, profileDirectory, threadId);
       if (aiCredential === undefined && authConfigIssue !== null) {
         return yield* new ProviderSetupError({
           instanceId,

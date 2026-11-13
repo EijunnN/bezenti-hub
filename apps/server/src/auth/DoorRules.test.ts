@@ -297,11 +297,15 @@ describe("every door of the Hub declares its rule", () => {
       // Asks only whether Hub turns run on AI accounts, to refuse Antigravity's Google sign-in.
       "provider/ProviderAuthService.ts",
       "server.ts",
+      // Asks only the same, to keep Antigravity's login out of titles and summaries.
+      "textGeneration/TextGeneration.ts",
     ]);
     const orchestrator = files.find(({ file }) => file === "orchestration-v2/Orchestrator.ts");
     expect(orchestrator?.text).not.toMatch(/\.forSession\(/u);
-    const auth = files.find(({ file }) => file === "provider/ProviderAuthService.ts");
-    expect(auth?.text).not.toMatch(/\.(issue|issueDirect|plan)\(/u);
+    for (const file of ["provider/ProviderAuthService.ts", "textGeneration/TextGeneration.ts"]) {
+      const text = files.find((entry) => entry.file === file)?.text;
+      expect(text, file).not.toMatch(/\.(issue|issueDirect|plan)\(/u);
+    }
     // On the wire, the key goes only with `provider.openSession`.
     const wire = files.find(({ file }) => file === "environment/RemoteExecutorWire.ts")?.text ?? "";
     expect(wire.match(/aiGateway: Schema\.optionalKey\(AiGatewayAccess\)/gu)?.length).toBe(1);
