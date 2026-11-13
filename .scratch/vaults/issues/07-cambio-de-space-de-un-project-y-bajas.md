@@ -4,13 +4,22 @@
 
 **Blocked by:** 04.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `POST /api/projects/move-plan` añade `vaultsLost` (Vaults que el Project recibe por el origen y que el destino no tiene), calculado con `EffectiveVaults`.
-- [ ] Al mover, se borran las `project_vault_choices` que nombran Vaults no permitidos al destino, en la misma transacción que el cambio de Space.
-- [ ] Quitar un User (spec 1) borra sus allowances de User; borrar una Organization borra sus Vaults y valores (dentro del flujo de borrado del spec 1).
-- [ ] Red-first: tras mover un Project de Acme a Globex, un turno nuevo no recibe los Vaults de Acme, y `list_secret_names` y `vaults.threadEnvironment` tampoco los listan; tras quitar una allowance, la siguiente terminal no la recibe; tras borrar una Organization no queda ninguna fila ni valor suyo.
-- [ ] Puertas: HttpApi `projects.movePlan` (misma regla que hoy), WS de allowances. Sin puertas nuevas.
-- [ ] Web: el diálogo «Move to…» lista los Vaults que se pierden antes de «Stop Threads and move».
-- [ ] Tests en `HubWithEnvironments.projectMove.test.ts` y en el flujo de borrado de Organization.
-- [ ] Prueba real: mover un Project con un Vault de Acme a Globex; el diálogo lo avisa; un turno en el destino hace `printenv` y no lo tiene.
+- [x] `POST /api/projects/move-plan` añade `vaultsLost` (Vaults que el Project recibe por el origen y que el destino no tiene), calculado con `EffectiveVaults`.
+- [x] Al mover, se borran las `project_vault_choices` que nombran Vaults no permitidos al destino, en la misma transacción que el cambio de Space.
+- [x] Quitar un User (spec 1) borra sus allowances de User; borrar una Organization borra sus Vaults y valores (dentro del flujo de borrado del spec 1).
+- [x] Red-first: tras mover un Project de Acme a Globex, un turno nuevo no recibe los Vaults de Acme, y `list_secret_names` y `vaults.threadEnvironment` tampoco los listan; tras quitar una allowance, la siguiente terminal no la recibe; tras borrar una Organization no queda ninguna fila ni valor suyo.
+- [x] Puertas: HttpApi `projects.movePlan` (misma regla que hoy), WS de allowances. Sin puertas nuevas.
+- [x] Web: el diálogo «Move to…» lista los Vaults que se pierden antes de «Stop Threads and move».
+- [x] Tests en `HubWithEnvironments.projectMove.test.ts` y en el flujo de borrado de Organization.
+- [x] Prueba real: mover un Project con un Vault de Acme a Globex; el diálogo lo avisa; un turno en el destino hace `printenv` y no lo tiene.
+
+**Hecho** (rama `impl/vlt-07`, sin migración):
+
+- Una regla para las bajas: `vaults/VaultReachLoss.ts`. La entrega ya se recalcula en cada turno, terminal y script (`EffectiveVaults`/`VaultReach`), y los procesos vivos siguen la regla de huella del ticket 04 (la sesión del provider se reabre en el siguiente turno; la terminal abierta dice «Secrets changed»). `VaultReachLoss` borra las filas que nombran un alcance perdido: mover un Project (`keepProjectChoicesReaching`, dentro del commit del movimiento con el nuevo `EventSink.commitProjectCommand` `alsoCommit`), quitar una allowance de un Space o de un User (`Vaults.allow` pasa por aquí), quitar un User (`InstallationUserService`, auditado `vault.allow` false), borrar una Organization (`OrganizationLifecycle.delete`: sus Vaults, entradas, valores, allowances, defectos y elecciones; auditado `vault.delete`) y borrar un Vault. Tabla completa en `docs/internals/secrets.md`, «Losing reach».
+- `EffectiveVaults.projectMove` (misma parte de Space que `forThread`, extraída a `spaceSide`) da `vaultsLost` (solo nombres) y el borrado de elecciones. `ProjectService` es el único llamador nuevo; DoorRules comprueba que no llama a `forThread`.
+- Contrato: `ProjectMovePlan.vaultsLost` (por defecto `[]` al decodificar si viene de un Hub anterior). Web: sección «Vaults it loses».
+- Testkit: Vaults/EffectiveVaults/SecretDelivery van bajo los Projects en `UserAuth.testkit.ts`, como en el servidor.
+- `list_secret_names` aún no existe (ticket 06); lo comprobado es `vaults.threadEnvironment` y `forThread`, de donde saldrá.
+- Prueba real (`makita-livepass-s5-07`, Podman): todo PASS.
