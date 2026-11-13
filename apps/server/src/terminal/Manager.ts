@@ -89,6 +89,7 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as PortScanner from "../preview/PortScanner.ts";
 import * as NativeTelemetryClient from "../resourceTelemetry/NativeTelemetryClient.ts";
 import { terminalOutputStream } from "./OutputProtocol.ts";
+import * as SessionProcesses from "./SessionProcesses.ts";
 import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 
 export {
@@ -1501,6 +1502,11 @@ interface TerminalManagerOptions {
   >;
   subprocessPollIntervalMs?: number;
   processKillGraceMs?: number;
+  /**
+   * Ends what a shell's session started (its pid is the session id), for shells closed as stale.
+   * Default: nothing (fake PTYs have no real session); `make` passes `SessionProcesses.endSession`.
+   */
+  endSessionProcesses?: (sessionId: number, graceMs: number) => Effect.Effect<void>;
   maxRetainedInactiveSessions?: number;
   registerTerminalProcesses?: (input: {
     readonly threadId: string;
@@ -1592,6 +1598,7 @@ export const make = Effect.fn("TerminalManager.make")(function* () {
     registerTerminalProcesses: portDiscovery.registerTerminalProcesses,
     unregisterTerminal: portDiscovery.unregisterTerminal,
     resolveProviderInstanceEnvironment,
+    endSessionProcesses: SessionProcesses.endSession,
   });
 });
 
@@ -1707,6 +1714,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const subprocessPollIntervalMs =
     options.subprocessPollIntervalMs ?? DEFAULT_SUBPROCESS_POLL_INTERVAL_MS;
   const processKillGraceMs = options.processKillGraceMs ?? DEFAULT_PROCESS_KILL_GRACE_MS;
+  const endSessionProcesses = options.endSessionProcesses ?? (() => Effect.void);
   const maxRetainedInactiveSessions =
     options.maxRetainedInactiveSessions ?? DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS;
   const registerTerminalProcesses = options.registerTerminalProcesses ?? (() => Effect.void);
@@ -2418,9 +2426,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
   });
 
-  const stopProcess = Effect.fn("terminal.stopProcess")(function* (session: TerminalSessionState) {
+  const stopProcess = Effect.fn("terminal.stopProcess")(function* (
+    session: TerminalSessionState,
+    endSession = false,
+  ) {
     const process = session.process;
     if (!process) return;
+    // The shell leads its PTY's session: its pid is the session id of every job it started.
+    const sessionId = process.pid;
 
     const updatedAt = yield* nowIso;
     yield* modifyManagerState((state) => {
@@ -2443,6 +2456,20 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       threadId: session.threadId,
       terminalId: session.terminalId,
     });
+    if (endSession && Number.isSafeInteger(sessionId) && sessionId > 1) {
+      // Closed as stale: its background jobs (own process groups the PTY close never reaches)
+      // end too. Processes that left the session (setsid, daemons) stay: an accepted risk.
+      yield* endSessionProcesses(sessionId, processKillGraceMs).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("failed to end a closed terminal's session", {
+            threadId: session.threadId,
+            terminalId: session.terminalId,
+            cause,
+          }),
+        ),
+        Effect.forkIn(workerScope),
+      );
+    }
     yield* startKillEscalation(process, session.threadId, session.terminalId);
     yield* evictInactiveSessionsIfNeeded();
   });
@@ -2705,13 +2732,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     threadId: string,
     terminalId: string,
     deleteHistoryOnClose: boolean,
+    endSession = false,
   ) {
     const key = toSessionKey(threadId, terminalId);
     const session = yield* getSession(threadId, terminalId);
     const closedEventSequence = Option.isSome(session) ? session.value.eventSequence + 1 : 0;
 
     if (Option.isSome(session)) {
-      yield* stopProcess(session.value);
+      yield* stopProcess(session.value, endSession);
       yield* unregisterTerminal({ threadId, terminalId });
       yield* persistHistory(threadId, terminalId, session.value.history);
     }
@@ -3575,15 +3603,21 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     withThreadLock(
       input.threadId,
       Effect.gen(function* () {
+        const endSession = input.endSession === true;
         if (input.terminalId) {
-          yield* closeSession(input.threadId, input.terminalId, input.deleteHistory === true);
+          yield* closeSession(
+            input.threadId,
+            input.terminalId,
+            input.deleteHistory === true,
+            endSession,
+          );
           return;
         }
 
         const threadSessions = yield* sessionsForThread(input.threadId);
         yield* Effect.forEach(
           threadSessions,
-          (session) => closeSession(input.threadId, session.terminalId, false),
+          (session) => closeSession(input.threadId, session.terminalId, false, endSession),
           { discard: true },
         );
 
@@ -3617,7 +3651,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             // Checked again under the lock: a shell reopened since for the new Space stays.
             const current = yield* getSession(session.threadId, session.terminalId);
             if (Option.isNone(current) || current.value !== session || !isStale(session)) return;
-            yield* closeSession(session.threadId, session.terminalId, true);
+            yield* closeSession(session.threadId, session.terminalId, true, true);
             closed += 1;
           }),
         ).pipe(

@@ -82,6 +82,11 @@ export const TerminalCloseInput = Schema.Struct({
   ...TerminalThreadInput.fields,
   terminalId: Schema.optional(TerminalIdSchema),
   deleteHistory: Schema.optional(Schema.Boolean),
+  /**
+   * The Hub closes this shell as stale (its Space or User no longer holds): the machine also ends
+   * what the shell's session started (background jobs). A machine that predates it ignores it.
+   */
+  endSession: Schema.optional(Schema.Boolean),
 });
 export type TerminalCloseInput = typeof TerminalCloseInput.Type;
 
