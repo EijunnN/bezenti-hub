@@ -61,7 +61,9 @@ export class SecretMasker extends Context.Service<
 >()("t3/vaults/SecretMasker") {}
 
 /** How long a Thread's masker is reused before its owner's effective set is read again. */
-const MASKER_TTL_MS = 5 * 60_000;
+const MASKER_TTL_MS = 30_000;
+/** How long every Vault value (the masker of a Thread not projected yet) is reused. */
+const EVERY_VALUE_TTL_MS = 10_000;
 const MAX_CACHED_THREADS = 2048;
 
 interface Entry {
@@ -113,14 +115,39 @@ export const make = Effect.gen(function* () {
           .get(valueId)
           .pipe(Effect.map(Option.map((bytes) => new TextDecoder().decode(bytes))));
 
+  let everyValue: { readonly loadedAt: number; readonly masker: ThreadMasker } | undefined;
+  /**
+   * Every value the Vaults hold: the masker of a Thread whose creation is being written (its first
+   * message and title come with it, before the Thread has a Space or an owner to read).
+   */
+  const everyVaultValue = Effect.fn("SecretMasker.everyVaultValue")(function* (now: number) {
+    if (everyValue !== undefined && now - everyValue.loadedAt < EVERY_VALUE_TTL_MS) {
+      return everyValue.masker;
+    }
+    const rows = yield* sql<{ readonly name: string; readonly valueId: string }>`
+      SELECT name, value_id AS "valueId" FROM vault_entries
+      WHERE value_id IS NOT NULL AND unmasked = 0 ORDER BY vault_id, name
+    `;
+    const secrets: Array<MaskableSecret> = [];
+    for (const row of rows) {
+      const value = yield* readValue(row.valueId);
+      if (Option.isSome(value)) secrets.push({ name: row.name, value: value.value });
+    }
+    rememberKnownSecrets(secrets);
+    everyValue = { loadedAt: now, masker: threadMaskerOf(makeSecretPatterns(secrets)) };
+    return everyValue.masker;
+  });
+
   /** What the Thread's processes received, and its owner's effective set now. */
   const load = Effect.fn("SecretMasker.load")(function* (root: string) {
     const secrets: Array<MaskableSecret> = [];
     const seen = new Set<string>();
-    const owner = yield* sql<{ readonly ownerUserId: string | null }>`
+    const threads = yield* sql<{ readonly ownerUserId: string | null }>`
       SELECT owner_user_id AS "ownerUserId" FROM orchestration_v2_projection_threads
       WHERE thread_id = ${root}
-    `.pipe(Effect.map((rows) => rows[0]?.ownerUserId ?? null));
+    `;
+    if (threads.length === 0) return undefined;
+    const owner = threads[0]?.ownerUserId ?? null;
     if (owner !== null && Option.isSome(effective)) {
       const set = yield* effective.value
         .forThread({ threadId: root as ThreadId, actingUserId: UserId.make(owner) })
@@ -161,6 +188,7 @@ export const make = Effect.gen(function* () {
       const cached = cache.get(root);
       if (cached !== undefined && now - cached.loadedAt < MASKER_TTL_MS) return cached.masker;
       const loaded = yield* load(root);
+      if (loaded === undefined) return yield* everyVaultValue(now);
       // What was delivered before (or while this loaded) stays, even if its row is not written.
       const latest = cache.get(root)?.secrets ?? [];
       const merged = entryOf(now, [

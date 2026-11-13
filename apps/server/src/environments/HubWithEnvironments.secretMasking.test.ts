@@ -12,8 +12,10 @@ import * as NodePath from "node:path";
 import { assert, describe, it } from "@effect/vitest";
 import {
   MAIN_VAULT_ID,
-  type ProviderInstanceId,
-  type ThreadId,
+  CommandId,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
   type UserId,
   type VaultEntryId,
 } from "@t3tools/contracts";
@@ -39,7 +41,7 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as SecretMasker from "../vaults/SecretMasker.ts";
 import * as Vaults from "../vaults/Vaults.ts";
-import { type Hub, makeHub } from "./HubWithEnvironments.testkit.ts";
+import { type Hub, makeHub, seedProject } from "./HubWithEnvironments.testkit.ts";
 import {
   awaitUploaded,
   loadFixture,
@@ -289,6 +291,40 @@ describe("Hub con Environments: a Thread's secret values are masked in its histo
       const masker = yield* restarted.forThread(threadId);
       assert.equal(masker.mask(`was ${OWNER_TOKEN}`), "was [OWNER_TOKEN]");
       assert.equal(masker.mask(`now ${ROTATED_TOKEN}`), "now [OWNER_TOKEN]");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a new Thread's first message and title are masked before any process ran", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub();
+      const owner = yield* ownerIdOf(hub);
+      yield* putOwnerToken(hub, owner, OWNER_TOKEN);
+      const projectId = ProjectId.make("project:pasted");
+      yield* seedProject(hub.server, { projectId, title: "Pasted", defaultModelSelection: null });
+      const threadId = ThreadId.make("thread:pasted");
+      yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("command:pasted"),
+        threadId,
+        projectId,
+        title: `My token is ${OWNER_TOKEN}`,
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-sonnet-4-6",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        ownerUserId: owner,
+      });
+      const projection = yield* hub
+        .service(Orchestrator.OrchestratorV2)
+        .getThreadProjection(threadId);
+      assert.equal(projection.thread.title, "My token is [OWNER_TOKEN]");
+      assert.notInclude(yield* databaseText(hub), OWNER_TOKEN);
     }).pipe(Effect.scoped),
   );
 });
