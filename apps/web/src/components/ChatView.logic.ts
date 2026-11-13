@@ -1555,6 +1555,19 @@ export function presentThreadShellFromProjection(
   };
 }
 
+/**
+ * The Hub AI account the Thread's live provider session runs on (spec 4 ticket 06): its latest
+ * session of the Thread's provider instance, while it has not stopped.
+ */
+export function deriveThreadAiAccount(projection: ThreadStructure | null) {
+  if (projection === null) return null;
+  const session = projection.providerSessions.findLast(
+    (candidate) => candidate.providerInstanceId === projection.thread.providerInstanceId,
+  );
+  if (session === undefined || session.status === "stopped") return null;
+  return session.aiAccount ?? null;
+}
+
 /** Background work the provider still runs after the latest run ended. */
 export function deriveThreadPendingBackgroundTasks(projection: ThreadStructure | null) {
   if (projection === null) return [];

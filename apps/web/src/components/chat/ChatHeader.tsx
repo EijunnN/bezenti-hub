@@ -2,6 +2,7 @@ import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
   type OrchestrationV2ThreadMove,
+  type ProviderSessionAiAccount,
   type ScopedThreadRef,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -65,6 +66,8 @@ interface ChatHeaderProps {
   environmentState?: ThreadEnvironmentState | null | undefined;
   /** The Thread's latest move to another Environment; shown while it runs. */
   activeThreadMove?: OrchestrationV2ThreadMove | null | undefined;
+  /** The Hub AI account its provider session runs on (spec 4 ticket 06). */
+  aiAccount?: ProviderSessionAiAccount | null | undefined;
   isServerThread: boolean;
   activeProject: EnvironmentProject | null;
   parentThreadLink: { threadId: ThreadId; title: string } | null;
@@ -94,6 +97,7 @@ export const ChatHeader = memo(function ChatHeader({
   activeEnvironment,
   environmentState,
   activeThreadMove,
+  aiAccount,
   isServerThread,
   activeProject,
   parentThreadLink,
@@ -479,6 +483,27 @@ export const ChatHeader = memo(function ChatHeader({
               </TooltipTrigger>
               <TooltipPopup side="top">
                 Runs on {activeEnvironment.name} · {activeEnvironmentStatusLabel(activeEnvironment)}
+              </TooltipPopup>
+            </Tooltip>
+          ) : null}
+          {renamingTitle === null && aiAccount ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Badge
+                    variant="outline"
+                    size="sm"
+                    data-ai-account={aiAccount.id}
+                    aria-label={`AI account in use: ${aiAccount.name}`}
+                  />
+                }
+              >
+                {aiAccount.name}
+                {aiAccount.model === null ? null : ` · ${aiAccount.model}`}
+              </TooltipTrigger>
+              <TooltipPopup side="top">
+                The agent uses the Hub's AI account {aiAccount.name} through the AI gateway. No
+                login of the machine is used.
               </TooltipPopup>
             </Tooltip>
           ) : null}

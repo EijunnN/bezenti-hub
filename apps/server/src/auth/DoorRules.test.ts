@@ -257,6 +257,46 @@ describe("every door of the Hub declares its rule", () => {
     }
   });
 
+  it("hands a Thread's gateway key only to its provider process (spec 4 ticket 06)", () => {
+    // Thread keys are issued in one place, for a provider session about to start a process.
+    expect(
+      files
+        .filter(({ text }) => /\.issueForThread\(/u.test(text))
+        .map(({ file }) => file)
+        .toSorted(),
+    ).toEqual(["ai/AiGatewaySessions.ts"]);
+    // That rule is reached by the session manager (which opens the process), the orchestrator
+    // (which only asks whether a Thread needs a process of its own) and the server's wiring.
+    expect(
+      files
+        .filter(({ text }) => /ai\/AiGatewaySessions\.ts"/u.test(text))
+        .map(({ file }) => file)
+        .toSorted(),
+    ).toEqual([
+      "orchestration-v2/Orchestrator.ts",
+      "orchestration-v2/ProviderSessionManager.ts",
+      "server.ts",
+    ]);
+    const orchestrator = files.find(({ file }) => file === "orchestration-v2/Orchestrator.ts");
+    expect(orchestrator?.text).not.toMatch(/\.forSession\(/u);
+    // On the wire, the key goes only with `provider.openSession`.
+    const wire = files.find(({ file }) => file === "environment/RemoteExecutorWire.ts")?.text ?? "";
+    expect(wire.match(/aiGateway: Schema\.optionalKey\(AiGatewayAccess\)/gu)?.length).toBe(1);
+    // Terminals and setup scripts never get one (a User's shell would carry the Thread's key).
+    for (const file of [
+      "environment/ThreadWorkspace.ts",
+      "project/ProjectSetupScriptRunner.ts",
+      "terminal/Manager.ts",
+    ]) {
+      const text = files.find((entry) => entry.file === file)?.text ?? "";
+      expect(text, file).not.toMatch(/aiGateway|AiGatewaySessions|T3_AI_GATEWAY_KEY/u);
+    }
+    // A machine's agents reach the gateway through its one relay, which reads no credential.
+    const relay = files.find(({ file }) => file === "environments/AiGatewayRelay.ts")?.text ?? "";
+    expect(relay).toMatch(/listen\(0, "127\.0\.0\.1"/u);
+    expect(relay).not.toMatch(/EnvironmentAuth|ServerSecretStore|joinedHubState|\.credential\b/u);
+  });
+
   it("signs in to subscriptions over the Owner's WS RPCs only: no callback route, tokens read by AiAccounts alone", () => {
     // Every sign-in door is the Owner's, on the Installation, whatever the session's scopes.
     const signIn = [...WsRpcGroup.requests.keys()].filter((tag) =>
