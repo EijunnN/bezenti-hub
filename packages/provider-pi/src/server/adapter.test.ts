@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off -- the gateway test reads the Pi home it made.
 import * as NodePath from "node:path";
 import * as NodeOS from "node:os";
 import * as NodeFS from "node:fs";
