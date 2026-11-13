@@ -12,6 +12,7 @@ import { useProjectGroupUpdate } from "../../hooks/useProjectGroupUpdate";
 import type { SidebarProjectSnapshot } from "../../sidebarProjectGrouping";
 import { useCurrentSpace } from "../../state/currentSpace";
 import { usePrimaryEnvironmentId } from "../../state/environments";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
 /**
@@ -101,25 +102,41 @@ export function ProjectPreferredEnvironmentSettings({
           )
         }
         control={
-          <select
-            aria-label="Preferred environment"
-            className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm sm:w-64"
+          <Select
             disabled={saving || !canEdit}
+            items={[
+              ...(usable.some((environment) => environment.id === current)
+                ? []
+                : [
+                    {
+                      value: current,
+                      label: currentListed?.name ?? "An Environment you can't use",
+                    },
+                  ]),
+              ...usable.map((environment) => ({ value: environment.id, label: environment.name })),
+            ]}
             value={current}
-            onChange={(event) => void choose(event.currentTarget.value as EnvironmentId)}
+            onValueChange={(value) => {
+              if (value !== null) void choose(value as EnvironmentId);
+            }}
           >
-            {/* Someone else's machine, chosen by them, stays named but can't be picked again. */}
-            {usable.some((environment) => environment.id === current) ? null : (
-              <option value={current} disabled>
-                {currentListed?.name ?? "An Environment you can't use"}
-              </option>
-            )}
-            {usable.map((environment) => (
-              <option key={environment.id} value={environment.id}>
-                {environment.name}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger aria-label="Preferred environment" className="sm:w-64">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectPopup>
+              {/* Someone else's machine, chosen by them, stays named but can't be picked again. */}
+              {usable.some((environment) => environment.id === current) ? null : (
+                <SelectItem value={current} disabled>
+                  {currentListed?.name ?? "An Environment you can't use"}
+                </SelectItem>
+              )}
+              {usable.map((environment) => (
+                <SelectItem key={environment.id} value={environment.id}>
+                  {environment.name}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
         }
       />
     </SettingsSection>

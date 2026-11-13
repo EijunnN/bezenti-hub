@@ -16,6 +16,7 @@ import { errorMessageOf } from "../../lib/errorMessage";
 import { useCurrentSpace } from "../../state/currentSpace";
 import { EnvironmentStatusBadge } from "../EnvironmentStatusDot";
 import { Button } from "../ui/button";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import {
   Dialog,
   DialogDescription,
@@ -352,26 +353,36 @@ export function HubEnvironmentsSettings() {
                 <label className="text-xs font-medium" htmlFor="hub-environment-use">
                   Used by
                 </label>
-                <select
-                  className="mt-1 h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
-                  id="hub-environment-use"
+                <Select<string>
                   disabled={pending}
+                  items={[
+                    { value: "personal", label: "Only me (personal machine)" },
+                    ...organizations.map((space) => ({
+                      value: space.id,
+                      label: `Everyone in ${space.name} (dedicated)`,
+                    })),
+                  ]}
                   value={changingMode.use}
-                  onChange={(event) => {
-                    const value = event.currentTarget.value;
+                  onValueChange={(value) => {
+                    if (value === null) return;
                     setChangingMode({
                       environment: changingMode.environment,
                       use: value === "personal" ? "personal" : (value as SpaceId),
                     });
                   }}
                 >
-                  <option value="personal">Only me (personal machine)</option>
-                  {organizations.map((space) => (
-                    <option key={space.id} value={space.id}>
-                      {`Everyone in ${space.name} (dedicated)`}
-                    </option>
-                  ))}
-                </select>
+                  <SelectTrigger id="hub-environment-use">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectPopup>
+                    <SelectItem value="personal">Only me (personal machine)</SelectItem>
+                    {organizations.map((space) => (
+                      <SelectItem key={space.id} value={space.id}>
+                        {`Everyone in ${space.name} (dedicated)`}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
                 {leavesSpace(changingMode) ? (
                   <p className="mt-2 text-sm text-warning-foreground">
                     {`Work files on ${changingMode.environment.name} for ${spaceName(changingMode.environment.spaceId) ?? "a Space"} will be deleted: its Sandbox's home goes, so no other Space or owner ever sees them.`}

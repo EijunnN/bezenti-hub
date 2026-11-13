@@ -10,6 +10,7 @@ import {
 } from "../../environments/primary/sshInstall";
 import { errorMessageOf } from "../../lib/errorMessage";
 import { Button } from "../ui/button";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Checkbox } from "../ui/checkbox";
 import {
   Dialog,
@@ -249,17 +250,22 @@ export function SshInstallDialog(props: {
                 <label className={fieldClass} htmlFor="ssh-install-auth">
                   Sign in with
                 </label>
-                <select
-                  className="mt-1 h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
-                  id="ssh-install-auth"
+                <Select
+                  items={[
+                    { value: "key", label: "A private key" },
+                    { value: "agent", label: "The Hub's SSH agent" },
+                  ]}
                   value={form.authKind}
-                  onChange={(event) =>
-                    set("authKind", event.currentTarget.value === "agent" ? "agent" : "key")
-                  }
+                  onValueChange={(value) => set("authKind", value === "agent" ? "agent" : "key")}
                 >
-                  <option value="key">A private key</option>
-                  <option value="agent">The Hub's SSH agent</option>
-                </select>
+                  <SelectTrigger id="ssh-install-auth">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectPopup>
+                    <SelectItem value="key">A private key</SelectItem>
+                    <SelectItem value="agent">The Hub's SSH agent</SelectItem>
+                  </SelectPopup>
+                </Select>
               </div>
               {form.authKind === "key" ? (
                 <>
@@ -304,21 +310,32 @@ export function SshInstallDialog(props: {
                 <label className={fieldClass} htmlFor="ssh-install-space">
                   Dedicated to
                 </label>
-                <select
-                  className="mt-1 h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
-                  id="ssh-install-space"
+                <Select
+                  items={
+                    props.organizations.length === 0
+                      ? [{ value: "", label: "Create an Organization first" }]
+                      : props.organizations.map((space) => ({
+                          value: space.id,
+                          label: `Everyone in ${space.name}`,
+                        }))
+                  }
                   value={form.spaceId}
-                  onChange={(event) => set("spaceId", event.currentTarget.value)}
+                  onValueChange={(value) => set("spaceId", value ?? "")}
                 >
-                  {props.organizations.length === 0 ? (
-                    <option value="">Create an Organization first</option>
-                  ) : null}
-                  {props.organizations.map((space) => (
-                    <option key={space.id} value={space.id}>
-                      {`Everyone in ${space.name}`}
-                    </option>
-                  ))}
-                </select>
+                  <SelectTrigger id="ssh-install-space">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectPopup>
+                    {props.organizations.length === 0 ? (
+                      <SelectItem value="">Create an Organization first</SelectItem>
+                    ) : null}
+                    {props.organizations.map((space) => (
+                      <SelectItem key={space.id} value={space.id}>
+                        {`Everyone in ${space.name}`}
+                      </SelectItem>
+                    ))}
+                  </SelectPopup>
+                </Select>
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>

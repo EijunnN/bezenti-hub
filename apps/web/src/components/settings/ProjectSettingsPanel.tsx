@@ -9,7 +9,6 @@ import {
   type EnvironmentId,
   type ProjectId,
   type SidebarProjectGroupingMode,
-  type SpaceId,
   type SpaceSummary,
 } from "@t3tools/contracts";
 import { projectMoveDestinations } from "@t3tools/client-runtime/spaces/space-directory";
@@ -198,15 +197,12 @@ function ProjectSpaceSettings({ group }: { group: SidebarProjectSnapshot }) {
         title="Move to another Space"
         description={`In ${originName}. Its Threads move with it; running ones stop.`}
         control={
-          <select
-            aria-label="Move to…"
-            className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm sm:w-64"
+          <Select
             disabled={moving !== null}
-            value=""
-            onChange={(event) => {
-              const destination = destinations.find(
-                (space) => space.id === (event.currentTarget.value as SpaceId),
-              );
+            items={destinations.map((space) => ({ value: space.id, label: space.name }))}
+            value={null}
+            onValueChange={(value) => {
+              const destination = destinations.find((space) => space.id === value);
               if (destination === undefined) return;
               const opened = { projectId: project.id, projectTitle: project.title, destination };
               setMoving({ ...opened, planned: { status: "planning" } });
@@ -217,15 +213,17 @@ function ProjectSpaceSettings({ group }: { group: SidebarProjectSnapshot }) {
               );
             }}
           >
-            <option value="" disabled>
-              Move to…
-            </option>
-            {destinations.map((space) => (
-              <option key={space.id} value={space.id}>
-                {space.name}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger aria-label="Move to…" className="sm:w-64">
+              <SelectValue placeholder="Move to…" />
+            </SelectTrigger>
+            <SelectPopup>
+              {destinations.map((space) => (
+                <SelectItem key={space.id} value={space.id}>
+                  {space.name}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
         }
       />
       {dialog}

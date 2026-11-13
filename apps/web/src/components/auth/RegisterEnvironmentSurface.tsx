@@ -11,6 +11,7 @@ import { fetchAccount } from "~/environments/primary/userAccounts";
 import { errorMessageOf } from "~/lib/errorMessage";
 import { emptyStepUp, StepUpFields, toStepUp } from "../settings/AccountSettingsSection";
 import { Alert, AlertDescription } from "../ui/alert";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { StandalonePage, StandalonePageHeader } from "../ui/standalone-page";
@@ -206,26 +207,33 @@ export function RegisterEnvironmentSurface({ signedIn }: { readonly signedIn: bo
               <label className="text-xs font-medium" htmlFor="register-environment-use">
                 Used by
               </label>
-              <select
-                className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+              <Select<string>
                 disabled={pending}
-                id="register-environment-use"
-                onChange={(event) =>
-                  setUse(
-                    event.currentTarget.value === "personal"
-                      ? "personal"
-                      : (event.currentTarget.value as SpaceId),
-                  )
-                }
+                items={[
+                  { value: "personal", label: "Only me (personal machine)" },
+                  ...request.dedicatedSpaces.map((space) => ({
+                    value: space.id,
+                    label: `Everyone in ${space.name} (dedicated)`,
+                  })),
+                ]}
+                onValueChange={(value) => {
+                  if (value !== null)
+                    setUse(value === "personal" ? "personal" : (value as SpaceId));
+                }}
                 value={use}
               >
-                <option value="personal">Only me (personal machine)</option>
-                {request.dedicatedSpaces.map((space) => (
-                  <option key={space.id} value={space.id}>
-                    {`Everyone in ${space.name} (dedicated)`}
-                  </option>
-                ))}
-              </select>
+                <SelectTrigger id="register-environment-use">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectPopup>
+                  <SelectItem value="personal">Only me (personal machine)</SelectItem>
+                  {request.dedicatedSpaces.map((space) => (
+                    <SelectItem key={space.id} value={space.id}>
+                      {`Everyone in ${space.name} (dedicated)`}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
             </>
           ) : null}
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">

@@ -24,9 +24,11 @@ import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
-import { SELECT_CLASS, settle } from "./vaultCommands";
+import { settle } from "./vaultCommands";
 
 // Spec 5 ticket 03: allowing Vaults (the Owner), a Space's defaults and a Project's choices (the
 // Owner and the Space's Admins), and the names a Thread receives. Never values.
@@ -143,23 +145,26 @@ export function VaultAllowances(props: {
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
         <label className="flex flex-1 flex-col gap-1 text-xs font-medium">
           Allow to
-          <select
-            aria-label={`Allow ${vault.name} to`}
-            className={SELECT_CLASS}
+          <Select
             disabled={pending}
-            value={choice}
-            onChange={(event) => {
-              setChoice(event.currentTarget.value);
+            items={options.map((option) => ({ value: option.key, label: option.label }))}
+            value={choice === "" ? null : choice}
+            onValueChange={(value) => {
+              setChoice(value ?? "");
               setUnderstood(false);
             }}
           >
-            <option value="">Choose a Space or a User…</option>
-            {options.map((option) => (
-              <option key={option.key} value={option.key}>
-                {option.label}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger aria-label={`Allow ${vault.name} to`}>
+              <SelectValue placeholder="Choose a Space or a User…" />
+            </SelectTrigger>
+            <SelectPopup>
+              {options.map((option) => (
+                <SelectItem key={option.key} value={option.key}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
         </label>
         <Button
           size="sm"
@@ -178,11 +183,10 @@ export function VaultAllowances(props: {
             {USER_ALLOWANCE_RISK}
           </p>
           <label className="flex items-center gap-2 text-xs font-medium">
-            <input
-              type="checkbox"
+            <Checkbox
               aria-label={UNDERSTOOD}
               checked={understood}
-              onChange={(event) => setUnderstood(event.currentTarget.checked)}
+              onCheckedChange={(checked) => setUnderstood(checked === true)}
             />
             {UNDERSTOOD}
           </label>
@@ -290,18 +294,24 @@ export function SpaceDefaultVaults(props: { readonly environmentId: EnvironmentI
           )
         }
         control={
-          <select
-            aria-label="Space for default Vaults"
-            className={`${SELECT_CLASS} sm:w-56`}
-            value={shown ?? ""}
-            onChange={(event) => setSpaceId(event.currentTarget.value as SpaceId)}
+          <Select
+            items={spaces.map((space) => ({ value: space.id, label: space.name }))}
+            value={shown ?? null}
+            onValueChange={(value) => {
+              if (value !== null) setSpaceId(value as SpaceId);
+            }}
           >
-            {spaces.map((space) => (
-              <option key={space.id} value={space.id}>
-                {space.name}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger aria-label="Space for default Vaults" className="sm:w-56">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectPopup>
+              {spaces.map((space) => (
+                <SelectItem key={space.id} value={space.id}>
+                  {space.name}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
         }
       />
       {choices === null ? null : choices.allowed.length === 0 ? (
@@ -322,16 +332,15 @@ export function SpaceDefaultVaults(props: { readonly environmentId: EnvironmentI
             return (
               <li key={vaultId} className="flex items-center gap-3 px-4 py-2 text-sm">
                 <label className="flex flex-1 items-center gap-2">
-                  <input
-                    type="checkbox"
+                  <Checkbox
                     aria-label={`Default: ${option.name}`}
                     checked={isDefault}
                     disabled={
                       fixed || pending || !choices.canChoose || (option.archived && !isDefault)
                     }
-                    onChange={(event) =>
+                    onCheckedChange={(checked) =>
                       void setDefaults(
-                        event.currentTarget.checked
+                        checked === true
                           ? [...defaults, vaultId]
                           : defaults.filter((id) => id !== vaultId),
                       )
@@ -427,13 +436,22 @@ export function ProjectVaults(props: {
               {choices.fixedDefaults.includes(option.vaultId) ? (
                 <span className="text-xs text-muted-foreground">Always (Personal space)</span>
               ) : (
-                <select
-                  aria-label={`${option.name} in this Project`}
-                  className={`${SELECT_CLASS} sm:w-56`}
+                <Select
                   disabled={pending || !choices.canChoose}
+                  items={[
+                    {
+                      value: "inherit",
+                      label: isDefault(option.vaultId)
+                        ? "As the Space (default)"
+                        : "As the Space (not a default)",
+                    },
+                    { value: "add", label: "Add" },
+                    { value: "remove", label: "Remove" },
+                  ]}
                   value={current}
-                  onChange={(event) => {
-                    const choice = event.currentTarget.value as "add" | "remove" | "inherit";
+                  onValueChange={(value) => {
+                    if (value === null) return;
+                    const choice = value as "add" | "remove" | "inherit";
                     setPending(true);
                     setError(null);
                     void settle(
@@ -448,14 +466,19 @@ export function ProjectVaults(props: {
                       .finally(() => setPending(false));
                   }}
                 >
-                  <option value="inherit">
-                    {isDefault(option.vaultId)
-                      ? "As the Space (default)"
-                      : "As the Space (not a default)"}
-                  </option>
-                  <option value="add">Add</option>
-                  <option value="remove">Remove</option>
-                </select>
+                  <SelectTrigger aria-label={`${option.name} in this Project`} className="sm:w-56">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectPopup>
+                    <SelectItem value="inherit">
+                      {isDefault(option.vaultId)
+                        ? "As the Space (default)"
+                        : "As the Space (not a default)"}
+                    </SelectItem>
+                    <SelectItem value="add">Add</SelectItem>
+                    <SelectItem value="remove">Remove</SelectItem>
+                  </SelectPopup>
+                </Select>
               )}
             </li>
           );

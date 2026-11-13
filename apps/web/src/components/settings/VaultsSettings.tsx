@@ -22,11 +22,13 @@ import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
 import { Input } from "../ui/input";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { emptyStepUp, StepUpFields, toStepUp } from "./AccountSettingsSection";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 import { SpaceDefaultVaults, VaultAllowances } from "./VaultChoices";
-import { SELECT_CLASS, settle } from "./vaultCommands";
+import { settle } from "./vaultCommands";
 
 const VALUE_INPUT_PROPS = {
   // Not a login: no password manager prompt, but hidden as typed.
@@ -67,11 +69,10 @@ function ConfirmDangerous(props: {
 }) {
   return (
     <label className="flex items-center gap-2 text-xs font-medium text-destructive">
-      <input
-        type="checkbox"
+      <Checkbox
         aria-label={CONFIRM_DANGEROUS}
         checked={props.checked}
-        onChange={(event) => props.onChange(event.currentTarget.checked)}
+        onCheckedChange={(checked) => props.onChange(checked === true)}
       />
       {CONFIRM_DANGEROUS}
     </label>
@@ -271,20 +272,27 @@ function NewVaultForm(props: {
       </label>
       <label className="flex flex-col gap-1 text-xs font-medium sm:w-56">
         Organization
-        <select
-          aria-label="Organization"
-          className={SELECT_CLASS}
+        <Select
           disabled={pending}
+          items={[
+            { value: "", label: "Only you (not an Organization's)" },
+            ...props.organizations.map((space) => ({ value: space.id, label: space.name })),
+          ]}
           value={spaceId}
-          onChange={(event) => setSpaceId(event.currentTarget.value)}
+          onValueChange={(value) => setSpaceId(value ?? "")}
         >
-          <option value="">Only you (not an Organization's)</option>
-          {props.organizations.map((space) => (
-            <option key={space.id} value={space.id}>
-              {space.name}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger aria-label="Organization">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectPopup>
+            <SelectItem value="">Only you (not an Organization's)</SelectItem>
+            {props.organizations.map((space) => (
+              <SelectItem key={space.id} value={space.id}>
+                {space.name}
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
       </label>
       <Button disabled={pending || name.trim().length === 0} size="sm" type="submit">
         Create Vault
@@ -801,19 +809,23 @@ function FromMainForm(props: {
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
         <label className="flex flex-1 flex-col gap-1 text-xs font-medium">
           Main vault secret
-          <select
-            aria-label="Main vault secret"
-            className={SELECT_CLASS}
+          <Select
             disabled={pending}
+            items={props.mainEntries.map((entry) => ({ value: entry.id, label: entry.name }))}
             value={source}
-            onChange={(event) => setSource(event.currentTarget.value)}
+            onValueChange={(value) => setSource(value ?? "")}
           >
-            {props.mainEntries.map((entry) => (
-              <option key={entry.id} value={entry.id}>
-                {entry.name}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger aria-label="Main vault secret">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectPopup>
+              {props.mainEntries.map((entry) => (
+                <SelectItem key={entry.id} value={entry.id}>
+                  {entry.name}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
         </label>
         <label className="flex flex-1 flex-col gap-1 text-xs font-medium">
           Name here (optional)

@@ -48,6 +48,7 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 
 type Client = Effect.Success<typeof PrimaryEnvironmentHttpClient>;
 const withClient = <A, E>(use: (client: Client) => Effect.Effect<A, E>) =>
@@ -283,6 +284,9 @@ export function OrganizationSettingsDialog({
   );
 }
 
+const roleItems = (roles: ReadonlyArray<SpaceRole>) =>
+  roles.map((role) => ({ value: role, label: SPACE_ROLE_LABELS[role] }));
+
 function MemberRow({
   member,
   assignableRoles,
@@ -312,19 +316,29 @@ function MemberRow({
       </span>
       <span className="flex shrink-0 items-center gap-1">
         {member.canChangeRole ? (
-          <select
-            aria-label={`Role for ${member.displayName}`}
-            className="h-7 rounded-md border border-input bg-background px-2 text-xs"
+          <Select
             disabled={busy}
+            items={roleItems(roles)}
             value={member.role}
-            onChange={(event) => onChangeRole(event.currentTarget.value as SpaceRole)}
+            onValueChange={(value) => {
+              if (value !== null) onChangeRole(value as SpaceRole);
+            }}
           >
-            {roles.map((role) => (
-              <option key={role} value={role}>
-                {SPACE_ROLE_LABELS[role]}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger
+              aria-label={`Role for ${member.displayName}`}
+              size="xs"
+              className="w-auto min-w-0"
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectPopup>
+              {roles.map((role) => (
+                <SelectItem key={role} value={role}>
+                  {SPACE_ROLE_LABELS[role]}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
         ) : (
           <span className="text-xs text-muted-foreground">
             {SPACE_ROLE_LABELS[member.role]}
@@ -565,19 +579,25 @@ function InvitationsSection({
       <div className="flex items-end gap-2">
         <div className="flex flex-1 flex-col gap-2">
           <Label htmlFor={`${id}-role`}>Role</Label>
-          <select
-            id={`${id}-role`}
-            className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+          <Select
             disabled={busy}
+            items={roleItems(assignableRoles)}
             value={role}
-            onChange={(event) => setRole(event.currentTarget.value as SpaceRole)}
+            onValueChange={(value) => {
+              if (value !== null) setRole(value as SpaceRole);
+            }}
           >
-            {assignableRoles.map((option) => (
-              <option key={option} value={option}>
-                {SPACE_ROLE_LABELS[option]}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger id={`${id}-role`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectPopup>
+              {assignableRoles.map((option) => (
+                <SelectItem key={option} value={option}>
+                  {SPACE_ROLE_LABELS[option]}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
         </div>
         <Button disabled={busy} size="sm" onClick={() => void create()}>
           Create invite link

@@ -31,10 +31,11 @@ import { usePrimaryEnvironmentId } from "../../state/environments";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
 import { Input } from "../ui/input";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 
-const SELECT_CLASS = "h-8 w-full rounded-md border border-input bg-background px-2 text-sm";
 /** Hidden as typed, and no password manager prompt: it is not a login. */
 const KEY_INPUT_PROPS = {
   type: "text",
@@ -363,19 +364,25 @@ function NewAccountForm(props: {
         </label>
         <label className="flex flex-col gap-1 text-xs font-medium sm:w-64">
           Provider
-          <select
-            aria-label="Provider"
-            className={SELECT_CLASS}
+          <Select
             disabled={pending}
+            items={API_KEY_PROVIDERS.map(([value, label]) => ({ value, label }))}
             value={provider}
-            onChange={(event) => setProvider(event.currentTarget.value as AiApiKeyProvider)}
+            onValueChange={(value) => {
+              if (value !== null) setProvider(value as AiApiKeyProvider);
+            }}
           >
-            {API_KEY_PROVIDERS.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger aria-label="Provider">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectPopup>
+              {API_KEY_PROVIDERS.map(([value, label]) => (
+                <SelectItem key={value} value={value}>
+                  {label}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
         </label>
       </div>
       <label className="flex flex-col gap-1 text-xs font-medium">
@@ -614,18 +621,24 @@ function NewSubscriptionForm(props: {
         </label>
         <label className="flex flex-col gap-1 text-xs font-medium sm:w-72">
           Subscription provider
-          <select
-            aria-label="Subscription provider"
-            className={SELECT_CLASS}
+          <Select
+            items={SUBSCRIPTION_PROVIDERS.map(([value, label]) => ({ value, label }))}
             value={provider}
-            onChange={(event) => setProvider(event.currentTarget.value as AiSubscriptionProvider)}
+            onValueChange={(value) => {
+              if (value !== null) setProvider(value as AiSubscriptionProvider);
+            }}
           >
-            {SUBSCRIPTION_PROVIDERS.map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger aria-label="Subscription provider">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectPopup>
+              {SUBSCRIPTION_PROVIDERS.map(([value, label]) => (
+                <SelectItem key={value} value={value}>
+                  {label}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
         </label>
       </div>
       <p
@@ -1091,13 +1104,12 @@ function AllowancesForm(props: {
         <legend className="text-xs font-medium">Spaces</legend>
         {props.spaces.map((space) => (
           <label key={space.id} className="flex items-center gap-1">
-            <input
-              type="checkbox"
+            <Checkbox
               aria-label={`Allow ${account.name} in ${space.name}`}
               checked={allowedSpaces.includes(space.id)}
               disabled={props.pending}
-              onChange={(event) =>
-                setAllowedSpaces(toggle(allowedSpaces, space.id, event.currentTarget.checked))
+              onCheckedChange={(checked) =>
+                setAllowedSpaces(toggle(allowedSpaces, space.id, checked === true))
               }
             />
             {space.name}
@@ -1108,13 +1120,12 @@ function AllowancesForm(props: {
         <legend className="text-xs font-medium">Users</legend>
         {props.people.map((person) => (
           <label key={person.id} className="flex items-center gap-1">
-            <input
-              type="checkbox"
+            <Checkbox
               aria-label={`Allow ${account.name} to ${person.name}`}
               checked={allowedUsers.includes(person.id)}
               disabled={props.pending}
-              onChange={(event) =>
-                setAllowedUsers(toggle(allowedUsers, person.id, event.currentTarget.checked))
+              onCheckedChange={(checked) =>
+                setAllowedUsers(toggle(allowedUsers, person.id, checked === true))
               }
             />
             {person.name}
