@@ -502,6 +502,17 @@ export default defineConfig({
         rules: { "t3code/no-raw-resize-observer": "error" },
       },
       {
+        // Native controls ignore the design system; upstream markdown task lists and the theme screen are the only holdouts.
+        files: ["apps/web/src/**"],
+        excludeFiles: [
+          "apps/web/src/components/ui/**",
+          "apps/web/src/components/ChatMarkdown.tsx",
+          "apps/web/src/components/settings/ThemeSettings.tsx",
+          "**/*.{test,spec}.{ts,tsx,js,jsx,mts,cts,mjs,cjs}",
+        ],
+        rules: { "t3code/no-native-form-controls": "error" },
+      },
+      {
         files: ["apps/web/src/**"],
         rules: { "shadcn/no-unknown-classes": "error" },
       },
