@@ -599,9 +599,16 @@ leader, so its pid is the session id of every job it started; bash puts each bac
 (`npm run dev &`) in its own process group, which the PTY's close never reaches.
 `terminal/SessionProcesses.ts` signals the session's process groups, SIGHUP, then SIGTERM, then
 SIGKILL after the kill grace, reading `/proc/<pid>/stat` (after its last `)`) again just before
-each signal and signalling only groups that still have a live member in that session and of the
-same uid (a group never spans sessions); never this process's own session. A user's normal close
-is unchanged: SIGTERM to the shell, whose background jobs live on as before. Accepted risk: a
+each signal and signalling only groups that still have a live member in that session and whose
+live members all have this process's real uid (the `Uid:` line of `/proc/<pid>/status`, not the
+owner of `/proc/<pid>`, which shows root for a non-dumpable process such as ssh); a group with a
+member of another uid (only possible on a machine running as root) is left and logged, since
+`kill(-pgrp)` would reach every member. A group never spans sessions; this process's own session
+is never ended. The session id is the last shell's pid, kept after the shell exits, so a stale
+close of an exited shell still ends its jobs (unless that pid is now another live shell's). A start
+that replaces the last shell for other facts (Space, User) or other secrets than it carried ends
+the old shell's session too. A user's normal close, and a restart with the same facts and secrets,
+are unchanged: SIGTERM to the shell, whose background jobs live on as before. Accepted risk: a
 process that left the session (`setsid`, a daemon) keeps its environment, the same risk as
 `/proc/<pid>/environ` in a shared Sandbox; on macOS and Windows (no `/proc` sessions) and on a
 machine that predates `endSession`, only the shell and its PTY end. The move dialog says
