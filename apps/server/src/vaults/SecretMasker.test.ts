@@ -299,6 +299,45 @@ describe("SecretMasker: stored events and live command output", () => {
       }),
     ).pipe(Effect.provide(layerTest)),
   );
+
+  it.live("never sends a value whose halves came apart past the hold, frame or tail", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const hub = yield* CommandOutputHub.CommandOutputHub;
+        const threadId = yield* seedThread;
+        yield* writeCommandItem(threadId, null);
+        const frames = yield* Queue.unbounded<OrchestrationV2CommandOutputFrame>();
+        yield* hub.subscribe({ threadId, itemId: ITEM_ID }).pipe(
+          Stream.runForEach((frame) => Queue.offer(frames, frame)),
+          Effect.forkScoped,
+        );
+        yield* hub.append({ threadId, itemId: ITEM_ID, chunk: `out ${TOKEN.slice(0, 6)}` });
+        let client = EMPTY_TERMINAL_OUTPUT;
+        const seen: Array<string> = [];
+        // Nothing followed within the hold: the start goes out on its own.
+        while (!client.text.includes(TOKEN.slice(0, 6))) {
+          const frame = yield* Queue.take(frames);
+          seen.push(frame.text);
+          client = applyFrame(client, frame);
+        }
+        yield* hub.append({ threadId, itemId: ITEM_ID, chunk: `${TOKEN.slice(6)} done\n` });
+        while (!client.text.includes("done")) {
+          const frame = yield* Queue.take(frames);
+          seen.push(frame.text);
+          client = applyFrame(client, frame);
+        }
+        // At most the start sent before the pause; the rest, and the whole value, never.
+        assert.equal(client.text, `out ${TOKEN.slice(0, 6)}[API_TOKEN] done\n`);
+        assert.notInclude(seen.join(""), TOKEN.slice(6));
+        // A late subscriber gets the tail as one 'replace' frame: the same, never the value.
+        const late = yield* hub
+          .subscribe({ threadId, itemId: ITEM_ID })
+          .pipe(Stream.take(1), Stream.runCollect);
+        assert.notInclude(JSON.stringify([...late]), TOKEN);
+        assert.notInclude(JSON.stringify([...late]), TOKEN.slice(6));
+      }),
+    ).pipe(Effect.provide(layerTest)),
+  );
 });
 
 // ── Doors that are not events: each called with a secret, as MaskedPaths.ts names them ───────

@@ -409,7 +409,7 @@ can put it in (only the characters that depend on the value alone, at least 8); 
 wrapped across lines (MIME, PEM). Values shorter than 6 characters are never masked (open question
 3). Overlapping values merge into one `[NAME]`, named after the first in precedence order. Matching
 indexes the forms by their first two characters: one map lookup per character of text, however
-many values there are.
+many values there are (4096 values: about 10 µs for a 1 KB log line, 35 ms to build the index).
 
 **Whose values.** Never another User's: masking with them would let a User type a guess and see
 it become `[NAME]`. A Thread's masker (`forThread`, its root's: a child Thread's tools run in its
@@ -428,11 +428,15 @@ drops the rows of deleted Threads (their tombstone; a Thread missing from the pr
 rebuild keeps its rows) and then sweeps their values. Values are decrypted once per value id and
 loads of one Thread are not repeated while one runs.
 
-Text that names no Thread is masked with the Threads it can come from: a checkout on the Hub
-machine (`forCheckout`, the Threads that run there: the Owner's) for the Changes panel and Git
-hook output; a change request (`forPullRequest`, the Threads linked to it). A file read or search
-that names no Thread reads the Hub machine's own checkout as it is: clients relay such reads to
-copy files to another machine, and masking them would write `[NAME]` there.
+Text that names no Thread is masked for the User who asks (the request's principal) with their own
+Threads it can come from: a checkout on the Hub machine (`forCheckout`, their Threads that run
+there) for the Changes panel and Git hook output; a change request (`forPullRequest`, their Threads
+linked to it) for its diffs, details, comments and review guide. Two Users looking at one checkout
+or change request each see their own values masked, never the other's. A call no User makes (an
+internal one) masks nothing. A review guide is stored as generated and masked when read, per
+viewer. A file read or search that names no Thread reads the Hub machine's own checkout as it is:
+clients relay such reads to copy files to another machine, and masking them would write `[NAME]`
+there.
 
 **Fails closed.** When a Thread's values cannot be read, its last read set (the Thread's own) is
 used if there is one; otherwise nothing is stored (the event sink's write fails), a client call
@@ -440,10 +444,12 @@ fails, command output and setup output are not sent, and Git hook output is drop
 
 **Saving what was shown.** A file is read masked; the editor saves what it showed. A save
 (`ThreadWorkspace.writeFile`, `maskWorkspace.restorePlaceholders`) reads the file as it is on the
-machine and puts each `[NAME]` of the Thread's set back to the value the file holds under that
-name; a name the file does not hold stays as typed. When the file holds two values under one name
-(a rotation), or cannot be read whole, the save is refused with «Edit it in a terminal», never
-written with a placeholder.
+machine and puts back what it holds behind each `[NAME]` the save keeps where the file showed one:
+the save and what was shown share a start and an end (what was not edited), and between them the
+n-th `[NAME]` of a name is the n-th one shown there. A rotated value (two values under one name)
+stays where it was. A `[NAME]` typed or copied elsewhere stays as typed, so a save never moves or
+copies a value, and a file that holds the text `[NAME]` keeps it. When the file cannot be read
+whole the save is refused with «Edit it in a terminal», never written with a placeholder.
 
 **Where it applies.** The full inventory is `vaults/MaskedPaths.ts`: every WS method, HTTP
 endpoint, raw route, MCP tool (as `DoorRules` lists them) and executor operation has a rule. A door
@@ -461,8 +467,8 @@ has no rule, a rule no door uses, or a proof is missing.
 | Handoff summaries                                                | `ThreadMoveService.storeHandoff`            |
 | Setup-script output and errors                                   | `WorktreeSetupTracker`                      |
 | Git hook output and progress                                     | `GitManager` (`maskGitProgress.ts`)         |
-| Change requests: diffs, details, comments, review guides         | `PullRequestService`, the guide service and |
-| (stored guides too)                                              | repository (`maskPullRequests.ts`)          |
+| Change requests: diffs, details, comments, review guides         | `PullRequestService`, the guide service     |
+| (per viewer)                                                     | (`maskPullRequests.ts`)                     |
 | A checkout's diffs and commits (Changes panel)                   | `ReviewService` (`maskCheckoutReads.ts`)    |
 | Logs, spans, trace and provider event files                      | every value the process knows (below)       |
 | A shell's history file                                           | `TerminalManager`, that shell's own values  |
@@ -473,8 +479,9 @@ as one, masked. When nothing follows in time the piece goes out; if the next pie
 value begun in it, that continuation is masked, so at most the part sent before the pause is seen.
 A history cut at its start (a terminal's bounded history, a file read cut at its size limit, a
 search line cut at 512 characters) loses what is left of a value at the cut. Search drops a match
-on a line that holds a value or ends in the start of one, and then no longer says that more
-matched, so searching for parts of a value cannot spell it out.
+on a line that holds a value or ends in the start of one, and one whose hit is past what the line
+shows (fff cuts lines at 512 bytes and reports such hits with no ranges), and then no longer says
+that more matched, so searching for parts of a value cannot spell it out.
 
 **Logs and spans, Hub and joined machine.** A process masks its own logs, spans, trace file and
 provider event files with every value it knows (`rememberKnownSecrets`): on the Hub, every Vault
@@ -499,7 +506,14 @@ files, never what a client is shown.
 - output paused for longer than 150 ms inside a value shows its first part live (the rest is
   masked); a value typed into a terminal a few characters at a time shows live as typed. The
   terminal's snapshot, history and history file are masked whole;
-- error messages a machine returns for an RPC (not stored) reach the client as they are.
+- error messages a machine returns for an RPC (not stored) reach the client as they are;
+- a Thread's view is masked with its owner's set (decision A), so a User who may write files or
+  type in a Thread they do not own (a teammate's, in a shared Space) can type a guess there and see
+  whether it comes back as `[NAME]`. Masking hides values from history; it does not keep them from
+  someone who can run commands in the Thread (`base64 | rev` defeats it there);
+- project events and a rejected project command's error are not masked: they hold what Users
+  typed (titles, scripts) and planner messages, never a Thread's process output, and no Thread's
+  set applies to them.
 
 ## What is not covered here
 
