@@ -924,6 +924,7 @@ describe("Hub con Environments: a moved Project's Vaults", () => {
         yield* laptop.connect;
         yield* laptop.awaitAnswered("terminal.reconcile", sentBefore);
         assert.isNotEmpty(acmeShell.signals, "closed once the laptop was back");
+        assert.isTrue(acmeShell.sessionEnded, "its background jobs end with it");
 
         // Opening term-1 again starts a new shell, with Globex's secrets alone.
         const spawnsBefore = laptop.ptySpawns.length;
@@ -949,6 +950,7 @@ describe("Hub con Environments: a moved Project's Vaults", () => {
           })
           .pipe(Effect.orDie);
         assert.isEmpty(globexShell.signals, "the shell opened in Globex stays");
+        assert.isFalse(globexShell.sessionEnded);
 
         // A shell another door started for Acme (a setup script's, one no reconcile reached),
         // with output in its history: typing into it through the Hub is refused...
@@ -971,6 +973,7 @@ describe("Hub con Environments: a moved Project's Vaults", () => {
         // ...and opening that id again closes it with its history, for a new shell in Globex.
         const reused = yield* openTerminal("term-3");
         assert.isNotEmpty(missed.signals, "the shell started for Acme was closed");
+        assert.isTrue(missed.sessionEnded, "a stale close ends what its session started");
         assert.equal(reused.history, "", "none of its old output comes back");
         assert.deepEqual(reused.facts, { spaceId: globex, userId: owner });
         assert.equal(lastShell().GLOBEX_TOKEN, GLOBEX_TOKEN);
@@ -991,6 +994,7 @@ describe("Hub con Environments: a moved Project's Vaults", () => {
           })
           .pipe(Stream.take(1), Stream.runCollect);
         assert.isNotEmpty(factless.signals, "the shell without facts was closed");
+        assert.isTrue(factless.sessionEnded);
         const first = [...attached][0];
         assert.equal(first?.type, "snapshot");
         if (first?.type === "snapshot") {

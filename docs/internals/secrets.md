@@ -593,10 +593,25 @@ under its Thread's lock (a shell reopened for the new Space stays). It is fired 
 move and the removal do not wait, failures are logged, and it runs again for each machine as it
 connects (a new socket), so a machine that was away, older or no longer the Thread's is covered.
 
-Closing is the terminal's normal close: the shell and its PTY end. A background job (`npm run dev &`:
-the live recheck saw one outlive its shell) or a process that left the session (`setsid`, `nohup`,
-a daemon) keeps its environment: the same accepted risk as `/proc/<pid>/environ` in a shared
-Sandbox (follow-up ticket: the machine ends the session's process groups). The move dialog says
+A stale close also ends what the shell's session started (`terminal.close` `endSession`, sent by
+`ThreadWorkspace`'s stale close; `reconcile` does it itself). The PTY makes the shell a session
+leader, so its pid is the session id of every job it started; bash puts each background job
+(`npm run dev &`) in its own process group, which the PTY's close never reaches.
+`terminal/SessionProcesses.ts` signals the session's process groups, SIGHUP, then SIGTERM, then
+SIGKILL after the kill grace, reading `/proc/<pid>/stat` (after its last `)`) again just before
+each signal and signalling only groups that still have a live member in that session and whose
+live members all have this process's real uid (the `Uid:` line of `/proc/<pid>/status`, not the
+owner of `/proc/<pid>`, which shows root for a non-dumpable process such as ssh); a group with a
+member of another uid (only possible on a machine running as root) is left and logged, since
+`kill(-pgrp)` would reach every member. A group never spans sessions; this process's own session
+is never ended. The session id is the last shell's pid, kept after the shell exits, so a stale
+close of an exited shell still ends its jobs (unless that pid is now another live shell's). A start
+that replaces the last shell for other facts (Space, User) or other secrets than it carried ends
+the old shell's session too. A user's normal close, and a restart with the same facts and secrets,
+are unchanged: SIGTERM to the shell, whose background jobs live on as before. Accepted risk: a
+process that left the session (`setsid`, a daemon) keeps its environment, the same risk as
+`/proc/<pid>/environ` in a shared Sandbox; on macOS and Windows (no `/proc` sessions) and on a
+machine that predates `endSession`, only the shell and its PTY end. The move dialog says
 «Open terminals of its Threads close». After a revocation, live processes keep the ticket 04 rule
 (stale flag): nobody new gains control of them.
 

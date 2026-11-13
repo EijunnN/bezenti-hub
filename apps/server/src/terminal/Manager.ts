@@ -89,6 +89,7 @@ import * as ProcessRunner from "../processRunner.ts";
 import * as PortScanner from "../preview/PortScanner.ts";
 import * as NativeTelemetryClient from "../resourceTelemetry/NativeTelemetryClient.ts";
 import { terminalOutputStream } from "./OutputProtocol.ts";
+import * as SessionProcesses from "./SessionProcesses.ts";
 import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 
 export {
@@ -363,6 +364,8 @@ interface TerminalSessionState {
   pendingFacts: TerminalShellFacts | null;
   /** The facts the running shell started with; null: none (started without the Hub's word). */
   facts: TerminalShellFacts | null;
+  /** The last shell's pid, kept after it exits: the session id of the jobs it started. */
+  lastSessionId: number | null;
 }
 
 interface TerminalGrid {
@@ -491,6 +494,20 @@ const secretsForStart = (
   }
   if (secrets.fingerprint === NO_SECRETS_FINGERPRINT) return Effect.succeed(secrets);
   return secrets.variables === undefined ? required : Effect.succeed(secrets);
+};
+
+/**
+ * A start replaces the last shell for other facts (Space, User) or other secrets than it carried:
+ * what that shell started must not keep them.
+ */
+const previousShellSuperseded = (session: TerminalSessionState): boolean => {
+  if (session.lastSessionId === null) return false;
+  const before = session.facts;
+  const next = session.pendingFacts;
+  if (before?.spaceId !== next?.spaceId || before?.userId !== next?.userId) return true;
+  const carried = session.secretFingerprint ?? NO_SECRETS_FINGERPRINT;
+  const nextFingerprint = session.pendingSecretEnv?.fingerprint ?? NO_SECRETS_FINGERPRINT;
+  return carried !== NO_SECRETS_FINGERPRINT && carried !== nextFingerprint;
 };
 
 function summary(session: TerminalSessionState): TerminalSummary {
@@ -1501,6 +1518,11 @@ interface TerminalManagerOptions {
   >;
   subprocessPollIntervalMs?: number;
   processKillGraceMs?: number;
+  /**
+   * Ends what a shell's session started (its pid is the session id), for shells closed as stale.
+   * Default: nothing (fake PTYs have no real session); `make` passes `SessionProcesses.endSession`.
+   */
+  endSessionProcesses?: (sessionId: number, graceMs: number) => Effect.Effect<void>;
   maxRetainedInactiveSessions?: number;
   registerTerminalProcesses?: (input: {
     readonly threadId: string;
@@ -1592,6 +1614,7 @@ export const make = Effect.fn("TerminalManager.make")(function* () {
     registerTerminalProcesses: portDiscovery.registerTerminalProcesses,
     unregisterTerminal: portDiscovery.unregisterTerminal,
     resolveProviderInstanceEnvironment,
+    endSessionProcesses: SessionProcesses.endSession,
   });
 });
 
@@ -1707,6 +1730,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const subprocessPollIntervalMs =
     options.subprocessPollIntervalMs ?? DEFAULT_SUBPROCESS_POLL_INTERVAL_MS;
   const processKillGraceMs = options.processKillGraceMs ?? DEFAULT_PROCESS_KILL_GRACE_MS;
+  const endSessionProcesses = options.endSessionProcesses ?? (() => Effect.void);
   const maxRetainedInactiveSessions =
     options.maxRetainedInactiveSessions ?? DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS;
   const registerTerminalProcesses = options.registerTerminalProcesses ?? (() => Effect.void);
@@ -2418,8 +2442,39 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
   });
 
-  const stopProcess = Effect.fn("terminal.stopProcess")(function* (session: TerminalSessionState) {
+  /**
+   * Ends what the session's last shell started (its pid is the session id of every job it
+   * started), running or exited. Processes that left the session (setsid, daemons) stay: an
+   * accepted risk. An exited shell's pid may be reused: never one that is another live shell's.
+   */
+  const endShellSession = Effect.fn("terminal.endShellSession")(function* (
+    session: TerminalSessionState,
+  ) {
+    const sessionId = session.lastSessionId;
+    session.lastSessionId = null;
+    if (sessionId === null || !Number.isSafeInteger(sessionId) || sessionId <= 1) return;
+    const { sessions } = yield* readManagerState;
+    for (const other of sessions.values()) {
+      if (other !== session && other.pid === sessionId) return;
+    }
+    yield* endSessionProcesses(sessionId, processKillGraceMs).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("failed to end a closed terminal's session", {
+          threadId: session.threadId,
+          terminalId: session.terminalId,
+          cause,
+        }),
+      ),
+      Effect.forkIn(workerScope),
+    );
+  });
+
+  const stopProcess = Effect.fn("terminal.stopProcess")(function* (
+    session: TerminalSessionState,
+    endSession = false,
+  ) {
     const process = session.process;
+    if (endSession) yield* endShellSession(session);
     if (!process) return;
 
     const updatedAt = yield* nowIso;
@@ -2515,7 +2570,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     input: TerminalStartInput,
     eventType: "started" | "restarted",
   ) {
-    yield* stopProcess(session);
+    // A new shell for other facts or other secrets: the old one's jobs do not outlive it.
+    yield* stopProcess(session, previousShellSuperseded(session));
     yield* Effect.annotateCurrentSpan({
       "terminal.thread_id": session.threadId,
       "terminal.id": session.terminalId,
@@ -2621,6 +2677,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               session.process = ptyProcess;
               session.shell = spawnResult.shell;
               session.pid = processPid;
+              session.lastSessionId = processPid;
               session.status = "running";
               // onExit may replay an exit immediately; accept it before subscribing.
               session.unsubscribeData = spawnResult.process.onData((data) => {
@@ -2705,13 +2762,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     threadId: string,
     terminalId: string,
     deleteHistoryOnClose: boolean,
+    endSession = false,
   ) {
     const key = toSessionKey(threadId, terminalId);
     const session = yield* getSession(threadId, terminalId);
     const closedEventSequence = Option.isSome(session) ? session.value.eventSequence + 1 : 0;
 
     if (Option.isSome(session)) {
-      yield* stopProcess(session.value);
+      yield* stopProcess(session.value, endSession);
       yield* unregisterTerminal({ threadId, terminalId });
       yield* persistHistory(threadId, terminalId, session.value.history);
     }
@@ -3014,6 +3072,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         secretsStale: false,
         pendingFacts: start?.facts ?? null,
         facts: null,
+        lastSessionId: null,
       };
 
       const createdSession = session;
@@ -3575,15 +3634,21 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     withThreadLock(
       input.threadId,
       Effect.gen(function* () {
+        const endSession = input.endSession === true;
         if (input.terminalId) {
-          yield* closeSession(input.threadId, input.terminalId, input.deleteHistory === true);
+          yield* closeSession(
+            input.threadId,
+            input.terminalId,
+            input.deleteHistory === true,
+            endSession,
+          );
           return;
         }
 
         const threadSessions = yield* sessionsForThread(input.threadId);
         yield* Effect.forEach(
           threadSessions,
-          (session) => closeSession(input.threadId, session.terminalId, false),
+          (session) => closeSession(input.threadId, session.terminalId, false, endSession),
           { discard: true },
         );
 
@@ -3617,7 +3682,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             // Checked again under the lock: a shell reopened since for the new Space stays.
             const current = yield* getSession(session.threadId, session.terminalId);
             if (Option.isNone(current) || current.value !== session || !isStale(session)) return;
-            yield* closeSession(session.threadId, session.terminalId, true);
+            yield* closeSession(session.threadId, session.terminalId, true, true);
             closed += 1;
           }),
         ).pipe(
