@@ -253,7 +253,34 @@ export const layer: Layer.Layer<
       (effect) => effect.pipe(logged("Could not read a moved Project's releases", {})),
     );
 
-    yield* hooks.register({ stopThreads, drainReleases });
+    /** Every terminal of the Thread on its Active environment closes, with what it started. */
+    const endTerminalsOf = Effect.fn("ProjectMoveThreads.endTerminalsOf")(
+      function* (threadId: ThreadId) {
+        const read = yield* projections.getThreadRecords(threadId, []).pipe(Effect.option);
+        if (Option.isNone(read)) return;
+        const environmentId = read.value.thread.activeEnvironmentId;
+        // A Thread that needs an environment has no machine to hold its terminals any more.
+        if (environmentId === null) return;
+        const executor = yield* executors
+          .get(environmentId ?? HUB_MACHINE_ENVIRONMENT_ID)
+          .pipe(Effect.option);
+        if (Option.isNone(executor)) return;
+        const input = { threadId, endProcesses: true } as const;
+        const { rpc, forward } = executor.value.workspace;
+        if (Option.isSome(rpc)) yield* rpc.value.terminals.close(input);
+        else if (Option.isSome(forward)) yield* forward.value.call("terminal.close", input);
+      },
+      (effect, threadId) =>
+        effect.pipe(logged("Could not close a Thread's terminals", { threadId })),
+    );
+
+    const endTerminals = Effect.fn("ProjectMoveThreads.endTerminals")(function* (
+      threadIds: ReadonlyArray<ThreadId>,
+    ) {
+      yield* Effect.forEach(threadIds, endTerminalsOf, { concurrency: 8, discard: true });
+    });
+
+    yield* hooks.register({ stopThreads, drainReleases, endTerminals });
     // Releases a Hub stopped in the middle of are finished as it starts.
     yield* drainReleases("all").pipe(Effect.forkIn(scope));
   }),

@@ -67,6 +67,7 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as InactiveUserTurns from "./InactiveUserTurns.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as EffectiveVaults from "../vaults/EffectiveVaults.ts";
 
 export const layerEventInfrastructure = Layer.mergeAll(
   OrchestrationEventStore.layer,
@@ -142,6 +143,8 @@ export const layerProjectService = ProjectService.layer.pipe(
       IdAllocator.layer,
       layerLegacyV1ThreadImporterProvided,
       SpaceDirectory.layer,
+      // A move's plan reads the Vaults it loses (spec 5 ticket 07): never optional.
+      EffectiveVaults.layer.pipe(Layer.provide(SpaceDirectory.layer)),
     ),
   ),
 );

@@ -2,17 +2,24 @@
  * The Owner disables, re-enables or removes a User. Every write commits in one transaction; once
  * it has, every session and pending link of theirs ends and their open connections close.
  */
-import type { InstallationUser, InstallationUserStatus, UserId } from "@t3tools/contracts";
+import type {
+  InstallationUser,
+  InstallationUserStatus,
+  ThreadId,
+  UserId,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as AuditLog from "../audit/AuditLog.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as PairingGrantStore from "../auth/PairingGrantStore.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
+import * as ProjectMoveHooks from "../project/ProjectMoveHooks.ts";
 import * as VaultReachLoss from "../vaults/VaultReachLoss.ts";
 import * as SpaceDirectory from "./SpaceDirectory.ts";
 
@@ -44,6 +51,8 @@ const make = Effect.gen(function* () {
   const pairingLinks = yield* PairingGrantStore.PairingGrantStore;
   const audit = yield* AuditLog.AuditLog;
   const environments = yield* EnvironmentRegistry.EnvironmentRegistry;
+  // The orchestration's work, registered late; absent where nothing runs Threads.
+  const moveHooks = yield* Effect.serviceOption(ProjectMoveHooks.ProjectMoveHooks);
   const storageError = (cause: unknown) => new SpaceDirectory.SpaceDirectoryStorageError({ cause });
 
   const writeStatus = Effect.fn("InstallationUserService.writeStatus")(function* (
@@ -68,21 +77,24 @@ const make = Effect.gen(function* () {
     yield* spaces.endAccessOf({ userId, removed: status === "removed" });
   }, Effect.mapError(storageError));
 
-  /** Every Vault allowed to the User is taken back, as the Owner would, in the caller's transaction. */
-  const forgetVaults = Effect.fn("InstallationUserService.forgetVaults")(function* (
-    actorUserId: UserId,
+  /**
+   * A removed User's Threads' terminals, and what they started, end on every machine: they hold
+   * the User's secrets (spec 5 ticket 07). After the commit, as the orchestration's work.
+   */
+  const endTerminalsOf = Effect.fn("InstallationUserService.endTerminalsOf")(function* (
     userId: UserId,
   ) {
-    for (const vault of yield* VaultReachLoss.forgetUser(sql, userId)) {
-      yield* audit.record({
-        actor: AuditLog.userActor(actorUserId),
-        action: "vault.allow",
-        spaceId: null,
-        target: { kind: "vault", id: vault.vaultId, name: vault.name },
-        detail: { subjectKind: "user", subjectId: userId, allowed: false },
-      });
-    }
-  }, Effect.mapError(storageError));
+    if (Option.isNone(moveHooks)) return;
+    const work = yield* moveHooks.value.current;
+    if (work === undefined) return;
+    const threads = yield* sql<{ readonly threadId: ThreadId }>`
+      SELECT t.thread_id AS "threadId" FROM orchestration_v2_projection_threads t
+      LEFT JOIN orchestration_v2_projection_threads root
+        ON root.thread_id = json_extract(t.payload_json, '$.lineage.rootThreadId')
+      WHERE t.deleted_at IS NULL AND COALESCE(t.owner_user_id, root.owner_user_id) = ${userId}
+    `;
+    yield* work.endTerminals(threads.map((row) => row.threadId));
+  });
 
   const setStatus: InstallationUserService["Service"]["setStatus"] = Effect.fn(
     "InstallationUserService.setStatus",
@@ -119,7 +131,12 @@ const make = Effect.gen(function* () {
           if (changed && current.status !== "removed") yield* writeStatus(userId, status);
           // A removed User's own Vault allowances go (spec 5 ticket 07); a disabled one keeps
           // them, unused while they cannot sign in.
-          if (status === "removed") yield* forgetVaults(actorUserId, userId);
+          if (status === "removed") {
+            yield* VaultReachLoss.forgetUser(sql, AuditLog.userActor(actorUserId), {
+              userId,
+              displayName: current.displayName,
+            }).pipe(Effect.mapError(storageError));
+          }
           // Their machines go with their sign-in, and stay revoked if they come back.
           const disconnect = yield* environments
             .revokeOwnedBy({ userId, actor: AuditLog.userActor(actorUserId) })
@@ -146,6 +163,13 @@ const make = Effect.gen(function* () {
     } else {
       yield* outcome.announce;
       yield* spaces.membershipsChanged([userId]);
+    }
+    if (status === "removed") {
+      yield* endTerminalsOf(userId).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Could not end a removed User's terminals", { userId, cause }),
+        ),
+      );
     }
     yield* spaces.userStatusChanged({ userId, active: status === "active" });
     return yield* spaces.installationUser(userId).pipe(

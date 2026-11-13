@@ -84,7 +84,6 @@ const make = Effect.gen(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   // Absent where no Environments are kept (orchestration-only hosts): there is no Sandbox.
   const environments = yield* Effect.serviceOption(EnvironmentRegistry.EnvironmentRegistry);
-  const audit = yield* AuditLog.AuditLog;
   // Absent where the Hub keeps no secrets: a value left behind is swept at the next start.
   const vaultValues = yield* Effect.serviceOption(ServerSecretStore.VaultValueStore);
 
@@ -197,16 +196,13 @@ const make = Effect.gen(function* () {
     const forgotten = yield* sql
       .withTransaction(
         Effect.gen(function* () {
-          const gone = yield* VaultReachLoss.forgetOrganization(sql, spaceId);
-          for (const vault of gone.vaults) {
-            yield* audit.record({
-              actor: AuditLog.userActor(actor),
-              action: "vault.delete",
-              spaceId,
-              target: { kind: "vault", id: vault.vaultId, name: vault.name },
-              detail: { entries: vault.entries },
-            });
-          }
+          const [row] = yield* sql<{ readonly name: string }>`
+            SELECT name FROM spaces WHERE space_id = ${spaceId}
+          `;
+          const gone = yield* VaultReachLoss.forgetOrganization(sql, AuditLog.userActor(actor), {
+            spaceId,
+            name: row?.name ?? spaceId,
+          });
           return gone.valueIds;
         }),
       )

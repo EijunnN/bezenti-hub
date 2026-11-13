@@ -26,7 +26,6 @@ import * as Ref from "effect/Ref";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
-import type { SqlError } from "effect/sql/SqlError";
 
 import { withCommandMetrics } from "../observability/Metrics.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
@@ -61,6 +60,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import type * as AuditLog from "../audit/AuditLog.ts";
 import { servesSpace } from "../sandboxes/sandboxSpace.ts";
 import * as EffectiveVaults from "../vaults/EffectiveVaults.ts";
+import * as VaultReachLoss from "../vaults/VaultReachLoss.ts";
 import * as ProjectMoveHooks from "./ProjectMoveHooks.ts";
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
@@ -293,8 +293,8 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const directories = { path, fileSystem: yield* Effect.serviceOption(FileSystem.FileSystem) };
   const moveHooks = yield* Effect.serviceOption(ProjectMoveHooks.ProjectMoveHooks);
-  // Absent where there are no Vaults (an orchestration-only host): a move loses none.
-  const effectiveVaults = yield* Effect.serviceOption(EffectiveVaults.EffectiveVaults);
+  // Required: a move whose losses cannot be read fails rather than warn of none (ticket 07).
+  const effectiveVaults = yield* EffectiveVaults.EffectiveVaults;
   const projectLocks = yield* KeyedLock.make<ProjectId>();
   const rootClaims = yield* KeyedLock.make<string>();
   const workspaceLocks = yield* KeyedLock.make<string>();
@@ -388,7 +388,7 @@ export const make = Effect.gen(function* () {
   const commit = Effect.fn("ProjectService.commit")(function* (
     command: ProjectCommand,
     /** Committed with the command's event, never on a replay (a move's Vault choices). */
-    alsoCommit?: Effect.Effect<void, SqlError>,
+    alsoCommit?: Effect.Effect<void, Error>,
   ) {
     const { projectId } = command;
     const dispatchError = (cause: unknown) =>
@@ -839,7 +839,11 @@ export const make = Effect.gen(function* () {
       if (isFirstDelete) {
         yield* deleteChildThreads(input);
       }
-      yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
+      // Its Vault choices go with it (spec 5 ticket 07).
+      yield* commit(
+        { type: "project.delete", commandId: input.commandId, projectId },
+        VaultReachLoss.forgetProject(sql, projectId),
+      );
       if (isFirstDelete) {
         yield* clearProjectSettingsOverrides(projectId);
       }
@@ -1084,24 +1088,17 @@ export const make = Effect.gen(function* () {
     return { running, changing };
   });
 
-  /**
-   * What the move does to the Project's Vaults (spec 5 ticket 07): the ones it loses, and the
-   * write that drops its choices of Vaults that do not reach the destination. Nothing between
-   * Spaces that are the same, or where there are no Vaults.
-   */
-  const vaultsOnMove = (
+  /** The Vaults the move takes from the Project's Threads (spec 5 ticket 07), by name. */
+  const vaultsLostOnMove = (
     projectId: ProjectId,
     route: { readonly from: SpaceId; readonly to: SpaceId },
-  ): Effect.Effect<EffectiveVaults.ProjectMoveVaults | undefined, ProjectOperationError> =>
-    route.from === route.to || Option.isNone(effectiveVaults)
-      ? Effect.succeed(undefined)
-      : effectiveVaults.value
-          .projectMove({ projectId, from: route.from, to: route.to })
-          .pipe(
-            Effect.mapError(
-              (cause) => new ProjectOperationError({ operation: "read-vaults", projectId, cause }),
-            ),
-          );
+  ) =>
+    effectiveVaults.projectMoveLoss({ projectId, from: route.from, to: route.to }).pipe(
+      Effect.map((lost) => lost.map(({ vaultId, name }) => ({ vaultId, name }))),
+      Effect.mapError(
+        (cause) => new ProjectOperationError({ operation: "read-vaults", projectId, cause }),
+      ),
+    );
 
   const movePlan: ProjectService["Service"]["movePlan"] = Effect.fn("ProjectService.movePlan")(
     function* (input) {
@@ -1132,8 +1129,7 @@ export const make = Effect.gen(function* () {
         if (plan.running) running.push(entry);
         if (plan.releasedFrom !== undefined) needsEnvironment.push(entry);
       }
-      const vaults = yield* vaultsOnMove(projectId, route);
-      const vaultsLost = (vaults?.lost ?? []).map(({ vaultId, name }) => ({ vaultId, name }));
+      const vaultsLost = yield* vaultsLostOnMove(projectId, route);
       return { projectId, spaceId: route.to, running, needsEnvironment, vaultsLost };
     },
   );
@@ -1181,7 +1177,15 @@ export const make = Effect.gen(function* () {
         if (route.from !== route.to || planned.changing > 0) {
           yield* spaces.projectAccessEnds(projectId);
         }
+        // Its terminals and what they started hold the old Space's secrets: they close now, and
+        // once more after the Threads moved, for one opened in between (spec 5 ticket 07).
+        const endTerminals = Effect.flatMap(listProjectThreads(projectId), (threads) =>
+          work === undefined
+            ? Effect.void
+            : work.endTerminals(threads.map((thread) => thread.threadId)),
+        );
         if (route.from !== route.to) {
+          yield* endTerminals;
           // A preferred machine that does not serve the new Space is no preference there.
           const preferred = yield* machineLeft(
             existing.value.preferredEnvironmentId,
@@ -1191,7 +1195,6 @@ export const make = Effect.gen(function* () {
           );
           // Its choices of Vaults that do not reach the new Space go with the same commit, so
           // allowing one there later never brings an old choice back unseen.
-          const vaults = yield* vaultsOnMove(projectId, route);
           yield* commit(
             {
               type: "project.meta.update",
@@ -1200,7 +1203,12 @@ export const make = Effect.gen(function* () {
               spaceId: route.to,
               ...(preferred === undefined ? {} : { preferredEnvironmentId: null }),
             },
-            vaults?.dropChoices,
+            VaultReachLoss.keepProjectChoicesReaching(sql, { projectId, spaceId: route.to }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectOperationError({ operation: "read-vaults", projectId, cause }),
+              ),
+            ),
           );
           yield* Ref.set(moved, true);
         }
@@ -1236,6 +1244,7 @@ export const make = Effect.gen(function* () {
         }
         // Out of the Threads' locks: each machine left is cut off, this move's and any release
         // an earlier one did not finish.
+        if (route.from !== route.to) yield* endTerminals;
         if (work !== undefined) {
           yield* work.drainReleases(threads.map((thread) => thread.threadId));
         }

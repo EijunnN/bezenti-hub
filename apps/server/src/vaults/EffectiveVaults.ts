@@ -24,13 +24,10 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
-import type { SqlError } from "effect/sql/SqlError";
 
-import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 import * as ServerConfig from "../config.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as VaultReach from "./VaultReach.ts";
-import * as VaultReachLoss from "./VaultReachLoss.ts";
 
 /** One variable of the effective set. */
 export interface EffectiveVariable {
@@ -85,14 +82,16 @@ export class EffectiveVaults extends Context.Service<
       input: VaultThreadEnvironmentInput,
     ) => Effect.Effect<VaultThreadEnvironment, VaultError>;
     /**
-     * Spec 5 ticket 07: what moving a Project from Space `from` to `to` does to its Vaults, by the
-     * same Space-side rule as `forThread`. Never values or value ids.
+     * Spec 5 ticket 07: the Vaults a Project's Threads receive from Space `from`'s side (its
+     * defaults, the Project's adds and removes there) and would not from `to`'s, by the same
+     * Space-side rule as `forThread`: what the mover is warned of. A User's own Vaults follow the
+     * User, never listed. Names only.
      */
-    readonly projectMove: (input: {
+    readonly projectMoveLoss: (input: {
       readonly projectId: ProjectId;
       readonly from: SpaceId;
       readonly to: SpaceId;
-    }) => Effect.Effect<ProjectMoveVaults, VaultError>;
+    }) => Effect.Effect<ReadonlyArray<SpaceSideVault>, VaultError>;
   }
 >()("t3/vaults/EffectiveVaults") {}
 
@@ -101,20 +100,6 @@ export interface SpaceSideVault {
   readonly vaultId: VaultId;
   readonly name: string;
   readonly source: Exclude<VaultSource, "user">;
-}
-
-export interface ProjectMoveVaults {
-  /**
-   * The Vaults the Project's Threads receive from `from`'s side and would not from `to`'s (its
-   * defaults, the Project's adds and removes there): what the mover is warned of. A User's own
-   * Vaults follow the User, not the Project, and are never in it.
-   */
-  readonly lost: ReadonlyArray<SpaceSideVault>;
-  /**
-   * Runs inside the transaction that moves the Project: drops its choices of Vaults that do not
-   * reach `to` (`VaultReachLoss.keepProjectChoicesReaching`).
-   */
-  readonly dropChoices: Effect.Effect<void, SqlError>;
 }
 
 const fail = (reason: VaultErrorReason, message: string) =>
@@ -165,14 +150,13 @@ const make = Effect.gen(function* () {
    * defaults, then the chosen ones).
    */
   const spaceSide = Effect.fn("EffectiveVaults.spaceSide")(function* (
-    space: AccessPolicy.SpaceResource,
+    spaceId: SpaceId,
     projectId: string | null,
   ) {
-    const ownersPersonal = yield* VaultReach.isOwnersPersonal(spaces, space);
     const [allowed, defaults, choices] = yield* Effect.all(
       [
-        VaultReach.allowedToSpace(sql, space.id, ownersPersonal),
-        VaultReach.chosenDefaults(sql, space.id),
+        VaultReach.allowedToSpace(sql, spaceId),
+        VaultReach.chosenDefaults(sql, spaceId),
         projectId === null ? Effect.succeed([]) : VaultReach.projectChoices(sql, projectId),
       ],
       { concurrency: "unbounded" },
@@ -203,7 +187,7 @@ const make = Effect.gen(function* () {
     for (const vaultId of defaults) {
       if (!removed.has(vaultId)) take(allowedById.get(vaultId), "space");
     }
-    return { ownersPersonal, groups };
+    return groups;
   });
 
   const forThread = Effect.fn("EffectiveVaults.forThread")(function* (input: {
@@ -234,7 +218,7 @@ const make = Effect.gen(function* () {
 
     const reach = yield* Effect.all(
       {
-        spaceSide: spaceSide(space, projectId),
+        spaceSide: spaceSide(space.id, projectId),
         ownVaults: VaultReach.allowedToUser(sql, input.actingUserId),
       },
       { concurrency: "unbounded" },
@@ -248,7 +232,7 @@ const make = Effect.gen(function* () {
       taken.add(row.vaultId);
       groups.push({ row, source: "user" });
     }
-    for (const group of reach.spaceSide.groups) {
+    for (const group of reach.spaceSide) {
       if (!taken.has(group.row.vaultId)) groups.push(group);
     }
 
@@ -342,54 +326,29 @@ const make = Effect.gen(function* () {
     } satisfies VaultThreadEnvironment;
   });
 
-  const projectMove = Effect.fn("EffectiveVaults.projectMove")(function* (input: {
+  const projectMoveLoss = Effect.fn("EffectiveVaults.projectMoveLoss")(function* (input: {
     readonly projectId: ProjectId;
     readonly from: SpaceId;
     readonly to: SpaceId;
   }) {
-    const read = (spaceId: SpaceId) =>
-      spaces.spaceById(spaceId).pipe(
-        Effect.catch(storage("read the Space")),
-        Effect.flatMap(
-          Option.match({
-            onNone: () => fail("not-found", "That Space does not exist."),
-            onSome: (found) => Effect.succeed(found.resource),
-          }),
-        ),
-      );
-    const [from, to] = yield* Effect.all([read(input.from), read(input.to)], {
-      concurrency: "unbounded",
-    });
+    if (input.from === input.to) return [];
     // The scratch Project spans every Space and takes no choices.
     const scratch = yield* VaultReach.isScratchProject(sql, path, baseDir, input.projectId).pipe(
       Effect.catch(storage("read the Project")),
     );
     const projectId = scratch ? null : input.projectId;
     const [before, after] = yield* Effect.all(
-      [spaceSide(from, projectId), spaceSide(to, projectId)],
-      {
-        concurrency: "unbounded",
-      },
+      [spaceSide(input.from, projectId), spaceSide(input.to, projectId)],
+      { concurrency: "unbounded" },
     ).pipe(Effect.catch(storage("read the Project's Vaults")));
     // `after` reads the choices as they are; those the move drops do not reach `to` anyway.
-    const kept = new Set<string>(after.groups.map((group) => group.row.vaultId));
-    const lost = before.groups
+    const kept = new Set<string>(after.map((group) => group.row.vaultId));
+    return before
       .filter((group) => !kept.has(group.row.vaultId))
       .map(({ row, source }) => ({ vaultId: row.vaultId, name: row.name, source }));
-    return {
-      lost,
-      dropChoices:
-        projectId === null
-          ? Effect.void
-          : VaultReachLoss.keepProjectChoicesReaching(sql, {
-              projectId: input.projectId,
-              spaceId: to.id,
-              ownersPersonal: after.ownersPersonal,
-            }),
-    } satisfies ProjectMoveVaults;
   });
 
-  return EffectiveVaults.of({ forThread, threadEnvironment, projectMove });
+  return EffectiveVaults.of({ forThread, threadEnvironment, projectMoveLoss });
 });
 
 export const layer = Layer.effect(EffectiveVaults, make);

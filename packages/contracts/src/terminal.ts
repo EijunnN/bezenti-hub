@@ -82,6 +82,12 @@ export const TerminalCloseInput = Schema.Struct({
   ...TerminalThreadInput.fields,
   terminalId: Schema.optional(TerminalIdSchema),
   deleteHistory: Schema.optional(Schema.Boolean),
+  /**
+   * Also ends every process the shell started (dev servers, scripts), not only the shell: the Hub
+   * asks it when the terminals hold secrets their Thread no longer reaches. A machine that does
+   * not know it closes the shell alone.
+   */
+  endProcesses: Schema.optional(Schema.Boolean),
 });
 export type TerminalCloseInput = typeof TerminalCloseInput.Type;
 

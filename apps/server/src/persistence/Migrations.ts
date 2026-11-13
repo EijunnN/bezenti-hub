@@ -114,6 +114,7 @@ import Migration0111 from "./Migrations/111_Vaults.ts";
 import Migration0112 from "./Migrations/112_AiAccounts.ts";
 import Migration0113 from "./Migrations/113_AiGatewayKeys.ts";
 import Migration0114 from "./Migrations/114_AiUsage.ts";
+import Migration0115 from "./Migrations/115_VaultUnreachableRows.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -230,6 +231,7 @@ const migrationEntries = [
   [112, "AiAccounts", Migration0112],
   [113, "AiGatewayKeys", Migration0113],
   [114, "AiUsage", Migration0114],
+  [115, "VaultUnreachableRows", Migration0115],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

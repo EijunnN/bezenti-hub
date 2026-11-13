@@ -112,6 +112,15 @@ const PROCESS_TABLE_QUERY_TIMEOUT = "15 seconds";
 // closeIdle queries while holding the thread lock, so it keeps a short budget
 // rather than stalling other operations on that thread behind a slow table.
 const CLOSE_IDLE_QUERY_TIMEOUT = { posix: "1 second", win32: "1500 millis" } as const;
+
+/** SIGKILL to one process a shell started; one already gone (ESRCH) is nothing to end. */
+const killByPid = (pid: number) => {
+  try {
+    globalThis.process.kill(pid, "SIGKILL");
+  } catch {
+    // Already gone, or not ours.
+  }
+};
 // Discover children started without terminal input or output.
 const QUIET_SUBPROCESS_SNAPSHOT_EVERY_TICKS = 30;
 const DEFAULT_PROCESS_KILL_GRACE_MS = 1_000;
@@ -1464,6 +1473,8 @@ interface TerminalManagerOptions {
   >;
   subprocessPollIntervalMs?: number;
   processKillGraceMs?: number;
+  /** Ends one process a shell started, by pid (tests observe it). */
+  killStartedProcess?: (pid: number) => void;
   maxRetainedInactiveSessions?: number;
   registerTerminalProcesses?: (input: {
     readonly threadId: string;
@@ -1670,6 +1681,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const subprocessPollIntervalMs =
     options.subprocessPollIntervalMs ?? DEFAULT_SUBPROCESS_POLL_INTERVAL_MS;
   const processKillGraceMs = options.processKillGraceMs ?? DEFAULT_PROCESS_KILL_GRACE_MS;
+  const killStartedProcess = options.killStartedProcess ?? killByPid;
   const maxRetainedInactiveSessions =
     options.maxRetainedInactiveSessions ?? DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS;
   const registerTerminalProcesses = options.registerTerminalProcesses ?? (() => Effect.void);
@@ -3498,10 +3510,47 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       }),
     );
 
+  /**
+   * Spec 5 ticket 07: every process the shells started (their whole tree, read now) ends with
+   * SIGKILL before the shells close, so a dev server left with old secrets does not outlive them.
+   */
+  const endStartedProcesses = Effect.fn("terminal.endStartedProcesses")(function* (
+    sessions: ReadonlyArray<TerminalSessionState>,
+  ) {
+    const running = sessions.filter(
+      (session): session is TerminalSessionState & { pid: number } =>
+        session.status === "running" && Number.isInteger(session.pid),
+    );
+    if (running.length === 0) return;
+    const { inspector: inspectorResult } = yield* acquireSubprocessInspector(
+      platform === "win32" ? CLOSE_IDLE_QUERY_TIMEOUT.win32 : CLOSE_IDLE_QUERY_TIMEOUT.posix,
+    );
+    const inspector = yield* Effect.fromResult(inspectorResult);
+    for (const session of running) {
+      const { processIds } = yield* inspector(session.pid);
+      for (const pid of processIds) {
+        if (pid !== session.pid) killStartedProcess(pid);
+      }
+    }
+  });
+
   const close: TerminalManager["Service"]["close"] = (input) =>
     withThreadLock(
       input.threadId,
       Effect.gen(function* () {
+        if (input.endProcesses === true) {
+          const sessions = (yield* sessionsForThread(input.threadId)).filter(
+            (session) => input.terminalId === undefined || session.terminalId === input.terminalId,
+          );
+          yield* endStartedProcesses(sessions).pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("failed to end what a terminal started", {
+                threadId: input.threadId,
+                error: error.message,
+              }),
+            ),
+          );
+        }
         if (input.terminalId) {
           yield* closeSession(input.threadId, input.terminalId, input.deleteHistory === true);
           return;

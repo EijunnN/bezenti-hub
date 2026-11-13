@@ -25,6 +25,12 @@ export interface ProjectMoveWork {
    * Hub's start finishes one cut short. `all` drains every recorded release.
    */
   readonly drainReleases: (threadIds: ReadonlyArray<ThreadId> | "all") => Effect.Effect<void>;
+  /**
+   * Closes every terminal of these Threads on their Active environment, and ends what each one
+   * started (dev servers, scripts): they hold secrets of a Space or User the Threads no longer
+   * reach (spec 5 ticket 07: a Project's move, a User's removal). Best effort per Thread.
+   */
+  readonly endTerminals: (threadIds: ReadonlyArray<ThreadId>) => Effect.Effect<void>;
 }
 
 export interface ProjectMoveHooksShape {
