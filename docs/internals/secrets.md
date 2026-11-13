@@ -437,26 +437,30 @@ are decrypted once per value id; loads of one Thread or User are not repeated wh
 User's Threads and a root's children are read through indexes (migration 116).
 
 **Fails closed.** A set is used only when it was read whole; a read that fails is tried twice
-more. If it still fails: an event write fails (nothing is stored), a client call fails, and text
-in pieces (command output, terminal, setup output, Git hook output, a Git error) shows
-`[output hidden: secrets could not be loaded]` instead. A set read whole before (a little old) is
-used meanwhile; one holding only what was delivered since never is.
+more, after 25 and 50 ms (a busy database). If it still fails, nothing unmasked goes anywhere,
+and nothing breaks with a defect: an event write fails (nothing is stored, decision R7); a file
+read shows `[content hidden: secrets could not be loaded]` (read-only), a search finds nothing, a
+diff or change request shows its text hidden (read-only), and text in pieces (command output,
+terminal, setup and Git hook output) and errors (any depth, causes and defects too) show
+`[output hidden: secrets could not be loaded]`. Output hidden this way stays hidden to the end
+of its line once the values can be read again (it may have been the start of one). A set read
+whole before (a little old) is used meanwhile; one holding only what was delivered since never
+is. A value delivered to a Thread makes its owner's set read again at once (only that User's); a
+read of it begun before stores nothing.
 
-**Masked files are read-only.** A read that shows `[NAME]` says so (`masked: true`): the editor
-opens it read-only with «This file contains secrets; edit it in a terminal.», and a save over a
-file that holds one of the User's values (or one too large to check) is refused with the same
-words. A change request's title, body or comment shown masked is read-only too (`canEdit` and
-`editChangeRequest` false), and an edit that carries one of the User's `[NAME]`s is refused, so
-`[NAME]` never replaces a value on the host. "Copy ignored files to another machine" skips a file
-read masked («Holds secrets; copy it in a terminal.»). Nothing is ever written back from masked
-text.
+**Masked text is never written back.** A read that shows `[NAME]` says so (`masked: true`): the
+editor opens it read-only with «This file contains secrets; edit it in a terminal.». A save is
+refused (same words) only when it carries one of the User's `[NAME]`s and the file on disk holds
+that value there, or cannot be read or checked whole (fails closed); any other save (one that
+replaces the line, a plan, a copy) is written. A change request's title, body or comment shown
+masked is read-only (`canEdit`, `editChangeRequest` false), and an edit carrying one of the
+User's `[NAME]`s is refused, so `[NAME]` never replaces a value on the host.
 
-**No unmasked reads to clients (decision R2).** A file read or search with no Thread is masked
-for its reader like any other. The client relays "copy ignored files to another machine" (the two
-servers never talk), so a server-side copy would be a new Hub-to-machine operation; instead the
-copy skips any file read with `masked: true` and says so, and the target's `writeFile` refuses to
-write over a file that holds the writer's values. No unmasked text reaches a client, and no value
-is overwritten by `[NAME]`.
+**Copying files to another machine (decision R2, revised).** "Copy ignored files to another
+machine" reads each file with `forCopy: true` and gets it as it is, unmasked, so an `.env`
+arrives with its values. Only a caller who may write files (`filesystem:write`) may ask for one
+(`ws.ts`): they could print the file in a terminal anyway, and their own values are the only ones
+a read masks for them (R1). Every other read to a client is masked for its reader.
 
 **Where it applies.** The full inventory is `vaults/MaskedPaths.ts`: every WS method, HTTP
 endpoint, raw route, MCP tool (as `DoorRules` lists them) and executor operation, each by name,
@@ -465,27 +469,29 @@ and calls every door marked masked with the Owner's secret on a «Hub con Enviro
 checking it answers `[OWNER_TOKEN]` (change requests and Git actions through the masking their
 services wrap every method in: no host or hook runs in tests).
 
-| What                                                         | Set      | Where                                                |
-| ------------------------------------------------------------ | -------- | ---------------------------------------------------- |
-| Events, the outbox's payloads, a rejected command's error    | Thread's | `EventSink` via `maskingEventWrites`                 |
-| Live command output                                          | Thread's | `CommandOutputHub` (`heldText.ts`)                   |
-| Terminal output and snapshots                                | Thread's | `ThreadWorkspace` (`maskTerminal.ts`)                |
-| Checkpoint diffs, handoff summaries                          | Thread's | `CheckpointDiffQuery`, `ThreadMoveService`           |
-| Setup-script output and errors                               | Thread's | `WorktreeSetupTracker`, over its last lines          |
-| `files.read`, `search.contents`, a save; machines' errors    | User's   | `ThreadWorkspace` (`maskWorkspace.ts`)               |
-| A checkout's diffs and commits (Changes panel), their errors | User's   | `ReviewService` (`maskCheckoutReads.ts`)             |
-| Git hook output, progress and failures                       | User's   | `GitManager` (`maskGitProgress.ts`)                  |
-| Change requests: every answer and failure; edits refused     | User's   | `PullRequestService`, guides (`maskPullRequests.ts`) |
-| Review guides as stored                                      | User's   | `PullRequestReviewGuides.put` (the generator's)      |
-| A checkout's file served by URL (large text, downloads)      | User's   | the asset route (`maskAssets.ts`)                    |
-| Logs, spans, trace and provider event files                  | process  | every value the process knows (below)                |
-| A terminal's history file                                    | terminal | `TerminalManager`, every value its shells got        |
+| What                                                          | Set      | Where                                                     |
+| ------------------------------------------------------------- | -------- | --------------------------------------------------------- |
+| Events, the outbox's payloads, a rejected command's error     | Thread's | `EventSink` via `maskingEventWrites`                      |
+| Live command output                                           | Thread's | `CommandOutputHub` (`heldText.ts`)                        |
+| Terminal output and snapshots                                 | Thread's | `ThreadWorkspace` (`maskTerminal.ts`)                     |
+| Checkpoint diffs, handoff summaries                           | Thread's | `CheckpointDiffQuery`, `ThreadMoveService`                |
+| Setup-script output and errors                                | Thread's | `WorktreeSetupTracker`, over its last lines               |
+| `files.read`, `search.contents`, a save; machines' errors     | User's   | `ThreadWorkspace` (`maskWorkspace.ts`)                    |
+| A checkout's diffs and commits (Changes panel), their errors  | User's   | `ReviewService` (`maskCheckoutReads.ts`)                  |
+| Git hook output and progress; every Git and VCS failure       | User's   | `GitManager`, `GitWorkflowService` (`maskGitProgress.ts`) |
+| Change requests (lists too): every answer and failure         | User's   | `PullRequestService`, guides (`maskPullRequests.ts`)      |
+| Review guides as stored (a session's or an MCP caller's User) | User's   | `PullRequestReviewGuides.put` (the generator's)           |
+| A checkout's text file served by URL (who asks; media as is)  | User's   | the asset route (`maskAssets.ts`)                         |
+| Logs, spans, trace and provider event files                   | process  | every value the process knows (below)                     |
+| A terminal's history file                                     | terminal | `TerminalManager`, every value its shells got             |
 
 **Text in pieces** (`heldText.ts` over one `SecretStreamGuard` per stream, for its whole life:
 terminals and command output). A piece whose end could be the start of a value's form waits for
 the next one (at most 150 ms) and the two go out as one, masked. When nothing follows in time (or
 too much is held) the piece goes out with that start as `[NAME]` when it is 6 characters or more,
-and the rest of the value is dropped when it comes: no part of the value is seen. A reload of the
+and the rest of the value is dropped as it comes, however many pieces it takes: no part of the
+value is seen (a start shorter than 6 characters already sent makes the rest show as `[NAME]`).
+A reload of the
 Thread's values, a value delivered meanwhile or a snapshot keeps the guard (a snapshot's end that
 starts a value shows as `[NAME]`, its rest is dropped). A history cut at its start (a terminal's
 bounded history, a file read cut at its size limit) loses what is left of a value at the cut.
@@ -516,8 +522,12 @@ files, never what a client is shown.
   encoding (gzip, other escapes); a binary file served by URL goes as it is;
 - a start of a value shorter than 6 characters sent before a pause shows (values shorter than 6
   are never masked); a value typed into a terminal a few characters at a time shows as typed;
-- a file served by URL larger than 16 MiB is refused for a User with values (it cannot be
-  checked);
+- a text file served by URL larger than 16 MiB is refused for a User with values (it cannot be
+  checked); media and binary files (a NUL in their first 8 KB) are served as they are, whatever
+  their size; a URL opened with no session and no User of its own serves no text;
+- the masker's expression index on `json_extract(payload_json, '$.lineage.rootThreadId')` costs
+  a JSON parse per projected Thread write; a generated column would be cheaper (ticket 09);
+- a `forCopy` read is unmasked by design (decision R2, revised);
 - a Thread's history is masked with its owner's set (decision A), so a User who may type in a
   Thread they do not own (a teammate's, in a shared Space) can type a guess there and see whether
   it comes back as `[NAME]`. Masking hides values from history; it does not keep them from someone
@@ -525,8 +535,6 @@ files, never what a client is shown.
 - a review guide is stored masked with the values of the User who generated it; another viewer
   sees those as `[NAME]` too (masked again with their own), so the guide tells them the
   generator's value names, never values;
-- change request lists (titles, as the host lists them) are not masked: every viewer sees the same
-  list, and no one User's set applies;
 - project events and a rejected project command's error are not masked: they hold what Users
   typed (titles, scripts) and planner messages, never a Thread's process output.
 
