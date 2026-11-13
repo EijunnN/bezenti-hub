@@ -275,8 +275,8 @@ export const claudeGatewaySettingsEnv = (
   const model = gateway.model ?? undefined;
   return {
     ANTHROPIC_BASE_URL: `${gateway.baseUrl}/api/ai/anthropic`,
-    // The Bash tool's commands do not inherit Claude Code's Anthropic credentials.
-    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1",
+    // Not CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: Claude Code then refuses to start without bubblewrap,
+    // which a Sandbox (no capabilities) cannot run. Its commands inherit the key (accepted risk).
     // A proxy a project sets never sees the calls to the loopback relay.
     NO_PROXY: processNoProxy ?? LOOPBACK_NO_PROXY,
     ...(model === undefined

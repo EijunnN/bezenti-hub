@@ -351,10 +351,10 @@ Decisions; the code is `ai/AiGatewaySessions.ts` (the rule), `environments/AiGat
 
 **Accepted risks.** The agent's own process holds the key: anything it runs can read
 `/proc/<pid>/environ`, and in a shared Sandbox so can the Space's other processes (ADR 0004).
-Claude Code scrubs its Bash tool's environment (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`) and Codex's
-default shell policy drops `*KEY*` names; OpenCode's and Pi's tools inherit the key, and a Pi
-extension of a trusted project runs with it. A key is worth only its Thread's allowed accounts
-while its session lives. Provider homes stay on the machine after a Thread is deleted (transcripts,
+Codex's default shell policy drops `*KEY*` names; Claude Code's, OpenCode's and Pi's tools inherit the
+key (Claude Code's `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` refuses to start without bubblewrap, which a
+Sandbox without capabilities cannot run), and a Pi extension of a trusted project runs with it.
+A key is worth only its Thread's allowed accounts while its session lives. Provider homes stay on the machine after a Thread is deleted (transcripts,
 never the key): removing them needs an executor operation, left for a later ticket.
 
 ## Known exception to «no upstream services»

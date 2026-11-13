@@ -1426,15 +1426,9 @@ describe("ClaudeAdapterV2 on the Hub's AI gateway (spec 4 ticket 06)", () => {
         assert.equal(env.ANTHROPIC_MODEL, "claude-sonnet-5-5");
         assert.equal(env.CLAUDE_CONFIG_DIR, "/state/provider-homes/abc/claudeAgent");
         assert.isUndefined(env.ANTHROPIC_API_KEY, "the machine's key never reaches it");
-        assert.equal(
-          env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB,
-          "1",
-          "its commands do not inherit the key",
-        );
         // Flag settings outrank a project's .claude/settings.json: its env cannot move the address.
         const flags = flagSettings[0] as { readonly env?: Record<string, string> } | undefined;
         assert.equal(flags?.env?.ANTHROPIC_BASE_URL, "http://127.0.0.1:41000/api/ai/anthropic");
-        assert.equal(flags?.env?.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, "1");
         assert.include(flags?.env?.NO_PROXY ?? "", "127.0.0.1");
         assert.notInclude(JSON.stringify(flagSettings), "t3gk_", "never the key in settings");
       }),
