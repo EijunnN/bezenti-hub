@@ -436,9 +436,10 @@ move; again on a rerun, never one opened in the new Space), a removal marks ever
 opened (in the removal's transaction). `ProjectMoveHooks.closePendingTerminals`
 (`ProjectMoveThreads`) then closes each on its machine if connected, and the record goes; a machine
 that is away, older or no longer the Thread's gets them when it connects (on every executor change).
-Closing is the terminal's normal close: the shell and its PTY session end. A process that left the
-shell's session (`setsid`, `nohup`, a daemon) keeps its environment: the same accepted risk as
-`/proc/<pid>/environ` in a shared Sandbox. Terminals opened before migration 115 have no record and
+Closing is the terminal's normal close: the shell and its PTY end. A background job (`npm run dev &`:
+the live recheck saw one outlive its shell) or a process that left the session (`setsid`, `nohup`,
+a daemon) keeps its environment: the same accepted risk as `/proc/<pid>/environ` in a shared
+Sandbox. Terminals opened before migration 115 have no record and
 are not refused. The move dialog says «Open terminals of its Threads close». After a revocation,
 live processes keep the ticket 04 rule (stale flag): nobody new gains control of them.
 
