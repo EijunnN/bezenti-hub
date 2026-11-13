@@ -13,8 +13,10 @@ const CODEX_GATEWAY_KEY_ENV = "T3_AI_GATEWAY_KEY";
 export interface LocalCliSetup {
   /** Claude Code: `~/.claude/settings.json` (merge `env` into an existing file). */
   readonly claudeCode: string;
-  /** Codex: `~/.codex/config.toml`, plus the key in the shell's environment. */
+  /** Codex: `~/.codex/config.toml`, which never holds the key. */
   readonly codex: string;
+  /** Codex: the key in the shell's environment (`~/.bashrc`, `~/.zshrc`…). */
+  readonly codexShell: string;
 }
 
 /** The Hub's origin without a trailing slash, path or query; null when it is not http(s). */
@@ -49,11 +51,10 @@ export function localCliSetup(hubOrigin: string, key: string | null): LocalCliSe
     `base_url = ${JSON.stringify(`${hubOrigin}/api/ai/openai/v1`)}`,
     `env_key = "${CODEX_GATEWAY_KEY_ENV}"`,
     'wire_api = "responses"',
-    "",
-    "# In your shell profile:",
-    `# export ${CODEX_GATEWAY_KEY_ENV}=${shellQuoted(secret)}`,
+    `# The key: in your shell's environment as ${CODEX_GATEWAY_KEY_ENV}, never in this file.`,
   ].join("\n");
-  return { claudeCode, codex };
+  const codexShell = `export ${CODEX_GATEWAY_KEY_ENV}=${shellQuoted(secret)}`;
+  return { claudeCode, codex, codexShell };
 }
 
 const shellQuoted = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;

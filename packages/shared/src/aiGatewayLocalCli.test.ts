@@ -22,13 +22,13 @@ describe("localCliSetup", () => {
     expect(setup.codex).toContain('base_url = "https://hub.example.com/api/ai/openai/v1"');
     expect(setup.codex).toContain('env_key = "T3_AI_GATEWAY_KEY"');
     expect(setup.codex).toContain('wire_api = "responses"');
-    expect(setup.codex).toContain(`export T3_AI_GATEWAY_KEY='${KEY}'`);
+    expect(setup.codexShell).toContain(`export T3_AI_GATEWAY_KEY='${KEY}'`);
   });
 
   it("uses a placeholder once the key is no longer shown", () => {
     const setup = localCliSetup("http://127.0.0.1:4310", null);
     expect(setup.claudeCode).toContain(LOCAL_CLI_KEY_PLACEHOLDER);
-    expect(setup.codex).toContain(LOCAL_CLI_KEY_PLACEHOLDER);
+    expect(setup.codexShell).toContain(LOCAL_CLI_KEY_PLACEHOLDER);
     expect(setup.claudeCode).not.toContain("t3gk_");
   });
 
@@ -37,5 +37,13 @@ describe("localCliSetup", () => {
     expect(gatewayOrigin("http://127.0.0.1:4310/")).toBe("http://127.0.0.1:4310");
     expect(gatewayOrigin("file:///etc/passwd")).toBeNull();
     expect(gatewayOrigin("not a url")).toBeNull();
+  });
+});
+
+describe("localCliSetup keeps the key out of Codex's config file", () => {
+  it("puts the key only in the shell line, never in config.toml", () => {
+    const setup = localCliSetup("https://hub.example.com", KEY);
+    expect(setup.codex).not.toContain(KEY);
+    expect(setup.codexShell).toBe(`export T3_AI_GATEWAY_KEY='${KEY}'`);
   });
 });

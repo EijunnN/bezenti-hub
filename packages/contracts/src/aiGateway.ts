@@ -100,7 +100,7 @@ export const AiGatewayUserKey = Schema.Struct({
   /** The User's name, for the Owner's list of everyone's keys. */
   userName: Schema.NullOr(Schema.String),
   spaceId: SpaceId,
-  /** Null for a Space the viewer can no longer see. */
+  /** Null for a Space that no longer exists (the Owner lists every User's keys). */
   spaceName: Schema.NullOr(Schema.String),
   createdAt: Schema.String,
   /** Written at most once a minute per key. */

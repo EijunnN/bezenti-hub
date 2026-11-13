@@ -1,4 +1,7 @@
-import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import {
+  type AtomCommandResult,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import type {
   AiGatewayKeyListResult,
   AiGatewayUserKey,
@@ -38,8 +41,21 @@ const TOOLS: ReadonlyArray<readonly [Tool, string]> = [
 ];
 const SETUP_HINTS: Readonly<Record<Tool, string>> = {
   "claude-code": "Put this in ~/.claude/settings.json (merge it into the env of a file you have).",
-  codex: "Put this in ~/.codex/config.toml and the key in your shell's environment.",
+  codex: "Put this in ~/.codex/config.toml; the key goes in your shell's environment, not there.",
 };
+
+type ListAnswer = AtomCommandResult<AiGatewayKeyListResult, unknown>;
+/** What a list answer shows: the keys, or why they could not be read. */
+const listedOutcome = (result: ListAnswer) =>
+  result._tag === "Success"
+    ? ({ listed: result.value, error: null } as const)
+    : ({
+        listed: null,
+        error: errorMessageOf(
+          squashAtomCommandFailure(result),
+          "Could not read your local CLI keys.",
+        ),
+      } as const);
 
 function useKeyCommands() {
   return {
@@ -63,7 +79,8 @@ export function LocalCliKeysSection({ environmentId }: { readonly environmentId:
   const commands = useKeyCommands();
   const spaceView = useCurrentSpace((state) => state.view);
   // The session may hand out credentials at all (access:write); the Hub decides the rest.
-  const mayWrite = useAtomValue(aiGatewayEnvironment.createKey.permissionAtom(environmentId));
+  const mayCreate = useAtomValue(aiGatewayEnvironment.createKey.permissionAtom(environmentId));
+  const mayRevoke = useAtomValue(aiGatewayEnvironment.revokeKey.permissionAtom(environmentId));
   const [listed, setListed] = useState<AiGatewayKeyListResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tool, setTool] = useState<Tool>("claude-code");
@@ -84,15 +101,10 @@ export function LocalCliKeysSection({ environmentId }: { readonly environmentId:
 
   const origin = gatewayOrigin(readHubLinkOrigin(environmentId) ?? "");
 
-  const showListed = (result: Awaited<ReturnType<typeof commands.list>>) => {
-    if (result._tag === "Success") {
-      setListed(result.value);
-      setError(null);
-    } else {
-      setError(
-        errorMessageOf(squashAtomCommandFailure(result), "Could not read your local CLI keys."),
-      );
-    }
+  const showListed = (result: ListAnswer) => {
+    const outcome = listedOutcome(result);
+    if (outcome.listed !== null) setListed(outcome.listed);
+    setError(outcome.error);
   };
   const loadKeys = useEffectEvent((target: EnvironmentId) =>
     commands.list({ environmentId: target, input: {} }),
@@ -105,13 +117,9 @@ export function LocalCliKeysSection({ environmentId }: { readonly environmentId:
     let cancelled = false;
     void loadKeys(environmentId).then((result) => {
       if (cancelled) return;
-      if (result._tag === "Success") {
-        setListed(result.value);
-      } else {
-        setError(
-          errorMessageOf(squashAtomCommandFailure(result), "Could not read your local CLI keys."),
-        );
-      }
+      const outcome = listedOutcome(result);
+      if (outcome.listed !== null) setListed(outcome.listed);
+      setError(outcome.error);
     });
     return () => {
       cancelled = true;
@@ -129,7 +137,9 @@ export function LocalCliKeysSection({ environmentId }: { readonly environmentId:
   const setupFor = (secret: string | null) => {
     if (origin === null) return null;
     const setup = localCliSetup(origin, secret);
-    return tool === "claude-code" ? setup.claudeCode : setup.codex;
+    return tool === "claude-code"
+      ? { file: setup.claudeCode, shell: null }
+      : { file: setup.codex, shell: setup.codexShell };
   };
 
   const revoke = async (key: AiGatewayUserKey) => {
@@ -181,7 +191,7 @@ export function LocalCliKeysSection({ environmentId }: { readonly environmentId:
           ))}
         </ToggleGroup>
       </div>
-      {mayWrite ? (
+      {mayCreate ? (
         <NewKeyForm
           environmentId={environmentId}
           spaces={spaces}
@@ -212,8 +222,16 @@ export function LocalCliKeysSection({ environmentId }: { readonly environmentId:
                 aria-label="Setup"
                 className="overflow-x-auto rounded bg-muted px-2 py-1 font-mono text-xs"
               >
-                {madeSetup}
+                {madeSetup.file}
               </pre>
+              {madeSetup.shell === null ? null : (
+                <pre
+                  aria-label="Shell line"
+                  className="overflow-x-auto rounded bg-muted px-2 py-1 font-mono text-xs"
+                >
+                  {madeSetup.shell}
+                </pre>
+              )}
             </>
           )}
           <div className="flex flex-wrap items-center gap-2">
@@ -221,8 +239,17 @@ export function LocalCliKeysSection({ environmentId }: { readonly environmentId:
               {isCopied && copied === "key" ? "Copied" : "Copy key"}
             </Button>
             {madeSetup === null ? null : (
-              <Button size="sm" variant="outline" onClick={() => copy("setup", madeSetup)}>
+              <Button size="sm" variant="outline" onClick={() => copy("setup", madeSetup.file)}>
                 {isCopied && copied === "setup" ? "Copied" : "Copy setup"}
+              </Button>
+            )}
+            {madeSetup?.shell == null ? null : (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => copy("shell", madeSetup.shell ?? "")}
+              >
+                {isCopied && copied === "shell" ? "Copied" : "Copy shell line"}
               </Button>
             )}
             <Button size="sm" variant="ghost" onClick={() => setMade(null)}>
@@ -248,7 +275,7 @@ export function LocalCliKeysSection({ environmentId }: { readonly environmentId:
                   <span className="text-xs text-muted-foreground">
                     {[
                       listed.everyone ? (key.userName ?? key.userId) : null,
-                      key.spaceName ?? "A Space you no longer see",
+                      key.spaceName ?? "A Space that no longer exists",
                       `Created ${formatWhen(key.createdAt)}`,
                       `Last used ${formatWhen(key.lastUsedAt)}`,
                     ]
@@ -262,12 +289,12 @@ export function LocalCliKeysSection({ environmentId }: { readonly environmentId:
                       size="sm"
                       variant="outline"
                       aria-label={`Copy setup for ${key.name}`}
-                      onClick={() => copy(key.keyId, setup)}
+                      onClick={() => copy(key.keyId, setup.file)}
                     >
                       {isCopied && copied === key.keyId ? "Copied" : "Copy setup"}
                     </Button>
                   )}
-                  {mayWrite ? (
+                  {mayRevoke ? (
                     <Button
                       size="sm"
                       variant="destructive-outline"

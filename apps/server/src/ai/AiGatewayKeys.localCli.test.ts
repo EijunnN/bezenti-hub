@@ -298,3 +298,53 @@ it.live.skipIf(!posix || platform === undefined)(
       assert.equal(linusReason, "user-inactive");
     }).pipe(Effect.scoped),
 );
+
+it.live.skipIf(!posix || platform === undefined)(
+  "a disabled User's key answers 401 (user-inactive), whichever watch runs first",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub;
+      yield* acmeSetup(setup);
+      const made = yield* setup.keys
+        .createForSession({ name: "Grace laptop", spaceId: setup.acmeId })
+        .pipe(CommandActor.actAs(setup.people.member));
+      const disabled = yield* setup.server.request(
+        `/api/installation/users/${setup.people.member}/status`,
+        { body: { status: "disabled" }, cookie: setup.ownerCookie },
+      );
+      assert.equal(disabled.status, 200);
+      // The Membership watch may run before the status watch (setStatus announces both).
+      yield* setup.keys.revokeLostSpaces(setup.people.member);
+      const answer = yield* call(setup, MESSAGES, {
+        key: Redacted.value(made.key),
+        body: messages(),
+      });
+      assert.equal(answer.status, 401);
+      assert.notInclude(answer.text, "Make a new key");
+      const rows = yield* setup.server.sql<{ readonly reason: string | null }>`
+        SELECT revoked_reason AS reason FROM ai_gateway_keys WHERE key_id = ${made.created.keyId}
+      `;
+      assert.equal(rows[0]?.reason, "user-inactive");
+    }).pipe(Effect.scoped),
+);
+
+it.live.skipIf(!posix || platform === undefined)(
+  "a Membership change revokes only User keys: a Thread key follows its own rules",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub;
+      yield* acmeSetup(setup);
+      const thread = yield* setup.thread(setup.people.member, setup.acmeId);
+      yield* setup.server.sql`
+        DELETE FROM space_memberships WHERE space_id = ${setup.acmeId} AND user_id = ${setup.people.member}
+      `;
+      yield* setup.keys.revokeLostSpaces(setup.people.member);
+      const rows = yield* setup.server.sql<{ readonly reason: string | null }>`
+        SELECT revoked_reason AS reason FROM ai_gateway_keys WHERE thread_id = ${thread.threadId}
+      `;
+      assert.notEqual(rows[0]?.reason, "space-lost");
+      const answer = yield* call(setup, MESSAGES, { key: thread.key, body: messages() });
+      assert.equal(answer.status, 403);
+      assert.notInclude(answer.text, "Make a new key");
+    }).pipe(Effect.scoped),
+);

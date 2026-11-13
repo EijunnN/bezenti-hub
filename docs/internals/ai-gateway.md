@@ -340,13 +340,16 @@ AI accounts → «Local CLI keys» (web and desktop; every User, not only the Ow
   AllowedAiAccounts gives the User in the key's Space, evaluated per request.
 - **Leaving the Space:** the next request answers 403 («You no longer work in this key's Space»)
   and the key is revoked for good (`space-lost`), also when the User comes back; the Membership
-  watch revokes the unused ones too. A removed or disabled User's keys are revoked (401).
+  watch revokes the unused ones too (User keys only: a Thread key follows its Thread). A key made
+  while its Membership ended is checked again once stored and taken back. A removed or disabled
+  User's keys are revoked as `user-inactive` and answer 401, whichever watch runs first.
 - **Usage:** counted like a Thread's (`ai_usage` with the key's User and Space, no Thread).
 - **Setup** (`@t3tools/shared/aiGatewayLocalCli`, the Hub's public URL, else the address the
   client reaches it on): Claude Code `~/.claude/settings.json` with `env.ANTHROPIC_BASE_URL =
   <hub>/api/ai/anthropic` and `env.ANTHROPIC_AUTH_TOKEN = <key>`; Codex `~/.codex/config.toml` with
   `model_provider = "t3"` and `[model_providers.t3]` (`base_url = <hub>/api/ai/openai/v1`,
-  `env_key = "T3_AI_GATEWAY_KEY"`, `wire_api = "responses"`), the key exported in the shell. Right
+  `env_key = "T3_AI_GATEWAY_KEY"`, `wire_api = "responses"`) and, apart, the shell line that
+  exports the key: never in `config.toml`. Right
   after «Create key» the setup holds the key; «Copy setup» on a listed key holds a placeholder.
 - **Accepted risk:** a key lives in the User's files on their own machine, readable by whatever
   runs as them there. It reaches only that User's allowed accounts in one Space, and its use shows
