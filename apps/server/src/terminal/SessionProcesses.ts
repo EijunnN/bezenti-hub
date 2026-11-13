@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off -- synchronous /proc reads right before each signal keep the re-check tight.
 /**
  * Ends a stale-closed shell's session: its pid is the session id of every job it started. Signals
  * the session's process groups (HUP, TERM, KILL), re-reading `/proc` before each signal; a group
@@ -121,6 +122,16 @@ export interface EndSessionOptions {
   readonly protectedSessions: ReadonlySet<number>;
 }
 
+/** False when the group is gone already (ESRCH) or not ours (EPERM): nothing to end. */
+const signalGroup = (options: EndSessionOptions, pgrp: number, signal: SessionSignal) => {
+  try {
+    options.killGroup(pgrp, signal);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 /**
  * Ends session `sid`: each signal goes to the groups found in that session just before it, and
  * the next step waits `graceMs`. Stops as soon as nothing is left. Answers the groups signalled.
@@ -138,13 +149,7 @@ export const endSessionWith = Effect.fn("SessionProcesses.endSession")(function*
     const groups = sessionGroups(options.source, sid, options.uid);
     if (groups.size === 0) break;
     for (const pgrp of groups) {
-      if (pgrp <= 1) continue;
-      try {
-        options.killGroup(pgrp, signal);
-        signalled.add(pgrp);
-      } catch {
-        // Gone already (ESRCH) or not ours (EPERM): nothing to end.
-      }
+      if (pgrp > 1 && signalGroup(options, pgrp, signal)) signalled.add(pgrp);
     }
   }
   return signalled;
