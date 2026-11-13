@@ -24,6 +24,7 @@ import {
   type OrchestratorMcpDelegateTaskInput,
   type OrchestratorMcpDelegateTaskResult,
   type OrchestratorMcpDeleteScheduledTaskInput,
+  type OrchestratorMcpListSecretNamesResult,
   type OrchestratorMcpRequestSecretInput,
   type OrchestratorMcpRequestSecretResult,
   type OrchestratorMcpDeleteScheduledTaskResult,
@@ -133,6 +134,7 @@ import {
 } from "./mcpVisibility.ts";
 import { visibleScheduledTasks } from "../scheduledTasks/visibleScheduledTasks.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as SecretDelivery from "../vaults/SecretDelivery.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_WAIT_TIMEOUT_MS = 60 * 60 * 1_000;
@@ -201,6 +203,10 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpRequestSecretInput,
   ) => Effect.Effect<OrchestratorMcpRequestSecretResult, OrchestratorMcpFailure>;
+  /** The names (never values) of the secrets the caller's own Thread's turns receive. */
+  readonly listSecretNames: (
+    scope: McpInvocationScope,
+  ) => Effect.Effect<OrchestratorMcpListSecretNamesResult, OrchestratorMcpFailure>;
   readonly listThreads: (
     scope: McpInvocationScope,
     input: OrchestratorMcpThreadListInput,
@@ -1067,6 +1073,8 @@ const make = Effect.gen(function* () {
         )
       : Effect.succeed(project.defaultModelSelection);
   const secretRequests = yield* SecretRequests.SecretRequests;
+  // On the Hub; a narrow test or a joined machine has none, and its agents then list nothing.
+  const secretDelivery = yield* Effect.serviceOption(SecretDelivery.SecretDelivery);
 
   const requireCapability = (scope: McpInvocationScope) =>
     scope.capabilities.has("orchestration")
@@ -2057,6 +2065,23 @@ const make = Effect.gen(function* () {
         return { scheduledTaskId: existing.id, deleted: true };
       },
     ),
+    listSecretNames: Effect.fn("OrchestratorMcpService.listSecretNames")(function* (scope) {
+      // The credential's own Thread only: the tool takes no Thread, so no agent names another's.
+      // A Thread its own User can no longer see answers as a hidden one, as every other door.
+      const threadScope = yield* requireThreadScope(scope, "list_secret_names");
+      const threadId = threadScope.thread.threadId;
+      yield* loadReadableThread(scope, threadId);
+      if (Option.isNone(secretDelivery)) return { secrets: [] };
+      const secrets = yield* secretDelivery.value
+        .turnNames(threadId)
+        .pipe(
+          Effect.mapError((error) =>
+            failure("orchestration_error", `Could not list the secrets: ${error.message}`),
+          ),
+        );
+      yield* Effect.annotateCurrentSpan({ "secret_names.count": secrets.length });
+      return { secrets };
+    }),
     requestSecret: Effect.fn("OrchestratorMcpService.requestSecret")(function* (scope, input) {
       const { scope: threadScope, parent } = yield* loadThreadCaller(scope, "request_secret");
       const threadId = threadScope.thread.threadId;
@@ -2114,6 +2139,7 @@ const make = Effect.gen(function* () {
             reason: input.reason,
             ...(input.placeholder === undefined ? {} : { placeholder: input.placeholder }),
             ...(input.delivery === "file" ? { delivery: "file" as const } : {}),
+            ...(input.name === undefined ? {} : { secretName: input.name }),
             secretStatus,
           })
           .pipe(

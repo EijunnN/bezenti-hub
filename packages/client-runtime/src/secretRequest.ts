@@ -1,4 +1,20 @@
-import type { OrchestrationV2TurnItem, SecretRequestAnswerInput } from "@t3tools/contracts";
+import {
+  type OrchestrationV2TurnItem,
+  SECRET_MASK_MIN_LENGTH,
+  type SecretRequestAnswerInput,
+  secretNameRisk,
+  type VaultId,
+} from "@t3tools/contracts";
+
+/**
+ * A value too short to be masked is never saved to a Vault from a card (the Hub refuses it too):
+ * it would reach the Space's Threads and show in their history.
+ */
+export function secretRequestVaultValueProblem(secret: string): string | null {
+  const length = [...secret.trim()].length;
+  if (length === 0 || length >= SECRET_MASK_MIN_LENGTH) return null;
+  return `Values shorter than ${SECRET_MASK_MIN_LENGTH} characters are never hidden in the history: add it in Settings → Vaults, or answer without saving.`;
+}
 
 export type SecretRequestItem = Extract<
   OrchestrationV2TurnItem,
@@ -64,14 +80,55 @@ export function secretRequestDisplay(
 
 export function secretRequestAnswerInput(
   item: Pick<SecretRequestItem, "id" | "threadId">,
-  answer: { readonly type: "save"; readonly secret: string } | { readonly type: "decline" },
+  answer:
+    | {
+        readonly type: "save";
+        readonly secret: string;
+        /** «Also save to Vault»: the Hub accepts only a Vault it offered for this Thread. */
+        readonly saveToVault?: { readonly vaultId: VaultId; readonly name: string };
+      }
+    | { readonly type: "decline" },
 ): SecretRequestAnswerInput | null {
   if (answer.type === "decline") {
     return { threadId: item.threadId, turnItemId: item.id, answer: { type: "decline" } };
   }
   const secret = answer.secret.trim();
   if (secret.length === 0) return null;
-  return { threadId: item.threadId, turnItemId: item.id, answer: { type: "save", secret } };
+  const saveToVault =
+    answer.saveToVault === undefined
+      ? undefined
+      : { vaultId: answer.saveToVault.vaultId, name: answer.saveToVault.name.trim() };
+  if (
+    saveToVault !== undefined &&
+    (secretRequestVaultNameProblem(saveToVault.name) !== null ||
+      secretRequestVaultValueProblem(secret) !== null)
+  ) {
+    return null;
+  }
+  return {
+    threadId: item.threadId,
+    turnItemId: item.id,
+    answer: { type: "save", secret, ...(saveToVault === undefined ? {} : { saveToVault }) },
+  };
+}
+
+/**
+ * Why a name can't be saved from the card, or null: the Hub checks again (`secretNameRisk`).
+ * Names that change how tools run are the Owner's, in Settings → Vaults, never from a card.
+ */
+export function secretRequestVaultNameProblem(name: string): string | null {
+  const trimmed = name.trim();
+  if (trimmed.length === 0) return "Name the secret.";
+  switch (secretNameRisk(trimmed)) {
+    case "invalid":
+      return "Use capital letters, digits and _, not starting with a digit.";
+    case "gateway":
+      return "The Hub reserves this name.";
+    case "dangerous":
+      return "This name changes how tools run: only the Owner adds it, in Settings → Vaults.";
+    default:
+      return null;
+  }
 }
 
 const USER_FACING_FAILURE_TAGS = new Set(["SecretRequestError", "EnvironmentAuthorizationError"]);

@@ -4065,6 +4065,7 @@ const fakeSecretDelivery = (
   const byFingerprint = new Map<string, SecretEnv>();
   return SecretDelivery.SecretDelivery.of({
     turnOwner: () => Effect.succeedNone,
+    turnNames: () => Effect.succeed([]),
     mayReceiveSecrets: (threadId) => Effect.succeed(byThread.get(threadId) !== undefined),
     plan: ({ target }) => Effect.succeed(SecretDelivery.emptyPlan(target)),
     planTurn: ({ threadId, target }) =>

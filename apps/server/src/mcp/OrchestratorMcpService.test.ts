@@ -63,6 +63,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as SecretDelivery from "../vaults/SecretDelivery.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
 import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.ts";
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
@@ -3753,5 +3754,108 @@ describe("OrchestratorMcpService thread stop", () => {
         }).pipe(Effect.provide(layerTest));
       }),
     ),
+  );
+});
+
+describe("OrchestratorMcpService list_secret_names", () => {
+  const own = ThreadId.make("thread:secret-names-own");
+  const scopeFor = (userId: string): McpInvocationScope => ({
+    environmentId: EnvironmentId.make("environment:secret-names"),
+    requestNamespace: "provider-session:secret-names",
+    thread: {
+      threadId: own,
+      providerSessionId: "provider-session:secret-names",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    },
+    userId: UserId.make(userId),
+    client: undefined,
+    capabilities: new Set(["orchestration"]),
+    issuedAt: 1,
+  });
+  const run = (scope: McpInvocationScope, visible: boolean, asked: Array<ThreadId>) =>
+    Effect.gen(function* () {
+      const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+      return yield* mcp.listSecretNames(scope).pipe(Effect.result);
+    }).pipe(
+      Effect.provide(
+        layerOrchestratorService.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              NodeServices.layer,
+              NodeCrypto.layer,
+              Layer.mock(ThreadManagementService.ThreadManagementService)({
+                getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
+                getThreadRecords: (threadId) =>
+                  Effect.succeed(idleThreadProjection(liveThreadShell(threadId))),
+                getProjectThreadRecords: (input) =>
+                  Effect.succeed({
+                    ...idleThreadProjection(liveThreadShell(input.threadId)),
+                  } as never),
+              }),
+              ServerSettings.layerTest(),
+              Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+              Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+                list: () => Effect.succeed([]),
+              }),
+              Layer.mock(ProjectService.ProjectService)({}),
+              Layer.mock(SecretRequests.SecretRequests)({}),
+              Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+              Layer.mock(SecretDelivery.SecretDelivery)({
+                turnNames: (threadId) =>
+                  Effect.sync(() => {
+                    asked.push(threadId);
+                    return [{ name: "STRIPE_KEY", description: null, vault: "Acme secrets" }];
+                  }),
+              }),
+            ),
+          ),
+        ),
+      ),
+      Effect.provide(
+        Layer.succeed(
+          SpaceVisibility.SpaceVisibility,
+          SpaceVisibility.SpaceVisibility.of({
+            of: () => Effect.succeed({ all: false, spaceIds: [] }),
+            visibleThreadIds: (_visibility: unknown, ids: ReadonlyArray<string>) =>
+              Effect.succeed(new Set(visible ? ids : [])),
+          } as never),
+        ),
+      ),
+    );
+
+  it.effect("lists the names of the calling agent's own Thread, never a value", () =>
+    Effect.gen(function* () {
+      const asked: Array<ThreadId> = [];
+      const listed = yield* run(scopeFor("grace"), true, asked);
+      assert.isTrue(listed._tag === "Success");
+      if (listed._tag === "Success") {
+        assert.deepStrictEqual(listed.success, {
+          secrets: [{ name: "STRIPE_KEY", description: null, vault: "Acme secrets" }],
+        });
+      }
+      assert.deepStrictEqual(asked, [own]);
+    }),
+  );
+
+  it.effect("a credential whose Thread its User cannot see gets the hidden-Thread answer", () =>
+    Effect.gen(function* () {
+      const asked: Array<ThreadId> = [];
+      const listed = yield* run(scopeFor("gus"), false, asked);
+      assert.isTrue(listed._tag === "Failure");
+      if (listed._tag === "Failure") assert.equal(listed.failure.code, "thread_not_found");
+      assert.deepStrictEqual(asked, []);
+    }),
+  );
+
+  it.effect("an MCP client outside a Thread has no Thread to list", () =>
+    Effect.gen(function* () {
+      const asked: Array<ThreadId> = [];
+      const listed = yield* run({ ...scopeFor("grace"), thread: undefined }, true, asked);
+      assert.isTrue(listed._tag === "Failure");
+      if (listed._tag === "Failure") {
+        assert.equal(listed.failure.code, "thread_credential_required");
+      }
+      assert.deepStrictEqual(asked, []);
+    }),
   );
 });

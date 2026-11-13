@@ -10,6 +10,7 @@ import {
   SECRET_VALUE_MAX_BYTES,
   secretNameRisk,
   type SpaceId,
+  type ThreadId,
   type UserId,
   type VaultBrokenLink,
   type VaultCreateInput,
@@ -120,6 +121,14 @@ export class Vaults extends Context.Service<
     readonly setProjectChoice: (
       input: VaultProjectChoiceSetInput,
     ) => Effect.Effect<VaultChoices, VaultError>;
+    /**
+     * Spec 5 ticket 06: where an answer to a Thread's `request_secret` may also be saved. The
+     * Vaults the acting User may edit (`vault.edit`), not archived, that reach the Thread's Space,
+     * in the Owner's order. The one rule for the card's picker and for the save itself.
+     */
+    readonly saveTargets: (input: {
+      readonly threadId: ThreadId;
+    }) => Effect.Effect<ReadonlyArray<VaultSummary>, VaultError>;
   }
 >()("t3/vaults/Vaults") {}
 
@@ -327,6 +336,7 @@ const unavailable = Vaults.of({
   choices: refuse,
   setSpaceDefaults: refuse,
   setProjectChoice: refuse,
+  saveTargets: refuse,
 });
 
 const invalidName = (name: string) =>
@@ -672,6 +682,29 @@ const make = Effect.gen(function* () {
       .map((row) => summaryOf(row, known, can));
     return { vaults };
   }).pipe(Effect.withSpan("Vaults.list"));
+
+  const saveTargets = Effect.fn("Vaults.saveTargets")(function* (input: {
+    readonly threadId: ThreadId;
+  }) {
+    const who = yield* caller;
+    const placement = yield* spaces
+      .placementOf(input.threadId)
+      .pipe(Effect.catch(storage("read the Thread's Space")));
+    if (Option.isNone(placement)) return [];
+    const reaching = new Set<string>(
+      (yield* VaultReach.allowedToSpace(sql, placement.value.space.id).pipe(
+        Effect.catch(storage("read the Vaults allowed to the Space")),
+      )).map((reach) => reach.vaultId),
+    );
+    const rows = yield* sql<VaultRow>`
+      SELECT ${sql.literal(VAULT_COLUMNS)} FROM vaults v ORDER BY v.is_main DESC, v.position, v.name
+    `.pipe(Effect.catch(storage("read the Vaults")));
+    const known = yield* spacesOf(rows, who);
+    return rows
+      .filter((row) => reaching.has(row.vaultId))
+      .map((row) => summaryOf(row, known, who.can))
+      .filter((summary) => summary.canEdit);
+  });
 
   const create = Effect.fn("Vaults.create")(function* (input: VaultCreateInput) {
     const { userId, can } = yield* caller;
@@ -1393,6 +1426,7 @@ const make = Effect.gen(function* () {
     choices,
     setSpaceDefaults,
     setProjectChoice,
+    saveTargets,
     authorizeReveal,
     create,
     update,

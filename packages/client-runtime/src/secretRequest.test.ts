@@ -1,10 +1,13 @@
-import { SecretRequestError } from "@t3tools/contracts";
+import { SecretRequestError, ThreadId, TurnItemId, VaultId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  secretRequestAnswerInput,
   secretRequestDisplay,
   secretRequestFailureMessage,
   secretRequestPrivacyNote,
+  secretRequestVaultNameProblem,
+  secretRequestVaultValueProblem,
 } from "./secretRequest.ts";
 
 describe("secretRequestDisplay", () => {
@@ -35,5 +38,47 @@ describe("secretRequestFailureMessage", () => {
       "Could not answer the request. Try again.",
     );
     expect(secretRequestFailureMessage(undefined)).toBe("Could not answer the request. Try again.");
+  });
+});
+
+describe("«Also save to Vault»", () => {
+  const item = { id: TurnItemId.make("turn-item:1"), threadId: ThreadId.make("thread-1") };
+  const vaultId = VaultId.make("vault-acme");
+
+  it("sends the Vault and the trimmed name with the answer", () => {
+    expect(
+      secretRequestAnswerInput(item, {
+        type: "save",
+        secret: " sk_live_1 ",
+        saveToVault: { vaultId, name: " STRIPE_KEY " },
+      }),
+    ).toEqual({
+      threadId: item.threadId,
+      turnItemId: item.id,
+      answer: { type: "save", secret: "sk_live_1", saveToVault: { vaultId, name: "STRIPE_KEY" } },
+    });
+  });
+
+  it("refuses names the Hub would refuse from a card", () => {
+    expect(secretRequestVaultNameProblem("STRIPE_KEY")).toBeNull();
+    expect(secretRequestVaultNameProblem("")).not.toBeNull();
+    expect(secretRequestVaultNameProblem("1KEY")).not.toBeNull();
+    expect(secretRequestVaultNameProblem("T3CODE_TOKEN")).not.toBeNull();
+    expect(secretRequestVaultNameProblem("GIT_SSH_COMMAND")).not.toBeNull();
+    expect(
+      secretRequestAnswerInput(item, {
+        type: "save",
+        secret: "sk_live_1",
+        saveToVault: { vaultId, name: "PATH" },
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("secretRequestVaultValueProblem", () => {
+  it("refuses saving a value too short to be masked, and says where it can go", () => {
+    expect(secretRequestVaultValueProblem("")).toBeNull();
+    expect(secretRequestVaultValueProblem("123456")).toBeNull();
+    expect(secretRequestVaultValueProblem("1234")).toContain("Settings → Vaults");
   });
 });

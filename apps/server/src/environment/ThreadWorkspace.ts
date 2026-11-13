@@ -639,6 +639,7 @@ export const make = Effect.gen(function* () {
       threadId: input.threadId,
       terminalId: input.terminalId,
       deleteHistory: true,
+      endSession: true,
     });
   const closeRemote = (
     forward: EnvironmentExecutor.EnvironmentWorkspaceForward,
@@ -648,6 +649,7 @@ export const make = Effect.gen(function* () {
       threadId: input.threadId,
       terminalId: input.terminalId,
       deleteHistory: true,
+      endSession: true,
     });
 
   /**

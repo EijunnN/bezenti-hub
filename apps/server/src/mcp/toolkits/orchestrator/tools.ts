@@ -8,6 +8,7 @@ import {
   OrchestratorMcpDelegateTaskResult,
   OrchestratorMcpDeleteScheduledTaskInput,
   OrchestratorMcpDeleteScheduledTaskResult,
+  OrchestratorMcpListSecretNamesResult,
   OrchestratorMcpRequestSecretInput,
   OrchestratorMcpRequestSecretResult,
   OrchestratorMcpFailure,
@@ -190,6 +191,19 @@ const RequestSecretTool = Tool.make("request_secret", {
   // Claude Code defers MCP tools behind ToolSearch; agents that never load this one ask in chat.
   .annotate(Tool.Meta, { "anthropic/alwaysLoad": true });
 
+const ListSecretNamesTool = Tool.make("list_secret_names", {
+  description:
+    "Names of the secrets this thread has as environment variables, with their Vault. Use $NAME in commands; never print a value. Values are never shown.",
+  // No `parameters`: Tool.EmptyParams (an empty Struct is not a valid MCP input schema).
+  success: OrchestratorMcpListSecretNamesResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "List secret names")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+
 const CreateThreadsTool = Tool.make("create_threads", {
   description:
     "Create new top-level threads in this checkout. Not delegation. One thread or its own worktree: `t3_thread_launch`. Project, branch, and worktree inherit.",
@@ -296,6 +310,7 @@ export const OrchestratorToolkit = Toolkit.make(
   ListScheduledTasksTool,
   DeleteScheduledTaskTool,
   RequestSecretTool,
+  ListSecretNamesTool,
   CreateThreadsTool,
   ThreadListTool,
   ThreadReadTool,

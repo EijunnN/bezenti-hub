@@ -187,6 +187,8 @@ describe("every door of the Hub declares its rule", () => {
       .map(({ file }) => file);
     expect(deliveryUsers.toSorted()).toEqual([
       "environment/ThreadWorkspace.ts",
+      // list_secret_names (spec 5 ticket 06): names only, through `turnNames`.
+      "mcp/OrchestratorMcpService.ts",
       "orchestration-v2/Orchestrator.ts",
       "orchestration-v2/ProviderSessionManager.ts",
       "project/ProjectSetupScriptRunner.ts",
@@ -194,6 +196,10 @@ describe("every door of the Hub declares its rule", () => {
     ]);
     const orchestrator = files.find(({ file }) => file === "orchestration-v2/Orchestrator.ts");
     expect(orchestrator?.text).not.toMatch(/\.(forProcess|forTurn)\(/u);
+    const mcp = files.find(({ file }) => file === "mcp/OrchestratorMcpService.ts")?.text ?? "";
+    const mcpCalls = [...mcp.matchAll(/secretDelivery\.value\s*\.(\w+)/gu)].map((m) => m[1]);
+    expect(mcpCalls.length).toBeGreaterThan(0);
+    expect(mcpCalls.every((call) => call === "turnNames")).toBe(true);
     // On the wire, values go only with the calls that start a process.
     const wire = files.find(({ file }) => file === "environment/RemoteExecutorWire.ts")?.text ?? "";
     expect(wire.match(/secretEnv: Schema\.optionalKey\(SecretEnv\)/gu)?.length).toBe(3);

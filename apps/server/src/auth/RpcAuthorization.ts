@@ -126,6 +126,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.serverReportClientActivity]: AuthOrchestrationReadScope,
   [WS_METHODS.scheduledTasksSubscribe]: AuthOrchestrationReadScope,
   [WS_METHODS.secretsAnswerRequest]: AuthOrchestrationOperateScope,
+  [WS_METHODS.secretsVaultTargets]: AuthOrchestrationOperateScope,
   // Vaults: names to read (writes are CLIENT_GUARDED_RPC_SCOPES'); who may is AccessPolicy's.
   [WS_METHODS.vaultsList]: AuthAccessReadScope,
   [WS_METHODS.vaultsEntriesList]: AuthAccessReadScope,

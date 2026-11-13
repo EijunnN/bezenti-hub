@@ -1015,6 +1015,11 @@ export function createServerEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.threadId, input.turnItemId]),
       },
     }),
+    // «Also save to Vault» on a secret request card: the Vaults the Hub lets this User save in.
+    secretRequestVaultTargets: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:secrets:vault-targets",
+      tag: WS_METHODS.secretsVaultTargets,
+    }),
     // Vaults: names and metadata; a value is revealed only over HTTP (`vaults.reveal`).
     listVaults: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:vaults:list",

@@ -680,6 +680,9 @@ export const OrchestratorMcpRequestSecretInput = Schema.Struct({
     description: "What it is for and where to get it.",
   }),
   placeholder: Schema.optional(TrimmedNonEmptyString),
+  name: Schema.optional(
+    Schema.String.check(Schema.isPattern(/^[A-Z_][A-Z0-9_]{0,127}$/u)),
+  ).annotate({ description: "Env var name to suggest, e.g. STRIPE_KEY." }),
   delivery: Schema.optional(Schema.Literals(["secretRef", "file"])).annotate({
     description: "secretRef (default) for a T3 tool; file for a command.",
   }),
@@ -719,6 +722,18 @@ export const OrchestratorMcpRequestSecretResult = Schema.Union([
   }),
 ]);
 export type OrchestratorMcpRequestSecretResult = typeof OrchestratorMcpRequestSecretResult.Type;
+
+/** `list_secret_names` (spec 5 ticket 06): what this Thread's turns receive. Never a value. */
+export const OrchestratorMcpListSecretNamesResult = Schema.Struct({
+  secrets: Schema.Array(
+    Schema.Struct({
+      name: Schema.String,
+      description: Schema.NullOr(Schema.String),
+      vault: Schema.String,
+    }),
+  ),
+});
+export type OrchestratorMcpListSecretNamesResult = typeof OrchestratorMcpListSecretNamesResult.Type;
 
 export const OrchestratorMcpDeleteScheduledTaskInput = Schema.Struct({
   scheduledTaskId: ScheduledTaskId,

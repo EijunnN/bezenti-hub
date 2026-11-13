@@ -132,6 +132,8 @@ export interface PtySpawn {
   readonly pid: number;
   /** The signals the shell got: a close ends it. */
   readonly signals: Array<string>;
+  /** Whether it was closed as stale: the machine ended what its session started. */
+  sessionEnded: boolean;
 }
 
 /**
@@ -148,6 +150,7 @@ const echoingPty = (spawns: Array<PtySpawn>): PtyAdapter.PtyAdapter["Service"] =
         env: { ...input.env },
         pid: 4242 + spawns.length,
         signals: [],
+        sessionEnded: false,
       };
       spawns.push(spawn);
       const listeners = new Set<(data: string) => void>();
@@ -194,6 +197,11 @@ const layerMachineWorkspace = (spawns: Array<PtySpawn>) =>
           logsDir: config.terminalLogsDir,
           ptyAdapter: echoingPty(spawns),
           processKillGraceMs: 1,
+          endSessionProcesses: (sessionId) =>
+            Effect.sync(() => {
+              const spawn = spawns.find((candidate) => candidate.pid === sessionId);
+              if (spawn !== undefined) spawn.sessionEnded = true;
+            }),
           subprocessPollIntervalMs: 60_000,
         }),
       ),

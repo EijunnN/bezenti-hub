@@ -600,10 +600,25 @@ under its Thread's lock (a shell reopened for the new Space stays). It is fired 
 move and the removal do not wait, failures are logged, and it runs again for each machine as it
 connects (a new socket), so a machine that was away, older or no longer the Thread's is covered.
 
-Closing is the terminal's normal close: the shell and its PTY end. A background job (`npm run dev &`:
-the live recheck saw one outlive its shell) or a process that left the session (`setsid`, `nohup`,
-a daemon) keeps its environment: the same accepted risk as `/proc/<pid>/environ` in a shared
-Sandbox (follow-up ticket: the machine ends the session's process groups). The move dialog says
+A stale close also ends what the shell's session started (`terminal.close` `endSession`, sent by
+`ThreadWorkspace`'s stale close; `reconcile` does it itself). The PTY makes the shell a session
+leader, so its pid is the session id of every job it started; bash puts each background job
+(`npm run dev &`) in its own process group, which the PTY's close never reaches.
+`terminal/SessionProcesses.ts` signals the session's process groups, SIGHUP, then SIGTERM, then
+SIGKILL after the kill grace, reading `/proc/<pid>/stat` (after its last `)`) again just before
+each signal and signalling only groups that still have a live member in that session and whose
+live members all have this process's real uid (the `Uid:` line of `/proc/<pid>/status`, not the
+owner of `/proc/<pid>`, which shows root for a non-dumpable process such as ssh); a group with a
+member of another uid (only possible on a machine running as root) is left and logged, since
+`kill(-pgrp)` would reach every member. A group never spans sessions; this process's own session
+is never ended. The session id is the last shell's pid, kept after the shell exits, so a stale
+close of an exited shell still ends its jobs (unless that pid is now another live shell's). A start
+that replaces the last shell for other facts (Space, User) or other secrets than it carried ends
+the old shell's session too. A user's normal close, and a restart with the same facts and secrets,
+are unchanged: SIGTERM to the shell, whose background jobs live on as before. Accepted risk: a
+process that left the session (`setsid`, a daemon) keeps its environment, the same risk as
+`/proc/<pid>/environ` in a shared Sandbox; on macOS and Windows (no `/proc` sessions) and on a
+machine that predates `endSession`, only the shell and its PTY end. The move dialog says
 «Open terminals of its Threads close». After a revocation, live processes keep the ticket 04 rule
 (stale flag): nobody new gains control of them.
 
@@ -634,6 +649,45 @@ the warning); it is the only caller outside `server.ts` and `ws.ts`, and never c
 Values of deleted entries are removed from `VaultValueStore` once the transaction commits
 (`removeValues`, also what `Vaults.delete` uses); one a failure leaves behind is removed at the
 next start (`sweepOrphanValues`).
+
+## The agent's names and a missing secret (spec 5 ticket 06)
+
+**`list_secret_names`** (MCP, `OWN_THREAD`). The tool takes no Thread: it answers for the
+credential's own Thread, after the same visibility check as `t3_thread_read` (a Thread its User can
+no longer see answers `thread_not_found`). The names come from `SecretDelivery.turnNames`, the
+names `planTurn` would deliver (the Thread's owner's effective set, a dangerous name only as the
+Owner last set it), each with its description and winning Vault: never a value or an id. A Thread
+without an owner, or whose owner left its Space, lists nothing. The agents' shared instructions
+(`orchestrationInstructions.ts`) say: secrets are environment variables; call `list_secret_names`
+and use `$NAME`; never print values; a missing one is asked with `request_secret` and its `name`.
+A Thread whose machine does not serve its Space (`servesSpace`, as `plan`) lists nothing.
+`DoorRules.test.ts` checks the MCP service calls nothing of `SecretDelivery` but `turnNames`.
+
+**«Also save to Vault».** `request_secret` takes an optional `name` (an env var name), kept on the
+card as `secretName`. One rule, `Vaults.saveTargets({ threadId })`: the Vaults the acting User may
+edit (`vault.edit`, as Settings → Vaults decides it), not archived, that reach the Thread's Space
+(`VaultReach.allowedToSpace`). Never the Main vault from an Organization's Thread, never another
+Organization's Vault (an Admin of both included), nothing for a Member or a Guest, whatever is
+allowed to them. Its doors:
+
+- `secrets.vaultTargets` (WS, `RPC_SPACE_ACCESS` `thread`): the picker's list, for whoever may
+  answer the Thread's cards (`thread.continue`).
+- `secrets.answerRequest` with `saveToVault: { vaultId, name }`: a Vault not in that list is
+  refused (`vault_not_permitted`) before anything is stored; then `Vaults.putEntry` as the caller
+  (the policy again, `secretNameRisk`, audit `secret.edit` with the name, never the value). Names the
+  Hub reserves, invalid ones and dangerous ones are refused (`vault_name_invalid`: the card never
+  confirms a dangerous name; the Owner adds those in Settings → Vaults); a name already in the
+  Vault is `vault_name_taken` (no silent replace), and a value shorter than 6 characters
+  (never masked) is `vault_value_short`. Only then the one-use ref, as before. A refused save
+  leaves the card pending. Answers run one at a time, so a second answer to a card finds it
+  `already_answered`; a card keeps a keyed digest of what it saved (`secret-request-vault-<id>`,
+  swept with the answers), so a retry of the same answer after a later step failed goes on, and a
+  different value is refused.
+
+Web and desktop show the option once focus enters the card, if the list is not empty: a Vault
+picker and the name, checked with `secretNameRisk` as typed. Mobile answers as before (ticket 08).
+If recording the answer fails after the Vault entry was written, the entry stays: the User asked
+for it.
 
 ## What is not covered here
 
