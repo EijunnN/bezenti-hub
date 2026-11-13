@@ -1,4 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - reads the server's own sources and runs git.
+// @effect-diagnostics anyUnknownInErrorContext:off - a door's proof fails with whatever it failed with.
+// @effect-diagnostics globalErrorInEffectFailure:off - a failed proof names its door for the report.
 /**
  * Spec 5 ticket 05, the inventory: every door of the Hub (as DoorRules lists them) and every
  * executor operation has a rule in `MaskedPaths.ts`, by name (a new door has none and fails here).
@@ -419,7 +421,7 @@ const review =
       );
       const answer = yield* inHub(
         scenario,
-        method === "getBranchCommits"
+        (method === "getBranchCommits"
           ? service.getBranchCommits({ cwd, baseRef: base })
           : method === "getDiffPreview"
             ? service.getDiffPreview({ cwd, baseRef: base, sourceKind: "branch-range" })
@@ -431,7 +433,7 @@ const review =
                 headRef: branch,
                 oldPath: `${method}.env`,
                 newPath: `${method}.env`,
-              }),
+              })) as Effect.Effect<unknown, unknown>,
       ).pipe(Effect.ensuring(Effect.sync(() => git(cwd, "checkout", "-q", base))));
       shownMasked(JSON.stringify(answer), `review.${method}`);
     });

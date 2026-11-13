@@ -3,6 +3,7 @@
  * Laptop whose agent printed OWNER_TOKEN and wrote it to notes.md, and the Hub's doors over it.
  */
 // @effect-diagnostics nodeBuiltinImport:off -- the tests read the Hub's files on disk.
+// @effect-diagnostics globalJsonInEffect:off -- a test reads the whole database as text.
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
