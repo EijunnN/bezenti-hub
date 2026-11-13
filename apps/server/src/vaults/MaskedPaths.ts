@@ -108,6 +108,10 @@ export const OTHER_PATHS: Record<string, MaskedPath> = {
     masked: "terminal/Manager.ts",
     how: "every value the process knows is masked when the history is written",
   },
+  "a checkout's diffs (the Changes panel: review.getDiffPreview, getDiffFileContents)": {
+    masked: "ws.ts",
+    how: "they name no Thread: every value the Hub process knows is masked",
+  },
   "Hub logs (console and OTLP)": {
     masked: "serverLogger.ts",
     how: "messages and causes, with every value the process knows",

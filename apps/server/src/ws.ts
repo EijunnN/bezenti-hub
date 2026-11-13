@@ -262,6 +262,7 @@ import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
 import { isNetworkPath } from "@t3tools/shared/path";
+import { redactKnownSecretsDeep } from "@t3tools/shared/secretMasking";
 import {
   sameUsageLimitCommandCoverage,
   withUsageLimitsCommands,
@@ -3214,8 +3215,11 @@ export const layerWsRpc = (
         [WS_METHODS.vcsInit]: (input) =>
           vcsProvisioning.initRepository(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
         [WS_METHODS.reviewGetBranchCommits]: (input) => review.getBranchCommits(input),
-        [WS_METHODS.reviewGetDiffPreview]: (input) => review.getDiffPreview(input),
-        [WS_METHODS.reviewGetDiffFileContents]: (input) => review.getDiffFileContents(input),
+        // Spec 5 ticket 05: a checkout's diffs name no Thread: every value the Hub knows is masked.
+        [WS_METHODS.reviewGetDiffPreview]: (input) =>
+          review.getDiffPreview(input).pipe(Effect.map(redactKnownSecretsDeep)),
+        [WS_METHODS.reviewGetDiffFileContents]: (input) =>
+          review.getDiffFileContents(input).pipe(Effect.map(redactKnownSecretsDeep)),
         [WS_METHODS.terminalOpen]: (input) => threadWorkspace.terminalOpen(input, workspaceCaller),
         [WS_METHODS.terminalAttach]: (input, metadata) =>
           threadWorkspace
