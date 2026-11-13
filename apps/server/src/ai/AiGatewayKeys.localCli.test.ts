@@ -7,11 +7,17 @@
 import * as NodeCrypto from "node:crypto";
 
 import { assert, it } from "@effect/vitest";
-import { SpaceId } from "@t3tools/contracts";
+import { SpaceId, UserId } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 
 import * as CommandActor from "../auth/CommandActor.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as AiGatewayKeys from "./AiGatewayKeys.ts";
+import * as AllowedAiAccounts from "./AllowedAiAccounts.ts";
 import { acmeSetup, call, hub, messages, platform, posix } from "./AiGatewayRoute.testkit.ts";
 
 const MESSAGES = "/api/ai/anthropic/v1/messages";
@@ -329,22 +335,121 @@ it.live.skipIf(!posix || platform === undefined)(
 );
 
 it.live.skipIf(!posix || platform === undefined)(
-  "a Membership change revokes only User keys: a Thread key follows its own rules",
+  "a lost Space revokes the User's Thread keys too, with the Thread's words, and they stay revoked",
   () =>
     Effect.gen(function* () {
       const setup = yield* hub;
       yield* acmeSetup(setup);
       const thread = yield* setup.thread(setup.people.member, setup.acmeId);
+      const reasonOf = () =>
+        setup.server.sql<{ readonly reason: string | null }>`
+          SELECT revoked_reason AS reason FROM ai_gateway_keys WHERE thread_id = ${thread.threadId}
+        `.pipe(Effect.map((rows) => rows[0]?.reason ?? null));
       yield* setup.server.sql`
         DELETE FROM space_memberships WHERE space_id = ${setup.acmeId} AND user_id = ${setup.people.member}
       `;
       yield* setup.keys.revokeLostSpaces(setup.people.member);
-      const rows = yield* setup.server.sql<{ readonly reason: string | null }>`
-        SELECT revoked_reason AS reason FROM ai_gateway_keys WHERE thread_id = ${thread.threadId}
-      `;
-      assert.notEqual(rows[0]?.reason, "space-lost");
+      assert.equal(yield* reasonOf(), "space-lost");
       const answer = yield* call(setup, MESSAGES, { key: thread.key, body: messages() });
       assert.equal(answer.status, 403);
       assert.notInclude(answer.text, "Make a new key");
+      assert.include(answer.text, "Thread's Space");
+      // Not a local CLI key: no ai_gateway_key audit for it.
+      const audits = yield* setup.server.sql<{ readonly n: number }>`
+        SELECT COUNT(*) AS n FROM audit_log WHERE action LIKE 'ai_gateway_key.%'
+      `;
+      assert.equal(audits[0]!.n, 0);
+      // Back in Acme: still refused (the next provider session gets a new key).
+      yield* setup.server.sql`
+        INSERT INTO space_memberships (space_id, user_id, role, created_at)
+        VALUES (${setup.acmeId}, ${setup.people.member}, 'member', '2026-11-02T00:00:00.000Z')
+      `;
+      yield* setup.directory.membershipsChanged([setup.people.member]);
+      const again = yield* call(setup, MESSAGES, { key: thread.key, body: messages() });
+      assert.equal(again.status, 403);
+      // Unused by any request, a Thread key the watch did not see is refused and revoked the same.
+      const other = yield* setup.thread(setup.people.guest, setup.acmeId);
+      yield* setup.server.sql`
+        DELETE FROM space_memberships WHERE space_id = ${setup.acmeId} AND user_id = ${setup.people.guest}
+      `;
+      const unseen = yield* call(setup, MESSAGES, { key: other.key, body: messages() });
+      assert.equal(unseen.status, 403);
+      assert.include(unseen.text, "Thread's Space");
+      const otherReason = yield* setup.server.sql<{ readonly reason: string | null }>`
+        SELECT revoked_reason AS reason FROM ai_gateway_keys WHERE thread_id = ${other.threadId}
+      `;
+      assert.equal(otherReason[0]?.reason, "space-lost");
+    }).pipe(Effect.scoped),
+);
+
+it.live.skipIf(!posix || platform === undefined)(
+  "keys of a User with no row are revoked as inactive; revoking many keys at once works",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub;
+      yield* acmeSetup(setup);
+      // More live keys than SQLite takes as parameters of one statement.
+      yield* setup.server.sql`
+        INSERT INTO ai_gateway_keys (key_id, key_hash, kind, user_id, space_id, thread_id, name,
+          created_at)
+        WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 33000)
+        SELECT 'gk_bulk_' || i, 'bulk-hash-' || i, 'thread', ${setup.people.member},
+          ${setup.acmeId}, 'thread-bulk-' || i, 'Bulk', '2026-11-01T00:00:00.000Z' FROM n
+      `;
+      yield* setup.keys.revokeUser(setup.people.member, "user-inactive");
+      const live = yield* setup.server.sql<{ readonly n: number }>`
+        SELECT COUNT(*) AS n FROM ai_gateway_keys WHERE user_id = ${setup.people.member}
+          AND revoked_at IS NULL
+      `;
+      assert.equal(live[0]!.n, 0);
+      yield* setup.server.sql`
+        INSERT INTO ai_gateway_keys (key_id, key_hash, kind, user_id, space_id, name, created_at)
+        VALUES ('gk_ghost', 'ghost-hash', 'user', 'ghost', ${setup.acmeId}, 'Ghost', '2026-11-01T00:00:00.000Z')
+      `;
+      yield* setup.keys.revokeLostSpaces(UserId.make("ghost"));
+      const ghost = yield* setup.server.sql<{ readonly reason: string | null }>`
+        SELECT revoked_reason AS reason FROM ai_gateway_keys WHERE key_id = 'gk_ghost'
+      `;
+      assert.equal(ghost[0]?.reason, "user-inactive");
+    }).pipe(Effect.scoped),
+);
+
+it.live.skipIf(!posix || platform === undefined)(
+  "a key is made with its Space checked inside the same write transaction as its insert",
+  () =>
+    Effect.gen(function* () {
+      const setup = yield* hub;
+      yield* acmeSetup(setup);
+      // A SpaceDirectory that notes, for each Space read, whether a transaction was open.
+      const real = Context.get(setup.server.services, SpaceDirectory.SpaceDirectory);
+      const sql = setup.server.sql;
+      const reads: Array<boolean> = [];
+      const watched = SpaceDirectory.SpaceDirectory.of({
+        ...real,
+        spacesById: (spaceIds) =>
+          Effect.serviceOption(sql.transactionService).pipe(
+            Effect.tap((open) => Effect.sync(() => reads.push(Option.isSome(open)))),
+            Effect.andThen(real.spacesById(spaceIds)),
+          ),
+      });
+      const keys = yield* Layer.build(
+        AiGatewayKeys.layer.pipe(
+          Layer.provide(AllowedAiAccounts.layer),
+          Layer.provide(
+            Layer.succeedContext(
+              Context.add(
+                Context.merge(setup.server.services, setup.context),
+                SpaceDirectory.SpaceDirectory,
+                watched,
+              ),
+            ),
+          ),
+        ),
+      ).pipe(Effect.map((context) => Context.get(context, AiGatewayKeys.AiGatewayKeys)));
+      const made = yield* keys
+        .createForSession({ name: "Grace laptop", spaceId: setup.acmeId })
+        .pipe(CommandActor.actAs(setup.people.member));
+      assert.equal(made.created.spaceName, "Acme");
+      assert.isTrue(reads.length > 0 && reads.every((open) => open), JSON.stringify(reads));
     }).pipe(Effect.scoped),
 );

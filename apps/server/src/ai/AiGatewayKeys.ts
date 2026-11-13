@@ -29,7 +29,6 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as AuditLog from "../audit/AuditLog.ts";
-import * as AccessPolicy from "../auth/AccessPolicy.ts";
 import * as CommandActor from "../auth/CommandActor.ts";
 import { threadTurnOwner } from "../orchestration-v2/threadTurnOwner.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
@@ -62,9 +61,11 @@ export interface GatewayCaller {
 export interface IssuedGatewayKey {
   readonly keyId: string;
   readonly key: Redacted.Redacted<string>;
-  /** A User key's name and creation, as stored. */
-  readonly name?: string;
-  readonly createdAt?: string;
+}
+
+/** A User key just made: the key, once, and the row as its list will show it. */
+export interface IssuedUserKey extends IssuedGatewayKey {
+  readonly shown: AiGatewayUserKey;
 }
 
 /** A User key as its User sees it: never the key, nor its hash. */
@@ -110,7 +111,7 @@ export class AiGatewayKeys extends Context.Service<
       readonly actorUserId: UserId;
       readonly spaceId: SpaceId;
       readonly name: string;
-    }) => Effect.Effect<IssuedGatewayKey, AiGatewayKeyError>;
+    }) => Effect.Effect<IssuedUserKey, AiGatewayKeyError>;
     /** The actor's own User keys; the Owner's lists everyone's. */
     readonly listUserKeys: (
       actorUserId: UserId,
@@ -177,6 +178,12 @@ const KEY_COLUMNS = `key_id AS "keyId", kind, user_id AS "userId", space_id AS "
 
 const UNKNOWN_KEY = "This AI gateway key is not valid. It may have been revoked or expired.";
 const SPACE_LOST = "You no longer work in this key's Space: it was revoked. Make a new key.";
+const THREAD_SPACE_LOST = "You no longer work in this Thread's Space; its key no longer works.";
+/** What a key revoked for a lost Space answers: a local CLI's User makes a new one. */
+const spaceLostMessage = (kind: AiGatewayKeyKind) =>
+  kind === "user" ? SPACE_LOST : THREAD_SPACE_LOST;
+/** SQLite takes at most 32766 parameters per statement: revocations go in batches. */
+const REVOKE_BATCH = 500;
 /** Why a key was revoked when its User stopped working in its Space. */
 const SPACE_LOST_REASON = "space-lost";
 const NOT_YOURS =
@@ -202,25 +209,11 @@ const make = Effect.gen(function* () {
   const refused = (status: 401 | 403 | 503, message: string) =>
     Effect.fail(new AiGatewayRefusal({ status, message }));
 
-  /** The Spaces among these the User may work in: the rule AllowedAiAccounts applies. */
-  const worksInSpaces = Effect.fn("AiGatewayKeys.worksInSpaces")(function* (
-    userId: UserId,
-    spaceIds: ReadonlyArray<SpaceId>,
-  ) {
-    const principal = yield* spaces.principalOf(userId);
-    const known = yield* spaces.spacesById(spaceIds);
-    return new Set(
-      spaceIds.filter((spaceId) => {
-        const space = known.get(spaceId);
-        return (
-          space !== undefined &&
-          AccessPolicy.isAllowed(AccessPolicy.decide(principal, "aiAccount.use", space.resource))
-        );
-      }),
-    );
-  });
+  /** The Spaces among these the User may work in, with names: AllowedAiAccounts' own rule. */
+  const worksInSpaces = (userId: UserId, spaceIds: ReadonlyArray<SpaceId>) =>
+    allowedAccounts.workingSpaces(userId, spaceIds);
   const worksIn = (userId: UserId, spaceId: SpaceId) =>
-    worksInSpaces(userId, [spaceId]).pipe(Effect.map((set) => set.has(spaceId)));
+    worksInSpaces(userId, [spaceId]).pipe(Effect.map((working) => working.has(spaceId)));
 
   const checkedName = (raw: string) => {
     const name = raw.trim();
@@ -281,14 +274,21 @@ const make = Effect.gen(function* () {
     if (rows.length === 0) return;
     const at = yield* nowIso;
     const byId = new Map(rows.map((row) => [row.keyId, row]));
+    const ids = [...byId.keys()];
     yield* sql
       .withTransaction(
         Effect.gen(function* () {
-          const revoked = yield* sql<{ readonly keyId: string }>`
-            UPDATE ai_gateway_keys SET revoked_at = ${at}, revoked_reason = ${reason}
-            WHERE ${sql.in("key_id", [...byId.keys()])} AND revoked_at IS NULL
-            RETURNING key_id AS "keyId"
-          `;
+          const revoked: Array<{ readonly keyId: string }> = [];
+          for (let start = 0; start < ids.length; start += REVOKE_BATCH) {
+            revoked.push(
+              ...(yield* sql<{ readonly keyId: string }>`
+                UPDATE ai_gateway_keys SET revoked_at = ${at}, revoked_reason = ${reason}
+                WHERE ${sql.in("key_id", ids.slice(start, start + REVOKE_BATCH))}
+                  AND revoked_at IS NULL
+                RETURNING key_id AS "keyId"
+              `),
+            );
+          }
           for (const { keyId } of revoked) {
             const row = byId.get(keyId);
             if (row === undefined || row.kind !== "user") continue;
@@ -317,12 +317,22 @@ const make = Effect.gen(function* () {
     yield* revokeRows(yield* liveKeysOf(userId), reason);
   });
 
+  /** Whether the User exists and is neither disabled nor removed. */
+  const isActiveUser = (userId: UserId) =>
+    sql<{ readonly active: number }>`
+      SELECT (disabled_at IS NULL AND removed_at IS NULL) AS active FROM users
+      WHERE user_id = ${userId}
+    `.pipe(
+      Effect.map((rows) => rows[0]?.active === 1),
+      Effect.catch(storage("read the User")),
+    );
+
   const revokeLostSpaces = Effect.fn("AiGatewayKeys.revokeLostSpaces")(function* (userId: UserId) {
-    // A disabled or removed User's keys go for that reason, whichever watch runs first.
-    const active = yield* spaces.isActive(userId).pipe(Effect.catch(storage("read the User")));
-    if (!active) return yield* revokeUser(userId, "user-inactive");
-    // Only User keys: a Thread key follows its Thread (authorize refuses it outside its Space).
-    const live = (yield* liveKeysOf(userId)).filter((row) => row.kind === "user");
+    // A disabled, removed or missing User's keys go for that reason, whichever watch runs first.
+    if (!(yield* isActiveUser(userId))) return yield* revokeUser(userId, "user-inactive");
+    // Every live key for a Space they no longer work in: User keys (audited) and Thread keys,
+    // which a rejoin must not bring back (the next provider session gets a new one).
+    const live = yield* liveKeysOf(userId);
     if (live.length === 0) return;
     const working = yield* worksInSpaces(userId, [
       ...new Set(live.map((row) => SpaceId.make(row.spaceId))),
@@ -371,84 +381,93 @@ const make = Effect.gen(function* () {
     return { keyId, key: Redacted.make(key) } satisfies IssuedGatewayKey;
   });
 
-  const createForUser = Effect.fn("AiGatewayKeys.createForUser")(function* (input: {
+  /**
+   * Makes a User key. The Space check and the insert are one write transaction (`BEGIN
+   * IMMEDIATE`): a Membership that ends commits either before it (refused here) or after it (the
+   * Membership watch then sees the key). Without a Space, the User's Personal space. The answer is
+   * built from what this call read and stored, so no read after the commit can lose the key.
+   */
+  const insertUserKey = Effect.fn("AiGatewayKeys.insertUserKey")(function* (input: {
     readonly actorUserId: UserId;
-    readonly spaceId: SpaceId;
+    readonly spaceId: SpaceId | undefined;
     readonly name: string;
   }) {
     const name = yield* checkedName(input.name);
-    const works = yield* worksIn(input.actorUserId, input.spaceId).pipe(
-      Effect.catch(storage("check the Space")),
-    );
-    if (!works) {
-      return yield* new AiGatewayKeyError({
-        reason: "forbidden",
-        message: "You can make a key only for a Space you work in.",
-      });
-    }
     const key = newKey();
     const keyId = newKeyId();
     const at = yield* nowIso;
-    const made = yield* sql
+    const outcome = yield* sql
       .withTransaction(
         Effect.gen(function* () {
+          const spaceId = input.spaceId ?? (yield* spaces.view(input.actorUserId)).personalSpaceId;
+          const working = yield* worksInSpaces(input.actorUserId, [spaceId]);
+          const space = working.get(spaceId);
+          if (space === undefined) {
+            return { _tag: input.spaceId === undefined ? "no-personal" : "forbidden" } as const;
+          }
           const live = yield* sql<{ readonly n: number }>`
             SELECT COUNT(*) AS n FROM ai_gateway_keys
             WHERE kind = 'user' AND user_id = ${input.actorUserId} AND revoked_at IS NULL
           `;
-          if ((live[0]?.n ?? 0) >= MAX_USER_KEYS) return false;
+          if ((live[0]?.n ?? 0) >= MAX_USER_KEYS) return { _tag: "limit" } as const;
+          const user = yield* sql<{ readonly name: string }>`
+            SELECT display_name AS name FROM users WHERE user_id = ${input.actorUserId}
+          `;
           yield* sql`
             INSERT INTO ai_gateway_keys (key_id, key_hash, kind, user_id, space_id, thread_id,
               name, created_at)
             VALUES (${keyId}, ${gatewayKeyHash(key)}, 'user', ${input.actorUserId},
-              ${input.spaceId}, NULL, ${name}, ${at})
+              ${spaceId}, NULL, ${name}, ${at})
           `;
           yield* audit.record({
             actor: AuditLog.userActor(input.actorUserId),
             action: "ai_gateway_key.create",
             target: { kind: "ai_gateway_key", id: keyId, name },
-            detail: { kind: "user", space: input.spaceId },
+            detail: { kind: "user", space: spaceId },
           });
-          return true;
+          const shown: AiGatewayUserKey = {
+            keyId,
+            name,
+            userId: input.actorUserId,
+            userName: user[0]?.name ?? null,
+            spaceId,
+            spaceName: space.name,
+            createdAt: at,
+            lastUsedAt: null,
+          };
+          return { _tag: "made", shown } as const;
         }),
       )
-      .pipe(Effect.catch(storage("make the AI gateway key")));
-    if (!made) {
-      return yield* new AiGatewayKeyError({
-        reason: "limit",
-        message: `You have ${MAX_USER_KEYS} keys already. Revoke one to make another.`,
-      });
-    }
-    // A Membership ended between the check and the insert: the watch may have run before the
-    // key existed, so check again now and take it back.
-    const stillWorks = yield* worksIn(input.actorUserId, input.spaceId).pipe(
-      Effect.catch(storage("check the Space")),
-    );
-    if (!stillWorks) {
-      yield* revokeRows(
-        [
-          {
-            keyId,
-            kind: "user",
-            userId: input.actorUserId,
-            spaceId: input.spaceId,
-            threadId: null,
-            name,
-            createdAt: at,
-            expiresAt: null,
-            lastUsedAt: null,
-            revokedAt: null,
-          },
-        ],
-        SPACE_LOST_REASON,
+      .pipe(
+        Effect.provideService(SqlClient.BeginTransaction, "BEGIN IMMEDIATE"),
+        Effect.catch(storage("make the AI gateway key")),
       );
-      return yield* new AiGatewayKeyError({
-        reason: "forbidden",
-        message: "You can make a key only for a Space you work in.",
-      });
+    switch (outcome._tag) {
+      case "no-personal":
+        return yield* new AiGatewayKeyError({
+          reason: "forbidden",
+          message: "Choose a Space you work in for this key.",
+        });
+      case "forbidden":
+        return yield* new AiGatewayKeyError({
+          reason: "forbidden",
+          message: "You can make a key only for a Space you work in.",
+        });
+      case "limit":
+        return yield* new AiGatewayKeyError({
+          reason: "limit",
+          message: `You have ${MAX_USER_KEYS} keys already. Revoke one to make another.`,
+        });
+      case "made":
+        return { keyId, key: Redacted.make(key), shown: outcome.shown } satisfies IssuedUserKey;
     }
-    return { keyId, key: Redacted.make(key), name, createdAt: at } satisfies IssuedGatewayKey;
   });
+
+  const createForUser = (input: {
+    readonly actorUserId: UserId;
+    readonly spaceId: SpaceId;
+    readonly name: string;
+  }) => insertUserKey(input);
 
   /** Live User keys the viewer sees: the Owner everyone's, anyone else their own. */
   const keysFor = Effect.fn("AiGatewayKeys.keysFor")(function* (
@@ -553,35 +572,12 @@ const make = Effect.gen(function* () {
     input: AiGatewayKeyCreateInput,
   ) {
     const userId = yield* sessionUser;
-    const name = yield* checkedName(input.name);
-    let spaceId = input.spaceId;
-    if (spaceId === undefined) {
-      // Their Personal space, when they may work there.
-      const view = yield* spaces.view(userId).pipe(Effect.catch(storage("read your Spaces")));
-      const personal = view.personalSpaceId;
-      const works = yield* worksIn(userId, personal).pipe(Effect.catch(storage("check the Space")));
-      if (!works) {
-        return yield* new AiGatewayKeyError({
-          reason: "forbidden",
-          message: "Choose a Space you work in for this key.",
-        });
-      }
-      spaceId = personal;
-    }
-    const issued = yield* createForUser({ actorUserId: userId, spaceId, name });
-    // Shown from what was just stored: the key must reach its User even if a watch revokes it.
-    const [created] = yield* shown([
-      {
-        keyId: issued.keyId,
-        name: issued.name ?? name,
-        userId,
-        spaceId,
-        createdAt: issued.createdAt ?? "",
-        expiresAt: null,
-        lastUsedAt: null,
-      },
-    ]);
-    return { created: created!, key: issued.key } satisfies AiGatewayKeyCreateResult;
+    const issued = yield* insertUserKey({
+      actorUserId: userId,
+      spaceId: input.spaceId,
+      name: input.name,
+    });
+    return { created: issued.shown, key: issued.key } satisfies AiGatewayKeyCreateResult;
   });
 
   const revokeForSession = Effect.fn("AiGatewayKeys.revokeForSession")(function* (input: {
@@ -643,22 +639,19 @@ const make = Effect.gen(function* () {
     }
     if (row.revokedAt !== null) {
       // A key whose User left its Space says so (its holder has it already).
-      return yield* refused(
-        row.revokedReason === SPACE_LOST_REASON ? 403 : 401,
-        row.revokedReason === SPACE_LOST_REASON ? SPACE_LOST : UNKNOWN_KEY,
-      );
+      return yield* row.revokedReason === SPACE_LOST_REASON
+        ? refused(403, spaceLostMessage(row.kind))
+        : refused(401, UNKNOWN_KEY);
     }
     const now = yield* DateTime.now;
     if (row.expiresAt !== null && Date.parse(row.expiresAt) <= DateTime.toEpochMillis(now)) {
       return yield* refused(401, UNKNOWN_KEY);
     }
-    // A User key whose User no longer works in its Space is over for good, recorded here.
-    if (row.kind === "user") {
-      const works = yield* worksIn(userId, spaceId).pipe(Effect.catch(unavailable));
-      if (!works) {
-        yield* revokeRows([row], SPACE_LOST_REASON).pipe(Effect.ignore);
-        return yield* refused(403, SPACE_LOST);
-      }
+    // A key whose User no longer works in its Space is over for good, recorded here.
+    const works = yield* worksIn(userId, spaceId).pipe(Effect.catch(unavailable));
+    if (!works) {
+      yield* revokeRows([row], SPACE_LOST_REASON).pipe(Effect.ignore);
+      return yield* refused(403, spaceLostMessage(row.kind));
     }
     let threadId: ThreadId | null = null;
     let chosenAccountId: AiAccountId | null = null;

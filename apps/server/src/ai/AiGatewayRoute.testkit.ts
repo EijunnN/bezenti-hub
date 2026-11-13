@@ -271,6 +271,8 @@ export const hubWith = Effect.fn(function* (
 
   return {
     server,
+    /** The AI layers built over the Hub's services (to build a variant of one in a test). */
+    context,
     ownerId,
     ownerCookie,
     cookies,

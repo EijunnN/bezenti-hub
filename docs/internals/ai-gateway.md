@@ -340,9 +340,12 @@ AI accounts → «Local CLI keys» (web and desktop; every User, not only the Ow
   AllowedAiAccounts gives the User in the key's Space, evaluated per request.
 - **Leaving the Space:** the next request answers 403 («You no longer work in this key's Space»)
   and the key is revoked for good (`space-lost`), also when the User comes back; the Membership
-  watch revokes the unused ones too (User keys only: a Thread key follows its Thread). A key made
-  while its Membership ended is checked again once stored and taken back. A removed or disabled
-  User's keys are revoked as `user-inactive` and answer 401, whichever watch runs first.
+  watch revokes the unused ones too. The User's Thread keys for that Space go the same way
+  (403 «You no longer work in this Thread's Space», not audited; a rejoin does not bring them back,
+  the next provider session gets a new key). A key is made in one write transaction (`BEGIN
+  IMMEDIATE`) with its Space check, so a Membership ending meanwhile either refuses it or is seen
+  by the watch. A removed, disabled or missing User's keys are revoked as `user-inactive` and
+  answer 401, whichever watch runs first.
 - **Usage:** counted like a Thread's (`ai_usage` with the key's User and Space, no Thread).
 - **Setup** (`@t3tools/shared/aiGatewayLocalCli`, the Hub's public URL, else the address the
   client reaches it on): Claude Code `~/.claude/settings.json` with `env.ANTHROPIC_BASE_URL =

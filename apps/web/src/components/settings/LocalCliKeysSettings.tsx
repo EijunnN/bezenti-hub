@@ -106,6 +106,7 @@ export function LocalCliKeysSection({ environmentId }: { readonly environmentId:
     if (outcome.listed !== null) setListed(outcome.listed);
     setError(outcome.error);
   };
+  const applyListed = useEffectEvent(showListed);
   const loadKeys = useEffectEvent((target: EnvironmentId) =>
     commands.list({ environmentId: target, input: {} }),
   );
@@ -116,10 +117,7 @@ export function LocalCliKeysSection({ environmentId }: { readonly environmentId:
   useEffect(() => {
     let cancelled = false;
     void loadKeys(environmentId).then((result) => {
-      if (cancelled) return;
-      const outcome = listedOutcome(result);
-      if (outcome.listed !== null) setListed(outcome.listed);
-      setError(outcome.error);
+      if (!cancelled) applyListed(result);
     });
     return () => {
       cancelled = true;
