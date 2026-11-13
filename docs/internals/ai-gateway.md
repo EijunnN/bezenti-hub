@@ -483,15 +483,20 @@ Decisions; the rule is `ai/AiGatewaySessions.ts` (`plan` → `direct`, `issueDir
   switch means a new process. Terminals and setup scripts never get it (they use
   `SecretDelivery.plan`, which knows no AI accounts). Executor contract **13**: an older machine is
   refused (it would keep its own logins beside the key), by the plan and by the link's guard.
-- **On the machine:** `applySecretEnv` with `aiCredential` unsets every ambient AI credential
-  (`AMBIENT_AI_VARIABLES`, as `undefined` so an overlay spread over the instance's environment unsets
-  them too) before the Thread's set; `openSessionWithSecrets` refuses a credential the adapter does
-  not declare in `acceptsAiCredential` (ACP Registry declares it only for Devin, so other registry
-  agents never run a Hub turn). Cursor passes it to the SDK for that session only (`apiKey`), never the
-  instance's `CURSOR_API_KEY`. Antigravity signs in with it (`gemini-api-key` or `agent-platform`) in a
-  profile of its own (`<profile>-ai-account`, never holding a Google sign-in), ignoring the instance's
-  `apiKey`; an instance set to «Google account» or «Gemini Enterprise» never starts a Hub turn
-  (`login-method`), and its Google sign-in (`provider.auth.start`) is refused once AI accounts apply.
+- **On the machine:** `applySecretEnv` with `aiCredential` unsets every ambient AI credential of the
+  machine or instance (the gateway's list plus the direct drivers' keys and sign-in hooks, as
+  `undefined` so an overlay spread over the instance's environment unsets them too), then sets the
+  Thread's set back, a Vault's `GOOGLE_APPLICATION_CREDENTIALS` included (gateway processes keep a
+  Vault's too); `openSessionWithSecrets` refuses a credential the adapter does not declare in
+  `acceptsAiCredential` (ACP Registry declares it only for Devin, so other registry agents never run a
+  Hub turn, and a Devin turn never asks for the sign-in method the instance stored). Cursor passes it
+  to the SDK for that session only (`apiKey`; the driver no longer replaces it with the machine's
+  sign-in), never the instance's `CURSOR_API_KEY`. Antigravity signs in with it (`gemini-api-key` or
+  `agent-platform`) in the Thread's own profile (`<profile>-ai-account/<hex Thread id>`, never one that
+  held a Google sign-in; its turn outcome is read there), ignoring the instance's `apiKey`; an
+  instance set to «Google account» or «Gemini Enterprise» never starts a Hub turn (`login-method`),
+  its Google sign-in (`provider.auth.start`) is refused once AI accounts apply, and it writes no
+  titles, commit messages or summaries then (`TextGeneration` picks another model, or says why).
   Settings shows those two methods disabled («Use the Owner's Google account through the AI gateway»).
 - **Masked** as `[NAME]` like a Vault value: `SecretMasker` reads `ai-account:` value ids from the AI
   accounts' credential store, so the mask survives reloads and restarts; a replaced or deleted
@@ -503,7 +508,8 @@ Decisions; the rule is `ai/AiGatewaySessions.ts` (`plan` → `direct`, `issueDir
 (ADR 0005); revoke it at the provider. Deleting the account does not stop a running process (the
 next open refuses). Kiro, Muse, Devin and Grok keep their machine-user login files (only their
 variables are unset): the direct key takes precedence in each CLI, but their homes are not per
-Thread. Antigravity's per-instance `-ai-account` profile is shared by that instance's Hub turns.
+Thread. Text generation of the other direct drivers (Cursor and the rest) is refused the same way
+as Antigravity's once AI accounts apply.
 
 ## Known exception to «no upstream services»
 
