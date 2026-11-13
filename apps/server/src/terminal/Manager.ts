@@ -3565,7 +3565,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       const removed = new Set(input.removedUserIds);
       // A shell planned for no Space got no secret; one without facts is never trusted.
       const isStale = (session: TerminalSessionState) => {
-        const facts = session.process === null ? session.pendingFacts : session.facts;
+        // A shell about to start has its facts pending; an exited one keeps those it ran with.
+        const facts =
+          session.process === null ? (session.pendingFacts ?? session.facts) : session.facts;
         if (facts !== null && facts.userId !== null && removed.has(facts.userId)) return true;
         const spaceId = spaceOf.get(session.threadId);
         if (spaceId === undefined) return false;

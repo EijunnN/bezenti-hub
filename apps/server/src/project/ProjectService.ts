@@ -1209,6 +1209,9 @@ export const make = Effect.gen(function* () {
             ),
           );
           yield* Ref.set(moved, true);
+          // Shells admitted for the old Space are checked again from the next keystroke on, not
+          // only once the whole move ends (spec 5 ticket 07).
+          yield* spaces.changed;
         }
         // Listed after the Project moved, so none created before it is left behind; legacy
         // Threads with no Space of their own follow too. A rerun finishes a move cut short.

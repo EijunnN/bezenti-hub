@@ -1038,8 +1038,10 @@ describe("Hub con Environments: a moved Project's Vaults", () => {
       const globex = yield* createOrganization(hub, "Globex");
       // The Owner's laptop serves both Spaces: the Thread stays on it through the move.
       const laptop = yield* hub.join({ name: "Laptop", adapters: loaded.adapters });
-      const [create] = loaded.materialized.commands;
+      const [create, ...messages] = loaded.materialized.commands;
       if (create?.type !== "thread.create") return yield* Effect.die("no thread.create");
+      const message = messages.find((command) => command.type === "message.dispatch");
+      if (message === undefined) return yield* Effect.die("no message");
       const { projectId, threadId } = create;
       const { workspaceRoot } = yield* seedProject(hub.server, {
         projectId,
@@ -1081,6 +1083,14 @@ describe("Hub con Environments: a moved Project's Vaults", () => {
       });
       assert.equal((yield* moveProject(hub, projectId, globex)).status, 200);
       assert.deepEqual(typed, ["TerminalEnvironmentUnavailableError"]);
+      // The recorded turn runs, in Globex, as the fixture expects.
+      yield* dispatchAs(hub, owner, message);
+      yield* awaitThread(
+        hub,
+        threadId,
+        (projection) =>
+          projection.runs.length > 0 && !projection.runs.some((run) => RUNNING.has(run.status)),
+      );
     }).pipe(Effect.scoped),
   );
 
