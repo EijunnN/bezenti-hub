@@ -1174,18 +1174,24 @@ export const make = Effect.gen(function* () {
           }
         }
         // It goes ahead: what machines hold on the Project ends now (never for a no-op rerun).
-        if (route.from !== route.to || planned.changing > 0) {
+        const cutting = route.from !== route.to || planned.changing > 0;
+        if (cutting) {
           yield* spaces.projectAccessEnds(projectId);
         }
         // Its terminals and what they started hold the old Space's secrets: they close now, and
-        // once more after the Threads moved, for one opened in between (spec 5 ticket 07).
+        // once more after the Threads moved, for one opened in between (spec 5 ticket 07). Best
+        // effort: nothing here stops a move whose machines were already cut off.
         const endTerminals = Effect.flatMap(listProjectThreads(projectId), (threads) =>
           work === undefined
             ? Effect.void
             : work.endTerminals(threads.map((thread) => thread.threadId)),
+        ).pipe(
+          Effect.catch((cause) =>
+            Effect.logWarning("Could not close a moved Project's terminals", { projectId, cause }),
+          ),
         );
+        if (cutting) yield* endTerminals;
         if (route.from !== route.to) {
-          yield* endTerminals;
           // A preferred machine that does not serve the new Space is no preference there.
           const preferred = yield* machineLeft(
             existing.value.preferredEnvironmentId,
@@ -1244,7 +1250,7 @@ export const make = Effect.gen(function* () {
         }
         // Out of the Threads' locks: each machine left is cut off, this move's and any release
         // an earlier one did not finish.
-        if (route.from !== route.to) yield* endTerminals;
+        if (cutting) yield* endTerminals;
         if (work !== undefined) {
           yield* work.drainReleases(threads.map((thread) => thread.threadId));
         }
