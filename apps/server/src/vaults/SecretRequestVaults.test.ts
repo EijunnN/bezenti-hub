@@ -32,6 +32,11 @@ import {
   makeAuthenticator,
   serveAuthHttp,
 } from "../auth/UserAuth.testkit.ts";
+import * as ServerConfig from "../config.ts";
+import {
+  filesHolding,
+  processArgsHolding,
+} from "../environments/HubWithEnvironments.secretMasking.testkit.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
@@ -323,6 +328,23 @@ it.effect("an Admin's answer is saved in Acme secrets, audited, and the next Thr
     assert.notInclude(JSON.stringify(listed), VALUE);
     // A Globex Thread never lists Acme's names.
     assert.deepStrictEqual(yield* t.delivery.turnNames(globex), []);
+    // Leak smoke (ticket 09): the answer and its Vault entry are sealed; no file of the Hub's
+    // state (its store included), no row and no process argument holds the value.
+    const { stateDir } = Context.get(t.server.services, ServerConfig.ServerConfig);
+    let rows = "";
+    for (const { name } of yield* t.server.sql<{ readonly name: string }>`
+      SELECT name FROM sqlite_master WHERE type = 'table'
+    `) {
+      rows += JSON.stringify(yield* t.server.sql.unsafe(`SELECT * FROM "${name}"`));
+    }
+    assert.deepStrictEqual(
+      {
+        files: yield* filesHolding(stateDir, VALUE),
+        database: rows.includes(VALUE),
+        processes: yield* processArgsHolding(VALUE),
+      },
+      { files: [], database: false, processes: [] },
+    );
   }),
 );
 

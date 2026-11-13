@@ -35,7 +35,7 @@ import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as Vaults from "../vaults/Vaults.ts";
-import { type Hub, makeHub } from "./HubWithEnvironments.testkit.ts";
+import { type Hub, makeHub, type TestEnvironment } from "./HubWithEnvironments.testkit.ts";
 import {
   awaitUploaded,
   createOrganization,
@@ -94,23 +94,48 @@ const printingSecret = (
     })),
   ).pipe(Layer.provide(adapters));
 
-/** Every file of the Hub's state outside the sealed store that holds `value`, by path. */
-export const hubFilesHolding = (hub: Hub, value: string) =>
+/** Every file under `root` (but `skip`) that holds `value`, by path from `root`. */
+export const filesHolding = (root: string, value: string, skip: ReadonlyArray<string> = []) =>
   Effect.promise(async () => {
-    const { stateDir } = hub.service(ServerConfig.ServerConfig);
     const needle = Buffer.from(value);
     const found: Array<string> = [];
     const walk = async (directory: string): Promise<void> => {
       for (const entry of await NodeFSP.readdir(directory, { withFileTypes: true })) {
         const full = NodePath.join(directory, entry.name);
-        if (entry.isDirectory()) {
-          if (full !== NodePath.join(stateDir, "secrets")) await walk(full);
-        } else if (entry.isFile() && NodeFS.readFileSync(full).includes(needle)) {
-          found.push(NodePath.relative(stateDir, full));
+        if (skip.includes(full)) continue;
+        if (entry.isDirectory()) await walk(full);
+        else if (entry.isFile() && NodeFS.readFileSync(full).includes(needle)) {
+          found.push(NodePath.relative(root, full));
         }
       }
     };
-    await walk(stateDir);
+    await walk(root);
+    return found;
+  });
+
+/**
+ * Every file of the Hub's state that holds `value`, by path. The sealed store included (spec 5
+ * ticket 09): what it seals holds no clear text, so nothing is left out.
+ */
+export const hubFilesHolding = (hub: Hub, value: string) =>
+  filesHolding(hub.service(ServerConfig.ServerConfig).stateDir, value);
+
+/** Every file of a machine's T3 home but its Projects' checkouts (the agent's own files). */
+export const machineFilesHolding = (machine: TestEnvironment, value: string) =>
+  filesHolding(NodePath.dirname(machine.workspaceRoot), value, [machine.workspaceRoot]);
+
+/** Every process of this host whose arguments hold `value` (`/proc/<pid>/cmdline`), by pid. */
+export const processArgsHolding = (value: string) =>
+  Effect.promise(async () => {
+    // Hosts without /proc (macOS, Windows) have nothing to read here.
+    if (!NodeFS.existsSync("/proc/self/cmdline")) return [];
+    const found: Array<string> = [];
+    for (const pid of await NodeFSP.readdir("/proc")) {
+      if (!/^\d+$/u.test(pid)) continue;
+      const args = await NodeFSP.readFile(`/proc/${pid}/cmdline`).catch(() => Buffer.alloc(0));
+      if (args.includes(Buffer.from(value)))
+        found.push(`${pid}: ${args.toString().replaceAll("\0", " ")}`);
+    }
     return found;
   });
 

@@ -37,6 +37,12 @@ import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SecretMasker from "../vaults/SecretMasker.ts";
+import {
+  databaseText,
+  hubFilesHolding,
+  machineFilesHolding,
+  processArgsHolding,
+} from "./HubWithEnvironments.secretMasking.testkit.ts";
 import { type Hub, type TestEnvironment } from "./HubWithEnvironments.testkit.ts";
 import {
   CLAUDE,
@@ -254,7 +260,7 @@ describe("Hub con Environments: the agent's memory after a move", () => {
     Effect.gen(function* () {
       const value = "handoff-secret-value-7777";
       const laptopAsked: Array<ThreadHandoffGenerationInput> = [];
-      const { hub, desktop, threadId, owner } = yield* turnOnLaptop({
+      const { hub, laptop, desktop, threadId, owner } = yield* turnOnLaptop({
         desktop: true,
         laptopTextGeneration: recordingTextGeneration(laptopAsked, {
           summary: `The deploy used ${value} from the environment.`,
@@ -281,6 +287,18 @@ describe("Hub con Environments: the agent's memory after a move", () => {
         SELECT payload_json AS payload FROM orchestration_v2_move_handoffs
       `;
       for (const row of stored) assert.notInclude(row.payload, value);
+      // Leak smoke (ticket 09): after the handoff, no file of the Hub or of either machine (but
+      // the checkouts), no row and no process argument holds it.
+      assert.deepEqual(
+        {
+          hub: yield* hubFilesHolding(hub, value),
+          database: (yield* databaseText(hub)).includes(value),
+          laptop: yield* machineFilesHolding(laptop, value),
+          desktop: yield* machineFilesHolding(desktop, value),
+          processes: yield* processArgsHolding(value),
+        },
+        { hub: [], database: false, laptop: [], desktop: [], processes: [] },
+      );
     }).pipe(Effect.scoped),
   );
 

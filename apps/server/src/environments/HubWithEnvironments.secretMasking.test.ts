@@ -45,6 +45,8 @@ import {
   ROTATED_TOKEN,
   threadWorkspaceOf,
   hubFilesHolding,
+  machineFilesHolding,
+  processArgsHolding,
   databaseText,
   putOwnerToken,
   hubCheckoutOf,
@@ -156,7 +158,7 @@ describe("Hub con Environments: a Thread's secret values are masked in its histo
 
   it.live("terminal output reaches the client masked, a value split between frames too", () =>
     Effect.gen(function* () {
-      const { hub, owner, threadId } = yield* turnThatPrintsTheSecret();
+      const { hub, laptop, owner, threadId } = yield* turnThatPrintsTheSecret();
       const workspace = yield* threadWorkspaceOf(hub);
       const caller = { userId: owner };
       const cwd = yield* hubCheckoutOf(hub, threadId);
@@ -196,6 +198,19 @@ describe("Hub con Environments: a Thread's secret values are masked in its histo
       );
       assert.include(reopened.history, "[OWNER_TOKEN]");
       assert.notInclude(reopened.history, OWNER_TOKEN);
+
+      // Leak smoke (ticket 09), after a turn and a terminal that printed it: no file of the Hub
+      // (its sealed store included), no row, no file of the Laptop but the agent's checkout, and
+      // no process argument on this host holds the value.
+      assert.deepEqual(
+        {
+          hub: yield* hubFilesHolding(hub, OWNER_TOKEN),
+          database: (yield* databaseText(hub)).includes(OWNER_TOKEN),
+          laptop: yield* machineFilesHolding(laptop, OWNER_TOKEN),
+          processes: yield* processArgsHolding(OWNER_TOKEN),
+        },
+        { hub: [], database: false, laptop: [], processes: [] },
+      );
     }).pipe(Effect.scoped),
   );
 
