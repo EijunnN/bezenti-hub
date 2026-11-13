@@ -226,8 +226,10 @@ is the one service; WS RPCs `vaults.*` and HTTP `vaults.reveal` are its doors.
   version never moves), not its name. Its editors (the Owner, the Organization's Admins) see that
   it broke; its Members and Guests do not.
 - **Names** (`secretNameRisk` in contracts, compared uppercased): `^[A-Z_][A-Z0-9_]{0,127}$`,
-  unique in a Vault. `gateway`: the Hub's own (`T3_*`, `T3CODE_*`, the AI gateway's variables),
-  refused for everyone. `dangerous`: what changes how tools run or whom they trust (process and
+  unique in a Vault. `gateway`: the Hub's own (`T3_*`, `T3CODE_*`, the AI gateway's variables,
+  among them the provider homes it sets such as `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
+  `CLAUDE_CONFIG_DIR`, `CODEX_HOME`), refused for everyone (`reserved-name`); it is checked
+  before `dangerous`, so those names are never the Owner's to confirm. `dangerous`: what changes how tools run or whom they trust (process and
   loader options, interpreters' startup options, `GIT_*`, `SSH_*`, proxies and CAs, home, temp,
   shell, `XDG_*`, `BASH_FUNC_*`, and every AI provider's keys and base URLs such as
   `ANTHROPIC_*`, `OPENAI_*`, `GEMINI_*`, `GOOGLE_*`): only the Owner (AccessPolicy
