@@ -242,10 +242,7 @@ export function ProjectMoveDialog({
                     </ul>
                   </section>
                 ) : null}
-                <p>
-                  Open terminals of its Threads close, with the dev servers and scripts started from
-                  them.
-                </p>
+                <p>Open terminals of its Threads close.</p>
               </>
             ) : null}
             {plan !== undefined && (step.status === "moved" || step.status === "moving-threads") ? (

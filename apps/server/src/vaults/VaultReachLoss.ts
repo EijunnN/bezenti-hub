@@ -187,7 +187,8 @@ export const forgetOrganization = Effect.fn("VaultReachLoss.forgetOrganization")
 
 /**
  * A Project moving to Space `spaceId`, in the transaction that moves it: its choices of Vaults that
- * do not reach that Space go (`VaultReach.dropChoicesNotReaching`), each audited as `inherit`.
+ * do not reach that Space go (`VaultReach.dropChoicesNotReaching`), each audited as `inherit` in
+ * the Space it left.
  */
 export const keepProjectChoicesReaching = Effect.fn("VaultReachLoss.keepProjectChoicesReaching")(
   function* (
