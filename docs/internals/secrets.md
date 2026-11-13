@@ -401,74 +401,105 @@ requests).
 Every secret value that could surface in a Thread's history is stored and shown as `[NAME]`. One
 rule, `@t3tools/shared/secretMasking`, and one service on the Hub, `SecretMasker`.
 
-**The rule** (`makeSecretPatterns`): a value is found as written, as a JSON string holds it,
-URL-encoded (`encodeURIComponent`) and in standard base64 at any of the three byte alignments a
-longer base64 text can put it in (only the characters that depend on the value alone, at least 8).
-Values shorter than 6 characters are never masked (open question 3; the Vault marks them
-`unmasked` when they are written). Overlapping values merge into one `[NAME]`, named after the
-first in precedence order, so no part of either is left. A form two secrets share masks as the
-winner's name.
+**The rule** (`makeSecretPatterns`). A value is found in every form `secretForms` lists: as
+written; with CRLF line ends (a terminal's `onlcr`, a multi-line PEM key); as a JSON string and
+with non-ASCII as `\uXXXX`; URL-encoded (upper- and lower-case escapes, `+` for spaces); in hex
+(both cases); in standard and URL-safe base64 at the three byte alignments a longer base64 text
+can put it in (only the characters that depend on the value alone, at least 8); and base64 or hex
+wrapped across lines (MIME, PEM). Values shorter than 6 characters are never masked (open question
+3). Overlapping values merge into one `[NAME]`, named after the first in precedence order. Matching
+indexes the forms by their first two characters: one map lookup per character of text, however
+many values there are.
 
-**A Thread's masker** (`SecretMasker.forThread`) is its root Thread's (a child Thread's tools run in
-its root's process) and holds:
+**Whose values.** Never another User's: masking with them would let a User type a guess and see
+it become `[NAME]`. A Thread's masker (`forThread`, its root's: a child Thread's tools run in its
+root's process) holds:
 
-- every value a process of the Thread received: `SecretDelivery.resolve` calls
-  `SecretMasker.remember` before it hands the values on, so they are masked before the process can
-  print anything. The value ids and names (never values) are kept in `thread_secret_values`
-  (migration 116), so after a restart the Thread still masks them;
-- its owner's effective set now (`EffectiveVaults.forThread`), read again every 5 minutes.
+- every value a process of the Thread (or a child of it) received: `SecretDelivery.resolve` calls
+  `remember` before it hands the values on, so they are masked before the process prints anything.
+  Value ids and names (never values) are kept in `thread_secret_values` (migration 116);
+- its owner's effective set now (`EffectiveVaults.forThread`), read again every 30 seconds. A
+  Thread whose creation is being written (its first message and title come with it) uses its
+  owner's set where it will be (`EffectiveVaults.forPlacement`, from its `thread.created`).
 
 A value rotated or deleted since stays masked for the Thread's life: `Vaults` does not remove a
-value a living Thread holds in `thread_secret_values` (it stays sealed in `secrets/vault-values/`),
-and its start drops the rows of Threads that are gone and then sweeps their values. If the
-Thread's values cannot be read, every value this process knows masks instead; the masker never
-fails a write.
+value a Thread that is not deleted holds (it stays sealed in `secrets/vault-values/`); its start
+drops the rows of deleted Threads (their tombstone; a Thread missing from the projections during a
+rebuild keeps its rows) and then sweeps their values. Values are decrypted once per value id and
+loads of one Thread are not repeated while one runs.
 
-**Where it applies** (the full inventory is `vaults/MaskedPaths.ts`; `MaskedPaths.test.ts` fails when
-an executor operation, a stream, a writer of the Thread tables or a history door is added without a
-line there):
+Text that names no Thread is masked with the Threads it can come from: a checkout on the Hub
+machine (`forCheckout`, the Threads that run there: the Owner's) for the Changes panel and Git
+hook output; a change request (`forPullRequest`, the Threads linked to it). A file read or search
+that names no Thread reads the Hub machine's own checkout as it is: clients relay such reads to
+copy files to another machine, and masking them would write `[NAME]` there.
 
-| What                                                          | Where                                                |
-| ------------------------------------------------------------- | ---------------------------------------------------- |
-| Provider events: messages, reasoning, tool calls and results, | `EventSink` (every method that writes                |
-| plans, titles, handoff items, user messages                   | `events`, via `maskingEventWrites`)                  |
-| Live command output (`command_output.delta`)                  | `CommandOutputHub.append`                            |
-| Terminal output, snapshots and history sent to a client       | `ThreadWorkspace` (`maskTerminal.ts`)                |
-| `files.read`, `search.contents` shown to a client             | `ThreadWorkspace.readFile`, `searchContents`         |
-| Checkpoint diffs (turn and thread)                            | `CheckpointDiffQuery`                                |
-| Handoff summaries of a move                                   | `ThreadMoveService.storeHandoff`                     |
-| A checkout's diffs (Changes panel)                            | `ws.ts`, every value the process knows               |
-| Logs (console, OTLP), spans, trace and provider event files   | `serverLogger`, `observability`, `EventNdjsonLogger` |
-| Terminal history files of a machine                           | `TerminalManager`, every value it knows              |
+**Fails closed.** When a Thread's values cannot be read, its last read set (the Thread's own) is
+used if there is one; otherwise nothing is stored (the event sink's write fails), a client call
+fails, command output and setup output are not sent, and Git hook output is dropped.
 
-Because events are masked before they are stored, every door that reads a Thread's history (the
-orchestration WS, the history HttpApi, guest routes, MCP tools such as `t3_thread_wait`) reads it
-masked; none reads a live provider stream (checked by `MaskedPaths.test.ts`). A search drops a
-match on a line that holds a value, so searching for parts of it cannot spell it out.
+**Saving what was shown.** A file is read masked; the editor saves what it showed. A save
+(`ThreadWorkspace.writeFile`, `maskWorkspace.restorePlaceholders`) reads the file as it is on the
+machine and puts each `[NAME]` of the Thread's set back to the value the file holds under that
+name; a name the file does not hold stays as typed. When the file holds two values under one name
+(a rotation), or cannot be read whole, the save is refused with «Edit it in a terminal», never
+written with a placeholder.
 
-**Text in pieces.** A terminal frame or a command output chunk whose end could be the start of a
-value's form waits for the next one (at most 150 ms) and the two go out as one, masked; after the
-wait it goes out as it is (it held no whole value). Snapshots and histories are masked whole.
+**Where it applies.** The full inventory is `vaults/MaskedPaths.ts`: every WS method, HTTP
+endpoint, raw route, MCP tool (as `DoorRules` lists them) and executor operation has a rule. A door
+marked masked names the test that calls it with a secret; `MaskedPaths.test.ts` fails when a door
+has no rule, a rule no door uses, or a proof is missing.
 
-**Logs and spans, Hub and joined machine.** Values a process holds join its known values
-(`rememberKnownSecrets`): on the Hub when a masker reads them or delivery remembers them, on a
-joined machine when `secretEnv` arrives (`EnvironmentAgent`). The server logger masks each message
-(and the existing cause redaction masks causes), the tracer masks span attributes and events (also
-what goes to OTLP), the trace file masks each line, and provider event logs mask each line.
+| What                                                             | Where                                       |
+| ---------------------------------------------------------------- | ------------------------------------------- |
+| Events (messages, reasoning, tools, titles, plans), the outbox's | `EventSink` via `maskingEventWrites` (every |
+| payloads, a rejected command's error                             | method with `events`, `effects` or `error`) |
+| Live command output                                              | `CommandOutputHub` (`SecretStreamGuard`)    |
+| Terminal output and snapshots                                    | `ThreadWorkspace` (`maskTerminal.ts`)       |
+| `files.read`, `search.contents`, a save                          | `ThreadWorkspace` (`maskWorkspace.ts`)      |
+| Checkpoint diffs                                                 | `CheckpointDiffQuery`                       |
+| Handoff summaries                                                | `ThreadMoveService.storeHandoff`            |
+| Setup-script output and errors                                   | `WorktreeSetupTracker`                      |
+| Git hook output and progress                                     | `GitManager` (`maskGitProgress.ts`)         |
+| Change requests: diffs, details, comments, review guides         | `PullRequestService`, the guide service and |
+| (stored guides too)                                              | repository (`maskPullRequests.ts`)          |
+| A checkout's diffs and commits (Changes panel)                   | `ReviewService` (`maskCheckoutReads.ts`)    |
+| Logs, spans, trace and provider event files                      | every value the process knows (below)       |
+| A shell's history file                                           | `TerminalManager`, that shell's own values  |
+
+**Text in pieces** (`SecretStreamGuard`, shared by terminals and command output). A piece whose
+end could be the start of a value's form waits for the next one (at most 150 ms) and the two go out
+as one, masked. When nothing follows in time the piece goes out; if the next piece continues a
+value begun in it, that continuation is masked, so at most the part sent before the pause is seen.
+A history cut at its start (a terminal's bounded history, a file read cut at its size limit, a
+search line cut at 512 characters) loses what is left of a value at the cut. Search drops a match
+on a line that holds a value or ends in the start of one, and then no longer says that more
+matched, so searching for parts of a value cannot spell it out.
+
+**Logs and spans, Hub and joined machine.** A process masks its own logs, spans, trace file and
+provider event files with every value it knows (`rememberKnownSecrets`): on the Hub, every Vault
+value from its start; on a joined machine, each `secretEnv` it receives. These are the operator's
+files, never what a client is shown.
 
 **Not masked (accepted):**
 
 - the AI provider sees a value the agent reads (decision 9); masking protects the Hub's history,
   not the model's context;
-- the files on the Thread's machine keep what the agent wrote; only the Hub's view is masked. Saving
-  a file from the client's editor that showed `[NAME]` writes `[NAME]` back;
+- the files on the Thread's machine keep what the agent wrote; only the Hub's view is masked;
+- a read that names no Thread (the Hub machine's own checkout), as above;
 - history written before this ticket stays as it was;
-- a dev server's pages proxied as a preview (`preview.proxyHttp`, `preview.proxySocket`): live, to
-  the User who may open it, never stored;
+- a dev server's pages and sockets proxied as a preview, a browser preview's screen, an MCP app's
+  answers, and the AI gateway's traffic: live, to the User who opened them, never stored;
+- the Hub repository's Git objects (`/api/git`): checkpoints are kept as written; diffs and reads
+  from them are masked when shown;
+- the Owner's own diagnostics (trace file, process list) and agent session scan;
 - log annotations (`Effect.annotateLogs`) are not rewritten, only messages and causes;
-- the Hub's Git repository keeps checkpoints as they are (compressed objects): a diff or a file
-  read from it is masked when shown;
-- error messages a machine returns for an RPC (not events) reach the client as they are.
+- forms not covered: a value with ANSI codes inside it, shell-quoted (`declare -p`), or in another
+  encoding (gzip, other escapes);
+- output paused for longer than 150 ms inside a value shows its first part live (the rest is
+  masked); a value typed into a terminal a few characters at a time shows live as typed. The
+  terminal's snapshot, history and history file are masked whole;
+- error messages a machine returns for an RPC (not stored) reach the client as they are.
 
 ## What is not covered here
 
