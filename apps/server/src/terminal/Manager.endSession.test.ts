@@ -14,6 +14,7 @@ import { assert, describe, it } from "@effect/vitest";
 import { DEFAULT_TERMINAL_ID } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { expect } from "vite-plus/test";
@@ -120,7 +121,7 @@ const setup = Effect.gen(function* () {
     return child.pid!;
   };
 
-  return { manager, openShell, unrelated };
+  return { manager, openShell, unrelated, dir };
 });
 
 const layer = Layer.mergeAll(
@@ -175,6 +176,58 @@ describe.skipIf(HostProcess.Platform.defaultValue() !== "linux")(
           yield* until("the normal shell ended", () => !alive(normal.shell));
           assert.isTrue(alive(normal.job), "a user's normal close is unchanged");
         }),
+      );
+
+      it.effect("a reconcile ends the jobs of a shell that already exited", () =>
+        Effect.gen(function* () {
+          const { manager, openShell } = yield* setup;
+          const { job, shell } = yield* openShell(DEFAULT_TERMINAL_ID);
+          const exited = yield* Deferred.make<void>();
+          const unsubscribe = yield* manager.subscribe((event) =>
+            event.type === "exited" ? Deferred.succeed(exited, undefined) : Effect.void,
+          );
+          yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+          yield* manager.write({
+            threadId: "thread-1",
+            terminalId: DEFAULT_TERMINAL_ID,
+            data: "exit\r",
+          });
+          // The manager saw it exit: its session has no shell process any more.
+          yield* Deferred.await(exited);
+          assert.isFalse(alive(shell));
+          assert.isTrue(alive(job), "its job outlives it in the session");
+
+          const closed = yield* manager.reconcile({
+            threads: [{ threadId: "thread-1", spaceId: "space-globex" }],
+            removedUserIds: [],
+          });
+          assert.equal(closed, 1);
+          yield* until("the exited shell's job ended", () => !alive(job));
+        }),
+      );
+
+      it.effect(
+        "a restart for another Space ends the old shell's jobs; one for the same stays",
+        () =>
+          Effect.gen(function* () {
+            const { manager, openShell, dir } = yield* setup;
+            const elsewhere = NodePath.join(dir, "elsewhere");
+            NodeFS.mkdirSync(elsewhere);
+            const same = yield* openShell("same");
+            const moved = yield* openShell("moved");
+            const reopen = (terminalId: string, spaceId: string) =>
+              manager.open(
+                { threadId: "thread-1", terminalId, cwd: elsewhere, cols: 100, rows: 24 },
+                { secrets: undefined, facts: { spaceId, userId: "grace" } },
+              );
+
+            yield* reopen("same", "space-acme");
+            yield* reopen("moved", "space-globex");
+
+            yield* until("the moved shell's job ended", () => !alive(moved.job));
+            yield* until("the same-Space shell was replaced", () => !alive(same.shell));
+            assert.isTrue(alive(same.job), "a restart with the same facts and secrets keeps it");
+          }),
       );
     });
   },

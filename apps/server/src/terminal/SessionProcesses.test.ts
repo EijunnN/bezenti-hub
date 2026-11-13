@@ -1,8 +1,15 @@
+// @effect-diagnostics nodeBuiltinImport:off -- a fake procRoot on disk, read as /proc would be.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
 import {
   endSessionWith,
+  parseRealUid,
+  procSource,
   parseProcStat,
   type ProcSource,
   type SessionSignal,
@@ -29,7 +36,7 @@ const fakeSource = (procs: Array<FakeProc>): ProcSource => ({
       ? undefined
       : stat(proc.pid, proc.comm, proc.state, proc.pgrp, proc.session);
   },
-  ownerUid: (pid) => procs.find((candidate) => candidate.pid === pid)?.uid,
+  uid: (pid) => procs.find((candidate) => candidate.pid === pid)?.uid,
 });
 
 it("reads a stat whose comm holds spaces, ')' and a newline, after the last ')'", () => {
@@ -66,7 +73,9 @@ it("finds the session's live groups of the same uid only", () => {
     // Another shell's session.
     { pid: 200, comm: "bash", state: "S", pgrp: 200, session: 200, uid: 1000 },
   ]);
-  assert.deepStrictEqual([...sessionGroups(source, 100, 1000)].toSorted(), [100, 101, 103]);
+  const { ours, mixed } = sessionGroups(source, 100, 1000);
+  assert.deepStrictEqual([...ours].toSorted(), [100, 101, 103]);
+  assert.deepStrictEqual([...mixed], [105]);
 });
 
 it.live("re-reads the session before each signal and stops once it is empty", () =>
@@ -138,3 +147,48 @@ it.live("never ends this process's own session", () =>
     assert.deepStrictEqual(sent, []);
   }),
 );
+
+it.live("never signals a group with a member of another uid (a machine running as root)", () =>
+  Effect.gen(function* () {
+    const sent: Array<number> = [];
+    yield* endSessionWith(100, {
+      source: fakeSource([
+        { pid: 101, comm: "sleep", state: "S", pgrp: 101, session: 100, uid: 0 },
+        { pid: 102, comm: "su", state: "S", pgrp: 101, session: 100, uid: 1001 },
+        { pid: 103, comm: "sleep", state: "S", pgrp: 103, session: 100, uid: 0 },
+      ]),
+      uid: 0,
+      graceMs: 1,
+      protectedSessions: new Set(),
+      killGroup: (pgrp) => sent.push(pgrp),
+    });
+    assert.deepStrictEqual([...new Set(sent)], [103]);
+  }),
+);
+
+it("reads the real uid from status, not the owner of /proc/<pid>", () => {
+  assert.equal(parseRealUid("Name:\tssh\nUid:\t1000\t0\t0\t0\nGid:\t1000\n"), 1000);
+  assert.equal(parseRealUid("Uid:\t0\t0\t0\t0\n"), 0);
+  assert.isNull(parseRealUid("Name:\tssh\n"));
+
+  const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-proc-"));
+  try {
+    const ours = NodeFS.statSync(root).uid;
+    const write = (pid: number, uid: number) => {
+      NodeFS.mkdirSync(NodePath.join(root, String(pid)));
+      NodeFS.writeFileSync(
+        NodePath.join(root, String(pid), "stat"),
+        stat(pid, "ssh", "S", pid, 100),
+      );
+      NodeFS.writeFileSync(NodePath.join(root, String(pid), "status"), `Uid:\t${uid}\t0\t0\t0\n`);
+    };
+    // Both directories are owned by this test's uid; only the status says whose they are.
+    write(101, ours);
+    write(102, ours + 1);
+    const { ours: groups, mixed } = sessionGroups(procSource(root), 100, ours);
+    assert.deepStrictEqual([...groups], [101]);
+    assert.deepStrictEqual([...mixed], [102]);
+  } finally {
+    NodeFS.rmSync(root, { recursive: true, force: true });
+  }
+});

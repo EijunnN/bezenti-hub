@@ -60,11 +60,18 @@ export interface ProcSource {
   readonly pids: () => ReadonlyArray<number>;
   /** The stat text, or undefined once the process is gone. */
   readonly stat: (pid: number) => string | undefined;
-  /** The uid owning the process, or undefined once it is gone. */
-  readonly ownerUid: (pid: number) => number | undefined;
+  /** The process's real uid, or undefined once it is gone. */
+  readonly uid: (pid: number) => number | undefined;
 }
 
-const procSource = (procRoot = "/proc"): ProcSource => ({
+/**
+ * The real uid from `/proc/<pid>/status` (`Uid:` real, effective, saved, fs). Not the owner of
+ * `/proc/<pid>`: that shows root for a non-dumpable process (ssh, setuid programs).
+ */
+export const parseRealUid = (status: string): number | null =>
+  positiveInt(/^Uid:\s+(\d+)/m.exec(status)?.[1]);
+
+export const procSource = (procRoot = "/proc"): ProcSource => ({
   pids: () => {
     try {
       return NodeFS.readdirSync(procRoot).flatMap((name) => {
@@ -82,31 +89,39 @@ const procSource = (procRoot = "/proc"): ProcSource => ({
       return undefined;
     }
   },
-  ownerUid: (pid) => {
+  uid: (pid) => {
     try {
-      return NodeFS.statSync(`${procRoot}/${pid}`).uid;
+      return parseRealUid(NodeFS.readFileSync(`${procRoot}/${pid}/status`, "utf8")) ?? undefined;
     } catch {
       return undefined;
     }
   },
 });
 
-/** The process groups with a live member in session `sid` owned by `uid`, read now. */
+/**
+ * The session's process groups read now: `ours`, whose live members are all of `uid`, and `mixed`,
+ * with a member of another uid. `kill(-pgrp)` reaches every member, so a mixed group (only possible
+ * when the machine runs as root) is never signalled.
+ */
 export const sessionGroups = (
   source: ProcSource,
   sid: number,
   uid: number,
-): ReadonlySet<number> => {
-  const groups = new Set<number>();
+): { readonly ours: ReadonlySet<number>; readonly mixed: ReadonlySet<number> } => {
+  const seen = new Set<number>();
+  const mixed = new Set<number>();
   for (const pid of source.pids()) {
     const text = source.stat(pid);
     const stat = text === undefined ? null : parseProcStat(text);
     if (stat === null || stat.session !== sid) continue;
     if (stat.state === "Z" || stat.state === "X") continue;
-    if (source.ownerUid(pid) !== uid) continue;
-    groups.add(stat.pgrp);
+    const owner = source.uid(pid);
+    if (owner === undefined) continue;
+    seen.add(stat.pgrp);
+    if (owner !== uid) mixed.add(stat.pgrp);
   }
-  return groups;
+  const ours = new Set([...seen].filter((pgrp) => !mixed.has(pgrp)));
+  return { ours, mixed };
 };
 
 export type SessionSignal = "SIGHUP" | "SIGTERM" | "SIGKILL";
@@ -146,9 +161,18 @@ export const endSessionWith = Effect.fn("SessionProcesses.endSession")(function*
   }
   for (const [index, signal] of SIGNALS.entries()) {
     if (index > 0) yield* Effect.sleep(Duration.millis(options.graceMs));
-    const groups = sessionGroups(options.source, sid, options.uid);
-    if (groups.size === 0) break;
-    for (const pgrp of groups) {
+    const { ours, mixed } = sessionGroups(options.source, sid, options.uid);
+    if (mixed.size > 0) {
+      yield* Effect.logWarning(
+        "left process groups with another uid's members in a closed session",
+        {
+          sessionId: sid,
+          processGroups: [...mixed],
+        },
+      );
+    }
+    if (ours.size === 0) break;
+    for (const pgrp of ours) {
       if (pgrp > 1 && signalGroup(options, pgrp, signal)) signalled.add(pgrp);
     }
   }

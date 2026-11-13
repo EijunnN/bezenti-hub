@@ -364,6 +364,8 @@ interface TerminalSessionState {
   pendingFacts: TerminalShellFacts | null;
   /** The facts the running shell started with; null: none (started without the Hub's word). */
   facts: TerminalShellFacts | null;
+  /** The last shell's pid, kept after it exits: the session id of the jobs it started. */
+  lastSessionId: number | null;
 }
 
 interface TerminalGrid {
@@ -492,6 +494,20 @@ const secretsForStart = (
   }
   if (secrets.fingerprint === NO_SECRETS_FINGERPRINT) return Effect.succeed(secrets);
   return secrets.variables === undefined ? required : Effect.succeed(secrets);
+};
+
+/**
+ * A start replaces the last shell for other facts (Space, User) or other secrets than it carried:
+ * what that shell started must not keep them.
+ */
+const previousShellSuperseded = (session: TerminalSessionState): boolean => {
+  if (session.lastSessionId === null) return false;
+  const before = session.facts;
+  const next = session.pendingFacts;
+  if (before?.spaceId !== next?.spaceId || before?.userId !== next?.userId) return true;
+  const carried = session.secretFingerprint ?? NO_SECRETS_FINGERPRINT;
+  const nextFingerprint = session.pendingSecretEnv?.fingerprint ?? NO_SECRETS_FINGERPRINT;
+  return carried !== NO_SECRETS_FINGERPRINT && carried !== nextFingerprint;
 };
 
 function summary(session: TerminalSessionState): TerminalSummary {
@@ -2426,14 +2442,40 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
   });
 
+  /**
+   * Ends what the session's last shell started (its pid is the session id of every job it
+   * started), running or exited. Processes that left the session (setsid, daemons) stay: an
+   * accepted risk. An exited shell's pid may be reused: never one that is another live shell's.
+   */
+  const endShellSession = Effect.fn("terminal.endShellSession")(function* (
+    session: TerminalSessionState,
+  ) {
+    const sessionId = session.lastSessionId;
+    session.lastSessionId = null;
+    if (sessionId === null || !Number.isSafeInteger(sessionId) || sessionId <= 1) return;
+    const { sessions } = yield* readManagerState;
+    for (const other of sessions.values()) {
+      if (other !== session && other.pid === sessionId) return;
+    }
+    yield* endSessionProcesses(sessionId, processKillGraceMs).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("failed to end a closed terminal's session", {
+          threadId: session.threadId,
+          terminalId: session.terminalId,
+          cause,
+        }),
+      ),
+      Effect.forkIn(workerScope),
+    );
+  });
+
   const stopProcess = Effect.fn("terminal.stopProcess")(function* (
     session: TerminalSessionState,
     endSession = false,
   ) {
     const process = session.process;
+    if (endSession) yield* endShellSession(session);
     if (!process) return;
-    // The shell leads its PTY's session: its pid is the session id of every job it started.
-    const sessionId = process.pid;
 
     const updatedAt = yield* nowIso;
     yield* modifyManagerState((state) => {
@@ -2456,20 +2498,6 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       threadId: session.threadId,
       terminalId: session.terminalId,
     });
-    if (endSession && Number.isSafeInteger(sessionId) && sessionId > 1) {
-      // Closed as stale: its background jobs (own process groups the PTY close never reaches)
-      // end too. Processes that left the session (setsid, daemons) stay: an accepted risk.
-      yield* endSessionProcesses(sessionId, processKillGraceMs).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("failed to end a closed terminal's session", {
-            threadId: session.threadId,
-            terminalId: session.terminalId,
-            cause,
-          }),
-        ),
-        Effect.forkIn(workerScope),
-      );
-    }
     yield* startKillEscalation(process, session.threadId, session.terminalId);
     yield* evictInactiveSessionsIfNeeded();
   });
@@ -2542,7 +2570,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     input: TerminalStartInput,
     eventType: "started" | "restarted",
   ) {
-    yield* stopProcess(session);
+    // A new shell for other facts or other secrets: the old one's jobs do not outlive it.
+    yield* stopProcess(session, previousShellSuperseded(session));
     yield* Effect.annotateCurrentSpan({
       "terminal.thread_id": session.threadId,
       "terminal.id": session.terminalId,
@@ -2648,6 +2677,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
               session.process = ptyProcess;
               session.shell = spawnResult.shell;
               session.pid = processPid;
+              session.lastSessionId = processPid;
               session.status = "running";
               // onExit may replay an exit immediately; accept it before subscribing.
               session.unsubscribeData = spawnResult.process.onData((data) => {
@@ -3042,6 +3072,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         secretsStale: false,
         pendingFacts: start?.facts ?? null,
         facts: null,
+        lastSessionId: null,
       };
 
       const createdSession = session;
