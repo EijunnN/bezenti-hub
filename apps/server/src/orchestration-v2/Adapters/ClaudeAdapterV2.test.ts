@@ -1324,9 +1324,11 @@ describe("ClaudeAdapterV2 MCP elicitation acceptance", () => {
 const captureSdkExecutablePaths = Effect.fn("captureSdkExecutablePaths")(function* (
   binaryPath: string,
   environment: ResolvedProviderInstanceEnvironment = [],
+  aiGateway?: ProviderAdapter.AiGatewaySessionInput,
 ) {
   const executablePaths: Array<string | undefined> = [];
   const taskToolEnvironment: Array<string | undefined> = [];
+  const environments: Array<Record<string, string | undefined> | undefined> = [];
   const adapter = yield* ClaudeAdapterV2.createClaudeAdapterV2(
     {
       instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
@@ -1348,6 +1350,7 @@ const captureSdkExecutablePaths = Effect.fn("captureSdkExecutablePaths")(functio
         Effect.sync(() => {
           executablePaths.push(input.options.pathToClaudeCodeExecutable);
           taskToolEnvironment.push(input.options.env?.CLAUDE_CODE_ENABLE_TODO_TOOLS);
+          environments.push(input.options.env);
           return {
             messages: Stream.never,
             offer: () => Effect.void,
@@ -1375,6 +1378,7 @@ const captureSdkExecutablePaths = Effect.fn("captureSdkExecutablePaths")(functio
     providerSessionId: ProviderSessionId.make("provider-session-claude-binary-path"),
     modelSelection: CLAUDE_TEST_MODEL_SELECTION,
     runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+    ...(aiGateway === undefined ? {} : { aiGateway }),
   });
   const providerThread = yield* runtime.ensureThread({
     threadId,
@@ -1391,7 +1395,47 @@ const captureSdkExecutablePaths = Effect.fn("captureSdkExecutablePaths")(functio
       attachments: [],
     }),
   );
-  return { executablePaths, taskToolEnvironment };
+  return { executablePaths, taskToolEnvironment, environments };
+});
+
+describe("ClaudeAdapterV2 on the Hub's AI gateway (spec 4 ticket 06)", () => {
+  it.effect("runs Claude Code on the gateway, with no login nor setting of the machine's own", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { environments } = yield* captureSdkExecutablePaths(
+          "claude",
+          [
+            { name: "ANTHROPIC_API_KEY", value: "sk-ant-owner", sensitive: true },
+            { name: "CLAUDE_CONFIG_DIR", value: "/home/owner/.claude", sensitive: false },
+          ],
+          {
+            key: "t3gk_claude-thread-key-0123456789",
+            aiAccountId: "acct-1" as never,
+            aiAccountName: "Acme Claude",
+            provider: "claude",
+            model: "claude-sonnet-5-5",
+            baseUrl: "http://127.0.0.1:41000",
+            home: "/state/provider-homes/abc/claudeAgent",
+          },
+        );
+        const env = environments[0] ?? {};
+        assert.equal(env.ANTHROPIC_BASE_URL, "http://127.0.0.1:41000/api/ai/anthropic");
+        assert.equal(env.ANTHROPIC_AUTH_TOKEN, "t3gk_claude-thread-key-0123456789");
+        assert.equal(env.ANTHROPIC_MODEL, "claude-sonnet-5-5");
+        assert.equal(env.CLAUDE_CONFIG_DIR, "/state/provider-homes/abc/claudeAgent");
+        assert.isUndefined(env.ANTHROPIC_API_KEY, "the machine's key never reaches it");
+      }),
+    ).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          IdAllocator.layer,
+          McpProviderSessions.layer,
+          NodeServices.layer,
+          NodeCrypto.layer,
+        ),
+      ),
+    ),
+  );
 });
 
 describe("ClaudeAdapterV2 executable path", () => {

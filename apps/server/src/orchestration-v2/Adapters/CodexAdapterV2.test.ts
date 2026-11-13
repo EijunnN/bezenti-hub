@@ -949,6 +949,88 @@ describe("CodexAdapterV2 process exit", () => {
   });
 });
 
+describe("CodexAdapterV2 on the Hub's AI gateway (spec 4 ticket 06)", () => {
+  it.effect(
+    "starts the app-server with the gateway as its model provider, the key by name only",
+    () => {
+      const spawned: Array<unknown> = [];
+      const factoryLayer = CodexAdapterV2.layerAppServerClientFactory.pipe(
+        Layer.provide(Layer.mock(PortScanner.PortDiscovery)({ trackAgent: () => () => {} })),
+        Layer.provide(
+          Layer.succeed(ProviderEventLoggers.ProviderEventLoggers, {
+            native: undefined,
+            canonical: undefined,
+          }),
+        ),
+        Layer.provide(
+          Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make((command) =>
+              Effect.sync(() => void spawned.push(command)).pipe(
+                Effect.as(
+                  ChildProcessSpawner.makeHandle({
+                    pid: ChildProcessSpawner.ProcessId(999_999_998),
+                    exitCode: Effect.never,
+                    isRunning: Effect.succeed(true),
+                    kill: () => Effect.void,
+                    unref: Effect.succeed(Effect.void),
+                    stdin: Sink.drain,
+                    stdout: Stream.never,
+                    stderr: Stream.empty,
+                    all: Stream.empty,
+                    getInputFd: () => Sink.drain,
+                    getOutputFd: () => Stream.empty,
+                  }),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      return Effect.gen(function* () {
+        const factory = yield* CodexAdapterV2.CodexAppServerClientFactory;
+        yield* Effect.scoped(
+          factory.open({
+            instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+            threadId: ThreadId.make("thread-codex-gateway"),
+            providerSessionId: ProviderSessionId.make("session-codex-gateway"),
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+            settings: { ...DEFAULT_CODEX_SETTINGS, homePath: "/home/owner/.codex" },
+            environment: { OPENAI_API_KEY: "sk-owner", CODEX_HOME: "/home/owner/.codex" },
+            aiGateway: {
+              key: "t3gk_codex-thread-key-0123456789",
+              aiAccountId: "acct-1" as never,
+              aiAccountName: "Acme OpenAI",
+              provider: "codex",
+              model: "gpt-5.5",
+              baseUrl: "http://127.0.0.1:41000",
+              home: "/state/provider-homes/abc/codex",
+            },
+          }),
+        );
+        assert.equal(spawned.length, 1);
+        const command = spawned[0] as {
+          readonly args: ReadonlyArray<string>;
+          readonly options: { readonly env?: Record<string, string | undefined> };
+        };
+        const args = command.args.join(" ");
+        assert.notInclude(args, "t3gk_", "never in its arguments");
+        assert.include(args, 'model_provider="t3"');
+        assert.include(
+          args,
+          'model_providers.t3.base_url="http://127.0.0.1:41000/api/ai/openai/v1"',
+        );
+        assert.include(args, 'model_providers.t3.env_key="T3_AI_GATEWAY_KEY"');
+        assert.include(args, 'model_providers.t3.wire_api="responses"');
+        const env = command.options.env ?? {};
+        assert.equal(env.T3_AI_GATEWAY_KEY, "t3gk_codex-thread-key-0123456789");
+        assert.equal(env.CODEX_HOME, "/state/provider-homes/abc/codex", "not the owner's ~/.codex");
+        assert.isUndefined(env.OPENAI_API_KEY);
+      }).pipe(Effect.provide(factoryLayer));
+    },
+  );
+});
+
 describe("CodexAdapterV2 session initialize", () => {
   const openReplaySession = (
     transcript: CodexReplay.CodexAppServerReplayTranscript,

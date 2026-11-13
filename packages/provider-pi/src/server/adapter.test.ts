@@ -1,3 +1,6 @@
+import * as NodePath from "node:path";
+import * as NodeOS from "node:os";
+import * as NodeFS from "node:fs";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -1626,6 +1629,45 @@ describe("PiAdapterV2", () => {
         "never in its arguments",
       );
     }).pipe(Effect.scoped, Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "spec 4: points the session's pi at the AI gateway, in a Pi home of the Thread's own",
+    () =>
+      Effect.gen(function* () {
+        const HOME_DIR = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-pi-gateway-"));
+        const fake = yield* makeFakePi;
+        const adapter = yield* makeAdapter(fake, "");
+        assert.isTrue(adapter.usesAiGateway);
+        yield* adapter.openSession({
+          threadId: THREAD_ID,
+          providerSessionId: SESSION_ID,
+          modelSelection: modelSelection("default"),
+          runtimePolicy,
+          aiGateway: {
+            key: "t3gk_thread-key-0123456789",
+            aiAccountId: "acct-1" as never,
+            aiAccountName: "Acme DeepSeek",
+            provider: "openai-compatible",
+            model: "deepseek-chat",
+            baseUrl: "http://127.0.0.1:41000",
+            home: HOME_DIR,
+          },
+        });
+        const spawn = fake.lastSpawn();
+        assert.equal(spawn.env.T3_AI_GATEWAY_KEY, "t3gk_thread-key-0123456789");
+        assert.equal(spawn.env.PI_CODING_AGENT_DIR, HOME_DIR);
+        assert.isUndefined(spawn.env.OPENAI_API_KEY, "no ambient credential");
+        assert.isFalse(
+          spawn.args.some((arg) => arg.includes("t3gk_")),
+          "never in its arguments",
+        );
+        const models = NodeFS.readFileSync(NodePath.join(HOME_DIR, "models.json"), "utf8");
+        assert.notInclude(models, "t3gk_", "never in a file");
+        assert.include(models, "$T3_AI_GATEWAY_KEY");
+        assert.include(models, "http://127.0.0.1:41000/api/ai/openai/v1");
+        NodeFS.rmSync(HOME_DIR, { recursive: true, force: true });
+      }).pipe(Effect.scoped, Effect.provide(layerTest)),
   );
 
   it.effect("rejects a resume while a turn is active", () =>

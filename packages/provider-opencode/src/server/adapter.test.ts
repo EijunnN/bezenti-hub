@@ -369,6 +369,83 @@ describe("OpenCodeAdapterV2", () => {
     ),
   );
 
+  it.effect(
+    "spec 4: starts its own server on the AI gateway, with XDG homes of the Thread's own",
+    () =>
+      Effect.gen(function* () {
+        const HOME_DIR = "/state/provider-homes/abc/opencode";
+        const seen: Array<NodeJS.ProcessEnv | undefined> = [];
+        const runtimeService = {
+          connectToOpenCodeServer: (input: { readonly environment?: NodeJS.ProcessEnv }) =>
+            Effect.sync(() => void seen.push(input.environment)).pipe(
+              Effect.andThen(Effect.die("stop after the server start")),
+            ),
+          createOpenCodeSdkClient: () => ({}),
+        } as unknown as OpenCodeRuntime.OpenCodeRuntime["Service"];
+        const host = {
+          paths: { cwd: "/workspace" },
+          resolveAttachmentPath: () => null,
+        } as unknown as ProviderHost.ProviderHost["Service"];
+        const adapter = yield* makeOpenCodeAdapterV2({
+          instanceId: ProviderInstanceId.make("opencode-gateway"),
+          settings: OWN_SERVER_SETTINGS,
+          environment: {
+            HOME_THING: "kept",
+            OPENAI_API_KEY: "sk-owner",
+            XDG_CONFIG_HOME: "/home/o/.config",
+          },
+        }).pipe(
+          Effect.provideService(OpenCodeRuntime.OpenCodeRuntime, runtimeService),
+          Effect.provideService(ProviderHost.ProviderHost, host),
+        );
+        assert.isTrue(adapter.usesAiGateway);
+        yield* Effect.exit(
+          adapter.openSession({
+            threadId: ThreadId.make("thread-opencode-gateway"),
+            providerSessionId: ProviderSessionId.make("session-opencode-gateway"),
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("opencode-gateway"),
+              model: "t3/deepseek-chat",
+            },
+            runtimePolicy: runtimePolicy("full-access", { cwd: "/workspace" }),
+            aiGateway: {
+              key: "t3gk_thread-key-0123456789",
+              aiAccountId: "acct-1" as never,
+              aiAccountName: "Acme DeepSeek",
+              provider: "openai-compatible",
+              model: "deepseek-chat",
+              baseUrl: "http://127.0.0.1:41000",
+              home: HOME_DIR,
+            },
+          }),
+        );
+        const env = seen[0]!;
+        assert.equal(env.T3_AI_GATEWAY_KEY, "t3gk_thread-key-0123456789");
+        assert.equal(env.XDG_CONFIG_HOME, `${HOME_DIR}/config`);
+        assert.equal(env.XDG_DATA_HOME, `${HOME_DIR}/data`);
+        assert.isUndefined(env.OPENAI_API_KEY);
+        assert.equal(env.HOME_THING, "kept");
+        assert.notInclude(env.OPENCODE_CONFIG_CONTENT ?? "", "t3gk_");
+        assert.include(
+          env.OPENCODE_CONFIG_CONTENT ?? "",
+          "http://127.0.0.1:41000/api/ai/openai/v1",
+        );
+        // An external server is not ours to start: it never claims the gateway.
+        const external = yield* makeOpenCodeAdapterV2({
+          instanceId: ProviderInstanceId.make("opencode-gateway"),
+          settings: OPEN_CODE_TEST_SETTINGS,
+          environment: {},
+        }).pipe(
+          Effect.provideService(OpenCodeRuntime.OpenCodeRuntime, runtimeService),
+          Effect.provideService(ProviderHost.ProviderHost, host),
+        );
+        assert.isUndefined(external.usesAiGateway);
+      }).pipe(
+        Effect.provide(Layer.merge(IdAllocator.layer, McpProviderSessions.layer)),
+        Effect.scoped,
+      ),
+  );
+
   it.effect("classifies APIError 429 as a usage limit", () =>
     Effect.gen(function* () {
       const nativeEvents = asyncEventStream();
