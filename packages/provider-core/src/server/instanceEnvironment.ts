@@ -178,6 +178,8 @@ export const AMBIENT_AI_VARIABLES: ReadonlyArray<string> = [
   "MISTRAL_API_KEY",
   "AZURE_OPENAI_API_KEY",
   "AI_GATEWAY_API_KEY",
+  "OPENCODE_API_KEY",
+  "OPENCODE_AUTH_CONTENT",
 ];
 
 /** The provider id OpenCode, Pi and Codex know the gateway by. */
@@ -186,16 +188,16 @@ const AI_GATEWAY_PROVIDER_ID = "t3";
 /** The OpenAI shape of the gateway, through the relay: what OpenCode, Pi and Codex call. */
 const aiGatewayOpenAiBaseUrl = (gateway: AiGatewayProcess) => `${gateway.baseUrl}/api/ai/openai/v1`;
 
-/** The model the gateway serves, from an OpenCode or Pi slug (`provider/model`) or a plain one. */
-const gatewayModelId = (model: string) => {
-  const separator = model.indexOf("/");
-  return separator <= 0 ? model : model.slice(separator + 1);
-};
-
 /**
- * A model slug of OpenCode or Pi on the gateway: always the gateway's provider, with the model it
- * serves (`t3/<model>`; another provider's prefix is dropped).
+ * The model the gateway serves: the selection without the gateway provider's `t3/`. Anything else
+ * is the gateway's model name as is (it may hold `/`, as `deepseek/deepseek-chat`).
  */
+const gatewayModelId = (model: string) =>
+  model.startsWith(`${AI_GATEWAY_PROVIDER_ID}/`)
+    ? model.slice(AI_GATEWAY_PROVIDER_ID.length + 1)
+    : model;
+
+/** A model slug of OpenCode or Pi on the gateway: always the gateway's provider (`t3/<model>`). */
 export const aiGatewayModelSlug = (model: string) =>
   `${AI_GATEWAY_PROVIDER_ID}/${gatewayModelId(model)}`;
 
@@ -210,18 +212,12 @@ export const aiGatewayVariables = (
   const model = gateway.model ?? undefined;
   switch (driver) {
     case "claudeAgent":
+      // NO_PROXY: `applyAiGatewayEnv` keeps the machine's and adds loopback.
+      const { NO_PROXY: _noProxy, ...settingsEnv } = claudeGatewaySettingsEnv(gateway);
       return {
-        ANTHROPIC_BASE_URL: `${gateway.baseUrl}/api/ai/anthropic`,
+        ...settingsEnv,
         ANTHROPIC_AUTH_TOKEN: gateway.key,
         CLAUDE_CONFIG_DIR: gateway.home,
-        ...(model === undefined
-          ? {}
-          : {
-              ANTHROPIC_MODEL: model,
-              // Claude Code's background calls ask for a small model the account may not serve.
-              ANTHROPIC_SMALL_FAST_MODEL: model,
-              ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
-            }),
       };
     case "codex":
       return { [AI_GATEWAY_KEY_VARIABLE]: gateway.key, CODEX_HOME: gateway.home };
@@ -233,6 +229,10 @@ export const aiGatewayVariables = (
         XDG_DATA_HOME: `${gateway.home}/data`,
         XDG_STATE_HOME: `${gateway.home}/state`,
         XDG_CACHE_HOME: `${gateway.home}/cache`,
+        // A project's opencode.json or .opencode/ (its plugins run in the server, with the key in
+        // reach) never redefines the gateway's provider.
+        OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+        OPENCODE_DISABLE_AUTOUPDATE: "1",
         // The key by name: OpenCode reads `{env:…}` when it loads the provider.
         OPENCODE_CONFIG_CONTENT: JSON.stringify({
           enabled_providers: [AI_GATEWAY_PROVIDER_ID],
@@ -261,6 +261,37 @@ export const aiGatewayVariables = (
       };
   }
 };
+
+/**
+ * What Claude Code must take from the gateway over any settings file: flag settings (`--settings`)
+ * outrank a project's `.claude/settings.json` and `settings.local.json`, whose `env` would otherwise
+ * beat the process's and send the key elsewhere. Never the key itself (flag settings may travel in
+ * arguments): a project that replaces the token only fails against the gateway.
+ */
+export const claudeGatewaySettingsEnv = (
+  gateway: AiGatewayProcess,
+  processNoProxy?: string,
+): Record<string, string> => {
+  const model = gateway.model ?? undefined;
+  return {
+    ANTHROPIC_BASE_URL: `${gateway.baseUrl}/api/ai/anthropic`,
+    // The Bash tool's commands do not inherit Claude Code's Anthropic credentials.
+    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1",
+    // A proxy a project sets never sees the calls to the loopback relay.
+    NO_PROXY: processNoProxy ?? LOOPBACK_NO_PROXY,
+    ...(model === undefined
+      ? {}
+      : {
+          ANTHROPIC_MODEL: model,
+          // Claude Code's background calls ask for a small model the account may not serve.
+          ANTHROPIC_SMALL_FAST_MODEL: model,
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: model,
+        }),
+  };
+};
+
+/** Loopback, kept out of any proxy so the relay's calls never leave the machine. */
+const LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1";
 
 /**
  * Pi's `models.json` on the gateway, in the Thread's Pi home: the gateway's provider, with the key
@@ -316,5 +347,14 @@ export const applyAiGatewayEnv = (
     if (!drop.has(fold(name))) next[name] = value;
   }
   for (const [name, value] of Object.entries(variables)) next[name] = value;
+  // The relay is on loopback: never through a proxy of the machine's or a Vault's.
+  for (const name of ["NO_PROXY", "no_proxy"]) {
+    const current = Object.entries(next).find(([key]) => fold(key) === fold(name))?.[1];
+    next[name] =
+      current === undefined || current.length === 0
+        ? LOOPBACK_NO_PROXY
+        : `${current},${LOOPBACK_NO_PROXY}`;
+    if (windows) break;
+  }
   return next;
 };

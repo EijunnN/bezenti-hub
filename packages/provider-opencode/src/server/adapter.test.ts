@@ -426,6 +426,9 @@ describe("OpenCodeAdapterV2", () => {
         assert.isUndefined(env.OPENAI_API_KEY);
         assert.equal(env.HOME_THING, "kept");
         assert.notInclude(env.OPENCODE_CONFIG_CONTENT ?? "", "t3gk_");
+        // A project's opencode.json and .opencode/ plugins never redefine the gateway's provider.
+        assert.equal(env.OPENCODE_DISABLE_PROJECT_CONFIG, "1");
+        assert.include(env.NO_PROXY ?? "", "127.0.0.1");
         assert.include(
           env.OPENCODE_CONFIG_CONTENT ?? "",
           "http://127.0.0.1:41000/api/ai/openai/v1",

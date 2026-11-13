@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Path from "effect/Path";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
+import { AI_GATEWAY_ENV_NAMES, AI_GATEWAY_KEY_VARIABLE } from "@t3tools/contracts";
 import {
   AMBIENT_AI_VARIABLES,
   type AiGatewayProcess,
@@ -132,6 +133,18 @@ const gateway: AiGatewayProcess = {
 };
 
 describe("the AI gateway in a provider process (spec 4 ticket 06)", () => {
+  it("sets only names a Vault cannot hold (the list both specs share)", () => {
+    for (const driver of ["claudeAgent", "codex", "opencode", "pi"] as const) {
+      for (const name of Object.keys(aiGatewayVariables(driver, gateway))) {
+        const reserved =
+          AI_GATEWAY_ENV_NAMES.has(name) ||
+          name === AI_GATEWAY_KEY_VARIABLE ||
+          name.startsWith("T3_");
+        expect(reserved, `${driver}: ${name}`).toBe(true);
+      }
+    }
+  });
+
   it("drops every ambient AI variable, from the machine or a Vault, and sets the gateway's last", () => {
     const machine = {
       PATH: "/bin",
@@ -195,7 +208,13 @@ describe("the AI gateway in a provider process (spec 4 ticket 06)", () => {
     });
     expect(opencode.XDG_CONFIG_HOME).toBe(`${gateway.home}/config`);
     expect(aiGatewayVariables("pi", gateway).PI_CODING_AGENT_DIR).toBe(gateway.home);
-    expect(aiGatewayModelSlug("openai/gpt-5")).toBe("t3/gpt-5");
+    expect(aiGatewayModelSlug("t3/gpt-5")).toBe("t3/gpt-5");
     expect(aiGatewayModelSlug("deepseek-chat")).toBe("t3/deepseek-chat");
+    // A gateway model with a slash keeps it (OpenRouter's names, for one).
+    expect(aiGatewayModelSlug("t3/deepseek/deepseek-chat")).toBe("t3/deepseek/deepseek-chat");
+    const routed = { ...gateway, model: "t3/deepseek/deepseek-chat" };
+    expect(JSON.parse(piGatewayModelsJson(routed)).providers.t3.models[0].id).toBe(
+      "deepseek/deepseek-chat",
+    );
   });
 });

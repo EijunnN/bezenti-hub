@@ -1329,6 +1329,7 @@ const captureSdkExecutablePaths = Effect.fn("captureSdkExecutablePaths")(functio
   const executablePaths: Array<string | undefined> = [];
   const taskToolEnvironment: Array<string | undefined> = [];
   const environments: Array<Record<string, string | undefined> | undefined> = [];
+  const flagSettings: Array<unknown> = [];
   const adapter = yield* ClaudeAdapterV2.createClaudeAdapterV2(
     {
       instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
@@ -1351,6 +1352,7 @@ const captureSdkExecutablePaths = Effect.fn("captureSdkExecutablePaths")(functio
           executablePaths.push(input.options.pathToClaudeCodeExecutable);
           taskToolEnvironment.push(input.options.env?.CLAUDE_CODE_ENABLE_TODO_TOOLS);
           environments.push(input.options.env);
+          flagSettings.push(input.options.settings);
           return {
             messages: Stream.never,
             offer: () => Effect.void,
@@ -1395,14 +1397,14 @@ const captureSdkExecutablePaths = Effect.fn("captureSdkExecutablePaths")(functio
       attachments: [],
     }),
   );
-  return { executablePaths, taskToolEnvironment, environments };
+  return { executablePaths, taskToolEnvironment, environments, flagSettings };
 });
 
 describe("ClaudeAdapterV2 on the Hub's AI gateway (spec 4 ticket 06)", () => {
   it.effect("runs Claude Code on the gateway, with no login nor setting of the machine's own", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const { environments } = yield* captureSdkExecutablePaths(
+        const { environments, flagSettings } = yield* captureSdkExecutablePaths(
           "claude",
           [
             { name: "ANTHROPIC_API_KEY", value: "sk-ant-owner", sensitive: true },
@@ -1424,6 +1426,17 @@ describe("ClaudeAdapterV2 on the Hub's AI gateway (spec 4 ticket 06)", () => {
         assert.equal(env.ANTHROPIC_MODEL, "claude-sonnet-5-5");
         assert.equal(env.CLAUDE_CONFIG_DIR, "/state/provider-homes/abc/claudeAgent");
         assert.isUndefined(env.ANTHROPIC_API_KEY, "the machine's key never reaches it");
+        assert.equal(
+          env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB,
+          "1",
+          "its commands do not inherit the key",
+        );
+        // Flag settings outrank a project's .claude/settings.json: its env cannot move the address.
+        const flags = flagSettings[0] as { readonly env?: Record<string, string> } | undefined;
+        assert.equal(flags?.env?.ANTHROPIC_BASE_URL, "http://127.0.0.1:41000/api/ai/anthropic");
+        assert.equal(flags?.env?.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, "1");
+        assert.include(flags?.env?.NO_PROXY ?? "", "127.0.0.1");
+        assert.notInclude(JSON.stringify(flagSettings), "t3gk_", "never the key in settings");
       }),
     ).pipe(
       Effect.provide(

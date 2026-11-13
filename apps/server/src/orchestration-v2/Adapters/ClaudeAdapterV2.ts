@@ -224,6 +224,7 @@ import {
   aiGatewayVariables,
   applyAiGatewayEnv,
   applySecretEnv,
+  claudeGatewaySettingsEnv,
 } from "@t3tools/provider-core/server/instanceEnvironment";
 import {
   ProviderAdapterDriverCreateError,
@@ -1776,6 +1777,12 @@ export function makeClaudeQueryOptions(input: {
   readonly appendSystemPromptFileText?: string;
   // Flag settings, because a user's settings.json env beats the process env in Claude Code.
   readonly toolSearchOverride?: "true";
+  /**
+   * Spec 4 ticket 06: the AI gateway's address and model, as flag settings, which outrank a
+   * project's settings files. A settings file path from the launch arguments cannot carry them,
+   * so on the gateway it is not used.
+   */
+  readonly gatewaySettingsEnv?: Record<string, string>;
 }): ClaudeAgentSdkQueryOptions {
   const compiledSelection = compileClaudeModelSelection(input.modelSelection);
   const {
@@ -1824,12 +1831,24 @@ export function makeClaudeQueryOptions(input: {
           autoCompactWindow: Number(input.settings.autoCompactWindow),
         } as ClaudeSdkSettings);
   // A settings file path cannot take extra keys, so it goes through unchanged.
-  const effectiveQuerySettings =
+  const toolSearchSettings =
     input.toolSearchOverride === undefined || typeof compactQuerySettings === "string"
       ? compactQuerySettings
       : ({
           ...compactQuerySettings,
           env: { ...compactQuerySettings?.env, ENABLE_TOOL_SEARCH: input.toolSearchOverride },
+        } as ClaudeSdkSettings);
+  const effectiveQuerySettings =
+    input.gatewaySettingsEnv === undefined
+      ? toolSearchSettings
+      : ({
+          ...(typeof toolSearchSettings === "object" && toolSearchSettings !== null
+            ? toolSearchSettings
+            : {}),
+          env: {
+            ...(typeof toolSearchSettings === "object" ? toolSearchSettings?.env : undefined),
+            ...input.gatewaySettingsEnv,
+          },
         } as ClaudeSdkSettings);
   const deviceInstructions = input.mcpServers !== undefined && input.deviceToolsAvailable === true;
   const options: ClaudeAgentSdkQueryOptions = {
@@ -5049,6 +5068,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           sessionGateway === undefined
             ? undefined
             : aiGatewayVariables("claudeAgent", sessionGateway);
+        // Where this session's Claude keeps its transcripts: the Thread's home on the gateway.
+        const sessionConfigDir =
+          sessionGateway?.home ?? adapterOptions.environment.CLAUDE_CONFIG_DIR;
         const sessionScope = yield* Effect.scope;
         const now = yield* DateTime.now;
         const session = providerSession({
@@ -6531,14 +6553,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   transcriptDir,
                   agentId,
                   cursor,
-                  ...(adapterOptions.environment.CLAUDE_CONFIG_DIR === undefined
+                  ...(sessionConfigDir === undefined
                     ? {}
-                    : {
-                        configDir: path.resolve(
-                          session.cwd,
-                          adapterOptions.environment.CLAUDE_CONFIG_DIR,
-                        ),
-                      }),
+                    : { configDir: path.resolve(session.cwd, sessionConfigDir) }),
                 }).pipe(Effect.option);
               const drain = Effect.fnUntraced(function* () {
                 lastReadAt = yield* DateTime.now;
@@ -9079,7 +9096,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               }
               if (message.error === "authentication_failed") {
                 context.authenticationFailureMessage = claudeSignedOutMessage({
-                  configDir: adapterOptions.environment.CLAUDE_CONFIG_DIR,
+                  configDir: sessionConfigDir,
                   cwd: path.resolve(context.input.runtimePolicy.cwd ?? "."),
                 });
               }
@@ -10860,6 +10877,21 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             turnInput.runtimePolicy.cwd,
             launchArgSettings,
           );
+          const queryEnvironment = applyAiGatewayEnv(
+            applySecretEnv(
+              claudeQueryEnvironment(
+                adapterOptions.environment,
+                turnInput.appThread,
+                turnInput.appThread.lineage.relationshipToParent === "subagent"
+                  ? yield* resolveSubagentPromptCacheTtl(turnInput.runtimePolicy.cwd)
+                  : undefined,
+              ),
+              sessionSecretEnv,
+              hostPlatform,
+            ),
+            sessionGatewayVariables,
+            hostPlatform,
+          );
           const queryOptions = makeClaudeQueryOptions({
             modelSelection: turnInput.modelSelection,
             nativeThreadId,
@@ -10872,21 +10904,15 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ...(launchArgSettings === undefined
               ? {}
               : { sdkSettings: claudeSdkLaunchArgSettings(launchArgSettings) }),
-            environment: applyAiGatewayEnv(
-              applySecretEnv(
-                claudeQueryEnvironment(
-                  adapterOptions.environment,
-                  turnInput.appThread,
-                  turnInput.appThread.lineage.relationshipToParent === "subagent"
-                    ? yield* resolveSubagentPromptCacheTtl(turnInput.runtimePolicy.cwd)
-                    : undefined,
-                ),
-                sessionSecretEnv,
-                hostPlatform,
-              ),
-              sessionGatewayVariables,
-              hostPlatform,
-            ),
+            environment: queryEnvironment,
+            ...(sessionGateway === undefined
+              ? {}
+              : {
+                  gatewaySettingsEnv: claudeGatewaySettingsEnv(
+                    sessionGateway,
+                    queryEnvironment.NO_PROXY,
+                  ),
+                }),
             tools: queryPolicy.tools ?? CLAUDE_CODE_PRESET_TOOLS,
             ...(mcpOverrides.allowedTools === undefined
               ? {}
@@ -11677,7 +11703,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         const claudeTranscriptState = Effect.fn("ClaudeAdapterV2.claudeTranscriptState")(function* (
           nativeThreadId: string,
         ) {
-          const configuredDir = adapterOptions.environment.CLAUDE_CONFIG_DIR?.trim() ?? "";
+          const configuredDir = sessionConfigDir?.trim() ?? "";
           const projectsDir = path.join(
             configuredDir.length > 0
               ? path.resolve(session.cwd, configuredDir)
