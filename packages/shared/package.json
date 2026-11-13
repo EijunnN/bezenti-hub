@@ -247,6 +247,10 @@
       "types": "./src/promptLinks.ts",
       "import": "./src/promptLinks.ts"
     },
+    "./aiGatewayLocalCli": {
+      "types": "./src/aiGatewayLocalCli.ts",
+      "import": "./src/aiGatewayLocalCli.ts"
+    },
     "./threadLinks": {
       "types": "./src/threadLinks.ts",
       "import": "./src/threadLinks.ts"

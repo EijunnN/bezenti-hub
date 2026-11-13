@@ -254,6 +254,7 @@ import * as SourceControlSignIn from "./sourceControl/SourceControlSignIn.ts";
 import * as AiAccounts from "./ai/AiAccounts.ts";
 import * as AiGateway from "./ai/AiGateway.ts";
 import * as AiUsage from "./ai/AiUsage.ts";
+import * as AiGatewayKeys from "./ai/AiGatewayKeys.ts";
 import * as SourceControlBuiltInDrivers from "./sourceControl/builtInDrivers.ts";
 import * as SourceControlProviderRegistry from "./sourceControl/SourceControlProviderRegistry.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
@@ -1378,6 +1379,7 @@ export const layerWsRpc = (
       const aiGateway = yield* AiGateway.AiGateway;
       const aiAccounts = yield* AiAccounts.AiAccounts;
       const aiUsage = yield* AiUsage.AiUsage;
+      const aiGatewayKeys = yield* AiGatewayKeys.AiGatewayKeys;
       const withPullRequestViewer = pullRequests.withRoutingCredential;
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const triage = yield* TriageService.TriageService;
@@ -2866,6 +2868,11 @@ export const layerWsRpc = (
         [WS_METHODS.aiAccountsImportVertex]: (input) => aiAccounts.importVertex(input),
         // Counts only; AiUsage.summary keeps each session to what it may see (spec 4 ticket 05).
         [WS_METHODS.aiUsageSummary]: (input) => aiUsage.summary(input),
+        // A User's own local CLI keys; the Owner's list and revoke reach everyone's. Only the
+        // person's session: AiGatewayKeys refuses an agent or a one-Space session (ticket 10).
+        [WS_METHODS.aiGatewayKeysList]: () => aiGatewayKeys.listForSession,
+        [WS_METHODS.aiGatewayKeysCreate]: (input) => aiGatewayKeys.createForSession(input),
+        [WS_METHODS.aiGatewayKeysRevoke]: (input) => aiGatewayKeys.revokeForSession(input),
         [WS_METHODS.projectCloneStart]: (input) =>
           requireCloneDestination(input.destinationPath, { asProject: true }).pipe(
             Effect.andThen(

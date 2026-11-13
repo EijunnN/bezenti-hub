@@ -134,6 +134,7 @@ import * as SourceControlSignIn from "./sourceControl/SourceControlSignIn.ts";
 import * as AiAccounts from "./ai/AiAccounts.ts";
 import * as AiGateway from "./ai/AiGateway.ts";
 import * as AiUsage from "./ai/AiUsage.ts";
+import * as AiGatewayKeys from "./ai/AiGatewayKeys.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as DatabaseStorage from "./persistence/DatabaseStorage.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
@@ -786,6 +787,7 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(AiGateway.AiGateway)({ authDir: "" }),
   Layer.mock(AiAccounts.AiAccounts)({}),
   Layer.mock(AiUsage.AiUsage)({}),
+  Layer.mock(AiGatewayKeys.AiGatewayKeys)({}),
   Layer.mock(StorageCleanup.StorageCleanup)({}),
   Layer.mock(DatabaseStorage.DatabaseStorage)({}),
   Layer.mock(TerminalManager.TerminalManager)({}),
