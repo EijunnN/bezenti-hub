@@ -1657,10 +1657,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       : posixProcessTableSnapshot(posixPsCommand, timeout).pipe(
           // Without a working ps (a slim Sandbox image), Linux still has /proc. A ps that timed
           // out keeps its budget: the table is busy, not missing.
-          Effect.catch((psError) =>
-            platform === "linux" && psError.timedOut !== true
-              ? linuxProcProcessTableSnapshot(procFileSystem).pipe(Effect.mapError(() => psError))
-              : Effect.fail(psError),
+          Effect.catchIf(
+            (psError) => platform === "linux" && psError.timedOut !== true,
+            (psError) =>
+              linuxProcProcessTableSnapshot(procFileSystem).pipe(Effect.mapError(() => psError)),
           ),
         )
     ).pipe(
