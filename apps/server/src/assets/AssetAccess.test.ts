@@ -970,13 +970,16 @@ describe("AssetAccess", () => {
       const separatorIndex = suffix.indexOf("/");
       const token = suffix.slice(0, separatorIndex);
 
+      // A checkout's file (spec 5: its text is served masked for the User who asks).
       expect(yield* resolveAsset(token, "report.html")).toEqual({
         kind: "file",
         path: canonicalHtmlPath,
+        checkout: true,
       });
       expect(yield* resolveAsset(token, "report.css")).toEqual({
         kind: "file",
         path: canonicalCssPath,
+        checkout: true,
       });
       for (const extension of ["otf", "ttf", "woff", "woff2"]) {
         const fontName = `preview.${extension}`;
@@ -992,6 +995,7 @@ describe("AssetAccess", () => {
           expect(yield* resolveAsset(suffix.slice(0, suffix.indexOf("/")), fontName)).toEqual({
             kind: "file",
             path: canonicalFontPath,
+            checkout: true,
           });
         }
       }
@@ -1134,7 +1138,11 @@ describe("AssetAccess", () => {
           const result = yield* issueAssetUrl({ resource, workspaceRoot: root });
           const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
           const token = suffix.slice(0, suffix.indexOf("/"));
-          expect(yield* resolveAsset(token, name)).toEqual({ kind: "file", path: canonicalPath });
+          expect(yield* resolveAsset(token, name)).toEqual({
+            kind: "file",
+            path: canonicalPath,
+            checkout: true,
+          });
           expect(yield* resolveAsset(token, siblingName)).toBeNull();
           expect(yield* resolveAsset(token, "private.docx")).toBeNull();
           expect(yield* resolveAsset(token, `../${name}`)).toBeNull();
@@ -1186,7 +1194,11 @@ describe("AssetAccess", () => {
         const suffix = result.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
         const token = suffix.slice(0, suffix.indexOf("/"));
 
-        expect(yield* resolveAsset(token, name)).toEqual({ kind: "file", path: canonicalFile });
+        expect(yield* resolveAsset(token, name)).toEqual({
+          kind: "file",
+          path: canonicalFile,
+          checkout: true,
+        });
         if (name.endsWith(".png")) {
           expect(yield* resolveAsset(token, "other.png")).toBeNull();
         }
