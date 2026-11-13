@@ -682,6 +682,27 @@ picker and the name, checked with `secretNameRisk` as typed. Mobile answers as b
 If recording the answer fails after the Vault entry was written, the entry stays: the User asked
 for it.
 
+## Clients: desktop and mobile (spec 5 ticket 08)
+
+No door of its own: clients call the commands of tickets 02-06, gated by each command's
+`permissionAtom`, and the Hub decides again.
+
+- **Shared state** (`@t3tools/client-runtime/vaults`): `vaultActions` / `entryActions` (what a
+  viewer is offered from the Hub's `canEdit` / `canReveal` plus the session's write grant; a link
+  is never replaced, a `dangerous` name only by the Owner; `reveal` is never true on the `mobile`
+  surface), `loadVaultOverview`, `entryBadges`, `vaultOwnerLine`, `threadSecretLines`,
+  `vaultFailureMessage` (only a Vault's own message is shown; anything else is generic, since a
+  transport error could carry what was typed). Web, desktop and mobile all use them.
+- **Desktop** renders the web bundle from the Hub (`window.desktopBridge` only changes the HTTP
+  layer to a bearer token), so Settings → Vaults, «Reveal» and «Download master key backup» (strong
+  factor in the request) are the web components.
+- **Mobile:** Settings → Vaults (`SettingsVaults`, `features/vaults/VaultsList.tsx`: Vaults, names,
+  badges, «Add secret» / «Replace value» for the Owner and an Organization's Admins), the Thread's
+  «Secrets» (`ThreadSecrets.tsx`) and «Also save to Vault» on the `request_secret` card. Inputs are
+  secure and cleared after saving. **No «Reveal», no master key:** `noReveal.test.ts` scans
+  `apps/mobile/src` for `vaults.reveal`, `revealVaultSecret` and the master key calls.
+  Creating, deleting, linking, allowing and defaults stay on web and desktop.
+
 ## What is not covered here
 
 - The agent's names and missing secrets: ticket 06.
