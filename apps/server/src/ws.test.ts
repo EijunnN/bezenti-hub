@@ -2247,7 +2247,13 @@ describe("Space visibility", () => {
         }),
         Layer.mock(TerminalManager.TerminalManager)({
           write: () => Effect.void,
-          open: () => Effect.succeed({} as never),
+          // A shell reports what it started with (spec 5 ticket 07); the Hub admits it on that.
+          open: (input, start) =>
+            Effect.succeed({
+              threadId: input.threadId,
+              terminalId: input.terminalId,
+              ...(start.facts === null ? {} : { facts: start.facts }),
+            } as never),
         }),
         SecretRequests.layer.pipe(
           Layer.provide(layerOrchestration(server)),
@@ -3111,8 +3117,17 @@ describe("Space visibility", () => {
       Effect.gen(function* () {
         const asGrace = yield* connectWriter(server, grace.userId);
         const asAda = yield* connectWriter(server, ada.userId);
+        // Typing goes to a shell the Hub admitted: each is opened first, where the door lets it.
         const write = (client: Writer, threadId: string) =>
-          client[WS_METHODS.terminalWrite]({ threadId, terminalId: "t", data: "ls" } as never).pipe(
+          client[WS_METHODS.terminalOpen]({
+            threadId,
+            terminalId: "t",
+            cwd: "/work/acme-app",
+          } as never).pipe(
+            Effect.ignore,
+            Effect.andThen(
+              client[WS_METHODS.terminalWrite]({ threadId, terminalId: "t", data: "ls" } as never),
+            ),
             Effect.result,
           );
         const owners = yield* write(asGrace, "acme-thread");

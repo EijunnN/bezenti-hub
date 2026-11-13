@@ -38,6 +38,7 @@ import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as InstallationUserService from "../spaces/InstallationUserService.ts";
 import * as SpaceVisibility from "../spaces/SpaceVisibility.ts";
 import * as SecretDelivery from "../vaults/SecretDelivery.ts";
 import * as Vaults from "../vaults/Vaults.ts";
@@ -271,6 +272,78 @@ describe("Hub con Environments: a Thread's secrets as environment variables", ()
     }).pipe(Effect.scoped),
   );
 
+  it.live(
+    "a removed User's terminals in a shared Sandbox close, and stay refused (ticket 07)",
+    () =>
+      Effect.gen(function* () {
+        const s = yield* sharedSandbox();
+        const cwd = s.acmeWeb.workspaceRoot;
+        yield* s.workspace.terminalOpen(
+          { threadId: s.graceThread, terminalId: "term-1", cwd },
+          { userId: s.grace },
+        );
+        const graces = s.sandbox.ptySpawns.at(-1);
+        assert.isDefined(graces);
+        assert.equal(graces.env.GRACE_TOKEN, GRACE_TOKEN);
+        // Ada's terminal, in the same Sandbox, stays.
+        yield* s.workspace.terminalOpen(
+          { threadId: s.adaThread, terminalId: "term-1", cwd },
+          { userId: s.ada },
+        );
+        const adas = s.sandbox.ptySpawns.at(-1);
+        assert.isDefined(adas);
+
+        const sentBefore = s.sandbox.requests.length;
+        yield* s.hub
+          .service(InstallationUserService.InstallationUserService)
+          .setStatus({ actorUserId: s.owner, userId: s.grace, status: "removed" });
+        // The machine closes the shells started with her set, whoever's Thread they are in.
+        yield* s.sandbox.awaitAnswered("terminal.reconcile", sentBefore);
+        assert.isNotEmpty(graces.signals, "her shell, with her own Vault's secret, ended");
+        assert.isEmpty(adas.signals, "Ada's stays");
+      }).pipe(Effect.scoped),
+  );
+
+  it.live("stop reaching the Space's next shell once its allowance is taken back (ticket 07)", () =>
+    Effect.gen(function* () {
+      const s = yield* sharedSandbox();
+      const tools = yield* s.vaults.create({ name: "Tools", spaceId: null }).pipe(s.asOwner);
+      yield* s.vaults
+        .putEntry({ vaultId: tools.id, name: "TOOLS_TOKEN", value: Redacted.make(OWNER_TOKEN) })
+        .pipe(s.asOwner);
+      yield* s.vaults
+        .allow({ vaultId: tools.id, subject: { kind: "space", spaceId: s.acme }, allowed: true })
+        .pipe(s.asOwner);
+      yield* s.vaults
+        .setSpaceDefaults({ spaceId: s.acme, vaultIds: [s.acmeVault, tools.id] })
+        .pipe(s.asOwner);
+      const open = (terminalId: string) =>
+        s.workspace.terminalOpen(
+          { threadId: s.adaThread, terminalId, cwd: s.acmeWeb.workspaceRoot },
+          { userId: s.ada },
+        );
+      yield* open("term-1");
+      assert.equal(lastShell(s.sandbox).TOOLS_TOKEN, OWNER_TOKEN);
+
+      yield* s.vaults
+        .allow({ vaultId: tools.id, subject: { kind: "space", spaceId: s.acme }, allowed: false })
+        .pipe(s.asOwner);
+      yield* open("term-2");
+      assert.isUndefined(
+        lastShell(s.sandbox).TOOLS_TOKEN,
+        "a taken-back Vault reaches no new shell",
+      );
+      assert.equal(lastShell(s.sandbox).ACME_TOKEN, ACME_TOKEN);
+      assert.isTrue((yield* open("term-1")).secretsStale, "the running shell says to reopen");
+      // Allowed again, it is no default until chosen again.
+      yield* s.vaults
+        .allow({ vaultId: tools.id, subject: { kind: "space", spaceId: s.acme }, allowed: true })
+        .pipe(s.asOwner);
+      yield* open("term-3");
+      assert.isUndefined(lastShell(s.sandbox).TOOLS_TOKEN);
+    }).pipe(Effect.scoped),
+  );
+
   it.live("never reach another Space's Sandbox", () =>
     Effect.gen(function* () {
       const s = yield* sharedSandbox();
@@ -314,89 +387,73 @@ describe("Hub con Environments: a Thread's secrets as environment variables", ()
     }).pipe(Effect.scoped),
   );
 
-  it.live("never reach a machine before executor contract 10, which says to update", () =>
-    Effect.gen(function* () {
-      const instanceId = "claudeAgent" as ProviderInstanceId;
-      const hub = yield* makeHub();
-      const owner = yield* ownerIdOf(hub);
-      const old = yield* hub.join({
-        name: "Old laptop",
-        adapters: idleAdapters(instanceId),
-        executorContractVersion: 9,
-      });
-      const projectId = ProjectId.make("project:old");
-      const { workspaceRoot } = yield* seedProject(hub.server, {
-        projectId,
-        title: "Old",
-        defaultModelSelection: null,
-      });
-      const threadId = ThreadId.make("thread:old");
-      yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
-        type: "thread.create",
-        createdBy: "user",
-        creationSource: "web",
-        commandId: CommandId.make("command:old"),
-        threadId,
-        projectId,
-        title: "Old",
-        modelSelection: { instanceId, model: "claude-sonnet-4-6" },
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        branch: null,
-        worktreePath: null,
-        ownerUserId: owner,
-        activeEnvironmentId: old.environmentId,
-      });
-      yield* checkoutOnMachine(hub, old.environmentId, projectId);
-      const workspace = yield* threadWorkspaceOf(hub);
-      const open = (terminalId: string) =>
-        workspace.terminalOpen({ threadId, terminalId, cwd: workspaceRoot }, { userId: owner });
-
-      // Without secrets it works as before.
-      yield* open("term-1");
-      assert.equal(old.ptySpawns.length, 1);
-
-      yield* hub
-        .service(Vaults.Vaults)
-        .putEntry({
-          vaultId: MAIN_VAULT_ID,
-          name: "OWNER_TOKEN",
-          value: Redacted.make(OWNER_TOKEN),
-        })
-        .pipe(CommandActor.actAs(owner));
-      const refused = yield* Effect.exit(open("term-2"));
-      assert.isTrue(Exit.isFailure(refused));
-      if (Exit.isFailure(refused)) {
-        assert.include(
-          Cause.pretty(refused.cause),
-          "Old laptop needs an update to receive this Thread's secrets",
+  it.live(
+    "refuse the terminals of a machine before executor contract 12, which says to update",
+    () =>
+      Effect.gen(function* () {
+        const instanceId = "claudeAgent" as ProviderInstanceId;
+        const hub = yield* makeHub();
+        const owner = yield* ownerIdOf(hub);
+        // Its shells would report no facts: the Hub could not tell which Space they belong to.
+        const old = yield* hub.join({
+          name: "Old laptop",
+          adapters: idleAdapters(instanceId),
+          executorContractVersion: 11,
+        });
+        const projectId = ProjectId.make("project:old");
+        const { workspaceRoot } = yield* seedProject(hub.server, {
+          projectId,
+          title: "Old",
+          defaultModelSelection: null,
+        });
+        const threadId = ThreadId.make("thread:old");
+        yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:old"),
+          threadId,
+          projectId,
+          title: "Old",
+          modelSelection: { instanceId, model: "claude-sonnet-4-6" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          ownerUserId: owner,
+          activeEnvironmentId: old.environmentId,
+        });
+        yield* checkoutOnMachine(hub, old.environmentId, projectId);
+        const workspace = yield* threadWorkspaceOf(hub);
+        const opened = yield* Effect.exit(
+          workspace.terminalOpen(
+            { threadId, terminalId: "term-1", cwd: workspaceRoot },
+            {
+              userId: owner,
+            },
+          ),
         );
-      }
-      assert.equal(old.ptySpawns.length, 1, "no shell started without its secrets");
-      // An attach that would make a new terminal says the same; the running one still reattaches.
-      const attached = yield* Effect.exit(
-        workspace
-          .terminalAttach({ threadId, terminalId: "term-3", cwd: workspaceRoot }, "viewer-1", {
-            userId: owner,
-          })
-          .pipe(Stream.take(1), Stream.runDrain),
-      );
-      assert.isTrue(Exit.isFailure(attached));
-      if (Exit.isFailure(attached)) {
-        assert.include(Cause.pretty(attached.cause), "Old laptop needs an update");
-      }
-      const reattached = yield* workspace
-        .terminalAttach({ threadId, terminalId: "term-1", cwd: workspaceRoot }, "viewer-2", {
-          userId: owner,
-        })
-        .pipe(Stream.take(1), Stream.runCollect);
-      assert.equal(reattached.length, 1, "the running shell reattaches, nothing is read");
-      assert.equal(old.ptySpawns.length, 1);
-      assert.isTrue(
-        old.ptySpawns.every((spawn) => spawn.env.OWNER_TOKEN === undefined),
-        "the value never reached the old machine",
-      );
-    }).pipe(Effect.scoped),
+        assert.isTrue(Exit.isFailure(opened));
+        if (Exit.isFailure(opened)) {
+          assert.include(
+            Cause.pretty(opened.cause),
+            "Old laptop needs an update to open this Thread's terminals",
+          );
+        }
+        const attached = yield* Effect.exit(
+          workspace
+            .terminalAttach({ threadId, terminalId: "term-2", cwd: workspaceRoot }, "viewer-1", {
+              userId: owner,
+            })
+            .pipe(Stream.take(1), Stream.runDrain),
+        );
+        assert.isTrue(Exit.isFailure(attached));
+        if (Exit.isFailure(attached)) {
+          assert.include(Cause.pretty(attached.cause), "Old laptop needs an update");
+        }
+        assert.isEmpty(old.ptySpawns, "no shell started on it");
+        assert.isFalse(old.requests.includes("terminal.open"), "nothing was sent");
+      }).pipe(Effect.scoped),
   );
 
   it.live("say a running shell is stale once the User's set became empty", () =>

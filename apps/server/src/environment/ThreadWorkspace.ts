@@ -11,6 +11,9 @@ import {
   NO_SECRETS_FINGERPRINT,
   SECRET_ENV_CONTRACT_VERSION,
   type SecretEnv,
+  SHELL_FACTS_CONTRACT_VERSION,
+  type TerminalSessionSnapshot,
+  type TerminalShellFacts,
   HUB_MACHINE_ENVIRONMENT_ID,
   HUB_RUNS_NO_AGENTS_MESSAGE,
   type PreviewAdjustInput,
@@ -55,6 +58,7 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -88,6 +92,7 @@ import {
   placeholderNames,
   searchOverFetchLimit,
 } from "../vaults/maskWorkspace.ts";
+import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 
 /** Who asks: the session's User, whose rules a forwarded call keeps to. */
 export interface WorkspaceCaller {
@@ -127,6 +132,8 @@ type Route =
 const LOCAL: Route = { _tag: "local" };
 const HUB_OFF: Route = { _tag: "hub-off" };
 const REFUSED: Route = { _tag: "refused" };
+const withThread = (error: TerminalEnvironmentUnavailableError, threadId: string) =>
+  new TerminalEnvironmentUnavailableError({ ...error, threadId });
 
 const offlineMessage = (name: string | undefined, stopped = false) =>
   stopped
@@ -166,6 +173,10 @@ export const make = Effect.gen(function* () {
   const secretDelivery = yield* Effect.serviceOption(SecretDelivery.SecretDelivery);
   // Spec 5 ticket 05: and what comes back from the Thread's machine is masked.
   const secretMasker = yield* Effect.serviceOption(SecretMasker.SecretMasker);
+  // Spec 5 ticket 07: where secrets are delivered, a shell is used only while its facts hold.
+  const factsSql = yield* Effect.serviceOption(SqlClient.SqlClient);
+  const spaceDirectory = yield* Effect.serviceOption(SpaceDirectory.SpaceDirectory);
+  const factsRule = Option.isSome(secretDelivery);
   const hubMachine = Option.isSome(registry)
     ? yield* Effect.option(registry.value.get(registry.value.hubMachineEnvironmentId))
     : Option.none();
@@ -511,6 +522,94 @@ export const make = Effect.gen(function* () {
     contractVersion: where.forward.contractVersion(),
   });
 
+  /** Spec 5 ticket 07: the facts a shell planned with `plan` starts with. */
+  const factsOf = (plan: SecretDelivery.SecretPlan | undefined): TerminalShellFacts | null =>
+    plan === undefined ? null : { spaceId: plan.spaceId, userId: plan.userId };
+  /**
+   * Whether a shell must not be used: it reports no facts, its User was removed, or its Space is
+   * not its Thread's now. Fails closed: a read that fails counts as stale.
+   */
+  const shellStale = Effect.fn("ThreadWorkspace.shellStale")(
+    function* (threadId: string, facts: TerminalShellFacts | undefined) {
+      if (!factsRule) return false;
+      if (facts === undefined) return true;
+      if (facts.userId !== null) {
+        if (Option.isNone(factsSql)) return true;
+        const [user] = yield* factsSql.value<{ readonly removed: number }>`
+          SELECT removed_at IS NOT NULL AS removed FROM users WHERE user_id = ${facts.userId}
+        `;
+        if (user === undefined || user.removed === 1) return true;
+      }
+      if (facts.spaceId !== null) {
+        if (Option.isNone(spaceDirectory)) return true;
+        const placement = yield* spaceDirectory.value.placementOf(ThreadId.make(threadId));
+        if (Option.isNone(placement) || placement.value.space.id !== facts.spaceId) return true;
+      }
+      return false;
+    },
+    (effect) => effect.pipe(Effect.orElseSucceed(() => true)),
+  );
+  /** What the Space directory's revision was when each shell was last found fit, by session. */
+  const admitted = new Map<string, { readonly facts: TerminalShellFacts; revision: number }>();
+  const sessionKey = (environmentId: EnvironmentId, input: TerminalRef) =>
+    `${environmentId}\u0000${input.threadId}\u0000${input.terminalId}`;
+  const revisionNow = Option.isNone(spaceDirectory)
+    ? Effect.succeed(0)
+    : spaceDirectory.value.revision;
+  const refusedShell = (threadId: string) => terminalUnavailable(threadId)(REFUSED);
+  /** Closes a shell the Hub refuses, with its history (it may show the old secrets). */
+  const closeRefused = (key: string, close: StaleClose) =>
+    Effect.sync(() => admitted.delete(key)).pipe(
+      Effect.andThen(close),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Could not close a terminal left from another Space", { key, cause }),
+      ),
+    );
+  /** A shell reported by its machine: admitted (remembered) or closed and refused. */
+  const admit = Effect.fn("ThreadWorkspace.admit")(function* (
+    environmentId: EnvironmentId,
+    snapshot: TerminalSessionSnapshot,
+    close: StaleClose,
+  ) {
+    if (!factsRule) return true;
+    const key = sessionKey(environmentId, snapshot);
+    const revision = yield* revisionNow;
+    if (yield* shellStale(snapshot.threadId, snapshot.facts)) {
+      yield* closeRefused(key, close);
+      return false;
+    }
+    if (snapshot.facts !== undefined) admitted.set(key, { facts: snapshot.facts, revision });
+    return true;
+  });
+  /** Before typing, resizing or clearing: only a shell admitted since the last Space change. */
+  const checkAdmitted = Effect.fn("ThreadWorkspace.checkAdmitted")(function* (
+    environmentId: EnvironmentId,
+    input: TerminalRef,
+    close: StaleClose,
+  ) {
+    if (!factsRule) return;
+    const key = sessionKey(environmentId, input);
+    const known = admitted.get(key);
+    const revision = yield* revisionNow;
+    if (known !== undefined && known.revision === revision) return;
+    // Never seen through this Hub (or the Spaces changed since): its facts are read again.
+    if (known !== undefined && !(yield* shellStale(input.threadId, known.facts))) {
+      known.revision = revision;
+      return;
+    }
+    if (known !== undefined) yield* closeRefused(key, close);
+    return yield* refusedShell(input.threadId);
+  });
+  /** A machine before contract 12 reports no facts: its terminals are refused, with why. */
+  const tooOldForTerminals = (where: Extract<Route, { _tag: "remote" }>) =>
+    factsRule && where.forward.contractVersion() < SHELL_FACTS_CONTRACT_VERSION
+      ? new TerminalEnvironmentUnavailableError({
+          threadId: "",
+          reason: "secrets_unavailable",
+          detail: `${where.name} needs an update to open this Thread's terminals.`,
+        })
+      : undefined;
+
   /** The folders a terminal names, resolved onto the Thread's machine; undefined if outside. */
   const terminalFolders = <I extends TerminalAttachInput>(
     route: Extract<Route, { _tag: "remote" }>,
@@ -529,6 +628,27 @@ export const make = Effect.gen(function* () {
       ...(input.worktreePath === undefined ? {} : { worktreePath }),
     };
   };
+
+  type TerminalRef = { readonly threadId: string; readonly terminalId: string };
+  type StaleClose = Effect.Effect<
+    unknown,
+    TerminalError | EnvironmentExecutor.EnvironmentExecutorUnavailableError
+  >;
+  const closeLocal = (terminals: TerminalManager.TerminalManager["Service"], input: TerminalRef) =>
+    terminals.close({
+      threadId: input.threadId,
+      terminalId: input.terminalId,
+      deleteHistory: true,
+    });
+  const closeRemote = (
+    forward: EnvironmentExecutor.EnvironmentWorkspaceForward,
+    input: TerminalRef,
+  ) =>
+    forward.call("terminal.close", {
+      threadId: input.threadId,
+      terminalId: input.terminalId,
+      deleteHistory: true,
+    });
 
   /**
    * Terminals a caller opened or attached on another machine, by (User, Thread, terminal): typing
@@ -588,6 +708,7 @@ export const make = Effect.gen(function* () {
           if (Option.isSome(demand) && caller.startsSandbox === true) {
             yield* demand.value.touch(known.environmentId);
           }
+          yield* checkAdmitted(known.environmentId, input, closeRemote(known.forward, input));
           return yield* runRemote(known.forward).pipe(
             Effect.catchTags({
               EnvironmentExecutorUnavailableError: () =>
@@ -600,7 +721,18 @@ export const make = Effect.gen(function* () {
         // It moved, or its machine reconnected or left: authorize it again.
         openTerminals.delete(key);
       }
-      return yield* terminalCall(input, caller, runLocal, (forward) => runRemote(forward));
+      return yield* terminalCall(
+        input,
+        caller,
+        (terminals) =>
+          checkAdmitted(HUB_MACHINE_ENVIRONMENT_ID, input, closeLocal(terminals, input)).pipe(
+            Effect.andThen(runLocal(terminals)),
+          ),
+        (forward, where) =>
+          checkAdmitted(where.environmentId, input, closeRemote(forward, input)).pipe(
+            Effect.andThen(runRemote(forward)),
+          ),
+      );
     }
   });
 
@@ -636,13 +768,44 @@ export const make = Effect.gen(function* () {
     viewerId: string | undefined,
     runLocal: (
       terminals: TerminalManager.TerminalManager["Service"],
-      secrets: TerminalManager.TerminalSecrets | undefined,
+      start: TerminalManager.TerminalStart,
     ) => Stream.Stream<TerminalAttachStreamEvent, TerminalError>,
   ): Stream.Stream<TerminalAttachStreamEvent, TerminalError> =>
     Stream.unwrap(
       Effect.gen(function* () {
         const refuse = terminalUnavailable(input.threadId);
         const where = yield* route(input.threadId, caller);
+        /**
+         * Spec 5 ticket 07: every snapshot the shell reports is checked. A stale one closes (with
+         * its history) and, for an attach, the stream starts once more with a new shell.
+         */
+        const guarded = (
+          environmentId: EnvironmentId,
+          events: () => Stream.Stream<TerminalAttachStreamEvent, TerminalError>,
+          close: StaleClose,
+          retries: number,
+        ): Stream.Stream<TerminalAttachStreamEvent, TerminalError> => {
+          if (!factsRule) return events();
+          const stale: TerminalError = refuse(REFUSED);
+          const check = (
+            event: TerminalAttachStreamEvent,
+          ): Effect.Effect<TerminalAttachStreamEvent, TerminalError> =>
+            event.type === "snapshot" || event.type === "restarted"
+              ? Effect.flatMap(admit(environmentId, event.snapshot, close), (fit) =>
+                  fit ? Effect.succeed(event) : Effect.fail(stale),
+                )
+              : Effect.succeed(event);
+          return events().pipe(
+            Stream.mapEffect(check),
+            Stream.catchIf(
+              (error) => error === stale,
+              () =>
+                attach && retries > 0
+                  ? guarded(environmentId, events, close, retries - 1)
+                  : Stream.fail(refuse(REFUSED)),
+            ),
+          );
+        };
         // Spec 5: an attach may start the shell (a new terminal), with the caller's secrets.
         const attach = mode === "attach";
         /** Opens with the set's name; again with the values if a shell would start. */
@@ -668,9 +831,17 @@ export const make = Effect.gen(function* () {
             ? yield* terminalPlan(input.threadId, caller, LOCAL_TARGET)
             : undefined;
           const terminals = (yield* local).terminals;
-          return withSecrets(plan, (secrets) => runLocal(terminals, secrets));
+          const facts = factsOf(plan);
+          return guarded(
+            HUB_MACHINE_ENVIRONMENT_ID,
+            () => withSecrets(plan, (secrets) => runLocal(terminals, { secrets, facts })),
+            closeLocal(terminals, input),
+            1,
+          );
         }
         if (where._tag !== "remote") return Stream.fail(refuse(where));
+        const tooOld = tooOldForTerminals(where);
+        if (tooOld !== undefined) return Stream.fail(withThread(tooOld, input.threadId));
         const target = remoteTarget(where);
         const plan = attach ? yield* terminalPlan(input.threadId, caller, target) : undefined;
         const outdated = outdatedWith(target, plan);
@@ -681,6 +852,7 @@ export const make = Effect.gen(function* () {
         yield* remember(input, caller, where);
         // An open terminal keeps its Sandbox from idling, for as long as the stream lives.
         if (Option.isSome(demand)) yield* demand.value.hold(where.environmentId);
+        const facts = factsOf(plan);
         const open = (secrets: SecretEnv | undefined) =>
           where.forward
             .stream("terminal.stream", {
@@ -689,6 +861,7 @@ export const make = Effect.gen(function* () {
               input: resolved,
               ...(viewerId === undefined ? {} : { viewerId }),
               ...(secrets === undefined ? {} : { secretEnv: secrets }),
+              ...(attach && facts !== null ? { facts } : {}),
             })
             .pipe(
               Stream.catchTags({
@@ -713,12 +886,35 @@ export const make = Effect.gen(function* () {
             ),
           );
         }
-        return withSecrets(
-          target.contractVersion < SECRET_ENV_CONTRACT_VERSION ? undefined : plan,
-          open,
+        return guarded(
+          where.environmentId,
+          () =>
+            withSecrets(
+              target.contractVersion < SECRET_ENV_CONTRACT_VERSION ? undefined : plan,
+              open,
+            ),
+          closeRemote(where.forward, input),
+          1,
         );
       }),
     );
+
+  /**
+   * Spec 5 ticket 07: an open answers the shell's snapshot; a stale one (a reused id still running
+   * from before a move) closes with its history and the open runs once more for a new shell.
+   */
+  const openAdmitted = Effect.fn("ThreadWorkspace.openAdmitted")(function* <E>(
+    environmentId: EnvironmentId,
+    threadId: string,
+    open: Effect.Effect<TerminalSessionSnapshot, E>,
+    close: StaleClose,
+  ) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const snapshot = yield* open;
+      if (yield* admit(environmentId, snapshot, close)) return snapshot;
+    }
+    return yield* refusedShell(threadId);
+  });
 
   const calls = {
     searchEntries: (input: ProjectSearchEntriesInput, caller: WorkspaceCaller) =>
@@ -862,27 +1058,36 @@ export const make = Effect.gen(function* () {
       terminalCall(
         input,
         acting(caller),
-        // Spec 5: the shell gets the opening User's secrets.
+        // Spec 5: the shell gets the opening User's secrets, and keeps the facts of that plan.
         (terminals) =>
           terminalPlan(input.threadId, caller, LOCAL_TARGET).pipe(
             Effect.flatMap((plan) =>
-              withTerminalSecrets(input.threadId, plan, (secrets) =>
-                terminals.open(input, secrets),
+              openAdmitted(
+                HUB_MACHINE_ENVIRONMENT_ID,
+                input.threadId,
+                withTerminalSecrets(input.threadId, plan, (secrets) =>
+                  terminals.open(input, { secrets, facts: factsOf(plan) }),
+                ),
+                closeLocal(terminals, input),
               ),
             ),
           ),
         (forward, where) => {
           const resolved = terminalFolders(where, input);
           const target = remoteTarget(where);
+          const tooOld = tooOldForTerminals(where);
+          if (tooOld !== undefined) return Effect.fail(withThread(tooOld, input.threadId));
           return resolved === undefined
             ? undefined
             : terminalPlan(input.threadId, caller, target).pipe(
                 Effect.flatMap((plan) => {
+                  const facts = factsOf(plan);
                   const open = (secrets: SecretEnv | undefined) =>
                     forward.call("terminal.open", {
                       root: where.remoteBase,
                       input: resolved,
                       ...(secrets === undefined ? {} : { secretEnv: secrets }),
+                      ...(facts === null ? {} : { facts }),
                     });
                   // A machine too old for secrets: an empty set works as before, else it says why.
                   if (target.contractVersion < SECRET_ENV_CONTRACT_VERSION) {
@@ -895,7 +1100,12 @@ export const make = Effect.gen(function* () {
                         )
                       : open(undefined);
                   }
-                  return withTerminalSecrets(input.threadId, plan, open);
+                  return openAdmitted(
+                    where.environmentId,
+                    input.threadId,
+                    withTerminalSecrets(input.threadId, plan, open),
+                    closeRemote(forward, input),
+                  );
                 }),
                 Effect.tap(() => remember(input, caller, where)),
               );
@@ -938,8 +1148,8 @@ export const make = Effect.gen(function* () {
         (forward) => forward.call("terminal.close", input),
       ),
     terminalAttach: (input: TerminalAttachInput, viewerId: string, caller: WorkspaceCaller) =>
-      terminalStream(input, acting(caller), "attach", viewerId, (terminals, secrets) =>
-        terminals.attachOutputStream(input, viewerId, secrets),
+      terminalStream(input, acting(caller), "attach", viewerId, (terminals, start) =>
+        terminals.attachOutputStream(input, viewerId, start),
       ),
     terminalObserve: (input: TerminalObserveInput, caller: WorkspaceCaller) =>
       terminalStream(input, caller, "observe", undefined, (terminals) =>

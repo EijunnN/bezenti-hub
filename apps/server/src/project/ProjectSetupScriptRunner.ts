@@ -445,8 +445,9 @@ export const make = Effect.gen(function* () {
       terminalId,
       onStartupPrompt: observed?.flushPartialLine ?? Effect.void,
     });
-    const secretEnv = Option.isNone(secretDelivery)
-      ? undefined
+    // Spec 5 ticket 07: the shell keeps the Space and User its set was planned for.
+    const start: TerminalManager.TerminalStart = Option.isNone(secretDelivery)
+      ? TerminalManager.NO_START
       : yield* secretDelivery.value
           .planTurn({
             threadId: ThreadId.make(input.threadId),
@@ -456,7 +457,12 @@ export const make = Effect.gen(function* () {
             },
           })
           .pipe(
-            Effect.flatMap(secretDelivery.value.resolve),
+            Effect.flatMap((plan) =>
+              Effect.map(secretDelivery.value.resolve(plan), (secrets) => ({
+                secrets,
+                facts: { spaceId: plan.spaceId, userId: plan.userId },
+              })),
+            ),
             Effect.mapError(
               (cause) =>
                 new ProjectSetupScriptOperationError({
@@ -476,7 +482,7 @@ export const make = Effect.gen(function* () {
             worktreePath: input.worktreePath,
             env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0" },
           },
-          secretEnv,
+          start,
         )
         .pipe(
           Effect.andThen(() =>

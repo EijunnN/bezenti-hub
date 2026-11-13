@@ -25,6 +25,12 @@ export interface ProjectMoveWork {
    * Hub's start finishes one cut short. `all` drains every recorded release.
    */
   readonly drainReleases: (threadIds: ReadonlyArray<ThreadId> | "all") => Effect.Effect<void>;
+  /**
+   * Spec 5 ticket 07: tells each connected machine every Thread's Space now and the removed Users,
+   * and each closes its shells started for another Space or a removed User (`terminal.reconcile`).
+   * Fire and forget: it returns at once, logs failures, and runs again as each machine connects.
+   */
+  readonly reconcileTerminals: Effect.Effect<void>;
 }
 
 export interface ProjectMoveHooksShape {

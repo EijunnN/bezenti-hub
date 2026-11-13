@@ -18,6 +18,7 @@ import {
   ProviderInstanceId,
   type ProviderReplayTranscript,
   sandboxEnvironmentIdOf,
+  type SecretEnv,
   type SpaceId,
   ThreadId,
   UserId,
@@ -31,6 +32,7 @@ import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Stream from "effect/Stream";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 
@@ -53,8 +55,11 @@ import * as Sandboxes from "../sandboxes/Sandboxes.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as ProjectCheckouts from "../environment/ProjectCheckouts.ts";
 import * as ThreadWorkspace from "../environment/ThreadWorkspace.ts";
+import * as ProjectMoveHooks from "../project/ProjectMoveHooks.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as EffectiveVaults from "../vaults/EffectiveVaults.ts";
+import * as Vaults from "../vaults/Vaults.ts";
 import { memberWithPasskey } from "./environments.testkit.ts";
 import { makeHub, seedProject, type Hub } from "./HubWithEnvironments.testkit.ts";
 
@@ -770,6 +775,347 @@ describe("Hub con Environments: a Project moves to another Space", () => {
         SELECT COUNT(*) AS count FROM thread_environment_releases
       `;
       assert.equal(left[0]?.count, 0);
+    }).pipe(Effect.scoped),
+  );
+});
+
+// Spec 5 ticket 07: secrets never follow a Project into another Space.
+const ACME_TOKEN = "acme-token-value-7001";
+const SHARED_TOKEN = "shared-token-value-7002";
+const GLOBEX_TOKEN = "globex-token-value-7003";
+
+/** A machine's adapters that note the secrets each provider session opened with, and take them. */
+const recordingSecrets = (adapters: Adapters, seen: Array<SecretEnv | undefined>): Adapters =>
+  Layer.effect(
+    ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+    Effect.map(ProviderAdapterRegistry.ProviderAdapterRegistryV2, (registry) => ({
+      ...registry,
+      get: (instanceId: Parameters<typeof registry.get>[0]) =>
+        registry.get(instanceId).pipe(
+          Effect.map((adapter) => ({
+            ...adapter,
+            receivesSecretEnv: true as const,
+            openSession: (open: ProviderAdapter.ProviderAdapterV2OpenSessionInput) =>
+              Effect.suspend(() => {
+                seen.push(open.secretEnv);
+                return adapter.openSession(open);
+              }),
+          })),
+        ),
+    })),
+  ).pipe(Layer.provide(adapters));
+
+const namesIn = (variables: ReadonlyArray<{ readonly name: string }> | undefined) =>
+  (variables ?? []).map((variable) => variable.name).toSorted();
+
+describe("Hub con Environments: a moved Project's Vaults", () => {
+  it.live(
+    "the plan names the Vaults it loses; after the move its Threads' next turn, terminal and names have the destination's alone",
+    () =>
+      Effect.gen(function* () {
+        const loaded = yield* loadFixture("simple");
+        const seen: Array<SecretEnv | undefined> = [];
+        const hub = yield* makeHub();
+        const owner = yield* ownerIdOf(hub);
+        const asOwner = CommandActor.actAs(owner);
+        const acme = yield* createOrganization(hub, "Acme");
+        const globex = yield* createOrganization(hub, "Globex");
+        const vaults = hub.service(Vaults.Vaults);
+        const vaultWith = Effect.fn(function* (
+          name: string,
+          spaceId: SpaceId | null,
+          variable: string,
+          value: string,
+        ) {
+          const made = yield* vaults.create({ name, spaceId }).pipe(asOwner);
+          yield* vaults
+            .putEntry({ vaultId: made.id, name: variable, value: Redacted.make(value) })
+            .pipe(asOwner);
+          return made.id;
+        });
+        const acmeVault = yield* vaultWith("Acme keys", acme, "ACME_TOKEN", ACME_TOKEN);
+        yield* vaults.setSpaceDefaults({ spaceId: acme, vaultIds: [acmeVault] }).pipe(asOwner);
+        const globexVault = yield* vaultWith("Globex keys", globex, "GLOBEX_TOKEN", GLOBEX_TOKEN);
+        yield* vaults.setSpaceDefaults({ spaceId: globex, vaultIds: [globexVault] }).pipe(asOwner);
+        // One of the Owner's, allowed to Acme alone, that the Project added there.
+        const shared = yield* vaultWith("Shared tools", null, "SHARED_TOKEN", SHARED_TOKEN);
+        yield* vaults
+          .allow({ vaultId: shared, subject: { kind: "space", spaceId: acme }, allowed: true })
+          .pipe(asOwner);
+
+        // The Owner's laptop serves every Space the Owner works in: the Thread keeps it.
+        const laptop = yield* hub.join({
+          name: "Laptop",
+          adapters: recordingSecrets(loaded.adapters, seen),
+        });
+        const [create, ...messages] = loaded.materialized.commands;
+        if (create?.type !== "thread.create") return yield* Effect.die("no thread.create");
+        const message = messages.find((command) => command.type === "message.dispatch");
+        if (message === undefined) return yield* Effect.die("no message");
+        const { projectId, threadId } = create;
+        const { workspaceRoot } = yield* seedProject(hub.server, {
+          projectId,
+          title: "Acme web",
+          defaultModelSelection: loaded.variant.modelSelection,
+          spaceId: acme,
+        });
+        yield* vaults.setProjectChoice({ projectId, vaultId: shared, choice: "add" }).pipe(asOwner);
+        yield* dispatchAs(hub, owner, { ...create, activeEnvironmentId: laptop.environmentId });
+        const executor = yield* hub
+          .service(EnvironmentExecutor.EnvironmentExecutorRegistry)
+          .get(laptop.environmentId)
+          .pipe(Effect.orDie);
+        const checkout = Option.getOrThrow(yield* executor.workspace.paths.checkout(projectId));
+        yield* Effect.promise(() => NodeFSP.mkdir(checkout, { recursive: true }));
+        const workspace = (yield* ThreadWorkspace.make.pipe(
+          Effect.provide(Layer.mergeAll(ProjectionStore.layer, ProjectCheckouts.layer)),
+          Effect.provideContext(hub.server.services as never),
+        )) as ThreadWorkspace.ThreadWorkspace["Service"];
+        const openTerminal = (terminalId: string) =>
+          workspace
+            .terminalOpen({ threadId, terminalId, cwd: workspaceRoot }, { userId: owner })
+            .pipe(Effect.orDie);
+        const lastShell = () => laptop.ptySpawns.at(-1)?.env ?? {};
+        const threadNames = hub
+          .service(EffectiveVaults.EffectiveVaults)
+          .threadEnvironment({ threadId })
+          .pipe(asOwner, Effect.orDie);
+
+        const opened = yield* openTerminal("term-1");
+        assert.equal(lastShell().ACME_TOKEN, ACME_TOKEN);
+        assert.equal(lastShell().SHARED_TOKEN, SHARED_TOKEN);
+        const acmeShell = laptop.ptySpawns.at(-1);
+        assert.isDefined(acmeShell);
+        // The machine keeps what the shell started with: Acme's set, the Owner's.
+        assert.deepEqual(opened.facts, { spaceId: acme, userId: owner });
+
+        // Before confirming, the mover sees which Vaults the Project loses.
+        const plan = yield* movePlan(hub, projectId, globex);
+        assert.equal(plan.status, 200, JSON.stringify(plan.body));
+        assert.deepEqual(
+          (plan.body.vaultsLost ?? []).map((vault) => vault.name),
+          ["Shared tools", "Acme keys"],
+        );
+        // The laptop is away while the Project moves: its terminal cannot be closed yet.
+        yield* laptop.disconnect;
+        assert.equal((yield* moveProject(hub, projectId, globex)).status, 200);
+        // Its choice of a Vault that does not reach Globex went with the move.
+        const choices = yield* hub.server.sql<{ readonly vaultId: string }>`
+          SELECT vault_id AS "vaultId" FROM project_vault_choices WHERE project_id = ${projectId}
+        `;
+        assert.deepEqual(choices, []);
+        // Dropped as the mover, audited as a Project's choice gone back to inherit, in Acme: the
+        // Space whose Admins already saw that Vault.
+        const audited = yield* hub.server.sql<{
+          readonly targetName: string;
+          readonly detail: string;
+          readonly spaceId: string;
+        }>`
+          SELECT target_name AS "targetName", detail_json AS "detail", space_id AS "spaceId"
+          FROM audit_log WHERE action = 'vault.choose' ORDER BY audit_id DESC LIMIT 1
+        `;
+        assert.equal(audited[0]?.targetName, "Shared tools");
+        assert.include(audited[0]?.detail ?? "", '"choice":"inherit"');
+        assert.equal(audited[0]?.spaceId, acme);
+
+        // The laptop was away: its shell closes as it connects again (the Hub's word on Spaces).
+        assert.isEmpty(acmeShell.signals);
+        const sentBefore = laptop.requests.length;
+        yield* laptop.connect;
+        yield* laptop.awaitAnswered("terminal.reconcile", sentBefore);
+        assert.isNotEmpty(acmeShell.signals, "closed once the laptop was back");
+
+        // Opening term-1 again starts a new shell, with Globex's secrets alone.
+        const spawnsBefore = laptop.ptySpawns.length;
+        const reopened = yield* openTerminal("term-1");
+        assert.equal(laptop.ptySpawns.length, spawnsBefore + 1);
+        assert.isNotTrue(reopened.secretsStale);
+        assert.isUndefined(lastShell().ACME_TOKEN);
+        assert.equal(lastShell().GLOBEX_TOKEN, GLOBEX_TOKEN);
+        assert.deepEqual(reopened.facts, { spaceId: globex, userId: owner });
+        const globexShell = laptop.ptySpawns.at(-1);
+        assert.isDefined(globexShell);
+        // A reconcile that lands now (one the move fired) leaves the shell reopened in Globex.
+        const machine = Option.getOrThrow(
+          (yield* hub
+            .service(EnvironmentExecutor.EnvironmentExecutorRegistry)
+            .get(laptop.environmentId)
+            .pipe(Effect.orDie)).workspace.forward,
+        );
+        yield* machine
+          .call("terminal.reconcile", {
+            threads: [{ threadId, spaceId: globex }],
+            removedUserIds: [],
+          })
+          .pipe(Effect.orDie);
+        assert.isEmpty(globexShell.signals, "the shell opened in Globex stays");
+
+        // A shell another door started for Acme (a setup script's, one no reconcile reached),
+        // with output in its history: typing into it through the Hub is refused...
+        yield* machine
+          .call("terminal.open", {
+            root: checkout,
+            input: { threadId, terminalId: "term-3", cwd: "." },
+            facts: { spaceId: acme, userId: owner },
+          })
+          .pipe(Effect.orDie);
+        const missed = laptop.ptySpawns.at(-1);
+        assert.isDefined(missed);
+        yield* machine
+          .call("terminal.write", { threadId, terminalId: "term-3", data: "printenv\r" })
+          .pipe(Effect.orDie);
+        const typed = yield* workspace
+          .terminalWrite({ threadId, terminalId: "term-3", data: "printenv\r" }, { userId: owner })
+          .pipe(Effect.flip);
+        assert.equal(typed._tag, "TerminalEnvironmentUnavailableError");
+        // ...and opening that id again closes it with its history, for a new shell in Globex.
+        const reused = yield* openTerminal("term-3");
+        assert.isNotEmpty(missed.signals, "the shell started for Acme was closed");
+        assert.equal(reused.history, "", "none of its old output comes back");
+        assert.deepEqual(reused.facts, { spaceId: globex, userId: owner });
+        assert.equal(lastShell().GLOBEX_TOKEN, GLOBEX_TOKEN);
+
+        // A shell that reports nothing (from before the upgrade): an attach closes it and starts
+        // a new one.
+        yield* machine
+          .call("terminal.open", {
+            root: checkout,
+            input: { threadId, terminalId: "term-4", cwd: "." },
+          })
+          .pipe(Effect.orDie);
+        const factless = laptop.ptySpawns.at(-1);
+        assert.isDefined(factless);
+        const attached = yield* workspace
+          .terminalAttach({ threadId, terminalId: "term-4", cwd: workspaceRoot }, "viewer-1", {
+            userId: owner,
+          })
+          .pipe(Stream.take(1), Stream.runCollect);
+        assert.isNotEmpty(factless.signals, "the shell without facts was closed");
+        const first = [...attached][0];
+        assert.equal(first?.type, "snapshot");
+        if (first?.type === "snapshot") {
+          assert.deepEqual(first.snapshot.facts, { spaceId: globex, userId: owner });
+        }
+        // So does any other.
+        yield* openTerminal("term-2");
+        assert.isUndefined(lastShell().ACME_TOKEN);
+        assert.isUndefined(lastShell().SHARED_TOKEN);
+        assert.equal(lastShell().GLOBEX_TOKEN, GLOBEX_TOKEN);
+        const names = yield* threadNames;
+        assert.deepEqual(namesIn(names.variables), ["GLOBEX_TOKEN"]);
+        assert.deepEqual(
+          names.vaults.map((vault) => vault.name),
+          ["Globex keys"],
+        );
+
+        // Allowing the Owner's Vault to Globex later does not bring the old choice back unseen.
+        yield* vaults
+          .allow({ vaultId: shared, subject: { kind: "space", spaceId: globex }, allowed: true })
+          .pipe(asOwner);
+        assert.deepEqual(namesIn((yield* threadNames).variables), ["GLOBEX_TOKEN"]);
+
+        // A new turn's provider session gets Globex's secrets alone.
+        yield* dispatchAs(hub, owner, message);
+        yield* awaitThread(
+          hub,
+          threadId,
+          (projection) =>
+            projection.runs.length > 0 && !projection.runs.some((run) => RUNNING.has(run.status)),
+        );
+        assert.isNotEmpty(seen);
+        for (const opened of seen) {
+          assert.deepEqual(namesIn(opened?.variables), ["GLOBEX_TOKEN"]);
+        }
+      }).pipe(Effect.scoped),
+  );
+
+  it.live("a shell admitted in Acme is refused as soon as the move commits (ticket 07)", () =>
+    Effect.gen(function* () {
+      const loaded = yield* loadFixture("simple");
+      const hub = yield* makeHub();
+      const owner = yield* ownerIdOf(hub);
+      const acme = yield* createOrganization(hub, "Acme");
+      const globex = yield* createOrganization(hub, "Globex");
+      // The Owner's laptop serves both Spaces: the Thread stays on it through the move.
+      const laptop = yield* hub.join({ name: "Laptop", adapters: loaded.adapters });
+      const [create, ...messages] = loaded.materialized.commands;
+      if (create?.type !== "thread.create") return yield* Effect.die("no thread.create");
+      const message = messages.find((command) => command.type === "message.dispatch");
+      if (message === undefined) return yield* Effect.die("no message");
+      const { projectId, threadId } = create;
+      const { workspaceRoot } = yield* seedProject(hub.server, {
+        projectId,
+        title: "Acme web",
+        defaultModelSelection: loaded.variant.modelSelection,
+        spaceId: acme,
+      });
+      yield* dispatchAs(hub, owner, { ...create, activeEnvironmentId: laptop.environmentId });
+      const executor = yield* hub
+        .service(EnvironmentExecutor.EnvironmentExecutorRegistry)
+        .get(laptop.environmentId)
+        .pipe(Effect.orDie);
+      const checkout = Option.getOrThrow(yield* executor.workspace.paths.checkout(projectId));
+      yield* Effect.promise(() => NodeFSP.mkdir(checkout, { recursive: true }));
+      const workspace = (yield* ThreadWorkspace.make.pipe(
+        Effect.provide(Layer.mergeAll(ProjectionStore.layer, ProjectCheckouts.layer)),
+        Effect.provideContext(hub.server.services as never),
+      )) as ThreadWorkspace.ThreadWorkspace["Service"];
+      const opened = yield* workspace
+        .terminalOpen({ threadId, terminalId: "term-1", cwd: workspaceRoot }, { userId: owner })
+        .pipe(Effect.orDie);
+      assert.equal(opened.facts?.spaceId, acme);
+
+      // Typing into it while the move still runs (after its commit, before it ends): refused.
+      const hooks = hub.service(ProjectMoveHooks.ProjectMoveHooks);
+      const work = yield* hooks.current;
+      assert.isDefined(work);
+      const typed: Array<string> = [];
+      yield* hooks.register({
+        ...work,
+        drainReleases: (threadIds) =>
+          workspace
+            .terminalWrite({ threadId, terminalId: "term-1", data: "ls\r" }, { userId: owner })
+            .pipe(
+              Effect.match({ onFailure: (error) => error._tag, onSuccess: () => "typed" }),
+              Effect.tap((outcome) => Effect.sync(() => typed.push(outcome))),
+              Effect.andThen(work.drainReleases(threadIds)),
+            ),
+      });
+      assert.equal((yield* moveProject(hub, projectId, globex)).status, 200);
+      assert.deepEqual(typed, ["TerminalEnvironmentUnavailableError"]);
+      // The recorded turn runs, in Globex, as the fixture expects.
+      yield* dispatchAs(hub, owner, message);
+      yield* awaitThread(
+        hub,
+        threadId,
+        (projection) =>
+          projection.runs.length > 0 && !projection.runs.some((run) => RUNNING.has(run.status)),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("a plan within the same Space loses no Vault", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub();
+      const owner = yield* ownerIdOf(hub);
+      const acme = yield* createOrganization(hub, "Acme");
+      const vaults = hub.service(Vaults.Vaults);
+      const acmeVault = yield* vaults
+        .create({ name: "Acme keys", spaceId: acme })
+        .pipe(CommandActor.actAs(owner));
+      yield* vaults
+        .setSpaceDefaults({ spaceId: acme, vaultIds: [acmeVault.id] })
+        .pipe(CommandActor.actAs(owner));
+      const projectId = ProjectId.make("project:stays");
+      yield* seedProject(hub.server, {
+        projectId,
+        title: "Stays",
+        defaultModelSelection: null,
+        spaceId: acme,
+      });
+      const plan = yield* movePlan(hub, projectId, acme);
+      assert.equal(plan.status, 200, JSON.stringify(plan.body));
+      assert.deepEqual(plan.body.vaultsLost, []);
     }).pipe(Effect.scoped),
   );
 });

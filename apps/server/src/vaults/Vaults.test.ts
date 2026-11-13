@@ -729,12 +729,18 @@ it.effect(
         "HTTPS_PROXY",
         "NODE_EXTRA_CA_CERTS",
         "BASH_FUNC_LS",
-        "XDG_CONFIG_HOME",
+        "XDG_RUNTIME_DIR",
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
         "GEMINI_API_KEY",
       ]) {
         assert.equal(yield* reasonOf(put(people.admin.id, name, true)), "dangerous-name", name);
+      }
+      // The provider homes the AI gateway sets (spec 4 ticket 06) are the Hub's: nobody sets
+      // them, the Owner included, confirmed or not.
+      for (const name of ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"]) {
+        assert.equal(yield* reasonOf(put(people.admin.id, name, true)), "reserved-name", name);
+        assert.equal(yield* reasonOf(put(ownerId, name, true)), "reserved-name", name);
       }
       assert.equal(yield* reasonOf(put(ownerId, "GIT_SSH_COMMAND")), "confirm-dangerous");
       const set = yield* put(ownerId, "GIT_SSH_COMMAND", true);

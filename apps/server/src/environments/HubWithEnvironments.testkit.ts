@@ -129,24 +129,33 @@ const layerNoProviders = Layer.succeed(ProviderInstanceRegistry.ProviderInstance
 export interface PtySpawn {
   readonly cwd: string;
   readonly env: Readonly<Record<string, string | undefined>>;
+  readonly pid: number;
+  /** The signals the shell got: a close ends it. */
+  readonly signals: Array<string>;
 }
 
 /**
  * A shell that answers each line typed with the folder it started in, as `pwd` would, so a test
- * sees which machine and folder a terminal runs in without a real shell. Each start is recorded.
- * `echo $NAME` prints the variable from its environment; `split $NAME` prints it in two writes, cut
- * in the middle, as a value split between two frames would arrive.
+ * sees which machine and folder a terminal runs in without a real shell. Each start is recorded,
+ * with the signals that end it. `echo $NAME` prints the variable from its environment; `split $NAME`
+ * prints it in two writes, cut in the middle, as a value split between two frames would arrive.
  */
 const echoingPty = (spawns: Array<PtySpawn>): PtyAdapter.PtyAdapter["Service"] => ({
   spawn: (input) =>
     Effect.sync(() => {
-      spawns.push({ cwd: input.cwd, env: { ...input.env } });
+      const spawn: PtySpawn = {
+        cwd: input.cwd,
+        env: { ...input.env },
+        pid: 4242 + spawns.length,
+        signals: [],
+      };
+      spawns.push(spawn);
       const listeners = new Set<(data: string) => void>();
       const emit = (text: string) => {
         for (const listener of listeners) listener(text);
       };
       return {
-        pid: 4242,
+        pid: spawn.pid,
         write: (data: string) => {
           const variable = /^(echo|split) \$([A-Z_][A-Z0-9_]*)/.exec(data);
           if (variable === null) return emit(`${input.cwd}\r\n`);
@@ -159,7 +168,9 @@ const echoingPty = (spawns: Array<PtySpawn>): PtyAdapter.PtyAdapter["Service"] =
           setTimeout(() => emit(`${value.slice(half)}\r\n`), 20);
         },
         resize: () => undefined,
-        kill: () => undefined,
+        kill: (signal?: string) => {
+          spawn.signals.push(signal ?? "SIGHUP");
+        },
         onData: (callback: (data: string) => void) => {
           listeners.add(callback);
           return () => listeners.delete(callback);

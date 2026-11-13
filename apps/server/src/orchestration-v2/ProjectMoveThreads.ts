@@ -8,6 +8,7 @@ import {
   EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
   ProviderSessionId,
+  SHELL_FACTS_CONTRACT_VERSION,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -16,12 +17,14 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as RemoteEnvironments from "../environment/RemoteEnvironments.ts";
+import { projectSpaceSql } from "../spaces/SpaceDirectory.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as ProjectMoveHooks from "../project/ProjectMoveHooks.ts";
 import * as EventSink from "./EventSink.ts";
@@ -253,7 +256,80 @@ export const layer: Layer.Layer<
       (effect) => effect.pipe(logged("Could not read a moved Project's releases", {})),
     );
 
-    yield* hooks.register({ stopThreads, drainReleases });
+    /**
+     * Spec 5 ticket 07: each listed machine (every connected one by default) gets every Thread's
+     * Space now and the removed Users, and closes its own shells started for another Space or a
+     * removed User. Machines before contract 12 cannot: the Hub refuses their terminals instead.
+     */
+    const reconcileOn = Effect.fn("ProjectMoveThreads.reconcileOn")(function* (
+      environmentIds: ReadonlyArray<EnvironmentId>,
+    ) {
+      if (environmentIds.length === 0) return;
+      const threads = yield* sql<{ readonly threadId: string; readonly spaceId: string }>`
+        SELECT t.thread_id AS "threadId",
+          COALESCE(t.space_id, ${sql.literal(projectSpaceSql("p.space_id"))}) AS "spaceId"
+        FROM orchestration_v2_projection_threads t
+        LEFT JOIN projection_projects p ON p.project_id = t.project_id
+        WHERE t.deleted_at IS NULL
+      `;
+      const removed = yield* sql<{ readonly userId: string }>`
+        SELECT user_id AS "userId" FROM users WHERE removed_at IS NOT NULL
+      `;
+      const input = { threads, removedUserIds: removed.map((row) => row.userId) };
+      yield* Effect.forEach(
+        environmentIds,
+        (environmentId) =>
+          Effect.gen(function* () {
+            const executor = yield* executors.get(environmentId).pipe(Effect.option);
+            if (Option.isNone(executor)) return;
+            const { rpc, forward } = executor.value.workspace;
+            if (Option.isSome(rpc)) {
+              yield* rpc.value.terminals.reconcile(input);
+            } else if (
+              Option.isSome(forward) &&
+              forward.value.contractVersion() >= SHELL_FACTS_CONTRACT_VERSION
+            ) {
+              yield* forward.value.call("terminal.reconcile", input);
+            }
+          }).pipe(logged("Could not reconcile a machine's terminals", { environmentId })),
+        { concurrency: 4, discard: true },
+      );
+    });
+
+    const reconcileAll = executors.list.pipe(
+      Effect.flatMap(reconcileOn),
+      logged("Could not reconcile the machines' terminals", {}),
+    );
+    /** Fire and forget: the caller (a move, a removal) never waits on the machines. */
+    const reconcileTerminals = reconcileAll.pipe(Effect.forkIn(scope), Effect.asVoid);
+
+    yield* hooks.register({ stopThreads, drainReleases, reconcileTerminals });
+    // Each machine as it connects (a new socket): its shells are checked against the Hub's word.
+    yield* Effect.scoped(
+      Effect.gen(function* () {
+        const changes = yield* executors.changes;
+        const seen = new Map<EnvironmentId, unknown>();
+        while (true) {
+          const connected = new Map<EnvironmentId, unknown>();
+          for (const environmentId of yield* executors.list) {
+            const executor = yield* executors.get(environmentId).pipe(Effect.option);
+            if (Option.isSome(executor)) {
+              connected.set(environmentId, Option.getOrUndefined(executor.value.workspace.forward));
+            }
+          }
+          const fresh = [...connected].filter(
+            ([id, socket]) => !seen.has(id) || seen.get(id) !== socket,
+          );
+          seen.clear();
+          for (const [id, socket] of connected) seen.set(id, socket);
+          yield* reconcileOn(fresh.map(([id]) => id)).pipe(
+            logged("Could not reconcile a connecting machine's terminals", {}),
+            Effect.forkIn(scope),
+          );
+          yield* PubSub.take(changes);
+        }
+      }),
+    ).pipe(Effect.forkIn(scope));
     // Releases a Hub stopped in the middle of are finished as it starts.
     yield* drainReleases("all").pipe(Effect.forkIn(scope));
   }),

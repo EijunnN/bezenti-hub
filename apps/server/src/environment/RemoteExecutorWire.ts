@@ -44,6 +44,8 @@ import {
   TerminalAttachStreamEvent,
   TerminalClearInput,
   TerminalCloseInput,
+  TerminalReconcileInput,
+  TerminalShellFacts,
   TerminalError,
   TerminalOpenInput,
   TerminalResizeInput,
@@ -528,6 +530,8 @@ export const REMOTE_OPERATIONS = {
       input: TerminalOpenInput,
       /** Contract 10: the opening User's secrets, for the shell's environment alone. */
       secretEnv: Schema.optionalKey(SecretEnv),
+      /** Contract 12: what a shell this starts was started with, kept with its session. */
+      facts: Schema.optionalKey(TerminalShellFacts),
     }),
     TerminalSessionSnapshot,
     TerminalError,
@@ -540,6 +544,8 @@ export const REMOTE_OPERATIONS = {
   ),
   "terminal.clear": workspace(TerminalClearInput, Schema.Void, TerminalError),
   "terminal.close": workspace(TerminalCloseInput, Schema.Void, TerminalError),
+  /** Contract 12: closes the shells the Hub's word no longer allows; answers how many. */
+  "terminal.reconcile": workspace(TerminalReconcileInput, Schema.Number, TerminalError),
   /** Opens a stream of `TerminalAttachStreamEvent`s; its items come as `workspace.stream` frames. */
   "terminal.stream": workspace(
     Schema.Struct({
@@ -550,6 +556,8 @@ export const REMOTE_OPERATIONS = {
       viewerId: Schema.optionalKey(Schema.String),
       /** Contract 10: for a shell the attach starts, the opening User's secrets. */
       secretEnv: Schema.optionalKey(SecretEnv),
+      /** Contract 12: for a shell the attach starts, what it is started with. */
+      facts: Schema.optionalKey(TerminalShellFacts),
     }),
     Schema.Void,
     TerminalError,

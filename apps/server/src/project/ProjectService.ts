@@ -12,6 +12,7 @@ import {
   type EnvironmentId,
   type OrchestrationV2DomainEvent,
   HUB_MACHINE_ENVIRONMENT_ID,
+  type VaultId,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
@@ -58,6 +59,8 @@ import * as CommandActor from "../auth/CommandActor.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import type * as AuditLog from "../audit/AuditLog.ts";
 import { servesSpace } from "../sandboxes/sandboxSpace.ts";
+import * as EffectiveVaults from "../vaults/EffectiveVaults.ts";
+import * as VaultReachLoss from "../vaults/VaultReachLoss.ts";
 import * as ProjectMoveHooks from "./ProjectMoveHooks.ts";
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
@@ -114,6 +117,8 @@ export interface ProjectMovePlan {
   readonly running: ReadonlyArray<ProjectMovePlanThread>;
   /** On a machine that does not serve `spaceId`: they need an environment after the move. */
   readonly needsEnvironment: ReadonlyArray<ProjectMovePlanThread>;
+  /** The Vaults its Threads stop receiving (`EffectiveVaults.projectMove`). */
+  readonly vaultsLost: ReadonlyArray<{ readonly vaultId: VaultId; readonly name: string }>;
 }
 
 const encodeSessionIds = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
@@ -180,6 +185,8 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
       "dispatch-project-command",
       "check-environment",
       "check-folder",
+      "read-vaults",
+      "drop-vault-choices",
     ]),
     projectId: Schema.optional(ProjectId),
     workspaceRoot: Schema.optional(Schema.String),
@@ -287,6 +294,8 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const directories = { path, fileSystem: yield* Effect.serviceOption(FileSystem.FileSystem) };
   const moveHooks = yield* Effect.serviceOption(ProjectMoveHooks.ProjectMoveHooks);
+  // Required: a move whose losses cannot be read fails rather than warn of none (ticket 07).
+  const effectiveVaults = yield* EffectiveVaults.EffectiveVaults;
   const projectLocks = yield* KeyedLock.make<ProjectId>();
   const rootClaims = yield* KeyedLock.make<string>();
   const workspaceLocks = yield* KeyedLock.make<string>();
@@ -377,7 +386,11 @@ export const make = Effect.gen(function* () {
     return undefined;
   };
 
-  const commit = Effect.fn("ProjectService.commit")(function* (command: ProjectCommand) {
+  const commit = Effect.fn("ProjectService.commit")(function* (
+    command: ProjectCommand,
+    /** Committed with the command's event, never on a replay (a move's Vault choices). */
+    alsoCommit?: Effect.Effect<void, Error>,
+  ) {
     const { projectId } = command;
     const dispatchError = (cause: unknown) =>
       new ProjectOperationError({ operation: "dispatch-project-command", projectId, cause });
@@ -411,6 +424,7 @@ export const make = Effect.gen(function* () {
           acceptedAt: now,
           event: planned.success,
           ...(audit === undefined ? {} : { audit }),
+          ...(alsoCommit === undefined ? {} : { alsoCommit }),
         });
         return receipt;
       }
@@ -826,7 +840,11 @@ export const make = Effect.gen(function* () {
       if (isFirstDelete) {
         yield* deleteChildThreads(input);
       }
-      yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
+      // Its Vault choices go with it (spec 5 ticket 07).
+      yield* commit(
+        { type: "project.delete", commandId: input.commandId, projectId },
+        VaultReachLoss.forgetProject(sql, projectId),
+      );
       if (isFirstDelete) {
         yield* clearProjectSettingsOverrides(projectId);
       }
@@ -1071,6 +1089,18 @@ export const make = Effect.gen(function* () {
     return { running, changing };
   });
 
+  /** The Vaults the move takes from the Project's Threads (spec 5 ticket 07), by name. */
+  const vaultsLostOnMove = (
+    projectId: ProjectId,
+    route: { readonly from: SpaceId; readonly to: SpaceId },
+  ) =>
+    effectiveVaults.projectMoveLoss({ projectId, from: route.from, to: route.to }).pipe(
+      Effect.map((lost) => lost.map(({ vaultId, name }) => ({ vaultId, name }))),
+      Effect.mapError(
+        (cause) => new ProjectOperationError({ operation: "read-vaults", projectId, cause }),
+      ),
+    );
+
   const movePlan: ProjectService["Service"]["movePlan"] = Effect.fn("ProjectService.movePlan")(
     function* (input) {
       const { projectId } = input;
@@ -1100,7 +1130,8 @@ export const make = Effect.gen(function* () {
         if (plan.running) running.push(entry);
         if (plan.releasedFrom !== undefined) needsEnvironment.push(entry);
       }
-      return { projectId, spaceId: route.to, running, needsEnvironment };
+      const vaultsLost = yield* vaultsLostOnMove(projectId, route);
+      return { projectId, spaceId: route.to, running, needsEnvironment, vaultsLost };
     },
   );
 
@@ -1144,7 +1175,8 @@ export const make = Effect.gen(function* () {
           }
         }
         // It goes ahead: what machines hold on the Project ends now (never for a no-op rerun).
-        if (route.from !== route.to || planned.changing > 0) {
+        const cutting = route.from !== route.to || planned.changing > 0;
+        if (cutting) {
           yield* spaces.projectAccessEnds(projectId);
         }
         if (route.from !== route.to) {
@@ -1155,14 +1187,31 @@ export const make = Effect.gen(function* () {
             projectId,
             cache,
           );
-          yield* commit({
-            type: "project.meta.update",
-            commandId: input.commandId,
-            projectId,
-            spaceId: route.to,
-            ...(preferred === undefined ? {} : { preferredEnvironmentId: null }),
-          });
+          // Its choices of Vaults that do not reach the new Space go with the same commit, so
+          // allowing one there later never brings an old choice back unseen.
+          yield* commit(
+            {
+              type: "project.meta.update",
+              commandId: input.commandId,
+              projectId,
+              spaceId: route.to,
+              ...(preferred === undefined ? {} : { preferredEnvironmentId: null }),
+            },
+            VaultReachLoss.keepProjectChoicesReaching(sql, {
+              projectId,
+              from: route.from,
+              spaceId: route.to,
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectOperationError({ operation: "drop-vault-choices", projectId, cause }),
+              ),
+            ),
+          );
           yield* Ref.set(moved, true);
+          // Shells admitted for the old Space are checked again from the next keystroke on, not
+          // only once the whole move ends (spec 5 ticket 07).
+          yield* spaces.changed;
         }
         // Listed after the Project moved, so none created before it is left behind; legacy
         // Threads with no Space of their own follow too. A rerun finishes a move cut short.
@@ -1198,6 +1247,9 @@ export const make = Effect.gen(function* () {
         // an earlier one did not finish.
         if (work !== undefined) {
           yield* work.drainReleases(threads.map((thread) => thread.threadId));
+          // Shells started for the old Space close on their machines (spec 5 ticket 07); the
+          // move does not wait for it, and the Hub refuses them meanwhile.
+          if (cutting) yield* work.reconcileTerminals;
         }
       });
       yield* spaces.whileProjectMoves(projectId, relocate).pipe(

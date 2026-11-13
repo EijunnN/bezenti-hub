@@ -85,6 +85,23 @@ export const TerminalCloseInput = Schema.Struct({
 });
 export type TerminalCloseInput = typeof TerminalCloseInput.Type;
 
+/**
+ * Spec 5 ticket 07: what a shell was started with (the Space whose secrets were planned for it, the
+ * User whose set it carries). The machine keeps them with the session; the Hub decides on them.
+ */
+export const TerminalShellFacts = Schema.Struct({
+  spaceId: Schema.NullOr(Schema.String),
+  userId: Schema.NullOr(Schema.String),
+});
+export type TerminalShellFacts = typeof TerminalShellFacts.Type;
+
+/** The Hub's word on which shells may stay: each listed Thread's Space now, the removed Users. */
+export const TerminalReconcileInput = Schema.Struct({
+  threads: Schema.Array(Schema.Struct({ threadId: Schema.String, spaceId: Schema.String })),
+  removedUserIds: Schema.Array(Schema.String),
+});
+export type TerminalReconcileInput = typeof TerminalReconcileInput.Type;
+
 export const TerminalSessionStatus = Schema.Literals(["starting", "running", "exited", "error"]);
 export type TerminalSessionStatus = typeof TerminalSessionStatus.Type;
 
@@ -106,6 +123,8 @@ export const TerminalSessionSnapshot = Schema.Struct({
   rows: Schema.optional(TerminalRowsSchema),
   // The shell kept the Thread's secrets it started with, which changed since: reopen to update.
   secretsStale: Schema.optional(Schema.Boolean),
+  // Spec 5 ticket 07: what the shell started with; absent from machines before contract 12.
+  facts: Schema.optional(TerminalShellFacts),
 });
 export type TerminalSessionSnapshot = typeof TerminalSessionSnapshot.Type;
 

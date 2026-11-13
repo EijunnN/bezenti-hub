@@ -8,9 +8,7 @@ import * as Effect from "effect/Effect";
 import type * as Path from "effect/Path";
 import type * as SqlClient from "effect/sql/SqlClient";
 
-import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 import { isScratchWorkspaceRoot } from "../environment/ScratchWorkspace.ts";
-import type * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 
 export interface ReachRow {
   readonly vaultId: VaultId;
@@ -39,15 +37,6 @@ const toReach = (row: RawReachRow): ReachRow => ({
   archived: row.archivedAt !== null,
 });
 
-/** Whether the Space is the Owner's own Personal space: the only one the Main vault reaches. */
-export const isOwnersPersonal = (
-  spaces: SpaceDirectory.SpaceDirectory["Service"],
-  space: AccessPolicy.SpaceResource,
-) =>
-  space.kind !== "personal" || space.personalOwnerUserId === null
-    ? Effect.succeed(false)
-    : spaces.principalOf(space.personalOwnerUserId).pipe(Effect.map((who) => who.isOwner));
-
 /**
  * The defaults nobody unsets, among the Vaults allowed to a Space: the Main vault, in the Owner's
  * Personal space (the only Space it is allowed to). A Project neither removes nor re-adds them.
@@ -55,22 +44,44 @@ export const isOwnersPersonal = (
 export const fixedDefaults = (allowed: ReadonlyArray<ReachRow>): ReadonlyArray<VaultId> =>
   allowed.filter((row) => row.isMain).map((row) => row.vaultId);
 
+/**
+ * The rule as SQL: whether Vault `v` reaches the Space named by the SQL expression `space` (a
+ * column, never a value). The Owner's Personal space is `personal:<Owner's id>`.
+ */
+const reachesSpaceSql = (space: string) => `(
+  (v.vault_id = '${MAIN_VAULT_ID}' AND v.is_main = 1
+    AND ${space} = 'personal:' || (SELECT user_id FROM users WHERE is_owner = 1))
+  OR (v.is_main = 0 AND v.space_id = ${space})
+  OR (v.is_main = 0 AND v.space_id IS NULL AND EXISTS (
+    SELECT 1 FROM vault_allowances a
+    WHERE a.vault_id = v.vault_id AND a.subject_kind = 'space' AND a.subject_id = ${space}
+  )))`;
+
 /** The Vaults allowed to a Space, archived ones included, in the Owner's order. */
-export const allowedToSpace = (
-  sql: SqlClient.SqlClient,
-  spaceId: SpaceId,
-  ownersPersonal: boolean,
-) =>
+export const allowedToSpace = (sql: SqlClient.SqlClient, spaceId: SpaceId) =>
   sql<RawReachRow>`
-    SELECT ${sql.literal(COLUMNS)} FROM vaults v
-    WHERE (v.vault_id = ${MAIN_VAULT_ID} AND v.is_main = 1 AND ${ownersPersonal ? 1 : 0} = 1)
-      OR (v.is_main = 0 AND v.space_id = ${spaceId})
-      OR (v.is_main = 0 AND v.space_id IS NULL AND EXISTS (
-        SELECT 1 FROM vault_allowances a
-        WHERE a.vault_id = v.vault_id AND a.subject_kind = 'space' AND a.subject_id = ${spaceId}
-      ))
+    SELECT ${sql.literal(COLUMNS)} FROM vaults v, (SELECT ${spaceId} AS space_id) target
+    WHERE ${sql.literal(reachesSpaceSql("target.space_id"))}
     ORDER BY ${sql.literal(VAULT_ORDER)}
   `.pipe(Effect.map((rows) => rows.map(toReach)));
+
+/**
+ * Drops the Project's choices of Vaults that do not reach Space `spaceId` (a Project moving
+ * there), and answers them, for the audit.
+ */
+export const dropChoicesNotReaching = (
+  sql: SqlClient.SqlClient,
+  projectId: string,
+  spaceId: SpaceId,
+) =>
+  sql<{ readonly vaultId: string; readonly choice: string }>`
+    DELETE FROM project_vault_choices
+    WHERE project_id = ${projectId} AND vault_id NOT IN (
+      SELECT v.vault_id FROM vaults v, (SELECT ${spaceId} AS space_id) target
+      WHERE ${sql.literal(reachesSpaceSql("target.space_id"))}
+    )
+    RETURNING vault_id AS "vaultId", choice AS "choice"
+  `;
 
 /** The Vaults allowed to a User themselves (the Owner's own, never the Main vault). */
 export const allowedToUser = (sql: SqlClient.SqlClient, userId: UserId) =>

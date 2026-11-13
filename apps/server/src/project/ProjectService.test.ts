@@ -37,6 +37,7 @@ import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
 import * as ProjectService from "./ProjectService.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as EffectiveVaults from "../vaults/EffectiveVaults.ts";
 
 const layerWorkspacePaths = Layer.succeed(WorkspacePaths.WorkspacePaths, {
   normalizeWorkspaceRoot: (workspaceRoot) => Effect.succeed(workspaceRoot.replace(/\/$/, "")),
@@ -200,6 +201,8 @@ const layerProjectServiceDependencies = Layer.mergeAll(
   IdAllocator.layer,
   ThreadCommandExecutor.layer,
   SpaceDirectory.layer,
+  // A move's plan reads the Vaults it loses (spec 5 ticket 07).
+  EffectiveVaults.layer.pipe(Layer.provide(SpaceDirectory.layer)),
 ).pipe(
   Layer.provideMerge(LegacyV1ThreadImporter.layer.pipe(Layer.provide(RuntimeLayer.layerEventSink))),
   Layer.provideMerge(ProjectEnrichmentService.layer),

@@ -247,11 +247,39 @@ interface CreateManagerOptions {
   managedBinaryToolsDir?: string;
 }
 
+type ManagerService = TerminalManager.TerminalManager["Service"];
+/** What a test opens with: a start, or only secrets (no facts), or nothing. */
+type TestStart = TerminalManager.TerminalStart | TerminalManager.TerminalSecrets | undefined;
+const asStart = (start: TestStart): TerminalManager.TerminalStart =>
+  start === undefined
+    ? TerminalManager.NO_START
+    : "fingerprint" in start
+      ? { secrets: start, facts: null }
+      : start;
+/** The manager as these tests drive it: a start is optional and may be secrets alone. */
+type TestManager = Omit<ManagerService, "open" | "attachOutputStream"> & {
+  readonly open: (
+    input: Parameters<ManagerService["open"]>[0],
+    start?: TestStart,
+  ) => ReturnType<ManagerService["open"]>;
+  readonly attachOutputStream: (
+    input: Parameters<ManagerService["attachOutputStream"]>[0],
+    viewerId: string,
+    start?: TestStart,
+  ) => ReturnType<ManagerService["attachOutputStream"]>;
+};
+const forTests = (manager: ManagerService): TestManager => ({
+  ...manager,
+  open: (input, start) => manager.open(input, asStart(start)),
+  attachOutputStream: (input, viewerId, start) =>
+    manager.attachOutputStream(input, viewerId, asStart(start)),
+});
+
 interface ManagerFixture {
   readonly baseDir: string;
   readonly logsDir: string;
   readonly ptyAdapter: FakePtyAdapter;
-  readonly manager: TerminalManager.TerminalManager["Service"];
+  readonly manager: TestManager;
   readonly getEvents: Effect.Effect<ReadonlyArray<TerminalEvent>>;
 }
 
@@ -314,7 +342,7 @@ const createManager = (
         logsDir,
         join,
         ptyAdapter,
-        manager,
+        manager: forTests(manager),
         getEvents: Ref.get(eventsRef),
       };
     }),
@@ -1090,6 +1118,47 @@ it.layer(
       yield* manager.closeIdle({ threadId: "thread-1" });
 
       expect(ptyAdapter.processes.map((process) => process.killed)).toEqual([false, false]);
+    }),
+  );
+
+  it.effect("a reconcile keeps an exited shell whose facts still hold, with its history", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5);
+      const exited = yield* Deferred.make<void>();
+      const unsubscribeEvents = yield* manager.subscribe((event) =>
+        event.type === "exited"
+          ? Deferred.succeed(exited, undefined).pipe(Effect.asVoid)
+          : Effect.void,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribeEvents));
+      yield* manager.open(openInput(), {
+        secrets: undefined,
+        facts: { spaceId: "space-acme", userId: "grace" },
+      });
+      ptyAdapter.processes[0]?.emitData("build output\n");
+      ptyAdapter.processes[0]?.emitExit({ exitCode: 0, signal: 0 });
+      yield* Deferred.await(exited);
+
+      // Still Acme's Thread: the exited shell and its scrollback stay.
+      const kept = yield* manager.reconcile({
+        threads: [{ threadId: "thread-1", spaceId: "space-acme" }],
+        removedUserIds: [],
+      });
+      expect(kept).toBe(0);
+      const events = yield* Ref.make<ReadonlyArray<TerminalAttachStreamEvent>>([]);
+      const unsubscribe = yield* manager.attachStream({ ...openInput(), resume: true }, (event) =>
+        Ref.update(events, (all) => [...all, event]),
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+      const [first] = yield* Ref.get(events);
+      expect(first?.type === "snapshot" ? first.snapshot.history : null).toContain("build output");
+
+      // Moved to Globex: it goes, with its history.
+      const closed = yield* manager.reconcile({
+        threads: [{ threadId: "thread-1", spaceId: "space-globex" }],
+        removedUserIds: [],
+      });
+      expect(closed).toBe(1);
     }),
   );
 

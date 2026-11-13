@@ -213,12 +213,6 @@ const makeLayerServices = (
           InstallationUserService.layer,
           SpaceVisibility.layer,
           AuditLog.layer,
-          Vaults.layer.pipe(Layer.provide(AuditLog.layer)),
-          // As server.ts: delivery, and the masking of what was delivered (spec 5 ticket 05).
-          SecretDelivery.layer.pipe(
-            Layer.provideMerge(SecretMasker.layer),
-            Layer.provideMerge(EffectiveVaults.layer),
-          ),
           // The Hub machine runs Threads here unless a test says otherwise (the dev setting). The
           // Owner's SSH installs register machines with it, by the test's policy if it has one.
           SshInstall.layer.pipe(
@@ -258,6 +252,17 @@ const makeLayerServices = (
       ).pipe((below) =>
         Layer.mergeAll(layerProjects, layerThreads).pipe(Layer.provideMerge(below)),
       ),
+    ),
+    // Vaults under the Projects, as on the server: a move asks what it loses (spec 5 ticket 07).
+    Layer.provideMerge(
+      Layer.mergeAll(
+        Vaults.layer,
+        // Delivery, and the masking of what was delivered (spec 5 ticket 05), under everything.
+        SecretDelivery.layer.pipe(
+          Layer.provideMerge(SecretMasker.layer),
+          Layer.provideMerge(EffectiveVaults.layer),
+        ),
+      ).pipe(Layer.provide(SpaceDirectory.layer), Layer.provideMerge(AuditLog.layer)),
     ),
     Layer.provide(ManagedPolicy.layerTest()),
     Layer.provideMerge(OwnerPresence.layer),

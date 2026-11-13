@@ -25,10 +25,12 @@ import {
   threadHasLiveWork,
 } from "../orchestration-v2/threadLiveWork.ts";
 import * as AuditLog from "../audit/AuditLog.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as VaultReachLoss from "../vaults/VaultReachLoss.ts";
 import * as SpaceDirectory from "./SpaceDirectory.ts";
 
 /** Refused, or the Organization is missing or hidden from the actor (alike). */
@@ -82,6 +84,8 @@ const make = Effect.gen(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   // Absent where no Environments are kept (orchestration-only hosts): there is no Sandbox.
   const environments = yield* Effect.serviceOption(EnvironmentRegistry.EnvironmentRegistry);
+  // Absent where the Hub keeps no secrets: a value left behind is swept at the next start.
+  const vaultValues = yield* Effect.serviceOption(ServerSecretStore.VaultValueStore);
 
   const storageError = (cause: unknown) => new OrganizationStorageError({ cause });
   const refusal = (error: {
@@ -186,6 +190,25 @@ const make = Effect.gen(function* () {
       yield* environments.value
         .deleteSandbox({ spaceId, actor: AuditLog.userActor(actor) })
         .pipe(Effect.mapError(storageError));
+    }
+    // Its own Vaults with their values, and every row that names it (spec 5 ticket 07); the
+    // Owner's Vaults it was allowed only lose that allowance. Before its row: a retry finds the rest.
+    const forgotten = yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const [row] = yield* sql<{ readonly name: string }>`
+            SELECT name FROM spaces WHERE space_id = ${spaceId}
+          `;
+          const gone = yield* VaultReachLoss.forgetOrganization(sql, AuditLog.userActor(actor), {
+            spaceId,
+            name: row?.name ?? spaceId,
+          });
+          return gone.valueIds;
+        }),
+      )
+      .pipe(Effect.mapError(storageError));
+    if (Option.isSome(vaultValues)) {
+      yield* VaultReachLoss.removeValues(sql, vaultValues.value, forgotten);
     }
     yield* spaces.removeArchivedOrganization({ actor, spaceId }).pipe(Effect.mapError(refusal));
     return yield* viewOf(actor);

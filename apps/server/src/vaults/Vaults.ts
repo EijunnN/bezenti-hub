@@ -61,6 +61,7 @@ import { projectSpaceSql } from "../spaces/SpaceDirectory.ts";
 import * as ThreadSecretValues from "./ThreadSecretValues.ts";
 import * as VaultKeyCheck from "./VaultKeyCheck.ts";
 import * as VaultReach from "./VaultReach.ts";
+import * as VaultReachLoss from "./VaultReachLoss.ts";
 
 const MAIN_VAULT_NAME = "Main vault";
 
@@ -349,6 +350,42 @@ const make = Effect.gen(function* () {
   const orStorage = (what: string) => (error: unknown) =>
     isVaultError(error) ? Effect.fail(error) : storage(what)(error);
 
+  // Spec 5 ticket 07: what a write checked before its transaction is checked again inside it, so
+  // a move, a removal or an Organization's deletion between the two never lets a row outlive it.
+
+  /** Whether the Space still takes Vaults: it exists, is not being deleted and is not frozen. */
+  const spaceTakesVaults = (spaceId: string) =>
+    sql<{ readonly n: number }>`
+      SELECT COUNT(*) AS n FROM spaces
+      WHERE space_id = ${spaceId} AND deleting_at IS NULL AND frozen_at IS NULL
+    `.pipe(Effect.map((rows) => (rows[0]?.n ?? 0) > 0));
+
+  /** In a write's transaction: the Vault exists and its Organization is not being deleted. */
+  const stillWritable = (vaultId: string) =>
+    sql<{ readonly spaceId: string | null }>`
+      SELECT space_id AS "spaceId" FROM vaults WHERE vault_id = ${vaultId}
+    `.pipe(
+      Effect.flatMap(([row]) =>
+        row === undefined
+          ? fail("not-found", NOT_FOUND)
+          : row.spaceId === null
+            ? Effect.void
+            : Effect.flatMap(spaceTakesVaults(row.spaceId), (alive) =>
+                alive ? Effect.void : fail("not-found", NOT_FOUND),
+              ),
+      ),
+    );
+
+  /** In a write's transaction: each Vault still reaches the Space (a move or revoke may have won). */
+  const stillReaching = (vaultIds: ReadonlyArray<string>, spaceId: SpaceId) =>
+    VaultReach.allowedToSpace(sql, spaceId).pipe(
+      Effect.flatMap((allowed) => {
+        const reaching = new Set<string>(allowed.map((row) => row.vaultId));
+        const missing = vaultIds.find((vaultId) => !reaching.has(vaultId));
+        return missing === undefined ? Effect.void : notAllowedHere(missing);
+      }),
+    );
+
   const now = Effect.map(DateTime.now, DateTime.formatIso);
   const newId = (prefix: string) =>
     random
@@ -550,17 +587,7 @@ const make = Effect.gen(function* () {
    * removes it once those Threads are gone.
    */
   const removeValue = (valueId: string | null) =>
-    valueId === null
-      ? Effect.void
-      : ThreadSecretValues.heldByThread(sql, valueId).pipe(
-          Effect.flatMap((held) => (held ? Effect.void : values.remove(valueId))),
-          Effect.catch((cause) =>
-            Effect.logWarning("Vaults: could not remove a value; the next start removes it", {
-              valueId,
-              cause,
-            }),
-          ),
-        );
+    VaultReachLoss.removeValues(sql, values, valueId === null ? [] : [valueId]);
 
   const readValue = (valueId: string | null) =>
     valueId === null
@@ -674,6 +701,9 @@ const make = Effect.gen(function* () {
     yield* sql
       .withTransaction(
         Effect.gen(function* () {
+          if (input.spaceId !== null && !(yield* spaceTakesVaults(input.spaceId))) {
+            return yield* fail("not-found", "A Vault belongs to an Organization, or to the Owner.");
+          }
           const taken = yield* sql<{ readonly n: number }>`
             SELECT COUNT(*) AS n FROM vaults WHERE name = ${input.name} COLLATE NOCASE
           `;
@@ -766,25 +796,19 @@ const make = Effect.gen(function* () {
     const removed = yield* sql
       .withTransaction(
         Effect.gen(function* () {
-          const gone = yield* sql<{ readonly valueId: string | null }>`
-            DELETE FROM vault_entries WHERE vault_id = ${row.vaultId} RETURNING value_id AS "valueId"
-          `;
-          yield* sql`DELETE FROM vault_allowances WHERE vault_id = ${row.vaultId}`;
-          yield* sql`DELETE FROM space_default_vaults WHERE vault_id = ${row.vaultId}`;
-          yield* sql`DELETE FROM project_vault_choices WHERE vault_id = ${row.vaultId}`;
-          yield* sql`DELETE FROM vaults WHERE vault_id = ${row.vaultId}`;
+          const gone = yield* VaultReachLoss.forgetVault(sql, row.vaultId);
           yield* audit.record({
             actor: AuditLog.userActor(userId),
             action: "vault.delete",
             spaceId: row.spaceId as SpaceId | null,
             target: { kind: "vault", id: row.vaultId, name: row.name },
-            detail: { entries: gone.length },
+            detail: { entries: gone.entries },
           });
-          return gone;
+          return gone.valueIds;
         }),
       )
       .pipe(Effect.catch(storage("delete the Vault")));
-    for (const { valueId } of removed) yield* removeValue(valueId);
+    yield* VaultReachLoss.removeValues(sql, values, removed);
     return { deleted: true };
   });
 
@@ -817,6 +841,7 @@ const make = Effect.gen(function* () {
       const entryId = yield* newId("secret");
       yield* withNewValue(value, "add the secret", (valueId) =>
         Effect.gen(function* () {
+          yield* stillWritable(row.vaultId);
           yield* sql`
             INSERT INTO vault_entries (entry_id, vault_id, name, description, kind, value_id, unmasked, version, created_at, updated_at, updated_by)
             VALUES (${entryId}, ${row.vaultId}, ${input.name}, ${input.description ?? null}, 'own', ${valueId}, ${isShort(value) ? 1 : 0}, 1, ${at}, ${at}, ${userId})
@@ -858,6 +883,7 @@ const make = Effect.gen(function* () {
     // The new value under a new id; the row, its version and the audit move to it together.
     const replaced = yield* withNewValue(value, "change the secret", (valueId) =>
       Effect.gen(function* () {
+        yield* stillWritable(row.vaultId);
         const current = yield* sql<{ readonly valueId: string | null }>`
           SELECT value_id AS "valueId" FROM vault_entries WHERE entry_id = ${entry.entryId}
         `;
@@ -962,6 +988,7 @@ const make = Effect.gen(function* () {
     const copied = kind === "copy" ? yield* readValue(source.valueId) : undefined;
     yield* withNewValue(copied, `add the ${kind}`, (valueId) =>
       Effect.gen(function* () {
+        yield* stillWritable(row.vaultId);
         yield* sql`
           INSERT INTO vault_entries (entry_id, vault_id, name, description, kind, linked_entry_id, value_id, unmasked, version, created_at, updated_at, updated_by)
           VALUES (${entryId}, ${row.vaultId}, ${name}, ${description}, ${kind}, ${kind === "link" ? source.entryId : null}, ${valueId}, ${source.unmasked}, 1, ${at}, ${at}, ${userId})
@@ -1060,28 +1087,33 @@ const make = Effect.gen(function* () {
           const had = (existing[0]?.n ?? 0) > 0;
           if (had === input.allowed) return;
           if (input.allowed) {
+            // Checked again here: a removal, a freeze or a deletion since the read above wins.
+            yield* stillWritable(row.vaultId);
+            if (subject.kind === "space" && !(yield* spaceTakesVaults(subjectId))) {
+              return yield* fail("not-found", "That Space does not exist.");
+            }
+            if (subject.kind === "user") {
+              const [user] = yield* sql<{ readonly removed: number }>`
+                SELECT removed_at IS NOT NULL AS removed FROM users WHERE user_id = ${subjectId}
+              `;
+              if (user === undefined || user.removed === 1) {
+                return yield* fail("not-found", "That User does not exist.");
+              }
+            }
             yield* sql`
               INSERT INTO vault_allowances (vault_id, subject_kind, subject_id, created_at)
               VALUES (${row.vaultId}, ${subject.kind}, ${subjectId}, ${at})
             `;
-          } else {
-            yield* sql`
-              DELETE FROM vault_allowances
-              WHERE vault_id = ${row.vaultId} AND subject_kind = ${subject.kind} AND subject_id = ${subjectId}
-            `;
+            // A default or choice of it there can only be left from before: it never comes back.
             if (subject.kind === "space") {
-              // Taken back from a Space: its default and its Projects' choices go too, so allowing
-              // it again later does not bring them back unseen.
-              yield* sql`
-                DELETE FROM space_default_vaults WHERE space_id = ${subjectId} AND vault_id = ${row.vaultId}
-              `;
-              yield* sql`
-                DELETE FROM project_vault_choices WHERE vault_id = ${row.vaultId} AND project_id IN (
-                  SELECT project_id FROM projection_projects
-                  WHERE ${sql.literal(projectSpaceSql("space_id"))} = ${subjectId}
-                )
-              `;
+              yield* VaultReachLoss.clearForGrant(sql, row.vaultId, subjectId);
             }
+          } else {
+            // Taken back from a Space: its default and its Projects' choices go too, so allowing
+            // it again later does not bring them back unseen.
+            yield* subject.kind === "space"
+              ? VaultReachLoss.forgetSpaceAllowance(sql, row.vaultId, subjectId)
+              : VaultReachLoss.forgetUserAllowance(sql, row.vaultId, subjectId);
           }
           yield* audit.record({
             actor: AuditLog.userActor(userId),
@@ -1134,10 +1166,7 @@ const make = Effect.gen(function* () {
       space = found.value.resource;
     }
     if (!can("space.view", space)) return yield* hidden();
-    const ownersPersonal = yield* VaultReach.isOwnersPersonal(spaces, space).pipe(
-      Effect.catch(storage("read the Space")),
-    );
-    const allowed = yield* VaultReach.allowedToSpace(sql, space.id, ownersPersonal).pipe(
+    const allowed = yield* VaultReach.allowedToSpace(sql, space.id).pipe(
       Effect.catch(storage("read the Space's Vaults")),
     );
     return { userId, can, space, allowed };
@@ -1247,6 +1276,14 @@ const make = Effect.gen(function* () {
     yield* sql
       .withTransaction(
         Effect.gen(function* () {
+          // Checked again here: a revoke or the Space's deletion since the read above wins.
+          if (!(yield* spaceTakesVaults(space.id))) {
+            return yield* fail("not-found", "That Space or Project does not exist.");
+          }
+          yield* stillReaching(
+            wanted.map((row) => row.vaultId),
+            space.id,
+          );
           const before = effectiveBefore(yield* VaultReach.chosenDefaults(sql, space.id));
           yield* sql`DELETE FROM space_default_vaults WHERE space_id = ${space.id}`;
           for (const [position, row] of wanted.entries()) {
@@ -1307,6 +1344,18 @@ const make = Effect.gen(function* () {
     yield* sql
       .withTransaction(
         Effect.gen(function* () {
+          if (input.choice !== "inherit") {
+            // Checked again here: the Project may have moved, or the Vault been taken back.
+            const [placed] = yield* sql<{ readonly spaceId: string }>`
+              SELECT ${sql.literal(projectSpaceSql("space_id"))} AS "spaceId"
+              FROM projection_projects
+              WHERE project_id = ${input.projectId} AND deleted_at IS NULL
+            `;
+            if (placed === undefined || placed.spaceId !== space.id) {
+              return yield* fail("not-found", "That Space or Project does not exist.");
+            }
+            yield* stillReaching([input.vaultId], space.id);
+          }
           const current = yield* sql<{ readonly choice: string }>`
             SELECT choice FROM project_vault_choices
             WHERE project_id = ${input.projectId} AND vault_id = ${input.vaultId}

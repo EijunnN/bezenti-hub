@@ -290,8 +290,8 @@ They stay in their organizations; **Turn back on** lets them sign in again and
 resumes the tasks that were paused.
 
 **Remove** is for good and asks you to type their sign-in name. On top of
-disabling, it takes them out of every organization (what they made there stays)
-and freezes their Personal space: it is listed for the Owner as "name (removed)"
+disabling, it takes them out of every organization (what they made there stays),
+takes back every vault you allowed them, and freezes their Personal space: it is listed for the Owner as "name (removed)"
 under **Personal spaces (read only)**, nobody can add to or change it, and the
 Owner can only read it, move its projects to an organization, or delete what is
 in it. Their name stays on what they did. The Owner
@@ -411,7 +411,9 @@ running threads and keeps its scheduled tasks from running. Nothing new starts i
 it, not even from the Owner. The Owner still sees it in the Space selector under
 **Archived**, where **Restore organization** brings it back as it was. Only an
 archived organization can be deleted: **Delete organization** asks you to type its
-name, then deletes its projects, threads, members and invitations for good.
+name, then deletes its projects, threads, members and invitations for good, and
+its own vaults with their secrets. Vaults of the Owner's that it was allowed keep
+their secrets and only lose that organization.
 
 ### Move a project to another Space
 
@@ -423,7 +425,10 @@ space, which the Owner only reads; a removed user's frozen Personal space is the
 exception, and the Owner can move projects out of it. All its threads move with it,
 and who can see it changes at once. Stop its running threads first: the move is
 refused while any of them runs, and says which. In the new Space the project uses
-that Space's vaults and AI accounts.
+that Space's vaults and AI accounts. Before you confirm, the dialog lists the
+vaults its threads stop receiving; the project's own vault choices that the new
+Space is not allowed are dropped, so allowing such a vault there later does not
+bring it back by itself.
 
 ### Join a machine to your Hub
 
