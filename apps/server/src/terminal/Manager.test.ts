@@ -1088,6 +1088,47 @@ it.layer(
     }),
   );
 
+  it.effect("a reconcile keeps an exited shell whose facts still hold, with its history", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter } = yield* createManager(5);
+      const exited = yield* Deferred.make<void>();
+      const unsubscribeEvents = yield* manager.subscribe((event) =>
+        event.type === "exited"
+          ? Deferred.succeed(exited, undefined).pipe(Effect.asVoid)
+          : Effect.void,
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribeEvents));
+      yield* manager.open(openInput(), {
+        secrets: undefined,
+        facts: { spaceId: "space-acme", userId: "grace" },
+      });
+      ptyAdapter.processes[0]?.emitData("build output\n");
+      ptyAdapter.processes[0]?.emitExit({ exitCode: 0, signal: 0 });
+      yield* Deferred.await(exited);
+
+      // Still Acme's Thread: the exited shell and its scrollback stay.
+      const kept = yield* manager.reconcile({
+        threads: [{ threadId: "thread-1", spaceId: "space-acme" }],
+        removedUserIds: [],
+      });
+      expect(kept).toBe(0);
+      const events = yield* Ref.make<ReadonlyArray<TerminalAttachStreamEvent>>([]);
+      const unsubscribe = yield* manager.attachStream({ ...openInput(), resume: true }, (event) =>
+        Ref.update(events, (all) => [...all, event]),
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(unsubscribe));
+      const [first] = yield* Ref.get(events);
+      expect(first?.type === "snapshot" ? first.snapshot.history : null).toContain("build output");
+
+      // Moved to Globex: it goes, with its history.
+      const closed = yield* manager.reconcile({
+        threads: [{ threadId: "thread-1", spaceId: "space-globex" }],
+        removedUserIds: [],
+      });
+      expect(closed).toBe(1);
+    }),
+  );
+
   it.effect("caps incrementally appended history without losing partial or empty lines", () =>
     Effect.gen(function* () {
       const { manager, ptyAdapter } = yield* createManager(3);

@@ -55,6 +55,7 @@ import * as Sandboxes from "../sandboxes/Sandboxes.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import * as ProjectCheckouts from "../environment/ProjectCheckouts.ts";
 import * as ThreadWorkspace from "../environment/ThreadWorkspace.ts";
+import * as ProjectMoveHooks from "../project/ProjectMoveHooks.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as EffectiveVaults from "../vaults/EffectiveVaults.ts";
@@ -1026,6 +1027,61 @@ describe("Hub con Environments: a moved Project's Vaults", () => {
           assert.deepEqual(namesIn(opened?.variables), ["GLOBEX_TOKEN"]);
         }
       }).pipe(Effect.scoped),
+  );
+
+  it.live("a shell admitted in Acme is refused as soon as the move commits (ticket 07)", () =>
+    Effect.gen(function* () {
+      const loaded = yield* loadFixture("simple");
+      const hub = yield* makeHub();
+      const owner = yield* ownerIdOf(hub);
+      const acme = yield* createOrganization(hub, "Acme");
+      const globex = yield* createOrganization(hub, "Globex");
+      // The Owner's laptop serves both Spaces: the Thread stays on it through the move.
+      const laptop = yield* hub.join({ name: "Laptop", adapters: loaded.adapters });
+      const [create] = loaded.materialized.commands;
+      if (create?.type !== "thread.create") return yield* Effect.die("no thread.create");
+      const { projectId, threadId } = create;
+      const { workspaceRoot } = yield* seedProject(hub.server, {
+        projectId,
+        title: "Acme web",
+        defaultModelSelection: loaded.variant.modelSelection,
+        spaceId: acme,
+      });
+      yield* dispatchAs(hub, owner, { ...create, activeEnvironmentId: laptop.environmentId });
+      const executor = yield* hub
+        .service(EnvironmentExecutor.EnvironmentExecutorRegistry)
+        .get(laptop.environmentId)
+        .pipe(Effect.orDie);
+      const checkout = Option.getOrThrow(yield* executor.workspace.paths.checkout(projectId));
+      yield* Effect.promise(() => NodeFSP.mkdir(checkout, { recursive: true }));
+      const workspace = (yield* ThreadWorkspace.make.pipe(
+        Effect.provide(Layer.mergeAll(ProjectionStore.layer, ProjectCheckouts.layer)),
+        Effect.provideContext(hub.server.services as never),
+      )) as ThreadWorkspace.ThreadWorkspace["Service"];
+      const opened = yield* workspace
+        .terminalOpen({ threadId, terminalId: "term-1", cwd: workspaceRoot }, { userId: owner })
+        .pipe(Effect.orDie);
+      assert.equal(opened.facts?.spaceId, acme);
+
+      // Typing into it while the move still runs (after its commit, before it ends): refused.
+      const hooks = hub.service(ProjectMoveHooks.ProjectMoveHooks);
+      const work = yield* hooks.current;
+      assert.isDefined(work);
+      const typed: Array<string> = [];
+      yield* hooks.register({
+        ...work,
+        drainReleases: (threadIds) =>
+          workspace
+            .terminalWrite({ threadId, terminalId: "term-1", data: "ls\r" }, { userId: owner })
+            .pipe(
+              Effect.match({ onFailure: (error) => error._tag, onSuccess: () => "typed" }),
+              Effect.tap((outcome) => Effect.sync(() => typed.push(outcome))),
+              Effect.andThen(work.drainReleases(threadIds)),
+            ),
+      });
+      assert.equal((yield* moveProject(hub, projectId, globex)).status, 200);
+      assert.deepEqual(typed, ["TerminalEnvironmentUnavailableError"]);
+    }).pipe(Effect.scoped),
   );
 
   it.live("a plan within the same Space loses no Vault", () =>
