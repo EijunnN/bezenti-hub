@@ -451,6 +451,13 @@ words. A change request's title, body or comment shown masked is read-only too (
 read masked («Holds secrets; copy it in a terminal.»). Nothing is ever written back from masked
 text.
 
+**No unmasked reads to clients (decision R2).** A file read or search with no Thread is masked
+for its reader like any other. The client relays "copy ignored files to another machine" (the two
+servers never talk), so a server-side copy would be a new Hub-to-machine operation; instead the
+copy skips any file read with `masked: true` and says so, and the target's `writeFile` refuses to
+write over a file that holds the writer's values. No unmasked text reaches a client, and no value
+is overwritten by `[NAME]`.
+
 **Where it applies.** The full inventory is `vaults/MaskedPaths.ts`: every WS method, HTTP
 endpoint, raw route, MCP tool (as `DoorRules` lists them) and executor operation, each by name,
 with no wildcard. `MaskedPaths.test.ts` fails for a door without a rule or a rule without a door,

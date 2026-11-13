@@ -14,6 +14,7 @@ import { create } from "zustand";
 
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { suggestAppAccessForRemote } from "../components/sourceControlAppAccessToast";
+import { fileCopyRefusal } from "./fileCopyRefusal";
 import { environmentProjectClonesAtom, silenceProjectCloneToasts } from "../state/projectClones";
 import { projectEnvironment } from "../state/projects";
 import { sourceControlEnvironment } from "../state/sourceControl";
@@ -115,11 +116,8 @@ export async function addProjectToMachine(input: AddProjectToMachineInput): Prom
         { label: "Read file to copy", reportFailure: false, refresh: true },
       );
       if (result._tag === "Failure") return { relativePath, error: failureMessage(result) };
-      if (result.value.truncated) return { relativePath, error: "Too large to copy." };
-      // Spec 5: read with secrets shown as [NAME]; copied, it would write [NAME] in their place.
-      if (result.value.masked === true) {
-        return { relativePath, error: "Holds secrets; copy it in a terminal." };
-      }
+      const refusal = fileCopyRefusal(result.value);
+      if (refusal !== null) return { relativePath, error: refusal };
       return { relativePath, contents: result.value.contents };
     }),
   );
