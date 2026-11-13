@@ -386,7 +386,12 @@ import {
   ScheduledTaskUpsertInput,
   ScheduledTaskMutationResult,
 } from "./scheduledTask.ts";
-import { SecretRequestAnswerInput, SecretRequestError } from "./secretRequest.ts";
+import {
+  SecretRequestAnswerInput,
+  SecretRequestError,
+  SecretRequestVaultTargets,
+  SecretRequestVaultTargetsInput,
+} from "./secretRequest.ts";
 import {
   ProjectCloneActionInput,
   ProjectCloneActionResult,
@@ -574,6 +579,7 @@ export const WS_METHODS = {
   scheduledTasksRunNow: "scheduledTasks.runNow",
   scheduledTasksRotateWebhookToken: "scheduledTasks.rotateWebhookToken",
   secretsAnswerRequest: "secrets.answerRequest",
+  secretsVaultTargets: "secrets.vaultTargets",
   // Vaults: names and metadata only. Values go in with `put` and out only by HTTP `vaults.reveal`.
   vaultsList: "vaults.list",
   vaultsCreate: "vaults.create",
@@ -2073,6 +2079,11 @@ const WsSecretsAnswerRequestRpc = Rpc.make(WS_METHODS.secretsAnswerRequest, {
   payload: SecretRequestAnswerInput,
   error: Schema.Union([SecretRequestError, EnvironmentAuthorizationError]),
 });
+const WsSecretsVaultTargetsRpc = Rpc.make(WS_METHODS.secretsVaultTargets, {
+  payload: SecretRequestVaultTargetsInput,
+  success: SecretRequestVaultTargets,
+  error: Schema.Union([SecretRequestError, EnvironmentAuthorizationError]),
+});
 
 const VaultRpcError = Schema.Union([VaultError, EnvironmentAuthorizationError]);
 const WsVaultsListRpc = Rpc.make(WS_METHODS.vaultsList, {
@@ -2247,6 +2258,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsScheduledTasksRunNowRpc,
   WsScheduledTasksRotateWebhookTokenRpc,
   WsSecretsAnswerRequestRpc,
+  WsSecretsVaultTargetsRpc,
   WsVaultsListRpc,
   WsVaultsCreateRpc,
   WsVaultsUpdateRpc,

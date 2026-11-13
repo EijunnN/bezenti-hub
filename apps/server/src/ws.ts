@@ -2369,6 +2369,11 @@ export const layerWsRpc = (
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
             Effect.andThen(secretRequests.answer(input)),
           ),
+        // The Vaults «Also save to Vault» offers: Vaults.saveTargets for whoever may answer.
+        [WS_METHODS.secretsVaultTargets]: (input) =>
+          Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
+            Effect.andThen(secretRequests.vaultTargets(input)),
+          ),
         // Vaults: each decided by Vaults (AccessPolicy `vault.*`) for the connection's User.
         // None returns a value; a value is revealed only over HTTP (`vaults.reveal`).
         [WS_METHODS.vaultsList]: (_input) => vaults.list,

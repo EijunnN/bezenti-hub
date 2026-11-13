@@ -82,6 +82,20 @@ export class SecretDelivery extends Context.Service<
      * value nor effective set is read). Used to give such a Thread a provider process of its own.
      */
     readonly mayReceiveSecrets: (threadId: ThreadId) => Effect.Effect<boolean, VaultError>;
+    /**
+     * `list_secret_names` (spec 5 ticket 06): the names the Thread's turns receive, as `planTurn`
+     * picks them (its owner's set, dangerous names only as the Owner set them), with each one's
+     * description and winning Vault. Never a value or an id. Empty without an owner, for a Thread
+     * that is gone, or for an owner who no longer works in its Space.
+     */
+    readonly turnNames: (threadId: ThreadId) => Effect.Effect<
+      ReadonlyArray<{
+        readonly name: string;
+        readonly description: string | null;
+        readonly vault: string;
+      }>,
+      VaultError
+    >;
   }
 >()("t3/vaults/SecretDelivery") {}
 
@@ -204,6 +218,25 @@ const make = Effect.gen(function* () {
     });
   });
 
+  const turnNames = Effect.fn("SecretDelivery.turnNames")(function* (threadId: ThreadId) {
+    const owner = yield* turnOwner(threadId);
+    if (Option.isNone(owner)) return [];
+    const set = yield* effective.forThread({ threadId, actingUserId: owner.value }).pipe(
+      Effect.asSome,
+      Effect.catchIf(
+        (error) => error.reason === "not-found" || error.reason === "forbidden",
+        () => Effect.succeedNone,
+      ),
+    );
+    if (Option.isNone(set)) return [];
+    const trusted = yield* ownerSet(
+      set.value.variables.filter((v) => v.dangerous).map((v) => v.valueId),
+    );
+    return set.value.variables
+      .filter((v) => !v.dangerous || trusted.has(v.valueId))
+      .map((v) => ({ name: v.name, description: v.description, vault: v.vaultName }));
+  });
+
   const resolve = Effect.fn("SecretDelivery.resolve")(function* (planned: SecretPlan) {
     if (planned.variables.length === 0) {
       return { fingerprint: NO_SECRETS_FINGERPRINT, variables: [] } satisfies SecretEnv;
@@ -266,7 +299,14 @@ const make = Effect.gen(function* () {
     return rows[0]?.found === 1;
   });
 
-  return SecretDelivery.of({ turnOwner, plan, planTurn, resolve, mayReceiveSecrets });
+  return SecretDelivery.of({
+    turnOwner,
+    plan,
+    planTurn,
+    resolve,
+    mayReceiveSecrets,
+    turnNames,
+  });
 });
 
 export const layer = Layer.effect(SecretDelivery, make);

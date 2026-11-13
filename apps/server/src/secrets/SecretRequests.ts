@@ -8,7 +8,9 @@ import {
   SecretRequestError,
   type ProjectId,
   type SecretRequestAnswerInput,
+  type SecretRequestVaultTargets,
   type ThreadId,
+  type VaultError,
 } from "@t3tools/contracts";
 
 import * as Clock from "effect/Clock";
@@ -19,6 +21,7 @@ import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Path from "effect/Path";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
@@ -30,6 +33,7 @@ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementSe
 import { writeAtomically } from "../auth/atomicFile.ts";
 import { SEALED_EXTENSION } from "../auth/MasterKeyFile.ts";
 import * as SecretCipher from "../auth/SecretCipher.ts";
+import * as Vaults from "../vaults/Vaults.ts";
 import { resolveSecretFilesDirectory } from "./SecretFilesDirectory.ts";
 
 const SECRET_REF_PREFIX = "secret-ref:";
@@ -50,6 +54,13 @@ export class SecretRequests extends Context.Service<
   SecretRequests,
   {
     readonly answer: (input: SecretRequestAnswerInput) => Effect.Effect<void, SecretRequestError>;
+    /**
+     * `secrets.vaultTargets`: the Vaults the caller, who may answer the Thread's cards, may also
+     * save an answer in (Vaults.saveTargets). Empty for whoever may not edit any of them.
+     */
+    readonly vaultTargets: (input: {
+      readonly threadId: ThreadId;
+    }) => Effect.Effect<SecretRequestVaultTargets, SecretRequestError>;
     readonly savedRef: (input: {
       readonly threadId: ThreadId;
       readonly turnItemId: string;
@@ -109,22 +120,63 @@ const make = Effect.gen(function* () {
       Effect.map((tag) => SecretRef.make(`${SECRET_REF_PREFIX}${Hex.encode(tag).slice(0, 32)}`)),
     );
 
+  // Vaults live on the Hub; without them (a joined machine, a narrow test) nothing is a target.
+  const vaults = yield* Effect.serviceOption(Vaults.Vaults);
+  const mayAnswer = (threadId: ThreadId) =>
+    threadManagement.authorizeThread(threadId, "thread.continue").pipe(
+      Effect.mapError(
+        (cause) =>
+          new SecretRequestError({
+            reason: cause._tag === "SpaceAccessDeniedError" ? "not_permitted" : "not_found",
+            cause,
+          }),
+      ),
+    );
+  const targetsOf = (threadId: ThreadId) =>
+    Option.isNone(vaults)
+      ? Effect.succeed([])
+      : vaults.value
+          .saveTargets({ threadId })
+          .pipe(
+            Effect.mapError(
+              (cause) => new SecretRequestError({ reason: "vault_save_failed", cause }),
+            ),
+          );
+
+  const vaultTargets: SecretRequests["Service"]["vaultTargets"] = Effect.fn(
+    "SecretRequests.vaultTargets",
+  )(function* (input) {
+    yield* mayAnswer(input.threadId);
+    const targets = yield* targetsOf(input.threadId);
+    return { vaults: targets.map((vault) => ({ id: vault.id, name: vault.name })) };
+  });
+
+  const vaultFailure = (cause: VaultError) =>
+    new SecretRequestError({
+      reason:
+        cause.reason === "duplicate-name"
+          ? "vault_name_taken"
+          : cause.reason === "invalid-name" ||
+              cause.reason === "reserved-name" ||
+              cause.reason === "dangerous-name" ||
+              cause.reason === "confirm-dangerous"
+            ? "vault_name_invalid"
+            : cause.reason === "forbidden" || cause.reason === "not-found"
+              ? "vault_not_permitted"
+              : "vault_save_failed",
+      cause,
+    });
+
   const answer: SecretRequests["Service"]["answer"] = Effect.fn("SecretRequests.answer")(
     function* (input) {
       yield* Effect.annotateCurrentSpan({
         "orchestration_v2.thread_id": input.threadId,
         "secret_request.answer": input.answer.type,
+        "secret_request.save_to_vault":
+          input.answer.type === "save" && input.answer.saveToVault !== undefined,
       });
       // Before anything is stored: a refused answer must not write, or clear, the Thread's secret.
-      yield* threadManagement.authorizeThread(input.threadId, "thread.continue").pipe(
-        Effect.mapError(
-          (cause) =>
-            new SecretRequestError({
-              reason: cause._tag === "SpaceAccessDeniedError" ? "not_permitted" : "not_found",
-              cause,
-            }),
-        ),
-      );
+      yield* mayAnswer(input.threadId);
       const records = yield* threadManagement
         .getThreadRecords(input.threadId, ["runs", "turnItems"], {
           turnItemTypes: ["secret_request"],
@@ -141,6 +193,24 @@ const make = Effect.gen(function* () {
       const run = records.runs.find((candidate) => candidate.id === item.runId);
       if (run === undefined || ThreadManagementService.isTerminalRunStatus(run.status)) {
         return yield* new SecretRequestError({ reason: "agent_stopped" });
+      }
+      // «Also save to Vault»: only a Vault the one rule offers for this Thread, then as the caller
+      // through Vaults (policy, names, audit `secret.edit` again). Before the one-use ref: a refused
+      // save stores nothing and leaves the card pending.
+      if (input.answer.type === "save" && input.answer.saveToVault !== undefined) {
+        const target = input.answer.saveToVault;
+        const targets = yield* targetsOf(input.threadId);
+        if (Option.isNone(vaults) || !targets.some((vault) => vault.id === target.vaultId)) {
+          return yield* new SecretRequestError({ reason: "vault_not_permitted" });
+        }
+        yield* vaults.value
+          .putEntry({
+            vaultId: target.vaultId,
+            name: target.name,
+            description: item.label,
+            value: Redacted.make(input.answer.secret),
+          })
+          .pipe(Effect.mapError(vaultFailure));
       }
       // Create before recording so racing answers cannot overwrite values or show saved before storage.
       // Existing values on pending cards finish earlier saves whose recording failed.
@@ -544,16 +614,14 @@ const make = Effect.gen(function* () {
       );
       if (kept) sealed += 1;
       // Sealed or not, the clear copy never stays.
-      yield* fileSystem
-        .remove(path.join(sealedDir, name), { recursive: true })
-        .pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("Could not remove a secret file left in clear", {
-              file: name,
-              cause,
-            }),
-          ),
-        );
+      yield* fileSystem.remove(path.join(sealedDir, name), { recursive: true }).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Could not remove a secret file left in clear", {
+            file: name,
+            cause,
+          }),
+        ),
+      );
     }
     yield* Effect.annotateCurrentSpan({ "secret_request.legacy_files_sealed": sealed });
   }).pipe(Effect.withSpan("SecretRequests.sealLegacyFiles"));
@@ -567,7 +635,7 @@ const make = Effect.gen(function* () {
     Effect.forkScoped,
   );
 
-  return SecretRequests.of({ answer, savedRef, consume, saveToFile, savePasted });
+  return SecretRequests.of({ answer, vaultTargets, savedRef, consume, saveToFile, savePasted });
 });
 
 export const layer = Layer.effect(SecretRequests, make);

@@ -133,6 +133,13 @@ const handlers = {
       return yield* service.requestSecret(scope, input);
     }),
   ),
+  list_secret_names: McpToolAccess.readsAsCaller(() =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      return yield* service.listSecretNames(scope);
+    }),
+  ),
   create_threads: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;

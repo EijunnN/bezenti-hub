@@ -89,6 +89,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.scheduledTasksListWebhookDeliveries]: "scheduledTasks",
   [WS_METHODS.scheduledTasksGetWebhookDelivery]: "scheduledTasks",
   [WS_METHODS.secretsAnswerRequest]: "secrets",
+  [WS_METHODS.secretsVaultTargets]: "secrets",
   [WS_METHODS.vaultsList]: "vaults",
   [WS_METHODS.vaultsCreate]: "vaults",
   [WS_METHODS.vaultsUpdate]: "vaults",

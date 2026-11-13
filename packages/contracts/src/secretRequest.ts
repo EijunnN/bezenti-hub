@@ -1,17 +1,40 @@
 import * as Schema from "effect/Schema";
 
 import { ThreadId, TrimmedNonEmptyString, TurnItemId } from "./baseSchemas.ts";
+import { VaultId } from "./vaults.ts";
+
+/**
+ * «Also save to Vault» (spec 5 ticket 06): the answer is also kept as a Vault entry under `name`.
+ * Only a Vault of `secrets.vaultTargets` for the Thread is accepted; the Hub decides, never this.
+ */
+export const SecretRequestSaveToVault = Schema.Struct({
+  vaultId: VaultId,
+  name: Schema.String.check(Schema.isMaxLength(128)),
+});
+export type SecretRequestSaveToVault = typeof SecretRequestSaveToVault.Type;
 
 /** Server stores the value under a one-use SecretRef; the thread learns only status. */
 export const SecretRequestAnswerInput = Schema.Struct({
   threadId: ThreadId,
   turnItemId: TurnItemId,
   answer: Schema.Union([
-    Schema.Struct({ type: Schema.Literal("save"), secret: TrimmedNonEmptyString }),
+    Schema.Struct({
+      type: Schema.Literal("save"),
+      secret: TrimmedNonEmptyString,
+      saveToVault: Schema.optionalKey(SecretRequestSaveToVault),
+    }),
     Schema.Struct({ type: Schema.Literal("decline") }),
   ]),
 });
 export type SecretRequestAnswerInput = typeof SecretRequestAnswerInput.Type;
+
+/** `secrets.vaultTargets`: the Vaults an answer to this Thread's card may also be saved in. */
+export const SecretRequestVaultTargetsInput = Schema.Struct({ threadId: ThreadId });
+export type SecretRequestVaultTargetsInput = typeof SecretRequestVaultTargetsInput.Type;
+export const SecretRequestVaultTargets = Schema.Struct({
+  vaults: Schema.Array(Schema.Struct({ id: VaultId, name: Schema.String })),
+});
+export type SecretRequestVaultTargets = typeof SecretRequestVaultTargets.Type;
 
 /** What the agent reads when its card ends without a secret. */
 export const SECRET_REQUEST_UNSAVED_NOTE = {
@@ -41,6 +64,11 @@ const SECRET_REQUEST_FAILURE_MESSAGES = {
     'This Hub keeps no secret on its disk and has no folder in memory to hand this one over as a file. Ask again with request_secret and delivery: "secretRef".',
   not_a_file_request:
     'The user did not save this secret for shell use. Ask again with request_secret and delivery: "file".',
+  vault_not_permitted: "You can't save secrets in that Vault from this Thread.",
+  vault_name_invalid:
+    "That name can't be saved here: use A-Z, 0-9 and _, and not a name the Hub reserves or only the Owner sets in Settings → Vaults.",
+  vault_name_taken: "That Vault already has a secret with this name.",
+  vault_save_failed: "Could not save the secret in the Vault.",
 } as const;
 
 export const SecretRequestFailureReason = Schema.Literals(

@@ -84,6 +84,7 @@ export const WS_DOOR_RULES: Record<string, DoorRule> = {
   "scheduledTasks.runNow": none("schedules and the webhooks that start them"),
   "scheduledTasks.rotateWebhookToken": none("schedules and the webhooks that start them"),
   "secrets.answerRequest": none("an answer a User types"),
+  "secrets.vaultTargets": none("Vault names the answering User may save in"),
   "vaults.list": none("Vaults and secret names; values only through HTTP vaults.reveal"),
   "vaults.create": none("Vaults and secret names; values only through HTTP vaults.reveal"),
   "vaults.update": none("Vaults and secret names; values only through HTTP vaults.reveal"),
@@ -488,6 +489,7 @@ export const MCP_DOOR_RULES: Record<string, DoorRule> = {
   preview_status: none("the calling agent's own work; what it says next is an event (masked)"),
   preview_wait_for: none("the calling agent's own work; what it says next is an event (masked)"),
   read_pull_request_guide: masked("vaults/maskPullRequests.ts"),
+  list_secret_names: none("secret names, descriptions and Vault names; never a value"),
   request_secret: none("the calling agent's own work; what it says next is an event (masked)"),
   run_scheduled_task_now: none(
     "the calling agent's own work; what it says next is an event (masked)",
