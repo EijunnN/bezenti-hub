@@ -4,6 +4,8 @@
  * and who may read what: the Owner everything, an Admin their Organization, a Member only theirs.
  */
 // @effect-diagnostics nodeBuiltinImport:off globalFetchInEffect:off globalTimers:off globalTimersInEffect:off - a client on the real port, aborting a stream.
+import * as NodeFS from "node:fs";
+
 import { assert, it } from "@effect/vitest";
 import {
   type AiUsageSummary,
@@ -486,9 +488,21 @@ live("the retention and sweep schedule come from the layer", () =>
   }),
 );
 
-/** A request the client abandons after `ms`, while the upstream still holds its answer. */
-const leaveAfter = (setup: Hub, key: string, ms: number) =>
+/** Resolves when the fake upstream has been asked (it logs the request on arrival): an event. */
+const upstreamAsked = (setup: Hub) =>
+  new Promise<void>((resolve) => {
+    const watcher = NodeFS.watch(setup.memory, (_event, name) => {
+      if (name === "fake-ai-requests.jsonl") {
+        watcher.close();
+        resolve();
+      }
+    });
+  });
+
+/** A request the upstream holds unanswered, once the upstream has it; `leave` abandons it. */
+const holdOne = (setup: Hub, key: string) =>
   Effect.promise(async () => {
+    const asked = upstreamAsked(setup);
     const controller = new AbortController();
     const pending = fetch(`http://127.0.0.1:${setup.port}/api/ai/anthropic/v1/messages`, {
       method: "POST",
@@ -496,8 +510,13 @@ const leaveAfter = (setup: Hub, key: string, ms: number) =>
       body: JSON.stringify(messages()),
       signal: controller.signal,
     }).catch(() => undefined);
-    setTimeout(() => controller.abort(), ms);
-    await pending;
+    await asked;
+    return {
+      leave: async () => {
+        controller.abort();
+        await pending;
+      },
+    };
   });
 
 live("a request cancelled before any answer is still one counted request", () =>
@@ -506,7 +525,8 @@ live("a request cancelled before any answer is still one counted request", () =>
     yield* acmeSetup(setup);
     const { key } = yield* setup.thread(setup.people.member, setup.acmeId);
     setup.flag("fake-hang");
-    yield* leaveAfter(setup, key, 400);
+    const held = yield* holdOne(setup, key);
+    yield* Effect.promise(() => held.leave());
     yield* stored(setup, 1);
     setup.flag("fake-hang", false);
     const rows = yield* setup.server.sql<{
@@ -531,7 +551,7 @@ live("refusals after authentication are counted as failed requests with no accou
     const rows = yield* setup.server.sql<{
       readonly status: number;
       readonly accountId: string | null;
-    }>`SELECT status, account_id AS "accountId" FROM ai_usage ORDER BY at, usage_id`;
+    }>`SELECT status, account_id AS "accountId" FROM ai_usage ORDER BY status`;
     assert.deepEqual(
       rows.map((row) => [row.status, row.accountId]),
       [
@@ -578,6 +598,10 @@ live("a Space the viewer left shows no name, not even a new one", () =>
     const view = yield* summaryAs(setup, setup.people.member);
     assert.equal(view.totals.requests, 1);
     assert.notInclude(JSON.stringify(view.labels.spaces), "Acme");
+    assert.deepEqual(
+      view.labels.spaces.map((space) => space.name),
+      [null],
+    );
   }),
 );
 
@@ -607,5 +631,29 @@ live("the sweep deletes old rows in batches", () =>
         1, 0 FROM n`;
     assert.equal(yield* setup.usage.sweep, 12000);
     assert.equal(yield* setup.usage.sweep, 0);
+  }),
+);
+
+live("limit refusals only add to the daily summary, never a row each", () =>
+  Effect.gen(function* () {
+    const setup = yield* hubWith({ perKey: 1 });
+    yield* acmeSetup(setup);
+    const { key } = yield* setup.thread(setup.people.member, setup.acmeId);
+    setup.flag("fake-hang");
+    const held = yield* holdOne(setup, key);
+    const refused = yield* call(setup, "/api/ai/anthropic/v1/messages", {
+      key,
+      body: messages(),
+    });
+    assert.equal(refused.status, 429);
+    yield* Effect.promise(() => held.leave());
+    // The refusal's flush and the abandoned request's row.
+    yield* stored(setup, 2);
+    setup.flag("fake-hang", false);
+    const rows = yield* setup.server.sql<{ readonly status: number }>`SELECT status FROM ai_usage`;
+    assert.deepEqual(rows, [{ status: 499 }]);
+    const owner = yield* summaryAs(setup, setup.ownerId);
+    assert.equal(owner.totals.requests, 2);
+    assert.equal(owner.totals.failedRequests, 2);
   }),
 );

@@ -4,10 +4,12 @@
  * on 429 within one provider, stream the answer through the tap and record it. docs: ai-gateway.md.
  */
 import type { AiAccountId } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Clock from "effect/Clock";
@@ -348,6 +350,7 @@ const make = Effect.fn("AiGatewayProxy.make")(function* (limits: AiGatewayProxyL
           readonly status: number;
           readonly failovers: number;
           readonly usage: AiGatewayActivity.GatewayRequestRecord["usage"];
+          readonly shed?: true;
         }) {
           if (recorded) return;
           recorded = true;
@@ -368,9 +371,15 @@ const make = Effect.fn("AiGatewayProxy.make")(function* (limits: AiGatewayProxyL
             durationMs: DateTime.toEpochMillis(endedAt) - DateTime.toEpochMillis(startedAt),
             failovers: input.failovers,
             usage: input.usage,
+            ...(input.shed === true ? { shed: true as const } : {}),
           };
           // Method, route, account, model, status and tokens: never a key, a header or a body.
-          yield* Effect.logInfo("AI gateway request").pipe(
+          // A refusal is already logged by the route: debug here, so it is not logged twice.
+          yield* (
+            input.shed === true || (input.status >= 400 && input.account === null)
+              ? Effect.logDebug
+              : Effect.logInfo
+          )("AI gateway request").pipe(
             Effect.annotateLogs({
               method: request.method,
               route: route.route,
@@ -401,15 +410,27 @@ const make = Effect.fn("AiGatewayProxy.make")(function* (limits: AiGatewayProxyL
           ),
       );
 
-      /** A refusal after authentication is still a request: counted as failed, no tokens. */
+      /**
+       * A refusal after authentication is still a request: counted as failed, no tokens. A limit
+       * (429) is shed load: it only adds to the daily summary, so a flood cannot fill the log.
+       */
       const refuseRecorded = (status: number, message: string) =>
-        record({ account: lastAccount, status, failovers, usage: null }).pipe(
-          Effect.as(refuse(shape, status, message)),
-        );
-      // A request cut off before it was answered (the client left, the hold timed out) is counted
-      // too, as 499, unless an answer already recorded it.
-      yield* Effect.addFinalizer(() =>
-        record({ account: lastAccount, status: 499, failovers, usage: null }),
+        record({
+          account: lastAccount,
+          status,
+          failovers,
+          usage: null,
+          ...(status === 429 ? { shed: true as const } : {}),
+        }).pipe(Effect.as(refuse(shape, status, message)));
+      // A request that never got an answer is counted too, unless an answer recorded it: 499 when
+      // the client left, 502 when the Hub itself failed (the client is answered 502).
+      yield* Effect.addFinalizer((exit) =>
+        record({
+          account: lastAccount,
+          status: Exit.isFailure(exit) && Cause.hasDies(exit.cause) ? 502 : 499,
+          failovers,
+          usage: null,
+        }),
       );
 
       const endpoint = yield* gateway.endpoint;

@@ -1,8 +1,8 @@
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type { ThreadId } from "@t3tools/contracts";
 import { useState } from "react";
 
 import { aiGatewayEnvironment } from "../../state/aiGateway";
-import { usePrimaryEnvironmentId } from "../../state/environments";
+import { useHubEnvironmentId } from "../../state/hubEnvironment";
 import { useEnvironmentQuery } from "../../state/query";
 import { dayBefore, formatTokens, usageNotes } from "../settings/aiUsageView";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
@@ -15,14 +15,11 @@ const THREAD_USAGE_DAYS = 90;
  * only what the session may see (the Thread's own User, an Admin of its Space, the Owner); a Thread
  * that never went through the gateway shows nothing.
  */
-export function ThreadAiUsagePanel(props: {
-  readonly environmentId: EnvironmentId;
-  readonly threadId: ThreadId;
-}) {
+export function ThreadAiUsagePanel(props: { readonly threadId: ThreadId }) {
   const [today] = useState(() => new Date());
   // The usage tables live on the Hub, which is the primary environment: a Thread running on a
   // joined machine is still counted there.
-  const hubId = usePrimaryEnvironmentId();
+  const hubId = useHubEnvironmentId();
   const query = useEnvironmentQuery(
     hubId === null
       ? null

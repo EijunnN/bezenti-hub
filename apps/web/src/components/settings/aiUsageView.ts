@@ -64,7 +64,12 @@ export function groupUsage(summary: AiUsageSummary, by: UsageGrouping): Readonly
         : by === "user"
           ? [row.userId, users.get(row.userId) ?? "Removed User"]
           : by === "space"
-            ? [row.spaceId, spaces.get(row.spaceId) ?? "Removed Space"]
+            ? [
+                row.spaceId,
+                spaces.has(row.spaceId)
+                  ? (spaces.get(row.spaceId) ?? "A Space you no longer see")
+                  : "Removed Space",
+              ]
             : [row.accountId ?? "none", accountLabel(row.accountId, accounts)];
     const previous = groups.get(key);
     groups.set(key, {

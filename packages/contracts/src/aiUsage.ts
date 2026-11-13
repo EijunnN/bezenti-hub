@@ -53,7 +53,8 @@ export type AiUsageRow = typeof AiUsageRow.Type;
 /** Names for the ids in the rows (a name the session may not see is left out). */
 export const AiUsageLabels = Schema.Struct({
   users: Schema.Array(Schema.Struct({ id: UserId, name: Schema.String })),
-  spaces: Schema.Array(Schema.Struct({ id: SpaceId, name: Schema.String })),
+  /** Null for a Space the viewer can no longer see: its rows stay, its name does not. */
+  spaces: Schema.Array(Schema.Struct({ id: SpaceId, name: Schema.NullOr(Schema.String) })),
   accounts: Schema.Array(
     Schema.Struct({
       id: AiAccountId,

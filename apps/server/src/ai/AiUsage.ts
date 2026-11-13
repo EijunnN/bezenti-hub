@@ -187,7 +187,7 @@ const make = Effect.fn("AiUsage.make")(function* (options: AiUsageOptions) {
         .withTransaction(Effect.forEach(batch, insert, { discard: true }))
         .pipe(
           Effect.as(true),
-          Effect.orElseSucceed(() => false),
+          Effect.catchCause(() => Effect.succeed(false)),
         );
       if (together) {
         for (const _ of batch) yield* PubSub.publish(outcomes, { written: true });
@@ -196,7 +196,7 @@ const make = Effect.fn("AiUsage.make")(function* (options: AiUsageOptions) {
       for (const request of batch) {
         const written = yield* sql
           .withTransaction(insert(request))
-          .pipe(Effect.as(true), Effect.catch(logLost));
+          .pipe(Effect.as(true), Effect.catchCause(logLost));
         yield* PubSub.publish(outcomes, { written });
       }
     });
@@ -209,57 +209,118 @@ const make = Effect.fn("AiUsage.make")(function* (options: AiUsageOptions) {
         { discard: true },
       );
 
-    // Subscribed before this returns: no request that ends after the layer is up is missed. The
-    // feeder only queues (bounded: the newest beyond the bound are dropped and logged); the
-    // writer is a fiber of its own taking what waited as one batch, off every response's path,
-    // and what is still queued when the layer closes is written then.
-    const pending = yield* Queue.dropping<AiGatewayActivity.GatewayRequestRecord>(MAX_PENDING);
-    const requests = yield* activity.subscribeRequests;
-    yield* Stream.runForEach(requests, (request) =>
-      // Counting tokens is not using a model: it would only add requests without tokens.
-      request.route.endsWith("/count_tokens")
-        ? Effect.void
-        : Queue.offer(pending, request).pipe(
-            Effect.flatMap((queued) =>
-              queued
-                ? Effect.void
-                : Effect.logWarning("AiUsage: the write queue is full; a request was not counted"),
+    // Subscribed before this returns, so nothing is missed. `null` marks shed (limit-refused)
+    // requests waiting in `shedCounts`: one marker at a time, one upsert per key and day.
+    const pending = yield* Queue.dropping<AiGatewayActivity.GatewayRequestRecord | null>(
+      MAX_PENDING,
+    );
+    const shedCounts = new Map<
+      string,
+      { day: string; userId: string; spaceId: string; count: number }
+    >();
+    let shedMarked = false;
+    const flushShed = Effect.suspend(() => {
+      const taken = [...shedCounts.values()];
+      shedCounts.clear();
+      shedMarked = false;
+      if (taken.length === 0) return Effect.void;
+      return sql
+        .withTransaction(
+          Effect.forEach(
+            taken,
+            (entry) => sql`
+              INSERT INTO ai_usage_daily (day, user_id, space_id, account_id, model, requests,
+                failed_requests)
+              VALUES (${entry.day}, ${entry.userId}, ${entry.spaceId}, '', '', ${entry.count},
+                ${entry.count})
+              ON CONFLICT (day, user_id, space_id, account_id, model) DO UPDATE SET
+                requests = requests + excluded.requests,
+                failed_requests = failed_requests + excluded.failed_requests
+            `,
+            { discard: true },
+          ),
+        )
+        .pipe(
+          Effect.andThen(PubSub.publish(outcomes, { written: true })),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("AiUsage: could not record refused requests", { cause }).pipe(
+              Effect.andThen(PubSub.publish(outcomes, { written: false })),
             ),
           ),
-    ).pipe(Effect.forkScoped);
-    yield* Effect.gen(function* () {
-      for (;;) {
-        const first = yield* Queue.take(pending);
-        const rest = yield* Queue.clear(pending);
-        yield* writeAll([first, ...rest]);
-      }
-    }).pipe(Effect.forkScoped);
+        );
+    });
+    const writeItems = (items: ReadonlyArray<AiGatewayActivity.GatewayRequestRecord | null>) =>
+      writeAll(items.filter((item) => item !== null)).pipe(
+        Effect.andThen(items.includes(null) ? flushShed : Effect.void),
+      );
+
+    // Shutdown order (finalizers run last-added first): the feeder and the writer are stopped
+    // first (the writer finishes the batch it holds: that part is uninterruptible), then what is
+    // still queued is written here, once.
     yield* Effect.addFinalizer(() =>
-      Queue.clear(pending).pipe(Effect.flatMap(writeAll), Effect.ignoreCause),
+      Queue.clear(pending).pipe(
+        Effect.flatMap(writeItems),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("AiUsage: usage still queued at shutdown was lost", { cause }),
+        ),
+      ),
     );
+    const requests = yield* activity.subscribeRequests;
+    yield* Stream.runForEach(requests, (request) => {
+      // Counting tokens is not using a model: it would only add requests without tokens.
+      if (request.route.endsWith("/count_tokens")) return Effect.void;
+      if (request.shed === true) {
+        const day = request.at.slice(0, 10);
+        const key = `${day}|${request.userId}|${request.spaceId}`;
+        const entry = shedCounts.get(key);
+        if (entry === undefined) {
+          shedCounts.set(key, { day, userId: request.userId, spaceId: request.spaceId, count: 1 });
+        } else entry.count += 1;
+        if (shedMarked) return Effect.void;
+        shedMarked = true;
+        return Queue.offer(pending, null).pipe(Effect.asVoid);
+      }
+      return Queue.offer(pending, request).pipe(
+        Effect.flatMap((queued) =>
+          queued
+            ? Effect.void
+            : Effect.logWarning("AiUsage: the write queue is full; a request was not counted"),
+        ),
+      );
+    }).pipe(Effect.forkScoped);
+    yield* Effect.uninterruptibleMask((restore) =>
+      Effect.forever(
+        restore(Queue.take(pending)).pipe(
+          Effect.flatMap((first) =>
+            Queue.clear(pending).pipe(Effect.flatMap((rest) => writeItems([first, ...rest]))),
+          ),
+        ),
+      ),
+    ).pipe(Effect.forkScoped);
 
     const sweep = Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
       const cutoff = DateTime.formatIso(DateTime.makeUnsafe(now - options.retentionDays * DAY_MS));
-      // In batches, so no one statement holds the write lock for long or materializes every id.
+      // In batches (each at most SWEEP_BATCH ids, so no statement holds the lock for long); a batch
+      // that fails ends the sweep with what was already removed.
       let removed = 0;
       for (;;) {
         const batch = yield* sql<{ readonly one: number }>`
           DELETE FROM ai_usage WHERE usage_id IN (
             SELECT usage_id FROM ai_usage WHERE at < ${cutoff} LIMIT ${SWEEP_BATCH}
           ) RETURNING 1 AS one
-        `;
+        `.pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("AiUsage: could not sweep old per-request rows", { cause }).pipe(
+              Effect.as(undefined),
+            ),
+          ),
+        );
+        if (batch === undefined) return removed;
         removed += batch.length;
         if (batch.length < SWEEP_BATCH) return removed;
       }
-    }).pipe(
-      Effect.catch((cause) =>
-        Effect.logWarning("AiUsage: could not sweep old per-request rows", { cause }).pipe(
-          Effect.as(0),
-        ),
-      ),
-      Effect.withSpan("AiUsage.sweep"),
-    );
+    }).pipe(Effect.withSpan("AiUsage.sweep"));
     yield* sweep.pipe(Effect.repeat(Schedule.spaced(options.sweepEveryMs)), Effect.forkScoped);
 
     const actor = spaces.actingUser.pipe(
@@ -300,6 +361,10 @@ const make = Effect.fn("AiUsage.make")(function* (options: AiUsageOptions) {
       // to one Space) all; others their own rows and every row of each Organization they run.
       const everything = can("aiAccount.manage", AccessPolicy.installation);
       let administered: ReadonlyArray<SpaceId> = [];
+      const readSpaces = new Map<
+        SpaceId,
+        { readonly resource: AccessPolicy.SpaceResource; readonly name: string }
+      >();
       if (!everything) {
         const viewable = yield* spaces
           .viewableSpaces(userId)
@@ -308,6 +373,7 @@ const make = Effect.fn("AiUsage.make")(function* (options: AiUsageOptions) {
         const known = yield* spaces
           .spacesById(candidates)
           .pipe(Effect.catch(storage("read your Spaces")));
+        for (const [spaceId, space] of known) readSpaces.set(spaceId, space);
         administered = [...known].flatMap(([spaceId, space]) =>
           can("aiUsage.viewSpace", space.resource) ? [spaceId] : [],
         );
@@ -409,7 +475,7 @@ const make = Effect.fn("AiUsage.make")(function* (options: AiUsageOptions) {
             Effect.catch(storage("read the AI usage")),
           );
 
-      const labels = yield* labelsOf(userId, everything, can, outRows);
+      const labels = yield* labelsOf(userId, everything, can, readSpaces, outRows);
       return {
         fromDay,
         toDay,
@@ -427,6 +493,10 @@ const make = Effect.fn("AiUsage.make")(function* (options: AiUsageOptions) {
       viewer: UserId,
       everything: boolean,
       can: (action: AccessPolicy.Action, resource: AccessPolicy.Resource) => boolean,
+      alreadyRead: ReadonlyMap<
+        SpaceId,
+        { readonly resource: AccessPolicy.SpaceResource; readonly name: string }
+      >,
       rows: ReadonlyArray<AiUsageRow>,
     ) {
       const userIds = [...new Set(rows.map((row) => row.userId))];
@@ -441,9 +511,15 @@ const make = Effect.fn("AiUsage.make")(function* (options: AiUsageOptions) {
               SELECT user_id AS "id", display_name AS "name" FROM users
               WHERE ${sql.in("user_id", userIds)}
             `.pipe(Effect.catch(storage("read the Users")));
-      const knownSpaces = yield* spaces
-        .spacesById(spaceIds)
-        .pipe(Effect.catch(storage("read the Spaces")));
+      // Only the Spaces the rights check did not already read.
+      const knownSpaces = new Map(alreadyRead);
+      const missing = spaceIds.filter((id) => !knownSpaces.has(id));
+      if (missing.length > 0) {
+        const more = yield* spaces
+          .spacesById(missing)
+          .pipe(Effect.catch(storage("read the Spaces")));
+        for (const [id, space] of more) knownSpaces.set(id, space);
+      }
       const accounts =
         accountIds.length === 0
           ? []
@@ -465,14 +541,13 @@ const make = Effect.fn("AiUsage.make")(function* (options: AiUsageOptions) {
       }
       return {
         users: users.map((user) => ({ id: user.id as UserId, name: user.name })),
-        // A Space the viewer can no longer see keeps its rows but not its name (nor a new one).
-        spaces: [...knownSpaces].map(([id, space]) => ({
-          id,
-          name:
-            everything || can("space.view", space.resource)
-              ? space.name
-              : "A Space you no longer see",
-        })),
+        // A Space the viewer can no longer see keeps its rows but no name (nor a new one).
+        spaces: spaceIds.flatMap((id) => {
+          const space = knownSpaces.get(id);
+          return space === undefined
+            ? []
+            : [{ id, name: everything || can("space.view", space.resource) ? space.name : null }];
+        }),
         accounts: accounts.map((account) => ({
           id: account.id as AiAccountId,
           name: everything || mayName.has(account.id) ? account.name : null,

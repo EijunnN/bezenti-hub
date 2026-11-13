@@ -286,6 +286,7 @@ export const hubWith = Effect.fn(function* (
     account,
     thread,
     upstream,
+    memory,
     unknownUpstream,
     flag,
   };

@@ -264,7 +264,7 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
               ) : null}
 
               {density === "full" && !props.draftId ? (
-                <ThreadAiUsagePanel environmentId={props.environmentId} threadId={props.threadId} />
+                <ThreadAiUsagePanel threadId={props.threadId} />
               ) : null}
 
               {visible.usage ? <ThreadDetailsUsage {...props.usage} /> : null}

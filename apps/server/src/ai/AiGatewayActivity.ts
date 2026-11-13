@@ -44,6 +44,8 @@ export interface GatewayRequestRecord {
   readonly failovers: number;
   /** Null when the answer never finished (cut off, failed). */
   readonly usage: GatewayUsage | null;
+  /** A request refused for load (a limit): counted in the daily summary, never as its own row. */
+  readonly shed?: true;
 }
 
 /** The AI account a Thread's requests go to now. */

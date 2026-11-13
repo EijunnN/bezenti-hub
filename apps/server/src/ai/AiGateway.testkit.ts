@@ -281,7 +281,7 @@ if (mode === "decoy") {
         const accountId = model.slice("acct-".length, model.indexOf("/"));
         response.setHeader("X-Fake-Account", accountId);
         response.setHeader("Set-Cookie", "fake=1");
-        if (fs.existsSync(path.join(dir, "fake-hang"))) await new Promise((resolve) => { const t = setInterval(() => { if (!fs.existsSync(path.join(dir, "fake-hang"))) { clearInterval(t); resolve(); } }, 25); response.once("close", () => { clearInterval(t); resolve(); }); });
+        if (fs.existsSync(path.join(dir, "fake-hang"))) await new Promise((resolve) => { const t = setTimeout(resolve, 30000); response.once("close", () => { clearTimeout(t); resolve(); }); });
         if (response.destroyed) return;
         if (fs.existsSync(path.join(dir, "fake-quota-" + accountId))) return send(response, 429, { error: { message: "Quota exceeded for owner@example.com with sk-ant-leaky_key_1234567890", type: "rate_limit_error" } });
         if (fs.existsSync(path.join(dir, "fake-redirect-" + accountId))) { response.statusCode = 302; response.setHeader("location", "https://provider.test/owner@example.com"); response.end(); return; }

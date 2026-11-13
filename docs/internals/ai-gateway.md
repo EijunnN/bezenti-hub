@@ -350,7 +350,10 @@ shown, **never limited**: no quota, cap or block anywhere.
 - **Counted as failed (no tokens):** a refusal after authentication (gateway not running, 415, 429
   limits, body too large or not JSON, no model served, all accounts out of quota) with the account
   last tried or none (account and model `''` in the summary; the model is kept only once the plan
-  accepted it), and a request cut off before any answer (the client left, a hold timed out): status 499.
+  accepted it), and a request that never got an answer: status 499 when the client left, 502 when the Hub
+  itself failed. A limit refusal (429 on a body or request slot) is shed load: it only adds to the
+  daily summary (one upsert per key and day per batch), has no row of its own and is logged once,
+  by the route.
 - **Not counted here:** direct credentials never pass through the gateway (the Thread shows what
   its provider reports); requests refused before authentication (bad key) have no row; model lists
   and `count_tokens` are not requests of the log.
