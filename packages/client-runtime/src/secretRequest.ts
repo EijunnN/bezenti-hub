@@ -1,9 +1,20 @@
 import {
   type OrchestrationV2TurnItem,
+  SECRET_MASK_MIN_LENGTH,
   type SecretRequestAnswerInput,
   secretNameRisk,
   type VaultId,
 } from "@t3tools/contracts";
+
+/**
+ * A value too short to be masked is never saved to a Vault from a card (the Hub refuses it too):
+ * it would reach the Space's Threads and show in their history.
+ */
+export function secretRequestVaultValueProblem(secret: string): string | null {
+  const length = [...secret.trim()].length;
+  if (length === 0 || length >= SECRET_MASK_MIN_LENGTH) return null;
+  return `Values shorter than ${SECRET_MASK_MIN_LENGTH} characters are never hidden in the history: add it in Settings → Vaults, or answer without saving.`;
+}
 
 export type SecretRequestItem = Extract<
   OrchestrationV2TurnItem,
@@ -87,7 +98,11 @@ export function secretRequestAnswerInput(
     answer.saveToVault === undefined
       ? undefined
       : { vaultId: answer.saveToVault.vaultId, name: answer.saveToVault.name.trim() };
-  if (saveToVault !== undefined && secretRequestVaultNameProblem(saveToVault.name) !== null) {
+  if (
+    saveToVault !== undefined &&
+    (secretRequestVaultNameProblem(saveToVault.name) !== null ||
+      secretRequestVaultValueProblem(secret) !== null)
+  ) {
     return null;
   }
   return {

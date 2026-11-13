@@ -653,6 +653,7 @@ Owner last set it), each with its description and winning Vault: never a value o
 without an owner, or whose owner left its Space, lists nothing. The agents' shared instructions
 (`orchestrationInstructions.ts`) say: secrets are environment variables; call `list_secret_names`
 and use `$NAME`; never print values; a missing one is asked with `request_secret` and its `name`.
+A Thread whose machine does not serve its Space (`servesSpace`, as `plan`) lists nothing.
 `DoorRules.test.ts` checks the MCP service calls nothing of `SecretDelivery` but `turnNames`.
 
 **«Also save to Vault».** `request_secret` takes an optional `name` (an env var name), kept on the
@@ -669,8 +670,12 @@ allowed to them. Its doors:
   (the policy again, `secretNameRisk`, audit `secret.edit` with the name, never the value). Names the
   Hub reserves, invalid ones and dangerous ones are refused (`vault_name_invalid`: the card never
   confirms a dangerous name; the Owner adds those in Settings → Vaults); a name already in the
-  Vault is `vault_name_taken` (no silent replace). Only then the one-use ref, as before. A refused
-  save leaves the card pending.
+  Vault is `vault_name_taken` (no silent replace), and a value shorter than 6 characters
+  (never masked) is `vault_value_short`. Only then the one-use ref, as before. A refused save
+  leaves the card pending. Answers run one at a time, so a second answer to a card finds it
+  `already_answered`; a card keeps a keyed digest of what it saved (`secret-request-vault-<id>`,
+  swept with the answers), so a retry of the same answer after a later step failed goes on, and a
+  different value is refused.
 
 Web and desktop show the option once focus enters the card, if the list is not empty: a Vault
 picker and the name, checked with `secretNameRisk` as typed. Mobile answers as before (ticket 08).

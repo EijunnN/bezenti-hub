@@ -68,6 +68,8 @@ const SECRET_REQUEST_FAILURE_MESSAGES = {
   vault_name_invalid:
     "That name can't be saved here: use A-Z, 0-9 and _, and not a name the Hub reserves or only the Owner sets in Settings → Vaults.",
   vault_name_taken: "That Vault already has a secret with this name.",
+  vault_value_short:
+    "Values shorter than 6 characters are never hidden in the history: add this one in Settings → Vaults.",
   vault_save_failed: "Could not save the secret in the Vault.",
 } as const;
 

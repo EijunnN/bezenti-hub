@@ -6,6 +6,7 @@ import {
   secretRequestFailureMessage,
   secretRequestPrivacyNote,
   secretRequestVaultNameProblem,
+  secretRequestVaultValueProblem,
   type SecretRequestItem,
 } from "@t3tools/client-runtime/secret-request";
 import {
@@ -83,7 +84,8 @@ function PendingSecretRequestForm(props: {
   const [saveToVault, setSaveToVault] = useState(false);
   const [vaultId, setVaultId] = useState<VaultId | null>(null);
   const [vaultName, setVaultName] = useState(item.secretName ?? "");
-  // Asked once, when the User starts answering (focus enters the card).
+  // Asked when the User starts answering (focus enters the card); a failed ask is tried again at
+  // the next focus.
   const targetsAsked = useRef(false);
   const askTargets = () => {
     if (targetsAsked.current) return;
@@ -92,13 +94,18 @@ function PendingSecretRequestForm(props: {
       environmentId: props.environmentId,
       input: { threadId: item.threadId },
     }).then((result) => {
-      if (result._tag !== "Success") return;
+      if (result._tag !== "Success") {
+        targetsAsked.current = false;
+        return;
+      }
       setTargets(result.value.vaults);
       setVaultId((current) => current ?? result.value.vaults[0]?.id ?? null);
     });
   };
-  const nameProblem = saveToVault ? secretRequestVaultNameProblem(vaultName) : null;
   const [secret, setSecret] = useState("");
+  const saveProblem = saveToVault
+    ? (secretRequestVaultNameProblem(vaultName) ?? secretRequestVaultValueProblem(secret))
+    : null;
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Enter and click can both submit before a render.
@@ -133,7 +140,7 @@ function PendingSecretRequestForm(props: {
 
   const onSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (saveToVault && (vaultId === null || nameProblem !== null)) return;
+    if (saveToVault && (vaultId === null || saveProblem !== null)) return;
     void send(
       saveToVault && vaultId !== null
         ? { type: "save", secret, saveToVault: { vaultId, name: vaultName } }
@@ -190,7 +197,7 @@ function PendingSecretRequestForm(props: {
         </div>
         <Button
           type="submit"
-          disabled={submitting || secret.trim().length === 0 || nameProblem !== null}
+          disabled={submitting || secret.trim().length === 0 || saveProblem !== null}
         >
           Save securely
         </Button>
@@ -235,15 +242,15 @@ function PendingSecretRequestForm(props: {
                   spellCheck={false}
                   value={vaultName}
                   disabled={submitting}
-                  aria-invalid={nameProblem !== null || undefined}
+                  aria-invalid={saveProblem !== null || undefined}
                   onChange={(event) => setVaultName(event.currentTarget.value.toUpperCase())}
                 />
-                {nameProblem === null ? (
+                {saveProblem === null ? (
                   <p className="text-xs text-muted-foreground">
                     Threads that receive this Vault get it as {vaultName.trim()}.
                   </p>
                 ) : (
-                  <p className="text-xs text-destructive">{nameProblem}</p>
+                  <p className="text-xs text-destructive">{saveProblem}</p>
                 )}
               </div>
             </div>

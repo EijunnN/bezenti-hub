@@ -119,6 +119,8 @@ const hub = Effect.gen(function* () {
   /** The Hub's SecretRequests over its store and Vaults, with one pending card per Thread. */
   const dispatched: Array<OrchestrationV2ServerCommand> = [];
   const status = new Map<string, string>();
+  /** How many of the next records fail, as a busy orchestration would. */
+  const failing = { records: 0 };
   const requests = yield* Layer.build(
     SecretRequests.layer.pipe(
       Layer.provide(
@@ -143,13 +145,18 @@ const hub = Effect.gen(function* () {
               ],
             } as never),
           dispatch: (command: OrchestrationV2ServerCommand) =>
-            Effect.sync(() => {
-              dispatched.push(command);
-              if (command.type === "secret_request.record") {
-                status.set(command.threadId, command.secretStatus);
-              }
-              return {} as never;
-            }),
+            failing.records > 0
+              ? Effect.suspend(() => {
+                  failing.records -= 1;
+                  return Effect.fail(new Error("orchestration busy") as never);
+                })
+              : Effect.sync(() => {
+                  dispatched.push(command);
+                  if (command.type === "secret_request.record") {
+                    status.set(command.threadId, command.secretStatus);
+                  }
+                  return {} as never;
+                }),
         }),
       ),
       Layer.provide(Layer.succeedContext(server.services)),
@@ -160,12 +167,13 @@ const hub = Effect.gen(function* () {
   const save = (
     threadId: ThreadId,
     saveToVault?: { readonly vaultId: VaultId; readonly name: string },
+    secret: string = VALUE,
   ): SecretRequestAnswerInput => ({
     threadId,
     turnItemId,
     answer: {
       type: "save",
-      secret: VALUE,
+      secret,
       ...(saveToVault === undefined ? {} : { saveToVault }),
     },
   });
@@ -199,6 +207,7 @@ const hub = Effect.gen(function* () {
     gracesOwn,
     requests,
     dispatched,
+    failing,
     save,
     entryNames,
     targetNames,
@@ -340,4 +349,90 @@ it.effect(
       assert.equal(yield* attempt(t.ada, byAda, "STRIPE_KEY"), "vault_name_taken");
       assert.equal(t.dispatched.length, 0);
     }),
+);
+
+it.effect(
+  "a retry after a failed record saves the same answer once; another value is refused",
+  () =>
+    Effect.gen(function* () {
+      const t = yield* hub;
+      const threadId = yield* t.thread("thread-ada-retry", t.ada, t.acmeId);
+      const target = { vaultId: t.acmeVault, name: "STRIPE_KEY" };
+      t.failing.records = 1;
+      assert.equal(
+        yield* reasonOf(t.requests.answer(t.save(threadId, target)).pipe(t.as(t.ada))),
+        "record_failed",
+      );
+      assert.deepStrictEqual(yield* t.entryNames(t.acmeVault), ["STRIPE_KEY"]);
+      // Another value for the same card is not this answer: refused, the entry untouched.
+      assert.equal(
+        yield* reasonOf(
+          t.requests.answer(t.save(threadId, target, "another-value-9999")).pipe(t.as(t.ada)),
+        ),
+        "vault_name_taken",
+      );
+      // The same answer again goes on to the turn.
+      yield* t.requests.answer(t.save(threadId, target)).pipe(t.as(t.ada));
+      assert.deepStrictEqual(yield* t.entryNames(t.acmeVault), ["STRIPE_KEY"]);
+      const records = t.dispatched.filter((command) => command.type === "secret_request.record");
+      assert.deepStrictEqual(
+        records.map((command) => [command.secretStatus, command.secretName]),
+        [["saved", "STRIPE_KEY"]],
+      );
+    }),
+);
+
+it.effect("two answers at once: one saves, the other finds the card answered", () =>
+  Effect.gen(function* () {
+    const t = yield* hub;
+    const threadId = yield* t.thread("thread-ada-twice", t.ada, t.acmeId);
+    const target = { vaultId: t.acmeVault, name: "STRIPE_KEY" };
+    const both = yield* Effect.all(
+      [
+        Effect.result(t.requests.answer(t.save(threadId, target)).pipe(t.as(t.ada))),
+        Effect.result(t.requests.answer(t.save(threadId, target)).pipe(t.as(t.ada))),
+      ],
+      { concurrency: "unbounded" },
+    );
+    const reasons = both.map((result) =>
+      result._tag === "Success" ? "saved" : (result.failure as { reason: string }).reason,
+    );
+    assert.deepStrictEqual(reasons.toSorted(), ["already_answered", "saved"]);
+    assert.deepStrictEqual(yield* t.entryNames(t.acmeVault), ["STRIPE_KEY"]);
+  }),
+);
+
+it.effect("a value too short to be masked is not saved to a Vault from a card", () =>
+  Effect.gen(function* () {
+    const t = yield* hub;
+    const threadId = yield* t.thread("thread-ada-short", t.ada, t.acmeId);
+    const reason = yield* reasonOf(
+      t.requests
+        .answer(t.save(threadId, { vaultId: t.acmeVault, name: "PIN" }, "1234"))
+        .pipe(t.as(t.ada)),
+    );
+    assert.equal(reason, "vault_value_short");
+    assert.deepStrictEqual(yield* t.entryNames(t.acmeVault), []);
+    assert.equal(t.dispatched.length, 0);
+  }),
+);
+
+it.effect("an agent on a machine that does not serve the Thread's Space lists no names", () =>
+  Effect.gen(function* () {
+    const t = yield* hub;
+    yield* t.vaults
+      .putEntry({ vaultId: t.acmeVault, name: "STRIPE_KEY", value: Redacted.make(VALUE) })
+      .pipe(t.as(t.ada));
+    const threadId = yield* t.thread("thread-grace-elsewhere", t.grace, t.acmeId);
+    assert.deepStrictEqual(
+      (yield* t.delivery.turnNames(threadId)).map((entry) => entry.name),
+      ["STRIPE_KEY"],
+    );
+    // Its process runs on Globex's Sandbox (or any machine not serving Acme): it gets nothing.
+    yield* t.server.sql`
+      UPDATE orchestration_v2_projection_threads
+      SET active_environment_id = ${`sandbox:${t.globexId}`} WHERE thread_id = ${threadId}
+    `;
+    assert.deepStrictEqual(yield* t.delivery.turnNames(threadId), []);
+  }),
 );

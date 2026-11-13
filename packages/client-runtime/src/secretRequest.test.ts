@@ -7,6 +7,7 @@ import {
   secretRequestFailureMessage,
   secretRequestPrivacyNote,
   secretRequestVaultNameProblem,
+  secretRequestVaultValueProblem,
 } from "./secretRequest.ts";
 
 describe("secretRequestDisplay", () => {
@@ -71,5 +72,13 @@ describe("«Also save to Vault»", () => {
         saveToVault: { vaultId, name: "PATH" },
       }),
     ).toBeNull();
+  });
+});
+
+describe("secretRequestVaultValueProblem", () => {
+  it("refuses saving a value too short to be masked, and says where it can go", () => {
+    expect(secretRequestVaultValueProblem("")).toBeNull();
+    expect(secretRequestVaultValueProblem("123456")).toBeNull();
+    expect(secretRequestVaultValueProblem("1234")).toContain("Settings → Vaults");
   });
 });

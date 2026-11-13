@@ -6,7 +6,7 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- a sync hash of names and value ids, never of values.
 import * as NodeCrypto from "node:crypto";
 import {
-  type EnvironmentId,
+  EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
   NO_SECRETS_FINGERPRINT,
   SECRET_ENV_CONTRACT_VERSION,
@@ -229,6 +229,23 @@ const make = Effect.gen(function* () {
       ),
     );
     if (Option.isNone(set)) return [];
+    // As `plan`: a machine that does not run this Space's Threads gets nothing, so lists nothing.
+    const active = yield* sql<{ readonly environmentId: string | null }>`
+      SELECT active_environment_id AS "environmentId"
+      FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}
+    `.pipe(Effect.catch(storage("read the Thread's machine")));
+    const environmentId = active[0]?.environmentId ?? null;
+    if (environmentId !== null && environmentId !== HUB_MACHINE_ENVIRONMENT_ID) {
+      const serves = yield* servesSpace(
+        EnvironmentId.make(environmentId),
+        set.value.spaceId,
+        threadId,
+      ).pipe(
+        Effect.provideService(SqlClient.SqlClient, sql),
+        Effect.catch(storage("check the machine's Space")),
+      );
+      if (!serves) return [];
+    }
     const trusted = yield* ownerSet(
       set.value.variables.filter((v) => v.dangerous).map((v) => v.valueId),
     );
