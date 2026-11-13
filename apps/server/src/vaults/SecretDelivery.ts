@@ -23,6 +23,7 @@ import * as Option from "effect/Option";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import { machineNameOf } from "../environments/machineName.ts";
 import { threadTurnOwner } from "../orchestration-v2/threadTurnOwner.ts";
 import { servesSpace } from "../sandboxes/sandboxSpace.ts";
 import * as EffectiveVaults from "./EffectiveVaults.ts";
@@ -126,13 +127,7 @@ const make = Effect.gen(function* () {
     return new Set(rows.map((row) => row.valueId));
   });
 
-  const machineName = (environmentId: EnvironmentId) =>
-    sql<{ readonly name: string }>`
-      SELECT name FROM environments WHERE environment_id = ${environmentId}
-    `.pipe(
-      Effect.map((rows) => rows[0]?.name),
-      Effect.orElseSucceed(() => undefined),
-    );
+  const machineName = (environmentId: EnvironmentId) => machineNameOf(sql, environmentId);
 
   const plan = Effect.fn("SecretDelivery.plan")(function* (input: {
     readonly threadId: ThreadId;

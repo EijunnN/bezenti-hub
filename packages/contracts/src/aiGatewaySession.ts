@@ -90,9 +90,12 @@ export class AiGatewaySessionError extends Schema.TaggedError<AiGatewaySessionEr
       "not-allowed",
       "provider",
       "unreachable",
+      "model-not-served",
+      "insecure-hub",
     ]),
     environmentName: Schema.optional(Schema.String),
     provider: Schema.optional(Schema.String),
+    model: Schema.optional(Schema.String),
   },
 ) {
   override get message(): string {
@@ -107,6 +110,10 @@ export class AiGatewaySessionError extends Schema.TaggedError<AiGatewaySessionEr
         return `${this.provider ?? "This provider"} can't use the Hub's AI accounts.`;
       case "unreachable":
         return `${this.environmentName ?? "This machine"} can't reach the Hub's AI gateway.`;
+      case "model-not-served":
+        return `No AI account allowed to you in this Space serves ${this.model ?? "this model"}. Switch model or AI account.`;
+      case "insecure-hub":
+        return "This machine reaches the Hub over plain HTTP, so it can't use the Hub's AI accounts. Join it to the Hub's https:// address.";
     }
   }
 }

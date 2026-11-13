@@ -31,6 +31,9 @@ import * as Redacted from "effect/Redacted";
 import * as Stream from "effect/Stream";
 
 import * as AiAccounts from "../ai/AiAccounts.ts";
+import * as AiGatewayKeys from "../ai/AiGatewayKeys.ts";
+import * as AiGatewaySessions from "../ai/AiGatewaySessions.ts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as AiGatewayActivity from "../ai/AiGatewayActivity.ts";
 import { addMember, joinOrganization } from "../auth/UserAuth.testkit.ts";
 import * as CommandActor from "../auth/CommandActor.ts";
@@ -116,7 +119,9 @@ const fakeCli = (
                     cause: "the fake CLI ends here",
                   });
                 }
-                return yield* adapter.openSession(input);
+                // The fake CLI is the gateway client; the recorded turn engine runs without it.
+                const { aiGateway: _gateway, ...recorded } = input;
+                return yield* adapter.openSession(recorded);
               }),
           })),
         ),
@@ -129,14 +134,17 @@ const addAccount = Effect.fn(function* (
   name: string,
   allow: { readonly spaceIds?: ReadonlyArray<SpaceId>; readonly userIds?: ReadonlyArray<UserId> },
   provider: AiAccountProvider = "claude",
+  /** An OpenAI-compatible account serving these models instead. */
+  models?: ReadonlyArray<string>,
 ) {
   const owner = yield* ownerIdOf(hub);
   const accounts = hub.service(AiAccounts.AiAccounts);
   const made = yield* accounts
     .create({
       name,
-      provider: provider as never,
+      provider: (models === undefined ? provider : "openai-compatible") as never,
       apiKey: Redacted.make(`sk-test-${name.replaceAll(" ", "-")}-0123456789abcdef`),
+      ...(models === undefined ? {} : { baseUrl: "http://127.0.0.1:9/v1", models: [...models] }),
     })
     .pipe(CommandActor.actAs(owner), Effect.orDie);
   yield* accounts
@@ -252,7 +260,11 @@ describe("Hub con Environments: agents on the Hub's AI gateway", () => {
         const loaded = yield* loadFixture("simple");
         const hub = yield* makeHub({ aiAccounts: true });
         const owner = yield* ownerIdOf(hub);
-        const accountId = yield* addAccount(hub, "Owner Claude", { userIds: [owner] });
+        // The fixture's model and the one the fake CLI asks for.
+        const accountId = yield* addAccount(hub, "Owner Claude", { userIds: [owner] }, "claude", [
+          MODEL,
+          loaded.variant.modelSelection.model,
+        ]);
         const requests = yield* recordRequests(hub);
         const opened: Array<Opened> = [];
         const laptop = yield* hub.join({
@@ -422,5 +434,110 @@ describe("Hub con Environments: agents on the Hub's AI gateway", () => {
       `;
       assert.equal(issued[0]?.n, 0, "no key was issued for it");
     }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "route the session to the account the gateway picks: the first allowed serving its model",
+    () =>
+      Effect.gen(function* () {
+        const opened: Array<Opened> = [];
+        const s = yield* sharedSandbox(opened);
+        // Higher priority, but without the Thread's model; then one that serves it.
+        yield* addAccount(s.hub, "Acme Other", { spaceIds: [s.acme] }, "claude", ["other-model"]);
+        const serving = yield* addAccount(s.hub, "Acme Serving", { spaceIds: [s.acme] }, "claude", [
+          MODEL,
+        ]);
+        const adas = yield* threadOn(s.hub, {
+          id: "ada-route",
+          spaceId: s.acme,
+          ownerUserId: s.ada,
+          environmentId: sandboxEnvironmentIdOf(s.acme),
+        });
+        yield* Effect.exit(openSession(s.hub, adas, "ps-ada-route"));
+        assert.equal(opened[0]?.aiGateway?.aiAccountId, serving, "the account its requests go to");
+        assert.equal(opened[0]?.aiGateway?.aiAccountName, "Acme Serving");
+      }).pipe(Effect.scoped),
+  );
+
+  it.live("issue no key for a session refused for a shared process", () =>
+    Effect.gen(function* () {
+      const opened: Array<Opened> = [];
+      const s = yield* sharedSandbox(opened);
+      yield* addAccount(s.hub, "Acme Claude", { spaceIds: [s.acme] });
+      const adas = yield* threadOn(s.hub, {
+        id: "ada-shared",
+        spaceId: s.acme,
+        ownerUserId: s.ada,
+        environmentId: sandboxEnvironmentIdOf(s.acme),
+      });
+      // The id every Thread of the instance shares.
+      const ids = yield* Effect.service(IdAllocator.IdAllocatorV2).pipe(
+        Effect.provide(IdAllocator.layer),
+      );
+      const sharedId = ids.derive.providerSession({ providerInstanceId: instanceId });
+      const exit = yield* Effect.exit(openSession(s.hub, adas, sharedId));
+      assert.include(failureText(exit), "shared with other Threads");
+      const keys = yield* s.hub.server.sql<{ readonly n: number }>`
+        SELECT COUNT(*) AS n FROM ai_gateway_keys WHERE thread_id = ${adas.threadId}
+      `;
+      assert.equal(keys[0]?.n, 0, "no key issued, none rotated");
+      assert.isEmpty(opened);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("stay off the gateway on a personal machine when no account is usable", () =>
+    Effect.gen(function* () {
+      const hub = yield* makeHub({ aiAccounts: true });
+      const owner = yield* ownerIdOf(hub);
+      const disabled = yield* addAccount(hub, "Disabled Claude", { userIds: [owner] });
+      yield* hub
+        .service(AiAccounts.AiAccounts)
+        .update({ accountId: disabled, disabled: true })
+        .pipe(CommandActor.actAs(owner), Effect.orDie);
+      const opened: Array<Opened> = [];
+      const laptop = yield* hub.join({
+        name: "Laptop",
+        adapters: fakeCli(idleAdapters(instanceId), opened, { fail: true }),
+      });
+      const thread = yield* threadOn(hub, {
+        id: "laptop-off",
+        ownerUserId: owner,
+        environmentId: laptop.environmentId,
+      });
+      yield* Effect.exit(openSession(hub, thread, "ps-laptop-off"));
+      assert.equal(opened.length, 1, "the session opened, on its machine's own configuration");
+      assert.isUndefined(opened[0]?.aiGateway, "a disabled account puts nobody on the gateway");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "revoke, at a Hub start, every Thread key left live by a session that did not survive",
+    () =>
+      Effect.gen(function* () {
+        const hub = yield* makeHub({ aiAccounts: true });
+        const owner = yield* ownerIdOf(hub);
+        yield* addAccount(hub, "Owner Claude", { userIds: [owner] });
+        const laptop = yield* hub.join({ name: "Laptop", adapters: idleAdapters(instanceId) });
+        const thread = yield* threadOn(hub, {
+          id: "restart",
+          ownerUserId: owner,
+          environmentId: laptop.environmentId,
+        });
+        yield* hub
+          .service(AiGatewayKeys.AiGatewayKeys)
+          .issueForThread(thread.threadId, { providerSessionId: "ps-before-restart" })
+          .pipe(Effect.orDie);
+        // The rule starts again, as at the next Hub start.
+        yield* Layer.build(
+          AiGatewaySessions.layer.pipe(
+            Layer.provide(Layer.succeedContext(hub.server.services as never)),
+          ),
+        );
+        const live = yield* hub.server.sql<{ readonly n: number }>`
+        SELECT COUNT(*) AS n FROM ai_gateway_keys
+        WHERE thread_id = ${thread.threadId} AND revoked_at IS NULL
+      `;
+        assert.equal(live[0]?.n, 0);
+      }).pipe(Effect.scoped),
   );
 });

@@ -98,6 +98,8 @@ export class AiGatewayKeys extends Context.Service<
       reason: string,
       threadId?: ThreadId,
     ) => Effect.Effect<void, AiGatewayKeyError>;
+    /** Revokes every live Thread key: at a Hub start no provider session of them is alive. */
+    readonly revokeLiveThreadKeys: (reason: string) => Effect.Effect<void, AiGatewayKeyError>;
     /** Revokes every key of a User (disabled or removed). */
     readonly revokeUser: (userId: UserId, reason: string) => Effect.Effect<void, AiGatewayKeyError>;
     /** A User's key for a local CLI, in a Space they work in (ticket 10 gives it a screen). */
@@ -206,6 +208,16 @@ const make = Effect.gen(function* () {
       WHERE provider_session_id = ${providerSessionId} AND revoked_at IS NULL
         AND ${threadId === undefined ? sql`1 = 1` : sql`thread_id = ${threadId}`}
     `.pipe(Effect.catch(storage("revoke the session's AI gateway keys")));
+  });
+
+  const revokeLiveThreadKeys = Effect.fn("AiGatewayKeys.revokeLiveThreadKeys")(function* (
+    reason: string,
+  ) {
+    const at = yield* nowIso;
+    yield* sql`
+      UPDATE ai_gateway_keys SET revoked_at = ${at}, revoked_reason = ${reason}
+      WHERE kind = 'thread' AND revoked_at IS NULL
+    `.pipe(Effect.catch(storage("revoke the earlier sessions' AI gateway keys")));
   });
 
   const revokeUser = Effect.fn("AiGatewayKeys.revokeUser")(function* (
@@ -495,6 +507,7 @@ const make = Effect.gen(function* () {
 
   return AiGatewayKeys.of({
     issueForThread,
+    revokeLiveThreadKeys,
     revokeThread,
     revokeSession,
     revokeUser,

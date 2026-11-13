@@ -24,6 +24,8 @@ const FORWARDED_REQUEST_HEADERS = [
   "x-api-key",
   "x-goog-api-key",
   "content-type",
+  // So the Hub refuses a compressed body (415) instead of reading it as plain.
+  "content-encoding",
   "accept",
   "anthropic-version",
   "anthropic-beta",
@@ -34,6 +36,13 @@ const FORWARDED_REQUEST_HEADERS = [
 const FORWARDED_RESPONSE_HEADERS = ["content-type", "cache-control", "www-authenticate"] as const;
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost"]);
+
+/** A host name of this machine's loopback. */
+const isLoopbackHost = (hostname: string) =>
+  hostname === "localhost" ||
+  hostname === "[::1]" ||
+  hostname === "::1" ||
+  /^127\.\d+\.\d+\.\d+$/u.test(hostname);
 
 export interface AiGatewayRelay {
   /** `http://127.0.0.1:<port>`, the relay started on first use; the refusal if it cannot listen. */
@@ -88,7 +97,11 @@ export const relayDecision = (
  * its allowed paths); on a personal machine, the Hub's own URL.
  */
 export const make = Effect.fn("AiGatewayRelay.make")(function* (hubUrl: string) {
-  const hubOrigin = new URL(hubUrl).origin;
+  const hub = new URL(hubUrl);
+  const hubOrigin = hub.origin;
+  // The key would cross the network in clear: only https, or the Hub on this machine's loopback
+  // (a Sandbox's socket relay, a dev Hub).
+  const insecure = hub.protocol !== "https:" && !isLoopbackHost(hub.hostname);
   let started: Promise<number> | undefined;
   let server: NodeHttp.Server | undefined;
 
@@ -174,10 +187,12 @@ export const make = Effect.fn("AiGatewayRelay.make")(function* (hubUrl: string) 
     ),
   );
 
-  const baseUrl = Effect.tryPromise({
-    try: listen,
-    catch: () => new AiGatewaySessionError({ reason: "unreachable" }),
-  }).pipe(Effect.map((port) => `http://127.0.0.1:${port}`));
+  const baseUrl = insecure
+    ? Effect.fail(new AiGatewaySessionError({ reason: "insecure-hub" }))
+    : Effect.tryPromise({
+        try: listen,
+        catch: () => new AiGatewaySessionError({ reason: "unreachable" }),
+      }).pipe(Effect.map((port) => `http://127.0.0.1:${port}`));
 
   return { baseUrl } satisfies AiGatewayRelay;
 }) satisfies (hubUrl: string) => Effect.Effect<AiGatewayRelay, never, Scope.Scope>;

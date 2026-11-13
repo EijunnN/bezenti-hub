@@ -56,6 +56,7 @@ import type * as Scope from "effect/Scope";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
+import { machineNameOf } from "../environments/machineName.ts";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import type { CheckpointStoreError } from "../checkpointing/Errors.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
@@ -408,10 +409,8 @@ const make = Effect.gen(function* () {
     input: object,
     what: "secrets" | "aiGateway" = "secrets",
   ) {
-    const [row] = yield* sql<{ readonly name: string }>`
-      SELECT name FROM environments WHERE environment_id = ${link.environmentId}
-    `.pipe(Effect.orElseSucceed(() => []));
-    const named = row === undefined ? {} : { environmentName: row.name };
+    const name = yield* machineNameOf(sql, link.environmentId);
+    const named = name === undefined ? {} : { environmentName: name };
     const refusal =
       what === "aiGateway"
         ? new AiGatewaySessionError({ reason: "outdated-machine", ...named })

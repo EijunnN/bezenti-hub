@@ -2,6 +2,7 @@ import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
+  AiGatewaySessionError,
   ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
   HUB_MACHINE_ENVIRONMENT_ID,
   isOrchestrationV2WorkActive,
@@ -244,6 +245,8 @@ interface LiveSessionEntry {
    * new process.
    */
   readonly aiAccount: ProviderSessionAiAccount | undefined;
+  /** Who and on what account its key acts (`AiGatewaySessions.fingerprintOf`). */
+  readonly gatewayFingerprint: string;
   readonly runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
   readonly exposedRuntime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
   readonly eventSubscribers: Ref.Ref<
@@ -345,6 +348,8 @@ function providerThreadLoadKey(input: {
   });
 }
 
+type OpenInput = Parameters<ProviderSessionManagerV2Shape["open"]>[0];
+
 export const layerWithOptions = (
   options: ProviderSessionManagerV2LayerOptions = {},
 ): Layer.Layer<
@@ -383,21 +388,24 @@ export const layerWithOptions = (
       // Spec 4 ticket 06: a session on the Hub's AI gateway gets the Thread's key in its process.
       const aiGatewaySessions = yield* Effect.serviceOption(AiGatewaySessions.AiGatewaySessions);
       /** The machine a Thread's process starts on, and its executor contract. */
-      const targetFor = (threadId: ThreadId) =>
-        Option.isNone(environments)
-          ? Effect.succeed({
-              environmentId: HUB_MACHINE_ENVIRONMENT_ID,
-              contractVersion: ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
-            })
-          : environments.value.forThread(threadId).pipe(
-              Effect.map((executor) => ({
-                environmentId: executor.environmentId,
-                contractVersion: Option.match(executor.workspace.forward, {
-                  onNone: () => ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
-                  onSome: (forward) => forward.contractVersion(),
-                }),
-              })),
-            );
+      const targetFor = Effect.fn("ProviderSessionManagerV2.targetFor")(function* (
+        threadId: ThreadId,
+      ) {
+        if (Option.isNone(environments)) {
+          return {
+            environmentId: HUB_MACHINE_ENVIRONMENT_ID,
+            contractVersion: ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
+          };
+        }
+        const executor = yield* environments.value.forThread(threadId);
+        return {
+          environmentId: executor.environmentId,
+          contractVersion: Option.match(executor.workspace.forward, {
+            onNone: () => ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
+            onSome: (forward) => forward.contractVersion(),
+          }),
+        };
+      });
       const secretPlanFor = Effect.fn("ProviderSessionManagerV2.secretPlanFor")(function* (
         threadId: ThreadId,
       ) {
@@ -405,22 +413,32 @@ export const layerWithOptions = (
         const target = yield* targetFor(threadId);
         return yield* secretDelivery.value.planTurn({ threadId, target });
       });
-      /** Whether the Thread's sessions of this instance go through the AI gateway now. */
-      const gatewayWantedFor = (input: {
-        readonly threadId: ThreadId;
-        readonly instanceId: ProviderInstanceId;
-      }) =>
-        Option.isNone(aiGatewaySessions)
-          ? Effect.succeed(false)
-          : Effect.gen(function* () {
-              const adapter = yield* registry.get(input.instanceId);
-              const target = yield* targetFor(input.threadId);
-              return yield* aiGatewaySessions.value.applies({
-                threadId: input.threadId,
-                driver: adapter.driver,
-                environmentId: target.environmentId,
-              });
-            }).pipe(Effect.orElseSucceed(() => false));
+      /**
+       * The Thread's AI gateway plan for this open, decided once. Unreadable (the instance or the
+       * machine) refuses: a Thread that may need the gateway never runs on a login instead.
+       */
+      const gatewayPlanFor = Effect.fn("ProviderSessionManagerV2.gatewayPlanFor")(function* (
+        input: OpenInput,
+      ) {
+        if (Option.isNone(aiGatewaySessions))
+          return { _tag: "off" } as AiGatewaySessions.GatewayPlan;
+        const resolved = yield* Effect.all({
+          adapter: registry.get(input.modelSelection.instanceId),
+          target: targetFor(input.threadId),
+        }).pipe(Effect.option);
+        if (Option.isNone(resolved)) {
+          return {
+            _tag: "refused",
+            error: new AiGatewaySessionError({ reason: "unreachable" }),
+          } as AiGatewaySessions.GatewayPlan;
+        }
+        return yield* aiGatewaySessions.value.plan({
+          threadId: input.threadId,
+          driver: resolved.value.adapter.driver,
+          modelSelection: input.modelSelection,
+          target: resolved.value.target,
+        });
+      });
       /** Unreadable settings must preserve explicit browser-access opt-outs. */
       const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
       const projectService = yield* Effect.serviceOption(ProjectService.ProjectService);
@@ -2245,187 +2263,107 @@ export const layerWithOptions = (
         ),
       );
 
-      type OpenInput = Parameters<ProviderSessionManagerV2Shape["open"]>[0];
       const openLocked = (
         input: OpenInput,
         plan: SecretDelivery.SecretPlan | undefined,
-        gatewayWanted: boolean,
+        gatewayPlan: AiGatewaySessions.GatewayPlan,
         openFailed: (cause: unknown) => ProviderSessionOpenError,
-      ) =>
-        sessionOpen.withLock(
-          input.providerSessionId,
-          Effect.gen(function* () {
-            const secretFingerprint = plan?.fingerprint ?? NO_SECRETS_FINGERPRINT;
-            const shared = (driver: string) =>
-              openFailed(new SecretDeliveryError({ reason: "shared-process", provider: driver }));
-            const sharedId =
-              input.providerSessionId ===
-              idAllocator.derive.providerSession({
-                providerInstanceId: input.modelSelection.instanceId,
-              });
-            const cwd = input.runtimePolicy.cwd;
-            if (cwd !== null && (yield* runsHere(input.threadId))) {
-              const workspaceIsDirectory = yield* fileSystem.stat(cwd).pipe(
-                Effect.map((stat) => stat.type === "Directory"),
-                Effect.catch((error) => Effect.succeed(error.reason._tag !== "NotFound")),
-              );
-              if (!workspaceIsDirectory) {
-                return yield* new ProviderWorkspaceMissingError({
-                  threadId: input.threadId,
-                  cwd,
+      ) => {
+        // The session whose key was issued in this open: revoked if the open does not complete.
+        let keyIssued = false;
+        const gatewayFingerprint = AiGatewaySessions.fingerprintOf(gatewayPlan);
+        return sessionOpen
+          .withLock(
+            input.providerSessionId,
+            Effect.gen(function* () {
+              // Never a session, new or running, for a Thread the gateway refuses.
+              if (gatewayPlan._tag === "refused") return yield* openFailed(gatewayPlan.error);
+              const secretFingerprint = plan?.fingerprint ?? NO_SECRETS_FINGERPRINT;
+              const shared = (driver: string) =>
+                openFailed(new SecretDeliveryError({ reason: "shared-process", provider: driver }));
+              const sharedId =
+                input.providerSessionId ===
+                idAllocator.derive.providerSession({
+                  providerInstanceId: input.modelSelection.instanceId,
                 });
+              const cwd = input.runtimePolicy.cwd;
+              if (cwd !== null && (yield* runsHere(input.threadId))) {
+                const workspaceIsDirectory = yield* fileSystem.stat(cwd).pipe(
+                  Effect.map((stat) => stat.type === "Directory"),
+                  Effect.catch((error) => Effect.succeed(error.reason._tag !== "NotFound")),
+                );
+                if (!workspaceIsDirectory) {
+                  return yield* new ProviderWorkspaceMissingError({
+                    threadId: input.threadId,
+                    cwd,
+                  });
+                }
               }
-            }
-            const key = sessionKey(input.providerSessionId);
-            const current = (yield* Ref.get(sessions)).get(key);
-            // A changed set (a rotation, a revoked Vault) means a new process: a provider cannot
-            // change a live one's environment. Decided here, under the lock, so a concurrent open
-            // never releases the session another just made.
-            let existing = current;
-            if (
-              current !== undefined &&
-              (current.secretFingerprint !== secretFingerprint ||
-                (current.aiAccount !== undefined) !== gatewayWanted)
-            ) {
-              const others = [...current.attachedThreadIds].some((id) => id !== input.threadId);
-              // A process other Threads share is never released for one Thread's secrets.
-              if (others || sharedId) return yield* shared(current.runtime.driver);
-              const busy =
-                current.busyTurns.size > 0 ||
-                (yield* (current.runtime.hasPendingBackgroundWork ?? Effect.succeed(false)).pipe(
-                  Effect.orElseSucceed(() => true),
-                ));
-              if (!busy) {
-                yield* releaseEntry({
-                  providerSessionId: input.providerSessionId,
-                  reason: "manual_shutdown",
-                  detail: "This Thread's secrets or AI gateway changed.",
-                }).pipe(Effect.mapError(openFailed));
-                existing = undefined;
+              const key = sessionKey(input.providerSessionId);
+              const current = (yield* Ref.get(sessions)).get(key);
+              // A changed set (a rotation, a revoked Vault) means a new process: a provider cannot
+              // change a live one's environment. Decided here, under the lock, so a concurrent open
+              // never releases the session another just made.
+              let existing = current;
+              if (
+                current !== undefined &&
+                (current.secretFingerprint !== secretFingerprint ||
+                  current.gatewayFingerprint !== gatewayFingerprint)
+              ) {
+                const others = [...current.attachedThreadIds].some((id) => id !== input.threadId);
+                // A process other Threads share is never released for one Thread's secrets.
+                if (others || sharedId) return yield* shared(current.runtime.driver);
+                const busy =
+                  current.busyTurns.size > 0 ||
+                  (yield* (current.runtime.hasPendingBackgroundWork ?? Effect.succeed(false)).pipe(
+                    Effect.orElseSucceed(() => true),
+                  ));
+                if (!busy) {
+                  yield* releaseEntry({
+                    providerSessionId: input.providerSessionId,
+                    reason: "manual_shutdown",
+                    detail: "This Thread's secrets or AI gateway changed.",
+                  }).pipe(Effect.mapError(openFailed));
+                  existing = undefined;
+                } else if (gatewayPlan._tag === "on") {
+                  // A busy process on a login, or for another owner or account, never serves a turn
+                  // that must go through the gateway as this one.
+                  return yield* openFailed(
+                    "This Thread's agent is still finishing work it started before its AI account changed. Try again when it is done.",
+                  );
+                }
+                // Busy: a turn or its background work runs there. The session goes on with what it
+                // started with; the first open after that work ends opens a new one.
               }
-              // Busy: a turn or its background work runs there. The session goes on with what it
-              // started with; the first open after that work ends opens a new one.
-            }
-            if (existing !== undefined) {
-              const attached = existing.attachedThreadIds.has(input.threadId);
-              if (!attached && !existing.supportsMultipleProviderThreads) {
-                return yield* new ProviderSessionOpenError({
-                  instanceId: input.modelSelection.instanceId,
-                  providerSessionId: input.providerSessionId,
-                  cause: `Provider ${existing.runtime.driver} does not support attaching multiple app threads to one session.`,
-                });
-              }
-              // A process holding one Thread's secrets serves no other.
-              if (!attached && existing.secretFingerprint !== secretFingerprint) {
-                return yield* shared(existing.runtime.driver);
-              }
-              if (!attached) yield* agentScope.clear(input.threadId);
-              yield* ensureThreadAttached({
-                providerSessionId: input.providerSessionId,
-                threadId: input.threadId,
-                providerInstanceId: existing.runtime.instanceId,
-              });
-              yield* touchActivity(input.providerSessionId);
-              return existing.exposedRuntime;
-            }
-
-            const adapter = yield* registry.get(input.modelSelection.instanceId).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderSessionOpenError({
+              if (existing !== undefined) {
+                const attached = existing.attachedThreadIds.has(input.threadId);
+                if (!attached && !existing.supportsMultipleProviderThreads) {
+                  return yield* new ProviderSessionOpenError({
                     instanceId: input.modelSelection.instanceId,
                     providerSessionId: input.providerSessionId,
-                    cause,
-                  }),
-              ),
-            );
-            // A provider whose one process serves every Thread (its session id derives from the
-            // instance alone) never gets a Thread's secrets.
-            if (secretFingerprint !== NO_SECRETS_FINGERPRINT && sharedId) {
-              return yield* shared(adapter.driver);
-            }
-            // The values, read now that a process starts (a machine too old for them refuses).
-            const secretEnv: SecretEnv | undefined =
-              plan === undefined || plan.variables.length === 0 || Option.isNone(secretDelivery)
-                ? undefined
-                : yield* secretDelivery.value.resolve(plan).pipe(Effect.mapError(openFailed));
-            // Spec 4 ticket 06: the Thread's key, issued now for this session (revoked with it),
-            // or the refusal: never a session on a login of the machine instead.
-            const gateway = Option.isNone(aiGatewaySessions)
-              ? Option.none<AiGatewaySessions.GatewaySession>()
-              : yield* aiGatewaySessions.value
-                  .forSession({
-                    threadId: input.threadId,
-                    providerSessionId: input.providerSessionId,
-                    driver: adapter.driver,
-                    modelSelection: input.modelSelection,
-                    target: yield* targetFor(input.threadId).pipe(Effect.mapError(openFailed)),
-                  })
-                  .pipe(Effect.mapError(openFailed));
-            const aiAccount = Option.isSome(gateway) ? gateway.value.account : undefined;
-            const releaseKey =
-              Option.isSome(gateway) && Option.isSome(aiGatewaySessions)
-                ? aiGatewaySessions.value.release(input.providerSessionId)
-                : Effect.void;
-            // A process every Thread of the instance shares never holds one Thread's key.
-            if (Option.isSome(gateway) && sharedId) {
-              yield* releaseKey;
-              return yield* shared(adapter.driver);
-            }
-            const prepared = yield* prepareMcpSession(
-              input.threadId,
-              input.modelSelection.instanceId,
-            );
-            const mcpCredentialId = prepared.mcpCredentialId;
-            let reservationDropped = mcpCredentialId === undefined;
-            const dropReservation = Effect.sync(() => {
-              if (!reservationDropped && mcpCredentialId !== undefined) {
-                reservationDropped = true;
-                dropMcpCredentialReservation(input.threadId, mcpCredentialId);
+                    cause: `Provider ${existing.runtime.driver} does not support attaching multiple app threads to one session.`,
+                  });
+                }
+                // A process holding one Thread's secrets, or one Thread's gateway key, serves no other.
+                if (
+                  !attached &&
+                  (existing.secretFingerprint !== secretFingerprint ||
+                    existing.gatewayFingerprint !== AiGatewaySessions.NO_GATEWAY ||
+                    gatewayFingerprint !== AiGatewaySessions.NO_GATEWAY)
+                ) {
+                  return yield* shared(existing.runtime.driver);
+                }
+                if (!attached) yield* agentScope.clear(input.threadId);
+                yield* ensureThreadAttached({
+                  providerSessionId: input.providerSessionId,
+                  threadId: input.threadId,
+                  providerInstanceId: existing.runtime.instanceId,
+                });
+                yield* touchActivity(input.providerSessionId);
+                return existing.exposedRuntime;
               }
-            });
-            const sessionScope = yield* Scope.fork(sessionScopes);
-            yield* agentScope.clear(input.threadId);
-            const openedRuntime = yield* adapter
-              .openSession({
-                threadId: input.threadId,
-                providerSessionId: input.providerSessionId,
-                modelSelection: input.modelSelection,
-                runtimePolicy: input.runtimePolicy,
-                ...(input.resumeFromSession === undefined
-                  ? {}
-                  : { resumeFromSession: input.resumeFromSession }),
-                ...(input.initialNativeThreadId === undefined
-                  ? {}
-                  : { initialNativeThreadId: input.initialNativeThreadId }),
-                ...(input.initialProviderItemIdentityVersion === undefined
-                  ? {}
-                  : {
-                      initialProviderItemIdentityVersion: input.initialProviderItemIdentityVersion,
-                    }),
-                ...(secretEnv === undefined ? {} : { secretEnv }),
-                ...(Option.isSome(gateway) ? { aiGateway: gateway.value.access } : {}),
-              })
-              .pipe(
-                Effect.provideService(Scope.Scope, sessionScope),
-                // Bound scope close after cleanup; a wedged finalizer must not hold the open lock or interrupter.
-                Effect.onError(() =>
-                  dropReservation.pipe(
-                    Effect.andThen(
-                      prepared.issued
-                        ? clearMcpSession(input.threadId, mcpCredentialId)
-                        : Effect.void,
-                    ),
-                    Effect.ensuring(
-                      closeScopeWithin(sessionScope, {
-                        providerSessionId: input.providerSessionId,
-                        reason: "open_failed",
-                      }),
-                    ),
-                    // The key of a session that never opened stops working now.
-                    Effect.ensuring(releaseKey),
-                  ),
-                ),
+
+              const adapter = yield* registry.get(input.modelSelection.instanceId).pipe(
                 Effect.mapError(
                   (cause) =>
                     new ProviderSessionOpenError({
@@ -2434,91 +2372,199 @@ export const layerWithOptions = (
                       cause,
                     }),
                 ),
-                withMetrics({
-                  counter: providerSessionsTotal,
-                  attributes: { provider: adapter.driver, operation: "open" },
-                }),
               );
-            // Every record of the session says which Hub AI account it runs on.
-            const runtime =
-              aiAccount === undefined
-                ? openedRuntime
-                : {
-                    ...openedRuntime,
-                    providerSession: withAiAccount(openedRuntime.providerSession, aiAccount),
-                    events: Stream.map(openedRuntime.events, (event) =>
-                      event.type === "provider_session.updated"
-                        ? {
-                            ...event,
-                            providerSession: withAiAccount(event.providerSession, aiAccount),
-                          }
-                        : event,
-                    ),
-                  };
-            const eventSubscribers = yield* Ref.make<
-              ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
-            >(new Map());
-            const exposedRuntime = decorateRuntime(runtime, eventSubscribers);
-            const entry: LiveSessionEntry = {
-              attachedThreadIds: new Set([input.threadId]),
-              loadedProviderThreadKeyByThread: new Map(),
-              mcpCredentialIdByThread:
-                mcpCredentialId === undefined
-                  ? new Map()
-                  : new Map([[input.threadId, mcpCredentialId]]),
-              supportsMultipleProviderThreads:
-                runtime.providerSession.capabilities.sessions
-                  .supportsMultipleProviderThreadsPerSession,
-              secretFingerprint,
-              aiAccount,
-              runtime,
-              exposedRuntime,
-              eventSubscribers,
-              requestEventPermit: yield* Semaphore.make(1),
-              scope: sessionScope,
-              idleGeneration: 0,
-              busyTurns: new Set(),
-              idleFiber: null,
-              pinnedSinceMs: null,
-              idleThreadUnloads: new Map(),
-            };
-            yield* Ref.update(sessions, (current) => {
-              const updated = new Map(current);
-              updated.set(key, entry);
-              return updated;
-            });
-            yield* dropReservation;
-            yield* withActivityError(
-              input.providerSessionId,
-              writeProviderSessionEvents({
-                runtime,
-                threadIds: [input.threadId],
-                type: "provider-session.attached",
-                payload: withAiAccount(runtime.providerSession, aiAccount),
-              }),
-            ).pipe(
-              // Release on interruption too; no event pump or idle timer exists to clean up yet.
-              Effect.onError((cause) =>
-                releaseEntry(
-                  Cause.hasInterruptsOnly(cause)
-                    ? {
-                        providerSessionId: input.providerSessionId,
-                        reason: "manual_shutdown",
-                        detail: "The provider session start was interrupted.",
-                      }
+              // A provider whose one process serves every Thread (its session id derives from the
+              // instance alone) never gets a Thread's secrets.
+              // Nor a Thread's gateway key: refused before any key is issued (or an earlier rotated).
+              if (
+                (secretFingerprint !== NO_SECRETS_FINGERPRINT || gatewayPlan._tag === "on") &&
+                sharedId
+              ) {
+                return yield* shared(adapter.driver);
+              }
+              // The values, read now that a process starts (a machine too old for them refuses).
+              const secretEnv: SecretEnv | undefined =
+                plan === undefined || plan.variables.length === 0 || Option.isNone(secretDelivery)
+                  ? undefined
+                  : yield* secretDelivery.value.resolve(plan).pipe(Effect.mapError(openFailed));
+              // Spec 4 ticket 06: the Thread's key, issued now for this session (revoked with it),
+              // or the refusal: never a session on a login of the machine instead.
+              const gateway =
+                gatewayPlan._tag !== "on" || Option.isNone(aiGatewaySessions)
+                  ? Option.none<AiGatewaySessions.GatewaySession>()
+                  : Option.some(
+                      yield* aiGatewaySessions.value
+                        .issue({
+                          threadId: input.threadId,
+                          providerSessionId: input.providerSessionId,
+                          plan: gatewayPlan,
+                        })
+                        .pipe(
+                          Effect.tap(() =>
+                            Effect.sync(() => {
+                              keyIssued = true;
+                            }),
+                          ),
+                          Effect.mapError(openFailed),
+                        ),
+                    );
+              const aiAccount = Option.isSome(gateway) ? gateway.value.account : undefined;
+              const prepared = yield* prepareMcpSession(
+                input.threadId,
+                input.modelSelection.instanceId,
+              );
+              const mcpCredentialId = prepared.mcpCredentialId;
+              let reservationDropped = mcpCredentialId === undefined;
+              const dropReservation = Effect.sync(() => {
+                if (!reservationDropped && mcpCredentialId !== undefined) {
+                  reservationDropped = true;
+                  dropMcpCredentialReservation(input.threadId, mcpCredentialId);
+                }
+              });
+              const sessionScope = yield* Scope.fork(sessionScopes);
+              yield* agentScope.clear(input.threadId);
+              const openedRuntime = yield* adapter
+                .openSession({
+                  threadId: input.threadId,
+                  providerSessionId: input.providerSessionId,
+                  modelSelection: input.modelSelection,
+                  runtimePolicy: input.runtimePolicy,
+                  ...(input.resumeFromSession === undefined
+                    ? {}
+                    : { resumeFromSession: input.resumeFromSession }),
+                  ...(input.initialNativeThreadId === undefined
+                    ? {}
+                    : { initialNativeThreadId: input.initialNativeThreadId }),
+                  ...(input.initialProviderItemIdentityVersion === undefined
+                    ? {}
                     : {
+                        initialProviderItemIdentityVersion:
+                          input.initialProviderItemIdentityVersion,
+                      }),
+                  ...(secretEnv === undefined ? {} : { secretEnv }),
+                  ...(Option.isSome(gateway) ? { aiGateway: gateway.value.access } : {}),
+                })
+                .pipe(
+                  Effect.provideService(Scope.Scope, sessionScope),
+                  // Bound scope close after cleanup; a wedged finalizer must not hold the open lock or interrupter.
+                  Effect.onError(() =>
+                    dropReservation.pipe(
+                      Effect.andThen(
+                        prepared.issued
+                          ? clearMcpSession(input.threadId, mcpCredentialId)
+                          : Effect.void,
+                      ),
+                      Effect.ensuring(
+                        closeScopeWithin(sessionScope, {
+                          providerSessionId: input.providerSessionId,
+                          reason: "open_failed",
+                        }),
+                      ),
+                    ),
+                  ),
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderSessionOpenError({
+                        instanceId: input.modelSelection.instanceId,
                         providerSessionId: input.providerSessionId,
-                        reason: "runtime_error",
-                        detail: "Failed to persist the provider-session attachment.",
-                      },
-                ).pipe(logReleaseFailure(input.providerSessionId)),
-              ),
-            );
-            yield* startEventPump(entry);
-            yield* scheduleIdleRelease(input.providerSessionId);
-            return exposedRuntime;
-          }),
-        );
+                        cause,
+                      }),
+                  ),
+                  withMetrics({
+                    counter: providerSessionsTotal,
+                    attributes: { provider: adapter.driver, operation: "open" },
+                  }),
+                );
+              // Every record of the session says which Hub AI account it runs on.
+              const runtime =
+                aiAccount === undefined
+                  ? openedRuntime
+                  : {
+                      ...openedRuntime,
+                      providerSession: withAiAccount(openedRuntime.providerSession, aiAccount),
+                      events: Stream.map(openedRuntime.events, (event) =>
+                        event.type === "provider_session.updated"
+                          ? {
+                              ...event,
+                              providerSession: withAiAccount(event.providerSession, aiAccount),
+                            }
+                          : event,
+                      ),
+                    };
+              const eventSubscribers = yield* Ref.make<
+                ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
+              >(new Map());
+              const exposedRuntime = decorateRuntime(runtime, eventSubscribers);
+              const entry: LiveSessionEntry = {
+                attachedThreadIds: new Set([input.threadId]),
+                loadedProviderThreadKeyByThread: new Map(),
+                mcpCredentialIdByThread:
+                  mcpCredentialId === undefined
+                    ? new Map()
+                    : new Map([[input.threadId, mcpCredentialId]]),
+                supportsMultipleProviderThreads:
+                  runtime.providerSession.capabilities.sessions
+                    .supportsMultipleProviderThreadsPerSession,
+                secretFingerprint,
+                aiAccount,
+                gatewayFingerprint,
+                runtime,
+                exposedRuntime,
+                eventSubscribers,
+                requestEventPermit: yield* Semaphore.make(1),
+                scope: sessionScope,
+                idleGeneration: 0,
+                busyTurns: new Set(),
+                idleFiber: null,
+                pinnedSinceMs: null,
+                idleThreadUnloads: new Map(),
+              };
+              yield* Ref.update(sessions, (current) => {
+                const updated = new Map(current);
+                updated.set(key, entry);
+                return updated;
+              });
+              yield* dropReservation;
+              yield* withActivityError(
+                input.providerSessionId,
+                writeProviderSessionEvents({
+                  runtime,
+                  threadIds: [input.threadId],
+                  type: "provider-session.attached",
+                  payload: withAiAccount(runtime.providerSession, aiAccount),
+                }),
+              ).pipe(
+                // Release on interruption too; no event pump or idle timer exists to clean up yet.
+                Effect.onError((cause) =>
+                  releaseEntry(
+                    Cause.hasInterruptsOnly(cause)
+                      ? {
+                          providerSessionId: input.providerSessionId,
+                          reason: "manual_shutdown",
+                          detail: "The provider session start was interrupted.",
+                        }
+                      : {
+                          providerSessionId: input.providerSessionId,
+                          reason: "runtime_error",
+                          detail: "Failed to persist the provider-session attachment.",
+                        },
+                  ).pipe(logReleaseFailure(input.providerSessionId)),
+                ),
+              );
+              yield* startEventPump(entry);
+              yield* scheduleIdleRelease(input.providerSessionId);
+              return exposedRuntime;
+            }),
+          )
+          .pipe(
+            // Any failure or interruption after the key was issued: it stops working now.
+            Effect.onExit((exit) =>
+              Exit.isFailure(exit) && keyIssued && Option.isSome(aiGatewaySessions)
+                ? aiGatewaySessions.value.release(input.providerSessionId)
+                : Effect.void,
+            ),
+          );
+      };
 
       return ProviderSessionManagerV2.of({
         shutdown,
@@ -2530,11 +2576,8 @@ export const layerWithOptions = (
               cause,
             });
           const plan = yield* secretPlanFor(input.threadId).pipe(Effect.mapError(openFailed));
-          const gatewayWanted = yield* gatewayWantedFor({
-            threadId: input.threadId,
-            instanceId: input.modelSelection.instanceId,
-          });
-          return yield* openLocked(input, plan, gatewayWanted, openFailed);
+          const gatewayPlan = yield* gatewayPlanFor(input);
+          return yield* openLocked(input, plan, gatewayPlan, openFailed);
         }),
         isLive: (providerSessionId) =>
           Ref.get(sessions).pipe(

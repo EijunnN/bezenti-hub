@@ -1097,7 +1097,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       : providerAdapters.get(input.providerInstanceId).pipe(
           Effect.flatMap((adapter) =>
             aiGatewaySessions.value.applies({
-              threadId: input.threadId,
               driver: adapter.driver,
               environmentId: input.environmentId,
             }),

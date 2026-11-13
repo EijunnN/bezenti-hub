@@ -231,6 +231,31 @@ describe("AiGatewayRelay", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.live("refuses to relay a key to a Hub over plain HTTP off this machine", () =>
+    Effect.gen(function* () {
+      const relay = yield* AiGatewayRelay.make("http://hub.example.test:8080");
+      const exit = yield* Effect.exit(relay.baseUrl);
+      assert.isTrue(exit._tag === "Failure");
+      assert.include(JSON.stringify(exit), "insecure-hub");
+      const secure = yield* AiGatewayRelay.make("https://hub.example.test");
+      assert.match(yield* secure.baseUrl, /^http:\/\/127\.0\.0\.1:\d+$/u);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("passes a body's encoding on, so the Hub refuses what it cannot read", () =>
+    Effect.gen(function* () {
+      const { hub, baseUrl } = yield* relayOn();
+      yield* Effect.promise(() =>
+        fetch(`${baseUrl}/api/ai/openai/v1/chat/completions`, {
+          method: "POST",
+          headers: { "content-encoding": "gzip", authorization: "Bearer t3gk_x" },
+          body: "compressed",
+        }).then((r) => r.text()),
+      );
+      assert.equal(hub.seen[0]?.headers["content-encoding"], "gzip");
+    }).pipe(Effect.scoped),
+  );
+
   it("decides from the request alone", () => {
     const decide = (url: string, headers: Record<string, string> = {}, method = "POST") =>
       AiGatewayRelay.relayDecision({ method, url, headers: { host: "127.0.0.1:9", ...headers } }, 9)
