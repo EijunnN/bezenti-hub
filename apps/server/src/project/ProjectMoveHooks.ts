@@ -26,11 +26,11 @@ export interface ProjectMoveWork {
    */
   readonly drainReleases: (threadIds: ReadonlyArray<ThreadId> | "all") => Effect.Effect<void>;
   /**
-   * Closes the terminals the Hub has waiting to close (`terminal_openings`, spec 5 ticket 07: a
-   * Project's move, a User's removal) on each machine connected now; the rest close when their
-   * machine connects. Best effort per terminal.
+   * Spec 5 ticket 07: tells each connected machine every Thread's Space now and the removed Users,
+   * and each closes its shells started for another Space or a removed User (`terminal.reconcile`).
+   * Fire and forget: it returns at once, logs failures, and runs again as each machine connects.
    */
-  readonly closePendingTerminals: Effect.Effect<void>;
+  readonly reconcileTerminals: Effect.Effect<void>;
 }
 
 export interface ProjectMoveHooksShape {

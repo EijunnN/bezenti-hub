@@ -27,8 +27,10 @@ import {
   type TerminalObserveInput,
   type TerminalResizeInput,
   type ResourceMonitorProcessTableEntry,
+  type TerminalReconcileInput,
   type TerminalSessionSnapshot,
   type TerminalSessionStatus,
+  type TerminalShellFacts as TerminalShellFactsSchema,
   type TerminalSummary,
   type TerminalWriteInput,
   ClaudeSettings,
@@ -179,12 +181,29 @@ class TerminalProcessSignalError extends Schema.TaggedError<TerminalProcessSigna
  */
 export type TerminalSecrets = SecretEnv;
 
+/**
+ * Spec 5 ticket 07: what a shell was started with, kept with its session and reported in its
+ * snapshot: the Space whose secrets were planned for it and the User whose set it carries. The Hub
+ * refuses and closes a shell whose Space is no longer its Thread's, whose User was removed, or
+ * that has none (`null`: started without the Hub's word).
+ */
+export type TerminalShellFacts = TerminalShellFactsSchema;
+
+/** What every door that may start a shell passes: its secrets and its facts. */
+export interface TerminalStart {
+  readonly secrets: TerminalSecrets | undefined;
+  readonly facts: TerminalShellFacts | null;
+}
+
+/** For a door that never starts a shell with secrets of its own (it only reattaches). */
+export const NO_START: TerminalStart = { secrets: undefined, facts: null };
+
 export class TerminalManager extends Context.Service<
   TerminalManager,
   {
     readonly open: (
       input: TerminalOpenInput,
-      secrets?: TerminalSecrets,
+      start: TerminalStart,
     ) => Effect.Effect<TerminalSessionSnapshot, TerminalError>;
 
     readonly getShell: (input: TerminalObserveInput) => Effect.Effect<string, TerminalError>;
@@ -209,7 +228,7 @@ export class TerminalManager extends Context.Service<
       input: TerminalAttachInput,
       viewerId: string,
       /** For a shell the attach starts (a new terminal, or `restartIfNotRunning`); used once. */
-      secrets?: TerminalSecrets,
+      start: TerminalStart,
     ) => Stream.Stream<TerminalAttachStreamEvent, TerminalError>;
 
     readonly observeStream: (
@@ -235,6 +254,13 @@ export class TerminalManager extends Context.Service<
 
     /** Omit terminalId to close all sessions for the thread. */
     readonly close: (input: TerminalCloseInput) => Effect.Effect<void, TerminalError>;
+
+    /**
+     * Spec 5 ticket 07: closes, with their history, the shells of the listed Threads started for
+     * another Space, every shell started for a removed User, and listed Threads' shells without
+     * facts. Answers how many closed.
+     */
+    readonly reconcile: (input: TerminalReconcileInput) => Effect.Effect<number>;
 
     readonly closeIdle: (input: {
       readonly threadId: string;
@@ -327,6 +353,10 @@ interface TerminalSessionState {
   secretFingerprint: string | null;
   /** The shell runs with secrets that changed since it started. */
   secretsStale: boolean;
+  /** Spec 5 ticket 07: the facts for the next start, taken as the shell spawns. */
+  pendingFacts: TerminalShellFacts | null;
+  /** The facts the running shell started with; null: none (started without the Hub's word). */
+  facts: TerminalShellFacts | null;
 }
 
 interface TerminalGrid {
@@ -423,6 +453,7 @@ function snapshot(session: TerminalSessionState): TerminalSessionSnapshot {
     cols: session.cols,
     rows: session.rows,
     ...(session.secretsStale ? { secretsStale: true } : {}),
+    ...(session.facts === null ? {} : { facts: session.facts }),
   };
 }
 
@@ -2534,6 +2565,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
             // Spec 5: the secrets go into this shell's environment and are then dropped here.
             const secrets = session.pendingSecretEnv;
             session.pendingSecretEnv = null;
+            session.facts = session.pendingFacts;
+            session.pendingFacts = null;
             session.secretFingerprint = secrets?.fingerprint ?? NO_SECRETS_FINGERPRINT;
             session.secretsStale = false;
             const spawnResult = yield* trySpawn(
@@ -2889,8 +2922,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   const openWithWorkspaceLease = Effect.fn("terminal.openLocked")(function* (
     requestedInput: TerminalOpenInput,
-    secrets: TerminalSecrets | undefined,
+    start: TerminalStart | undefined,
   ) {
+    const secrets = start?.secrets;
     const terminalId = requestedInput.terminalId;
     yield* assertValidCwd(requestedInput.cwd);
 
@@ -2944,6 +2978,8 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         pendingSecretEnv: startSecrets,
         secretFingerprint: null,
         secretsStale: false,
+        pendingFacts: start?.facts ?? null,
+        facts: null,
       };
 
       const createdSession = session;
@@ -3010,6 +3046,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
     if (!liveSession.process) {
       liveSession.pendingSecretEnv = startSecrets;
+      liveSession.pendingFacts = start?.facts ?? null;
       yield* startSession(
         liveSession,
         {
@@ -3032,17 +3069,17 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     return snapshot(liveSession);
   });
 
-  const openLocked = (input: TerminalOpenInput, secrets?: TerminalSecrets) =>
+  const openLocked = (input: TerminalOpenInput, start?: TerminalStart) =>
     withWorkspaceLease(
       path.resolve(input.worktreePath ?? input.cwd),
-      openWithWorkspaceLease(input, secrets),
+      openWithWorkspaceLease(input, start),
     );
 
-  const open: TerminalManager["Service"]["open"] = (input, secrets) =>
+  const open: TerminalManager["Service"]["open"] = (input, start) =>
     withThreadLock(
       input.threadId,
       resolveLaunchInputEnvironment(input).pipe(
-        Effect.flatMap((resolved) => openLocked(resolved, secrets)),
+        Effect.flatMap((resolved) => openLocked(resolved, start)),
       ),
     );
 
@@ -3056,7 +3093,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
 
   const openOrAttachForStream = Effect.fnUntraced(function* (
     requestedInput: TerminalAttachInput,
-    takeSecrets: () => TerminalSecrets | undefined,
+    takeSecrets: () => TerminalStart | undefined,
   ) {
     const terminalId = requestedInput.terminalId;
     const input = withSharedGrid(toSessionKey(requestedInput.threadId, terminalId), requestedInput);
@@ -3094,7 +3131,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       return yield* Effect.uninterruptible(openLocked(resolvedInput, takeSecrets()));
     }
 
-    noteSecrets(session, takeSecrets());
+    noteSecrets(session, takeSecrets()?.secrets);
     if (
       session.process &&
       session.status === "running" &&
@@ -3244,7 +3281,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>,
     registerCleanup: ((stop: () => void) => void) | undefined,
     viewerId: string | undefined,
-    takeSecrets: () => TerminalSecrets | undefined,
+    takeSecrets: () => TerminalStart | undefined,
   ) => {
     const viewer = viewerId ?? `stream:${++anonymousViewerCount}`;
     let detach = () => {};
@@ -3313,14 +3350,16 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const attachOutputStream: TerminalManager["Service"]["attachOutputStream"] = (
     input,
     viewerId,
-    secrets,
+    start,
   ) => {
     // Values serve the first attach only, then are dropped: the stream may live for hours. The
-    // fingerprint stays, so a later start asks for them again (`secrets_required`).
-    let pending = secrets;
+    // fingerprint and the facts stay, so a later start asks for them again (`secrets_required`).
+    let pending = start;
     const takeSecrets = () => {
       const taken = pending;
-      if (pending?.variables !== undefined) pending = { fingerprint: pending.fingerprint };
+      if (pending.secrets?.variables !== undefined) {
+        pending = { ...pending, secrets: { fingerprint: pending.secrets.fingerprint } };
+      }
       return taken;
     };
     return Stream.unwrap(
@@ -3520,6 +3559,45 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       }),
     );
 
+  const reconcile: TerminalManager["Service"]["reconcile"] = Effect.fn("terminal.reconcile")(
+    function* (input) {
+      const spaceOf = new Map(input.threads.map((thread) => [thread.threadId, thread.spaceId]));
+      const removed = new Set(input.removedUserIds);
+      // A shell planned for no Space got no secret; one without facts is never trusted.
+      const isStale = (session: TerminalSessionState) => {
+        const facts = session.process === null ? session.pendingFacts : session.facts;
+        if (facts !== null && facts.userId !== null && removed.has(facts.userId)) return true;
+        const spaceId = spaceOf.get(session.threadId);
+        if (spaceId === undefined) return false;
+        return facts === null || (facts.spaceId !== null && facts.spaceId !== spaceId);
+      };
+      const sessions = [...(yield* readManagerState).sessions.values()];
+      const stale = sessions.filter(isStale);
+      let closed = 0;
+      for (const session of stale) {
+        yield* withThreadLock(
+          session.threadId,
+          Effect.gen(function* () {
+            // Checked again under the lock: a shell reopened since for the new Space stays.
+            const current = yield* getSession(session.threadId, session.terminalId);
+            if (Option.isNone(current) || current.value !== session || !isStale(session)) return;
+            yield* closeSession(session.threadId, session.terminalId, true);
+            closed += 1;
+          }),
+        ).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("failed to close a terminal left from another Space", {
+              threadId: session.threadId,
+              terminalId: session.terminalId,
+              cause,
+            }),
+          ),
+        );
+      }
+      return closed;
+    },
+  );
+
   const closeIdle: TerminalManager["Service"]["closeIdle"] = (input) =>
     withThreadLock(
       input.threadId,
@@ -3582,6 +3660,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     clear,
     close,
     closeIdle,
+    reconcile,
     subscribe,
     subscribeMetadata,
   });

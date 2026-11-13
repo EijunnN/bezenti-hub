@@ -20,11 +20,14 @@ import {
 } from "./environmentConnection.ts";
 
 /**
- * 8: previews through the Hub. 9: checkouts from the Hub's copy. 10: a Thread's secrets as
- * environment variables (`secretEnv`). 11: a session on the Hub's AI gateway (`aiGateway` in
- * `provider.openSession`); a machine before 11 gets no gateway key.
+ * 8: Hub previews. 9: checkouts from the Hub. 10: `secretEnv`. 11: `aiGateway` in
+ * `provider.openSession`. 12: shells keep and report their `facts`, and `terminal.reconcile`; the
+ * Hub refuses terminals of a machine before 12.
  */
-export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 11;
+export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 12;
+
+/** The first contract whose shells report their facts (spec 5 ticket 07). */
+export const SHELL_FACTS_CONTRACT_VERSION = 12;
 
 /**
  * The Hub machine's Environment id. It is a constant so the `environments` table can seed the

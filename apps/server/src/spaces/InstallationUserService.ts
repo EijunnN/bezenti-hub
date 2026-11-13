@@ -12,7 +12,6 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import * as AuditLog from "../audit/AuditLog.ts";
 import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
-import * as TerminalOpenings from "../environment/TerminalOpenings.ts";
 import * as PairingGrantStore from "../auth/PairingGrantStore.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import * as ProjectMoveHooks from "../project/ProjectMoveHooks.ts";
@@ -73,11 +72,11 @@ const make = Effect.gen(function* () {
     yield* spaces.endAccessOf({ userId, removed: status === "removed" });
   }, Effect.mapError(storageError));
 
-  /** The terminals waiting to close, on the machines connected now: the orchestration's work. */
-  const closePendingTerminals = Effect.gen(function* () {
+  /** Shells started for a removed User close on their machines: the orchestration's work. */
+  const reconcileTerminals = Effect.gen(function* () {
     if (Option.isNone(moveHooks)) return;
     const work = yield* moveHooks.value.current;
-    if (work !== undefined) yield* work.closePendingTerminals;
+    if (work !== undefined) yield* work.reconcileTerminals;
   });
 
   const setStatus: InstallationUserService["Service"]["setStatus"] = Effect.fn(
@@ -120,9 +119,6 @@ const make = Effect.gen(function* () {
               userId,
               displayName: current.displayName,
             }).pipe(Effect.mapError(storageError));
-            // Every terminal they opened holds their secrets, in whoever's Thread: the Hub
-            // refuses it from now on and closes it, now or when its machine connects.
-            yield* TerminalOpenings.markOpener(sql, userId).pipe(Effect.mapError(storageError));
           }
           // Their machines go with their sign-in, and stay revoked if they come back.
           const disconnect = yield* environments
@@ -151,7 +147,8 @@ const make = Effect.gen(function* () {
       yield* outcome.announce;
       yield* spaces.membershipsChanged([userId]);
     }
-    if (status === "removed") yield* closePendingTerminals;
+    // Every shell started with their set, in whoever's Thread, closes (spec 5 ticket 07).
+    if (status === "removed") yield* reconcileTerminals;
     yield* spaces.userStatusChanged({ userId, active: status === "active" });
     return yield* spaces.installationUser(userId).pipe(
       Effect.flatMap(Effect.fromOption),

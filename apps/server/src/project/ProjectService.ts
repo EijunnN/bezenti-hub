@@ -61,7 +61,6 @@ import type * as AuditLog from "../audit/AuditLog.ts";
 import { servesSpace } from "../sandboxes/sandboxSpace.ts";
 import * as EffectiveVaults from "../vaults/EffectiveVaults.ts";
 import * as VaultReachLoss from "../vaults/VaultReachLoss.ts";
-import * as TerminalOpenings from "../environment/TerminalOpenings.ts";
 import * as ProjectMoveHooks from "./ProjectMoveHooks.ts";
 
 export interface ProjectCreateInput extends ProjectCreatePayload {
@@ -187,6 +186,7 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
       "check-environment",
       "check-folder",
       "read-vaults",
+      "drop-vault-choices",
     ]),
     projectId: Schema.optional(ProjectId),
     workspaceRoot: Schema.optional(Schema.String),
@@ -1202,14 +1202,9 @@ export const make = Effect.gen(function* () {
               from: route.from,
               spaceId: route.to,
             }).pipe(
-              // Its terminals opened under the old Space hold its secrets: the Hub refuses them
-              // from now on and closes them (spec 5 ticket 07).
-              Effect.andThen(
-                TerminalOpenings.markProjectMoved(sql, { projectId, spaceId: route.to }),
-              ),
               Effect.mapError(
                 (cause) =>
-                  new ProjectOperationError({ operation: "read-vaults", projectId, cause }),
+                  new ProjectOperationError({ operation: "drop-vault-choices", projectId, cause }),
               ),
             ),
           );
@@ -1249,19 +1244,9 @@ export const make = Effect.gen(function* () {
         // an earlier one did not finish.
         if (work !== undefined) {
           yield* work.drainReleases(threads.map((thread) => thread.threadId));
-          // Each machine connected now closes them; one away does when it connects. A rerun
-          // marks again what an earlier attempt left (never those opened in the new Space).
-          if (cutting) {
-            yield* TerminalOpenings.markProjectMoved(sql, { projectId, spaceId: route.to }).pipe(
-              Effect.catch((cause) =>
-                Effect.logWarning("Could not mark a moved Project's terminals", {
-                  projectId,
-                  cause,
-                }),
-              ),
-            );
-            yield* work.closePendingTerminals;
-          }
+          // Shells started for the old Space close on their machines (spec 5 ticket 07); the
+          // move does not wait for it, and the Hub refuses them meanwhile.
+          if (cutting) yield* work.reconcileTerminals;
         }
       });
       yield* spaces.whileProjectMoves(projectId, relocate).pipe(

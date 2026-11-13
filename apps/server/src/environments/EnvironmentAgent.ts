@@ -663,11 +663,11 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
       "terminal.stream",
       request.subscriptionId,
       request.mode === "attach"
-        ? terminals.attachOutputStream(
-            input,
-            request.viewerId ?? request.subscriptionId,
-            request.secretEnv,
-          )
+        ? terminals.attachOutputStream(input, request.viewerId ?? request.subscriptionId, {
+            secrets: request.secretEnv,
+            // Spec 5 ticket 07: a shell started without the Hub's facts reports none.
+            facts: request.facts ?? null,
+          })
         : terminalOutputStream(
             (listener, registerCleanup) =>
               terminals.observeStream(input, listener, registerCleanup),
@@ -1053,7 +1053,9 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
                 WorkspaceRootEscapeError: () => Effect.fail(terminalOutside(rooted.input.threadId)),
               }),
               // Spec 5: the opening User's secrets, for this shell's environment alone.
-              Effect.flatMap((input) => terminals.open(input, rooted.secretEnv)),
+              Effect.flatMap((input) =>
+                terminals.open(input, { secrets: rooted.secretEnv, facts: rooted.facts ?? null }),
+              ),
             ),
         );
       }
@@ -1072,6 +1074,10 @@ export const make = Effect.fn("EnvironmentAgent.make")(function* (input: Environ
       case "terminal.close":
         return Effect.flatMap(workspaceRpc, ({ terminals }) =>
           terminals.close(request as RemoteInput<"terminal.close">),
+        );
+      case "terminal.reconcile":
+        return Effect.flatMap(workspaceRpc, ({ terminals }) =>
+          terminals.reconcile(request as RemoteInput<"terminal.reconcile">),
         );
       case "terminal.stream":
         return openTerminalStream(request as RemoteInput<"terminal.stream">, origin);

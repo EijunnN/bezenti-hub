@@ -103,11 +103,17 @@ export const forgetUser = Effect.fn("VaultReachLoss.forgetUser")(function* (
       OR (subject_kind = 'space' AND subject_id = ${personal})
   `;
   yield* sql`DELETE FROM space_default_vaults WHERE space_id = ${personal}`;
-  yield* sql`
+  const choices = yield* sql<{
+    readonly projectId: string;
+    readonly vaultId: string;
+    readonly name: string | null;
+  }>`
     DELETE FROM project_vault_choices WHERE project_id IN (
       SELECT project_id FROM projection_projects
       WHERE ${sql.literal(projectSpaceSql("space_id"))} = ${personal}
     )
+    RETURNING project_id AS "projectId", vault_id AS "vaultId",
+      (SELECT name FROM vaults WHERE vaults.vault_id = project_vault_choices.vault_id) AS "name"
   `;
   const write = AuditLog.write(sql);
   for (const row of allowed) {
@@ -122,6 +128,20 @@ export const forgetUser = Effect.fn("VaultReachLoss.forgetUser")(function* (
         subjectName: user.displayName,
         allowed: false,
       },
+    });
+  }
+  // Its Projects' choices there go back to inherit, audited like any other choice dropped.
+  for (const row of choices) {
+    yield* write({
+      actor,
+      action: "vault.choose",
+      spaceId: personal as SpaceId,
+      target: {
+        kind: "vault",
+        id: row.vaultId,
+        ...(row.name === null ? {} : { name: row.name }),
+      },
+      detail: { scope: "project", projectId: row.projectId, choice: "inherit" },
     });
   }
   return allowed.length;

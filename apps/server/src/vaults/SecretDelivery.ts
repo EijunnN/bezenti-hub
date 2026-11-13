@@ -12,6 +12,7 @@ import {
   SECRET_ENV_CONTRACT_VERSION,
   type SecretEnv,
   SecretDeliveryError,
+  type SpaceId,
   type ThreadId,
   UserId,
   VaultError,
@@ -39,6 +40,12 @@ export interface SecretPlan {
   readonly fingerprint: string;
   readonly target: SecretTarget;
   readonly variables: ReadonlyArray<{ readonly name: string; readonly valueId: string }>;
+  /**
+   * Spec 5 ticket 07: the Space the set was planned for (the Thread's, read by the same
+   * `forThread`) and the User whose set it is; null when nothing was computed. A shell keeps them.
+   */
+  readonly spaceId: SpaceId | null;
+  readonly userId: UserId | null;
 }
 
 export type SecretDeliveryFailure = VaultError | SecretDeliveryError;
@@ -88,10 +95,17 @@ const fingerprintOf = (
         .slice(0, 32);
 
 /** The plan of a process that gets no secret. */
-export const emptyPlan = (target: SecretTarget): SecretPlan => ({
+export const emptyPlan = (
+  target: SecretTarget,
+  facts: { readonly spaceId: SpaceId | null; readonly userId: UserId | null } = {
+    spaceId: null,
+    userId: null,
+  },
+): SecretPlan => ({
   fingerprint: NO_SECRETS_FINGERPRINT,
   target,
   variables: [],
+  ...facts,
 });
 
 const make = Effect.gen(function* () {
@@ -144,7 +158,9 @@ const make = Effect.gen(function* () {
           () => Effect.succeedNone,
         ),
       );
-    if (Option.isNone(set) || set.value.variables.length === 0) return emptyPlan(input.target);
+    if (Option.isNone(set)) return emptyPlan(input.target);
+    const facts = { spaceId: set.value.spaceId, userId: input.actingUserId };
+    if (set.value.variables.length === 0) return emptyPlan(input.target, facts);
     // A machine that does not run this Space's Threads gets nothing (spec 3, ticket 12).
     if (input.target.environmentId !== HUB_MACHINE_ENVIRONMENT_ID) {
       const serves = yield* servesSpace(
@@ -155,7 +171,7 @@ const make = Effect.gen(function* () {
         Effect.provideService(SqlClient.SqlClient, sql),
         Effect.catch(storage("check the machine's Space")),
       );
-      if (!serves) return emptyPlan(input.target);
+      if (!serves) return emptyPlan(input.target, facts);
     }
     const trusted = yield* ownerSet(
       set.value.variables.filter((v) => v.dangerous).map((v) => v.valueId),
@@ -167,6 +183,7 @@ const make = Effect.gen(function* () {
       fingerprint: fingerprintOf(input.actingUserId, variables),
       target: input.target,
       variables,
+      ...facts,
     } satisfies SecretPlan;
   });
 
