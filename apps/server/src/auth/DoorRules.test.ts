@@ -179,6 +179,56 @@ describe("every door of the Hub declares its rule", () => {
     }
   });
 
+  it("reads a Vault value in three places only: the reveal, delivery and masking (spec 5 ticket 09)", () => {
+    // Every module that holds the values' store, and why. A new one fails here.
+    const holders = files
+      .filter(({ text }) => /\bVaultValueStore\b/u.test(text))
+      .map(({ file }) => file)
+      .filter((file) => !["auth/ServerSecretStore.ts", "auth/MasterKeyFile.ts"].includes(file));
+    expect(holders.toSorted()).toEqual([
+      "persistence/Migrations/111_Vaults.ts", // a comment: where values live
+      "spaces/OrganizationLifecycle.ts", // removes an Organization's values
+      "vaults/EffectiveVaults.ts", // a comment: value ids, read by delivery alone
+      "vaults/SecretDelivery.ts", // reads: the environment of a process that starts
+      "vaults/SecretMasker.ts", // reads: what to show as [NAME]
+      "vaults/VaultReachLoss.ts", // removes values no row holds
+      "vaults/Vaults.ts", // reads: the reveal and a copy (sealed again, never answered)
+    ]);
+    const readers = files
+      .filter(({ file }) => holders.includes(file))
+      .filter(({ text }) => /\b(values|vaultValues)(\.value)?\s*\.get\(/u.test(text))
+      .map(({ file }) => file);
+    expect(readers.toSorted()).toEqual([
+      "vaults/SecretDelivery.ts",
+      "vaults/SecretMasker.ts",
+      "vaults/Vaults.ts",
+    ]);
+    // In Vaults, a value is read for the reveal and for a copy, nothing else.
+    const vaults = files.find(({ file }) => file === "vaults/Vaults.ts")?.text ?? "";
+    expect(vaults.match(/\breadValue\(/gu)?.length).toBe(2);
+    // The Vaults' tables: the modules of the Vaults and their migrations, nothing else.
+    expect(
+      files
+        .filter(({ text }) => /\b(vault_entries|thread_secret_values)\b/u.test(text))
+        .map(({ file }) => file)
+        .toSorted(),
+    ).toEqual([
+      "persistence/Migrations/111_Vaults.ts",
+      "persistence/Migrations/115_VaultReachLoss.ts",
+      "persistence/Migrations/116_ThreadSecretValues.ts",
+      "vaults/EffectiveVaults.ts",
+      "vaults/SecretDelivery.ts",
+      "vaults/SecretMasker.ts",
+      "vaults/ThreadSecretValues.ts",
+      "vaults/VaultReachLoss.ts",
+      "vaults/Vaults.ts",
+    ]);
+    // No WS answer, of any RPC, can carry a process's secrets.
+    for (const rpc of WsRpcGroup.requests.values()) {
+      expect(successFields(rpc.successSchema.ast), rpc._tag).not.toContain("secretEnv");
+    }
+  });
+
   it("delivers secret values only where a process starts (spec 5 ticket 04)", () => {
     // SecretDelivery reads values: each module that reaches it starts a process of a Thread
     // (a provider session, a shell, a setup script), or asks only whether it has secrets.

@@ -2236,6 +2236,7 @@ describe("Space visibility", () => {
   const connectWriter = (
     server: Effect.Success<typeof serveAuthHttp>,
     userId: UserId | undefined,
+    scopes?: ReadonlyArray<AuthEnvironmentScope>,
   ) =>
     connect(
       server,
@@ -2265,6 +2266,8 @@ describe("Space visibility", () => {
           Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
         ),
       ),
+      // Undefined keeps connect's default (every scope a writer holds).
+      scopes,
     );
   type Writer = Effect.Success<ReturnType<typeof connectWriter>>;
   let sent = 0;
@@ -3456,6 +3459,48 @@ describe("Space visibility", () => {
         );
       }),
     ),
+  );
+
+  it.effect(
+    "a copy read (unmasked) is refused to a session that may read files but not write them",
+    () =>
+      withTeam(({ server, grace }) =>
+        Effect.gen(function* () {
+          const message = <A, E, R>(call: Effect.Effect<A, E, R>) =>
+            call.pipe(
+              Effect.flip,
+              Effect.map((error) => String((error as { readonly message?: unknown }).message)),
+              Effect.catchCause(() => Effect.succeed("reached")),
+            );
+          // Every scope a writer holds but filesystem:write.
+          const readOnly = yield* connectWriter(server, grace.userId, [
+            AuthOrchestrationReadScope,
+            AuthOrchestrationOperateScope,
+            AuthTerminalReadScope,
+            AuthTerminalOperateScope,
+            AuthFilesystemReadScope,
+          ]);
+          const writer = yield* connectWriter(server, grace.userId);
+          const copy = (client: Writer) =>
+            message(
+              client[WS_METHODS.projectsReadFile]({
+                cwd: "/work/acme-app",
+                relativePath: "README.md",
+                forCopy: true,
+              } as never),
+            );
+          // Her team's Project: a read-only session reads it masked, but never as it is on disk.
+          assert.equal(yield* copy(readOnly), "Copying files needs permission to write files.");
+          // A writer passes both the Space rule and the scope: the read itself answers.
+          assert.notInclude(
+            [
+              "Copying files needs permission to write files.",
+              "That Project or Thread does not exist.",
+            ],
+            yield* copy(writer),
+          );
+        }),
+      ),
   );
 
   it.effect(
