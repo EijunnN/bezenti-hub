@@ -1,7 +1,7 @@
 /**
  * Spec 4 ticket 07: how a direct AI account's credential is named among a Thread's delivered
- * values (`thread_secret_values.value_id`), so SecretMasker reads it back from
- * `AiAccountCredentialStore` instead of the Vault store, and AiAccounts keeps it sealed while a
+ * values (`thread_secret_values.value_id`), so SecretMasker reads it back from the AI accounts'
+ * credential store instead of the Vault store, and AiAccounts keeps it sealed while a
  * Thread that received it lives.
  */
 const PREFIX = "ai-account:";

@@ -69,6 +69,7 @@ import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
 import { AcpSessionManagementSection } from "./AcpSessionManagementSection";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
+import { ANTIGRAVITY_HUB_DISABLED, useHubUsesAiAccounts } from "./useHubUsesAiAccounts";
 import { readCodexSetupMode } from "./CodexSetupSection.logic";
 import {
   getProviderVersionAdvisoryPresentation,
@@ -800,6 +801,10 @@ export function ProviderInstanceCard({
   const driverKind: ProviderDriverKind | null = isProviderDriverKind(instance.driver)
     ? instance.driver
     : null;
+  // Spec 4 ticket 07: on a Hub running on AI accounts, Antigravity never signs in with an account.
+  const hubUsesAiAccounts = useHubUsesAiAccounts(environmentId ?? undefined);
+  const disabledOptions =
+    hubUsesAiAccounts && instance.driver === "antigravity" ? ANTIGRAVITY_HUB_DISABLED : undefined;
   const storedCustomModels =
     instance.config !== null && typeof instance.config === "object"
       ? (instance.config as Record<string, unknown>).customModels
@@ -1233,6 +1238,7 @@ export function ProviderInstanceCard({
       onChange={updateConfig}
       managed={instanceLocks && { keys: instanceLocks.configKeys, reason: instanceLocks.reason }}
       environmentId={environmentId}
+      disabledOptions={disabledOptions}
     />
   ) : (
     <SettingsRow

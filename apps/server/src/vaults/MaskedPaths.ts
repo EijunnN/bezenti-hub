@@ -102,7 +102,7 @@ export const WS_DOOR_RULES: Record<string, DoorRule> = {
     "Vaults and secret names; values only through HTTP vaults.reveal",
   ),
   "vaults.threadEnvironment": none(
-    "Vaults and secret names; values only through HTTP vaults.reveal",
+    "Vaults and secret names, and the direct AI account credential's variable and account names (spec 4 ticket 07); values only through HTTP vaults.reveal",
   ),
   "scheduledTasks.listWebhookDeliveries": none("schedules and the webhooks that start them"),
   "scheduledTasks.getWebhookDelivery": none("schedules and the webhooks that start them"),

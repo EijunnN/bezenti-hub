@@ -450,6 +450,61 @@ Sandbox without capabilities cannot run), and a Pi extension of a trusted projec
 A key is worth only its Thread's allowed accounts while its session lives. Provider homes stay on the machine after a Thread is deleted (transcripts,
 never the key): removing them needs an executor operation, left for a later ticket.
 
+## Direct credentials: providers without a base URL (spec 4 ticket 07)
+
+Decisions; the rule is `ai/AiGatewaySessions.ts` (`plan` → `direct`, `issueDirect`), the table
+`AI_DIRECT_DRIVERS` (contracts, `aiGatewaySession.ts`), the machine side
+`provider-core/server/instanceEnvironment.ts` (`applySecretEnv`, `openSessionWithSecrets`).
+
+- **Which agents.** Drivers whose CLI cannot point at the gateway, each with the direct account
+  providers it takes and the one variable its credential reaches the process under: Antigravity
+  (`gemini` → `GEMINI_API_KEY`, `vertex` → `GOOGLE_API_KEY`, a Vertex AI express key, its «Agent
+  Platform» method), Cursor (`CURSOR_API_KEY`), Kiro (`KIRO_API_KEY`), Fx (`AI_GATEWAY_API_KEY`),
+  Muse (`meta` → `META_API_KEY`), ACP Registry (Devin only, `DEVIN_TOKEN`) and Grok (`XAI_API_KEY`).
+- **Grok stays direct.** Checked with `@xai-official/grok` 1.0.77 against a fake upstream:
+  `GROK_CLI_CHAT_PROXY_BASE_URL` routes chat only in session-token mode (`GROK_AUTH_PROVIDER_COMMAND`,
+  which then also calls `/v1/user`, `/v1/settings`, `/v1/bundle/archive`); with `XAI_API_KEY` set the
+  CLI ignores it and calls `api.x.ai`. `GROK_XAI_API_BASE_URL` with `XAI_API_KEY` does reach a custom
+  base (`/v1/models`, `/v1/api-key`, `/v1/chat/completions`): a follow-up ticket
+  (`.scratch/ai-accounts-and-gateway/issues/14-grok-por-la-gateway.md`).
+- **An AI account of type `direct`** (`aiAccounts.create` with `type: "direct"`): an API key of an
+  `AiDirectProvider`, never a subscription login nor a service-account file (refused). Never sent to
+  CLIProxyAPI; status «Working». The form says «This credential will be visible to the agent».
+- **Same condition as the gateway** (`applies`): once the Hub has any enabled AI account, or always
+  in a Sandbox or dedicated machine, a direct driver's Hub turn runs only on a direct account: the
+  Thread's choice if it is allowed (AllowedAiAccounts for its turn owner in its Space), else the first
+  allowed of a provider the driver takes, by global priority. None → refused («No AI account is
+  allowed to you in this Space»); a chosen account not allowed → refused, never another. Never the
+  instance's own key or a login of the machine.
+- **Delivery** (`provider.openSession` only): the value is read from the store when the process
+  starts, remembered by the Thread's masker first (`ai-account:<credential id>`), and sent as one more
+  `secretEnv` variable, which wins over a Vault's of the same name, with `secretEnv.aiCredential`
+  naming it. The fingerprint holds owner, Space, account and credential id: «Replace credential» or a
+  switch means a new process. Terminals and setup scripts never get it (they use
+  `SecretDelivery.plan`, which knows no AI accounts). Executor contract **13**: an older machine is
+  refused (it would keep its own logins beside the key), by the plan and by the link's guard.
+- **On the machine:** `applySecretEnv` with `aiCredential` unsets every ambient AI credential
+  (`AMBIENT_AI_VARIABLES`, as `undefined` so an overlay spread over the instance's environment unsets
+  them too) before the Thread's set; `openSessionWithSecrets` refuses a credential the adapter does
+  not declare in `acceptsAiCredential` (ACP Registry declares it only for Devin, so other registry
+  agents never run a Hub turn). Cursor passes it to the SDK for that session only (`apiKey`), never the
+  instance's `CURSOR_API_KEY`. Antigravity signs in with it (`gemini-api-key` or `agent-platform`) in a
+  profile of its own (`<profile>-ai-account`, never holding a Google sign-in), ignoring the instance's
+  `apiKey`; an instance set to «Google account» or «Gemini Enterprise» never starts a Hub turn
+  (`login-method`), and its Google sign-in (`provider.auth.start`) is refused once AI accounts apply.
+  Settings shows those two methods disabled («Use the Owner's Google account through the AI gateway»).
+- **Masked** as `[NAME]` like a Vault value: `SecretMasker` reads `ai-account:` value ids from the AI
+  accounts' credential store, so the mask survives reloads and restarts; a replaced or deleted
+  credential stays sealed while a Thread that received it lives (AiAccounts keeps it). The Thread's
+  «Secrets» panel lists it as «AI account credential» (variable and account name only).
+- **Not counted** by the gateway's usage (it never passes through it).
+
+**Accepted risks.** The credential is visible to the agent and to whatever it runs, in its Sandbox
+(ADR 0005); revoke it at the provider. Deleting the account does not stop a running process (the
+next open refuses). Kiro, Muse, Devin and Grok keep their machine-user login files (only their
+variables are unset): the direct key takes precedence in each CLI, but their homes are not per
+Thread. Antigravity's per-instance `-ai-account` profile is shared by that instance's Hub turns.
+
 ## Known exception to «no upstream services»
 
 CLIProxyAPI 8.0.67, even with `-local-model`, asks the internet for the latest Antigravity client
