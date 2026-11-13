@@ -26,10 +26,12 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import { McpInvocationContext } from "../mcp/McpInvocationContext.ts";
 import * as EffectiveVaults from "./EffectiveVaults.ts";
 
 /** A Thread's masker: the patterns, and the same applied to every string of a value. */
@@ -106,8 +108,8 @@ export class SecretMasker extends Context.Service<
 /** How long a Thread's set is reused before its owner's effective set is read again. */
 const MASKER_TTL_MS = 30_000;
 const MAX_CACHED = 2048;
-/** A failed load is tried again this many times before the read fails. */
-const LOAD_RETRIES = 2;
+/** A failed load (a busy database) is tried again twice, after 25 and 50 ms, before it fails. */
+const LOAD_RETRY = { times: 2, schedule: Schedule.exponential("25 millis") } as const;
 
 interface Entry {
   readonly loadedAt: number;
@@ -281,7 +283,7 @@ export const make = Effect.gen(function* () {
     const cached = cache.get(root);
     if (cached !== undefined && now - cached.loadedAt < MASKER_TTL_MS) return cached.secrets;
     const loaded = yield* loadEntry(root, now).pipe(
-      Effect.retry({ times: LOAD_RETRIES }),
+      Effect.retry(LOAD_RETRY),
       // Fails closed: the Thread's own set read whole before (a little old), or nothing at all; a
       // set holding only what was delivered since is never enough.
       Effect.catch((error) =>
@@ -314,8 +316,10 @@ export const make = Effect.gen(function* () {
   /** A User's own values, read again after the TTL; one read per User at a time. */
   const users = new Map<string, { readonly loadedAt: number; readonly masker: ThreadMasker }>();
   const userLoads = new Map<string, Deferred.Deferred<ThreadMasker, SecretMaskingError>>();
+  /** Bumped when a User's set grows (a value delivered): a load begun before stores nothing. */
+  const userVersions = new Map<string, number>();
 
-  const loadUser = Effect.fnUntraced(function* (userId: UserId) {
+  const loadUser = Effect.fn("SecretMasker.loadUser")(function* (userId: UserId) {
     // Their roots, one per Project and Space (the effective set depends on those alone).
     const roots = yield* sql<{ readonly threadId: string }>`
       SELECT MIN(thread_id) AS "threadId" FROM orchestration_v2_projection_threads
@@ -349,8 +353,10 @@ export const make = Effect.gen(function* () {
     return secrets.length === 0 ? noSecrets : maskerOf(secrets);
   });
 
+  // Untraced: every file read, search and change request view asks (its span would be most spans).
   const forUser = Effect.fnUntraced(function* (userId: UserId) {
     const now = yield* Clock.currentTimeMillis;
+    const version = userVersions.get(userId) ?? 0;
     const cached = users.get(userId);
     if (cached !== undefined && now - cached.loadedAt < MASKER_TTL_MS) return cached.masker;
     const running = userLoads.get(userId);
@@ -360,23 +366,25 @@ export const make = Effect.gen(function* () {
     const exit = yield* Effect.exit(
       loadUser(userId).pipe(
         Effect.mapError(failed(undefined)),
-        Effect.retry({ times: LOAD_RETRIES }),
+        Effect.retry(LOAD_RETRY),
         Effect.tap((masker) =>
-          Effect.sync(() => setBounded(users, userId, { loadedAt: now, masker })),
+          Effect.sync(() => {
+            if ((userVersions.get(userId) ?? 0) === version) {
+              setBounded(users, userId, { loadedAt: now, masker });
+            }
+          }),
         ),
       ),
     ).pipe(Effect.uninterruptible);
-    userLoads.delete(userId);
+    if (userLoads.get(userId) === done) userLoads.delete(userId);
     yield* Deferred.done(done, exit);
     return yield* exit;
   });
 
   const forViewer = Effect.flatMap(
-    Effect.serviceOption(EnvironmentAuthenticatedPrincipal),
-    (principal): Effect.Effect<ThreadMasker, SecretMaskingError> => {
-      const userId = Option.isSome(principal) ? principal.value.userId : undefined;
-      return userId === undefined ? Effect.succeed(noSecrets) : forUser(userId);
-    },
+    requester,
+    (userId): Effect.Effect<ThreadMasker, SecretMaskingError> =>
+      Option.isNone(userId) ? Effect.succeed(noSecrets) : forUser(userId.value),
   );
 
   const remember = Effect.fn("SecretMasker.remember")(function* (
@@ -391,8 +399,17 @@ export const make = Effect.gen(function* () {
     const current = cache.get(root);
     const added = delivered.map(({ name, value }) => ({ name, value }));
     setBounded(cache, root, entryOf(current?.loadedAt ?? 0, union(added, current?.secrets ?? [])));
-    // Its owner's own set grows too (read again at once).
-    users.clear();
+    // Its owner's own set grows too: read again at once, and no load begun before stores.
+    const owners = yield* sql<{ readonly ownerUserId: string | null }>`
+      SELECT owner_user_id AS "ownerUserId" FROM orchestration_v2_projection_threads
+      WHERE thread_id = ${root}
+    `.pipe(Effect.orElseSucceed(() => []));
+    const owner = owners[0]?.ownerUserId ?? null;
+    if (owner !== null) {
+      userVersions.set(owner, (userVersions.get(owner) ?? 0) + 1);
+      users.delete(owner);
+      userLoads.delete(owner);
+    }
     const at = DateTime.formatIso(yield* DateTime.now);
     yield* Effect.forEach(
       delivered,
@@ -433,3 +450,16 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(SecretMasker, make);
+
+/**
+ * The User a request is made for: a WS or HTTP session's principal, else the MCP caller's User
+ * (an agent's tool call is its Thread owner's). None for internal work.
+ */
+export const requester: Effect.Effect<Option.Option<UserId>> = Effect.gen(function* () {
+  const principal = yield* Effect.serviceOption(EnvironmentAuthenticatedPrincipal);
+  if (Option.isSome(principal) && principal.value.userId !== undefined) {
+    return Option.some(principal.value.userId);
+  }
+  const mcp = yield* Effect.serviceOption(McpInvocationContext);
+  return Option.isSome(mcp) ? Option.fromNullishOr(mcp.value.userId) : Option.none();
+});

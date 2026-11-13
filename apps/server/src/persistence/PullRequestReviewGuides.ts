@@ -6,10 +6,13 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { hideErrorText } from "@t3tools/shared/secretMasking";
+
+import { HIDDEN_CONTENT } from "../vaults/maskWorkspace.ts";
 import * as SecretMasker from "../vaults/SecretMasker.ts";
 import * as SqlSchema from "effect/sql/SqlSchema";
 
-import { PullRequestReviewGuide, ThreadPullRequestKey } from "@t3tools/contracts";
+import { PullRequestReviewGuide, ThreadPullRequestKey, type UserId } from "@t3tools/contracts";
 
 import {
   PersistenceDecodeError,
@@ -30,9 +33,14 @@ export class PullRequestReviewGuideRepository extends Context.Service<
       Option.Option<PullRequestReviewGuide>,
       PullRequestReviewGuideRepositoryError
     >;
+    /**
+     * Stores a guide masked with the values of the User who generated it (spec 5 ticket 05); with
+     * none known, as written. Values that cannot be read hide its text.
+     */
     readonly put: (
       key: ThreadPullRequestKey,
       guide: PullRequestReviewGuide,
+      generatedBy?: Option.Option<UserId>,
     ) => Effect.Effect<void, PullRequestReviewGuideRepositoryError>;
   }
 >()("t3/persistence/PullRequestReviewGuides/PullRequestReviewGuideRepository") {}
@@ -65,13 +73,17 @@ const make = Effect.gen(function* () {
         ),
       );
     }),
-    put: Effect.fn("PullRequestReviewGuideRepository.put")(function (key, unmasked) {
+    put: Effect.fn("PullRequestReviewGuideRepository.put")(function (key, unmasked, generatedBy) {
       // Spec 5 ticket 05: stored with the generating User's values as `[NAME]` (and masked again
       // for each viewer when read).
+      const user = generatedBy ?? Option.none();
       return (
-        Option.isNone(masker)
+        Option.isNone(masker) || Option.isNone(user)
           ? Effect.succeed(unmasked)
-          : Effect.map(Effect.orDie(masker.value.forViewer), (found) => found.maskDeep(unmasked))
+          : masker.value.forUser(user.value).pipe(
+              Effect.map((found) => found.maskDeep(unmasked)),
+              Effect.orElseSucceed(() => hideErrorText(unmasked, HIDDEN_CONTENT)),
+            )
       ).pipe(
         Effect.flatMap(encodeGuide),
         Effect.mapError((cause) =>

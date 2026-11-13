@@ -279,9 +279,18 @@ export const maskWhole = (
 ): string => {
   if (patterns.isEmpty) return text;
   const body = options?.cutAtStart === true ? text.slice(patterns.pendingPrefix(text)) : text;
-  const partial = patterns.pendingSuffix(body);
-  if (partial < MIN_MASKED_SECRET_LENGTH) return patterns.mask(body);
-  return `${patterns.mask(body.slice(0, body.length - partial))}[${patterns.pendingName(body)}]`;
+  const partial = trailingPartial(patterns, body);
+  if (partial.length < MIN_MASKED_SECRET_LENGTH) return patterns.mask(body);
+  return `${patterns.mask(body.slice(0, body.length - partial.length))}[${partial.name}]`;
+};
+
+/** The start of a value's form at the end of `text`, past its last whole value (never inside one). */
+const trailingPartial = (
+  patterns: SecretPatterns,
+  text: string,
+): { readonly length: number; readonly name: string | undefined } => {
+  const tail = text.slice(patterns.intervals(text).at(-1)?.end ?? 0);
+  return { length: patterns.pendingSuffix(tail), name: patterns.pendingName(tail) };
 };
 
 /**
@@ -334,6 +343,16 @@ export class SecretStreamGuard {
         this.remember(text.slice(0, cut));
         prefix = this.open ? "" : `[${name}]`;
         text = text.slice(cut);
+      } else {
+        // All of it may still be inside a value begun before (a value in three or more pieces):
+        // its middle is never sent.
+        const begun = this.patterns.pendingSuffix(this.emitted + text);
+        if (begun > text.length && begun >= MIN_MASKED_SECRET_LENGTH) {
+          const named = this.open ? "" : `[${this.patterns.pendingName(this.emitted + text)}]`;
+          this.remember(text);
+          this.open = true;
+          return { text: named, hold: false };
+        }
       }
     }
     this.open = false;
@@ -357,7 +376,7 @@ export class SecretStreamGuard {
     this.emitted = "";
     this.open = false;
     this.remember(text);
-    this.open = this.patterns.pendingSuffix(text) >= MIN_MASKED_SECRET_LENGTH;
+    this.open = trailingPartial(this.patterns, text).length >= MIN_MASKED_SECRET_LENGTH;
   }
 
   get holding(): boolean {
@@ -367,7 +386,7 @@ export class SecretStreamGuard {
   private send(text: string): string {
     this.remember(text);
     const masked = maskWhole(this.patterns, text);
-    this.open = this.patterns.pendingSuffix(text) >= MIN_MASKED_SECRET_LENGTH;
+    this.open = trailingPartial(this.patterns, text).length >= MIN_MASKED_SECRET_LENGTH;
     return masked;
   }
 
@@ -421,23 +440,86 @@ export const maskDeep = <A>(value: A, mask: (text: string) => string): A => {
  * An error (a class instance, which {@link maskDeep} leaves alone) with every string field masked,
  * its own `message` and `cause` too, keeping its class. Other values: {@link maskDeep}.
  */
-export const maskError = <E>(error: E, mask: (text: string) => string): E => {
-  if (typeof error !== "object" || error === null || isPlainObject(error) || Array.isArray(error)) {
-    return maskDeep(error, mask);
+export const maskError = <E>(error: E, mask: (text: string) => string): E =>
+  walkError(error, (_key, text) => mask(text), new WeakMap()) as E;
+
+/** Fields that carry what a process or a person wrote (not tags, kinds, ids or codes). */
+const ERROR_TEXT_KEYS = new Set([
+  "message",
+  "detail",
+  "stderr",
+  "stdout",
+  "output",
+  "text",
+  "error",
+  "description",
+  "summary",
+  "title",
+  "body",
+  "subject",
+  "diff",
+  "patch",
+  "contents",
+  "oldContents",
+  "newContents",
+  "lineContent",
+]);
+
+/**
+ * An error whose text fields (message, detail, stderr, ... at any depth, causes too) all read
+ * `hidden`: for when the values to mask it with could not be read. Tags and kinds stay.
+ */
+export const hideErrorText = <E>(error: E, hidden: string): E =>
+  walkError(
+    error,
+    // A bare string (an answer that is only text) is text too.
+    (key, text) => (key === undefined || ERROR_TEXT_KEYS.has(key) ? hidden : text),
+    new WeakMap(),
+  ) as E;
+
+/** Every string in `value`, at any depth (class instances and causes too), through `map`. */
+const walkError = (
+  value: unknown,
+  map: (key: string | undefined, text: string) => string,
+  seen: WeakMap<object, unknown>,
+  key?: string,
+): unknown => {
+  if (typeof value === "string") return map(key, value);
+  if (typeof value !== "object" || value === null) return value;
+  const known = seen.get(value);
+  if (known !== undefined) return known;
+  if (Array.isArray(value)) {
+    const out: Array<unknown> = [];
+    seen.set(value, out);
+    let changed = false;
+    value.forEach((item, index) => {
+      const next = walkError(item, map, seen, key);
+      if (next !== item) changed = true;
+      out[index] = next;
+    });
+    if (!changed) seen.set(value, value);
+    return changed ? out : value;
   }
+  if (value instanceof Date || value instanceof Uint8Array) return value;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const copy = Object.create(Object.getPrototypeOf(value)) as Record<string, unknown>;
+  seen.set(value, copy);
   let changed = false;
-  const descriptors = Object.getOwnPropertyDescriptors(error);
-  for (const [key, descriptor] of Object.entries(descriptors)) {
-    if (!("value" in descriptor)) continue;
-    const next =
-      key === "cause" ? maskError(descriptor.value, mask) : maskDeep(descriptor.value, mask);
-    if (next !== descriptor.value) {
-      descriptor.value = next;
-      changed = true;
+  for (const [name, descriptor] of Object.entries(descriptors)) {
+    if ("value" in descriptor) {
+      const next = walkError(descriptor.value, map, seen, name);
+      if (next !== descriptor.value) {
+        descriptor.value = next;
+        changed = true;
+      }
     }
   }
-  if (!changed) return error;
-  return Object.create(Object.getPrototypeOf(error), descriptors) as E;
+  if (!changed) {
+    seen.set(value, value);
+    return value;
+  }
+  Object.defineProperties(copy, descriptors);
+  return copy;
 };
 
 // ── The values this process knows, for its own logs, spans and files ─────────────────────────

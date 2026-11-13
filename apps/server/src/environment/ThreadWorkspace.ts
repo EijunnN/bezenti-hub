@@ -72,16 +72,20 @@ import * as ProjectCheckouts from "./ProjectCheckouts.ts";
 import * as RemoteEnvironments from "./RemoteEnvironments.ts";
 import { locateInCheckout } from "./WorkspaceLocation.ts";
 import * as SecretDelivery from "../vaults/SecretDelivery.ts";
+import { hideErrorText } from "@t3tools/shared/secretMasking";
 import * as SecretMasker from "../vaults/SecretMasker.ts";
 import {
   hiddenTerminalSnapshot,
   maskTerminalSnapshot,
   maskTerminalStream,
 } from "../vaults/maskTerminal.ts";
+import { HIDDEN_OUTPUT } from "../vaults/heldText.ts";
 import {
   FILE_HOLDS_SECRETS,
+  HIDDEN_CONTENT,
   maskReadFile,
   maskSearchContents,
+  placeholderNames,
   searchOverFetchLimit,
 } from "../vaults/maskWorkspace.ts";
 
@@ -1008,18 +1012,23 @@ export const make = Effect.gen(function* () {
   };
 
   // Spec 5 ticket 05: files, search and errors masked with the asking User's own values (never a
-  // named Thread's); a file holding one is not written over. Terminals: the Thread's values, or
-  // hidden when they cannot be read.
+  // named Thread's); hidden when those cannot be read. A save that would put one of the User's
+  // `[NAME]`s over its value is refused. Terminals: the Thread's values, or hidden.
   if (Option.isNone(secretMasker)) return calls;
   const masker = secretMasker.value;
+  /** The caller's own values; none when they could not be read (what they mask is hidden). */
   const viewerOf = (caller: WorkspaceCaller) =>
-    caller.userId === undefined ? masker.forViewer : masker.forUser(caller.userId);
+    Effect.option(caller.userId === undefined ? masker.forViewer : masker.forUser(caller.userId));
   /** A call, with whatever a machine says in its error masked for the caller. */
   const maskingErrors = <A, E, R>(caller: WorkspaceCaller, call: Effect.Effect<A, E, R>) =>
     call.pipe(
       Effect.catch((error: E) =>
-        Effect.flatMap(Effect.orDie(viewerOf(caller)), (found) =>
-          Effect.fail(found.maskError(error)),
+        Effect.flatMap(viewerOf(caller), (found) =>
+          Effect.fail(
+            Option.isSome(found)
+              ? found.value.maskError(error)
+              : hideErrorText(error, HIDDEN_OUTPUT),
+          ),
         ),
       ),
     );
@@ -1028,32 +1037,51 @@ export const make = Effect.gen(function* () {
     readFile: (input: ProjectReadFileInput, caller: WorkspaceCaller) =>
       maskingErrors(
         caller,
-        Effect.flatMap(calls.readFile(input, caller), (result) =>
-          Effect.map(Effect.orDie(viewerOf(caller)), (found) => maskReadFile(found, result)),
-        ),
+        // A copy read (bringing a checkout's ignored files to another machine) goes as it is:
+        // `ws.ts` lets only a caller who may write files ask for one.
+        input.forCopy === true
+          ? calls.readFile(input, caller)
+          : Effect.flatMap(calls.readFile(input, caller), (result) =>
+              Effect.map(viewerOf(caller), (found) =>
+                Option.isSome(found)
+                  ? maskReadFile(found.value, result)
+                  : { ...result, contents: HIDDEN_CONTENT, masked: true },
+              ),
+            ),
       ),
     searchContents: (input: ProjectSearchContentsInput, caller: WorkspaceCaller) =>
       maskingErrors(
         caller,
         Effect.gen(function* () {
-          const found = yield* Effect.orDie(viewerOf(caller));
-          if (found.isEmpty) return yield* calls.searchContents(input, caller);
+          const found = yield* viewerOf(caller);
+          if (Option.isNone(found)) return { matches: [], truncated: false };
+          if (found.value.isEmpty) return yield* calls.searchContents(input, caller);
           // Filtered first, limited after: what a search shows never depends on a value.
           const result = yield* calls.searchContents(
             { ...input, limit: searchOverFetchLimit(input.limit) },
             caller,
           );
-          return maskSearchContents(found, result, input.limit);
+          return maskSearchContents(found.value, result, input.limit);
         }),
       ),
     writeFile: (input: ProjectWriteFileInput, caller: WorkspaceCaller) =>
       maskingErrors(
         caller,
         Effect.gen(function* () {
-          const found = yield* Effect.orDie(viewerOf(caller));
-          if (!found.isEmpty) {
-            // The file as it is now (this read never leaves the Hub): one that holds a value was
-            // shown masked, and saving what was shown would write `[NAME]` over the value.
+          const found = yield* viewerOf(caller);
+          const placed = placeholderNames(input.contents);
+          // Only a save carrying one of the caller's `[NAME]`s can put it over its value.
+          const names = Option.isSome(found)
+            ? new Set([...placed].filter((name) => found.value.names.has(name)))
+            : placed;
+          if (names.size > 0) {
+            const refuse = new ProjectWriteFileError({
+              cwd: input.cwd,
+              relativePath: input.relativePath,
+              failure: "operation_failed",
+              message: FILE_HOLDS_SECRETS,
+            });
+            // The file as it is now, read as the write would be (this read never leaves the Hub).
             const current = yield* calls
               .readFile(
                 {
@@ -1065,18 +1093,14 @@ export const make = Effect.gen(function* () {
                 caller,
               )
               .pipe(Effect.option);
-            // (One too large to read whole is refused too: it cannot be checked.)
-            if (
-              Option.isSome(current) &&
-              current.value.exists !== false &&
-              (current.value.truncated || found.matches(current.value.contents))
-            ) {
-              return yield* new ProjectWriteFileError({
-                cwd: input.cwd,
-                relativePath: input.relativePath,
-                failure: "operation_failed",
-                message: FILE_HOLDS_SECRETS,
-              });
+            // Fails closed: a file that cannot be read or checked whole is not written over.
+            if (Option.isNone(current) || Option.isNone(found)) return yield* refuse;
+            if (current.value.exists !== false) {
+              if (current.value.truncated) return yield* refuse;
+              const held = found.value
+                .intervals(current.value.contents)
+                .some((interval) => names.has(interval.name));
+              if (held) return yield* refuse;
             }
           }
           return yield* calls.writeFile(input, caller);

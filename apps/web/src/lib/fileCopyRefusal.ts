@@ -1,13 +1,14 @@
-import type { ProjectReadFileResult } from "@t3tools/contracts";
+import type { ProjectReadFileInput, ProjectReadFileResult } from "@t3tools/contracts";
 
 /**
- * Why a file read to be copied to another machine is not copied, or null to copy it. A read that
- * shows a secret as `[NAME]` (spec 5) would write `[NAME]` in its place there.
+ * The read of a file to copy to another machine: as it is on disk (spec 5: a copy read is never
+ * masked, so an `.env` arrives with its values, not `[NAME]`).
  */
-export function fileCopyRefusal(
-  read: Pick<ProjectReadFileResult, "truncated" | "masked">,
-): string | null {
-  if (read.truncated) return "Too large to copy.";
-  if (read.masked === true) return "Holds secrets; copy it in a terminal.";
-  return null;
+export function copyReadInput(cwd: string, relativePath: string): ProjectReadFileInput {
+  return { cwd, relativePath, forCopy: true };
+}
+
+/** Why a file read to be copied to another machine is not copied, or null to copy it. */
+export function fileCopyRefusal(read: Pick<ProjectReadFileResult, "truncated">): string | null {
+  return read.truncated ? "Too large to copy." : null;
 }

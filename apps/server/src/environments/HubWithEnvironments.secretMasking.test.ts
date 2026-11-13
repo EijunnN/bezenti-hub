@@ -235,6 +235,23 @@ describe("Hub con Environments: a Thread's secret values are masked in its histo
         NodeFSP.readFile(NodePath.join(laptopCheckout, "notes.md"), "utf8"),
       );
       assert.equal(onDisk, `TOKEN=${OWNER_TOKEN} (turn 1)\n`);
+      // A copy read (to another machine) gets the file as it is.
+      const copied = yield* workspace.readFile(
+        { cwd, relativePath: "notes.md", threadId, forCopy: true },
+        caller,
+      );
+      assert.equal(copied.contents, `TOKEN=${OWNER_TOKEN} (turn 1)\n`);
+      // A save that carries no `[NAME]` of the caller's is not refused (it puts nothing over a value).
+      yield* workspace.writeFile(
+        { cwd, relativePath: "notes.md", contents: "replaced\n", threadId },
+        caller,
+      );
+      assert.equal(
+        yield* Effect.promise(() =>
+          NodeFSP.readFile(NodePath.join(laptopCheckout, "notes.md"), "utf8"),
+        ),
+        "replaced\n",
+      );
       // A file without one saves as before.
       yield* workspace.writeFile(
         { cwd, relativePath: "plain.md", contents: "nothing secret\n", threadId },

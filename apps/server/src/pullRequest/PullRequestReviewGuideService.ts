@@ -21,6 +21,7 @@ import {
   ProjectId,
   type RepositoryIdentity,
   type ThreadPullRequestKey,
+  type UserId,
 } from "@t3tools/contracts";
 import type { ReviewGuideStackLayer } from "@t3tools/provider-core/server/textGeneration";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -374,6 +375,7 @@ const make = Effect.gen(function* () {
     headSha: string,
     runId: string,
     owns: Effect.Effect<boolean>,
+    generatedBy: Option.Option<UserId>,
   ) {
     const [activity, settings, providers, stack] = yield* Effect.all(
       [
@@ -423,7 +425,7 @@ const make = Effect.gen(function* () {
     };
     yield* ownership.withPermits(1)(
       Effect.gen(function* () {
-        if (yield* owns) yield* guides.put(key, guide);
+        if (yield* owns) yield* guides.put(key, guide, generatedBy);
       }),
     );
   });
@@ -458,6 +460,9 @@ const make = Effect.gen(function* () {
     const { key, workspaceRoot, identity } = yield* keyFor(input);
     const locator = yield* requireOwnRepository(key, identity);
     const runKey = keyString(key);
+    // Spec 5 ticket 05: stored masked with the values of the User who asks (a session's, or the
+    // MCP caller's), read now: the run below outlives the request.
+    const generatedBy = yield* SecretMasker.requester;
     yield* pullRequests.invalidate({ reference: input });
     const [detail, stored] = yield* Effect.all([pullRequests.detail(input), readStored(key)], {
       concurrency: "unbounded",
@@ -507,7 +512,17 @@ const make = Effect.gen(function* () {
         return updated;
       });
     const runId = `${runCounter++}`;
-    yield* write(input, key, workspaceRoot, locator, detail, currentHeadSha, runId, owns).pipe(
+    yield* write(
+      input,
+      key,
+      workspaceRoot,
+      locator,
+      detail,
+      currentHeadSha,
+      runId,
+      owns,
+      generatedBy,
+    ).pipe(
       Effect.andThen(finish(null)),
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)

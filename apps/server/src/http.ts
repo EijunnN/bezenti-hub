@@ -486,9 +486,24 @@ export const layerAssetRoute = HttpRouter.add(
         ),
       );
     }
-    // Spec 5 ticket 05: a checkout's text file, masked for the User the URL was issued to.
-    if (asset.kind === "file" && "viewer" in asset && typeof asset.viewer === "string") {
-      const masked = yield* maskedAssetText(asset.path, UserId.make(asset.viewer));
+    // Spec 5 ticket 05: a checkout's text file, masked for the User who asks (the session's;
+    // the URL's own User for an embed without one). A URL with neither serves no text.
+    if (asset.kind === "file" && "checkout" in asset && asset.checkout === true) {
+      const session = yield* EnvironmentAuth.EnvironmentAuth.pipe(
+        Effect.flatMap((auth) => auth.authenticateHttpRequest(request)),
+        Effect.map((found) => Option.fromNullishOr(found.userId)),
+        Effect.orElseSucceed(() => Option.none<UserId>()),
+      );
+      const tokenViewer =
+        "viewer" in asset && typeof asset.viewer === "string"
+          ? Option.some(UserId.make(asset.viewer))
+          : Option.none<UserId>();
+      const masked = yield* maskedAssetText(
+        asset.path,
+        Option.orElse(session, () => tokenViewer),
+        request.method === "GET" ? request.headers.range : undefined,
+        "download" in asset && asset.download === true ? asset.fileName : undefined,
+      );
       if (masked !== undefined) return masked;
     }
     return yield* assetFileResponse(

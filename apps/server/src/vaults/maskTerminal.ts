@@ -12,7 +12,7 @@ import * as Queue from "effect/Queue";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
-import { HIDDEN_OUTPUT, makeHeldText } from "./heldText.ts";
+import { afterLineEnd, HIDDEN_OUTPUT, makeHeldText } from "./heldText.ts";
 import type * as SecretMasker from "./SecretMasker.ts";
 
 export const maskTerminalSnapshot = (
@@ -68,8 +68,16 @@ export const maskTerminalStream = <E, R>(
               hidden = true;
               return;
             }
-            hidden = false;
             const threadMasker = found.value;
+            if (hidden && event.type === "output") {
+              // What was hidden may have been the start of a value: hidden until its line ends.
+              const shown = afterLineEnd(event.data);
+              if (shown === undefined) return;
+              hidden = false;
+              if (shown.length > 0) yield* held.push(threadMasker, shown, event);
+              return;
+            }
+            hidden = false;
             switch (event.type) {
               case "output":
                 return yield* held.push(threadMasker, event.data, event);

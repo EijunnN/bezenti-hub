@@ -5,6 +5,10 @@
  */
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import { hideErrorText } from "@t3tools/shared/secretMasking";
+
+import { HIDDEN_OUTPUT } from "./heldText.ts";
+import { HIDDEN_CONTENT } from "./maskWorkspace.ts";
 
 import type * as SecretMasker from "./SecretMasker.ts";
 
@@ -13,7 +17,15 @@ export const maskingCheckoutReads = <S extends object>(
   service: S,
 ): S => {
   if (Option.isNone(masker)) return service;
-  const viewer = Effect.orDie(masker.value.forViewer);
+  // Values that cannot be read hide the text instead (never a defect, never unmasked).
+  const viewer = Effect.map(Effect.option(masker.value.forViewer), (found) =>
+    Option.isSome(found)
+      ? { answer: found.value.maskDeep, failure: found.value.maskError }
+      : {
+          answer: <X>(value: X) => hideErrorText(value, HIDDEN_CONTENT),
+          failure: <X>(error: X) => hideErrorText(error, HIDDEN_OUTPUT),
+        },
+  );
   const wrapped: Record<string, unknown> = {};
   for (const [name, method] of Object.entries(service)) {
     wrapped[name] =
@@ -24,10 +36,10 @@ export const maskingCheckoutReads = <S extends object>(
             if (!Effect.isEffect(answer)) return answer;
             // @effect-diagnostics-next-line anyUnknownInErrorContext:off -- any method's own answer.
             return (answer as Effect.Effect<unknown, unknown, unknown>).pipe(
-              Effect.flatMap((value) => Effect.map(viewer, (found) => found.maskDeep(value))),
+              Effect.flatMap((value) => Effect.map(viewer, (found) => found.answer(value))),
               Effect.catch((error: unknown) =>
                 // @effect-diagnostics-next-line anyUnknownInErrorContext:off -- its own error.
-                Effect.flatMap(viewer, (found) => Effect.fail(found.maskError(error))),
+                Effect.flatMap(viewer, (found) => Effect.fail(found.failure(error))),
               ),
             );
           };

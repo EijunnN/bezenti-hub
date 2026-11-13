@@ -25,7 +25,9 @@ import {
   authScopeResponse,
   AuthAccessStreamError,
   type AuthAccessStreamEvent,
+  AuthFilesystemWriteScope,
   AuthOrchestrationOperateScope,
+  ProjectReadFileError,
   type AuthEnvironmentScope,
   type ScheduledTaskListResult,
   AuthSessionId,
@@ -2973,7 +2975,18 @@ export const layerWsRpc = (
           threadWorkspace.listEntries(input, workspaceCaller),
         [WS_METHODS.projectsListIgnoredFiles]: (input) =>
           threadWorkspace.listIgnoredFiles(input, workspaceCaller),
-        [WS_METHODS.projectsReadFile]: (input) => threadWorkspace.readFile(input, workspaceCaller),
+        // Spec 5: a copy read is unmasked, so only a caller who may write files can ask for one.
+        [WS_METHODS.projectsReadFile]: (input) =>
+          input.forCopy === true && !principal.scopes.has(AuthFilesystemWriteScope)
+            ? Effect.fail(
+                new ProjectReadFileError({
+                  cwd: input.cwd,
+                  relativePath: input.relativePath,
+                  failure: "operation_failed",
+                  message: "Copying files needs permission to write files.",
+                }),
+              )
+            : threadWorkspace.readFile(input, workspaceCaller),
         [WS_METHODS.projectsWriteFile]: (input) =>
           threadWorkspace.writeFile(input, workspaceCaller),
         [WS_METHODS.projectsMutate]: (mutation) =>

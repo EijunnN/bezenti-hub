@@ -15,6 +15,14 @@ const MAX_HELD_CHARS = 128 * 1024;
 /** Shown instead of a stream's text when the values to hide in it could not be read. */
 export const HIDDEN_OUTPUT = "[output hidden: secrets could not be loaded]";
 
+/** What follows the first line end of `text`; undefined when it has none (still the same line). */
+export const afterLineEnd = (text: string): string | undefined => {
+  const end = text.search(/[\r\n]/);
+  if (end === -1) return undefined;
+  const crlf = text[end] === "\r" && text[end + 1] === "\n";
+  return text.slice(end + (crlf ? 2 : 1));
+};
+
 export interface HeldText<C> {
   /** A piece, masked with `patterns` (the stream's values now); `context` goes out with it. */
   readonly push: (patterns: SecretPatterns, chunk: string, context: C) => Effect.Effect<void>;

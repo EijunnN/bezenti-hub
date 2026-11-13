@@ -190,7 +190,9 @@ export type ResolvedAsset =
       readonly mimeType?: string;
       readonly file?: OpenMediaFile;
       readonly renderIntent?: "mcp-app";
-      /** Spec 5: the User the URL was issued to; a text file is served masked for them. */
+      /** Spec 5: a file of a checkout (text in it is served masked for the User who asks). */
+      readonly checkout?: boolean;
+      /** Spec 5: the User the URL was issued to (who asks, for an embed without a session). */
       readonly viewer?: string;
     }
   | {
@@ -1019,6 +1021,7 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
           mimeType,
           file,
           ...(claims.download ? { download: true, fileName: path.basename(canonicalFile) } : {}),
+          checkout: true,
           ...(claims.viewer === undefined ? {} : { viewer: claims.viewer }),
         } satisfies ResolvedAsset)
       : null;
@@ -1033,6 +1036,7 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
       ? ({
           kind: "file",
           path: exactWorkspaceFile,
+          checkout: true,
           ...(claims.viewer === undefined ? {} : { viewer: claims.viewer }),
         } satisfies ResolvedAsset)
       : null;
@@ -1056,6 +1060,7 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
     ? ({
         kind: "file",
         path: workspaceFile,
+        checkout: true,
         ...(claims.viewer === undefined ? {} : { viewer: claims.viewer }),
       } satisfies ResolvedAsset)
     : null;

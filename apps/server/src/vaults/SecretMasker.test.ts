@@ -518,8 +518,9 @@ describe("SecretMasker: the doors that are not events", () => {
           diff: (_input: { readonly repository: string; readonly number: number }) =>
             Effect.succeed(TOKEN),
         });
-        const refused = yield* Effect.exit(failing.diff({ repository: "acme/web", number: 7 }));
-        assert.isTrue(Exit.isFailure(refused), "nothing unmasked when the values cannot be read");
+        // Values that cannot be read hide the text: no defect, nothing unmasked.
+        const hidden = yield* failing.diff({ repository: "acme/web", number: 7 });
+        assert.equal(hidden, "[content hidden: secrets could not be loaded]");
       }),
   );
 
@@ -663,6 +664,54 @@ describe("SecretMasker: the doors that are not events", () => {
     }),
   );
 
+  it.effect("after hiding, shows nothing more of the line a value may have started on", () =>
+    Effect.gen(function* () {
+      // The first read fails (the start of a value is hidden), the next ones work.
+      let reads = 0;
+      const recovering = SecretMasker.SecretMasker.of({
+        ...fakeMasker,
+        forThread: (threadId) =>
+          (reads += 1) === 1
+            ? Effect.fail(new SecretMasker.SecretMaskingError({ threadId }))
+            : Effect.succeed(tokenMasker),
+      });
+      const events = yield* maskTerminalStream(
+        recovering,
+        "thread-1",
+        Stream.make(output(`x ${TOKEN.slice(0, 8)}`), output(`${TOKEN.slice(8)} end\r\nnext`)),
+      ).pipe(Stream.runCollect);
+      const sent = outputsOf([...events]).join("");
+      assert.equal(sent, `${HIDDEN_OUTPUT}\r\nnext`);
+      assert.notInclude(sent, TOKEN.slice(8));
+    }),
+  );
+
+  it.effect(
+    "hides checkout reads and change requests when the viewer's values cannot be read",
+    () =>
+      Effect.gen(function* () {
+        const review = maskingCheckoutReads(Option.some(failingMasker), {
+          getDiffPreview: (_input: { readonly cwd: string }) =>
+            Effect.succeed({ sources: [{ diff: `+TOKEN=${TOKEN}`, path: "a.env" }] }),
+        });
+        const answer = yield* review.getDiffPreview({ cwd: "/work/acme" });
+        assert.deepEqual(answer, {
+          sources: [{ diff: "[content hidden: secrets could not be loaded]", path: "a.env" }],
+        });
+        const pulls = maskingPullRequestReads(Option.some(failingMasker), {
+          detail: (_input: { readonly repository: string; readonly number: number }) =>
+            Effect.succeed({
+              title: "Deploy",
+              body: `uses ${TOKEN}`,
+              viewerPermissions: { editChangeRequest: true },
+            }),
+        });
+        const detail = yield* pulls.detail({ repository: "acme/web", number: 7 });
+        assert.notInclude(JSON.stringify(detail), TOKEN);
+        assert.isFalse(detail.viewerPermissions.editChangeRequest, "hidden text is read-only");
+      }),
+  );
+
   it.effect("filters a search first and limits after: what it says never depends on a value", () =>
     Effect.sync(() => {
       const line = (path: string, lineContent: string, end = lineContent.length) => ({
@@ -749,14 +798,28 @@ describe("SecretMasker: a checkout file served by URL", () => {
       yield* fileSystem.writeFileString(secretFile, `TOKEN=${TOKEN}\n`);
       yield* fileSystem.writeFileString(plainFile, "nothing here\n");
       const viewer = UserId.make("viewer");
-      const masked = yield* maskedAssetText(secretFile, viewer);
+      const masked = yield* maskedAssetText(secretFile, Option.some(viewer));
       assert.isDefined(masked);
       const body = masked!.body;
       assert.equal(
         body._tag === "Uint8Array" ? new TextDecoder().decode(body.body) : "",
         "TOKEN=[API_TOKEN]\n",
       );
-      assert.isUndefined(yield* maskedAssetText(plainFile, viewer), "served as it is");
+      assert.isUndefined(yield* maskedAssetText(plainFile, Option.some(viewer)), "served as it is");
+      // A script keeps its type; a range of it is served from the masked text.
+      const script = `${dir}/app.js`;
+      yield* fileSystem.writeFileString(script, `const t = "${TOKEN}";\n`);
+      const ranged = yield* maskedAssetText(script, Option.some(viewer), "bytes=0-4");
+      assert.equal(ranged?.status, 206);
+      assert.include(String(ranged?.headers["content-type"]), "javascript");
+      // Media and binary files go as they are, however large; text asked for by no User, refused.
+      const image = `${dir}/shot.png`;
+      yield* fileSystem.writeFile(image, new Uint8Array([137, 80, 78, 71, 0, 1, 2]));
+      assert.isUndefined(yield* maskedAssetText(image, Option.some(viewer)));
+      const binary = `${dir}/blob.bin`;
+      yield* fileSystem.writeFile(binary, new Uint8Array([1, 0, 2, 3]));
+      assert.isUndefined(yield* maskedAssetText(binary, Option.none()));
+      assert.equal((yield* maskedAssetText(secretFile, Option.none()))?.status, 403);
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(layerMasker, NodeServices.layer))),
   );
 });

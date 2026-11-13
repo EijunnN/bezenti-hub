@@ -177,6 +177,32 @@ describe("secretMasking", () => {
     );
   });
 
+  it("never sends the middle of a value that came in three pieces", () => {
+    const patterns = makeSecretPatterns([{ name: "API_TOKEN", value: TOKEN }]);
+    const guard = new SecretStreamGuard(patterns);
+    assert.deepEqual(guard.push(`a ${TOKEN.slice(0, 7)}`, 1024), { text: "", hold: true });
+    assert.equal(guard.release(), "a [API_TOKEN]");
+    assert.deepEqual(guard.push(TOKEN.slice(7, 12), 1024), { text: "", hold: false });
+    assert.deepEqual(guard.push(`${TOKEN.slice(12)} done\n`, 1024), {
+      text: " done\n",
+      hold: false,
+    });
+    // Begun raw (shorter than any masked start), its middle is never sent either.
+    const raw = new SecretStreamGuard(patterns);
+    assert.deepEqual(raw.push(`b ${TOKEN.slice(0, 3)}`, 1024), { text: "", hold: true });
+    assert.equal(raw.release(), `b ${TOKEN.slice(0, 3)}`);
+    assert.deepEqual(raw.push(TOKEN.slice(3, 10), 1024), { text: "[API_TOKEN]", hold: false });
+    assert.deepEqual(raw.push(`${TOKEN.slice(10)} ok\n`, 1024), { text: " ok\n", hold: false });
+  });
+
+  it("masks a whole value at the end of text even where another value's start overlaps it", () => {
+    const patterns = makeSecretPatterns([
+      { name: "A", value: "abcdefghij" },
+      { name: "B", value: "efghijKLMNOP" },
+    ]);
+    assert.equal(maskWhole(patterns, "x abcdefghij"), "x [A]");
+  });
+
   it("matches among thousands of values", () => {
     const many = Array.from({ length: 4000 }, (_, index) => ({
       name: `S${index}`,

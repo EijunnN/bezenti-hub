@@ -23,7 +23,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
-import { type HeldText, HIDDEN_OUTPUT, makeHeldText } from "../vaults/heldText.ts";
+import { afterLineEnd, type HeldText, HIDDEN_OUTPUT, makeHeldText } from "../vaults/heldText.ts";
 import * as SecretMasker from "../vaults/SecretMasker.ts";
 import * as EventSink from "./EventSink.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -194,8 +194,11 @@ export const make = Effect.gen(function* () {
       stream.hidden = true;
       return;
     }
+    // What was hidden may have been the start of a value: hidden until its line ends.
+    const shown = stream.hidden ? afterLineEnd(chunk) : chunk;
+    if (shown === undefined) return;
     stream.hidden = false;
-    yield* stream.held.push(threadMasker.value, chunk, target);
+    if (shown.length > 0) yield* stream.held.push(threadMasker.value, shown, target);
   });
 
   const finish: CommandOutputHubShape["finish"] = (target) =>

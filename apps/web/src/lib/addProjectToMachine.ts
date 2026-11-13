@@ -14,7 +14,7 @@ import { create } from "zustand";
 
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { suggestAppAccessForRemote } from "../components/sourceControlAppAccessToast";
-import { fileCopyRefusal } from "./fileCopyRefusal";
+import { copyReadInput, fileCopyRefusal } from "./fileCopyRefusal";
 import { environmentProjectClonesAtom, silenceProjectCloneToasts } from "../state/projectClones";
 import { projectEnvironment } from "../state/projects";
 import { sourceControlEnvironment } from "../state/sourceControl";
@@ -111,7 +111,7 @@ export async function addProjectToMachine(input: AddProjectToMachineInput): Prom
         appAtomRegistry,
         projectEnvironment.readFile({
           environmentId: input.source.environmentId,
-          input: { cwd: input.source.cwd, relativePath },
+          input: copyReadInput(input.source.cwd, relativePath),
         }),
         { label: "Read file to copy", reportFailure: false, refresh: true },
       );

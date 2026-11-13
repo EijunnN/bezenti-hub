@@ -6,6 +6,10 @@
 import { PullRequestOperationError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import { hideErrorText } from "@t3tools/shared/secretMasking";
+
+import { HIDDEN_OUTPUT } from "./heldText.ts";
+import { HIDDEN_CONTENT, placeholderNames } from "./maskWorkspace.ts";
 
 import type * as SecretMasker from "./SecretMasker.ts";
 
@@ -20,12 +24,13 @@ const namesAChangeRequest = (input: unknown) => {
   return typeof ref?.repository === "string" && typeof ref.number === "number";
 };
 
-const placeholdersIn = (input: unknown, names: ReadonlySet<string>) => {
+/** Whether an edit carries one of `names` as `[NAME]` (any `[NAME]` when they are unknown). */
+const placeholdersIn = (input: unknown, names: ReadonlySet<string> | undefined) => {
   const fields = input as { readonly title?: unknown; readonly body?: unknown };
   return [fields.title, fields.body].some(
     (text) =>
       typeof text === "string" &&
-      [...text.matchAll(/\[([A-Za-z_][A-Za-z0-9_]*)\]/g)].some((match) => names.has(match[1]!)),
+      [...placeholderNames(text)].some((name) => names === undefined || names.has(name)),
   );
 };
 
@@ -55,38 +60,49 @@ const readOnlyWhereMasked = (original: unknown, masked: unknown): unknown => {
   return out;
 };
 
-/** The service, with every answer about a change request masked for the asking User. */
+/**
+ * The service, with every Effect answer and failure masked for the asking User (lists too). When
+ * their values cannot be read, its text is hidden (and read-only) instead.
+ */
 export const maskingPullRequestReads = <S extends object>(
   masker: Option.Option<SecretMasker.SecretMasker["Service"]>,
   service: S,
 ): S => {
   if (Option.isNone(masker)) return service;
-  const viewer = masker.value.forViewer;
+  const viewer = Effect.option(masker.value.forViewer);
   const wrapped: Record<string, unknown> = {};
   for (const [name, method] of Object.entries(service)) {
     wrapped[name] =
       typeof method !== "function"
         ? method
         : (input: unknown, ...rest: ReadonlyArray<unknown>) => {
-            const call = () =>
-              (method as (...args: ReadonlyArray<unknown>) => unknown)(input, ...rest);
-            if (!namesAChangeRequest(input)) return call();
+            const answer = (method as (...args: ReadonlyArray<unknown>) => unknown)(input, ...rest);
+            if (!Effect.isEffect(answer)) return answer;
             // @effect-diagnostics-next-line anyUnknownInErrorContext:off -- any method's own answer.
             return Effect.gen(function* () {
-              const found = yield* Effect.orDie(viewer);
-              if (EDITS.has(name) && placeholdersIn(input, found.names)) {
+              const found = yield* viewer;
+              const names = Option.isSome(found) ? found.value.names : undefined;
+              if (EDITS.has(name) && namesAChangeRequest(input) && placeholdersIn(input, names)) {
                 return yield* new PullRequestOperationError({
                   operation: name,
                   detail: SHOWN_MASKED,
                 });
               }
-              const answer = call();
-              if (!Effect.isEffect(answer)) return answer;
+              const hide = <X>(value: X): X =>
+                Option.isSome(found)
+                  ? found.value.maskDeep(value)
+                  : hideErrorText(value, HIDDEN_CONTENT);
               // @effect-diagnostics-next-line anyUnknownInErrorContext:off -- any method's own answer.
               return yield* (answer as Effect.Effect<unknown, unknown, unknown>).pipe(
-                Effect.map((value) => readOnlyWhereMasked(value, found.maskDeep(value))),
-                // @effect-diagnostics-next-line anyUnknownInErrorContext:off -- its own error.
-                Effect.catch((error: unknown) => Effect.fail(found.maskError(error))),
+                Effect.map((value) => readOnlyWhereMasked(value, hide(value))),
+                Effect.catch((error: unknown) =>
+                  // @effect-diagnostics-next-line anyUnknownInErrorContext:off -- its own error.
+                  Effect.fail(
+                    Option.isSome(found)
+                      ? found.value.maskError(error)
+                      : hideErrorText(error, HIDDEN_OUTPUT),
+                  ),
+                ),
               );
             });
           };

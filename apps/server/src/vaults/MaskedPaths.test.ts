@@ -27,6 +27,7 @@ import {
 } from "@t3tools/contracts";
 import { assert, describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as HttpApi from "effect/http-api/HttpApi";
@@ -54,6 +55,8 @@ import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ReviewService from "../review/ReviewService.ts";
+import { McpInvocationContext } from "../mcp/McpInvocationContext.ts";
+import * as PullRequestReviewGuides from "../persistence/PullRequestReviewGuides.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
@@ -61,7 +64,7 @@ import * as VcsProjectConfig from "../vcs/VcsProjectConfig.ts";
 import * as KnownWorkspaces from "../workspace/KnownWorkspaces.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { maskedAssetText } from "./maskAssets.ts";
-import { maskGitProgress, maskingGitErrors } from "./maskGitProgress.ts";
+import { maskGitProgress, maskingGitErrors, maskingServiceFailures } from "./maskGitProgress.ts";
 import { maskingPullRequestReads } from "./maskPullRequests.ts";
 import {
   type DoorRule,
@@ -370,7 +373,7 @@ const assetUrl: Proof = (scenario) =>
     assert.equal(viewer, scenario.owner);
     const response = yield* inHub(
       scenario,
-      maskedAssetText((asset as { readonly path: string }).path, scenario.owner),
+      maskedAssetText((asset as { readonly path: string }).path, Option.some(scenario.owner)),
     );
     const body = response?.body;
     shownMasked(
@@ -472,7 +475,34 @@ const gitAction: Proof = (scenario) =>
     shownMasked(failed.message, "git failure");
   });
 
-class GitFailed extends Schema.TaggedError<GitFailed>()("GitFailed", { detail: Schema.String }) {
+/**
+ * A Git workflow method that fails with git's stderr (the value in a nested cause and a defect),
+ * through the masking the workflow service wraps every method in, with the Hub's own masker.
+ */
+const gitWorkflowFailure =
+  (method: string): Proof =>
+  (scenario) =>
+    Effect.gen(function* () {
+      const masker = Option.some(scenario.hub.service(SecretMasker.SecretMasker));
+      const service = maskingServiceFailures(masker, {
+        [method]: (_input: unknown) =>
+          Effect.fail(
+            new GitFailed({ detail: "git failed", cause: { stderr: `fatal: ${OWNER_TOKEN}` } }),
+          ),
+      }) as Record<string, (input: unknown) => Effect.Effect<unknown, GitFailed>>;
+      const failed = yield* asOwner(scenario, Effect.flip(service[method]!({})));
+      shownMasked(JSON.stringify(failed.cause), method);
+      const died = maskingServiceFailures(masker, {
+        [method]: (_input: unknown) => Effect.die(new Error(`hook: ${OWNER_TOKEN}`)),
+      }) as Record<string, (input: unknown) => Effect.Effect<unknown>>;
+      const exit = yield* asOwner(scenario, Effect.exit(died[method]!({})));
+      shownMasked(String(exit._tag === "Failure" ? Cause.squash(exit.cause) : ""), method);
+    });
+
+class GitFailed extends Schema.TaggedError<GitFailed>()("GitFailed", {
+  detail: Schema.String,
+  cause: Schema.optional(Schema.Unknown),
+}) {
   override get message(): string {
     return this.detail;
   }
@@ -503,7 +533,52 @@ const pullRequest =
       }
     });
 
+/** An MCP tool call: the agent's User comes from its invocation, with no session principal. */
+const asMcpCaller = (scenario: Scenario) =>
+  Effect.provideService(McpInvocationContext, { userId: scenario.owner } as never);
+
+/** `write_pull_request_guides`: the guide is stored masked with the MCP caller's values. */
+const mcpGuideStore: Proof = (scenario) =>
+  Effect.gen(function* () {
+    const generatedBy = yield* asMcpCaller(scenario)(SecretMasker.requester);
+    expect(Option.getOrUndefined(generatedBy)).toBe(scenario.owner);
+    const repository = yield* Effect.service(
+      PullRequestReviewGuides.PullRequestReviewGuideRepository,
+    ).pipe(
+      Effect.provide(PullRequestReviewGuides.layer),
+      Effect.provideContext(scenario.hub.server.services as never),
+    ) as Effect.Effect<PullRequestReviewGuides.PullRequestReviewGuideRepository["Service"]>;
+    yield* repository.put(
+      { host: "github.com", repository: "acme/web", number: 7 } as never,
+      {
+        headSha: `sha-${OWNER_TOKEN}`,
+        generatedAt: "2026-11-13T00:00:00.000Z",
+        modelSelection: { instanceId: "codex", model: "gpt-5" },
+        stops: [],
+      } as never,
+      generatedBy,
+    );
+    const rows = yield* scenario.hub.server.sql<{ readonly guide: string }>`
+      SELECT guide_json AS guide FROM pull_request_review_guides
+    `;
+    shownMasked(JSON.stringify(rows), "write_pull_request_guides");
+  });
+
+/** `read_pull_request_guide`: what it answers, masked for the MCP caller (no session). */
+const mcpGuideRead: Proof = (scenario) =>
+  Effect.gen(function* () {
+    const masker = Option.some(scenario.hub.service(SecretMasker.SecretMasker));
+    const service = maskingPullRequestReads(masker, {
+      get: (_input: unknown) => Effect.succeed({ guide: { headSha: `sha-${OWNER_TOKEN}` } }),
+    });
+    const answer = yield* asMcpCaller(scenario)(service.get({ repository: "acme/web", number: 7 }));
+    shownMasked(JSON.stringify(answer), "read_pull_request_guide");
+  });
+
 const PULL_REQUEST_METHODS = [
+  "list",
+  "listStats",
+  "filterOptions",
   "summary",
   "stack",
   "detail",
@@ -535,6 +610,14 @@ const PROOFS: Record<string, Proof> = {
   "ws:review.getDiffPreview": review("getDiffPreview"),
   "ws:review.getDiffFileContents": review("getDiffFileContents"),
   "ws:git.runStackedAction": gitAction,
+  "ws:vcs.pull": gitWorkflowFailure("pullCurrentBranch"),
+  "ws:git.resolvePullRequest": gitWorkflowFailure("resolvePullRequest"),
+  "ws:git.preparePullRequestThread": gitWorkflowFailure("preparePullRequestThread"),
+  "ws:vcs.listRefs": gitWorkflowFailure("listRefs"),
+  "ws:vcs.createWorktree": gitWorkflowFailure("createWorktree"),
+  "ws:vcs.removeWorktree": gitWorkflowFailure("removeWorktree"),
+  "ws:vcs.createRef": gitWorkflowFailure("createRef"),
+  "ws:vcs.switchRef": gitWorkflowFailure("switchRef"),
   "ws:orchestration.dispatchCommand": rejectedCommand,
   "ws:orchestration.getTurnDiff": turnDiff,
   "ws:orchestration.getFullThreadDiff": fullThreadDiff,
@@ -547,8 +630,8 @@ const PROOFS: Record<string, Proof> = {
   "http:pullRequests.diff": pullRequest("diff"),
   "raw:guest/http.ts: GET GUEST_COMMAND_OUTPUT_ROUTE": commandOutput,
   "raw:http.ts: GET `${ASSET_ROUTE_PREFIX}/*`": assetUrl,
-  "mcp:read_pull_request_guide": pullRequest("get"),
-  "mcp:write_pull_request_guides": pullRequest("generate"),
+  "mcp:read_pull_request_guide": mcpGuideRead,
+  "mcp:write_pull_request_guides": mcpGuideStore,
   "executor:files.read": readFile,
   "executor:files.write": writeFile,
   "executor:search.contents": searchContents,

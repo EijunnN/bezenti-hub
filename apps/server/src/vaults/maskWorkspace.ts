@@ -11,6 +11,13 @@ import type * as SecretMasker from "./SecretMasker.ts";
 /** Why a save is refused. */
 export const FILE_HOLDS_SECRETS = "This file contains secrets; edit it in a terminal.";
 
+/** Shown instead of a file's contents when the reader's values could not be read. */
+export const HIDDEN_CONTENT = "[content hidden: secrets could not be loaded]";
+
+/** The names a text writes as `[NAME]`. */
+export const placeholderNames = (text: string): ReadonlySet<string> =>
+  new Set([...text.matchAll(/\[([A-Za-z_][A-Za-z0-9_]*)\]/g)].map((match) => match[1]!));
+
 /** A read, masked; one cut at its size limit shows a value starting at the cut as `[NAME]`. */
 export const maskReadFile = (
   masker: SecretMasker.ThreadMasker,
