@@ -88,6 +88,21 @@ import * as JoinedHub from "./JoinedHub.ts";
 import type * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 import type { Authenticator, HubServices, Server } from "../auth/UserAuth.testkit.ts";
 import * as EnvironmentAgent from "./EnvironmentAgent.ts";
+import * as AuditLog from "../audit/AuditLog.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as AiAccounts from "../ai/AiAccounts.ts";
+import * as AiGateway from "../ai/AiGateway.ts";
+import * as AiGatewayActivity from "../ai/AiGatewayActivity.ts";
+import * as AiGatewayKeyRevocation from "../ai/AiGatewayKeyRevocation.ts";
+import * as AiGatewayKeys from "../ai/AiGatewayKeys.ts";
+import * as AiGatewayProxy from "../ai/AiGatewayProxy.ts";
+import * as AiGatewaySessions from "../ai/AiGatewaySessions.ts";
+import { fakeCliproxyRelease, fakeReleases, pinsOf } from "../ai/AiGateway.testkit.ts";
+import { cliproxyPlatformOf } from "../ai/cliproxyRelease.ts";
+import { CliproxyReleases } from "../ai/CliproxyReleases.ts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Stream from "effect/Stream";
+import { FetchHttpClient } from "effect/http";
 import { joinMachine, hubWithOwner } from "./environments.testkit.ts";
 import { connectOnce } from "./JoinedHub.ts";
 import type * as SshInstall from "./sshInstall/SshInstall.ts";
@@ -207,6 +222,64 @@ const layerTextGeneration = (textGeneration: ProviderTextGeneration | undefined)
         TextGeneration.TextGeneration.of(textGeneration),
       );
 
+/**
+ * Spec 4 ticket 06: the Hub's AI accounts and gateway over the fake CLIProxyAPI (its files in
+ * `memory`), below the orchestration as the server has them.
+ */
+const withAiAccounts = (memory: string) => (services: Context.Context<HubServices>) =>
+  Effect.gen(function* () {
+    const os = HostProcess.Platform.defaultValue();
+    const platform = cliproxyPlatformOf(os, HostProcess.Architecture.defaultValue());
+    if (platform === undefined) return yield* Effect.die("no CLIProxyAPI platform here");
+    const release = fakeCliproxyRelease(memory, "1.0.0");
+    const stateDir = `${memory}/state`;
+    yield* (yield* FileSystem.FileSystem).makeDirectory(stateDir, { recursive: true, mode: 0o700 });
+    const gateway = yield* AiGateway.make({
+      placement: { _tag: "forced", enabled: true },
+      os,
+      stateDir,
+      platform,
+      pinned: pinsOf([release]),
+      runtimeFolder: { directory: `${memory}/memory`, inMemory: true },
+      restartDelay: { initialMs: 100, maxMs: 200 },
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.succeed(
+            ServerSecretStore.ServerSecretStore,
+            Context.get(
+              services as unknown as Context.Context<ServerSecretStore.ServerSecretStore>,
+              ServerSecretStore.ServerSecretStore,
+            ),
+          ),
+          Layer.succeed(CliproxyReleases, fakeReleases({ releases: [release] }).service),
+          Layer.succeed(
+            AuditLog.AuditLog,
+            AuditLog.AuditLog.of({ record: () => Effect.void, list: () => Effect.die("not used") }),
+          ),
+          FetchHttpClient.layer,
+        ),
+      ),
+    );
+    yield* gateway.changes.pipe(
+      Stream.filter((status) => status.state === "running"),
+      Stream.runHead,
+    );
+    const ai = yield* Layer.build(
+      AiGatewaySessions.layer.pipe(
+        Layer.provideMerge(AiGatewayProxy.layer),
+        Layer.provideMerge(AiGatewayKeys.layer),
+        Layer.provideMerge(AiGatewayActivity.layer),
+        Layer.provideMerge(AiAccounts.layer),
+        Layer.provideMerge(AuditLog.layer),
+        Layer.provideMerge(Layer.succeed(AiGateway.AiGateway, gateway)),
+        Layer.provideMerge(FetchHttpClient.layer),
+        Layer.provide(Layer.succeedContext(services)),
+      ),
+    );
+    return Context.merge(services, ai) as unknown as Context.Context<HubServices>;
+  }).pipe(Effect.provide(NodeServices.layer), Effect.orDie);
+
 const withOrchestration =
   (textGeneration: ProviderTextGeneration | undefined, reconnectWait: Duration.Input | undefined) =>
   (services: Context.Context<HubServices>) =>
@@ -235,6 +308,13 @@ const withOrchestration =
       );
       // The effect worker runs as the server runs it, so effects settle without a test draining them.
       yield* EffectWorker.runDaemon.pipe(Effect.provideContext(merged), Effect.forkScoped);
+      // With AI accounts: gateway keys revoked as their sessions and Threads end, as on the Hub.
+      if (Context.getOption(merged, AiGatewayKeys.AiGatewayKeys)._tag === "Some") {
+        // The AI services were merged in by `withAiAccounts`, which the context's type omits.
+        yield* Layer.build(
+          AiGatewayKeyRevocation.layer.pipe(Layer.provide(Layer.succeedContext(merged))),
+        ) as unknown as Effect.Effect<unknown, never, Scope.Scope>;
+      }
       return merged as unknown as Context.Context<HubServices>;
     }).pipe(Effect.orDie);
 
@@ -721,6 +801,8 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     readonly sshInstallPolicy?: SshInstall.SshInstallPolicy["Service"];
     /** How long the Hub's calls wait for a dropped machine to return (30 s by default). */
     readonly reconnectWait?: Duration.Input;
+    /** The Hub's AI accounts and gateway, over the fake CLIProxyAPI (spec 4). */
+    readonly aiAccounts?: boolean;
   } = {},
 ) {
   const sandboxRoot = yield* FileSystem.FileSystem.pipe(
@@ -728,6 +810,14 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     Effect.provide(NodeServices.layer),
     Effect.orDie,
   );
+  const aiGatewayDir =
+    options.aiAccounts === true
+      ? yield* FileSystem.FileSystem.pipe(
+          Effect.flatMap((fs) => fs.makeTempDirectoryScoped({ prefix: "t3-ai-gateway-" })),
+          Effect.provide(NodeServices.layer),
+          Effect.orDie,
+        )
+      : undefined;
   const sandboxes = makeSandboxRuntime(
     options.sandboxAdapters ?? ProviderAdapterRegistry.layerFromAdapters([]),
     options.sandboxLauncher,
@@ -752,7 +842,11 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     listen: true,
     ...(options.previewOrigin === undefined ? {} : { previewOrigin: options.previewOrigin }),
     ...(options.publicUrl === undefined ? {} : { publicUrl: options.publicUrl }),
-    extend: withOrchestration(options.textGeneration, options.reconnectWait),
+    extend: (services) =>
+      (aiGatewayDir === undefined
+        ? Effect.succeed(services)
+        : withAiAccounts(aiGatewayDir)(services)
+      ).pipe(Effect.flatMap(withOrchestration(options.textGeneration, options.reconnectWait))),
     ...(options.sandboxes === false ? {} : { sandboxRuntime }),
     registry: {
       ...(options.hubRunsAgents === undefined ? {} : { hubRunsAgents: options.hubRunsAgents }),
@@ -950,6 +1044,8 @@ export const makeHub = Effect.fn("HubWithEnvironments.makeHub")(function* (
     crashSandbox: sandboxes.crash,
     /** Where the Sandboxes' homes are. */
     sandboxRoot,
+    /** The fake CLIProxyAPI's folder (its request log), with `aiAccounts`. */
+    aiGatewayDir,
   };
 });
 

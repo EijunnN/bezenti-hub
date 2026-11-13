@@ -68,8 +68,11 @@ export class AiGatewaySessions extends Context.Service<
       Option.Option<GatewaySession>,
       AiGatewaySessionError | AiGatewayKeys.AiGatewayKeyError
     >;
-    /** Revokes the key of a session that did not open (its process never started). */
-    readonly release: (providerSessionId: string) => Effect.Effect<void>;
+    /** Revokes a session's key: it closed, or never opened (its process never started). */
+    readonly release: (
+      providerSessionId: string,
+      reason?: "session-closed" | "session-not-opened",
+    ) => Effect.Effect<void>;
   }
 >()("t3/ai/AiGatewaySessions") {}
 
@@ -194,14 +197,17 @@ const make = Effect.gen(function* () {
     });
   });
 
-  const release = (providerSessionId: string) =>
-    keys.revokeSession(providerSessionId, "session-not-opened").pipe(
-      Effect.catch((cause) =>
-        Effect.logWarning("AiGatewaySessions: could not revoke an unopened session's key", {
-          cause,
-        }),
-      ),
-    );
+  const release = (
+    providerSessionId: string,
+    reason: "session-closed" | "session-not-opened" = "session-not-opened",
+  ) =>
+    keys
+      .revokeSession(providerSessionId, reason)
+      .pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("AiGatewaySessions: could not revoke a session's key", { cause }),
+        ),
+      );
 
   return AiGatewaySessions.of({ applies, forSession, release });
 });

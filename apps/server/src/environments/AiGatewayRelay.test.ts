@@ -2,7 +2,7 @@
  * The local relay to the Hub's AI gateway (spec 4 ticket 06): loopback only, the gateway's routes
  * only, nothing added, kept or followed; never a way to anything else on the Hub or the network.
  */
-// @effect-diagnostics nodeBuiltinImport:off globalFetch:off globalFetchInEffect:off -- raw sockets and a fake Hub on loopback.
+// @effect-diagnostics nodeBuiltinImport:off globalFetch:off globalFetchInEffect:off globalTimers:off -- raw sockets and a fake Hub on loopback.
 import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
 import * as NodeNet from "node:net";

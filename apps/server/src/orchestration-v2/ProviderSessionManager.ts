@@ -1140,6 +1140,13 @@ export const layerWithOptions = (
               onNone: () => Effect.void,
               onSome: (entry) =>
                 Effect.gen(function* () {
+                  // Spec 4 ticket 06: the session's gateway key stops working before it stops.
+                  if (entry.aiAccount !== undefined && Option.isSome(aiGatewaySessions)) {
+                    yield* aiGatewaySessions.value.release(
+                      input.providerSessionId,
+                      "session-closed",
+                    );
+                  }
                   const releasedBackgroundTasks = yield* readReleasedBackgroundTasks({
                     entry,
                     reason: input.reason,
@@ -2379,7 +2386,7 @@ export const layerWithOptions = (
             });
             const sessionScope = yield* Scope.fork(sessionScopes);
             yield* agentScope.clear(input.threadId);
-            const runtime = yield* adapter
+            const openedRuntime = yield* adapter
               .openSession({
                 threadId: input.threadId,
                 providerSessionId: input.providerSessionId,
@@ -2432,6 +2439,22 @@ export const layerWithOptions = (
                   attributes: { provider: adapter.driver, operation: "open" },
                 }),
               );
+            // Every record of the session says which Hub AI account it runs on.
+            const runtime =
+              aiAccount === undefined
+                ? openedRuntime
+                : {
+                    ...openedRuntime,
+                    providerSession: withAiAccount(openedRuntime.providerSession, aiAccount),
+                    events: Stream.map(openedRuntime.events, (event) =>
+                      event.type === "provider_session.updated"
+                        ? {
+                            ...event,
+                            providerSession: withAiAccount(event.providerSession, aiAccount),
+                          }
+                        : event,
+                    ),
+                  };
             const eventSubscribers = yield* Ref.make<
               ReadonlyMap<number, Queue.Queue<ProviderSessionEventSignal, Cause.Done>>
             >(new Map());
