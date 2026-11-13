@@ -1032,6 +1032,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
     const text = use(ChatMarkdownTextContext);
     if (type !== "checkbox" || !onTaskListChange) {
       return (
+        // oxlint-disable-next-line t3code/no-native-form-controls -- react-markdown hands us the rendered task-list input; its type comes from the markdown AST
         <input
           {...props}
           type={type}
@@ -1042,6 +1043,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
       );
     }
     return (
+      // oxlint-disable-next-line t3code/no-native-form-controls -- the markdown task-list checkbox is the element react-markdown renders in message text, not a form field
       <input
         {...props}
         type="checkbox"

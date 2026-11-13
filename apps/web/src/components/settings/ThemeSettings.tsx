@@ -926,6 +926,7 @@ export function ThemeLibrary({
                     key={customTheme.id}
                   >
                     <span className="absolute right-2 top-2 inline-grid size-5 grid-cols-1 sm:size-4">
+                      {/* oxlint-disable-next-line t3code/no-native-form-controls -- upstream theme card overlay: the card is the label, so the hit area and look are the card's own */}
                       <input
                         checked={checked}
                         className="col-start-1 row-start-1 size-full appearance-none rounded-sm border border-input bg-background outline-none checked:border-primary checked:bg-primary focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring checked:focus-visible:inset-ring-3 checked:focus-visible:inset-ring-background dark:not-checked:bg-input/32 forced-colors:appearance-auto"
