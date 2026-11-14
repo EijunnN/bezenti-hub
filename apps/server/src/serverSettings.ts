@@ -68,6 +68,13 @@ import {
   SECRET_REDACTED,
   type SettingsSecret,
 } from "./settingsSecrets.ts";
+import {
+  aiCredentialChanges,
+  holdsFieldValue,
+  type ProviderCredential,
+  providerCredentialsIn,
+  withoutProviderCredentials,
+} from "./settingsAiCredentials.ts";
 
 export {
   resolveReviewGuideModelSelection,
@@ -278,6 +285,24 @@ export class ServerSettingsService extends Context.Service<
 
     /** Subscribe before reading a snapshot to retain changes before lazy stream startup. */
     readonly subscribeChanges: Effect.Effect<Stream.Stream<ServerSettings>, never, Scope.Scope>;
+
+    /**
+     * Spec 4 ticket 09: whether AI accounts are in use on this server, asked on every write; while
+     * it says so, no write adds or changes an AI credential on a provider instance. Unset: never.
+     */
+    readonly setAiCredentialGuard: (inUse: Effect.Effect<boolean>) => Effect.Effect<void>;
+    /** The AI credentials the provider instances hold as stored (no managed policy's), read. */
+    readonly listProviderCredentials: Effect.Effect<
+      ReadonlyArray<ProviderCredential>,
+      ServerSettingsError
+    >;
+    /**
+     * Removes those credentials that still hold the same value, secrets included, in one write;
+     * returns what went.
+     */
+    readonly removeProviderCredentials: (
+      items: ReadonlyArray<ProviderCredential>,
+    ) => Effect.Effect<ReadonlyArray<ProviderCredential>, ServerSettingsError>;
   }
 >()("t3/serverSettings/ServerSettingsService") {
   static readonly layerTest = (
@@ -305,14 +330,29 @@ const makeTest = Effect.fn("serverSettings.makeTest")(function* (
   const currentSettingsRef = yield* Ref.make<ServerSettings>(initialSettings);
   const writeSemaphore = yield* Semaphore.make(1);
   const getSettings = Ref.get(currentSettingsRef).pipe(Effect.map(resolveTextGenerationProvider));
+  const aiCredentialGuard = yield* Ref.make<Effect.Effect<boolean>>(Effect.succeed(false));
+  const refuseAiCredentials = Effect.fn("serverSettings.test.refuseAiCredentials")(function* (
+    current: ServerSettings,
+    next: ServerSettings,
+  ) {
+    if (!(yield* Effect.flatten(Ref.get(aiCredentialGuard)))) return next;
+    const { refused, literalFields } = aiCredentialChanges(current, next);
+    const slot = refused ?? literalFields.find((field) => !holdsFieldValue(current, field));
+    if (slot === undefined) return next;
+    return yield* aiCredentialError("test settings", slot);
+  });
 
   const updateTestSettings = (
     update: (current: ServerSettings) => Effect.Effect<ServerSettings, ServerSettingsError>,
   ): Effect.Effect<ServerSettings, ServerSettingsError> =>
     writeSemaphore.withPermits(1)(
       Ref.get(currentSettingsRef).pipe(
-        Effect.flatMap(update),
-        Effect.flatMap(normalizeServerSettings),
+        Effect.flatMap((current) =>
+          update(current).pipe(
+            Effect.flatMap(normalizeServerSettings),
+            Effect.flatMap((next) => refuseAiCredentials(current, next)),
+          ),
+        ),
         Effect.tap((nextSettings) => Ref.set(currentSettingsRef, nextSettings)),
         Effect.map(resolveTextGenerationProvider),
       ),
@@ -339,8 +379,32 @@ const makeTest = Effect.fn("serverSettings.makeTest")(function* (
       writeSemaphore.withPermits(1)(getSettings.pipe(Effect.flatMap(use))),
     streamChanges: Stream.empty,
     subscribeChanges: Effect.succeed(Stream.empty),
+    setAiCredentialGuard: (inUse) => Ref.set(aiCredentialGuard, inUse),
+    listProviderCredentials: getSettings.pipe(Effect.map(providerCredentialsIn)),
+    removeProviderCredentials: (items) =>
+      writeSemaphore.withPermits(1)(
+        Effect.gen(function* () {
+          const current = yield* Ref.get(currentSettingsRef);
+          const next = withoutProviderCredentials(current, current, items);
+          yield* Ref.set(currentSettingsRef, next.settings);
+          return next.removed;
+        }),
+      ),
   } satisfies ServerSettingsService["Service"];
 });
+
+const aiCredentialError = (
+  settingsPath: string,
+  slot: { readonly instanceId: string; readonly name: string },
+) =>
+  Effect.fail(
+    new ServerSettingsError({
+      settingsPath,
+      operation: "write-ai-credential",
+      providerInstanceId: slot.instanceId,
+      environmentVariable: slot.name,
+    }),
+  );
 
 /** Test settings; `managedPolicy` only tells consumers a policy applies, it does not lock values. */
 export const layerTest = (
@@ -684,6 +748,7 @@ const make = Effect.gen(function* () {
       managedProviders.isDriverAllowed,
     );
   const writeSemaphore = yield* Semaphore.make(1);
+  const aiCredentialGuard = yield* Ref.make<Effect.Effect<boolean>>(Effect.succeed(false));
   const cacheKey = "settings" as const;
   const changesPubSub = yield* PubSub.unbounded<ServerSettings>();
   const startedRef = yield* Ref.make(false);
@@ -1200,6 +1265,7 @@ const make = Effect.gen(function* () {
             managedBy: managedPolicy?.organization,
           });
         }
+        yield* refuseAiCredentials(current, vettedProviders.settings);
         const persisted = yield* persistSettingsSecrets(current, vettedProviders.settings);
         const next = yield* normalizeServerSettings(persisted.settings);
         const materializedNext = yield* Effect.uninterruptibleMask(() =>
@@ -1226,6 +1292,43 @@ const make = Effect.gen(function* () {
         return resolved;
       }),
     );
+
+  /** Ticket 09: no write adds or changes an AI credential while AI accounts are in use. */
+  const refuseAiCredentials = Effect.fn("serverSettings.refuseAiCredentials")(function* (
+    current: ServerSettings,
+    next: ServerSettings,
+  ) {
+    if (!(yield* Effect.flatten(Ref.get(aiCredentialGuard)))) return;
+    const { refused, literalFields } = aiCredentialChanges(current, next);
+    if (refused !== undefined) return yield* aiCredentialError(settingsPath, refused);
+    if (literalFields.length === 0) return;
+    // A field echoed back read (not as the «saved» marker) passes when it is the stored secret.
+    const stored = yield* materializeSettingsSecrets(current);
+    const changed = literalFields.find((field) => !holdsFieldValue(stored, field));
+    if (changed !== undefined) return yield* aiCredentialError(settingsPath, changed);
+  });
+
+  const listProviderCredentials = getSettingsFromCache.pipe(
+    Effect.flatMap(materializeSettingsSecrets),
+    Effect.map(providerCredentialsIn),
+  );
+
+  const removeProviderCredentials = Effect.fn("serverSettings.removeProviderCredentials")(
+    function* (items: ReadonlyArray<ProviderCredential>) {
+      if (items.length === 0) return [];
+      let removed: ReadonlyArray<ProviderCredential> = [];
+      yield* updateAndPersistSettings({}, (current) =>
+        materializeSettingsSecrets(current).pipe(
+          Effect.map((read) => {
+            const next = withoutProviderCredentials(current, read, items);
+            removed = next.removed;
+            return next.settings;
+          }),
+        ),
+      );
+      return removed;
+    },
+  );
 
   const withSettingsSnapshot: ServerSettingsService["Service"]["withSettingsSnapshot"] = (use) =>
     writeSemaphore.withPermits(1)(getMaterializedSettings.pipe(Effect.flatMap(use)));
@@ -1351,6 +1454,9 @@ const make = Effect.gen(function* () {
         }),
       ),
     withSettingsSnapshot,
+    setAiCredentialGuard: (inUse) => Ref.set(aiCredentialGuard, inUse),
+    listProviderCredentials,
+    removeProviderCredentials,
     get streamChanges() {
       return materializeChanges(Stream.fromPubSub(changesPubSub));
     },

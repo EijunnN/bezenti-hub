@@ -296,3 +296,29 @@ export class AiAccountError extends Schema.TaggedError<AiAccountError>()("AiAcco
 
 /** The prefix CLIProxyAPI serves an account's models under (`acct-<id>/<model>`). */
 export const aiAccountPrefixOf = (accountId: string) => `acct-${accountId}`;
+
+/**
+ * Spec 4 ticket 09: provider-instance variables that are AI credentials. Where AI accounts are in
+ * use, the Hub moves them into AI accounts at its start and settings writes refuse them; each names
+ * the provider of the account it becomes.
+ */
+export const AI_ACCOUNT_CREDENTIAL_VARIABLES: ReadonlyMap<string, AiAccountProvider> = new Map<
+  string,
+  AiAccountProvider
+>([
+  ["ANTHROPIC_API_KEY", "claude"],
+  ["ANTHROPIC_AUTH_TOKEN", "claude"],
+  ["OPENAI_API_KEY", "codex"],
+  ["GEMINI_API_KEY", "gemini"],
+  ["XAI_API_KEY", "xai"],
+  ["CURSOR_API_KEY", "cursor"],
+  ["KIRO_API_KEY", "kiro"],
+  ["META_API_KEY", "meta"],
+  ["AI_GATEWAY_API_KEY", "fx"],
+  ["DEVIN_TOKEN", "devin"],
+]);
+
+/** Ticket 09: provider settings fields that are AI credentials, by driver. */
+export const AI_ACCOUNT_CREDENTIAL_FIELDS: ReadonlyMap<string, ReadonlyArray<string>> = new Map([
+  ["antigravity", ["apiKey"]],
+]);
