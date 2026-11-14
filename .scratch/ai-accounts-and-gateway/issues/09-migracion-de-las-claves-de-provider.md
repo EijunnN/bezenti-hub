@@ -4,13 +4,15 @@
 
 **Blocked by:** 07.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Paso de arranque idempotente: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY`, `KIRO_API_KEY`, `META_API_KEY`, `AI_GATEWAY_API_KEY`, `DEVIN_TOKEN` y `AntigravitySettings.apiKey` → AI account (tipo según la tabla del spec); el resto de variables sensibles se queda en la instance.
-- [ ] Referencias de secret provider (1Password) se resuelven una vez; si no se puede, se dejan y Settings avisa.
-- [ ] Formulario y RPC de settings rechazan esas variables y campos con un enlace a Settings → AI accounts (validación en el servidor, no solo en el cliente).
-- [ ] Auditoría `ai_account.create` con vía `migration`.
-- [ ] Red-first: tras migrar, ningún archivo de `secrets/` ni ajuste guarda la clave fuera de `ai-account-<id>`; `server.updateSettings` con `OPENAI_API_KEY` en una instance se rechaza; correr la migración dos veces no duplica cuentas.
-- [ ] Puertas: WS de settings (`server.updateSettings` y `server.getSettings`), HttpApi gemela si existe; ninguna devuelve la clave migrada.
-- [ ] Tests en `serverSettings.test.ts` y en un test de arranque con un estado de antes.
-- [ ] Prueba real: un Hub dev con una instance de Claude con `ANTHROPIC_API_KEY`; tras actualizar, aparece la AI account «Claude (migrated)», la instance ya no la tiene y un turno del Owner funciona por la gateway.
+- [x] Paso de arranque idempotente: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY`, `KIRO_API_KEY`, `META_API_KEY`, `AI_GATEWAY_API_KEY`, `DEVIN_TOKEN` y `AntigravitySettings.apiKey` → AI account (tipo según la tabla del spec); el resto de variables sensibles se queda en la instance.
+- [x] Referencias de secret provider (1Password) se resuelven una vez; si no se puede, se dejan y Settings avisa.
+- [x] Formulario y RPC de settings rechazan esas variables y campos con un enlace a Settings → AI accounts (validación en el servidor, no solo en el cliente).
+- [x] Auditoría `ai_account.create` con vía `migration`.
+- [x] Red-first: tras migrar, ningún archivo de `secrets/` ni ajuste guarda la clave fuera de `ai-account-<id>`; `server.updateSettings` con `OPENAI_API_KEY` en una instance se rechaza; correr la migración dos veces no duplica cuentas.
+- [x] Puertas: WS de settings (`server.updateSettings` y `server.getSettings`), HttpApi gemela si existe; ninguna devuelve la clave migrada.
+- [x] Tests en `serverSettings.test.ts` y en un test de arranque con un estado de antes.
+- [x] Prueba real: un Hub dev con una instance de Claude con `ANTHROPIC_API_KEY`; tras actualizar, aparece la AI account «Claude (migrated)», la instance ya no la tiene y un turno del Owner funciona por la gateway.
+
+**Hecho** (2026-11-13): `ai/ProviderKeyMigration.ts` mueve las claves al arrancar (y al encender la gateway) solo donde las AI accounts están en uso (una cuenta usable o la gateway encendida; un desktop sin ellas no cambia), cuenta primero y borrado después, idempotente por la migración 119 (`ai_account_migrated_keys`); `ServerSettingsService` rechaza en todas las puertas añadir o cambiar una (`write-ai-credential`, cualquier mayúscula); el formulario lo dice con enlace a Settings → AI accounts y avisa de las que quedan. Auditoría `ai_account.create` con `via: "migration"`. Docs: `docs/internals/ai-gateway.md`, «Keys moved from provider instances». Prueba real: la cuenta llega a Anthropic por la gateway como «Claude (migrated)»; la clave de prueba es falsa, así que Anthropic la rechaza (502). No se probó con una clave real.
