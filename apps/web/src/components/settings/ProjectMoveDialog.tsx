@@ -17,7 +17,7 @@ import {
 import * as Effect from "effect/Effect";
 import { useState } from "react";
 
-import { aiAccountFallbackName } from "../../aiAccountPicker";
+import { aiAccountFallbackName } from "@t3tools/client-runtime/ai-account-picker";
 import { useHubEnvironments } from "../../environments/primary/useHubEnvironments";
 import { PrimaryEnvironmentHttpClient } from "../../environments/primary/httpClient";
 import { errorMessageOf } from "../../lib/errorMessage";

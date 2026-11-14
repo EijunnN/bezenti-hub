@@ -112,7 +112,7 @@ export const AI_PROVIDER_LABEL: Readonly<Record<AiAccountProvider, string>> = {
 };
 
 /** How an account is named to someone who may not see its name. */
-function aiAccountFallbackName(provider: AiAccountProvider): string {
+export function aiAccountFallbackName(provider: AiAccountProvider): string {
   return `${AI_PROVIDER_LABEL[provider]} account`;
 }
 
