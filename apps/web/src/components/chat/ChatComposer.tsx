@@ -17,6 +17,8 @@ import {
   useQuestionAttachmentPreparation,
 } from "../../questionAttachments";
 import type {
+  AiAccountId,
+  AiAccountPickerResult,
   KeybindingCommand,
   AssistantCitation,
   ChatAttachment as ContractChatAttachment,
@@ -276,6 +278,13 @@ import {
   usePreparingComposerImages,
 } from "./preparingComposerImages";
 import { ComposerControlsBar } from "./ComposerControlsBar";
+import { ComposerAiAccountSelect } from "./ComposerAiAccountSelect";
+import {
+  aiAccountServes,
+  aiAccountsDecide,
+  aiAccountsFor,
+  resolveAiAccount,
+} from "../../aiAccountPicker";
 import { composerCommandKeyHandler } from "./composerCommandKey";
 
 function consumePasteAsTextShortcut(deadline: { current: number }): boolean {
@@ -419,6 +428,11 @@ export interface ChatComposerProps {
 
   lockedProvider: ProviderDriverKind | null;
   providerStatuses: ServerProvider[];
+  /** Spec 4 ticket 08: the AI accounts the User may pick here; null when unknown or off. */
+  aiAccountPicker?: AiAccountPickerResult | null;
+  /** The Thread's (or draft's) chosen account; the first allowed that fits when unset. */
+  chosenAiAccountId?: AiAccountId | null;
+  onAiAccountChange?: (accountId: AiAccountId) => void;
   providerCatalogKnown: boolean;
   activeProjectDefaultModelSelection: ModelSelection | null | undefined;
   activeThreadModelSelection: ModelSelection | null | undefined;
@@ -963,11 +977,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     provider: selectedProviderStatus,
     interactionMode: requestedInteractionMode,
   });
-  const selectedModelSelection: ModelSelection = createModelSelection(
-    selectedInstanceId,
-    selectedModel,
-    selectedModelOptionsForDispatch,
+  // Spec 4 ticket 08: the selection carries the AI account it runs on (the Hub checks it).
+  const selectedAiAccount = resolveAiAccount({
+    driver: selectedProvider,
+    model: selectedModel,
+    picker: props.aiAccountPicker,
+    preferred: props.chosenAiAccountId,
+  });
+  const selectableAiAccounts = aiAccountsFor(selectedProvider, props.aiAccountPicker).filter(
+    (account) => aiAccountServes(account, selectedModel),
   );
+  const selectedModelSelection: ModelSelection = {
+    ...createModelSelection(selectedInstanceId, selectedModel, selectedModelOptionsForDispatch),
+    ...(selectedAiAccount === undefined ? {} : { aiAccountId: selectedAiAccount.id }),
+  };
   const selectedModelForPicker = selectedModel;
   const modelOptionsByInstance = new Map<ProviderInstanceId, ReadonlyArray<AppModelOption>>();
   for (const entry of providerInstanceEntries) {
@@ -2308,6 +2331,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       : expandedControlsIconOnlyBlockCount;
   const composerControls = (
     <ComposerControlsBar
+      aiAccountControl={
+        aiAccountsDecide(selectedProvider, props.aiAccountPicker) &&
+        selectableAiAccounts.length > 0 ? (
+          <ComposerAiAccountSelect
+            accounts={selectableAiAccounts}
+            value={selectedAiAccount?.id ?? null}
+            disabled={isSendBusy}
+            size={composerControlsCollapsed ? "xs" : "sm"}
+            onChange={(accountId) => props.onAiAccountChange?.(accountId)}
+          />
+        ) : null
+      }
       environmentId={environmentId}
       routeKind={routeKind}
       routeThreadRef={routeThreadRef}

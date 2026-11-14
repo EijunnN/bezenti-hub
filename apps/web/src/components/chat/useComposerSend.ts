@@ -1234,11 +1234,17 @@ export function useComposerSend(input: ComposerSendInput) {
       attachments: composerAttachmentsSnapshot,
       fallbackLabels: sendTitleFallbackLabels(sendSnapshot),
     });
-    const threadCreateModelSelection = createModelSelection(
-      ctxSelectedModelSelection.instanceId,
-      ctxSelectedModel || activeProjectDefaultModelSelection?.model || DEFAULT_MODEL,
-      ctxSelectedModelSelection.options,
-    );
+    const threadCreateModelSelection = {
+      ...createModelSelection(
+        ctxSelectedModelSelection.instanceId,
+        ctxSelectedModel || activeProjectDefaultModelSelection?.model || DEFAULT_MODEL,
+        ctxSelectedModelSelection.options,
+      ),
+      // Spec 4 ticket 08: the AI account the draft picked (the Hub checks it, or picks one).
+      ...(ctxSelectedModelSelection.aiAccountId === undefined
+        ? {}
+        : { aiAccountId: ctxSelectedModelSelection.aiAccountId }),
+    };
 
     let failure: AtomCommandResult<unknown, unknown> | null = null;
 

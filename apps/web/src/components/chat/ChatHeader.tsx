@@ -2,10 +2,10 @@ import {
   AuthOrchestrationOperateScope,
   type EnvironmentId,
   type OrchestrationV2ThreadMove,
-  type ProviderSessionAiAccount,
   type ScopedThreadRef,
   type ThreadId,
 } from "@t3tools/contracts";
+import type { ThreadAiAccountLabel } from "../ChatView.logic";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { ThreadMoveBadge } from "./MoveThreadDialog";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
@@ -66,8 +66,11 @@ interface ChatHeaderProps {
   environmentState?: ThreadEnvironmentState | null | undefined;
   /** The Thread's latest move to another Environment; shown while it runs. */
   activeThreadMove?: OrchestrationV2ThreadMove | null | undefined;
-  /** The Hub AI account its provider session runs on (spec 4 ticket 06). */
-  aiAccount?: ProviderSessionAiAccount | null | undefined;
+  /**
+   * The Hub AI account its requests go to now (spec 4 tickets 06 and 08: also after a failover or
+   * a switch), named as this viewer may see it.
+   */
+  aiAccount?: ThreadAiAccountLabel | null | undefined;
   isServerThread: boolean;
   activeProject: EnvironmentProject | null;
   parentThreadLink: { threadId: ThreadId; title: string } | null;
@@ -502,8 +505,9 @@ export const ChatHeader = memo(function ChatHeader({
                 {aiAccount.model === null ? null : ` · ${aiAccount.model}`}
               </TooltipTrigger>
               <TooltipPopup side="top">
-                The agent uses the Hub's AI account {aiAccount.name} through the AI gateway. No
-                login of the machine is used.
+                The agent uses the Hub's AI account {aiAccount.name}
+                {aiAccount.model === null ? "" : ` with ${aiAccount.model}`}. No login of the
+                machine is used.
               </TooltipPopup>
             </Tooltip>
           ) : null}

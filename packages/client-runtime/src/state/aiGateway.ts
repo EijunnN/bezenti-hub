@@ -63,6 +63,16 @@ export function createAiGatewayEnvironmentAtoms<R, E>(
       label: "environment-data:ai-accounts:reorder",
       tag: WS_METHODS.aiAccountsReorder,
     }),
+    // Spec 4 ticket 08: the composer's picker (what the User may use in one Space, with models)
+    // and a Thread's switch (same provider: next request; another: a context handoff).
+    pickerAccounts: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ai-accounts:picker",
+      tag: WS_METHODS.aiAccountsPicker,
+    }),
+    setThreadAccount: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:thread:set-ai-account",
+      tag: WS_METHODS.threadSetAiAccount,
+    }),
     // AI usage (spec 4 ticket 05): counts per day, User, Space and AI account, narrowed by the Hub
     // to what the session may see. Fetched while a screen shows it, again every 30 s.
     usageSummary: createEnvironmentRpcQueryAtomFamily(runtime, {

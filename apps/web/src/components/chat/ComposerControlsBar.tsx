@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { ChatComposerProps } from "./ChatComposer";
 import type { PromptUltrathink } from "./TraitsPicker";
 import type { ProviderInstanceEntry } from "../../providerInstances";
@@ -88,6 +89,8 @@ export function ComposerControlsBar(props: {
   onModelPickerOpenChange: (open: boolean) => void;
   modelPickerIconClassName: string | undefined;
   getModelDisabledReason: ChatComposerProps["getModelDisabledReason"];
+  /** Spec 4 ticket 08: the AI account picker, beside the model picker; null off AI accounts. */
+  aiAccountControl?: ReactNode;
 }) {
   const {
     environmentId,
@@ -269,6 +272,7 @@ export function ComposerControlsBar(props: {
   ) : (
     <>
       {composerModelPicker}
+      {props.aiAccountControl ?? null}
 
       <>
         {restingBlockDefs.map((def, index) => {

@@ -34,7 +34,14 @@ import { ThreadFind, ThreadFindCanvas } from "./chat/ThreadFindProvider";
 import { closeThreadFind, openThreadFind, useThreadFindOpen } from "./chat/threadFindStore";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
-import { deriveThreadAiAccount, resolveDraftHeroState } from "./ChatView.logic";
+import {
+  deriveThreadAiAccount,
+  nameThreadAiAccount,
+  resolveDraftHeroState,
+} from "./ChatView.logic";
+import { applyAiAccountsToProviders } from "../aiAccountPicker";
+import { useAiAccountPicker } from "./chat/useAiAccountPicker";
+import { aiGatewayEnvironment } from "../state/aiGateway";
 import { useQueuedRunEdit } from "./chat/useQueuedRunEdit";
 import { recallCheckoutIsRepo, rememberCheckoutIsRepo } from "./ChatView.logic";
 import { useLogicalProjectEnvironments } from "../hooks/useLogicalProjectEnvironments";
@@ -67,6 +74,7 @@ import {
   type PreviewAnnotationPayload,
   ProviderInstanceId,
   type ServerProvider,
+  type AiAccountId,
   type ScopedThreadRef,
   type ThreadId,
   ProviderInteractionMode,
@@ -1200,10 +1208,50 @@ export default function ChatView(props: ChatViewProps) {
     : (primaryEnvironment?.serverConfig ?? null);
   const providerEnvironmentId = (activeThread ? activeEnvironment : primaryEnvironment)
     ?.environmentId;
-  const providerStatuses =
+  const hubProviderStatuses =
     (providerEnvironmentId === undefined
       ? undefined
       : providersByEnvironment.get(providerEnvironmentId)) ?? EMPTY_PROVIDERS;
+  // Spec 4 ticket 08: where the Hub runs turns on AI accounts, a provider is offered with an
+  // account allowed to the User in the Thread's Space, never with the machine's own login.
+  const aiAccountPicker = useAiAccountPicker({
+    environmentId: providerEnvironmentId,
+    spaceId: activeProject?.spaceId ?? null,
+    threadEnvironmentId: activeThread?.activeEnvironmentId ?? null,
+  });
+  const providerStatuses = applyAiAccountsToProviders(hubProviderStatuses, aiAccountPicker);
+  const draftAiAccountKey = isServerThread ? null : (activeThread?.id ?? null);
+  const [draftAiAccount, setDraftAiAccount] = useState<{
+    readonly key: string;
+    readonly accountId: AiAccountId;
+  } | null>(null);
+  const chosenAiAccountId = isServerThread
+    ? (activeThread?.modelSelection.aiAccountId ?? null)
+    : draftAiAccount !== null && draftAiAccount.key === draftAiAccountKey
+      ? draftAiAccount.accountId
+      : null;
+  const switchThreadAiAccount = useAtomCommand(
+    aiGatewayEnvironment.setThreadAccount,
+    "switch the Thread's AI account",
+  );
+  const onAiAccountChange = (accountId: AiAccountId) => {
+    if (!isServerThread || activeThread == null) {
+      if (draftAiAccountKey !== null) setDraftAiAccount({ key: draftAiAccountKey, accountId });
+      return;
+    }
+    void switchThreadAiAccount({
+      environmentId: activeThread.environmentId,
+      input: { threadId: activeThread.id, aiAccountId: accountId },
+    });
+  };
+  const onAiAccountChangeStable = useStableCallback(onAiAccountChange);
+  // The header names the account only for a viewer who may use it (their picker), else by its
+  // provider: the Thread itself carries no name (every viewer of the Space reads it).
+  const headerAiAccount = nameThreadAiAccount({
+    session: deriveThreadAiAccount(serverProjection),
+    threadSelection: isServerThread ? activeThread?.modelSelection : undefined,
+    picker: aiAccountPicker,
+  });
   const selectedProviderByThreadId = composerActiveProvider ?? null;
   const threadProvider =
     activeThread?.modelSelection.instanceId ??
@@ -3405,7 +3453,7 @@ export default function ChatView(props: ChatViewProps) {
               activeEnvironment={isServerThread ? threadActiveEnvironment : null}
               environmentState={threadEnvState}
               activeThreadMove={isServerThread ? (activeThreadShell?.move ?? null) : null}
-              aiAccount={deriveThreadAiAccount(serverProjection)}
+              aiAccount={headerAiAccount}
               activeProject={activeProject ?? null}
               parentThreadLink={headerParentThreadLink}
               onOpenThread={onOpenRelatedThreadStable}
@@ -3748,6 +3796,9 @@ export default function ChatView(props: ChatViewProps) {
                               interactionMode={interactionMode}
                               lockedProvider={modelPickerLockedProvider}
                               providerStatuses={providerStatuses as ServerProvider[]}
+                              aiAccountPicker={aiAccountPicker}
+                              chosenAiAccountId={chosenAiAccountId}
+                              onAiAccountChange={onAiAccountChangeStable}
                               providerCatalogKnown={serverConfig !== null}
                               activeProjectDefaultModelSelection={
                                 activeProjectDefaultModelSelection
