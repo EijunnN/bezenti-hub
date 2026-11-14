@@ -8,15 +8,18 @@ import * as NodeHttp from "node:http";
 
 import { assert, describe, it } from "@effect/vitest";
 import {
+  type AiAccountId,
   CommandId,
   type EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
+  type ModelSelection,
   type OrchestrationV2Command,
   ProjectId,
   type ProjectMovePlan,
   ProviderDriverKind,
   ProviderInstanceId,
   type ProviderReplayTranscript,
+  ProviderSessionId,
   sandboxEnvironmentIdOf,
   type SecretEnv,
   type SpaceId,
@@ -27,7 +30,9 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { makeProviderReplayGate } from "@t3tools/provider-testing/replayGate";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -44,6 +49,7 @@ import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/Claud
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { materializeFixtureInput } from "../orchestration-v2/testkit/fixtures/shared.ts";
 import {
@@ -61,7 +67,27 @@ import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import * as EffectiveVaults from "../vaults/EffectiveVaults.ts";
 import * as Vaults from "../vaults/Vaults.ts";
 import { memberWithPasskey } from "./environments.testkit.ts";
-import { makeHub, seedProject, type Hub } from "./HubWithEnvironments.testkit.ts";
+import {
+  addDirectAccount,
+  addGatewayAccount,
+  callGateway,
+  eventually,
+  fakeGatewayCli,
+  GATEWAY_MODEL,
+  heldStream,
+  type OpenedSession,
+} from "./HubWithEnvironments.aiAccounts.testkit.ts";
+import {
+  type LoadedFixture as ScenarioFixture,
+  loadFixture as loadScenario,
+  replayOn,
+} from "./HubWithEnvironments.scenarios.testkit.ts";
+import {
+  makeHub,
+  seedProject,
+  type Hub,
+  type TestEnvironment,
+} from "./HubWithEnvironments.testkit.ts";
 
 const CLAUDE = ProviderDriverKind.make("claudeAgent");
 
@@ -1120,6 +1146,324 @@ describe("Hub con Environments: a moved Project's Vaults", () => {
       const plan = yield* movePlan(hub, projectId, acme);
       assert.equal(plan.status, 200, JSON.stringify(plan.body));
       assert.deepEqual(plan.body.vaultsLost, []);
+      assert.deepEqual(plan.body.aiAccountsLost, []);
     }).pipe(Effect.scoped),
+  );
+});
+
+/** A Thread of the Owner's in a new Project of `spaceId`, on `environmentId`, its checkout made. */
+const aiThreadIn = Effect.fn(function* (
+  hub: Hub,
+  input: {
+    readonly id: string;
+    readonly spaceId: SpaceId;
+    readonly environmentId: EnvironmentId;
+    readonly modelSelection: ModelSelection;
+  },
+) {
+  const owner = yield* ownerIdOf(hub);
+  const projectId = ProjectId.make(`project:${input.id}`);
+  yield* seedProject(hub.server, {
+    projectId,
+    title: input.id,
+    defaultModelSelection: null,
+    spaceId: input.spaceId,
+  });
+  const threadId = ThreadId.make(`thread:${input.id}`);
+  yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
+    type: "thread.create",
+    createdBy: "user",
+    creationSource: "web",
+    commandId: CommandId.make(`command:${input.id}`),
+    threadId,
+    projectId,
+    title: input.id,
+    modelSelection: input.modelSelection,
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    branch: null,
+    worktreePath: null,
+    spaceId: input.spaceId,
+    ownerUserId: owner,
+    activeEnvironmentId: input.environmentId,
+  });
+  const executor = yield* hub
+    .service(EnvironmentExecutor.EnvironmentExecutorRegistry)
+    .get(input.environmentId)
+    .pipe(Effect.orDie);
+  const checkout = Option.getOrThrow(yield* executor.workspace.paths.checkout(projectId));
+  yield* Effect.promise(() => NodeFSP.mkdir(checkout, { recursive: true }));
+  return { projectId, threadId, checkout };
+});
+
+/**
+ * The fixture's Thread run once on `environment` in `spaceId` (its session stays open after the
+ * turn), then given `aiAccountId` as its choice, as the composer's door writes it.
+ */
+const replayedThread = Effect.fn(function* (
+  hub: Hub,
+  environment: TestEnvironment,
+  loaded: ScenarioFixture,
+  spaceId: SpaceId,
+  aiAccountId: AiAccountId,
+) {
+  const owner = yield* ownerIdOf(hub);
+  yield* replayOn(hub, environment, loaded, { spaceId, ownerUserId: owner });
+  const create = loaded.materialized.commands.find((command) => command.type === "thread.create");
+  if (create?.type !== "thread.create") return yield* Effect.die("no thread.create");
+  const { threadId, projectId } = create;
+  const now = yield* threadOf(hub, threadId);
+  yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
+    type: "thread.model-selection.set",
+    commandId: CommandId.make(`choose:${threadId}`),
+    threadId,
+    modelSelection: { ...now.thread.modelSelection, aiAccountId },
+  } as OrchestrationV2Command);
+  const [session] = yield* hub.server.sql<{ readonly id: string }>`
+    SELECT provider_session_id AS id FROM orchestration_v2_projection_provider_sessions
+    WHERE thread_id = ${threadId}
+  `;
+  assert.isDefined(session, "the turn's session");
+  const executor = yield* hub
+    .service(EnvironmentExecutor.EnvironmentExecutorRegistry)
+    .get(environment.environmentId)
+    .pipe(Effect.orDie);
+  const checkout = Option.getOrThrow(yield* executor.workspace.paths.checkout(projectId));
+  return { threadId, projectId, checkout, providerSessionId: session.id };
+});
+
+/** Opens one of the Thread's provider sessions with its selection now, as a turn does. */
+const openAiSession = Effect.fn(function* (
+  hub: Hub,
+  thread: { readonly threadId: ThreadId; readonly checkout: string },
+  providerSessionId: string,
+) {
+  const projection = yield* threadOf(hub, thread.threadId);
+  return yield* hub.service(ProviderSessionManagerV2).open({
+    threadId: thread.threadId,
+    providerSessionId: ProviderSessionId.make(providerSessionId),
+    modelSelection: projection.thread.modelSelection,
+    runtimePolicy: { runtimeMode: "full-access", interactionMode: "default", cwd: thread.checkout },
+  });
+});
+
+const isClosed = (hub: Hub, providerSessionId: string) =>
+  hub
+    .service(ProviderSessionManagerV2)
+    .isLive(ProviderSessionId.make(providerSessionId))
+    .pipe(Effect.map((live) => !live));
+
+const ACME_CURSOR_KEY = "crsr-acme-move-key-0123456789abcdef";
+const GLOBEX_CURSOR_KEY = "crsr-globex-move-key-0123456789abcdef";
+
+const cursorKeyIn = (secretEnv: SecretEnv | undefined) =>
+  secretEnv?.variables?.find((variable) => variable.name === "CURSOR_API_KEY")?.value;
+
+/**
+ * A machine's adapters as Cursor's: they take a direct `CURSOR_API_KEY`, noted as they open; from
+ * the second open on the agent ends there (the transcript replays one session).
+ */
+const asCursor = (adapters: Adapters, seen: Array<SecretEnv | undefined>): Adapters =>
+  Layer.effect(
+    ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+    Effect.map(ProviderAdapterRegistry.ProviderAdapterRegistryV2, (registry) => ({
+      ...registry,
+      get: (id: ProviderInstanceId) =>
+        registry.get(id).pipe(
+          Effect.map((adapter) => ({
+            ...adapter,
+            driver: ProviderDriverKind.make("cursor"),
+            acceptsAiCredential: ["CURSOR_API_KEY"],
+            openSession: (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) => {
+              seen.push(input.secretEnv);
+              if (seen.length > 1) {
+                return Effect.fail(
+                  new ProviderAdapter.ProviderAdapterOpenSessionError({
+                    driver: ProviderDriverKind.make("cursor"),
+                    providerSessionId: input.providerSessionId,
+                    cause: "the fake agent ends here",
+                  }),
+                );
+              }
+              const { secretEnv: _secrets, ...recorded } = input;
+              // The process is Cursor's, as its session records it.
+              const cursor = ProviderDriverKind.make("cursor");
+              return adapter.openSession(recorded).pipe(
+                Effect.map((runtime) => ({
+                  ...runtime,
+                  driver: cursor,
+                  providerSession: { ...runtime.providerSession, driver: cursor },
+                })),
+              );
+            },
+          })),
+        ),
+    })),
+  ).pipe(Layer.provide(adapters));
+
+describe("Hub con Environments: a Project moves to another Space, with AI accounts (spec 4 ticket 11)", () => {
+  it.live(
+    "the plan names the AI accounts its Threads lose; the move revokes the Thread's key (401, a request in flight ends), closes its session, and the next one runs on Globex's account",
+    () =>
+      Effect.gen(function* () {
+        const loaded = yield* loadScenario("simple");
+        const models = [GATEWAY_MODEL, loaded.variant.modelSelection.model];
+        const hub = yield* makeHub({ aiAccounts: true });
+        const owner = yield* ownerIdOf(hub);
+        const acme = yield* createOrganization(hub, "Acme");
+        const globex = yield* createOrganization(hub, "Globex");
+        const acmeAccount = yield* addGatewayAccount(
+          hub,
+          "Acme Claude",
+          { spaceIds: [acme] },
+          models,
+        );
+        const globexAccount = yield* addGatewayAccount(
+          hub,
+          "Globex Claude",
+          { spaceIds: [globex] },
+          models,
+        );
+        // Allowed to the Owner wherever they work: it still reaches Globex, so it is never lost.
+        yield* addGatewayAccount(hub, "Owner Claude", { userIds: [owner] }, ["other-model"]);
+        const opened: Array<OpenedSession> = [];
+        // The Owner's laptop serves both Spaces: the Thread stays on it.
+        const laptop = yield* hub.join({
+          name: "Laptop",
+          adapters: fakeGatewayCli(loaded.adapters, opened, { failFrom: 1 }),
+        });
+        const thread = yield* replayedThread(hub, laptop, loaded, acme, acmeAccount);
+        const before = opened[0];
+        assert.equal(before?.aiGateway?.aiAccountId, acmeAccount);
+        assert.equal(before?.answer?.status, 200, before?.answer?.text);
+        const baseUrl = before!.aiGateway!.baseUrl!;
+        const key = before!.aiGateway!.key;
+
+        const plan = yield* movePlan(hub, thread.projectId, globex);
+        assert.equal(plan.status, 200, JSON.stringify(plan.body));
+        assert.deepEqual(plan.body.aiAccountsLost, [
+          {
+            aiAccountId: acmeAccount,
+            provider: "openai-compatible",
+            name: "Acme Claude",
+            threads: 1,
+          },
+        ]);
+
+        // A request already streaming when the move commits ends whole.
+        const inFlight = yield* heldStream(hub, baseUrl, key);
+        assert.equal(inFlight.status, 200);
+        const moved = yield* moveProject(hub, thread.projectId, globex);
+        assert.equal(moved.status, 200, JSON.stringify(moved.body));
+        const ended = yield* inFlight.release;
+        assert.equal(ended.status, 200);
+        assert.include(ended.text, "message_stop");
+
+        // The old key is revoked with the move (401, not merely refused), recorded as moved.
+        const after = yield* callGateway(baseUrl, key);
+        assert.equal(after.status, 401, after.text);
+        const rows = yield* hub.server.sql<{ readonly reason: string | null }>`
+          SELECT revoked_reason AS reason FROM ai_gateway_keys WHERE thread_id = ${thread.threadId}
+        `;
+        assert.deepEqual(
+          rows.map((row) => row.reason),
+          ["thread-moved"],
+        );
+        // The Thread is on Globex's account now, and its old process is closed.
+        const projection = yield* threadOf(hub, thread.threadId);
+        assert.equal(projection.thread.modelSelection.aiAccountId, globexAccount);
+        assert.isTrue(
+          yield* eventually(isClosed(hub, thread.providerSessionId)),
+          "the session started for Acme is closed",
+        );
+        // The next session runs on Globex's account with a new key.
+        yield* Effect.exit(openAiSession(hub, thread, "ps-globex"));
+        const next = opened.at(-1);
+        assert.equal(next?.providerSessionId, "ps-globex");
+        assert.equal(next?.aiGateway?.aiAccountId, globexAccount);
+        assert.notEqual(next?.aiGateway?.key, key);
+        assert.equal(next?.answer?.status, 200, next?.answer?.text);
+      }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "a Thread whose account Globex does not allow, with none there, moves without one and its next turn says why",
+    () =>
+      Effect.gen(function* () {
+        const instanceId = ProviderInstanceId.make("claudeAgent");
+        const hub = yield* makeHub({ aiAccounts: true });
+        const acme = yield* createOrganization(hub, "Acme");
+        const globex = yield* createOrganization(hub, "Globex");
+        const acmeAccount = yield* addGatewayAccount(hub, "Acme Claude", { spaceIds: [acme] }, [
+          GATEWAY_MODEL,
+        ]);
+        const opened: Array<OpenedSession> = [];
+        const laptop = yield* hub.join({
+          name: "Laptop",
+          adapters: fakeGatewayCli(idleAdapters(instanceId), opened, { failFrom: 0 }),
+        });
+        const thread = yield* aiThreadIn(hub, {
+          id: "ai-none",
+          spaceId: acme,
+          environmentId: laptop.environmentId,
+          modelSelection: { instanceId, model: GATEWAY_MODEL, aiAccountId: acmeAccount },
+        });
+        const plan = yield* movePlan(hub, thread.projectId, globex);
+        assert.deepEqual(
+          (plan.body.aiAccountsLost ?? []).map((lost) => lost.name),
+          ["Acme Claude"],
+        );
+        const moved = yield* moveProject(hub, thread.projectId, globex);
+        assert.equal(moved.status, 200, JSON.stringify(moved.body));
+        const projection = yield* threadOf(hub, thread.threadId);
+        assert.isUndefined(projection.thread.modelSelection.aiAccountId, "needs an AI account");
+        const exit = yield* Effect.exit(openAiSession(hub, thread, "ps-none"));
+        assert.isTrue(Exit.isFailure(exit));
+        assert.include(
+          Exit.isFailure(exit) ? Cause.pretty(exit.cause) : "",
+          "No AI account is allowed to you in this Space",
+        );
+        assert.isEmpty(opened, "no process started");
+      }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "a Cursor session holding Acme's direct key is closed when its Project moves; the next one gets Globex's",
+    () =>
+      Effect.gen(function* () {
+        const loaded = yield* loadScenario("simple");
+        const hub = yield* makeHub({ aiAccounts: true });
+        const acme = yield* createOrganization(hub, "Acme");
+        const globex = yield* createOrganization(hub, "Globex");
+        const acmeKey = yield* addDirectAccount(hub, "Acme Cursor", ACME_CURSOR_KEY, {
+          spaceIds: [acme],
+        });
+        const globexKey = yield* addDirectAccount(hub, "Globex Cursor", GLOBEX_CURSOR_KEY, {
+          spaceIds: [globex],
+        });
+        const seen: Array<SecretEnv | undefined> = [];
+        const laptop = yield* hub.join({
+          name: "Laptop",
+          adapters: asCursor(loaded.adapters, seen),
+        });
+        const thread = yield* replayedThread(hub, laptop, loaded, acme, acmeKey);
+        assert.equal(cursorKeyIn(seen[0]), ACME_CURSOR_KEY);
+        const plan = yield* movePlan(hub, thread.projectId, globex);
+        assert.deepEqual(
+          (plan.body.aiAccountsLost ?? []).map((lost) => lost.name),
+          ["Acme Cursor"],
+        );
+        const moved = yield* moveProject(hub, thread.projectId, globex);
+        assert.equal(moved.status, 200, JSON.stringify(moved.body));
+        assert.isTrue(
+          yield* eventually(isClosed(hub, thread.providerSessionId)),
+          "the process holding Acme's key is closed",
+        );
+        const projection = yield* threadOf(hub, thread.threadId);
+        assert.equal(projection.thread.modelSelection.aiAccountId, globexKey);
+        yield* Effect.exit(openAiSession(hub, thread, "ps-cursor-globex"));
+        assert.equal(seen.length, 2, "a new process was asked for");
+        assert.equal(cursorKeyIn(seen[1]), GLOBEX_CURSOR_KEY);
+      }).pipe(Effect.scoped),
   );
 });

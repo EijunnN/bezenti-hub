@@ -2,6 +2,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import { RepositoryIdentity, ThreadEnvMode } from "./environment.ts";
+import { AiAccountId, AiAccountProvider } from "./aiAccounts.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import { VaultId } from "./vaults.ts";
 import {
@@ -282,6 +283,21 @@ export const ProjectMovePlanVault = Schema.Struct({
 });
 export type ProjectMovePlanVault = typeof ProjectMovePlanVault.Type;
 
+/**
+ * An AI account the Project's Threads chose that their owners may not use in the destination
+ * (spec 4 ticket 11): the move switches them to the destination's first allowed account, or to
+ * none. `name` only for an account the Space it leaves is allowed (its viewers see it there);
+ * otherwise null, and clients say «<Provider> account».
+ */
+export const ProjectMovePlanAiAccount = Schema.Struct({
+  aiAccountId: AiAccountId,
+  provider: AiAccountProvider,
+  name: Schema.NullOr(Schema.String),
+  /** How many of its Threads use it. */
+  threads: Schema.Number,
+});
+export type ProjectMovePlanAiAccount = typeof ProjectMovePlanAiAccount.Type;
+
 /** What moving the Project to `spaceId` does to its Threads. */
 export const ProjectMovePlan = Schema.Struct({
   projectId: ProjectId,
@@ -296,6 +312,10 @@ export const ProjectMovePlan = Schema.Struct({
    * a Hub before Vaults: none.
    */
   vaultsLost: Schema.Array(ProjectMovePlanVault).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed([])),
+  ),
+  /** The AI accounts its Threads lose (spec 4 ticket 11). Missing from an older Hub: none. */
+  aiAccountsLost: Schema.Array(ProjectMovePlanAiAccount).pipe(
     Schema.withDecodingDefaultKey(Effect.succeed([])),
   ),
 });

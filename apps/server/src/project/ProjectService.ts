@@ -59,6 +59,7 @@ import * as CommandActor from "../auth/CommandActor.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import type * as AuditLog from "../audit/AuditLog.ts";
 import { servesSpace } from "../sandboxes/sandboxSpace.ts";
+import * as AiAccountReach from "../ai/AiAccountReach.ts";
 import * as EffectiveVaults from "../vaults/EffectiveVaults.ts";
 import * as VaultReachLoss from "../vaults/VaultReachLoss.ts";
 import * as ProjectMoveHooks from "./ProjectMoveHooks.ts";
@@ -119,6 +120,8 @@ export interface ProjectMovePlan {
   readonly needsEnvironment: ReadonlyArray<ProjectMovePlanThread>;
   /** The Vaults its Threads stop receiving (`EffectiveVaults.projectMove`). */
   readonly vaultsLost: ReadonlyArray<{ readonly vaultId: VaultId; readonly name: string }>;
+  /** The AI accounts its Threads lose (`AiAccountReach.projectMoveLoss`, spec 4 ticket 11). */
+  readonly aiAccountsLost: ReadonlyArray<AiAccountReach.AiAccountLost>;
 }
 
 const encodeSessionIds = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
@@ -186,6 +189,7 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
       "check-environment",
       "check-folder",
       "read-vaults",
+      "read-ai-accounts",
       "drop-vault-choices",
     ]),
     projectId: Schema.optional(ProjectId),
@@ -296,6 +300,8 @@ export const make = Effect.gen(function* () {
   const moveHooks = yield* Effect.serviceOption(ProjectMoveHooks.ProjectMoveHooks);
   // Required: a move whose losses cannot be read fails rather than warn of none (ticket 07).
   const effectiveVaults = yield* EffectiveVaults.EffectiveVaults;
+  // Required too: a move always re-chooses its Threads' AI accounts and revokes their keys.
+  const aiReach = yield* AiAccountReach.AiAccountReach;
   const projectLocks = yield* KeyedLock.make<ProjectId>();
   const rootClaims = yield* KeyedLock.make<string>();
   const workspaceLocks = yield* KeyedLock.make<string>();
@@ -960,6 +966,8 @@ export const make = Effect.gen(function* () {
     threadId: ThreadId,
     actor: UserId | undefined,
     cache: ServesCache,
+    /** The destination's catalogs, read before any write (`AiAccountReach.catalogsFor`). */
+    catalogs: AiAccountReach.Catalogs,
   ) {
     const plan = yield* threadMovePlan(threadId, input.projectId, input.spaceId, cache);
     if (plan === undefined || !plan.changes) return { changed: false, released: undefined };
@@ -999,53 +1007,72 @@ export const make = Effect.gen(function* () {
         });
       }
     }
-    const commitThread = eventSink.commitCommand({
-      commandId,
-      commandType: "thread.space.move",
-      threadId,
-      acceptedAt: now,
-      events: [
-        {
-          id,
-          type: "thread.metadata-updated",
-          threadId,
-          providerInstanceId: thread.providerInstanceId,
-          occurredAt: now,
-          payload: {
-            ...thread,
-            spaceId: input.spaceId,
-            updatedAt: now,
-            ...(releasedFrom === undefined ? {} : { activeEnvironmentId: null }),
+    const commitThread = (modelSelection: typeof thread.modelSelection) =>
+      eventSink.commitCommand({
+        commandId,
+        commandType: "thread.space.move",
+        threadId,
+        acceptedAt: now,
+        events: [
+          {
+            id,
+            type: "thread.metadata-updated",
+            threadId,
+            providerInstanceId: thread.providerInstanceId,
+            occurredAt: now,
+            payload: {
+              ...thread,
+              modelSelection,
+              spaceId: input.spaceId,
+              updatedAt: now,
+              ...(releasedFrom === undefined ? {} : { activeEnvironmentId: null }),
+            },
           },
-        },
-        ...detached,
-      ],
-      effects: [],
-    });
+          ...detached,
+        ],
+        effects: [],
+      });
     // Every session the Thread had there is let go, whatever the projection says of it.
     const sessionIds = encodeSessionIds(records.providerSessions.map((session) => session.id));
+    const spaceChanges = thread.spaceId !== input.spaceId;
+    const recordRelease = (environmentId: EnvironmentId) =>
+      sql`
+        INSERT INTO thread_environment_releases (
+          thread_id, environment_id, provider_session_ids_json, released_at
+        ) VALUES (${threadId}, ${environmentId}, ${sessionIds}, ${DateTime.formatIso(now)})
+        ON CONFLICT (thread_id, environment_id)
+        DO UPDATE SET provider_session_ids_json = excluded.provider_session_ids_json
+      `.pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProjectOperationError({
+              operation: "move-thread",
+              projectId: input.projectId,
+              cause,
+            }),
+        ),
+      );
+    // Spec 4 ticket 11: in the same transaction, its gateway keys are revoked and its AI account
+    // is the destination's (kept if still allowed to its turn owner there, else the first allowed,
+    // else none), read in the transaction that writes it.
+    const driver = records.providerSessions
+      .filter((session) => session.providerInstanceId === thread.providerInstanceId)
+      .at(-1)?.driver;
+    const write = Effect.gen(function* () {
+      if (releasedFrom !== undefined) yield* recordRelease(releasedFrom);
+      const modelSelection = spaceChanges
+        ? yield* aiReach.moveThread({
+            thread: { threadId, modelSelection: thread.modelSelection, driver },
+            spaceId: input.spaceId,
+            catalogs,
+          })
+        : thread.modelSelection;
+      return yield* commitThread(modelSelection);
+    });
     const committed = yield* (
-      releasedFrom === undefined
-        ? commitThread
-        : sql.withTransaction(
-            sql`
-              INSERT INTO thread_environment_releases (
-                thread_id, environment_id, provider_session_ids_json, released_at
-              ) VALUES (${threadId}, ${releasedFrom}, ${sessionIds}, ${DateTime.formatIso(now)})
-              ON CONFLICT (thread_id, environment_id)
-              DO UPDATE SET provider_session_ids_json = excluded.provider_session_ids_json
-            `.pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProjectOperationError({
-                    operation: "move-thread",
-                    projectId: input.projectId,
-                    cause,
-                  }),
-              ),
-              Effect.andThen(commitThread),
-            ),
-          )
+      releasedFrom === undefined && !spaceChanges
+        ? commitThread(thread.modelSelection)
+        : sql.withTransaction(write)
     ).pipe(
       Effect.mapError((cause) =>
         isMoveBlocked(cause)
@@ -1131,7 +1158,22 @@ export const make = Effect.gen(function* () {
         if (plan.releasedFrom !== undefined) needsEnvironment.push(entry);
       }
       const vaultsLost = yield* vaultsLostOnMove(projectId, route);
-      return { projectId, spaceId: route.to, running, needsEnvironment, vaultsLost };
+      const aiAccountsLost = yield* aiReach
+        .projectMoveLoss({ projectId, from: route.from, to: route.to })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProjectOperationError({ operation: "read-ai-accounts", projectId, cause }),
+          ),
+        );
+      return {
+        projectId,
+        spaceId: route.to,
+        running,
+        needsEnvironment,
+        vaultsLost,
+        aiAccountsLost,
+      };
     },
   );
 
@@ -1216,11 +1258,16 @@ export const make = Effect.gen(function* () {
         // Listed after the Project moved, so none created before it is left behind; legacy
         // Threads with no Space of their own follow too. A rerun finishes a move cut short.
         const threads = yield* listProjectThreads(projectId);
+        // The gateway is asked before any write, never while one waits on it.
+        const catalogs = yield* aiReach.catalogsFor({
+          threadIds: threads.map((thread) => thread.threadId),
+          spaceId: route.to,
+        });
         for (const thread of threads) {
           const result = yield* threadCommands
             .withLock(
               thread.threadId,
-              moveThread({ ...input, spaceId: route.to }, thread.threadId, actor, cache),
+              moveThread({ ...input, spaceId: route.to }, thread.threadId, actor, cache, catalogs),
             )
             .pipe(
               Effect.mapError((cause) =>
@@ -1250,6 +1297,9 @@ export const make = Effect.gen(function* () {
           // Shells started for the old Space close on their machines (spec 5 ticket 07); the
           // move does not wait for it, and the Hub refuses them meanwhile.
           if (cutting) yield* work.reconcileTerminals;
+          // Their provider processes started for the old Space (a direct credential, a key)
+          // close; the next turn opens one for the new Space (spec 4 ticket 11).
+          if (cutting) yield* work.reconcileAiSessions;
         }
       });
       yield* spaces.whileProjectMoves(projectId, relocate).pipe(

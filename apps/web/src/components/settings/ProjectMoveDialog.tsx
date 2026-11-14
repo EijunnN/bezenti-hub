@@ -17,6 +17,7 @@ import {
 import * as Effect from "effect/Effect";
 import { useState } from "react";
 
+import { aiAccountFallbackName } from "../../aiAccountPicker";
 import { useHubEnvironments } from "../../environments/primary/useHubEnvironments";
 import { PrimaryEnvironmentHttpClient } from "../../environments/primary/httpClient";
 import { errorMessageOf } from "../../lib/errorMessage";
@@ -238,6 +239,23 @@ export function ProjectMoveDialog({
                     <ul className="mt-1 list-disc pl-5">
                       {plan.vaultsLost.map((vault) => (
                         <li key={vault.vaultId}>{vault.name}</li>
+                      ))}
+                    </ul>
+                  </section>
+                ) : null}
+                {plan.aiAccountsLost.length > 0 ? (
+                  <section aria-label="AI accounts it loses">
+                    <p className="font-medium">
+                      {`${destination.name} does not allow ${plan.aiAccountsLost.length === 1 ? "this AI account" : "these AI accounts"} for its Threads; they switch to the first one allowed there, or need one:`}
+                    </p>
+                    <ul className="mt-1 list-disc pl-5">
+                      {plan.aiAccountsLost.map((account) => (
+                        <li key={account.aiAccountId}>
+                          {account.name ?? aiAccountFallbackName(account.provider)}{" "}
+                          <span className="text-muted-foreground">
+                            {account.threads === 1 ? "(1 Thread)" : `(${account.threads} Threads)`}
+                          </span>
+                        </li>
                       ))}
                     </ul>
                   </section>

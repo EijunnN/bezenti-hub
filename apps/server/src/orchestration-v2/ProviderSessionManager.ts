@@ -2,6 +2,7 @@ import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
+  type AiAccountId,
   AiGatewaySessionError,
   ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
   HUB_MACHINE_ENVIRONMENT_ID,
@@ -19,6 +20,8 @@ import {
   type ProviderSessionAiAccount,
   ThreadId,
   type ProviderThreadId,
+  type SpaceId,
+  type UserId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -165,8 +168,21 @@ export const ProviderSessionManagerV2Error = Schema.Union([
 ]);
 export type ProviderSessionManagerV2Error = typeof ProviderSessionManagerV2Error.Type;
 
+/** A live session started on a Hub AI account, and what it was started for. */
+export interface LiveAiSession {
+  readonly providerSessionId: ProviderSessionId;
+  readonly threadIds: ReadonlyArray<ThreadId>;
+  readonly facts: {
+    readonly ownerUserId: UserId;
+    readonly spaceId: SpaceId;
+    readonly accountId: AiAccountId;
+  };
+}
+
 export interface ProviderSessionManagerV2Shape {
   readonly shutdown: Effect.Effect<void>;
+  /** Every live session started on a Hub AI account, read from memory (`AiSessionReach`). */
+  readonly liveAiSessions: Effect.Effect<ReadonlyArray<LiveAiSession>>;
   readonly open: (input: {
     readonly threadId: ThreadId;
     readonly providerSessionId: ProviderSessionId;
@@ -248,6 +264,8 @@ interface LiveSessionEntry {
   readonly aiAccount: ProviderSessionAiAccount | undefined;
   /** Who and on what account its key acts (`AiGatewaySessions.fingerprintOf`). */
   readonly gatewayFingerprint: string;
+  /** For whom, in which Space and on which account its process was started (spec 4 ticket 11). */
+  readonly aiFacts: LiveAiSession["facts"] | undefined;
   readonly runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
   readonly exposedRuntime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
   readonly eventSubscribers: Ref.Ref<
@@ -2613,6 +2631,14 @@ export const layerWithOptions = (
                 secretFingerprint,
                 aiAccount,
                 gatewayFingerprint,
+                aiFacts:
+                  gatewayPlan._tag === "on" || gatewayPlan._tag === "direct"
+                    ? {
+                        ownerUserId: gatewayPlan.ownerUserId,
+                        spaceId: gatewayPlan.spaceId,
+                        accountId: gatewayPlan.account.id as AiAccountId,
+                      }
+                    : undefined,
                 runtime,
                 exposedRuntime,
                 eventSubscribers,
@@ -2752,6 +2778,21 @@ export const layerWithOptions = (
             ),
         ),
         release: releaseEntry,
+        liveAiSessions: Ref.get(sessions).pipe(
+          Effect.map((current) =>
+            [...current.values()].flatMap((entry): ReadonlyArray<LiveAiSession> =>
+              entry.aiFacts === undefined
+                ? []
+                : [
+                    {
+                      providerSessionId: entry.runtime.providerSession.id,
+                      threadIds: [...entry.attachedThreadIds],
+                      facts: entry.aiFacts,
+                    },
+                  ],
+            ),
+          ),
+        ),
         releaseUnlessBusy: Effect.fn("ProviderSessionManager.releaseUnlessBusy")(function* (input) {
           const key = sessionKey(input.providerSessionId);
           const before = (yield* Ref.get(sessions)).get(key);

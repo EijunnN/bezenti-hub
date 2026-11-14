@@ -18,6 +18,7 @@ import {
   type ProviderDriverKind,
   type ProviderSessionAiAccount,
   type SecretEnvVariable,
+  type SpaceId,
   type ThreadId,
   type UserId,
 } from "@t3tools/contracts";
@@ -56,6 +57,8 @@ export type GatewayPlan =
   | {
       readonly _tag: "on";
       readonly ownerUserId: UserId;
+      /** The Thread's Space the plan was made for (a move means another process). */
+      readonly spaceId: SpaceId;
       readonly account: ProviderSessionAiAccount;
       /** Names who the process acts for and on what: a session with another is not reused. */
       readonly fingerprint: string;
@@ -63,6 +66,7 @@ export type GatewayPlan =
   | {
       readonly _tag: "direct";
       readonly ownerUserId: UserId;
+      readonly spaceId: SpaceId;
       readonly account: ProviderSessionAiAccount;
       /** The variable the credential reaches the process under (`AI_DIRECT_DRIVERS`). */
       readonly variable: string;
@@ -193,7 +197,7 @@ const make = Effect.gen(function* () {
     readonly driver: ProviderDriverKind;
     readonly modelSelection: ModelSelection;
     readonly ownerUserId: UserId;
-    readonly spaceId: string;
+    readonly spaceId: SpaceId;
     readonly allowed: ReadonlyArray<AllowedAiAccounts.AllowedAiAccount>;
   }) {
     const choice = yield* chooseAiAccount({
@@ -225,6 +229,7 @@ const make = Effect.gen(function* () {
     return {
       _tag: "direct",
       ownerUserId: input.ownerUserId,
+      spaceId: input.spaceId,
       account: {
         id: account.id,
         name: account.name,
@@ -311,6 +316,7 @@ const make = Effect.gen(function* () {
     return {
       _tag: "on",
       ownerUserId: owner.value,
+      spaceId: space.value.id,
       account: {
         id: account.id,
         name: account.name,

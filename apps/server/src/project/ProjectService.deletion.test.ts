@@ -36,6 +36,8 @@ import * as ProjectFaviconResolver from "./ProjectFaviconResolver.ts";
 import * as ProjectService from "./ProjectService.ts";
 import * as RepositoryIdentityResolver from "./RepositoryIdentityResolver.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as AiAccountReach from "../ai/AiAccountReach.ts";
+import * as AllowedAiAccounts from "../ai/AllowedAiAccounts.ts";
 import * as EffectiveVaults from "../vaults/EffectiveVaults.ts";
 
 const layerEventPersistence = EventSink.layer.pipe(
@@ -50,6 +52,9 @@ const layerServices = Layer.mergeAll(
   ThreadCommandExecutor.layer,
   layerSpaces,
   EffectiveVaults.layer.pipe(Layer.provide(layerSpaces)),
+  AiAccountReach.layer.pipe(
+    Layer.provide(AllowedAiAccounts.layer.pipe(Layer.provide(layerSpaces))),
+  ),
   Layer.succeed(WorkspacePaths.WorkspacePaths, {
     normalizeWorkspaceRoot: (workspaceRoot) => Effect.succeed(workspaceRoot),
     resolveRelativePathWithinRoot: ({ workspaceRoot, relativePath }) =>

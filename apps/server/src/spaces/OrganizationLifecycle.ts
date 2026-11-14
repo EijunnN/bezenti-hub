@@ -30,6 +30,7 @@ import * as EnvironmentRegistry from "../environments/EnvironmentRegistry.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as AiAccountReachLoss from "../ai/AiAccountReachLoss.ts";
 import * as VaultReachLoss from "../vaults/VaultReachLoss.ts";
 import * as SpaceDirectory from "./SpaceDirectory.ts";
 
@@ -203,6 +204,8 @@ const make = Effect.gen(function* () {
             spaceId,
             name: row?.name ?? spaceId,
           });
+          // Its AI account allowances, and the keys made for its Space (spec 4 ticket 11).
+          yield* AiAccountReachLoss.forgetSpace(sql, AuditLog.userActor(actor), spaceId);
           return gone.valueIds;
         }),
       )

@@ -31,6 +31,7 @@ import * as EventSink from "./EventSink.ts";
 import { interruptRunsOnHub } from "./HubRunInterrupt.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import * as AiSessionReach from "./AiSessionReach.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import { LIVE_WORK_FIELDS, LIVE_WORK_FILTER, threadHasLiveWork } from "./threadLiveWork.ts";
 
@@ -75,6 +76,8 @@ export const layer: Layer.Layer<
     // The server provides these; an orchestration-only host joins no machines and runs no MCP.
     const remote = yield* Effect.serviceOption(RemoteEnvironments.RemoteEnvironments);
     const mcp = yield* Effect.serviceOption(McpSessionRegistry.McpSessionRegistry);
+    // Absent where no Hub AI account can run (an orchestration-only host).
+    const aiSessions = yield* Effect.serviceOption(AiSessionReach.AiSessionReach);
     const scope = yield* Effect.scope;
 
     const logged =
@@ -303,7 +306,10 @@ export const layer: Layer.Layer<
     /** Fire and forget: the caller (a move, a removal) never waits on the machines. */
     const reconcileTerminals = reconcileAll.pipe(Effect.forkIn(scope), Effect.asVoid);
 
-    yield* hooks.register({ stopThreads, drainReleases, reconcileTerminals });
+    /** Spec 4 ticket 11: provider processes out of their AI account's reach close. */
+    const reconcileAiSessions = Option.isSome(aiSessions) ? aiSessions.value.request : Effect.void;
+
+    yield* hooks.register({ stopThreads, drainReleases, reconcileTerminals, reconcileAiSessions });
     // Each machine as it connects (a new socket): its shells are checked against the Hub's word.
     yield* Effect.scoped(
       Effect.gen(function* () {
@@ -326,6 +332,8 @@ export const layer: Layer.Layer<
             logged("Could not reconcile a connecting machine's terminals", {}),
             Effect.forkIn(scope),
           );
+          // A machine back from away: its sessions are checked against the Hub's word too.
+          if (fresh.length > 0) yield* reconcileAiSessions;
           yield* PubSub.take(changes);
         }
       }),

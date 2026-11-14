@@ -31,6 +31,13 @@ export interface ProjectMoveWork {
    * Fire and forget: it returns at once, logs failures, and runs again as each machine connects.
    */
   readonly reconcileTerminals: Effect.Effect<void>;
+  /**
+   * Spec 4 ticket 11: closes every live provider session whose AI facts no longer hold (its
+   * Thread in another Space, another turn owner, a removed User, an account no longer allowed),
+   * so no process keeps a direct credential or a key past its reach (`AiSessionReach`). Fire and
+   * forget, coalesced; it also runs as each machine connects.
+   */
+  readonly reconcileAiSessions: Effect.Effect<void>;
 }
 
 export interface ProjectMoveHooksShape {

@@ -59,6 +59,7 @@ import { makeCliproxyApi } from "../usage/cliproxyApi.ts";
 import { heldByThread, pruneAndListHeld } from "../vaults/ThreadSecretValues.ts";
 import { AiGateway } from "./AiGateway.ts";
 import { aiCredentialValueId, credentialIdOfValueId } from "./aiCredentialValue.ts";
+import * as AiAccountChanges from "./AiAccountChanges.ts";
 import * as AllowedAiAccounts from "./AllowedAiAccounts.ts";
 import {
   type CliproxyCredential,
@@ -2557,8 +2558,34 @@ export const layerWith = (options: AiAccountsOptions) =>
           }),
         ),
       );
-      return yield* make(options);
+      const accounts = yield* make(options);
+      // Who may use an account may have changed: live processes are checked again (ticket 11).
+      const changes = yield* AiAccountChanges.AiAccountChanges;
+      return AiAccounts.of({
+        ...accounts,
+        update: Effect.fn("AiAccounts.update")(function* (
+          input: Parameters<typeof accounts.update>[0],
+        ) {
+          const updated = yield* accounts.update(input);
+          yield* changes.changed;
+          return updated;
+        }),
+        remove: Effect.fn("AiAccounts.remove")(function* (
+          input: Parameters<typeof accounts.remove>[0],
+        ) {
+          const removed = yield* accounts.remove(input);
+          yield* changes.changed;
+          return removed;
+        }),
+        allow: Effect.fn("AiAccounts.allow")(function* (
+          input: Parameters<typeof accounts.allow>[0],
+        ) {
+          const allowed = yield* accounts.allow(input);
+          yield* changes.changed;
+          return allowed;
+        }),
+      });
     }),
-  ).pipe(Layer.provideMerge(AllowedAiAccounts.layer));
+  ).pipe(Layer.provideMerge(AllowedAiAccounts.layer), Layer.provideMerge(AiAccountChanges.layer));
 
 export const layer = layerWith({});

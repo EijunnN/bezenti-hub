@@ -59,6 +59,7 @@ import * as RuntimeRequestService from "./RuntimeRequestService.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ThreadMoveService from "./ThreadMoveService.ts";
 import * as EnvironmentReturnService from "./EnvironmentReturnService.ts";
+import * as AiSessionReach from "./AiSessionReach.ts";
 import * as ProjectMoveThreads from "./ProjectMoveThreads.ts";
 import * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import * as ThreadForkService from "./ThreadForkService.ts";
@@ -67,6 +68,8 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as InactiveUserTurns from "./InactiveUserTurns.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
+import * as AiAccountReach from "../ai/AiAccountReach.ts";
+import * as AllowedAiAccounts from "../ai/AllowedAiAccounts.ts";
 import * as EffectiveVaults from "../vaults/EffectiveVaults.ts";
 
 export const layerEventInfrastructure = Layer.mergeAll(
@@ -134,6 +137,8 @@ const layerLegacyV1ThreadImporterProvided = LegacyV1ThreadImporter.layer.pipe(
   Layer.provide(layerEventSink),
 );
 
+const layerAllowedAiAccounts = AllowedAiAccounts.layer.pipe(Layer.provide(SpaceDirectory.layer));
+
 export const layerProjectService = ProjectService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -145,6 +150,8 @@ export const layerProjectService = ProjectService.layer.pipe(
       SpaceDirectory.layer,
       // A move's plan reads the Vaults it loses (spec 5 ticket 07): never optional.
       EffectiveVaults.layer.pipe(Layer.provide(SpaceDirectory.layer)),
+      // And its AI accounts: it re-chooses them and revokes keys (spec 4 ticket 11).
+      AiAccountReach.layer.pipe(Layer.provide(layerAllowedAiAccounts)),
     ),
   ),
 );
@@ -479,6 +486,16 @@ const layerProjectMoveThreadsProvided = ProjectMoveThreads.layer.pipe(
       // Without it a released Thread's events, terminals and sessions there would go unchecked.
       layerRemoteEnvironmentsProvided,
       layerProviderSessionManagerProvided,
+      // Provider processes out of their AI account's reach close (spec 4 ticket 11).
+      AiSessionReach.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            layerProviderSessionManagerProvided,
+            layerAllowedAiAccounts,
+            SpaceDirectory.layer,
+          ),
+        ),
+      ),
     ),
   ),
 );
