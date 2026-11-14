@@ -5,7 +5,7 @@ import {
   type ScopedThreadRef,
   type ThreadId,
 } from "@t3tools/contracts";
-import type { ThreadAiAccountLabel } from "../ChatView.logic";
+import type { ThreadAiAccountLabel } from "@t3tools/client-runtime/ai-account-picker";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { ThreadMoveBadge } from "./MoveThreadDialog";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";

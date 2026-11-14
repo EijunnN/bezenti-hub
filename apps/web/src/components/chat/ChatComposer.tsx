@@ -284,7 +284,7 @@ import {
   aiAccountsDecide,
   aiAccountsFor,
   resolveAiAccount,
-} from "../../aiAccountPicker";
+} from "@t3tools/client-runtime/ai-account-picker";
 import { composerCommandKeyHandler } from "./composerCommandKey";
 
 function consumePasteAsTextShortcut(deadline: { current: number }): boolean {

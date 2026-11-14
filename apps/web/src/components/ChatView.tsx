@@ -34,12 +34,12 @@ import { ThreadFind, ThreadFindCanvas } from "./chat/ThreadFindProvider";
 import { closeThreadFind, openThreadFind, useThreadFindOpen } from "./chat/threadFindStore";
 import { THREAD_FIND_BAR_RESERVED_HEIGHT } from "./chat/ThreadFindBar";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
+import { resolveDraftHeroState } from "./ChatView.logic";
 import {
+  applyAiAccountsToProviders,
   deriveThreadAiAccount,
   nameThreadAiAccount,
-  resolveDraftHeroState,
-} from "./ChatView.logic";
-import { applyAiAccountsToProviders } from "../aiAccountPicker";
+} from "@t3tools/client-runtime/ai-account-picker";
 import { useAiAccountPicker } from "./chat/useAiAccountPicker";
 import { aiGatewayEnvironment } from "../state/aiGateway";
 import { useQueuedRunEdit } from "./chat/useQueuedRunEdit";

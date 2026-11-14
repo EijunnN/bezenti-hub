@@ -66,6 +66,14 @@ const SETTINGS_SEARCH_TERMS = {
     "login",
     "auth",
   ],
+  SettingsAiAccounts: [
+    "ai accounts",
+    "ai gateway",
+    "local cli keys",
+    "subscriptions",
+    "usage",
+    "quota",
+  ],
   SettingsVaults: ["vaults", "secrets", "api keys", "tokens", "environment variables"],
   SettingsEnvironmentSourceControl: [
     "git",

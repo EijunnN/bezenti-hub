@@ -1,7 +1,8 @@
+// @effect-diagnostics globalDate:off -- the Usage range is calendar days (UTC) computed from the clock the screen reads.
 import type { AiUsageSummary } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { dayBefore, formatTokens, groupUsage, usageNotes } from "./aiUsageView";
+import { dayBefore, formatTokens, groupUsage, usageNotes } from "./aiUsageView.ts";
 
 const totals = (requests: number, input = 0, output = 0) => ({
   requests,

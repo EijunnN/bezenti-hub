@@ -44,6 +44,8 @@ const reactTests = [
   "src/features/connection/ConnectionsNewRouteScreen.test.tsx",
   "src/features/environments/HubMachinesSection.test.tsx",
   "src/features/vaults/VaultsList.test.tsx",
+  "src/features/ai-accounts/AiAccounts.test.tsx",
+  "src/features/ai-accounts/ThreadAiAccountStrip.test.tsx",
   "src/features/threads/SecretRequestCard.test.tsx",
 ];
 

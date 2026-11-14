@@ -222,6 +222,11 @@ function useSettingsIndexSections(): SettingsListSection[] {
       rows: [
         ...ownerPage(serverPage("SettingsProviderAccounts", "person.crop.circle", "Providers")),
         serverPage("SettingsThreads", "text.bubble", "Threads"),
+        serverPage(
+          "SettingsAiAccounts",
+          { ios: "sparkles", android: "auto_awesome" },
+          "AI accounts",
+        ),
         serverPage("SettingsVaults", { ios: "key", android: "lock" }, "Vaults"),
         page("SettingsScheduledTasks", "clock", "Scheduled tasks"),
       ],

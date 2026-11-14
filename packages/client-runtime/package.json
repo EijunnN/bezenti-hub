@@ -59,6 +59,18 @@
       "types": "./src/promptLinks.ts",
       "default": "./src/promptLinks.ts"
     },
+    "./ai-account-picker": {
+      "types": "./src/aiAccountPicker.ts",
+      "default": "./src/aiAccountPicker.ts"
+    },
+    "./ai-usage-view": {
+      "types": "./src/aiUsageView.ts",
+      "default": "./src/aiUsageView.ts"
+    },
+    "./ai-accounts-view": {
+      "types": "./src/aiAccountsView.ts",
+      "default": "./src/aiAccountsView.ts"
+    },
     "./vaults": {
       "types": "./src/vaults.ts",
       "default": "./src/vaults.ts"

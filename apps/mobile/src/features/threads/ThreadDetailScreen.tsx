@@ -12,7 +12,11 @@ import * as Dialog from "../../components/ui/Dialog";
 import { useAtomMount, useAtomValue } from "@effect/atom-react";
 import { parseThreadKey, threadKey } from "@t3tools/client-runtime/state/entities";
 import { createThreadVisitTracker } from "@t3tools/client-runtime/state/thread-visits";
-import { useChildThreadInputs, useThreadReportedModelSelection } from "../../state/entities";
+import {
+  useChildThreadInputs,
+  useProject,
+  useThreadReportedModelSelection,
+} from "../../state/entities";
 import { UsageLimitRecoveryCard } from "./UsageLimitRecoveryCard";
 import { ChatGptUsageLimitNotice } from "./ChatGptUsageLimitNotice";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
@@ -146,6 +150,11 @@ import { ThreadBrowserFloat } from "../browser/ThreadBrowserFloat";
 import { useThreadServerBrowserTabs } from "../../state/preview";
 import type { QueuedThreadMessage } from "../../state/thread-outbox-model";
 import { scopedThreadKey } from "../../lib/scopedEntities";
+import { ThreadAiAccountStrip } from "../ai-accounts/ThreadAiAccountStrip";
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import { useQuietThreadStructure } from "../../state/use-thread-detail";
+import { updateThreadDraftModelSelection } from "../../state/use-thread-composer-state";
+import { useComposerDraftSettings } from "../../state/use-composer-drafts";
 import {
   finishThreadMessageJump,
   pendingThreadMessageJump,
@@ -485,6 +494,11 @@ function ThreadDetailBody(
   const nativeMetrics = usesNativeWorkspaceColumns ? columnMetrics : screenMetrics;
   const controlInsets = deriveBottomControlInsets(nativeMetrics);
   const selectedThreadKey = scopedThreadKey(props.environmentId, props.selectedThread.id);
+  const aiStructure = useQuietThreadStructure(props.selectedThreadDetailRef);
+  const aiProject = useProject(
+    scopeProjectRef(props.environmentId, props.selectedThread.projectId),
+  );
+  const aiDraftSettings = useComposerDraftSettings(selectedThreadKey);
   const childThreadInputs = useChildThreadInputs({
     environmentId: props.environmentId,
     threadId: props.selectedThread.id,
@@ -1797,6 +1811,29 @@ function ThreadDetailBody(
                     </View>
                   ) : (
                     <>
+                      <ThreadAiAccountStrip
+                        environmentId={props.environmentId}
+                        threadId={props.selectedThread.id}
+                        isDraft={Boolean(props.draftMode)}
+                        spaceId={aiProject?.spaceId ?? null}
+                        threadEnvironmentId={props.selectedThread.activeEnvironmentId}
+                        modelSelection={
+                          aiDraftSettings.modelSelection ?? props.selectedThread.modelSelection
+                        }
+                        providers={props.serverConfig?.providers ?? []}
+                        structure={aiStructure?.projection ?? null}
+                        onChooseDraft={(aiAccountId) =>
+                          updateThreadDraftModelSelection(
+                            selectedThreadKey,
+                            {
+                              ...(aiDraftSettings.modelSelection ??
+                                props.selectedThread.modelSelection),
+                              aiAccountId,
+                            },
+                            props.serverConfig?.providers ?? [],
+                          )
+                        }
+                      />
                       <ThreadComposer
                         isDraft={Boolean(props.draftMode)}
                         canOperateThread={props.canOperateThread}

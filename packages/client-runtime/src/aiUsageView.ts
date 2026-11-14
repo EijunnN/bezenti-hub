@@ -1,3 +1,4 @@
+// @effect-diagnostics globalDate:off -- the Usage range is calendar days (UTC) computed from the clock the screen reads.
 import {
   addAiUsageTotals,
   AI_USAGE_NO_TOTALS,
@@ -80,8 +81,8 @@ export function groupUsage(summary: AiUsageSummary, by: UsageGrouping): Readonly
   }
   const list = [...groups.values()];
   return by === "day"
-    ? list.toSorted((a, b) => b.key.localeCompare(a.key))
-    : list.toSorted(
+    ? [...list].sort((a, b) => b.key.localeCompare(a.key))
+    : [...list].sort(
         (a, b) => b.totals.requests - a.totals.requests || a.label.localeCompare(b.label),
       );
 }

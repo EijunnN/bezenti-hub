@@ -7,8 +7,12 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { applyAiAccountsToProviders, modelFamilyOf, resolveAiAccount } from "./aiAccountPicker";
-import { nameThreadAiAccount } from "./components/ChatView.logic";
+import {
+  applyAiAccountsToProviders,
+  modelFamilyOf,
+  nameThreadAiAccount,
+  resolveAiAccount,
+} from "./aiAccountPicker.ts";
 
 const claude: ServerProvider = {
   instanceId: ProviderInstanceId.make("claudeAgent"),
