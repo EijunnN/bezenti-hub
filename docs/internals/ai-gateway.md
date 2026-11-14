@@ -194,6 +194,27 @@ keys; `type: subscription`. Pure parts in `ai/subscriptionLogin.ts`.
   token files every 10 s and reads tokens back when one changed (and every 5 minutes, and while a
   sign-in is open), and once more when the Hub stops (a finalizer), so a refresh is lost only if
   the machine dies within those 10 s.
+- **Import from another CLIProxyAPI** (ticket 15): Settings → AI accounts → «Import from
+  CLIProxyAPI» picks the auth files of an old proxy (its `auth-dir`: `claude-…`, `codex-…`,
+  `antigravity-….json`, as CLIProxyAPI 8.0.x writes them) and sends them once
+  (`aiAccounts.importCliproxy`, contents Redacted, at most 50 files of 64 KB). Pure parts in
+  `ai/cliproxyImport.ts`. Each `claude`, `codex` or `antigravity` file with an email and a refresh
+  token becomes a subscription exactly as a sign-in leaves it: sealed under a new token id, named
+  «Claude|ChatGPT|Antigravity (<email>)», **disabled** with «Signed in as <email>» until the Owner
+  turns it on, allowed only to the Owner's Personal space (the Owner then allows it elsewhere).
+  `prefix`, `disabled`, `base_url` and `proxy_url` are dropped: an imported file never chooses
+  where a request or its token goes. An identity the Hub already holds (provider, email, and the
+  provider's account or project id) is skipped, whether signed in, imported, or earlier in the
+  same files; any other type, a file that is not JSON, or one without an email or refresh token
+  is skipped with a reason. The answer says per file what happened, never a token field. No
+  gateway call: it works with the gateway off, and the token reaches CLIProxyAPI when the account
+  is turned on. Audit `ai_account.create` (`provider`, `type: subscription`, `via: "import"`).
+  **One proxy per sign-in:** an OAuth refresh token may live in ONE proxy only. Stop the old
+  CLIProxyAPI (or delete its copies of the files) when importing: if both keep running, a refresh
+  on either side invalidates the other and the account shows «Needs sign-in again». The form
+  says so. (CLIProxyAPI 8.0.67 reads every key the 8.0.3 files carry: `account_uuid`,
+  `organization_*`, `claude_device_ids`, `priority`, `project_id`, `expires_in`, `timestamp`,
+  `id_token`, `account_id`.)
 - **Gateway not running** (off, crashed, restarting) and **before every launch**
   (`AiGateway.setBeforeLaunch`): the Hub reads and removes the memory folder's files directly. A
   newer copy of an account's current token is sealed first; every file that is not an enabled
@@ -219,7 +240,8 @@ keys; `type: subscription`. Pure parts in `ai/subscriptionLogin.ts`.
   copied before the delete keeps working at the provider until the Owner revokes the app there
   (Google, Anthropic or OpenAI account settings).
 - **Doors:** WS only, in `INSTALLATION_RPC_METHODS` (the Owner's alone, `settings:write`):
-  `aiAccounts.login.start`, `aiAccounts.login.complete`, `aiAccounts.importVertex`;
+  `aiAccounts.login.start`, `aiAccounts.login.complete`, `aiAccounts.importVertex`,
+  `aiAccounts.importCliproxy`;
   `DoorRules.AI_ACCOUNT_SIGN_IN_RULES`. No raw route or HTTP endpoint takes a provider's callback.
   Audit `ai_account.login` (provider, `new`/`again`/`import`, `signed-in`/`failed`, reason) and
   `ai_account.create` for a new one. Tokens never in a log, span, error, answer, the database or
