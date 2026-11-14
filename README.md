@@ -1,153 +1,106 @@
-# T3 Code
+# T3 Code Hub
 
-T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), a web app the Hub serves itself ([Publish the Hub](docs/user/public-hub.md)) and an Electron-based desktop app.
+A self-hosted, multi-user home for coding agents. One Hub on your own server keeps every Thread's history, decides who may use which secret and which AI account, and sends the work to the right machine. Your team reaches it from the web, the desktop app or the phone.
 
-Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, Google Antigravity, and fx. If they're set up on your computer, T3 Code can control them.
+Works with Claude Code, Codex, OpenCode, Pi, Cursor, Antigravity, Grok, Kiro and more.
 
-## "Wait, what are you selling me?"
+## Why
 
-Nothing. We built T3 Code because we wanted the best possible development experience with agents. We were inspired by existing solutions like the Codex desktop app, Conductor, Claude Desktop and Cursor Glass, but none met our bar.
+Coding agents usually live on one person's laptop: the history, the keys and the logins stay there. When a team wants to share them, three things break:
 
-We wanted something performant, remote-ready, and truly open. If we ever go the wrong direction, we want you to have everything you need to fork and build the editor that you want.
+- **Work doesn't travel.** Close the laptop and the Thread is stuck on it.
+- **Keys spread badly.** Everyone pastes API keys on their own machine; nobody knows who has what or how to take it back.
+- **AI subscriptions don't share.** One person uses a subscription, or a password gets passed around.
 
-## Installation
+The Hub fixes all three. The rule behind it: **the Hub decides and stores; machines run the work.** The Hub never runs agents itself.
 
-> [!WARNING]
-> T3 Code currently supports Codex, Claude, Cursor, Grok Build, OpenCode, Antigravity, and fx. Install and authenticate at least one provider before use:
->
-> - Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
-> - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
-> - Cursor: install [Cursor CLI](https://cursor.com/cli) and run `agent login`
-> - Grok Build: install [Grok Build CLI](https://x.ai/cli) and run `grok login`
-> - OpenCode: install [OpenCode](https://opencode.ai) and run `opencode auth login`
-> - Antigravity: enable it in Settings, then use **Install Antigravity** and **Sign in with Google**. No CLI is required.
-> - fx: install [fx](https://fx.sh) and run `fx login` on the machine running the T3 Code server ([setup guide](./docs/user/providers-fx.md))
+## What you get
 
-### Command line
+- **People and permissions.** One Owner; Organizations with Admins, Members and Guests; a private Personal space per person; passkeys; an audit log.
+- **Threads stored on the Hub.** Every conversation and its changes live on the Hub. Move a Thread from one machine to another and keep going; nothing is lost when a machine goes away.
+- **Where the work runs.** A Sandbox per Space (a rootless Podman container on the Hub's server), machines people join with `t3 join`, and dedicated servers an Organization shares (added by hand or over SSH).
+- **Vaults.** Secrets reach agents as environment variables, never as arguments, files or logs. Values show as `[NAME]` in history, terminals, diffs and files. Allow a Vault to a Space or a person; take it back at any time.
+- **AI accounts and the gateway.** Add API keys and subscriptions (Claude, ChatGPT, Google AI Pro and others) once. Choose who may use each one and in what order. Agents go through the Hub's gateway with a per-Thread key and never see the real credential. Usage is recorded per person, Space and account.
+- **Local CLI keys.** Use Claude Code or Codex on your own computer through the Hub's accounts.
+- **Clients.** The web app served by the Hub, an Electron desktop app, and a mobile app.
 
-```bash
-T3CODE_VERSION=<version> T3CODE_RELEASE_BASE_URL=<release source> sh scripts/install.sh
-```
+## Concepts in one table
 
-On Windows, in PowerShell:
+| Word            | What it is                                                                                      |
+| --------------- | ----------------------------------------------------------------------------------------------- |
+| **Hub**         | Your central server: people, permissions, Vaults, AI accounts and every Thread's history.       |
+| **Space**       | Where things belong: an **Organization** (a team or a client) or a person's **Personal space**. |
+| **Project**     | A code repository. It belongs to one Space, not to one machine.                                 |
+| **Thread**      | A conversation with an agent about one task. Its history lives on the Hub.                      |
+| **Environment** | A machine that runs the work: a Sandbox, a joined laptop or a dedicated server.                 |
+| **Vault**       | A box of secrets handed to agents as environment variables.                                     |
+| **AI account**  | An API key or a subscription the Hub shares with whoever you allow.                             |
 
-```powershell
-$env:T3CODE_VERSION = "<version>"; $env:T3CODE_RELEASE_BASE_URL = "<release source>"; .\scripts\install.ps1
-```
+## Run your own Hub
 
-Then run `t3` to start the server and open the local web app. `t3 service install` keeps it running in the background, and `t3 --help` has the full reference. T3 Code does not update itself; see [Updating T3 Code](./docs/user/updating.md).
-
-To try it once without installing, run `npx t3@latest` instead.
-
-### Desktop app
-
-Install the latest version of the desktop app from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), or from your favorite package registry:
-
-#### Windows (`winget`)
+You need a Linux server with systemd, a domain with HTTPS (passkeys require it) and, for Sandboxes, rootless Podman 3.4 or newer.
 
 ```bash
-winget install T3Tools.T3Code
+git clone https://github.com/EijunnN/bezenti-hub.git
+cd bezenti-hub
+vp i          # install dependencies (see "Build from source" below)
+vp run build
 ```
 
-#### Windows (`scoop`)
+Then publish the Hub behind a reverse proxy with TLS, set its public address and start it as a service:
 
-```bash
-scoop install extras/t3code
-```
+- [Install and first run](./docs/user/install.md)
+- [Publish the Hub](./docs/user/public-hub.md): DNS, proxy, `T3CODE_PUBLIC_URL`, previews
+- [Run it as a background service](./docs/user/background-service.md)
+- [Updating](./docs/user/updating.md)
 
-#### macOS (Homebrew)
-
-```bash
-brew install --cask t3-code
-```
-
-#### Debian, Ubuntu (`.deb`)
-
-Download the `.deb` from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), then:
-
-```bash
-sudo apt install ./T3-Code-*.deb
-```
-
-#### Arch Linux (AUR)
-
-Stable:
-
-```bash
-yay -S t3code-bin
-```
-
-Nightly:
-
-```bash
-yay -S t3code-nightly-bin
-```
-
-The AUR packaging is maintained in this repository under [`packaging/aur`](./packaging/aur).
-
-#### Nix (nixpkgs)
-
-```bash
-nix profile add github:NixOS/nixpkgs/nixos-unstable#t3code
-```
-
-The package is maintained in [nixpkgs](https://github.com/NixOS/nixpkgs/tree/nixos-unstable/pkgs/by-name/t3/t3code)
-and includes the desktop app (`t3code-desktop`) and the `t3` command.
-See [Nix installation](./docs/user/install.md#nix-nixpkgs) for NixOS configuration and updates.
-
-## Some notes
-
-We are very very early in this project. Expect bugs.
-
-We are (mostly) not accepting contributions yet. Small fixes may be considered. Big features will not be.
+On first start the Hub prints a pairing link: create the Owner account with a passkey, then download the **master key** backup from Settings → Sharing & access. Without that key, every stored secret is lost if the server is lost.
 
 ## Documentation
 
-Full docs live in [docs/](./docs). There's no docs site yet.
+User guides live in [docs/user](./docs/user):
 
-- [FAQ](./docs/user/faq.md)
 - [Install and first run](./docs/user/install.md)
+- [Remote access from a phone or another machine](./docs/user/remote-access.md)
+- [Guest links](./docs/user/guest-links.md)
+- [Moving Threads between machines](./docs/user/thread-migration.md)
+- [Connect outside agents over MCP](./docs/user/outside-agents.md)
+- [Source control](./docs/user/source-control.md)
 - [Permission modes](./docs/user/permission-modes.md)
 - [Keyboard shortcuts](./docs/user/keybindings.md)
-- [Project settings](./docs/user/project-settings.md)
-- [Appearance preferences](./docs/user/appearance.md)
-- [Remote access from a phone or another machine](./docs/user/remote-access.md)
-- [Connect Claude Code, Codex, ChatGPT and other agents over MCP](./docs/user/outside-agents.md)
-- [Keeping app and server in sync](./docs/user/updating.md)
-- [Source control integrations](./docs/user/source-control.md)
-- Multiple accounts: [Codex](./docs/user/providers-codex.md) · [Claude](./docs/user/providers-claude.md)
-- [Run T3 Code as a background service](./docs/user/background-service.md)
+- [FAQ](./docs/user/faq.md)
 
-Building from source? Start at [docs/internals/overview.md](./docs/internals/overview.md).
+How it works inside: [docs/internals](./docs/internals), starting at [overview.md](./docs/internals/overview.md). Secrets and masking: [secrets.md](./docs/internals/secrets.md). AI accounts and the gateway: [ai-gateway.md](./docs/internals/ai-gateway.md). Sandboxes: [sandboxes.md](./docs/internals/sandboxes.md).
 
-## If you REALLY want to contribute still.... read this first
+## Build from source
 
-### Install `vp`
-
-T3 Code uses Vite+ so you'll need to install the global `vp` command-line tool.
-
-#### macOS / Linux
+The repo uses [Vite+](https://viteplus.dev/guide/), so install the global `vp` tool first.
 
 ```bash
+# macOS / Linux
 curl -fsSL https://vite.plus | bash
 ```
 
-#### Windows
-
-```bash
+```powershell
+# Windows
 irm https://vite.plus/ps1 | iex
 ```
 
-Checkout their getting started guide for more information: https://viteplus.dev/guide/
-
-### Install dependencies
+Then:
 
 ```bash
-vp i
+vp i                                  # dependencies
+vp run dev                            # local development
+vp run dist:desktop:linux             # desktop app (also :dmg, :win)
+cd apps/mobile && pnpm android        # mobile app (or pnpm ios)
 ```
 
-Read [CONTRIBUTING.md](./CONTRIBUTING.md) before reporting a bug or opening a PR.
+See [docs/operations/development.md](./docs/operations/development.md) for prerequisites and details.
 
-Have a feature request? Start an [Ideas discussion](https://github.com/pingdotgg/t3code/discussions/categories/ideas).
+## Status
 
-Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).
+Early. The core is in place and covered by tests, but it has not been run in production yet. Expect rough edges.
+
+## License
+
+[MIT](./LICENSE)
