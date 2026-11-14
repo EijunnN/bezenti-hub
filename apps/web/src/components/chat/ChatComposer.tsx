@@ -432,7 +432,11 @@ export interface ChatComposerProps {
   aiAccountPicker?: AiAccountPickerResult | null;
   /** The Thread's (or draft's) chosen account; the first allowed that fits when unset. */
   chosenAiAccountId?: AiAccountId | null;
-  onAiAccountChange?: (accountId: AiAccountId) => void;
+  /** With the composer's provider instance and model, which the switch keeps. */
+  onAiAccountChange?: (
+    accountId: AiAccountId,
+    selection: { readonly instanceId: ProviderInstanceId; readonly model: string },
+  ) => void;
   providerCatalogKnown: boolean;
   activeProjectDefaultModelSelection: ModelSelection | null | undefined;
   activeThreadModelSelection: ModelSelection | null | undefined;
@@ -2339,7 +2343,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             value={selectedAiAccount?.id ?? null}
             disabled={isSendBusy}
             size={composerControlsCollapsed ? "xs" : "sm"}
-            onChange={(accountId) => props.onAiAccountChange?.(accountId)}
+            onChange={(accountId) =>
+              props.onAiAccountChange?.(accountId, {
+                instanceId: selectedInstanceId,
+                model: selectedModel,
+              })
+            }
           />
         ) : null
       }

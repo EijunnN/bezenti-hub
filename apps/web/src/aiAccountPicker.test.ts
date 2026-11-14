@@ -90,6 +90,24 @@ describe("applyAiAccountsToProviders", () => {
     expect(shown?.message).toBe("No AI account is allowed for you in Acme.");
   });
 
+  it("keeps the agent's own models when the Hub could not read an account's catalog", () => {
+    const unknown: AiAccountPickerResult = {
+      ...picker,
+      accounts: [{ ...picker.accounts[0]!, models: null }],
+    };
+    const [shown] = applyAiAccountsToProviders([claude], unknown);
+    expect(shown?.status).toBe("ready");
+    expect(shown?.models.map((model) => model.slug)).toEqual(["claude-sonnet-5-5"]);
+    expect(
+      resolveAiAccount({
+        driver: "claudeAgent",
+        model: "claude-sonnet-5-5",
+        picker: unknown,
+        preferred: undefined,
+      })?.id,
+    ).toBe(acmeClaude);
+  });
+
   it("leaves the providers as the Hub reports them off AI accounts", () => {
     const off = { ...picker, applies: false };
     expect(applyAiAccountsToProviders([claude], off)).toEqual([claude]);

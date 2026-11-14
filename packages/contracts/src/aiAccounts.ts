@@ -322,7 +322,10 @@ export const AiAccountPickerAccount = Schema.Struct({
   type: AiAccountType,
   provider: AiAccountProvider,
   priority: Schema.Number,
-  /** Gateway accounts: the models of its prefix; null for a direct one (its agent's catalog). */
+  /**
+   * Gateway accounts: the models of its prefix. Null: a direct one (its agent's catalog), or a
+   * gateway catalog the Hub could not read now (unknown, never "serves nothing").
+   */
   models: Schema.NullOr(Schema.Array(Schema.String)),
 });
 export type AiAccountPickerAccount = typeof AiAccountPickerAccount.Type;

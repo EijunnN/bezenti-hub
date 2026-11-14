@@ -121,6 +121,13 @@ function gatewayModelsOf(
   const native = NATIVE_FAMILY[provider.driver];
   const seen = new Set<string>();
   const models: Array<ServerProviderModel> = [];
+  // An account whose catalog the Hub could not read (null): the agent's own models stand in.
+  if (accounts.some((account) => account.models === null)) {
+    for (const model of provider.models) {
+      seen.add(servedModelOf(model.slug));
+      models.push(model);
+    }
+  }
   for (const account of accounts) {
     for (const slug of account.models ?? []) {
       if (seen.has(slug)) continue;

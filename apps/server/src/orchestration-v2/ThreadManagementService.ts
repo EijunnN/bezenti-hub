@@ -37,6 +37,7 @@ import {
   ProjectId,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   ProviderInstanceId,
+  type ProviderDriverKind,
   type ProviderSessionId,
   resolveProjectProviderInstanceEnabled,
   RunId,
@@ -1051,12 +1052,28 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
 
   // Spec 4 ticket 08: the selection's AI account, checked (and filled in) for every transport.
   const aiAccountChoice = yield* Effect.serviceOption(AiAccountChoice.AiAccountChoice);
+  /**
+   * An instance's driver on the machine the Thread runs on (a Sandbox's own instances included),
+   * asked of that machine's executor; none when it cannot answer now.
+   */
+  const resolveDriver = (
+    instanceId: ProviderInstanceId,
+    environmentId: EnvironmentId | undefined,
+  ) =>
+    Option.isNone(executors)
+      ? Effect.succeed(Option.none<ProviderDriverKind>())
+      : executors.value.get(environmentId ?? HUB_MACHINE_ENVIRONMENT_ID).pipe(
+          Effect.flatMap((executor) => executor.provider.adapters.get(instanceId)),
+          Effect.map((adapter) => adapter.driver),
+          Effect.asSome,
+          Effect.orElseSucceed(() => Option.none<ProviderDriverKind>()),
+        );
   const settleAiAccount = (
     command: OrchestrationV2ServerCommand,
   ): Effect.Effect<OrchestrationV2ServerCommand, Orchestrator.OrchestratorCommandRejectedError> =>
     Option.isNone(aiAccountChoice)
       ? Effect.succeed(command)
-      : aiAccountChoice.value.settle(command).pipe(
+      : aiAccountChoice.value.settle(command, resolveDriver).pipe(
           Effect.mapError(
             (cause) =>
               new Orchestrator.OrchestratorCommandRejectedError({
@@ -1070,9 +1087,10 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
     claimThreadSpace(command).pipe(
       Effect.flatMap(placeThread),
-      Effect.flatMap(settleAiAccount),
       Effect.flatMap(checkMoveTarget),
       Effect.flatMap(startMachine),
+      // After the machine is up: an instance only it has is described by it.
+      Effect.flatMap(settleAiAccount),
       Effect.flatMap(queueWhileAway),
       Effect.flatMap((claimed) =>
         ensureCommandTranscripts(claimed).pipe(

@@ -81,8 +81,11 @@ const addAccount = Effect.fn(function* (
 });
 
 /** Ada and Grace, Members of Acme, with Acme's Sandbox; Globex has none of them. */
-const acmeHub = Effect.fn(function* () {
-  const hub = yield* makeHub({ aiAccounts: true, sandboxAdapters: idleAdapters(instanceId) });
+const acmeHub = Effect.fn(function* (sandboxInstance: ProviderInstanceId = instanceId) {
+  const hub = yield* makeHub({
+    aiAccounts: true,
+    sandboxAdapters: idleAdapters(sandboxInstance),
+  });
   const acme = yield* createOrganization(hub, "Acme");
   const globex = yield* createOrganization(hub, "Globex");
   for (const id of ["ada", "grace"]) {
@@ -290,6 +293,49 @@ describe("Hub con Environments: the AI account of a Thread", () => {
       );
       assert.isTrue(Exit.isFailure(byGrace));
       assert.equal((yield* selectionOf(s.hub, made.threadId)).aiAccountId, first);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("tell another User's viewer nothing about accounts: the role check comes first", () =>
+    Effect.gen(function* () {
+      const s = yield* acmeHub();
+      const globexAccount = yield* addAccount(s.hub, "Globex Claude", { spaceIds: [s.globex] });
+      yield* addAccount(s.hub, "Acme Claude", { spaceIds: [s.acme] });
+      const made = yield* createThread(s, "adas-private", { instanceId, model: MODEL });
+      assert.isTrue(Exit.isSuccess(made.exit), failureText(made.exit));
+      const byGrace = yield* setSelection(
+        s.hub,
+        made.threadId,
+        { instanceId, model: MODEL, aiAccountId: globexAccount },
+        s.grace,
+      );
+      assert.isTrue(Exit.isFailure(byGrace));
+      const said = failureText(byGrace);
+      assert.notInclude(said, "AiAccountChoiceError", "refused for the role, before any account");
+      assert.notInclude(said, "Globex Claude");
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("check a Sandbox-only provider instance's account like any other", () =>
+    Effect.gen(function* () {
+      // An instance only Acme's Sandbox has (not configured on the Hub): its driver is still known.
+      const sandboxOnly = "claude-work" as ProviderInstanceId;
+      const s = yield* acmeHub(sandboxOnly);
+      const globexAccount = yield* addAccount(s.hub, "Globex Claude", { spaceIds: [s.globex] });
+      const acmeAccount = yield* addAccount(s.hub, "Acme Claude", { spaceIds: [s.acme] });
+      const refused = yield* createThread(s, "sandbox-only", {
+        instanceId: sandboxOnly,
+        model: MODEL,
+        aiAccountId: globexAccount,
+      });
+      assert.isTrue(Exit.isFailure(refused.exit), "Globex's account refused");
+      assert.include(failureText(refused.exit), "not allowed for this Thread");
+      const made = yield* createThread(s, "sandbox-only-default", {
+        instanceId: sandboxOnly,
+        model: MODEL,
+      });
+      assert.isTrue(Exit.isSuccess(made.exit), failureText(made.exit));
+      assert.equal((yield* selectionOf(s.hub, made.threadId)).aiAccountId, acmeAccount);
     }).pipe(Effect.scoped),
   );
 

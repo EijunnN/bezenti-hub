@@ -5,6 +5,8 @@
  * docs/internals/ai-gateway.md, «The AI account of a Thread».
  */
 import {
+  AI_DIRECT_DRIVERS,
+  AI_GATEWAY_DRIVERS,
   AiAccountChoiceError,
   AiAccountError,
   type AiAccountId,
@@ -26,6 +28,7 @@ import * as Option from "effect/Option";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as CommandActor from "../auth/CommandActor.ts";
+import { threadAccessOf } from "../orchestration-v2/commandAccess.ts";
 import { threadTurnOwner } from "../orchestration-v2/threadTurnOwner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
@@ -43,7 +46,15 @@ export class AiAccountChoice extends Context.Service<
      */
     readonly settle: (
       command: OrchestrationV2ServerCommand,
-    ) => Effect.Effect<OrchestrationV2ServerCommand, AiAccountChoiceError>;
+      /** The driver of an instance wherever it runs (a Sandbox's own included); none: unknown. */
+      resolveDriver?: (
+        instanceId: ProviderInstanceId,
+        environmentId: EnvironmentId | undefined,
+      ) => Effect.Effect<Option.Option<ProviderDriverKind>>,
+    ) => Effect.Effect<
+      OrchestrationV2ServerCommand,
+      AiAccountChoiceError | SpaceDirectory.ItemAccessError
+    >;
     /** The composer's picker for the session's User in one Space. */
     readonly picker: (
       input: AiAccountPickerInput,
@@ -70,16 +81,35 @@ const make = Effect.gen(function* () {
   const sessions = yield* AiGatewaySessions.AiGatewaySessions;
   const settings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
 
-  /** The driver of a provider instance; a default instance's id is its driver's. */
+  /**
+   * The driver of a provider instance: where it runs (the routed registry), else the Hub's
+   * settings; a default instance's id is its driver's.
+   */
   const driverOf = Effect.fn("AiAccountChoice.driverOf")(function* (
     instanceId: ProviderInstanceId,
+    environmentId: EnvironmentId | undefined,
+    resolveDriver:
+      | ((
+          instanceId: ProviderInstanceId,
+          environmentId: EnvironmentId | undefined,
+        ) => Effect.Effect<Option.Option<ProviderDriverKind>>)
+      | undefined,
   ) {
-    if (Option.isNone(settings)) return instanceId as unknown as ProviderDriverKind;
-    const current = yield* settings.value.getSettings.pipe(Effect.option);
-    const configured = Option.isSome(current)
-      ? current.value.providerInstances[instanceId]
-      : undefined;
-    return configured?.driver ?? (instanceId as unknown as ProviderDriverKind);
+    if (resolveDriver !== undefined) {
+      const resolved = yield* resolveDriver(instanceId, environmentId);
+      if (Option.isSome(resolved)) return resolved;
+    }
+    if (Option.isSome(settings)) {
+      const current = yield* settings.value.getSettings.pipe(Effect.option);
+      const configured = Option.isSome(current)
+        ? current.value.providerInstances[instanceId]
+        : undefined;
+      if (configured !== undefined) return Option.some(configured.driver);
+    }
+    // A default instance's id is its driver's.
+    return AI_GATEWAY_DRIVERS.has(instanceId) || AI_DIRECT_DRIVERS.has(instanceId)
+      ? Option.some(instanceId as unknown as ProviderDriverKind)
+      : Option.none<ProviderDriverKind>();
   });
 
   const modelsOf = (accountId: AiAccountId) =>
@@ -127,8 +157,23 @@ const make = Effect.gen(function* () {
   const settleSelection = Effect.fn("AiAccountChoice.settleSelection")(function* (
     selection: ModelSelection,
     facts: ThreadFacts,
+    resolveDriver:
+      | ((
+          instanceId: ProviderInstanceId,
+          environmentId: EnvironmentId | undefined,
+        ) => Effect.Effect<Option.Option<ProviderDriverKind>>)
+      | undefined,
   ) {
-    const driver = yield* driverOf(selection.instanceId);
+    const knownDriver = yield* driverOf(selection.instanceId, facts.environmentId, resolveDriver);
+    if (Option.isNone(knownDriver)) {
+      // Never skip the check for an instance nobody can describe now (its machine away).
+      if (selection.aiAccountId === undefined) return selection;
+      return yield* refuse(
+        "unavailable",
+        "Could not tell which provider this Thread uses. Try again once its machine is online.",
+      );
+    }
+    const driver = knownDriver.value;
     const applies = yield* sessions.applies({
       driver,
       ...(facts.environmentId === undefined ? {} : { environmentId: facts.environmentId }),
@@ -166,14 +211,11 @@ const make = Effect.gen(function* () {
     if (named === undefined) return selection;
     switch (choice.reason) {
       case "not-compatible":
-        return yield* refuse(
-          "not-compatible",
-          `${choice.account?.name ?? "This AI account"} cannot be used by this provider.`,
-        );
+        return yield* refuse("not-compatible", "This AI account cannot be used by this provider.");
       case "model-not-served":
         return yield* refuse(
           "model-not-served",
-          `${choice.account?.name ?? "This AI account"} does not serve ${choice.model ?? "this model"}.`,
+          `This AI account does not serve ${choice.model ?? "this model"}.`,
         );
       default:
         return yield* refuse(
@@ -213,6 +255,10 @@ const make = Effect.gen(function* () {
 
   const settle = Effect.fn("AiAccountChoice.settle")(function* (
     command: OrchestrationV2ServerCommand,
+    resolveDriver?: (
+      instanceId: ProviderInstanceId,
+      environmentId: EnvironmentId | undefined,
+    ) => Effect.Effect<Option.Option<ProviderDriverKind>>,
   ) {
     const selection =
       command.type === "thread.create" ||
@@ -232,7 +278,15 @@ const make = Effect.gen(function* () {
     );
     // No owner or Space known (server work, a host without Spaces): the session plan decides.
     if (Option.isNone(found)) return command;
-    const settled = yield* settleSelection(selection, found.value);
+    // The Role rules first (as the orchestrator applies them), so a User who may not continue
+    // the Thread learns nothing about which accounts its owner may use.
+    const actor = yield* CommandActor.current;
+    if (actor !== undefined) {
+      for (const access of threadAccessOf(command)) {
+        yield* spaces.authorizeItem(actor, access.action, { kind: "thread", id: access.threadId });
+      }
+    }
+    const settled = yield* settleSelection(selection, found.value, resolveDriver);
     return settled === selection
       ? command
       : ({ ...command, modelSelection: settled } as OrchestrationV2ServerCommand);
@@ -268,9 +322,9 @@ const make = Effect.gen(function* () {
     const listed = yield* Effect.forEach(allowed, (account) =>
       Effect.gen(function* () {
         const gateway = isCompatibleAccount("claudeAgent" as ProviderDriverKind, account);
-        const models = gateway
-          ? Option.getOrElse(yield* modelsOf(account.id), () => [] as ReadonlyArray<string>)
-          : null;
+        // Unknown (catalog unreadable) is null like a direct one's: the client offers its
+        // agent's own models then, and the Hub still checks at the door and per request.
+        const models = gateway ? Option.getOrNull(yield* modelsOf(account.id)) : null;
         return {
           id: account.id,
           name: account.name,

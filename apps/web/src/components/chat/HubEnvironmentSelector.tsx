@@ -40,6 +40,34 @@ function useNewThreadSpaceId(projectSpaceId: SpaceId | null): SpaceId | null {
 }
 
 /**
+ * Spec 4 ticket 08: where a draft will run (the User's pick, else the Hub's default for it) and
+ * the Space it is claimed in, so its AI-account picker asks about that machine. Null: unknown.
+ */
+export function useDraftPlacement(input: {
+  readonly draftThreadId: string | null;
+  readonly providerInstanceId: ProviderInstanceId | null;
+  readonly preferredEnvironmentId: EnvironmentId | null;
+  readonly spaceId: SpaceId | null;
+}): { readonly environmentId: EnvironmentId | null; readonly spaceId: SpaceId | null } {
+  const userId = useCurrentSpace((state) => state.view?.userId ?? null);
+  const spaceId = useNewThreadSpaceId(input.spaceId);
+  const all = useHubEnvironments();
+  const unavailable = useSandboxesUnavailable();
+  const chosen = useHubEnvironmentChoice(input.draftThreadId ?? "");
+  if (input.draftThreadId === null) return { environmentId: null, spaceId };
+  if (chosen !== undefined) return { environmentId: chosen, spaceId };
+  if (input.providerInstanceId === null) return { environmentId: null, spaceId };
+  const placed = previewDefaultEnvironment({
+    environments: placeableEnvironments(all, spaceId),
+    preferredEnvironmentId: input.preferredEnvironmentId,
+    providerInstanceId: input.providerInstanceId,
+    userId,
+    sandboxesUnavailable: unavailable,
+  });
+  return { environmentId: placed, spaceId };
+}
+
+/**
  * Why a new Thread nobody placed could run nowhere (the Hub has no Sandbox for it and does not
  * run it itself), as the composer says it before sending; null when it can run somewhere, when
  * the User chose a machine, or until the Environments list is read.

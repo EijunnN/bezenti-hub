@@ -396,7 +396,11 @@ import { startHubEnvironment } from "../environments/primary/hubEnvironments";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/models";
 import { openMoveThreadDialog } from "./chat/MoveThreadDialog";
 import { Button } from "./ui/button";
-import { HubEnvironmentSelector, useNoPlacementMessage } from "./chat/HubEnvironmentSelector";
+import {
+  HubEnvironmentSelector,
+  useDraftPlacement,
+  useNoPlacementMessage,
+} from "./chat/HubEnvironmentSelector";
 
 const EMPTY_FEEDBACK_SUBMISSIONS: ReadonlyArray<CodexFeedbackSubmission> = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
@@ -1214,10 +1218,19 @@ export default function ChatView(props: ChatViewProps) {
       : providersByEnvironment.get(providerEnvironmentId)) ?? EMPTY_PROVIDERS;
   // Spec 4 ticket 08: where the Hub runs turns on AI accounts, a provider is offered with an
   // account allowed to the User in the Thread's Space, never with the machine's own login.
+  // A draft asks where it will be placed (its chosen machine, else the Hub's default for it).
+  const draftPlacement = useDraftPlacement({
+    draftThreadId: isServerThread || !activeThread ? null : activeThread.id,
+    providerInstanceId: activeThread?.modelSelection.instanceId ?? null,
+    preferredEnvironmentId: activeProject?.preferredEnvironmentId ?? null,
+    spaceId: activeProject?.spaceId ?? null,
+  });
   const aiAccountPicker = useAiAccountPicker({
     environmentId: providerEnvironmentId,
-    spaceId: activeProject?.spaceId ?? null,
-    threadEnvironmentId: activeThread?.activeEnvironmentId ?? null,
+    spaceId: isServerThread ? (activeProject?.spaceId ?? null) : draftPlacement.spaceId,
+    threadEnvironmentId: isServerThread
+      ? (activeThread?.activeEnvironmentId ?? null)
+      : draftPlacement.environmentId,
   });
   const providerStatuses = applyAiAccountsToProviders(hubProviderStatuses, aiAccountPicker);
   const draftAiAccountKey = isServerThread ? null : (activeThread?.id ?? null);
@@ -1234,14 +1247,23 @@ export default function ChatView(props: ChatViewProps) {
     aiGatewayEnvironment.setThreadAccount,
     "switch the Thread's AI account",
   );
-  const onAiAccountChange = (accountId: AiAccountId) => {
+  const onAiAccountChange = (
+    accountId: AiAccountId,
+    selection: { readonly instanceId: ProviderInstanceId; readonly model: string },
+  ) => {
     if (!isServerThread || activeThread == null) {
       if (draftAiAccountKey !== null) setDraftAiAccount({ key: draftAiAccountKey, accountId });
       return;
     }
     void switchThreadAiAccount({
       environmentId: activeThread.environmentId,
-      input: { threadId: activeThread.id, aiAccountId: accountId },
+      // The composer's provider instance and model: another instance is a provider switch.
+      input: {
+        threadId: activeThread.id,
+        aiAccountId: accountId,
+        instanceId: selection.instanceId,
+        model: selection.model,
+      },
     });
   };
   const onAiAccountChangeStable = useStableCallback(onAiAccountChange);
