@@ -1492,6 +1492,8 @@ export const ServerSettingsOperation = Schema.Literals([
   "prepare-directory",
   "write-managed-setting",
   "use-disallowed-provider",
+  // Spec 4 ticket 09: an AI credential on a provider instance where AI accounts are in use.
+  "write-ai-credential",
 ]);
 export type ServerSettingsOperation = typeof ServerSettingsOperation.Type;
 
@@ -1523,6 +1525,9 @@ export class ServerSettingsError extends Schema.TaggedError<ServerSettingsError>
         this.managedBy,
         this.providerLabel ?? this.providerInstanceId ?? "this",
       );
+    }
+    if (this.operation === "write-ai-credential") {
+      return `${this.environmentVariable ?? "This key"} is an AI credential: add it in Settings → AI accounts.`;
     }
     const provider =
       this.providerInstanceId === undefined ? "" : ` for provider ${this.providerInstanceId}`;

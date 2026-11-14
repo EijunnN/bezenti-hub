@@ -2790,3 +2790,259 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
     );
   },
 );
+
+// Spec 4 ticket 09: where AI accounts are in use, an AI credential never goes back into a provider
+// instance; a desktop without them keeps working as before.
+it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AI credentials", (it) => {
+  const codex = ProviderDriverKind.make("codex");
+  const antigravity = ProviderDriverKind.make("antigravity");
+  const codexId = ProviderInstanceId.make("codex");
+  const antigravityId = ProviderInstanceId.make("antigravity");
+  const openAiKey = { name: "OPENAI_API_KEY", value: "sk-openai-0123456789", sensitive: true };
+
+  it.effect("a server without AI accounts in use still saves OPENAI_API_KEY", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const saved = yield* service.updateProviderInstance({
+        operation: "upsert",
+        instanceId: codexId,
+        instance: { driver: codex, environment: [openAiKey] },
+      });
+      assert.equal(saved.providerInstances[codexId]?.environment?.[0]?.value, openAiKey.value);
+      yield* service.setAiCredentialGuard!(Effect.succeed(false));
+      yield* service.updateProviderInstance({
+        operation: "upsert",
+        instanceId: antigravityId,
+        instance: { driver: antigravity, config: { apiKey: "AIza-desktop-key" } },
+      });
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect(
+    "refuses an AI credential added or changed on any write where AI accounts are in use",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        yield* service.setAiCredentialGuard!(Effect.succeed(true));
+        const added = yield* service
+          .updateProviderInstance({
+            operation: "upsert",
+            instanceId: codexId,
+            instance: { driver: codex, environment: [openAiKey] },
+          })
+          .pipe(Effect.flip);
+        assert.equal(added.operation, "write-ai-credential");
+        assert.equal(added.environmentVariable, "OPENAI_API_KEY");
+        assert.include(added.message, "Settings → AI accounts");
+        assert.notInclude(JSON.stringify(added), openAiKey.value);
+
+        // The patch door too, and a key marked not sensitive.
+        const patched = yield* service
+          .updateSettings({
+            providerInstances: {
+              [codexId]: {
+                driver: codex,
+                environment: [
+                  { name: "ANTHROPIC_API_KEY", value: "sk-ant-plain", sensitive: false },
+                ],
+              },
+            },
+          } as unknown as ServerSettingsPatch)
+          .pipe(Effect.flip);
+        assert.equal(patched.operation, "write-ai-credential");
+
+        const field = yield* service
+          .updateProviderInstance({
+            operation: "upsert",
+            instanceId: antigravityId,
+            instance: { driver: antigravity, config: { apiKey: "AIza-new-key" } },
+          })
+          .pipe(Effect.flip);
+        assert.equal(field.operation, "write-ai-credential");
+
+        // Other sensitive variables are the instance's.
+        const other = yield* service.updateProviderInstance({
+          operation: "upsert",
+          instanceId: codexId,
+          instance: {
+            driver: codex,
+            environment: [{ name: "HTTPS_PROXY_TOKEN", value: "proxy-secret", sensitive: true }],
+          },
+        });
+        assert.equal(other.providerInstances[codexId]?.environment?.[0]?.value, "proxy-secret");
+        const raw = yield* (yield* FileSystem.FileSystem).readFileString(
+          (yield* ServerConfig.ServerConfig).settingsPath,
+        );
+        assert.notInclude(raw, "AIza-new-key");
+        assert.notInclude(raw, openAiKey.value);
+      }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect("lets a leftover key ride along unchanged and be removed", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      yield* service.updateProviderInstance({
+        operation: "upsert",
+        instanceId: codexId,
+        instance: { driver: codex, environment: [openAiKey] },
+      });
+      yield* service.updateProviderInstance({
+        operation: "upsert",
+        instanceId: antigravityId,
+        instance: { driver: antigravity, config: { apiKey: "AIza-left-over" } },
+      });
+      yield* service.setAiCredentialGuard!(Effect.succeed(true));
+      const client = ServerSettingsModule.redactServerSettingsForClient(
+        yield* service.getSettings,
+        {
+          secretReferences: true,
+        },
+      );
+      // What the client was shown saves with other edits; so does a materialized echo.
+      yield* service.updateProviderInstance({
+        operation: "upsert",
+        instanceId: codexId,
+        instance: { ...client.providerInstances[codexId]!, displayName: "Codex (work)" },
+      });
+      yield* service.updateProviderInstance({
+        operation: "upsert",
+        instanceId: antigravityId,
+        instance: { ...client.providerInstances[antigravityId]!, displayName: "Agy" },
+      });
+      const materialized = yield* service.getSettings;
+      yield* service.updateProviderInstance({
+        operation: "upsert",
+        instanceId: antigravityId,
+        instance: { ...materialized.providerInstances[antigravityId]!, displayName: "Agy 2" },
+      });
+      // Changing it is refused; removing it is not.
+      const changed = yield* service
+        .updateProviderInstance({
+          operation: "upsert",
+          instanceId: codexId,
+          instance: {
+            driver: codex,
+            environment: [{ ...openAiKey, value: "sk-openai-other-0123" }],
+          },
+        })
+        .pipe(Effect.flip);
+      assert.equal(changed.operation, "write-ai-credential");
+      const removed = yield* service.updateProviderInstance({
+        operation: "upsert",
+        instanceId: codexId,
+        instance: { driver: codex, environment: [] },
+      });
+      assert.deepEqual(removed.providerInstances[codexId]?.environment, []);
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect("the test layer applies the same rule", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      yield* service.setAiCredentialGuard!(Effect.succeed(true));
+      const refused = yield* service
+        .updateProviderInstance({
+          operation: "upsert",
+          instanceId: codexId,
+          instance: { driver: codex, environment: [openAiKey] },
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused.operation, "write-ai-credential");
+    }).pipe(Effect.provide(ServerSettingsModule.layerTest())),
+  );
+});
+
+// Spec 4 ticket 09, after review: the rule holds however the name is cased, across a driver change,
+// and before the Hub's AI accounts layer sets the guard (a usable account is enough).
+it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AI credentials, edges", (it) => {
+  const codex = ProviderDriverKind.make("codex");
+  const opencode = ProviderDriverKind.make("opencode");
+  const antigravity = ProviderDriverKind.make("antigravity");
+  const instanceId = ProviderInstanceId.make("work");
+
+  it.effect("refuses a reserved variable whatever its case", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      yield* service.setAiCredentialGuard!(Effect.succeed(true));
+      const refused = yield* service
+        .updateProviderInstance({
+          operation: "upsert",
+          instanceId,
+          instance: {
+            driver: codex,
+            environment: [
+              { name: "openai_api_key", value: "sk-lower-0123456789", sensitive: true },
+            ],
+          },
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused.operation, "write-ai-credential");
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect("checks Antigravity's API key against the new driver's stored key", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      yield* service.updateProviderInstance({
+        operation: "upsert",
+        instanceId,
+        instance: { driver: opencode, config: { apiKey: "AIza-under-another-driver" } },
+      });
+      yield* service.setAiCredentialGuard!(Effect.succeed(true));
+      const refused = yield* service
+        .updateProviderInstance({
+          operation: "upsert",
+          instanceId,
+          instance: { driver: antigravity, config: { apiKey: "AIza-under-another-driver" } },
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused.operation, "write-ai-credential");
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect("refuses with a usable AI account before any guard is set", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        INSERT INTO ai_accounts (account_id, name, type, provider, priority, status, disabled,
+          credential_id, key_hint, base_url, models_json, created_at, updated_at, created_by)
+        VALUES ('a1', 'Claude', 'api-key', 'claude', 1, 'working', 0, NULL, NULL, NULL, '[]',
+          '2026-11-13T00:00:00.000Z', '2026-11-13T00:00:00.000Z', 'owner')
+      `;
+      const refused = yield* service
+        .updateProviderInstance({
+          operation: "upsert",
+          instanceId,
+          instance: {
+            driver: codex,
+            environment: [
+              { name: "OPENAI_API_KEY", value: "sk-early-0123456789", sensitive: true },
+            ],
+          },
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused.operation, "write-ai-credential");
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+});
+
+it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AI credentials, empty", (it) => {
+  it.effect("refuses a new reserved variable even before its value", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      yield* service.setAiCredentialGuard!(Effect.succeed(true));
+      const refused = yield* service
+        .updateProviderInstance({
+          operation: "upsert",
+          instanceId: ProviderInstanceId.make("codex"),
+          instance: {
+            driver: ProviderDriverKind.make("codex"),
+            environment: [{ name: "OPENAI_API_KEY", value: "", sensitive: true }],
+          },
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused.operation, "write-ai-credential");
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+});

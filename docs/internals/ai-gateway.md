@@ -561,6 +561,73 @@ Decisions; the rule is `ai/chooseAiAccount.ts` (one chooser, also the session pl
 - **Routing** of the Hub's provider switch plan (`ProviderSwitchService`) asks an instance's
   metadata from the Environment that has it when the Hub machine lacks it, as `get` already did.
 
+## Keys moved from provider instances (spec 4 ticket 09)
+
+Decisions; the rule is `ai/ProviderKeyMigration.ts` (`aiAccountsInUse`, `migrateProviderKeys`), the
+settings side `settingsAiCredentials.ts` and `ServerSettingsService` (`setAiCredentialGuard`,
+`listProviderCredentials`, `removeProviderCredentials`), the account side
+`AiAccounts.adoptProviderKey`, the list `aiAccountCredentialProviderOf` /
+`AI_ACCOUNT_CREDENTIAL_FIELDS` (contracts).
+
+- **Which keys.** Provider-instance variables `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  `OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY`, `KIRO_API_KEY`,
+  `META_API_KEY`, `AI_GATEWAY_API_KEY`, `DEVIN_TOKEN` (marked sensitive or not, a value or a
+  secret provider reference; the name in any case) and Antigravity's `apiKey`. Every other variable
+  stays on its instance.
+- **Only where AI accounts are in use** (`aiAccountsInUse`, the one condition): the server has a
+  usable AI account (not deleted, not disabled: what `AiGatewaySessions.applies` asks) or its AI
+  gateway is turned on (any state but `off`/`unsupported`; on by default on a server Hub, off by
+  default in the desktop app and on a dev Hub). Accounts that cannot be read count as none
+  (`ai/usableAiAccounts.ts`). A desktop or dev Hub with neither keeps its keys and saves new ones
+  exactly as before; nothing moves.
+- **When.** A pass at every start (beside it, not blocking it) and again when the gateway is turned
+  on; one pass at a time. It needs the Owner: before one exists nothing moves (the next pass does).
+  Only the server does it: no RPC triggers it, and nobody else gains any use of a key, since each
+  account is allowed only to the Owner's Personal space until the Owner allows it elsewhere.
+- **Which account.** The variable names the provider (`ANTHROPIC_*` → `claude`, `OPENAI_API_KEY`
+  → `codex`, `GEMINI_API_KEY` → `gemini`, `XAI_API_KEY` → `xai`, `CURSOR_API_KEY` → `cursor`,
+  `KIRO_API_KEY` → `kiro`, `META_API_KEY` → `meta`, `AI_GATEWAY_API_KEY` → `fx`, `DEVIN_TOKEN` →
+  `devin`; Antigravity's `apiKey` → `vertex` with «Agent Platform», else `gemini`). Direct when the
+  instance's driver is one of `AI_DIRECT_DRIVERS` and the provider takes a direct key, else an API
+  key through the gateway. Named «<Provider> (migrated)», then «<Provider> (migrated, <instance>)»,
+  then numbered. The same key on two instances is one account.
+- **Order: the account first, the removal second.** `adoptProviderKey` seals the key under a new
+  credential id, then writes the row (`created_by` the Owner), its one allowance, its ledger row
+  and the audit `ai_account.create` (`via: "migration"`, actor `system`) in one transaction. Only
+  then `removeProviderCredentials` takes the variable or field off its instance in one settings
+  write, if it still holds that value; the settings service's usual path deletes its
+  `provider-env-*` / `provider-config-*` secret and rewrites settings.json without it. A stop in
+  between leaves the key owned and still on the instance (which Hub turns ignore since tickets 06
+  and 07), never live and unowned.
+- **Twice is once.** Migration **117** (the next free id after 116: a database that recorded a
+  higher id would refuse a lower one added later), `ai_account_migrated_keys` (`source` =
+  `env:<instance>:<VARIABLE>` or `field:<instance>:<field>`, the account id; never the key or a hash
+  of it). A source already moved whose account still holds the same key is only removed from the
+  instance; any other key under it becomes a new account, so a key is never lost. Deleting an
+  account deletes its ledger rows.
+- **Deleted meanwhile.** The removal asks again, under the settings write lock and right before
+  its write, whether the account still exists and holds the key (`AiAccounts.holdsKey`); an
+  account the Owner deleted in between leaves its key on the instance.
+- **Left on the instance**, named in the log by instance and variable only: a secret provider
+  reference that cannot be read within 15 s (read once per pass), a value AI accounts refuse
+  (spaces, control characters), or a write a managed policy locks. Settings shows each one on its
+  instance («… could not be moved into an AI account», with a link to Settings → AI accounts).
+  Values a managed policy supplies are not stored by the Hub and are not moved.
+- **Writes refuse them** while AI accounts are in use, in `ServerSettingsService` itself, so every
+  door does: WS `server.updateSettings` (patch and provider instance mutation), the MCP tool
+  `t3_environment_preferences_update`, and the Hub's own callers. Until the AI accounts layer sets
+  the whole condition at boot, a usable account is enough. A write may keep a leftover as stored
+  (the redacted echo, the same value or reference, a field read back under the same driver), clear
+  it or remove it; adding one (even empty) or changing one fails with `write-ai-credential` («OPENAI_API_KEY is an AI credential: add it in
+  Settings → AI accounts.»), naming the variable, never the value. No HttpApi twin exists. The web
+  form says it first (with the link), hides Cursor's and Kiro's key fields and Antigravity's
+  «API key» once the Hub has an enabled AI account.
+
+**Accepted risks.** `ANTHROPIC_AUTH_TOKEN` (which may be an OAuth token) and a key paired with a
+custom `*_BASE_URL` become plain provider API keys; the account then shows an error and the Owner
+fixes or deletes it. A Hub whose gateway is on with no account yet refuses new keys before the web
+form knows (the Hub's message says where to go).
+
 ## Known exception to «no upstream services»
 
 CLIProxyAPI 8.0.67, even with `-local-model`, asks the internet for the latest Antigravity client

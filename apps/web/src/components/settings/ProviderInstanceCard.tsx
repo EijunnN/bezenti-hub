@@ -15,6 +15,7 @@ import {
 import { Lock as LockGlyph, LockOpen } from "lucide";
 import * as Arr from "effect/Array";
 import * as Result from "effect/Result";
+import { Link } from "@tanstack/react-router";
 import { Fragment, useState, type ReactElement, type ReactNode } from "react";
 import {
   isProviderDriverKind,
@@ -70,6 +71,12 @@ import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayo
 import { AcpSessionManagementSection } from "./AcpSessionManagementSection";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { ANTIGRAVITY_HUB_DISABLED, useHubUsesAiAccounts } from "./useHubUsesAiAccounts";
+import {
+  aiCredentialAdded,
+  aiCredentialFieldsOf,
+  aiCredentialLeftovers,
+  isAiCredentialVariable,
+} from "./aiCredentialSettings.logic";
 import { readCodexSetupMode } from "./CodexSetupSection.logic";
 import {
   getProviderVersionAdvisoryPresentation,
@@ -803,6 +810,8 @@ export function ProviderInstanceCard({
     : null;
   // Spec 4 ticket 07: on a Hub running on AI accounts, Antigravity never signs in with an account.
   const hubUsesAiAccounts = useHubUsesAiAccounts(environmentId ?? undefined);
+  const [refusedAiCredential, setRefusedAiCredential] = useState<string | null>(null);
+  const aiCredentialsLeft = hubUsesAiAccounts ? aiCredentialLeftovers(instance) : [];
   const disabledOptions =
     hubUsesAiAccounts && instance.driver === "antigravity" ? ANTIGRAVITY_HUB_DISABLED : undefined;
   const storedCustomModels =
@@ -866,6 +875,12 @@ export function ProviderInstanceCard({
 
   const updateEnvironment = (environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>) => {
     const cleaned = environment.filter((variable) => variable.name.trim().length > 0);
+    // Spec 4 ticket 09: on a Hub on AI accounts an AI credential goes to Settings → AI accounts.
+    const refused = hubUsesAiAccounts
+      ? aiCredentialAdded(instance.environment, cleaned)
+      : undefined;
+    setRefusedAiCredential(refused ?? null);
+    if (refused !== undefined) return;
     const { environment: _omit, ...rest } = instance;
     onUpdate(
       cleaned.length > 0
@@ -873,7 +888,9 @@ export function ProviderInstanceCard({
         : (rest as ProviderInstanceConfig),
     );
   };
-  const environmentFields = driverOption?.environmentFields ?? [];
+  const environmentFields = (driverOption?.environmentFields ?? []).filter(
+    (field) => !(hubUsesAiAccounts && isAiCredentialVariable(field.name)),
+  );
   const environmentFieldNames = new Set(environmentFields.map((field) => field.name));
   const genericEnvironment = providerEnvironmentWithoutNames(
     instance.environment,
@@ -1239,6 +1256,7 @@ export function ProviderInstanceCard({
       managed={instanceLocks && { keys: instanceLocks.configKeys, reason: instanceLocks.reason }}
       environmentId={environmentId}
       disabledOptions={disabledOptions}
+      hiddenKeys={hubUsesAiAccounts ? aiCredentialFieldsOf(instance.driver) : undefined}
     />
   ) : (
     <SettingsRow
@@ -1353,6 +1371,24 @@ export function ProviderInstanceCard({
       >
         {instanceLocks?.wholeEnvironment ? (
           <ManagedNotice>{instanceLocks.reason}</ManagedNotice>
+        ) : null}
+        {refusedAiCredential !== null ? (
+          <p role="alert" className="px-4 pt-3 text-xs text-destructive sm:px-5">
+            <code>{refusedAiCredential}</code> is an AI credential: add it in{" "}
+            <Link to="/settings/ai-accounts" className="underline underline-offset-2">
+              Settings → AI accounts
+            </Link>
+            .
+          </p>
+        ) : null}
+        {aiCredentialsLeft.length > 0 ? (
+          <p className="px-4 pt-3 text-xs text-warning sm:px-5">
+            {aiCredentialsLeft.join(", ")} could not be moved into an AI account. Add the key in{" "}
+            <Link to="/settings/ai-accounts" className="underline underline-offset-2">
+              Settings → AI accounts
+            </Link>
+            , then remove it here.
+          </p>
         ) : null}
         <div className={instanceLocks?.wholeEnvironment ? "opacity-50" : undefined}>
           <ProviderEnvironmentSection

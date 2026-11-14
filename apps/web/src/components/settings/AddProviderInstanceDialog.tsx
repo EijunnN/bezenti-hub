@@ -58,6 +58,8 @@ import { AddManagedCodexAccountDialog } from "./CodexSetupSection";
 import { MultipleAccountsNote } from "./MultipleAccountsNote";
 import { ProviderEnvironmentSection } from "./ProviderInstanceCard";
 import { useSecretSources } from "./SecretSourceInput";
+import { aiCredentialFieldsOf } from "./aiCredentialSettings.logic";
+import { useHubUsesAiAccounts } from "./useHubUsesAiAccounts";
 
 /** Limit the slug to 48 chars so the composed ProviderInstanceId fits its 64-char cap. */
 function slugifyLabel(value: string): string {
@@ -171,6 +173,8 @@ export function AddProviderInstanceDialog({
   const [addingChatGptAccount, setAddingChatGptAccount] = useState(false);
   // Drivers the administrator's policy leaves out are not offered at all.
   const managedPolicy = useManagedPolicy(environmentId);
+  // Spec 4 ticket 09: a Hub on AI accounts takes AI credentials only in Settings → AI accounts.
+  const hubUsesAiAccounts = useHubUsesAiAccounts(environmentId);
   const featuredDriverOptions = FEATURED_DRIVER_OPTIONS.filter((option) =>
     isManagedDriverAllowed(managedPolicy, option.driverKind),
   );
@@ -708,6 +712,7 @@ export function AddProviderInstanceDialog({
                       driverLocks && { keys: driverLocks.configKeys, reason: driverLocks.reason }
                     }
                     environmentId={environmentId}
+                    hiddenKeys={hubUsesAiAccounts ? aiCredentialFieldsOf(driver) : undefined}
                   />
                 </SettingsGroup>
               ) : !isAcpRegistry && wizardStep === 2 ? (
