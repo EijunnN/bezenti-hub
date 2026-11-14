@@ -40,6 +40,9 @@ vi.mock("../../state/query", () => ({
 vi.mock("../../state/use-atom-command", () => ({
   useAtomCommand: (command: { id: string }) => mocks.commands[command.id],
 }));
+vi.mock("../../state/spaces", () => ({
+  useSpaceSelections: () => new Map([["hub", { view: { userId: "u1" } }]]),
+}));
 vi.mock("../../state/hubLinks", () => ({ readHubLinkOrigin: () => "https://hub.example.com" }));
 vi.mock("../../lib/copyTextWithHaptic", () => ({
   tryCopyTextWithHaptic: (text: string) => {
@@ -184,6 +187,21 @@ describe("Local CLI keys on mobile", () => {
     expect(mocks.copied).toEqual(["t3gw-secret-1"]);
     await click("Done");
     expect(text()).not.toContain("t3gw-secret-1");
+  });
+
+  it("shows the Owner only their own keys, never Revoke on someone else's", async () => {
+    await setup();
+    mocks.commands.listKeys = vi.fn(() =>
+      ok({
+        everyone: true,
+        keys: [userKey, { ...userKey, keyId: "k9", name: "Grace desktop", userId: "u2" }],
+      }),
+    );
+    await render(null);
+    await render(<LocalCliKeys environmentId={hub} />);
+    expect(text()).toContain("Laptop");
+    expect(text()).not.toContain("Grace desktop");
+    expect(byLabel("Revoke Grace desktop")).toBeNull();
   });
 
   it("revokes a key", async () => {

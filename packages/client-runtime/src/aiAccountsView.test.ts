@@ -1,7 +1,14 @@
 import type { AiAccountSummary } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { accountRows, MOBILE_FORBIDDEN_AI_METHODS, quotaText } from "./aiAccountsView.ts";
+import {
+  accountRows,
+  aiAccountSelection,
+  MOBILE_FORBIDDEN_AI_METHODS,
+  ownKeys,
+  quotaText,
+  withAiAccount,
+} from "./aiAccountsView.ts";
 
 const account = (over: Record<string, unknown>): AiAccountSummary =>
   ({
@@ -81,5 +88,38 @@ describe("MOBILE_FORBIDDEN_AI_METHODS", () => {
     expect(MOBILE_FORBIDDEN_AI_METHODS).toContain("aiAccounts.login.complete");
     expect(MOBILE_FORBIDDEN_AI_METHODS).toContain("aiGateway.update");
     expect(MOBILE_FORBIDDEN_AI_METHODS).toContain("aiAccounts.create");
+  });
+});
+
+describe("ownKeys", () => {
+  const keys = [
+    { keyId: "k1", userId: "ada" },
+    { keyId: "k2", userId: "olivia" },
+  ];
+  it("keeps only the viewer's keys, even in the Owner's list of everyone's", () => {
+    expect(ownKeys(keys, "olivia").map((key) => key.keyId)).toEqual(["k2"]);
+    expect(ownKeys(keys, null)).toEqual([]);
+  });
+});
+
+describe("aiAccountSelection", () => {
+  const thread = { instanceId: "claudeAgent", model: "m", aiAccountId: "a2" } as never;
+  it("mid-Thread, the account is the Thread's whatever the composer's draft selection says", () => {
+    const draft = { instanceId: "claudeAgent", model: "m2" } as never;
+    expect(aiAccountSelection({ isDraft: false, thread, draft })).toMatchObject({
+      model: "m2",
+      aiAccountId: "a2",
+    });
+  });
+  it("on a new-task draft, the draft's own selection stands", () => {
+    expect(aiAccountSelection({ isDraft: true, thread, draft: null })).toBe(thread);
+  });
+});
+
+describe("withAiAccount", () => {
+  it("puts the chosen account into the selection", () => {
+    expect(withAiAccount({ instanceId: "x", model: "m" } as never, "a1" as never)).toMatchObject({
+      aiAccountId: "a1",
+    });
   });
 });

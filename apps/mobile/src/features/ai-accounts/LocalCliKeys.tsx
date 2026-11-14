@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { ownKeys } from "@t3tools/client-runtime/ai-accounts-view";
 import type { AiGatewayKeyListResult, AiGatewayUserKey, EnvironmentId } from "@t3tools/contracts";
 import { gatewayOrigin, localCliSetup } from "@t3tools/shared/aiGatewayLocalCli";
 import * as Redacted from "effect/Redacted";
@@ -11,6 +12,7 @@ import { ListSection } from "../../components/ui/ListSection";
 import { tryCopyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import { aiGatewayEnvironment } from "../../state/aiGateway";
 import { readHubLinkOrigin } from "../../state/hubLinks";
+import { useSpaceSelections } from "../../state/spaces";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { commandFailureMessage } from "./failureMessage";
 
@@ -28,6 +30,7 @@ export function LocalCliKeys(props: { readonly environmentId: EnvironmentId }) {
   const revoke = useAtomCommand(aiGatewayEnvironment.revokeKey, "revoke a local CLI key");
   const mayCreate = useAtomValue(aiGatewayEnvironment.createKey.permissionAtom(environmentId));
   const mayRevoke = useAtomValue(aiGatewayEnvironment.revokeKey.permissionAtom(environmentId));
+  const viewerId = useSpaceSelections().get(environmentId)?.view?.userId ?? null;
   const [listed, setListed] = useState<AiGatewayKeyListResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [name, setName] = useState("");
@@ -53,6 +56,7 @@ export function LocalCliKeys(props: { readonly environmentId: EnvironmentId }) {
     };
   }, [environmentId]);
 
+  const mine = listed === null ? [] : ownKeys(listed.keys, viewerId);
   const origin = gatewayOrigin(readHubLinkOrigin(environmentId) ?? "");
   const setup = made === null || origin === null ? null : localCliSetup(origin, made.secret);
 
@@ -139,10 +143,10 @@ export function LocalCliKeys(props: { readonly environmentId: EnvironmentId }) {
           )}
         </View>
       )}
-      {listed === null ? null : listed.keys.length === 0 ? (
+      {listed === null ? null : mine.length === 0 ? (
         <Text className="px-4 py-3 text-sm text-foreground-muted">No local CLI key yet.</Text>
       ) : (
-        listed.keys.map((key) => (
+        mine.map((key) => (
           <View key={key.keyId} className="gap-1 px-4 py-3">
             <Text className="text-base text-foreground">{key.name}</Text>
             <Text className="text-xs text-foreground-muted">

@@ -5,7 +5,9 @@
 import {
   type AiAccountDetails,
   type AiAccountStatus,
+  type AiAccountId,
   type AiAccountSummary,
+  type ModelSelection,
   WS_METHODS,
 } from "@t3tools/contracts";
 
@@ -88,3 +90,33 @@ export const MOBILE_FORBIDDEN_AI_METHODS: ReadonlyArray<string> = [
   WS_METHODS.aiGatewayRollback,
   WS_METHODS.aiGatewaySetEnabled,
 ];
+
+/** The viewer's own keys: the Hub's list for the Owner holds everyone's, and Revoke is the Owner's there. */
+export function ownKeys<K extends { readonly userId: string }>(
+  keys: ReadonlyArray<K>,
+  userId: string | null,
+): ReadonlyArray<K> {
+  return userId === null ? [] : keys.filter((key) => key.userId === userId);
+}
+
+/**
+ * The selection the account strip reads. Mid-Thread the composer's draft selection (model, provider)
+ * carries no account, so the account is the Thread's own; a new-task draft's selection stands.
+ */
+export function aiAccountSelection(input: {
+  readonly isDraft: boolean;
+  readonly thread: ModelSelection;
+  readonly draft: ModelSelection | null | undefined;
+}): ModelSelection {
+  if (input.isDraft) return input.thread;
+  const base = input.draft ?? input.thread;
+  const { aiAccountId: _draftAccount, ...rest } = base;
+  return input.thread.aiAccountId === undefined
+    ? rest
+    : { ...rest, aiAccountId: input.thread.aiAccountId };
+}
+
+export const withAiAccount = (
+  selection: ModelSelection,
+  aiAccountId: AiAccountId,
+): ModelSelection => ({ ...selection, aiAccountId });

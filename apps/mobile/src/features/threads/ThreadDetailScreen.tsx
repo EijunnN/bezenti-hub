@@ -45,6 +45,7 @@ import { NativeLayoutObserver } from "../../native/NativeLayoutObserver";
 import { useThreadRolePermissions } from "../../state/spaces";
 import { deriveBottomControlInsets, type NativeLayoutMetrics } from "../../lib/reserved-regions";
 import type {
+  AiAccountId,
   EnvironmentId,
   MessageId,
   ProviderInteractionMode,
@@ -153,7 +154,7 @@ import { scopedThreadKey } from "../../lib/scopedEntities";
 import { ThreadAiAccountStrip } from "../ai-accounts/ThreadAiAccountStrip";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { useQuietThreadStructure } from "../../state/use-thread-detail";
-import { updateThreadDraftModelSelection } from "../../state/use-thread-composer-state";
+import { aiAccountSelection } from "@t3tools/client-runtime/ai-accounts-view";
 import { useComposerDraftSettings } from "../../state/use-composer-drafts";
 import {
   finishThreadMessageJump,
@@ -230,6 +231,8 @@ export interface ThreadDetailScreenProps {
     readonly editorRef: React.RefObject<ComposerEditorHandle | null>;
     readonly sendBlockedReason: string | null;
     readonly interactionLocked: boolean;
+    /** Writes the account into the draft the new-task flow sends the first message from. */
+    readonly chooseAiAccount: (accountId: AiAccountId) => void;
   };
   readonly worktreeSetup?: WorktreeSetupCardProps | null;
   readonly setupWorkingStartedAt?: string | null;
@@ -1817,21 +1820,15 @@ function ThreadDetailBody(
                         isDraft={Boolean(props.draftMode)}
                         spaceId={aiProject?.spaceId ?? null}
                         threadEnvironmentId={props.selectedThread.activeEnvironmentId}
-                        modelSelection={
-                          aiDraftSettings.modelSelection ?? props.selectedThread.modelSelection
-                        }
+                        modelSelection={aiAccountSelection({
+                          isDraft: Boolean(props.draftMode),
+                          thread: props.selectedThread.modelSelection,
+                          draft: aiDraftSettings.modelSelection,
+                        })}
                         providers={props.serverConfig?.providers ?? []}
                         structure={aiStructure?.projection ?? null}
                         onChooseDraft={(aiAccountId) =>
-                          updateThreadDraftModelSelection(
-                            selectedThreadKey,
-                            {
-                              ...(aiDraftSettings.modelSelection ??
-                                props.selectedThread.modelSelection),
-                              aiAccountId,
-                            },
-                            props.serverConfig?.providers ?? [],
-                          )
+                          props.draftMode?.chooseAiAccount(aiAccountId)
                         }
                       />
                       <ThreadComposer
