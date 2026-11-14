@@ -1,11 +1,4 @@
-import {
-  type AiAccountPickerResult,
-  type AiAccountProvider,
-  type OrchestrationV2ProviderTurn,
-  type ProviderSessionAiAccount,
-  type RunAttemptId,
-} from "@t3tools/contracts";
-import { aiAccountFallbackName } from "../aiAccountPicker";
+import { type OrchestrationV2ProviderTurn, type RunAttemptId } from "@t3tools/contracts";
 import {
   deriveLatestThreadRun,
   deriveThreadRuntime,
@@ -1559,57 +1552,6 @@ export function presentThreadShellFromProjection(
     }),
     latestRun,
     runtime,
-  };
-}
-
-/**
- * The Hub AI account the Thread's live provider session runs on (spec 4 ticket 06): its latest
- * session of the Thread's provider instance, while it has not stopped.
- */
-export function deriveThreadAiAccount(projection: ThreadStructure | null) {
-  if (projection === null) return null;
-  const session = projection.providerSessions.findLast(
-    (candidate) => candidate.providerInstanceId === projection.thread.providerInstanceId,
-  );
-  if (session === undefined || session.status === "stopped") return null;
-  return session.aiAccount ?? null;
-}
-
-/** The AI account the Thread's header shows: named only from the viewer's own picker. */
-export interface ThreadAiAccountLabel {
-  readonly id: string;
-  readonly name: string;
-  readonly provider: AiAccountProvider;
-  readonly model: string | null;
-}
-
-/**
- * Spec 4 ticket 08: the account in use (its live session's, kept current after a failover), else
- * the one the Thread chose; its name from the accounts this viewer may use, else its provider's.
- */
-export function nameThreadAiAccount(input: {
-  readonly session: ProviderSessionAiAccount | null;
-  readonly threadSelection: ModelSelection | null | undefined;
-  readonly picker: AiAccountPickerResult | null | undefined;
-}): ThreadAiAccountLabel | null {
-  const known = (id: string) => input.picker?.accounts.find((account) => account.id === id);
-  if (input.session !== null) {
-    const account = known(input.session.id);
-    return {
-      id: input.session.id,
-      name: account?.name ?? aiAccountFallbackName(input.session.provider),
-      provider: input.session.provider,
-      model: input.session.model,
-    };
-  }
-  const chosen = input.threadSelection?.aiAccountId;
-  const account = chosen === undefined ? undefined : known(chosen);
-  if (account === undefined || input.threadSelection == null) return null;
-  return {
-    id: account.id,
-    name: account.name,
-    provider: account.provider,
-    model: input.threadSelection.model,
   };
 }
 

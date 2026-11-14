@@ -1,3 +1,4 @@
+import { AI_ACCOUNT_STATUS_LABELS, quotaText } from "@t3tools/client-runtime/ai-accounts-view";
 import { fetchInstallationUsers } from "@t3tools/client-runtime/spaces/space-directory";
 import {
   type AtomCommandResult,
@@ -6,7 +7,6 @@ import {
 import type {
   AiAccountDetails,
   AiAccountProvider,
-  AiAccountStatus,
   AiAccountLoginStartResult,
   AiAccountSummary,
   AiAccountUpdateInput,
@@ -101,17 +101,6 @@ const TOS_WARNING =
   "Sharing a personal subscription with your team may break the provider's terms; the provider may suspend the account. API keys and per-seat plans are the compliant choice.";
 const ANTIGRAVITY_NOTE =
   "CLIProxyAPI disguises its Antigravity traffic (hardened in v8.0.65), a sign that Google detects and may suspend this use.";
-
-const STATUS_LABELS: Readonly<Record<AiAccountStatus, string>> = {
-  pending: "Waiting for the AI gateway",
-  working: "Working",
-  unverified: "In the gateway, unverified",
-  error: "Error",
-  disabled: "Disabled",
-  removing: "Still live in the gateway",
-  "needs-sign-in": "Needs sign-in again",
-  "quota-exhausted": "Quota exhausted",
-};
 
 const splitModels = (text: string) =>
   text
@@ -851,16 +840,6 @@ function ImportVertexForm(props: {
   );
 }
 
-/** A subscription's quota windows, as its provider reports them. */
-const quotaText = (details: AiAccountDetails) =>
-  details.usageLimits === undefined || details.usageLimits === null
-    ? null
-    : details.usageLimits.windows.length === 0
-      ? null
-      : `Quota: ${details.usageLimits.windows
-          .map((window) => `${window.label} ${Math.round(window.usedPercent)}% used`)
-          .join(", ")}.`;
-
 function AccountSection(props: {
   readonly environmentId: EnvironmentId;
   readonly commands: AccountCommands;
@@ -939,7 +918,7 @@ function AccountSection(props: {
                   : "secondary"
               }
             >
-              {STATUS_LABELS[account.status]}
+              {AI_ACCOUNT_STATUS_LABELS[account.status]}
             </Badge>
           </span>
         }

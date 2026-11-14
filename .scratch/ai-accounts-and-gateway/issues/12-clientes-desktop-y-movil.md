@@ -4,7 +4,7 @@
 
 **Blocked by:** 08, 10.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Datos de AI accounts, cuenta en uso y uso del Thread por la fuente compartida de client-runtime.
 - [ ] Desktop: todo lo de web, incluido el login de suscripciones con la URL pegada.
@@ -13,3 +13,10 @@
 - [ ] Puertas: ninguna nueva.
 - [ ] Tests de componentes en móvil (no hay Expo web) y de client-runtime.
 - [ ] Prueba real: desktop contra el Hub dev (selector, header, Settings); móvil en dispositivo si está disponible (este spec toca móvil: preparar las instrucciones de build para el Owner), si no, tests de componentes.
+
+## Hecho
+
+- Lógica compartida (picker, uso, filas de cuentas) movida a client-runtime; web y móvil la importan.
+- Desktop = bundle web: mismas pantallas; el enlace de inicio de sesión se abre en el navegador del sistema (test en `ElectronShell.test.ts`); prueba real contra el Hub dev.
+- Móvil: Settings → AI accounts (estado, cuotas, uso; solo lectura), «Local CLI keys» propias (crear, copiar una vez, revocar), franja de cuenta y modelo sobre el composer con selector. Sin llamadas a `aiAccounts.login.*` ni `aiGateway.update` (`noOwnerControls.test.ts`, visto en rojo).
+- Cuenta y modelo en una franja sobre el composer, no en el header nativo (sin hueco de subtítulo). Sin dispositivo: instrucciones de build en `docs/internals/ai-gateway.md`.

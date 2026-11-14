@@ -15,10 +15,19 @@ export const nativeMocks = {
     AppText: ({
       children,
       accessibilityRole,
+      accessibilityLabel,
     }: {
       children?: ReactNode;
       accessibilityRole?: string;
-    }) => <span role={accessibilityRole === "alert" ? "alert" : undefined}>{children}</span>,
+      accessibilityLabel?: string;
+    }) => (
+      <span
+        role={accessibilityRole === "alert" ? "alert" : undefined}
+        aria-label={accessibilityLabel}
+      >
+        {children}
+      </span>
+    ),
     AppTextInput: ({
       accessibilityLabel,
       value,

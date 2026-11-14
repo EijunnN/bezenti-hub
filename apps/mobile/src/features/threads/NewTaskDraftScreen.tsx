@@ -12,6 +12,7 @@ import { useRememberThreadProject } from "./useRememberThreadProject";
 import { scopedProjectKey } from "../../lib/scopedEntities";
 import { connectionTone } from "../connection/connectionTone";
 import { AppBar } from "../../components/ui/AppBar";
+import { withAiAccount } from "@t3tools/client-runtime/ai-accounts-view";
 import { ThreadId } from "@t3tools/contracts";
 
 import * as Dialog from "../../components/ui/Dialog";
@@ -933,6 +934,12 @@ export function NewTaskDraftScreen(props: {
           editorRef: promptInputRef,
           sendBlockedReason: setupBlockReason,
           interactionLocked: isComposerInteractionLocked,
+          chooseAiAccount: (accountId) => {
+            if (!flow.draftKey || !flow.selectedModel) return;
+            updateComposerDraftSettings(flow.draftKey, {
+              modelSelection: withAiAccount(flow.selectedModel, accountId),
+            });
+          },
         }}
         canOperateThread={canOperate}
         selectedThread={thread}

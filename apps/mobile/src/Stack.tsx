@@ -94,6 +94,7 @@ import { SettingsClientStorageRouteScreen } from "./features/settings/SettingsCl
 import { SettingsDiagnosticsRouteScreen } from "./features/diagnostics/SettingsDiagnosticsRouteScreen";
 import { SettingsProviderAccountsRouteScreen } from "./features/settings/SettingsProviderAccountsRouteScreen";
 import { SettingsVaultsRouteScreen } from "./features/settings/SettingsVaultsRouteScreen";
+import { SettingsAiAccountsRouteScreen } from "./features/settings/SettingsAiAccountsRouteScreen";
 import { SettingsEnvironmentDetailRouteScreen } from "./features/settings/SettingsEnvironmentDetailRouteScreen";
 import { SettingsEnvironmentsRouteScreen } from "./features/settings/SettingsEnvironmentsRouteScreen";
 import { SettingsFollowUpRouteScreen } from "./features/settings/SettingsFollowUpRouteScreen";
@@ -261,6 +262,11 @@ const SETTINGS_SCREENS = {
     screen: SettingsProviderAccountsRouteScreen,
     linking: "settings/provider-accounts",
     options: { ...SETTINGS_PAGE_OPTIONS, title: "Providers" },
+  }),
+  SettingsAiAccounts: createNativeStackScreen({
+    screen: SettingsAiAccountsRouteScreen,
+    linking: "settings/ai-accounts",
+    options: { ...SETTINGS_PAGE_OPTIONS, title: "AI accounts" },
   }),
   SettingsVaults: createNativeStackScreen({
     screen: SettingsVaultsRouteScreen,

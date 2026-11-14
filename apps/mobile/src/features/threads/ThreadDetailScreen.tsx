@@ -12,7 +12,11 @@ import * as Dialog from "../../components/ui/Dialog";
 import { useAtomMount, useAtomValue } from "@effect/atom-react";
 import { parseThreadKey, threadKey } from "@t3tools/client-runtime/state/entities";
 import { createThreadVisitTracker } from "@t3tools/client-runtime/state/thread-visits";
-import { useChildThreadInputs, useThreadReportedModelSelection } from "../../state/entities";
+import {
+  useChildThreadInputs,
+  useProject,
+  useThreadReportedModelSelection,
+} from "../../state/entities";
 import { UsageLimitRecoveryCard } from "./UsageLimitRecoveryCard";
 import { ChatGptUsageLimitNotice } from "./ChatGptUsageLimitNotice";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
@@ -41,6 +45,7 @@ import { NativeLayoutObserver } from "../../native/NativeLayoutObserver";
 import { useThreadRolePermissions } from "../../state/spaces";
 import { deriveBottomControlInsets, type NativeLayoutMetrics } from "../../lib/reserved-regions";
 import type {
+  AiAccountId,
   EnvironmentId,
   MessageId,
   ProviderInteractionMode,
@@ -146,6 +151,11 @@ import { ThreadBrowserFloat } from "../browser/ThreadBrowserFloat";
 import { useThreadServerBrowserTabs } from "../../state/preview";
 import type { QueuedThreadMessage } from "../../state/thread-outbox-model";
 import { scopedThreadKey } from "../../lib/scopedEntities";
+import { ThreadAiAccountStrip } from "../ai-accounts/ThreadAiAccountStrip";
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import { useQuietThreadStructure } from "../../state/use-thread-detail";
+import { aiAccountSelection } from "@t3tools/client-runtime/ai-accounts-view";
+import { useComposerDraftSettings } from "../../state/use-composer-drafts";
 import {
   finishThreadMessageJump,
   pendingThreadMessageJump,
@@ -221,6 +231,8 @@ export interface ThreadDetailScreenProps {
     readonly editorRef: React.RefObject<ComposerEditorHandle | null>;
     readonly sendBlockedReason: string | null;
     readonly interactionLocked: boolean;
+    /** Writes the account into the draft the new-task flow sends the first message from. */
+    readonly chooseAiAccount: (accountId: AiAccountId) => void;
   };
   readonly worktreeSetup?: WorktreeSetupCardProps | null;
   readonly setupWorkingStartedAt?: string | null;
@@ -485,6 +497,11 @@ function ThreadDetailBody(
   const nativeMetrics = usesNativeWorkspaceColumns ? columnMetrics : screenMetrics;
   const controlInsets = deriveBottomControlInsets(nativeMetrics);
   const selectedThreadKey = scopedThreadKey(props.environmentId, props.selectedThread.id);
+  const aiStructure = useQuietThreadStructure(props.selectedThreadDetailRef);
+  const aiProject = useProject(
+    scopeProjectRef(props.environmentId, props.selectedThread.projectId),
+  );
+  const aiDraftSettings = useComposerDraftSettings(selectedThreadKey);
   const childThreadInputs = useChildThreadInputs({
     environmentId: props.environmentId,
     threadId: props.selectedThread.id,
@@ -1797,6 +1814,23 @@ function ThreadDetailBody(
                     </View>
                   ) : (
                     <>
+                      <ThreadAiAccountStrip
+                        environmentId={props.environmentId}
+                        threadId={props.selectedThread.id}
+                        isDraft={Boolean(props.draftMode)}
+                        spaceId={aiProject?.spaceId ?? null}
+                        threadEnvironmentId={props.selectedThread.activeEnvironmentId}
+                        modelSelection={aiAccountSelection({
+                          isDraft: Boolean(props.draftMode),
+                          thread: props.selectedThread.modelSelection,
+                          draft: aiDraftSettings.modelSelection,
+                        })}
+                        providers={props.serverConfig?.providers ?? []}
+                        structure={aiStructure?.projection ?? null}
+                        onChooseDraft={(aiAccountId) =>
+                          props.draftMode?.chooseAiAccount(aiAccountId)
+                        }
+                      />
                       <ThreadComposer
                         isDraft={Boolean(props.draftMode)}
                         canOperateThread={props.canOperateThread}

@@ -518,6 +518,9 @@ export function NewTaskFlowProvider(
       : {
           instanceId: selectedModel.instanceId,
           model: selectedModel.model,
+          ...(selectedModel.aiAccountId === undefined
+            ? {}
+            : { aiAccountId: selectedModel.aiAccountId }),
         };
     updateComposerDraftSettings(selectedProjectDraftKey, {
       modelSelection: nextSelection,

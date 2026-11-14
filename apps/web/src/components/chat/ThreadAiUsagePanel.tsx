@@ -4,7 +4,7 @@ import { useState } from "react";
 import { aiGatewayEnvironment } from "../../state/aiGateway";
 import { useHubEnvironmentId } from "../../state/hubEnvironment";
 import { useEnvironmentQuery } from "../../state/query";
-import { dayBefore, formatTokens, usageNotes } from "../settings/aiUsageView";
+import { dayBefore, formatTokens, usageNotes } from "@t3tools/client-runtime/ai-usage-view";
 import { ThreadDetailsSection } from "./ThreadDetailsSection";
 
 /** Per-request rows are kept 90 days (spec 4 ticket 05). */

@@ -14,7 +14,7 @@ import {
   USAGE_GROUPINGS,
   type UsageGrouping,
   usageNotes,
-} from "./aiUsageView";
+} from "@t3tools/client-runtime/ai-usage-view";
 
 const RANGES = [
   { value: "7", label: "Last 7 days", days: 7 },
