@@ -93,6 +93,19 @@ describe("ElectronShell", () => {
     }).pipe(Effect.provide(ElectronShell.layer)),
   );
 
+  it.effect("opens an AI account's provider sign-in page in the system browser", () =>
+    Effect.gen(function* () {
+      openExternalMock.mockResolvedValue(undefined);
+      const electronShell = yield* ElectronShell.ElectronShell;
+      const result = yield* electronShell.openExternal(
+        "https://accounts.example.com/o/oauth2/auth?client_id=x&state=y",
+      );
+
+      assert.equal(result, true);
+      assert.equal(openExternalMock.mock.calls.length, 1);
+    }).pipe(Effect.provide(ElectronShell.layer)),
+  );
+
   it.effect("does not open unsafe external URLs", () =>
     Effect.gen(function* () {
       const electronShell = yield* ElectronShell.ElectronShell;
