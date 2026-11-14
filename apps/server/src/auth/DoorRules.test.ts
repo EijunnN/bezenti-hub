@@ -3,7 +3,7 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
-import { EnvironmentHttpApi, WsRpcGroup } from "@t3tools/contracts";
+import { EnvironmentHttpApi, SecretEnv, WsRpcGroup } from "@t3tools/contracts";
 import type * as SchemaAST from "effect/SchemaAST";
 import { describe, expect, it } from "@effect/vitest";
 import * as HttpApi from "effect/http-api/HttpApi";
@@ -213,6 +213,7 @@ describe("every door of the Hub declares its rule", () => {
         .map(({ file }) => file)
         .toSorted(),
     ).toEqual([
+      "ai/aiCredentialValue.ts", // a comment: how a direct AI credential is named there
       "persistence/Migrations/111_Vaults.ts",
       "persistence/Migrations/115_VaultReachLoss.ts",
       "persistence/Migrations/116_ThreadSecretValues.ts",
@@ -223,6 +224,21 @@ describe("every door of the Hub declares its rule", () => {
       "vaults/VaultReachLoss.ts",
       "vaults/Vaults.ts",
     ]);
+    // A direct AI account's credential (spec 4 ticket 07) is a value too: read in AiAccounts,
+    // handed only to the session manager opening a provider process (issueDirect), which
+    // remembers it for masking first; on the wire it is a variable of `secretEnv`, whose
+    // `aiCredential` only names it.
+    const directReaders = files
+      .filter(({ text }) => /\.directCredential\(/u.test(text))
+      .map(({ file }) => file);
+    expect(directReaders.toSorted()).toEqual(["ai/AiGatewaySessions.ts"]);
+    const issuers = files
+      .filter(({ text }) => /\.issueDirect\(/u.test(text))
+      .map(({ file }) => file);
+    expect(issuers.toSorted()).toEqual(["orchestration-v2/ProviderSessionManager.ts"]);
+    const sessions = files.find(({ file }) => file === "ai/AiGatewaySessions.ts")?.text ?? "";
+    expect(sessions).toMatch(/\.directCredential\([\s\S]*\.remember\([\s\S]*DirectSession/u);
+    expect(SecretEnv.fields.aiCredential.ast._tag).toBe("String");
     // No WS answer, of any RPC, can carry a process's secrets.
     for (const rpc of WsRpcGroup.requests.values()) {
       expect(successFields(rpc.successSchema.ast), rpc._tag).not.toContain("secretEnv");
