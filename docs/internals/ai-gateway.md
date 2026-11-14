@@ -425,8 +425,8 @@ Decisions; the code is `ai/AiGatewaySessions.ts` (the rule), `environments/AiGat
   session is released, on any failure or interruption of the open, and at every Hub start (no
   session survives one). A gateway session never serves another Thread.
 - **The account shown is the account routed**: the Thread's, else the first allowed by global
-  priority that serves the model, as the gateway's `planRoute` picks it. A failover is not shown
-  yet (ticket 08's header).
+  priority that serves the model, as the gateway's `planRoute` picks it. A failover or a switch
+  is shown as soon as a request goes to another account (ticket 08, below).
 - **The key travels like a secret** (`provider.openSession` only, environment only: never
   arguments, files, logs or the event store). Ambient AI variables are dropped and the gateway's
   set last, so neither the machine nor a Vault overrides them; Vaults refuse those names
@@ -510,6 +510,56 @@ next open refuses). Kiro, Muse, Devin and Grok keep their machine-user login fil
 variables are unset): the direct key takes precedence in each CLI, but their homes are not per
 Thread. Text generation of the other direct drivers (Cursor and the rest) is refused the same way
 as Antigravity's once AI accounts apply.
+
+## The AI account of a Thread (spec 4 ticket 08)
+
+Decisions; the rule is `ai/chooseAiAccount.ts` (one chooser, also the session plan's) and
+`ai/AiAccountChoice.ts` (the doors and the picker).
+
+- **One door for every transport.** `ThreadManagementService.dispatch` settles the selection's
+  `aiAccountId` (`AiAccountChoice.settle`) after the Space is claimed and the Thread placed, for
+  `thread.create`, `message.dispatch` (with a selection), `thread.model-selection.set`,
+  `provider.switch` and `delegated_task.request` (a child: its parent's owner, Space and machine).
+  WS, HTTP, MCP (`t3_thread_launch`, an agent's child Threads) and scheduled tasks all pass there.
+  Server work without a User or Space is left to the session plan.
+- **The rule** (only where `AiGatewaySessions.applies`): a named account must be in
+  `AllowedAiAccounts.for(turn owner, Thread's Space)`, taken by the driver (gateway agents: any
+  non-direct account; direct agents: a direct account of a provider they take) and, for the
+  gateway, serve the model when its catalog can be read. Else the command is refused
+  (`AiAccountChoiceError`: «This AI account is not allowed for this Thread in its Space», «… cannot
+  be used by this provider», «… does not serve <model>»): never another account, never a login.
+  The check is on the **turn owner** (whom the gateway key acts for), so an Admin cannot put a
+  Member's Thread on an account allowed only to the Admin; who may send the command at all is
+  still `commandAccess` (`thread.continue`).
+- **The default.** No account named: the Thread's own, while its provider instance stays (old
+  clients and agents never drop it; if it is no longer allowed the session plan refuses with
+  «Switch AI account»); else the first allowed by global priority that the driver takes and that
+  serves the model, written into the Thread. None: the selection goes on without one and the plan
+  says why when a turn starts; the composer says it before sending.
+- **`thread.setAiAccount`** (WS, `RPC_SPACE_ACCESS` `thread`, scope `orchestration:operate`) is
+  only sugar: same provider instance → `thread.model-selection.set` (the gateway reads the
+  Thread's `modelSelection.aiAccountId` on every request, so the next request goes to the new
+  account, even mid-turn; account changes are not a model change for the provider session);
+  another instance → `provider.switch` (spec 2 ticket 09's context handoff at the next turn). Both
+  go through the door above.
+- **The picker** (`aiAccounts.picker {spaceId, environmentId?}`, WS, unscoped with its reason):
+  AllowedAiAccounts for the session's User in that Space (nothing, not even names, in a Space they
+  do not work in or outside `spaceLimit`), with each gateway account's models (its prefix's
+  catalog) and `null` for a direct one; `applies` says whether turns there run on AI accounts.
+- **Availability in the clients.** Where `applies`, a gateway or direct agent is ready only with a
+  compatible allowed account; its machine login (auth status, sign-in prompts) is ignored; a
+  gateway agent lists its accounts' models, other families labeled (Gemini under Claude Code).
+  None: «No AI account is allowed for you in <Space>». The composer has an «AI account» select
+  (the accounts that fit the provider and model, first by priority); mid-Thread it calls
+  `thread.setAiAccount`.
+- **The header** shows the account in use: `ProviderSessionManager` follows
+  `AiGatewayActivity.subscribeAccountsInUse` and re-emits `provider-session.updated` for the live
+  session (after a failover, or the first request after a switch). The projection carries the
+  account's id, provider and model, **never its name**, since every viewer of the Space reads it:
+  each client names it from its own picker, else «<Provider> account». Events written before
+  ticket 08 still hold the name they had.
+- **Routing** of the Hub's provider switch plan (`ProviderSwitchService`) asks an instance's
+  metadata from the Environment that has it when the Hub machine lacks it, as `get` already did.
 
 ## Known exception to «no upstream services»
 
