@@ -17,7 +17,6 @@ import {
   UserId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -26,7 +25,9 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import { threadTurnOwner } from "../orchestration-v2/threadTurnOwner.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as AuditLog from "../audit/AuditLog.ts";
 import * as AiAccounts from "./AiAccounts.ts";
+import * as AiGatewayKeys from "./AiGatewayKeys.ts";
 import * as AllowedAiAccounts from "./AllowedAiAccounts.ts";
 import { chooseAiAccount, gatewayModelOf } from "./chooseAiAccount.ts";
 
@@ -213,12 +214,13 @@ const make = Effect.gen(function* () {
     readonly catalogs: Catalogs;
   }) {
     const { thread } = input;
-    const at = DateTime.formatIso(yield* DateTime.now);
     // Its keys were for the Space it leaves: over for good, whoever holds one.
-    yield* sql`
-      UPDATE ai_gateway_keys SET revoked_at = ${at}, revoked_reason = 'thread-moved'
-      WHERE thread_id = ${thread.threadId} AND revoked_at IS NULL
-    `.pipe(Effect.catch(failed("revoke the Thread's AI gateway keys")));
+    yield* AiGatewayKeys.revokeWithin(
+      sql,
+      AuditLog.cliActor,
+      { threadId: thread.threadId },
+      "thread-moved",
+    ).pipe(Effect.catch(failed("revoke the Thread's AI gateway keys")));
     const owner = yield* ownerOf(thread.threadId);
     const { aiAccountId: chosen, ...rest } = thread.modelSelection;
     if (Option.isNone(owner)) return rest as ModelSelection;

@@ -561,6 +561,53 @@ Decisions; the rule is `ai/chooseAiAccount.ts` (one chooser, also the session pl
 - **Routing** of the Hub's provider switch plan (`ProviderSwitchService`) asks an instance's
   metadata from the Environment that has it when the Hub machine lacks it, as `get` already did.
 
+## Moving a Project and removals (spec 4 ticket 11)
+
+The rule stays `AllowedAiAccounts.for(turn owner, the Thread's Space now)`, checked by the gateway
+on every request. What ticket 11 adds is that the records, the Threads' choices and the live
+processes agree with it at once, in the write that ends a reach (`ai/AiAccountReach.ts`,
+`ai/AiAccountReachLoss.ts`, `orchestration-v2/AiSessionReach.ts`), as Vaults do
+(docs/internals/secrets.md, «Losing reach»).
+
+| How reach is lost                                                                            | In the same transaction                                                                                                                                                                                                                                                  | Live processes                                             |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------- |
+| A Project moves to another Space                                                             | each Thread's commit (`thread.space.move`): its gateway keys revoked (`thread-moved`, the old key answers 401), its `modelSelection.aiAccountId` kept if allowed to its turn owner there, else the first allowed one its driver takes, else none («needs an AI account») | closed after the commit (`reconcileAiSessions`)            |
+| A User is removed                                                                            | every key of theirs revoked (`user-inactive`, User keys audited `ai_gateway_key.revoke` by the Owner), every allowance to them and to their Personal space dropped (audited `ai_account.allow`)                                                                          | closed after the commit                                    |
+| An Organization is deleted                                                                   | its Threads go first (their keys with them); then the keys made for its Space (`space-lost`) and its allowances, audited                                                                                                                                                 | ended with its Threads                                     |
+| An allowance taken back, an account disabled or deleted, a Membership ended, a User disabled | nothing to drop: the next request is refused (a Thread key is refused, never revoked, when its turn owner merely lost access)                                                                                                                                            | closed (`AiAccountChanges`, the Space directory's watches) |
+
+- **The move plan** (`POST /api/projects/move-plan`, same door and rule as before) answers
+  `aiAccountsLost`: each account a Thread chose that its turn owner may not use in the destination,
+  with how many Threads use it. The name only for an account allowed to the Space it leaves (its
+  viewers see it there); otherwise `null`, and clients say «<Provider> account». The dialog lists
+  them under «AI accounts it loses». A Thread left without one shows the composer's «AI account»
+  select (ticket 08).
+- **The re-choice** runs inside the Thread's move transaction: the allowed set is read there, so an
+  allowance taken back meanwhile is seen. The catalogs that pick an account serving the model are
+  read before any write (`catalogsFor`); none readable: the first compatible account. The driver is
+  the Thread's last session's, else its instance's.
+- **Live processes: closed, not restarted** (`AiSessionReach`). Each provider session started on an
+  AI account keeps what it was started for (`aiFacts`: turn owner, Space, account; the session
+  plan's). A check reads the live sessions from memory, their Threads in one query and the allowed
+  accounts once per owner, and releases every session whose Thread is in another Space, has another
+  turn owner, is gone, or whose account is no longer allowed to them there. Requests coalesce (one
+  pending at most); they come from a move, a removal, Membership and User status changes, an
+  account's allowances, disablement or deletion, and each machine as it connects. A machine away
+  when its session is released is told on its return (`provider.detach`, then `retired`). The next
+  turn opens a new process by its fingerprint, which holds the Space. A direct credential is thus
+  gone from a process's environment once its reach ends; a gateway key is refused per request anyway.
+- **Keys** are still written by `AiGatewayKeys` alone: a move or removal calls `revokeWithin` inside
+  its own transaction. A request in flight when its key is revoked finishes; the next is refused.
+- Migration **118** (`AiAccountReachLoss`) drops once what earlier Hubs left: allowances to Spaces
+  that are gone, to removed Users and their Personal spaces; live keys of removed Users and of
+  Spaces that are gone.
+
+**Accepted risks.** Between the commit and the check (milliseconds, or a machine's return), an idle
+process still holds its direct credential; it runs no turn of the new Space (that needs a new
+process). Whatever such a process started outside its session keeps it, as with terminals. A
+Thread whose model no default account serves gets the first compatible one, and its turn says
+«does not serve <model>» rather than silently changing model.
+
 ## Keys moved from provider instances (spec 4 ticket 09)
 
 Decisions; the rule is `ai/ProviderKeyMigration.ts` (`aiAccountsInUse`, `migrateProviderKeys`), the

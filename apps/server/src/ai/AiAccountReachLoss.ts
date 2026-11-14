@@ -4,11 +4,11 @@
  * check (`AiGatewayKeys.authorize`) refuses them anyway; this keeps the record true at once.
  */
 import type { SpaceId, UserId } from "@t3tools/contracts";
-import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import type * as SqlClient from "effect/sql/SqlClient";
 
 import * as AuditLog from "../audit/AuditLog.ts";
+import * as AiGatewayKeys from "./AiGatewayKeys.ts";
 
 /**
  * Drops every allowance to these subjects, each account's audited `ai_account.allow` with what
@@ -58,36 +58,6 @@ const dropAllowances = Effect.fn("AiAccountReachLoss.dropAllowances")(function* 
   }
 });
 
-/** Revokes these live keys, each User key audited `ai_gateway_key.revoke` with `reason`. */
-const revokeKeysWhere = Effect.fn("AiAccountReachLoss.revokeKeysWhere")(function* (
-  sql: SqlClient.SqlClient,
-  actor: AuditLog.AuditActor,
-  where: ReturnType<SqlClient.SqlClient["and"]>,
-  reason: string,
-) {
-  const at = DateTime.formatIso(yield* DateTime.now);
-  const revoked = yield* sql<{
-    readonly keyId: string;
-    readonly kind: string;
-    readonly name: string;
-    readonly spaceId: string;
-  }>`
-    UPDATE ai_gateway_keys SET revoked_at = ${at}, revoked_reason = ${reason}
-    WHERE revoked_at IS NULL AND ${where}
-    RETURNING key_id AS "keyId", kind AS "kind", name AS "name", space_id AS "spaceId"
-  `;
-  const write = AuditLog.write(sql);
-  for (const row of revoked) {
-    if (row.kind !== "user") continue;
-    yield* write({
-      actor,
-      action: "ai_gateway_key.revoke",
-      target: { kind: "ai_gateway_key", id: row.keyId, name: row.name },
-      detail: { kind: row.kind, space: row.spaceId, reason },
-    });
-  }
-});
-
 /**
  * A User removed from the Installation (inside `InstallationUserService`'s transaction): every
  * key of theirs revoked (`user-inactive`), every allowance to them and to their frozen Personal
@@ -98,7 +68,7 @@ export const forgetUser = Effect.fn("AiAccountReachLoss.forgetUser")(function* (
   actor: AuditLog.AuditActor,
   userId: UserId,
 ) {
-  yield* revokeKeysWhere(sql, actor, sql.and([sql`user_id = ${userId}`]), "user-inactive");
+  yield* AiGatewayKeys.revokeWithin(sql, actor, { userId }, "user-inactive");
   yield* dropAllowances(sql, actor, [
     { kind: "user", id: userId },
     { kind: "space", id: `personal:${userId}` },
@@ -114,6 +84,6 @@ export const forgetSpace = Effect.fn("AiAccountReachLoss.forgetSpace")(function*
   actor: AuditLog.AuditActor,
   spaceId: SpaceId,
 ) {
-  yield* revokeKeysWhere(sql, actor, sql.and([sql`space_id = ${spaceId}`]), "space-lost");
+  yield* AiGatewayKeys.revokeWithin(sql, actor, { spaceId }, "space-lost");
   yield* dropAllowances(sql, actor, [{ kind: "space", id: spaceId }]);
 });

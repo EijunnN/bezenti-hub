@@ -749,3 +749,42 @@ const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(AiGatewayKeys, make);
+
+/**
+ * Spec 4 ticket 11: revokes, inside the caller's write transaction, every live key of a Thread
+ * (it moved), of a User (removed) or made for a Space (deleted); each User key is audited.
+ */
+export const revokeWithin = Effect.fn("AiGatewayKeys.revokeWithin")(function* (
+  sql: SqlClient.SqlClient,
+  actor: AuditLog.AuditActor,
+  of: { readonly threadId: ThreadId } | { readonly userId: UserId } | { readonly spaceId: SpaceId },
+  reason: string,
+) {
+  const at = DateTime.formatIso(yield* DateTime.now);
+  const which =
+    "threadId" in of
+      ? sql`thread_id = ${of.threadId}`
+      : "userId" in of
+        ? sql`user_id = ${of.userId}`
+        : sql`space_id = ${of.spaceId}`;
+  const revoked = yield* sql<{
+    readonly keyId: string;
+    readonly kind: string;
+    readonly name: string;
+    readonly spaceId: string;
+  }>`
+    UPDATE ai_gateway_keys SET revoked_at = ${at}, revoked_reason = ${reason}
+    WHERE revoked_at IS NULL AND ${which}
+    RETURNING key_id AS "keyId", kind AS "kind", name AS "name", space_id AS "spaceId"
+  `;
+  const write = AuditLog.write(sql);
+  for (const row of revoked) {
+    if (row.kind !== "user") continue;
+    yield* write({
+      actor,
+      action: "ai_gateway_key.revoke",
+      target: { kind: "ai_gateway_key", id: row.keyId, name: row.name },
+      detail: { kind: row.kind, space: row.spaceId, reason },
+    });
+  }
+});

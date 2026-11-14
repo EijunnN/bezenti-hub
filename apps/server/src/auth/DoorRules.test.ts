@@ -329,13 +329,18 @@ describe("every door of the Hub declares its rule", () => {
     const gateway = Object.keys(RAW_ROUTE_RULES).filter((door) => door.startsWith("ai/"));
     expect(gateway).toEqual(["ai/AiGatewayRoute.ts: * `${AI_GATEWAY_ROUTE_PREFIX}/*`"]);
     expect(AMBIENT_COOKIE_RULES[gateway[0]!]).toHaveProperty("refused");
-    // Keys are read and written by AiGatewayKeys alone (the migration aside): no other door.
+    // Keys are read and written by AiGatewayKeys alone (the migrations aside): no other door.
+    // A move or a removal revokes them through it, inside its own transaction (ticket 11).
     expect(
       files
         .filter(({ text }) => /\bai_gateway_keys\b/u.test(text))
         .map(({ file }) => file)
         .toSorted(),
-    ).toEqual(["ai/AiGatewayKeys.ts", "persistence/Migrations/113_AiGatewayKeys.ts"]);
+    ).toEqual([
+      "ai/AiGatewayKeys.ts",
+      "persistence/Migrations/113_AiGatewayKeys.ts",
+      "persistence/Migrations/118_AiAccountReachLoss.ts",
+    ]);
     // The route reads no cookie and no session: only its key headers.
     for (const file of ["ai/AiGatewayRoute.ts", "ai/AiGatewayProxy.ts"]) {
       const text = files.find((entry) => entry.file === file)?.text ?? "";
