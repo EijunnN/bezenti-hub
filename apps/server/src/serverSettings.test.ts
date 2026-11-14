@@ -2809,7 +2809,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AI credentials",
         instance: { driver: codex, environment: [openAiKey] },
       });
       assert.equal(saved.providerInstances[codexId]?.environment?.[0]?.value, openAiKey.value);
-      yield* service.setAiCredentialGuard(Effect.succeed(false));
+      yield* service.setAiCredentialGuard!(Effect.succeed(false));
       yield* service.updateProviderInstance({
         operation: "upsert",
         instanceId: antigravityId,
@@ -2823,7 +2823,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AI credentials",
     () =>
       Effect.gen(function* () {
         const service = yield* ServerSettingsModule.ServerSettingsService;
-        yield* service.setAiCredentialGuard(Effect.succeed(true));
+        yield* service.setAiCredentialGuard!(Effect.succeed(true));
         const added = yield* service
           .updateProviderInstance({
             operation: "upsert",
@@ -2891,7 +2891,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AI credentials",
         instanceId: antigravityId,
         instance: { driver: antigravity, config: { apiKey: "AIza-left-over" } },
       });
-      yield* service.setAiCredentialGuard(Effect.succeed(true));
+      yield* service.setAiCredentialGuard!(Effect.succeed(true));
       const client = ServerSettingsModule.redactServerSettingsForClient(
         yield* service.getSettings,
         {
@@ -2939,7 +2939,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AI credentials",
   it.effect("the test layer applies the same rule", () =>
     Effect.gen(function* () {
       const service = yield* ServerSettingsModule.ServerSettingsService;
-      yield* service.setAiCredentialGuard(Effect.succeed(true));
+      yield* service.setAiCredentialGuard!(Effect.succeed(true));
       const refused = yield* service
         .updateProviderInstance({
           operation: "upsert",

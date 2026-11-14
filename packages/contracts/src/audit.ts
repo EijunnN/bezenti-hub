@@ -203,8 +203,9 @@ export const AUDIT_DETAIL_KEYS = {
   "ai_gateway.rollback": ["from", "version", "outcome", "reason"],
   /** `on` or `off`, as the Owner chose where the environment does not decide. */
   "ai_gateway.enable": ["to"],
-  /** The account's provider and type; never its credential, nor any part of it. */
-  "ai_account.create": ["provider", "type"],
+  /** The account's provider and type, and `via: "migration"` for a key moved from a provider
+   * instance at the Hub's start (spec 4 ticket 09); never its credential, nor any part of it. */
+  "ai_account.create": ["provider", "type", "via"],
   /** What changed: `from` and `to` on a rename, `disabled`, `credential` (replaced), `endpoint`. */
   "ai_account.update": ["provider", "from", "to", "disabled", "credential", "endpoint", "priority"],
   "ai_account.delete": ["provider"],

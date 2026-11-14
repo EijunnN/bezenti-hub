@@ -145,8 +145,27 @@ export class AiAccounts extends Context.Service<
       },
       AiAccountError
     >;
+    /**
+     * Ticket 09: a provider instance's key as the Owner's account, allowed to their Personal space
+     * only, in one transaction with its ledger row (`source`). No RPC reaches it. Already moved, or
+     * the same key moved from elsewhere: no new account (`created: false`).
+     */
+    readonly adoptProviderKey: (
+      input: AdoptProviderKeyInput,
+    ) => Effect.Effect<{ readonly accountId: string; readonly created: boolean }, AiAccountError>;
   }
 >()("t3/ai/AiAccounts") {}
+
+export interface AdoptProviderKeyInput {
+  /** `env:<instance>:<VARIABLE>` or `field:<instance>:<field>`. */
+  readonly source: string;
+  readonly ownerId: UserId;
+  readonly type: "api-key" | "direct";
+  readonly provider: AiAccountProvider;
+  /** Names to try, first free one wins (a number is added after the last). */
+  readonly names: ReadonlyArray<string>;
+  readonly key: Redacted.Redacted<string>;
+}
 
 const isAiAccountError = Schema.is(AiAccountError);
 
@@ -405,6 +424,7 @@ const unavailable = AiAccounts.of({
   loginComplete: refuse,
   importVertex: refuse,
   directCredential: refuse,
+  adoptProviderKey: refuse,
 });
 
 /** Options for tests: how often the Hub reads back refreshed tokens; how long a sign-in lasts. */
@@ -2323,6 +2343,118 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     return { credentialId, value: Redacted.make(new TextDecoder().decode(bytes.value)) };
   });
 
+  /** Ticket 09: an account of that provider and type holding `key`, if one of the moved does. */
+  const movedHolding = Effect.fn("AiAccounts.movedHolding")(function* (
+    provider: AiAccountProvider,
+    type: AiAccountType,
+    key: string,
+    accountIds: ReadonlyArray<string>,
+  ) {
+    if (accountIds.length === 0) return undefined;
+    const rows = yield* sql<{ readonly accountId: string; readonly credentialId: string | null }>`
+      SELECT account_id AS "accountId", credential_id AS "credentialId" FROM ai_accounts
+      WHERE deleted_at IS NULL AND provider = ${provider} AND type = ${type}
+        AND ${sql.in("account_id", accountIds)}
+    `.pipe(Effect.catch(storage("read the AI accounts")));
+    for (const row of rows) {
+      if (row.credentialId === null) continue;
+      const stored = yield* credentials
+        .get(row.credentialId)
+        .pipe(Effect.catch(storage("read an AI account's key")));
+      if (Option.isSome(stored) && new TextDecoder().decode(stored.value) === key) {
+        return row.accountId;
+      }
+    }
+    return undefined;
+  });
+
+  const adoptProviderKey = Effect.fn("AiAccounts.adoptProviderKey")(function* (
+    input: AdoptProviderKeyInput,
+  ) {
+    const key = Redacted.value(input.key).trim();
+    const problem = credentialProblem(key);
+    if (problem !== undefined) return yield* fail("invalid", problem);
+    if (
+      input.type === "direct"
+        ? !isAiDirectProvider(input.provider) || key.startsWith("{")
+        : !isAiApiKeyProvider(input.provider) || input.provider === "openai-compatible"
+    ) {
+      return yield* fail("invalid", "That key cannot become an AI account of that kind.");
+    }
+    const moved = yield* sql<{ readonly source: string; readonly accountId: string }>`
+      SELECT source, account_id AS "accountId" FROM ai_account_migrated_keys
+    `.pipe(Effect.catch(storage("read the moved keys")));
+    const at = yield* now;
+    const ledger = (accountId: string) => sql`
+      INSERT INTO ai_account_migrated_keys (source, account_id, migrated_at)
+      VALUES (${input.source}, ${accountId}, ${at})
+      ON CONFLICT (source) DO UPDATE SET account_id = excluded.account_id,
+        migrated_at = excluded.migrated_at
+    `;
+    const earlier = moved.find((row) => row.source === input.source);
+    if (earlier !== undefined) {
+      const alive = yield* sql<{ readonly n: number }>`
+        SELECT COUNT(*) AS n FROM ai_accounts
+        WHERE account_id = ${earlier.accountId} AND deleted_at IS NULL
+      `.pipe(Effect.catch(storage("read the AI account")));
+      // The Owner deleted it since, or it holds this key: the instance's copy only goes.
+      if ((alive[0]?.n ?? 0) === 0) return { accountId: earlier.accountId, created: false };
+      const same = yield* movedHolding(input.provider, input.type, key, [earlier.accountId]);
+      if (same !== undefined) return { accountId: same, created: false };
+    }
+    const twin = yield* movedHolding(
+      input.provider,
+      input.type,
+      key,
+      moved.map((row) => row.accountId),
+    );
+    if (twin !== undefined) {
+      yield* ledger(twin).pipe(Effect.catch(storage("record the moved key")));
+      return { accountId: twin, created: false };
+    }
+    const taken = new Set(
+      (yield* sql<{ readonly name: string }>`SELECT name FROM ai_accounts`.pipe(
+        Effect.catch(storage("read the AI accounts")),
+      )).map((row) => row.name.toLowerCase()),
+    );
+    const last = input.names.at(-1) ?? "Migrated key";
+    const candidates = [
+      ...input.names,
+      ...Array.from({ length: 50 }, (_, n) => `${last} ${n + 2}`),
+    ];
+    const name = candidates.find((candidate) => !taken.has(candidate.toLowerCase()));
+    if (name === undefined) return yield* fail("duplicate-name", "No free name for the key.");
+    const accountId = yield* newId(8);
+    const spaceId = SpaceDirectory.personalSpaceIdOf(input.ownerId);
+    yield* withNewCredential(key, "move a provider key into an AI account", (credentialId) =>
+      Effect.gen(function* () {
+        const top = yield* sql<{ readonly top: number | null }>`
+          SELECT MAX(priority) AS top FROM ai_accounts
+        `;
+        yield* sql`
+          INSERT INTO ai_accounts (account_id, name, type, provider, priority, status, disabled,
+            credential_id, key_hint, base_url, models_json, created_at, updated_at, created_by)
+          VALUES (${accountId}, ${name}, ${input.type}, ${input.provider}, ${(top[0]?.top ?? 0) + 1},
+            ${input.type === "direct" ? "working" : "pending"}, 0, ${credentialId}, ${hintOf(key)},
+            NULL, ${encodeModels([])}, ${at}, ${at}, ${input.ownerId})
+        `;
+        yield* sql`
+          INSERT INTO ai_account_allowances (account_id, subject_kind, subject_id, created_at)
+          VALUES (${accountId}, 'space', ${spaceId}, ${at})
+        `;
+        yield* ledger(accountId);
+        yield* audit.record({
+          actor: { source: "system" },
+          action: "ai_account.create",
+          target: { kind: "ai_account", id: accountId, name },
+          detail: { provider: input.provider, type: input.type, via: "migration" },
+        });
+      }),
+    );
+    if (input.type === "api-key") yield* syncNow;
+    return { accountId, created: true };
+  });
+
   return AiAccounts.of({
     list,
     create,
@@ -2336,6 +2468,7 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     loginComplete,
     importVertex,
     directCredential,
+    adoptProviderKey,
   });
 });
 

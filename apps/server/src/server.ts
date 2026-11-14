@@ -206,6 +206,7 @@ import * as AiGateway from "./ai/AiGateway.ts";
 import * as AiGatewayActivity from "./ai/AiGatewayActivity.ts";
 import * as AiUsage from "./ai/AiUsage.ts";
 import * as AiGatewayKeyRevocation from "./ai/AiGatewayKeyRevocation.ts";
+import * as ProviderKeyMigration from "./ai/ProviderKeyMigration.ts";
 import * as AiGatewayKeys from "./ai/AiGatewayKeys.ts";
 import * as AiGatewayProxy from "./ai/AiGatewayProxy.ts";
 import * as AiGatewayRoute from "./ai/AiGatewayRoute.ts";
@@ -654,6 +655,9 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   ProviderUsageLimitsIngestion.layer,
   // Gateway keys revoked as their sessions and Threads end (spec 4 ticket 04).
   AiGatewayKeyRevocation.layer,
+  // Provider keys become AI accounts where AI accounts are in use; settings refuse new ones there
+  // (spec 4 ticket 09).
+  ProviderKeyMigration.layer,
   layerProviderInstallationRefresh,
   ReplayMarkers.layer,
   Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),

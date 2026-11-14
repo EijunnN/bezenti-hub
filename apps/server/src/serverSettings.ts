@@ -289,10 +289,11 @@ export class ServerSettingsService extends Context.Service<
     /**
      * Spec 4 ticket 09: whether AI accounts are in use on this server, asked on every write; while
      * it says so, no write adds or changes an AI credential on a provider instance. Unset: never.
+     * The three AI credential members are absent only from hand-made test stubs.
      */
-    readonly setAiCredentialGuard: (inUse: Effect.Effect<boolean>) => Effect.Effect<void>;
+    readonly setAiCredentialGuard?: (inUse: Effect.Effect<boolean>) => Effect.Effect<void>;
     /** The AI credentials the provider instances hold as stored (no managed policy's), read. */
-    readonly listProviderCredentials: Effect.Effect<
+    readonly listProviderCredentials?: Effect.Effect<
       ReadonlyArray<ProviderCredential>,
       ServerSettingsError
     >;
@@ -300,7 +301,7 @@ export class ServerSettingsService extends Context.Service<
      * Removes those credentials that still hold the same value, secrets included, in one write;
      * returns what went.
      */
-    readonly removeProviderCredentials: (
+    readonly removeProviderCredentials?: (
       items: ReadonlyArray<ProviderCredential>,
     ) => Effect.Effect<ReadonlyArray<ProviderCredential>, ServerSettingsError>;
   }
