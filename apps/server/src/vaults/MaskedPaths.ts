@@ -160,6 +160,8 @@ export const WS_DOOR_RULES: Record<string, DoorRule> = {
   "aiGateway.rollback": none("the AI gateway's status"),
   "aiGateway.setEnabled": none("the AI gateway's status"),
   "aiAccounts.list": none("AI accounts' names and status"),
+  "aiAccounts.picker": none("AI accounts' names and model names"),
+  "thread.setAiAccount": none("which change was made"),
   "aiAccounts.create": none("AI accounts' names and status"),
   "aiAccounts.update": none("AI accounts' names and status"),
   "aiAccounts.delete": none("AI accounts' names and status"),

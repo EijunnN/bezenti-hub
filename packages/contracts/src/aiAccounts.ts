@@ -6,7 +6,15 @@
  */
 import * as Schema from "effect/Schema";
 
-import { makeEntityId, SpaceId, TrimmedNonEmptyString, UserId } from "./baseSchemas.ts";
+import {
+  EnvironmentId,
+  makeEntityId,
+  SpaceId,
+  ThreadId,
+  TrimmedNonEmptyString,
+  UserId,
+} from "./baseSchemas.ts";
+import { ProviderInstanceId } from "./providerInstance.ts";
 import { ServerProviderUsageLimits } from "./providerUsageLimits.ts";
 
 export const AiAccountId = makeEntityId("AiAccountId");
@@ -296,3 +304,68 @@ export class AiAccountError extends Schema.TaggedError<AiAccountError>()("AiAcco
 
 /** The prefix CLIProxyAPI serves an account's models under (`acct-<id>/<model>`). */
 export const aiAccountPrefixOf = (accountId: string) => `acct-${accountId}`;
+
+/**
+ * Spec 4 ticket 08: the AI accounts a User may pick for a Thread in one Space (AllowedAiAccounts),
+ * with their models. `environmentId`: where the Thread runs (a Sandbox or dedicated machine always
+ * runs on AI accounts).
+ */
+export const AiAccountPickerInput = Schema.Struct({
+  spaceId: SpaceId,
+  environmentId: Schema.optionalKey(EnvironmentId),
+});
+export type AiAccountPickerInput = typeof AiAccountPickerInput.Type;
+
+export const AiAccountPickerAccount = Schema.Struct({
+  id: AiAccountId,
+  name: Schema.String,
+  type: AiAccountType,
+  provider: AiAccountProvider,
+  priority: Schema.Number,
+  /** Gateway accounts: the models of its prefix; null for a direct one (its agent's catalog). */
+  models: Schema.NullOr(Schema.Array(Schema.String)),
+});
+export type AiAccountPickerAccount = typeof AiAccountPickerAccount.Type;
+
+export const AiAccountPickerResult = Schema.Struct({
+  /**
+   * Whether the Hub's turns there run on AI accounts (one is enabled on the Hub, or the machine is
+   * a Sandbox or dedicated): then a provider is usable only with an allowed account, never with
+   * the machine's own login.
+   */
+  applies: Schema.Boolean,
+  /** The Space's name, when the User works there. */
+  spaceName: Schema.NullOr(Schema.String),
+  /** Allowed to the User in the Space, first to last by the Installation's priority. */
+  accounts: Schema.Array(AiAccountPickerAccount),
+});
+export type AiAccountPickerResult = typeof AiAccountPickerResult.Type;
+
+/**
+ * Switch a Thread's AI account (`thread.continue`'s rule). Same provider instance: the gateway
+ * routes the next request to it. Another instance: a provider switch with the context handoff.
+ */
+export const ThreadSetAiAccountInput = Schema.Struct({
+  threadId: ThreadId,
+  aiAccountId: AiAccountId,
+  /** Another provider instance (a context handoff); omitted: the Thread's own. */
+  instanceId: Schema.optionalKey(ProviderInstanceId),
+  /** The model on that account; omitted: the Thread's current model. */
+  model: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type ThreadSetAiAccountInput = typeof ThreadSetAiAccountInput.Type;
+
+export const ThreadSetAiAccountResult = Schema.Struct({
+  /** `routing`: same provider, next request. `handoff`: another provider, next turn. */
+  change: Schema.Literals(["routing", "handoff", "unchanged"]),
+});
+export type ThreadSetAiAccountResult = typeof ThreadSetAiAccountResult.Type;
+
+/** Why a Thread's AI account was refused at a door (never a substitute, never a login). */
+export class AiAccountChoiceError extends Schema.TaggedError<AiAccountChoiceError>()(
+  "AiAccountChoiceError",
+  {
+    reason: Schema.Literals(["not-allowed", "not-compatible", "model-not-served", "unavailable"]),
+    message: Schema.String,
+  },
+) {}

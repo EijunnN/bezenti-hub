@@ -100,10 +100,14 @@ export const AiGatewayAccess = Schema.Struct({
 });
 export type AiGatewayAccess = typeof AiGatewayAccess.Type;
 
-/** The AI account a provider session uses, as the Thread shows it (never a key). */
+/**
+ * The AI account a provider session uses, as the Thread shows it (never a key). Every viewer of
+ * the Space reads it, so the Hub no longer writes the account's `name` here (ticket 08): each
+ * client names it from what that viewer may use (`aiAccounts.list`), else by its provider.
+ */
 export const ProviderSessionAiAccount = Schema.Struct({
   id: AiAccountId,
-  name: Schema.String,
+  name: Schema.optionalKey(Schema.String),
   provider: AiAccountProvider,
   model: Schema.NullOr(Schema.String),
 });

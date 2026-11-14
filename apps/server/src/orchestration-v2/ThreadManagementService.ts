@@ -64,6 +64,7 @@ import * as Stream from "effect/Stream";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import * as AiAccountChoice from "../ai/AiAccountChoice.ts";
 import * as ServerConfig from "../config.ts";
 import { makeScratchThreads } from "../environment/ScratchWorkspace.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
@@ -1048,9 +1049,28 @@ const makeWith = Effect.fn("ThreadManagementService.make")(function* (
     );
   };
 
+  // Spec 4 ticket 08: the selection's AI account, checked (and filled in) for every transport.
+  const aiAccountChoice = yield* Effect.serviceOption(AiAccountChoice.AiAccountChoice);
+  const settleAiAccount = (
+    command: OrchestrationV2ServerCommand,
+  ): Effect.Effect<OrchestrationV2ServerCommand, Orchestrator.OrchestratorCommandRejectedError> =>
+    Option.isNone(aiAccountChoice)
+      ? Effect.succeed(command)
+      : aiAccountChoice.value.settle(command).pipe(
+          Effect.mapError(
+            (cause) =>
+              new Orchestrator.OrchestratorCommandRejectedError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause,
+              }),
+          ),
+        );
+
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
     claimThreadSpace(command).pipe(
       Effect.flatMap(placeThread),
+      Effect.flatMap(settleAiAccount),
       Effect.flatMap(checkMoveTarget),
       Effect.flatMap(startMachine),
       Effect.flatMap(queueWhileAway),

@@ -93,6 +93,8 @@ export const RPC_REQUIRED_SCOPES = {
   // Names, providers and status of what the User may use (AllowedAiAccounts); writes are
   // CLIENT_GUARDED_RPC_SCOPES' and the Owner's alone (INSTALLATION_RPC_METHODS).
   [WS_METHODS.aiAccountsList]: AuthOrchestrationReadScope,
+  // The composer's picker: what AllowedAiAccounts gives the session's User in one Space.
+  [WS_METHODS.aiAccountsPicker]: AuthOrchestrationReadScope,
   // Counts of what passed through the gateway layer, narrowed to what the session may see.
   [WS_METHODS.aiUsageSummary]: AuthOrchestrationReadScope,
   // The session's own local CLI keys (no key in the answer); making and revoking one is

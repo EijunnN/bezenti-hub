@@ -1023,7 +1023,29 @@ export const layerProviderAdapterRegistry: Layer.Layer<
       list: Effect.fn("EnvironmentExecutor.adapters.list")(function* () {
         return yield* local.list();
       }),
-      ...(local.getMetadata === undefined ? {} : { getMetadata: local.getMetadata }),
+      // Like `get`: an instance the Hub machine lacks is described by the Environment that has
+      // it (a provider switch or an AI-account switch on a Sandbox's Thread plans against it).
+      ...(local.getMetadata === undefined
+        ? {}
+        : {
+            getMetadata: Effect.fn("EnvironmentExecutor.adapters.getMetadata")(function* (
+              instanceId: ProviderInstanceId,
+            ) {
+              const found = yield* Effect.result(local.getMetadata!(instanceId));
+              if (found._tag === "Success") return found.success;
+              const remote = yield* fromEnvironments(instanceId);
+              if (Option.isNone(remote)) return yield* found.failure;
+              const capabilities = yield* remote.value
+                .getCapabilities()
+                .pipe(Effect.mapError(() => found.failure));
+              return {
+                driver: remote.value.driver,
+                continuationKey: `${remote.value.driver}:instance:${instanceId}`,
+                enabled: true,
+                capabilities,
+              };
+            }),
+          }),
     });
   }),
 );

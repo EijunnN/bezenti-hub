@@ -209,6 +209,7 @@ import * as AiGatewayKeyRevocation from "./ai/AiGatewayKeyRevocation.ts";
 import * as AiGatewayKeys from "./ai/AiGatewayKeys.ts";
 import * as AiGatewayProxy from "./ai/AiGatewayProxy.ts";
 import * as AiGatewayRoute from "./ai/AiGatewayRoute.ts";
+import * as AiAccountChoice from "./ai/AiAccountChoice.ts";
 import * as AiGatewaySessions from "./ai/AiGatewaySessions.ts";
 import * as CliproxyReleases from "./ai/CliproxyReleases.ts";
 import * as JoinedHub from "./environments/JoinedHub.ts";
@@ -519,21 +520,28 @@ const layerAuth = Layer.mergeAll(
   // CLIProxyAPI, run by the Hub on loopback (`T3CODE_AI_GATEWAY`), and the AI accounts it gets
   // at every start (spec 4 ticket 02); the gateway layer's keys and what it did (ticket 04); the
   // gateway of each provider session (ticket 06), under the orchestration that opens them.
-  AiGatewaySessions.layer.pipe(
-    // Ticket 07: a direct credential is masked by the Thread's one masker (the same layer, so
-    // one instance) before its process starts.
-    Layer.provide(layerSecretMasking),
-    Layer.provideMerge(AiGatewayProxy.layer),
-    Layer.provideMerge(AiGatewayKeys.layer),
-    // The usage log: counts what the gateway layer ends, off its path (spec 4 ticket 05).
-    Layer.provideMerge(AiUsage.layer),
-    Layer.provideMerge(AiGatewayActivity.layer),
+  // The AI account of each Thread's selection, at every door (spec 4 ticket 08).
+  AiAccountChoice.layer.pipe(
     Layer.provideMerge(
-      AiAccounts.layer.pipe(
-        Layer.provideMerge(AiGateway.layerFromConfig.pipe(Layer.provide(CliproxyReleases.layer))),
+      AiGatewaySessions.layer.pipe(
+        // Ticket 07: a direct credential is masked by the Thread's one masker (the same layer, so
+        // one instance) before its process starts.
+        Layer.provide(layerSecretMasking),
+        Layer.provideMerge(AiGatewayProxy.layer),
+        Layer.provideMerge(AiGatewayKeys.layer),
+        // The usage log: counts what the gateway layer ends, off its path (spec 4 ticket 05).
+        Layer.provideMerge(AiUsage.layer),
+        Layer.provideMerge(AiGatewayActivity.layer),
+        Layer.provideMerge(
+          AiAccounts.layer.pipe(
+            Layer.provideMerge(
+              AiGateway.layerFromConfig.pipe(Layer.provide(CliproxyReleases.layer)),
+            ),
+          ),
+        ),
+        Layer.provide(AuditLog.layer),
       ),
     ),
-    Layer.provide(AuditLog.layer),
   ),
   // Sandboxes only with a runtime that runs them (`T3CODE_SANDBOX_RUNTIME`, or rootless Podman);
   // the Owner's SSH installs register machines with it.

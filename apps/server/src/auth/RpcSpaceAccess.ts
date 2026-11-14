@@ -77,6 +77,11 @@ const AI_ACCOUNTS_LIST = {
   unscoped:
     "AI accounts: AiAccounts.list answers with what AllowedAiAccounts lets the session's User use in the Spaces SpaceDirectory.authorizer lets them act in (spaceLimit too); only the Owner, unlimited, sees every account and its details; no credential is returned",
 };
+/** The picker names a Space: AllowedAiAccounts answers nothing where the User does not work. */
+const AI_ACCOUNTS_PICKER = {
+  unscoped:
+    "AI-account picker: AiAccountChoice.picker answers AllowedAiAccounts for the session's User in the named Space (AccessPolicy `aiAccount.use`), nothing in a Space they do not work in or outside spaceLimit; names and model names only, no credential",
+};
 /** AI usage names a Thread only to narrow its answer: AiUsage.summary decides what is seen. */
 const AI_USAGE_SUMMARY = {
   unscoped:
@@ -128,6 +133,10 @@ export const RPC_SPACE_ACCESS = {
   [WS_METHODS.vaultsEntriesLink]: VAULTS,
   [WS_METHODS.vaultsEntriesCopy]: VAULTS,
   [WS_METHODS.aiAccountsList]: AI_ACCOUNTS_LIST,
+  [WS_METHODS.aiAccountsPicker]: AI_ACCOUNTS_PICKER,
+  // Spec 4 ticket 08: a hidden Thread answers like a missing one; the switch is a command on the
+  // Thread (`thread.continue` in the orchestrator) whose account AiAccountChoice decides.
+  [WS_METHODS.threadSetAiAccount]: "thread",
   [WS_METHODS.aiUsageSummary]: AI_USAGE_SUMMARY,
   [WS_METHODS.aiGatewayKeysList]: AI_GATEWAY_KEYS,
   [WS_METHODS.aiGatewayKeysCreate]: AI_GATEWAY_KEYS,

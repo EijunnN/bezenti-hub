@@ -1,4 +1,9 @@
-import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
+import {
+  AiAccountChoiceError,
+  AiAccountError,
+  OrchestrationDispatchCommandError,
+  type ThreadSetAiAccountInput,
+} from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
@@ -253,6 +258,7 @@ import * as SourceControlDiscovery from "./sourceControl/SourceControlDiscovery.
 import * as OtlpEndpointCheck from "./observability/OtlpEndpointCheck.ts";
 import * as SourceControlRepositoryService from "./sourceControl/SourceControlRepositoryService.ts";
 import * as SourceControlSignIn from "./sourceControl/SourceControlSignIn.ts";
+import * as AiAccountChoice from "./ai/AiAccountChoice.ts";
 import * as AiAccounts from "./ai/AiAccounts.ts";
 import * as AiGateway from "./ai/AiGateway.ts";
 import * as AiUsage from "./ai/AiUsage.ts";
@@ -318,6 +324,7 @@ const resolveEditorConfig = Effect.fn("ws.resolveEditorConfig")(function* <E, R>
   };
 });
 
+const isAiAccountChoiceError = Schema.is(AiAccountChoiceError);
 export const withLateConfigDiscovery = <E, R>(
   config: ClientServerConfig,
   liveUpdates: Stream.Stream<ServerConfigStreamEvent, E, R>,
@@ -1380,6 +1387,60 @@ export const layerWsRpc = (
       const sourceControlSignIn = yield* SourceControlSignIn.SourceControlSignIn;
       const aiGateway = yield* AiGateway.AiGateway;
       const aiAccounts = yield* AiAccounts.AiAccounts;
+      const aiAccountChoice = yield* Effect.serviceOption(AiAccountChoice.AiAccountChoice);
+      /**
+       * Spec 4 ticket 08: `thread.setAiAccount` is a `thread.model-selection.set` (same provider
+       * instance: the gateway routes the next request to it) or a `provider.switch` (another: the
+       * context handoff), sent through the Thread door like any command; it decides nothing.
+       */
+      const setThreadAiAccount = Effect.fn("ws.setThreadAiAccount")(function* (
+        input: ThreadSetAiAccountInput,
+      ) {
+        const refused = (cause: unknown) => {
+          let current: unknown = cause;
+          for (let depth = 0; depth < 4 && current !== undefined; depth += 1) {
+            if (isAiAccountChoiceError(current)) return current;
+            current = (current as { readonly cause?: unknown } | null)?.cause;
+          }
+          const message = SpaceDirectory.spaceRefusalMessage(cause);
+          return new AiAccountError({
+            reason: message === undefined ? "unavailable" : "forbidden",
+            message: message ?? "Could not switch this Thread's AI account.",
+          });
+        };
+        const projection = yield* threadManagement
+          .getThreadRecords(input.threadId, [])
+          .pipe(Effect.mapError(refused));
+        const current = projection.thread.modelSelection;
+        const instanceId = input.instanceId ?? current.instanceId;
+        const model = input.model ?? current.model;
+        const sameInstance = instanceId === current.instanceId;
+        if (sameInstance && current.aiAccountId === input.aiAccountId && current.model === model) {
+          return { change: "unchanged" as const };
+        }
+        const modelSelection = {
+          ...(sameInstance ? current : {}),
+          instanceId,
+          model,
+          aiAccountId: input.aiAccountId,
+        };
+        const commandId = yield* serverCommandId("set-ai-account");
+        yield* startup
+          .enqueueCommand(
+            threadManagement.dispatch(
+              sameInstance
+                ? {
+                    type: "thread.model-selection.set",
+                    commandId,
+                    threadId: input.threadId,
+                    modelSelection,
+                  }
+                : { type: "provider.switch", commandId, threadId: input.threadId, modelSelection },
+            ),
+          )
+          .pipe(Effect.mapError(refused));
+        return { change: sameInstance ? ("routing" as const) : ("handoff" as const) };
+      });
       const aiUsage = yield* AiUsage.AiUsage;
       const aiGatewayKeys = yield* AiGatewayKeys.AiGatewayKeys;
       const withPullRequestViewer = pullRequests.withRoutingCredential;
@@ -2862,6 +2923,13 @@ export const layerWsRpc = (
         // AiAccounts as AccessPolicy `aiAccount.manage`, and before it as an Installation RPC).
         // None returns a credential.
         [WS_METHODS.aiAccountsList]: () => aiAccounts.list,
+        // Spec 4 ticket 08: what the session's User may pick in one Space (AllowedAiAccounts), and
+        // a Thread's switch through the Thread door (`thread.continue`, AiAccountChoice).
+        [WS_METHODS.aiAccountsPicker]: (input) =>
+          Option.isNone(aiAccountChoice)
+            ? Effect.succeed({ applies: false, spaceName: null, accounts: [] })
+            : aiAccountChoice.value.picker(input),
+        [WS_METHODS.threadSetAiAccount]: (input) => setThreadAiAccount(input),
         [WS_METHODS.aiAccountsCreate]: (input) => aiAccounts.create(input),
         [WS_METHODS.aiAccountsUpdate]: (input) => aiAccounts.update(input),
         [WS_METHODS.aiAccountsDelete]: (input) => aiAccounts.remove(input),

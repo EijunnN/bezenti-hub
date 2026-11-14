@@ -65,6 +65,7 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import * as EnvironmentExecutor from "../environment/EnvironmentExecutor.ts";
 import { ProviderSessionReleasedDuringStartError } from "./ProviderSessionReleasedDuringStart.ts";
 import * as SecretDelivery from "../vaults/SecretDelivery.ts";
+import * as AiGatewayActivity from "../ai/AiGatewayActivity.ts";
 import * as AiGatewaySessions from "../ai/AiGatewaySessions.ts";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
@@ -261,12 +262,21 @@ interface LiveSessionEntry {
   readonly idleThreadUnloads: ReadonlyMap<ThreadId, IdleThreadUnload>;
 }
 
-/** A provider session as the Thread shows it, with the Hub AI account it runs on, if any. */
+/**
+ * A provider session as the Thread shows it, with the Hub AI account it runs on, if any. Every
+ * viewer of the Space reads it, so never the account's name (ticket 08): each client names it
+ * from the accounts that viewer may use.
+ */
 const withAiAccount = (
   providerSession: OrchestrationV2ProviderSession,
   aiAccount: ProviderSessionAiAccount | undefined,
 ): OrchestrationV2ProviderSession =>
-  aiAccount === undefined ? providerSession : { ...providerSession, aiAccount };
+  aiAccount === undefined
+    ? providerSession
+    : {
+        ...providerSession,
+        aiAccount: { id: aiAccount.id, provider: aiAccount.provider, model: aiAccount.model },
+      };
 
 interface IdleThreadUnload {
   readonly providerThread: OrchestrationV2ProviderThread;
@@ -387,6 +397,8 @@ export const layerWithOptions = (
       const secretDelivery = yield* Effect.serviceOption(SecretDelivery.SecretDelivery);
       // Spec 4 ticket 06: a session on the Hub's AI gateway gets the Thread's key in its process.
       const aiGatewaySessions = yield* Effect.serviceOption(AiGatewaySessions.AiGatewaySessions);
+      // Spec 4 ticket 08: the account a Thread's requests go to now (a failover, a switch).
+      const aiGatewayActivity = yield* Effect.serviceOption(AiGatewayActivity.AiGatewayActivity);
       /** The machine a Thread's process starts on, and its executor contract. */
       const targetFor = Effect.fn("ProviderSessionManagerV2.targetFor")(function* (
         threadId: ThreadId,
@@ -505,6 +517,8 @@ export const layerWithOptions = (
           }),
       );
       const sessions = yield* Ref.make(new Map<string, LiveSessionEntry>());
+      /** What each live session last showed on its Threads, so a new account keeps its status. */
+      const shownSessions = new Map<string, OrchestrationV2ProviderSession>();
       // Retry per released entry; reusing ids must not lose cleanup for earlier threads.
       const releaseRecordRetries = yield* FiberSet.make();
       const nextSubscriberId = yield* Ref.make(0);
@@ -747,7 +761,73 @@ export const layerWithOptions = (
         if (events.length > 0) {
           yield* eventSink.write({ events });
         }
+        if (input.payload.status === "stopped") {
+          shownSessions.delete(input.runtime.providerSessionId);
+        } else {
+          shownSessions.set(input.runtime.providerSessionId, input.payload);
+        }
       });
+
+      /**
+       * Spec 4 ticket 08: a live gateway session whose Thread's requests now go to another account
+       * or model (a failover, a switch on the same provider) shows it on the Thread at once.
+       */
+      const showAccountInUse = Effect.fn("ProviderSessionManager.showAccountInUse")(function* (
+        use: AiGatewayActivity.AccountInUse,
+      ) {
+        const changed: Array<LiveSessionEntry> = [];
+        yield* Ref.update(sessions, (current) => {
+          const updated = new Map(current);
+          for (const [key, entry] of current) {
+            const shown = entry.aiAccount;
+            if (
+              shown === undefined ||
+              !entry.attachedThreadIds.has(use.threadId) ||
+              (shown.id === use.accountId && shown.model === use.model)
+            ) {
+              continue;
+            }
+            const next: LiveSessionEntry = {
+              ...entry,
+              aiAccount: {
+                ...shown,
+                id: use.accountId,
+                model: use.model,
+                provider: use.provider ?? shown.provider,
+              },
+            };
+            updated.set(key, next);
+            changed.push(next);
+          }
+          return updated;
+        });
+        for (const entry of changed) {
+          const payload =
+            shownSessions.get(entry.runtime.providerSessionId) ?? entry.runtime.providerSession;
+          yield* writeProviderSessionEvents({
+            runtime: entry.runtime,
+            threadIds: [use.threadId],
+            type: "provider-session.updated",
+            payload: withAiAccount(payload, entry.aiAccount),
+          });
+        }
+      });
+      if (Option.isSome(aiGatewayActivity)) {
+        const accountsInUse = yield* aiGatewayActivity.value.subscribeAccountsInUse;
+        yield* accountsInUse.pipe(
+          Stream.runForEach((use) =>
+            showAccountInUse(use).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("orchestration-v2.ai-account-in-use.show-failed", {
+                  threadId: use.threadId,
+                  cause,
+                }),
+              ),
+            ),
+          ),
+          Effect.forkIn(layerScope),
+        );
+      }
 
       const writeReleasedSessionEvents = Effect.fn(
         "ProviderSessionManager.writeReleasedSessionEvents",
@@ -1158,6 +1238,7 @@ export const layerWithOptions = (
               onNone: () => Effect.void,
               onSome: (entry) =>
                 Effect.gen(function* () {
+                  shownSessions.delete(input.providerSessionId);
                   // Spec 4 ticket 06: the session's gateway key stops working before it stops.
                   if (entry.aiAccount !== undefined && Option.isSome(aiGatewaySessions)) {
                     yield* aiGatewaySessions.value.release(
@@ -2072,7 +2153,7 @@ export const layerWithOptions = (
             runtime: entry.runtime,
             threadIds: current.attachedThreadIds,
             type: "provider-session.updated",
-            payload: withAiAccount(event.providerSession, entry.aiAccount),
+            payload: withAiAccount(event.providerSession, current.aiAccount),
           });
         },
         (effect, entry, _event) =>

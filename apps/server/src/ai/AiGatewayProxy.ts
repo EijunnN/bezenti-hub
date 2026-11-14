@@ -562,6 +562,7 @@ const make = Effect.fn("AiGatewayProxy.make")(function* (limits: AiGatewayProxyL
             threadId: caller.threadId,
             accountId: account.id,
             model: plan.model,
+            provider: account.provider,
           });
         }
         const contentType = response.headers["content-type"] ?? "application/json";

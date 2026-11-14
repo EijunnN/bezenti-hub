@@ -37,6 +37,7 @@ import * as AiGatewayActivity from "./AiGatewayActivity.ts";
 import * as AiGatewayKeys from "./AiGatewayKeys.ts";
 import { aiCredentialValueId } from "./aiCredentialValue.ts";
 import * as AllowedAiAccounts from "./AllowedAiAccounts.ts";
+import { chooseAiAccount, gatewayModelOf } from "./chooseAiAccount.ts";
 
 /** The machine a session's process starts on, and its executor contract. */
 export interface GatewayTarget {
@@ -129,9 +130,6 @@ export class AiGatewaySessions extends Context.Service<
   }
 >()("t3/ai/AiGatewaySessions") {}
 
-/** The model the gateway serves for a selection: without the gateway provider's `t3/`. */
-const gatewayModelOf = (model: string) => (model.startsWith("t3/") ? model.slice(3) : model);
-
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const spaces = yield* SpaceDirectory.SpaceDirectory;
@@ -198,22 +196,22 @@ const make = Effect.gen(function* () {
     readonly spaceId: string;
     readonly allowed: ReadonlyArray<AllowedAiAccounts.AllowedAiAccount>;
   }) {
-    const usable = input.allowed.filter(
-      (account) =>
-        account.type === "direct" &&
-        aiDirectVariableOf(input.driver, account.provider) !== undefined,
-    );
-    const chosen = input.modelSelection.aiAccountId;
-    // The Thread's choice, or the first allowed by global priority; never another in its place.
-    const account =
-      chosen === undefined ? usable[0] : usable.find((candidate) => candidate.id === chosen);
-    if (account === undefined) {
+    const choice = yield* chooseAiAccount({
+      driver: input.driver,
+      allowed: input.allowed,
+      chosen: input.modelSelection.aiAccountId,
+      model: input.modelSelection.model,
+      modelsOf: () => Effect.succeedNone,
+      atTheDoor: false,
+    });
+    if (choice._tag === "refused") {
       return refused(
         new AiGatewaySessionError({
-          reason: chosen === undefined ? "no-ai-account" : "not-allowed",
+          reason: choice.reason === "no-ai-account" ? "no-ai-account" : "not-allowed",
         }),
       );
     }
+    const account = choice.account;
     const variable = aiDirectVariableOf(input.driver, account.provider);
     const rows = yield* sql<{ readonly credentialId: string | null }>`
       SELECT credential_id AS "credentialId" FROM ai_accounts
@@ -284,40 +282,32 @@ const make = Effect.gen(function* () {
       });
     }
     // Through the gateway only, by global priority: what the gateway itself routes to.
-    const allowed = everyAllowed.filter((account) => account.type !== "direct");
-    if (allowed.length === 0) {
-      return refused(new AiGatewaySessionError({ reason: "no-ai-account" }));
+    const choice = yield* chooseAiAccount({
+      driver: input.driver,
+      allowed: everyAllowed,
+      chosen: input.modelSelection.aiAccountId,
+      model: input.modelSelection.model,
+      modelsOf: (accountId) =>
+        accounts.modelsOf(accountId).pipe(
+          Effect.asSome,
+          Effect.orElseSucceed(() => Option.some([] as ReadonlyArray<string>)),
+        ),
+      atTheDoor: false,
+    });
+    if (choice._tag === "refused") {
+      return refused(
+        choice.reason === "model-not-served"
+          ? new AiGatewaySessionError({ reason: "model-not-served", model: choice.model ?? "" })
+          : new AiGatewaySessionError({
+              reason: choice.reason === "no-ai-account" ? "no-ai-account" : "not-allowed",
+            }),
+      );
     }
-    const model = input.modelSelection.model.trim().length > 0 ? input.modelSelection.model : null;
-    const served = model === null ? null : gatewayModelOf(model);
-    const chosen = input.modelSelection.aiAccountId;
-    let account: AllowedAiAccounts.AllowedAiAccount | undefined;
-    if (chosen !== undefined) {
-      account = allowed.find((candidate) => candidate.id === chosen);
-      // Never another account in its place: the Thread chose this one.
-      if (account === undefined) {
-        return refused(new AiGatewaySessionError({ reason: "not-allowed" }));
-      }
-    } else if (served === null) {
-      account = allowed[0];
-    } else {
-      // The first allowed that serves the model, as the gateway picks it (`planRoute`).
-      for (const candidate of allowed) {
-        const models = yield* accounts
-          .modelsOf(candidate.id)
-          .pipe(Effect.orElseSucceed(() => [] as ReadonlyArray<string>));
-        if (models.includes(served)) {
-          account = candidate;
-          break;
-        }
-      }
-      if (account === undefined) {
-        return refused(new AiGatewaySessionError({ reason: "model-not-served", model: served }));
-      }
-    }
-    if (account === undefined) {
-      return refused(new AiGatewaySessionError({ reason: "no-ai-account" }));
-    }
+    const account = choice.account;
+    const served =
+      input.modelSelection.model.trim().length > 0
+        ? gatewayModelOf(input.modelSelection.model)
+        : null;
     return {
       _tag: "on",
       ownerUserId: owner.value,
@@ -345,13 +335,14 @@ const make = Effect.gen(function* () {
         threadId: input.threadId,
         accountId: account.id,
         model: account.model,
+        provider: account.provider,
       });
     }
     return {
       access: {
         key: Redacted.value(issued.key),
         aiAccountId: account.id,
-        aiAccountName: account.name,
+        aiAccountName: account.name ?? "",
         provider: account.provider,
         model: account.model,
       },

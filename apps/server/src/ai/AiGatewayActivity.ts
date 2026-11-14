@@ -53,6 +53,8 @@ export interface AccountInUse {
   readonly threadId: ThreadId;
   readonly accountId: AiAccountId;
   readonly model: string;
+  /** Its provider, when the caller knows it (not kept: the header's own copy has it). */
+  readonly provider?: AiAccountProvider;
 }
 
 export class AiGatewayActivity extends Context.Service<

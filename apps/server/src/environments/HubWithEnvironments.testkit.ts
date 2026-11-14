@@ -97,6 +97,7 @@ import * as AiUsage from "../ai/AiUsage.ts";
 import * as AiGatewayKeyRevocation from "../ai/AiGatewayKeyRevocation.ts";
 import * as AiGatewayKeys from "../ai/AiGatewayKeys.ts";
 import * as AiGatewayProxy from "../ai/AiGatewayProxy.ts";
+import * as AiAccountChoice from "../ai/AiAccountChoice.ts";
 import * as AiGatewaySessions from "../ai/AiGatewaySessions.ts";
 import { fakeCliproxyRelease, fakeReleases, pinsOf } from "../ai/AiGateway.testkit.ts";
 import { cliproxyPlatformOf } from "../ai/cliproxyRelease.ts";
@@ -298,7 +299,8 @@ const withAiAccounts = (memory: string) => (services: Context.Context<HubService
       Stream.runHead,
     );
     const ai = yield* Layer.build(
-      AiGatewaySessions.layer.pipe(
+      AiAccountChoice.layer.pipe(
+        Layer.provideMerge(AiGatewaySessions.layer),
         Layer.provideMerge(AiGatewayProxy.layer),
         Layer.provideMerge(AiGatewayKeys.layer),
         Layer.provideMerge(AiUsage.layer),

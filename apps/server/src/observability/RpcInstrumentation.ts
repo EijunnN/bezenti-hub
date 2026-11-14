@@ -158,6 +158,8 @@ const RPC_AGGREGATES = {
   [WS_METHODS.aiGatewayKeysList]: "server",
   [WS_METHODS.aiGatewayKeysCreate]: "server",
   [WS_METHODS.aiGatewayKeysRevoke]: "server",
+  [WS_METHODS.aiAccountsPicker]: "server",
+  [WS_METHODS.threadSetAiAccount]: "server",
   [WS_METHODS.aiAccountsCreate]: "server",
   [WS_METHODS.aiAccountsUpdate]: "server",
   [WS_METHODS.aiAccountsDelete]: "server",

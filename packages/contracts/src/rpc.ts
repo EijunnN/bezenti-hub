@@ -32,6 +32,11 @@ import {
   AiAccountDeleteResult,
   AiAccountError,
   AiAccountListInput,
+  AiAccountChoiceError,
+  AiAccountPickerInput,
+  AiAccountPickerResult,
+  ThreadSetAiAccountInput,
+  ThreadSetAiAccountResult,
   AiAccountImportVertexInput,
   AiAccountListResult,
   AiAccountLoginCompleteInput,
@@ -663,6 +668,9 @@ export const WS_METHODS = {
   aiAccountsLoginStart: "aiAccounts.login.start",
   aiAccountsLoginComplete: "aiAccounts.login.complete",
   aiAccountsImportVertex: "aiAccounts.importVertex",
+  // Spec 4 ticket 08: the composer's AI-account picker and a Thread's switch.
+  aiAccountsPicker: "aiAccounts.picker",
+  threadSetAiAccount: "thread.setAiAccount",
   // AI usage (spec 4 ticket 05): per day, User, Space and AI account; no quotas.
   aiUsageSummary: "aiUsage.summary",
   // A User's own gateway keys for local CLIs (spec 4 ticket 10); the Owner sees and revokes all.
@@ -1313,6 +1321,18 @@ const WsAiAccountsListRpc = Rpc.make(WS_METHODS.aiAccountsList, {
   payload: AiAccountListInput,
   success: AiAccountListResult,
   error: AiAccountRpcError,
+});
+// Only what AllowedAiAccounts gives the session's User in that Space; nothing elsewhere.
+const WsAiAccountsPickerRpc = Rpc.make(WS_METHODS.aiAccountsPicker, {
+  payload: AiAccountPickerInput,
+  success: AiAccountPickerResult,
+  error: AiAccountRpcError,
+});
+// Sugar over `thread.model-selection.set` / `provider.switch`: their door decides.
+const WsThreadSetAiAccountRpc = Rpc.make(WS_METHODS.threadSetAiAccount, {
+  payload: ThreadSetAiAccountInput,
+  success: ThreadSetAiAccountResult,
+  error: Schema.Union([AiAccountChoiceError, AiAccountError, EnvironmentAuthorizationError]),
 });
 // Never a prompt or a key: counts only. What the session sees is decided in AiUsage.summary.
 const WsAiUsageSummaryRpc = Rpc.make(WS_METHODS.aiUsageSummary, {
@@ -2325,6 +2345,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsAiGatewayRollbackRpc,
   WsAiGatewaySetEnabledRpc,
   WsAiAccountsListRpc,
+  WsAiAccountsPickerRpc,
+  WsThreadSetAiAccountRpc,
   WsAiAccountsCreateRpc,
   WsAiAccountsUpdateRpc,
   WsAiAccountsDeleteRpc,
