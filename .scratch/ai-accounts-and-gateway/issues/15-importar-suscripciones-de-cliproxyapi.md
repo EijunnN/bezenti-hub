@@ -8,7 +8,7 @@
 
 - [x] Puerta: WS `aiAccounts.importCliproxy` (solo el Owner, `INSTALLATION_RPC_METHODS`, `settings:write`, `DoorRules.AI_ACCOUNT_SIGN_IN_RULES`), contenido Redacted, máx. 50 archivos de 64 KB; selector de archivos en Settings. Sin CLI (decidido con el lead).
 - [x] Cada archivo `claude`, `codex` o `antigravity` con email y refresh token: token sellado en `AiAccountTokenStore` (nunca en log, respuesta, auditoría ni base de datos), cuenta «<Proveedor> (<email>)» desactivada con «Signed in as <email>», permitida solo al Personal space del Owner.
-- [x] Se descartan `prefix`, `disabled`, `base_url` y `proxy_url`: un archivo importado no decide adónde va una petición ni su token.
+- [x] Lista de claves permitidas (las que escriben esos sign-ins); todo lo demás se descarta (`headers`, `prefix`, `disabled`, cualquier variante de base o proxy URL): un archivo importado no decide adónde va una petición ni su token. Una identidad sin id del proveedor coincide con cualquiera del mismo proveedor y email.
 - [x] Idempotente: una identidad (proveedor, email, id de cuenta o proyecto) ya presente, firmada, importada o repetida en el mismo envío, se omite con motivo; tipos desconocidos y archivos inválidos también, con motivo, sin sellar nada.
 - [x] Auditoría `ai_account.create {provider, type: subscription, via: "import"}`.
 - [x] Sin llamada a la gateway: funciona con la gateway parada; el token llega a CLIProxyAPI al activar la cuenta.

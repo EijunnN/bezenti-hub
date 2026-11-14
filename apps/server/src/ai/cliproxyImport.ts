@@ -22,10 +22,28 @@ const LABELS: Readonly<Record<string, string>> = {
 };
 
 /**
- * Never kept from an imported file: the prefix and switch the Hub sets itself, and anything that
- * would choose where CLIProxyAPI sends a request or the token.
+ * The only keys kept from an imported file: those CLIProxyAPI's Claude, Codex and Antigravity
+ * sign-ins write. Anything else goes (headers, the prefix and switch the Hub sets itself, any
+ * spelling of a base or proxy URL), so a file never chooses where a request or its token goes.
  */
-const DROPPED_FIELDS = ["prefix", "disabled", "base_url", "proxy_url"] as const;
+const KEPT_FIELDS: ReadonlySet<string> = new Set([
+  "type",
+  "email",
+  "access_token",
+  "refresh_token",
+  "id_token",
+  "expired",
+  "expires_in",
+  "timestamp",
+  "last_refresh",
+  "account_uuid",
+  "account_id",
+  "organization_name",
+  "organization_uuid",
+  "claude_device_ids",
+  "project_id",
+  "priority",
+]);
 
 /** The longest AI account name. */
 const NAME_MAX = 80;
@@ -59,22 +77,33 @@ export const readCliproxyAuthFile = (contents: string): ReadCliproxyFile => {
   if (typeof parsed.refresh_token !== "string" || parsed.refresh_token.length === 0) {
     return skip("It holds no refresh token, so it would stop working within the hour.");
   }
-  const token: Record<string, unknown> = { ...parsed };
-  for (const field of DROPPED_FIELDS) delete token[field];
+  const token = Object.fromEntries(Object.entries(parsed).filter(([key]) => KEPT_FIELDS.has(key)));
   return { _tag: "token", provider, signedInAs, token };
 };
 
-/**
- * Who a token is signed in as, to tell one account from another: its provider, its email, and the
- * provider's own account or project id when it carries one.
- */
-export const identityOf = (provider: string, token: Record<string, unknown>) => {
+/** Who a token is signed in as: its provider, its email, and the provider's own id if it has one. */
+export interface CliproxyIdentity {
+  readonly provider: string;
+  readonly email: string;
+  readonly id: string | null;
+}
+
+export const identityOf = (provider: string, token: Record<string, unknown>): CliproxyIdentity => {
   const email = signedInAsOf(token.email)?.toLowerCase() ?? "";
-  const ids = ["account_uuid", "account_id", "project_id"]
+  const id = ["account_uuid", "account_id", "project_id"]
     .map((field) => token[field])
-    .filter((value): value is string => typeof value === "string" && value.length > 0);
-  return JSON.stringify([provider, email, ids[0] ?? null]);
+    .find((value): value is string => typeof value === "string" && value.length > 0);
+  return { provider, email, id: id ?? null };
 };
+
+/**
+ * The same account: same provider and email, and the same provider id when both carry one. A token
+ * without an id (a sign-in may leave none) matches any, so one refresh token never becomes two.
+ */
+export const sameIdentity = (a: CliproxyIdentity, b: CliproxyIdentity) =>
+  a.provider === b.provider &&
+  a.email === b.email &&
+  (a.id === null || b.id === null || a.id === b.id);
 
 /** «Claude (owner@example.com)», kept to an account name's length. */
 export const importedNameOf = (provider: AiSubscriptionProvider, signedInAs: string) => {

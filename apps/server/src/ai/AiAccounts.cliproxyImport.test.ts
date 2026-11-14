@@ -210,6 +210,82 @@ live(
     }).pipe(Effect.scoped),
 );
 
+live("keeps only the keys CLIProxyAPI's sign-ins carry: headers and routing variants go", () =>
+  Effect.gen(function* () {
+    const setup = yield* hub;
+    const {
+      base_url: _base,
+      proxy_url: _proxy,
+      prefix: _prefix,
+      disabled: _disabled,
+      ...kept
+    } = claudeFile;
+    const result = yield* setup.accounts
+      .importCliproxy({
+        files: [
+          fileOf("claude.json", {
+            ...claudeFile,
+            headers: { "X-Exfiltrate": "1" },
+            "header:X-Exfiltrate": "1",
+            PROXY_URL: "http://evil.example:8080",
+            "proxy-url": "http://evil.example:8080",
+            "base-url": "https://evil.example",
+            Base_Url: "https://evil.example",
+            label: "anything else",
+          }),
+        ],
+      })
+      .pipe(setup.asOwner);
+    assert.equal(result.files[0]!.outcome, "imported");
+    const row = (yield* rowsOf(setup))[0]!;
+    assert.deepEqual(yield* sealedOf(setup, row.credentialId!), kept);
+  }).pipe(Effect.scoped),
+);
+
+live("a token without the provider's account id is the same account as one with it", () =>
+  Effect.gen(function* () {
+    const setup = yield* hub;
+    const { account_uuid: _uuid, ...withoutId } = claudeFile;
+    // As a sign-in may have left it: no account_uuid. The old proxy's file names one.
+    const first = yield* setup.accounts
+      .importCliproxy({ files: [fileOf("signed-in.json", withoutId)] })
+      .pipe(setup.asOwner);
+    assert.equal(first.files[0]!.outcome, "imported");
+    const second = yield* setup.accounts
+      .importCliproxy({
+        files: [
+          fileOf("old-proxy.json", claudeFile),
+          fileOf("other-org.json", { ...claudeFile, account_uuid: "uuid-cl-2" }),
+          fileOf("again-other-org.json", { ...claudeFile, account_uuid: "uuid-cl-2" }),
+        ],
+      })
+      .pipe(setup.asOwner);
+    assert.deepEqual(
+      second.files.map((file) => file.outcome),
+      // The id-less account matches any id, so the second org is held already, as it may be.
+      ["skipped", "skipped", "skipped"],
+    );
+    // The other way round: an id-less file matches an account that has an id.
+    const setup2 = yield* hub;
+    yield* setup2.accounts
+      .importCliproxy({ files: [fileOf("old-proxy.json", claudeFile)] })
+      .pipe(setup2.asOwner);
+    const reverse = yield* setup2.accounts
+      .importCliproxy({
+        files: [
+          fileOf("signed-in.json", withoutId),
+          fileOf("other-org.json", { ...claudeFile, account_uuid: "uuid-cl-2" }),
+        ],
+      })
+      .pipe(setup2.asOwner);
+    assert.deepEqual(
+      reverse.files.map((file) => file.outcome),
+      ["skipped", "imported"],
+    );
+    assert.equal((yield* rowsOf(setup2)).length, 2);
+  }).pipe(Effect.scoped),
+);
+
 live("skips what is not a subscription it knows, with a reason, and seals nothing", () =>
   Effect.gen(function* () {
     const setup = yield* hub;

@@ -202,9 +202,12 @@ keys; `type: subscription`. Pure parts in `ai/subscriptionLogin.ts`.
   token becomes a subscription exactly as a sign-in leaves it: sealed under a new token id, named
   «Claude|ChatGPT|Antigravity (<email>)», **disabled** with «Signed in as <email>» until the Owner
   turns it on, allowed only to the Owner's Personal space (the Owner then allows it elsewhere).
-  `prefix`, `disabled`, `base_url` and `proxy_url` are dropped: an imported file never chooses
-  where a request or its token goes. An identity the Hub already holds (provider, email, and the
-  provider's account or project id) is skipped, whether signed in, imported, or earlier in the
+  Only the keys those sign-ins write are kept (an allowlist: `type`, `email`, the tokens and
+  their times, `account_uuid`, `account_id`, `organization_*`, `claude_device_ids`, `project_id`,
+  `priority`); everything else goes (`headers`, `prefix`, `disabled`, any spelling of a base or
+  proxy URL), so an imported file never chooses where a request or its token goes. An identity the
+  Hub already holds (provider and email, and the provider's account or project id when both carry
+  one: a token without it matches any) is skipped, whether signed in, imported, or earlier in the
   same files; any other type, a file that is not JSON, or one without an email or refresh token
   is skipped with a reason. The answer says per file what happened, never a token field. No
   gateway call: it works with the gateway off, and the token reaches CLIProxyAPI when the account

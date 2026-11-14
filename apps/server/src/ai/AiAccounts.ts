@@ -64,7 +64,13 @@ import { AiGateway } from "./AiGateway.ts";
 import { aiCredentialValueId, credentialIdOfValueId } from "./aiCredentialValue.ts";
 import * as AiAccountChanges from "./AiAccountChanges.ts";
 import * as AllowedAiAccounts from "./AllowedAiAccounts.ts";
-import { identityOf, importedNameOf, readCliproxyAuthFile } from "./cliproxyImport.ts";
+import {
+  type CliproxyIdentity,
+  identityOf,
+  importedNameOf,
+  readCliproxyAuthFile,
+  sameIdentity,
+} from "./cliproxyImport.ts";
 import {
   type CliproxyCredential,
   type CliproxyEndpoint,
@@ -2375,10 +2381,11 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
           SELECT name, provider, credential_id AS "credentialId" FROM ai_accounts
           WHERE type = 'subscription' AND deleted_at IS NULL AND credential_id IS NOT NULL
         `.pipe(Effect.catch(storage("read the AI accounts")));
-        const held = new Map<string, string>();
+        const held: Array<{ readonly identity: CliproxyIdentity; readonly name: string }> = [];
         for (const row of existing) {
           const sealed = yield* sealedOf(row.credentialId);
-          if (sealed !== undefined) held.set(identityOf(row.provider, sealed), row.name);
+          if (sealed !== undefined)
+            held.push({ identity: identityOf(row.provider, sealed), name: row.name });
         }
         const names = new Set(
           (yield* sql<{ readonly name: string }>`SELECT name FROM ai_accounts`.pipe(
@@ -2402,9 +2409,9 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
             continue;
           }
           const identity = identityOf(read.provider, read.token);
-          const holder = held.get(identity);
+          const holder = held.find((one) => sameIdentity(one.identity, identity));
           if (holder !== undefined) {
-            skipped(file.fileName, `Already an AI account: «${holder}».`);
+            skipped(file.fileName, `Already an AI account: «${holder.name}».`);
             continue;
           }
           const base = importedNameOf(read.provider, read.signedInAs);
@@ -2457,7 +2464,7 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
                   ),
               ),
             );
-          held.set(identity, name);
+          held.push({ identity, name });
           names.add(name.toLowerCase());
           results.push({
             fileName: file.fileName,
