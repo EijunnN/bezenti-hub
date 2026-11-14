@@ -549,8 +549,9 @@ settings side `settingsAiCredentials.ts` and `ServerSettingsService` (`setAiCred
   and 07), never live and unowned.
 - **Twice is once.** Migration **119**, `ai_account_migrated_keys` (`source` =
   `env:<instance>:<VARIABLE>` or `field:<instance>:<field>`, the account id; never the key or a hash
-  of it). A source already moved whose account is gone, or holds the same key, is only removed from
-  the instance; a different key under the same source becomes a new account.
+  of it). A source already moved whose account still holds the same key is only removed from the
+  instance; any other key under it (also after the Owner deleted that account: a deleted account
+  cannot say which key it held) becomes a new account, so a key is never lost.
 - **Left on the instance**, named in the log by instance and variable only: a secret provider
   reference that cannot be read within 15 s (read once per pass), a value AI accounts refuse
   (spaces, control characters), or a write a managed policy locks. Settings shows each one on its

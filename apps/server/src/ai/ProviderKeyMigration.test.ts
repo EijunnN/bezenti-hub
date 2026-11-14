@@ -507,3 +507,33 @@ it.effect("each key becomes the account its variable and driver say", () =>
     });
   }),
 );
+
+it.live.skipIf(!posix || platform === undefined)(
+  "a key saved again after its moved account was deleted becomes an account, never lost",
+  () =>
+    Effect.gen(function* () {
+      const { settings, sql, run } = yield* hub({ gateway: true });
+      yield* earlierState(settings);
+      yield* run(ProviderKeyMigration.migrateProviderKeys);
+      yield* sql`UPDATE ai_accounts SET deleted_at = '2026-11-13T00:00:00.000Z' WHERE provider = 'codex'`;
+      const newKey = "sk-proj-saved-again-after-delete-0123456789";
+      yield* settings.updateProviderInstance({
+        operation: "upsert",
+        instanceId: id("codex"),
+        instance: {
+          driver: driver("codex"),
+          environment: [{ name: "OPENAI_API_KEY", value: newKey, sensitive: true }],
+        },
+      });
+      const pass = yield* run(ProviderKeyMigration.migrateProviderKeys);
+      assert.equal(pass.created, 1);
+      const live = yield* sql<{ readonly n: number }>`
+        SELECT COUNT(*) AS n FROM ai_accounts WHERE provider = 'codex' AND deleted_at IS NULL
+      `;
+      assert.equal(live[0]?.n, 1);
+      assert.deepEqual(
+        (yield* settings.getSettings).providerInstances[id("codex")]?.environment,
+        [],
+      );
+    }),
+);

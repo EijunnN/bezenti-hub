@@ -2392,13 +2392,9 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
         migrated_at = excluded.migrated_at
     `;
     const earlier = moved.find((row) => row.source === input.source);
+    // Moved before and still holding this key: the instance's copy only goes. An account the Owner
+    // deleted since cannot say which key it held, so the key becomes an account again, never lost.
     if (earlier !== undefined) {
-      const alive = yield* sql<{ readonly n: number }>`
-        SELECT COUNT(*) AS n FROM ai_accounts
-        WHERE account_id = ${earlier.accountId} AND deleted_at IS NULL
-      `.pipe(Effect.catch(storage("read the AI account")));
-      // The Owner deleted it since, or it holds this key: the instance's copy only goes.
-      if ((alive[0]?.n ?? 0) === 0) return { accountId: earlier.accountId, created: false };
       const same = yield* movedHolding(input.provider, input.type, key, [earlier.accountId]);
       if (same !== undefined) return { accountId: same, created: false };
     }
