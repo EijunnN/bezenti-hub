@@ -347,6 +347,8 @@ interface ProviderSettingsFormProps {
   readonly environmentId?: EnvironmentId | undefined;
   /** Select options not offered here, shown disabled with the reason. */
   readonly disabledOptions?: ProviderSettingsDisabledOptions | undefined;
+  /** Config keys not offered here (spec 4 ticket 09: AI credentials on a Hub on AI accounts). */
+  readonly hiddenKeys?: ReadonlySet<string> | undefined;
 }
 
 function SecretSettingsControl({
@@ -693,16 +695,22 @@ export function ProviderSettingsForm({
   managed,
   environmentId,
   disabledOptions,
+  hiddenKeys,
 }: ProviderSettingsFormProps) {
-  const fields = deriveProviderSettingsFields(definition, value).map((field) => {
+  const fields = deriveProviderSettingsFields(definition, value).flatMap((field) => {
+    if (hiddenKeys?.has(field.key)) return [];
     const disabled = disabledOptions?.[field.key];
-    if (disabled === undefined || field.options === undefined) return field;
-    return {
-      ...field,
-      options: field.options.map((option) =>
-        disabled.values.has(option.value) ? { ...option, disabledReason: disabled.reason } : option,
-      ),
-    };
+    if (disabled === undefined || field.options === undefined) return [field];
+    return [
+      {
+        ...field,
+        options: field.options.map((option) =>
+          disabled.values.has(option.value)
+            ? { ...option, disabledReason: disabled.reason }
+            : option,
+        ),
+      },
+    ];
   });
   const isLocalAcp =
     definition.driverKind === "acpRegistry" &&
