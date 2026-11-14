@@ -628,6 +628,35 @@ custom `*_BASE_URL` become plain provider API keys; the account then shows an er
 fixes or deletes it. A Hub whose gateway is on with no account yet refuses new keys before the web
 form knows (the Hub's message says where to go).
 
+## Clients: desktop and mobile (spec 4 ticket 12)
+
+**One source.** The picker rules (`resolveAiAccount`, `aiAccountsFor`, `applyAiAccountsToProviders`,
+`nameThreadAiAccount`, `deriveThreadAiAccount`), the usage grouping (`groupUsage`, `formatTokens`) and
+the account rows (`accountRows`, status words, quota text) live in `packages/client-runtime`
+(`ai-account-picker`, `ai-usage-view`, `ai-accounts-view`). Web and mobile import them; the Hub's
+commands come from one `createAiGatewayEnvironmentAtoms` on each client.
+
+**Desktop** loads the web bundle, so Settings → AI accounts (accounts, Usage, Local CLI keys),
+Settings → AI gateway, the composer's «AI account» select and the Thread header badge are the same
+screens. The provider sign-in link is a `target=_blank` https link: the window-open handler sends it
+to the system browser (`ElectronShell.test.ts`), and the Owner pastes the address the browser lands
+on, as on web.
+
+**Mobile** (read-only, spec story 42): Settings → AI accounts (`SettingsAiAccounts`,
+`settings/ai-accounts`) lists the accounts the Hub returns with status, status message and quota,
+the last 30 days of usage by AI account, and the User's own Local CLI keys (make, copy the key once
+at creation, revoke; the key is a Personal-space key). Above the composer a strip shows the account
+in use and the model and, where the Hub says AI accounts decide and more than one fits, lets the
+User change it: mid-Thread `thread.setAiAccount` (gated by its `permissionAtom`), on a draft the
+choice goes into the draft's model selection. The phone never calls `aiAccounts.login.*`,
+`importVertex`, account create/update/delete/allow/reorder or `aiGateway.update|rollback|setEnabled`
+(`noOwnerControls.test.ts` scans the mobile source); the Hub refuses them from a Member anyway.
+No credential or key hint is shown; mobile follows the Hub's answers and never guesses a role.
+
+**Build for a device** (not run here, no device): `cd apps/mobile && pnpm ios` or `pnpm android`
+(prebuild + run), connect to the Hub, open Settings → AI accounts, and open a Thread in a Space
+whose accounts allow it.
+
 ## Known exception to «no upstream services»
 
 CLIProxyAPI 8.0.67, even with `-local-model`, asks the internet for the latest Antigravity client
