@@ -464,14 +464,20 @@ User's `[NAME]`s is refused, so `[NAME]` never replaces a value on the host.
 machine" reads each file with `forCopy: true` and gets it as it is, unmasked, so an `.env`
 arrives with its values. Only a caller who may write files (`filesystem:write`) may ask for one
 (`ws.ts`): they could print the file in a terminal anyway, and their own values are the only ones
-a read masks for them (R1). Every other read to a client is masked for its reader.
+a read masks for them (R1). Every other read to a client is masked for its reader. `ws.test.ts`
+proves both guards: the Space rule (a copy needs what a save needs) and the scope (a session with
+every scope but `filesystem:write` is refused).
 
 **Where it applies.** The full inventory is `vaults/MaskedPaths.ts`: every WS method, HTTP
 endpoint, raw route, MCP tool (as `DoorRules` lists them) and executor operation, each by name,
 with no wildcard. `MaskedPaths.test.ts` fails for a door without a rule or a rule without a door,
 and calls every door marked masked with the Owner's secret on a «Hub con Environments» Hub,
 checking it answers `[OWNER_TOKEN]` (change requests and Git actions through the masking their
-services wrap every method in: no host or hook runs in tests).
+services wrap every method in). The real paths are proven once each, below the wrappers:
+`GitManager.test.ts` runs a real commit with a real `pre-commit` hook that prints the value and one
+that fails with it (hook output `[HOOK_TOKEN]`, the failure without it), and
+`PullRequestService.test.ts` reads a change request through the real service over its host stub
+(`[PR_TOKEN]`) and refuses an edit carrying it. A real host (GitHub) never answers in tests.
 
 | What                                                          | Set      | Where                                                     |
 | ------------------------------------------------------------- | -------- | --------------------------------------------------------- |
@@ -530,7 +536,10 @@ files, never what a client is shown.
   checked); media and binary files (a NUL in their first 8 KB) are served as they are, whatever
   their size; a URL opened with no session and no User of its own serves no text;
 - the masker's expression index on `json_extract(payload_json, '$.lineage.rootThreadId')` costs
-  a JSON parse per projected Thread write; a generated column would be cheaper (ticket 09);
+  a JSON parse per projected Thread write: measured (ticket 09, SQLite in Node 26) at about 2.5 µs
+  per write for a 2.6 KB payload and 35 µs for 60 KB, against a full scan per lookup without it.
+  A VIRTUAL generated column indexes the same expression at the same cost; a STORED one needs a
+  rebuild of the Thread projection table. Kept as is;
 - a `forCopy` read is unmasked by design (decision R2, revised);
 - a Thread's history is masked with its owner's set (decision A), so a User who may type in a
   Thread they do not own (a teammate's, in a shared Space) can type a guess there and see whether
@@ -703,6 +712,33 @@ No door of its own: clients call the commands of tickets 02-06, gated by each co
   `apps/mobile/src` for `vaults.reveal`, `revealVaultSecret` and the master key calls.
   Creating, deleting, linking, allowing and defaults stay on web and desktop.
 
-## What is not covered here
+## The door inventory (spec 5 ticket 09)
 
-- The agent's names and missing secrets: ticket 06.
+The rule: a value leaves the Hub only by `vaults.reveal` (the Owner, strong factor), the master
+key's backup (the Owner) and `secretEnv` to a process that starts; everything else carries names
+or `[NAME]`. Each door is declared, and a test fails for one that is not:
+
+| Doors                                              | Declared in                                         | Test that fails for a new one                        |
+| -------------------------------------------------- | --------------------------------------------------- | ---------------------------------------------------- |
+| WS RPCs                                            | `RPC_SPACE_ACCESS`, `MaskedPaths.WS_DOOR_RULES`     | `RpcAuthorization.test.ts`, `MaskedPaths.test.ts`    |
+| HTTP endpoints, raw routes, MCP tools              | `DoorRules.ts`, `MaskedPaths.ts`                    | `DoorRules.test.ts`, `MaskedPaths.test.ts`           |
+| Executor operations (`secretEnv` on three of them) | `MaskedPaths.EXECUTOR_OPERATIONS`                   | `MaskedPaths.test.ts`, `DoorRules.test.ts` (count)   |
+| Modules that read a value                          | `DoorRules.test.ts`: reveal, delivery, masking only | the same (a new reader, a new caller of `readValue`) |
+| The Vaults' tables                                 | `DoorRules.test.ts`                                 | the same                                             |
+| Doors named after Vaults or secrets                | `vaults/VaultDoors.test.ts`                         | the same (a door neither called there nor elsewhere) |
+
+- **Value sweep** (`vaults/VaultDoors.test.ts`): full Vaults (Main, link, copy, each
+  Organization's own, one of the Owner's allowed to Acme and one to a User); the Owner and an
+  Admin, a Member and a Guest of Acme and of Globex call every `vaults.*` door, reads and writes,
+  the reveal without a strong factor, the master key's status, the audit log and
+  `list_secret_names`. No answer or refusal holds a value; none names a secret its caller may not
+  see; only the Owner's reveal with a passkey answers one.
+- **Guest and read-only views**: a guest link's stream and items show `[OWNER_TOKEN]`
+  (`HubWithEnvironments.secretMasking.test.ts`); the read-only snapshots serve the masked store.
+- **Leak smoke**: after a turn and a terminal (`secretMasking`), a handoff (`handoff`) and a
+  `request_secret` saved to a Vault (`SecretRequestVaults`), no file of the Hub's state (its sealed
+  store included), no row, no file of a machine but its checkouts and no `/proc/*/cmdline` holds
+  the value. Logs and spans of the real processes are searched by the live pass (the Hub's log,
+  its trace file, every process argument on the host and in the Sandboxes).
+- Not in the smoke: a setup script on the Hub machine (its shell gets the values in its spawn
+  environment only, `terminal/Manager.test.ts`).
