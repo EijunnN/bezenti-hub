@@ -202,6 +202,8 @@ describe("RPC authorization scopes", () => {
           WS_METHODS.aiAccountsLoginStart,
           WS_METHODS.aiAccountsLoginComplete,
           WS_METHODS.aiAccountsImportVertex,
+          // Ticket 15: importing CLIProxyAPI auth files.
+          WS_METHODS.aiAccountsImportCliproxy,
         ]) {
           expect([method, spaceAccessForRpcMethod(method)]).toEqual([method, "installation"]);
           const refused = yield* guardRpcPayload(

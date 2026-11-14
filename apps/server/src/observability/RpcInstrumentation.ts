@@ -168,6 +168,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.aiAccountsLoginStart]: "server",
   [WS_METHODS.aiAccountsLoginComplete]: "server",
   [WS_METHODS.aiAccountsImportVertex]: "server",
+  [WS_METHODS.aiAccountsImportCliproxy]: "server",
   [WS_METHODS.projectCloneStart]: "source-control",
   [WS_METHODS.projectCloneCancel]: "source-control",
   [WS_METHODS.projectCloneRetry]: "source-control",

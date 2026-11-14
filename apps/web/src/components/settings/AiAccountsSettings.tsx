@@ -4,8 +4,10 @@ import {
   type AtomCommandResult,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
+import { AI_CLIPROXY_IMPORT_MAX_FILES } from "@t3tools/contracts";
 import type {
   AiAccountDetails,
+  AiAccountImportCliproxyFileResult,
   AiAccountProvider,
   AiAccountLoginStartResult,
   AiAccountSummary,
@@ -21,7 +23,7 @@ import type {
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import { useAtomValue } from "@effect/atom-react";
-import { useEffect, useEffectEvent, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import { PrimaryEnvironmentHttpClient } from "../../environments/primary/httpClient";
 import { errorMessageOf } from "../../lib/errorMessage";
@@ -130,6 +132,10 @@ function useAccountCommands() {
     importVertex: useAtomCommand(
       aiGatewayEnvironment.importVertexAccount,
       "import a Vertex service account",
+    ),
+    importCliproxy: useAtomCommand(
+      aiGatewayEnvironment.importCliproxyAccounts,
+      "import CLIProxyAPI sign-ins",
     ),
   };
 }
@@ -302,6 +308,9 @@ function AiAccountsPage({ environmentId }: { readonly environmentId: Environment
         ) : null}
         {manage ? (
           <ImportVertexForm environmentId={environmentId} commands={commands} onAdded={refresh} />
+        ) : null}
+        {manage ? (
+          <ImportCliproxyForm environmentId={environmentId} commands={commands} onAdded={refresh} />
         ) : null}
       </SettingsSection>
       {accounts === null ? null : accounts.length === 0 ? (
@@ -837,6 +846,107 @@ function ImportVertexForm(props: {
         )}
       </div>
     </form>
+  );
+}
+
+/** The rule an imported sign-in lives by: its refresh token works in one proxy at a time. */
+const ONE_PROXY_NOTE =
+  "Stop the old CLIProxyAPI (or delete its copies of these files) once imported: a sign-in's refresh token works in one proxy only, and a refresh on either side signs the other out.";
+
+/**
+ * Spec 4 ticket 15: another CLIProxyAPI's auth files (Claude, Codex, Antigravity), each a
+ * subscription, disabled until the Owner checks who it is signed in as.
+ */
+function ImportCliproxyForm(props: {
+  readonly environmentId: EnvironmentId;
+  readonly commands: AccountCommands;
+  readonly onAdded: () => Promise<void>;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [results, setResults] = useState<ReadonlyArray<AiAccountImportCliproxyFileResult>>([]);
+  const importFiles = async (picked: ReadonlyArray<File>) => {
+    if (picked.length > AI_CLIPROXY_IMPORT_MAX_FILES) {
+      setError(`Pick at most ${AI_CLIPROXY_IMPORT_MAX_FILES} files at a time.`);
+      return;
+    }
+    setPending(true);
+    setError(null);
+    setResults([]);
+    try {
+      const files = await Promise.all(
+        picked.map(async (file) => ({
+          fileName: file.name,
+          contents: Redacted.make(await file.text()),
+        })),
+      );
+      const answer = await settle(
+        props.commands.importCliproxy({ environmentId: props.environmentId, input: { files } }),
+      );
+      setResults(answer.files);
+      await props.onAdded();
+    } catch (cause) {
+      setError(errorMessageOf(cause, "Could not import them."));
+    } finally {
+      setPending(false);
+    }
+  };
+  return (
+    <section
+      aria-label="Import from CLIProxyAPI"
+      className="flex flex-col gap-2 border-t px-4 py-4"
+    >
+      <h3 className="text-sm font-medium">Import from CLIProxyAPI</h3>
+      <p className="text-xs text-muted-foreground">
+        Pick the auth files of another CLIProxyAPI (its auth folder: claude-…, codex-…,
+        antigravity-….json). Each becomes a subscription, off until you check who it is signed in
+        as. {ONE_PROXY_NOTE}
+      </p>
+      <p className="text-xs text-muted-foreground">{TOS_WARNING}</p>
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".json,application/json"
+        multiple
+        hidden
+        aria-label="CLIProxyAPI auth files"
+        onChange={(event) => {
+          const picked = Array.from(event.currentTarget.files ?? []);
+          // The same files can be picked again.
+          event.currentTarget.value = "";
+          if (picked.length > 0) void importFiles(picked);
+        }}
+      />
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          type="button"
+          disabled={pending}
+          onClick={() => inputRef.current?.click()}
+        >
+          Choose CLIProxyAPI auth files
+        </Button>
+        {error === null ? null : (
+          <span className="text-xs text-destructive" role="alert">
+            {error}
+          </span>
+        )}
+      </div>
+      {results.length === 0 ? null : (
+        <ul aria-label="Imported files" className="flex flex-col gap-1 text-xs">
+          {results.map((result) => (
+            <li key={`${result.fileName}:${result.accountId ?? result.reason ?? ""}`}>
+              <span className="font-mono">{result.fileName}</span>
+              {": "}
+              {result.outcome === "imported"
+                ? `imported as «${result.name}», off until you turn it on.`
+                : `skipped. ${result.reason ?? ""}`}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 

@@ -276,6 +276,38 @@ export const AiAccountImportVertexInput = Schema.Struct({
 });
 export type AiAccountImportVertexInput = typeof AiAccountImportVertexInput.Type;
 
+/**
+ * Spec 4 ticket 15: auth files of another CLIProxyAPI (Claude, Codex, Antigravity sign-ins), each
+ * becoming a subscription AI account as a sign-in would. Their contents travel Redacted.
+ */
+export const AI_CLIPROXY_IMPORT_MAX_FILES = 50;
+export const AiAccountImportCliproxyInput = Schema.Struct({
+  files: Schema.Array(
+    Schema.Struct({
+      fileName: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
+      contents: AiCredentialInput,
+    }),
+  ).check(Schema.isMaxLength(AI_CLIPROXY_IMPORT_MAX_FILES)),
+});
+export type AiAccountImportCliproxyInput = typeof AiAccountImportCliproxyInput.Type;
+
+/** What became of one file: never anything it held but who it is signed in as. */
+export const AiAccountImportCliproxyFileResult = Schema.Struct({
+  fileName: Schema.String,
+  outcome: Schema.Literals(["imported", "skipped"]),
+  accountId: Schema.NullOr(AiAccountId),
+  name: Schema.NullOr(Schema.String),
+  signedInAs: Schema.NullOr(Schema.String),
+  /** Why it was skipped. */
+  reason: Schema.NullOr(Schema.String),
+});
+export type AiAccountImportCliproxyFileResult = typeof AiAccountImportCliproxyFileResult.Type;
+
+export const AiAccountImportCliproxyResult = Schema.Struct({
+  files: Schema.Array(AiAccountImportCliproxyFileResult),
+});
+export type AiAccountImportCliproxyResult = typeof AiAccountImportCliproxyResult.Type;
+
 export const AiAccountErrorReason = Schema.Literals([
   "not-found",
   "forbidden",

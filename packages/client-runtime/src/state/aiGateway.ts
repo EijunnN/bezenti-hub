@@ -109,5 +109,10 @@ export function createAiGatewayEnvironmentAtoms<R, E>(
       label: "environment-data:ai-accounts:import-vertex",
       tag: WS_METHODS.aiAccountsImportVertex,
     }),
+    // Spec 4 ticket 15: another CLIProxyAPI's auth files, as disabled subscriptions.
+    importCliproxyAccounts: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:ai-accounts:import-cliproxy",
+      tag: WS_METHODS.aiAccountsImportCliproxy,
+    }),
   };
 }

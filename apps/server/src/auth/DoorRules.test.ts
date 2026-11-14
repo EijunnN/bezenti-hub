@@ -298,6 +298,7 @@ describe("every door of the Hub declares its rule", () => {
       "aiAccounts.allow",
       "aiAccounts.create",
       "aiAccounts.delete",
+      "aiAccounts.importCliproxy",
       "aiAccounts.importVertex",
       "aiAccounts.list",
       "aiAccounts.login.complete",
@@ -530,7 +531,7 @@ describe("every door of the Hub declares its rule", () => {
   it("signs in to subscriptions over the Owner's WS RPCs only: no callback route, tokens read by AiAccounts alone", () => {
     // Every sign-in door is the Owner's, on the Installation, whatever the session's scopes.
     const signIn = [...WsRpcGroup.requests.keys()].filter((tag) =>
-      /^aiAccounts\.(login\.|importVertex)/u.test(tag),
+      /^aiAccounts\.(login\.|importVertex|importCliproxy)/u.test(tag),
     );
     expect(signIn.toSorted()).toEqual(Object.keys(AI_ACCOUNT_SIGN_IN_RULES).toSorted());
     for (const method of signIn) {

@@ -170,6 +170,7 @@ export const WS_DOOR_RULES: Record<string, DoorRule> = {
   "aiAccounts.login.start": none("AI accounts' names and status"),
   "aiAccounts.login.complete": none("AI accounts' names and status"),
   "aiAccounts.importVertex": none("AI accounts' names and status"),
+  "aiAccounts.importCliproxy": none("AI accounts' names and status"),
   "aiUsage.summary": none("usage figures: tokens, requests and costs"),
   "projectClone.start": none("a clone's progress"),
   "projectClone.cancel": none("a clone's progress"),

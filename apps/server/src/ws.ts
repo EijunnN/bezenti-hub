@@ -2941,6 +2941,7 @@ export const layerWsRpc = (
         [WS_METHODS.aiAccountsLoginComplete]: (input) =>
           aiAccounts.loginComplete(input, principal.sessionId),
         [WS_METHODS.aiAccountsImportVertex]: (input) => aiAccounts.importVertex(input),
+        [WS_METHODS.aiAccountsImportCliproxy]: (input) => aiAccounts.importCliproxy(input),
         // Counts only; AiUsage.summary keeps each session to what it may see (spec 4 ticket 05).
         [WS_METHODS.aiUsageSummary]: (input) => aiUsage.summary(input),
         // A User's own local CLI keys; the Owner's list and revoke reach everyone's. Only the

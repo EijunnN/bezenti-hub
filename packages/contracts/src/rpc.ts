@@ -38,6 +38,8 @@ import {
   ThreadSetAiAccountInput,
   ThreadSetAiAccountResult,
   AiAccountImportVertexInput,
+  AiAccountImportCliproxyInput,
+  AiAccountImportCliproxyResult,
   AiAccountListResult,
   AiAccountLoginCompleteInput,
   AiAccountLoginStartInput,
@@ -668,6 +670,8 @@ export const WS_METHODS = {
   aiAccountsLoginStart: "aiAccounts.login.start",
   aiAccountsLoginComplete: "aiAccounts.login.complete",
   aiAccountsImportVertex: "aiAccounts.importVertex",
+  // Spec 4 ticket 15: auth files of another CLIProxyAPI become subscriptions, Owner only.
+  aiAccountsImportCliproxy: "aiAccounts.importCliproxy",
   // Spec 4 ticket 08: the composer's AI-account picker and a Thread's switch.
   aiAccountsPicker: "aiAccounts.picker",
   threadSetAiAccount: "thread.setAiAccount",
@@ -1395,6 +1399,11 @@ const WsAiAccountsLoginCompleteRpc = Rpc.make(WS_METHODS.aiAccountsLoginComplete
 const WsAiAccountsImportVertexRpc = Rpc.make(WS_METHODS.aiAccountsImportVertex, {
   payload: AiAccountImportVertexInput,
   success: AiAccountSummary,
+  error: AiAccountRpcError,
+});
+const WsAiAccountsImportCliproxyRpc = Rpc.make(WS_METHODS.aiAccountsImportCliproxy, {
+  payload: AiAccountImportCliproxyInput,
+  success: AiAccountImportCliproxyResult,
   error: AiAccountRpcError,
 });
 
@@ -2355,6 +2364,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsAiAccountsLoginStartRpc,
   WsAiAccountsLoginCompleteRpc,
   WsAiAccountsImportVertexRpc,
+  WsAiAccountsImportCliproxyRpc,
   WsAiUsageSummaryRpc,
   WsAiGatewayKeysListRpc,
   WsAiGatewayKeysCreateRpc,

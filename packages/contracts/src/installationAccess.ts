@@ -105,6 +105,7 @@ export const INSTALLATION_RPC_METHODS = [
   WS_METHODS.aiAccountsLoginStart,
   WS_METHODS.aiAccountsLoginComplete,
   WS_METHODS.aiAccountsImportVertex,
+  WS_METHODS.aiAccountsImportCliproxy,
 ] as const;
 export type InstallationRpcMethod = (typeof INSTALLATION_RPC_METHODS)[number];
 

@@ -364,4 +364,6 @@ export const AI_ACCOUNT_SIGN_IN_RULES: Readonly<Record<string, DoorRule>> = {
     "the Owner, from the session that started that sign-in, within 10 minutes, with its state; the pasted address must be its redirect",
   ),
   [WS_METHODS.aiAccountsImportVertex]: OWNER,
+  // Ticket 15: CLIProxyAPI auth files, sealed as a sign-in; no gateway call.
+  [WS_METHODS.aiAccountsImportCliproxy]: OWNER,
 };

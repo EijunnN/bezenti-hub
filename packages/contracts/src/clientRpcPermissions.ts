@@ -57,6 +57,7 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.aiAccountsLoginStart]: AuthSettingsWriteScope,
   [WS_METHODS.aiAccountsLoginComplete]: AuthSettingsWriteScope,
   [WS_METHODS.aiAccountsImportVertex]: AuthSettingsWriteScope,
+  [WS_METHODS.aiAccountsImportCliproxy]: AuthSettingsWriteScope,
   // A User's local CLI keys (spec 4 ticket 10): a credential to the Hub, as a pairing link is.
   [WS_METHODS.aiGatewayKeysCreate]: AuthAccessWriteScope,
   // Switching a Thread's AI account changes the Thread, as any command on it does.

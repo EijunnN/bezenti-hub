@@ -12,6 +12,9 @@ import {
   type AiAccountErrorReason,
   type AiAccountId,
   type AiAccountImportVertexInput,
+  type AiAccountImportCliproxyInput,
+  type AiAccountImportCliproxyFileResult,
+  type AiAccountImportCliproxyResult,
   type AiAccountListResult,
   type AiAccountLoginCompleteInput,
   type AiAccountLoginStartInput,
@@ -61,6 +64,7 @@ import { AiGateway } from "./AiGateway.ts";
 import { aiCredentialValueId, credentialIdOfValueId } from "./aiCredentialValue.ts";
 import * as AiAccountChanges from "./AiAccountChanges.ts";
 import * as AllowedAiAccounts from "./AllowedAiAccounts.ts";
+import { identityOf, importedNameOf, readCliproxyAuthFile } from "./cliproxyImport.ts";
 import {
   type CliproxyCredential,
   type CliproxyEndpoint,
@@ -133,6 +137,13 @@ export class AiAccounts extends Context.Service<
     readonly importVertex: (
       input: AiAccountImportVertexInput,
     ) => Effect.Effect<AiAccountSummary, AiAccountError>;
+    /**
+     * Spec 4 ticket 15: another CLIProxyAPI's auth files, each a subscription as a sign-in leaves
+     * it (disabled until the Owner confirms who it is signed in as), once per identity.
+     */
+    readonly importCliproxy: (
+      input: AiAccountImportCliproxyInput,
+    ) => Effect.Effect<AiAccountImportCliproxyResult, AiAccountError>;
     /**
      * Spec 4 ticket 07: a direct account's credential, read for the one provider process about to
      * start with it (`AiGatewaySessions.issue`; no RPC reaches it). Its id names the value for the
@@ -436,6 +447,7 @@ const unavailable = AiAccounts.of({
   loginStart: refuse,
   loginComplete: refuse,
   importVertex: refuse,
+  importCliproxy: refuse,
   directCredential: refuse,
   adoptProviderKey: refuse,
   holdsKey: holdsNothing,
@@ -2344,6 +2356,123 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     return yield* ownerSummaryOf(userId, accountId);
   });
 
+  /**
+   * Ticket 15: another CLIProxyAPI's auth files, each sealed and disabled as a sign-in leaves it,
+   * allowed to the Owner's Personal space; an identity already held is skipped. No gateway call.
+   */
+  const importCliproxy = Effect.fn("AiAccounts.importCliproxy")(function* (
+    input: AiAccountImportCliproxyInput,
+  ) {
+    const userId = yield* manager;
+    const personal = SpaceDirectory.personalSpaceIdOf(userId);
+    return yield* syncLock.withPermits(1)(
+      Effect.gen(function* () {
+        const existing = yield* sql<{
+          readonly name: string;
+          readonly provider: AiAccountProvider;
+          readonly credentialId: string;
+        }>`
+          SELECT name, provider, credential_id AS "credentialId" FROM ai_accounts
+          WHERE type = 'subscription' AND deleted_at IS NULL AND credential_id IS NOT NULL
+        `.pipe(Effect.catch(storage("read the AI accounts")));
+        const held = new Map<string, string>();
+        for (const row of existing) {
+          const sealed = yield* sealedOf(row.credentialId);
+          if (sealed !== undefined) held.set(identityOf(row.provider, sealed), row.name);
+        }
+        const names = new Set(
+          (yield* sql<{ readonly name: string }>`SELECT name FROM ai_accounts`.pipe(
+            Effect.catch(storage("read the AI accounts")),
+          )).map((row) => row.name.toLowerCase()),
+        );
+        const results: Array<AiAccountImportCliproxyFileResult> = [];
+        const skipped = (fileName: string, reason: string) =>
+          results.push({
+            fileName,
+            outcome: "skipped",
+            accountId: null,
+            name: null,
+            signedInAs: null,
+            reason,
+          });
+        for (const file of input.files) {
+          const read = readCliproxyAuthFile(Redacted.value(file.contents));
+          if (read._tag === "skipped") {
+            skipped(file.fileName, read.reason);
+            continue;
+          }
+          const identity = identityOf(read.provider, read.token);
+          const holder = held.get(identity);
+          if (holder !== undefined) {
+            skipped(file.fileName, `Already an AI account: «${holder}».`);
+            continue;
+          }
+          const base = importedNameOf(read.provider, read.signedInAs);
+          const name = [base, ...Array.from({ length: 50 }, (_, n) => `${base} ${n + 2}`)].find(
+            (candidate) => !names.has(candidate.toLowerCase()),
+          );
+          if (name === undefined) {
+            skipped(file.fileName, "No free name for it. Rename an AI account and try again.");
+            continue;
+          }
+          const tokenId = `tok-${yield* newId(16)}`;
+          const accountId = yield* newId(8);
+          const at = yield* now;
+          yield* tokens
+            .set(tokenId, sealedTokenBytes(read.token))
+            .pipe(Effect.catch(storage("seal the imported sign-in")));
+          yield* sql
+            .withTransaction(
+              Effect.gen(function* () {
+                const last = yield* sql<{ readonly top: number | null }>`
+                  SELECT MAX(priority) AS top FROM ai_accounts
+                `;
+                yield* sql`
+                  INSERT INTO ai_accounts (account_id, name, type, provider, priority, status,
+                    disabled, status_message, credential_id, key_hint, base_url, models_json,
+                    created_at, updated_at, created_by)
+                  VALUES (${accountId}, ${name}, 'subscription', ${read.provider},
+                    ${(last[0]?.top ?? 0) + 1}, 'pending', 1, ${confirmMessageOf(read.signedInAs)},
+                    ${tokenId}, NULL, NULL, '[]', ${at}, ${at}, ${userId})
+                `;
+                yield* sql`
+                  INSERT INTO ai_account_allowances (account_id, subject_kind, subject_id, created_at)
+                  VALUES (${accountId}, 'space', ${personal}, ${at})
+                `;
+                yield* audit.record({
+                  actor: AuditLog.userActor(userId),
+                  action: "ai_account.create",
+                  target: { kind: "ai_account", id: accountId, name },
+                  detail: { provider: read.provider, type: "subscription", via: "import" },
+                });
+              }),
+            )
+            .pipe(
+              Effect.catch((error) =>
+                tokens
+                  .remove(tokenId)
+                  .pipe(
+                    Effect.ignore({ log: true }),
+                    Effect.andThen(orStorage("save the imported sign-in")(error)),
+                  ),
+              ),
+            );
+          held.set(identity, name);
+          names.add(name.toLowerCase());
+          results.push({
+            fileName: file.fileName,
+            outcome: "imported",
+            accountId: accountId as AiAccountId,
+            name,
+            signedInAs: read.signedInAs,
+            reason: null,
+          });
+        }
+        return { files: results } satisfies AiAccountImportCliproxyResult;
+      }),
+    );
+  });
+
   const directCredential = Effect.fn("AiAccounts.directCredential")(function* (
     accountId: AiAccountId,
   ) {
@@ -2497,6 +2626,7 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     loginStart,
     loginComplete,
     importVertex,
+    importCliproxy,
     directCredential,
     adoptProviderKey,
     holdsKey,
