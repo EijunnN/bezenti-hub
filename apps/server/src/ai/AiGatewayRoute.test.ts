@@ -127,6 +127,7 @@ it.live.skipIf(!posix || platform === undefined)(
         threadId,
         accountId: ids.claudeA,
         model: "claude-sonnet-5-5",
+        provider: "claude",
       });
       const [record] = [...(yield* Fiber.join(records))];
       assert.equal(record!.accountId, ids.claudeA);

@@ -302,6 +302,7 @@ describe("every door of the Hub declares its rule", () => {
       "aiAccounts.list",
       "aiAccounts.login.complete",
       "aiAccounts.login.start",
+      "aiAccounts.picker",
       "aiAccounts.reorder",
       "aiAccounts.update",
     ]);
@@ -419,6 +420,29 @@ describe("every door of the Hub declares its rule", () => {
     expect(environment).toBeDefined();
     for (const credential of ["apiKey", "key", "credential", "secret", "token", "value"]) {
       expect(successFields(environment!.successSchema.ast)).not.toContain(credential);
+    }
+  });
+
+  it("picks and switches a Thread's AI account over WS only: the picker per Space, the switch a Thread command (spec 4 ticket 08)", () => {
+    // The switch names a Thread (hidden ones answer like missing ones) and goes through the
+    // Thread door (`thread.continue`, AiAccountChoice); the picker is decided for the session.
+    expect(spaceAccessForRpcMethod("thread.setAiAccount")).toBe("thread");
+    expect(typeof spaceAccessForRpcMethod("aiAccounts.picker")).toBe("object");
+    expect(
+      [
+        ...Object.keys(HTTP_ENDPOINT_RULES),
+        ...Object.keys(MCP_TOOL_RULES),
+        ...Object.keys(RAW_ROUTE_RULES),
+      ].filter((name) => /setAiAccount|picker/iu.test(name)),
+    ).toEqual([]);
+    // Names and model names only: never a credential.
+    for (const tag of ["aiAccounts.picker", "thread.setAiAccount"]) {
+      const rpc = [...WsRpcGroup.requests.values()].find((candidate) => candidate._tag === tag);
+      expect(rpc, tag).toBeDefined();
+      const fields = successFields(rpc!.successSchema.ast);
+      for (const credential of ["apiKey", "key", "credential", "secret", "token", "value"]) {
+        expect(fields, tag).not.toContain(credential);
+      }
     }
   });
 

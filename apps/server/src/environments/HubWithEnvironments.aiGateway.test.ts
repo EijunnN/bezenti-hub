@@ -302,8 +302,10 @@ describe("Hub con Environments: agents on the Hub's AI gateway", () => {
           FROM orchestration_v2_projection_provider_sessions WHERE thread_id = ${first.threadId}
         `;
         assert.isNotEmpty(rows);
-        const shown = JSON.parse(rows[0]!.payload) as { aiAccount?: { name: string } };
-        assert.equal(shown.aiAccount?.name, "Owner Claude");
+        const shown = JSON.parse(rows[0]!.payload) as { aiAccount?: { id: string; name?: string } };
+        assert.equal(shown.aiAccount?.id, accountId);
+        // Every viewer of the Space reads it: each client names the account (ticket 08).
+        assert.isUndefined(shown.aiAccount?.name);
 
         // Never a key in the event store nor the projections.
         const leaked = yield* hub.server.sql<{ readonly n: number }>`
