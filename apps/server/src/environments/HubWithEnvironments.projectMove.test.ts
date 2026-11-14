@@ -10,7 +10,8 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   type AiAccountId,
   CommandId,
-  type EnvironmentId,
+  ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
+  EnvironmentId,
   HUB_MACHINE_ENVIRONMENT_ID,
   type ModelSelection,
   type OrchestrationV2Command,
@@ -31,6 +32,7 @@ import type * as McpProviderSessions from "@t3tools/provider-core/server/McpProv
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { makeProviderReplayGate } from "@t3tools/provider-testing/replayGate";
 import * as Cause from "effect/Cause";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -41,6 +43,7 @@ import * as Redacted from "effect/Redacted";
 import * as Stream from "effect/Stream";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 
+import * as AiGatewayKeys from "../ai/AiGatewayKeys.ts";
 import { addMember, joinOrganization } from "../auth/UserAuth.testkit.ts";
 import * as CommandActor from "../auth/CommandActor.ts";
 import * as HubRepository from "../checkpointing/HubRepository.ts";
@@ -49,6 +52,7 @@ import { ClaudeProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/Claud
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import * as AiSessionReach from "../orchestration-v2/AiSessionReach.ts";
 import { ProviderSessionManagerV2 } from "../orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { materializeFixtureInput } from "../orchestration-v2/testkit/fixtures/shared.ts";
@@ -83,6 +87,7 @@ import {
   replayOn,
 } from "./HubWithEnvironments.scenarios.testkit.ts";
 import {
+  connectProtocolEnvironment,
   makeHub,
   seedProject,
   type Hub,
@@ -1464,6 +1469,225 @@ describe("Hub con Environments: a Project moves to another Space, with AI accoun
         yield* Effect.exit(openAiSession(hub, thread, "ps-cursor-globex"));
         assert.equal(seen.length, 2, "a new process was asked for");
         assert.equal(cursorKeyIn(seen[1]), GLOBEX_CURSOR_KEY);
+      }).pipe(Effect.scoped),
+  );
+});
+
+describe("Hub con Environments: a Project move's AI reach, its edges (spec 4 ticket 11 review)", () => {
+  it.live(
+    "a session still opening when the move commits is closed once it is live, not left on Acme's account",
+    () =>
+      Effect.gen(function* () {
+        const hub = yield* makeHub({ aiAccounts: true });
+        const owner = yield* ownerIdOf(hub);
+        const acme = yield* createOrganization(hub, "Acme");
+        const globex = yield* createOrganization(hub, "Globex");
+        const acmeAccount = yield* addGatewayAccount(hub, "Acme Claude", { spaceIds: [acme] }, [
+          GATEWAY_MODEL,
+        ]);
+        yield* addGatewayAccount(hub, "Globex Claude", { spaceIds: [globex] }, [GATEWAY_MODEL]);
+        const instanceId = ProviderInstanceId.make("claudeAgent");
+        const environmentId = EnvironmentId.make("environment:protocol");
+        const machine = yield* connectProtocolEnvironment(hub, {
+          environmentId,
+          instanceId,
+          driver: CLAUDE,
+          capabilities: ClaudeProviderCapabilitiesV2,
+          executorContractVersion: ENVIRONMENT_EXECUTOR_CONTRACT_VERSION,
+        });
+        const projectId = ProjectId.make("project:opening");
+        yield* seedProject(hub.server, {
+          projectId,
+          title: "opening",
+          defaultModelSelection: null,
+          spaceId: acme,
+        });
+        const threadId = ThreadId.make("thread:opening");
+        const modelSelection = { instanceId, model: GATEWAY_MODEL, aiAccountId: acmeAccount };
+        yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:opening"),
+          threadId,
+          projectId,
+          title: "opening",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          spaceId: acme,
+          ownerUserId: owner,
+          activeEnvironmentId: environmentId,
+        });
+        const providerSessionId = ProviderSessionId.make("provider-session:opening");
+        const opening = yield* hub
+          .service(ProviderSessionManagerV2)
+          .open({
+            threadId,
+            providerSessionId,
+            modelSelection,
+            runtimePolicy: {
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd: "/remote",
+            },
+          })
+          .pipe(Effect.forkScoped);
+        // Its plan is made (Acme's account, a key issued): the machine is asked to start it.
+        let open = yield* machine.nextFrame;
+        while (open.method !== "provider.openSession") open = yield* machine.nextFrame;
+        const moved = yield* moveProject(hub, projectId, globex);
+        assert.equal(moved.status, 200, JSON.stringify(moved.body));
+        // A check runs while it is still opening: nothing live to close yet.
+        assert.deepEqual(yield* hub.service(AiSessionReach.AiSessionReach).reconcile, []);
+        yield* machine.connection.receive({
+          type: "response",
+          requestId: open.requestId,
+          result: {
+            _tag: "success",
+            value: {
+              providerSession: machine.providerSession(providerSessionId, "/remote"),
+              features: {
+                injectHistory: false,
+                compactThread: false,
+                stopTask: false,
+                unloadThread: false,
+                hasPendingBackgroundWork: false,
+                backgroundTasksEndWithProcess: false,
+              },
+            },
+          },
+        });
+        yield* Effect.exit(Fiber.join(opening));
+        assert.isTrue(
+          yield* eventually(isClosed(hub, providerSessionId)),
+          "the session started for Acme closes once it is live",
+        );
+      }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "a move that fails part way closes the moved Threads' processes, and a Thread whose move is rejected keeps its keys",
+    () =>
+      Effect.gen(function* () {
+        const loaded = yield* loadScenario("simple");
+        const models = [GATEWAY_MODEL, loaded.variant.modelSelection.model];
+        const hub = yield* makeHub({ aiAccounts: true });
+        const acme = yield* createOrganization(hub, "Acme");
+        const globex = yield* createOrganization(hub, "Globex");
+        const account = yield* addGatewayAccount(
+          hub,
+          "Shared Claude",
+          { spaceIds: [acme, globex] },
+          models,
+        );
+        const opened: Array<OpenedSession> = [];
+        const laptop = yield* hub.join({
+          name: "Laptop",
+          adapters: fakeGatewayCli(loaded.adapters, opened, { failFrom: 1 }),
+        });
+        const first = yield* replayedThread(hub, laptop, loaded, acme, account);
+        // A second Thread of the Project, made later, with a live key of its own.
+        const second = ThreadId.make("thread:second");
+        const now = yield* threadOf(hub, first.threadId);
+        yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:second"),
+          threadId: second,
+          projectId: first.projectId,
+          title: "second",
+          modelSelection: now.thread.modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          spaceId: acme,
+          ownerUserId: yield* ownerIdOf(hub),
+          activeEnvironmentId: laptop.environmentId,
+        });
+        yield* hub
+          .service(AiGatewayKeys.AiGatewayKeys)
+          .issueForThread(second, { providerSessionId: "ps-second" })
+          .pipe(Effect.orDie);
+        // Its move was rejected before: this move fails there, after the first Thread moved.
+        const commandId = "move:partial";
+        yield* hub
+          .service(EventSink.EventSinkV2)
+          .commitRejectedCommand({
+            commandId: CommandId.make(`${commandId}:move-thread:${second}`),
+            threadId: second,
+            commandType: "thread.space.move",
+            rejectedAt: yield* DateTime.now,
+            error: "rejected before",
+          })
+          .pipe(Effect.orDie);
+        const moved = yield* hub.server.request("/api/projects/mutate", {
+          cookie: hub.owner,
+          body: { type: "project.move", commandId, projectId: first.projectId, spaceId: globex },
+        });
+        assert.notEqual((moved as { status: number }).status, 200, JSON.stringify(moved));
+        assert.equal((yield* threadOf(hub, first.threadId)).thread.spaceId, globex);
+        const live = yield* hub.server.sql<{ readonly n: number }>`
+          SELECT COUNT(*) AS n FROM ai_gateway_keys WHERE thread_id = ${second} AND revoked_at IS NULL
+        `;
+        assert.equal(live[0]?.n, 1, "the rejected Thread's key is not revoked");
+        assert.isTrue(
+          yield* eventually(isClosed(hub, first.providerSessionId)),
+          "the moved Thread's process closes although the move failed after it",
+        );
+      }).pipe(Effect.scoped),
+  );
+
+  it.live(
+    "a Thread from before Spaces keeps its keys when its Project's Space does not change",
+    () =>
+      Effect.gen(function* () {
+        const hub = yield* makeHub({ aiAccounts: true });
+        const owner = yield* ownerIdOf(hub);
+        const acme = yield* createOrganization(hub, "Acme");
+        yield* addGatewayAccount(hub, "Acme Claude", { spaceIds: [acme] }, [GATEWAY_MODEL]);
+        const instanceId = ProviderInstanceId.make("claudeAgent");
+        const laptop = yield* hub.join({ name: "Laptop", adapters: idleAdapters(instanceId) });
+        const projectId = ProjectId.make("project:legacy");
+        yield* seedProject(hub.server, {
+          projectId,
+          title: "legacy",
+          defaultModelSelection: null,
+          spaceId: acme,
+        });
+        const threadId = ThreadId.make("thread:legacy");
+        // No Space of its own: it is its Project's.
+        yield* hub.service(Orchestrator.OrchestratorV2).dispatch({
+          type: "thread.create",
+          createdBy: "user",
+          creationSource: "web",
+          commandId: CommandId.make("command:legacy"),
+          threadId,
+          projectId,
+          title: "legacy",
+          modelSelection: { instanceId, model: GATEWAY_MODEL },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          ownerUserId: owner,
+          activeEnvironmentId: laptop.environmentId,
+        });
+        assert.isUndefined((yield* threadOf(hub, threadId)).thread.spaceId ?? undefined);
+        yield* hub
+          .service(AiGatewayKeys.AiGatewayKeys)
+          .issueForThread(threadId, { providerSessionId: "ps-legacy" })
+          .pipe(Effect.orDie);
+        const moved = yield* moveProject(hub, projectId, acme);
+        assert.equal(moved.status, 200, JSON.stringify(moved.body));
+        const live = yield* hub.server.sql<{ readonly n: number }>`
+        SELECT COUNT(*) AS n FROM ai_gateway_keys WHERE thread_id = ${threadId} AND revoked_at IS NULL
+      `;
+        assert.equal(live[0]?.n, 1, "its key is not revoked: its Space did not change");
       }).pipe(Effect.scoped),
   );
 });

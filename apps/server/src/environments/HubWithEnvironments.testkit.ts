@@ -1198,6 +1198,8 @@ export const connectProtocolEnvironment = Effect.fn("HubWithEnvironments.connect
       readonly capabilities: OrchestrationV2ProviderCapabilities;
       /** The sessions the machine says it still runs. */
       readonly sessions?: EnvironmentHelloFrame["sessions"];
+      /** The executor contract it says it runs; none: the oldest one. */
+      readonly executorContractVersion?: number;
     },
   ) {
     const remote = hub.service(RemoteEnvironments.RemoteEnvironments);
@@ -1224,6 +1226,9 @@ export const connectProtocolEnvironment = Effect.fn("HubWithEnvironments.connect
           protocolVersion: ENVIRONMENT_CONNECTION_PROTOCOL_VERSION,
           os: "linux",
           hostname: "protocol",
+          ...(input.executorContractVersion === undefined
+            ? {}
+            : { executorContractVersion: input.executorContractVersion }),
           providers: [
             {
               instanceId: input.instanceId,

@@ -53,6 +53,27 @@ const make = Effect.gen(function* () {
       WHERE ${sql.in("t.thread_id", threadIds)}
     `;
 
+  /** The removed Users among these: everything started for them closes. */
+  const removedOf = (userIds: ReadonlyArray<UserId>) =>
+    sql<{ readonly userId: string }>`
+      SELECT user_id AS "userId" FROM users
+      WHERE removed_at IS NOT NULL AND ${sql.in("user_id", userIds)}
+    `.pipe(Effect.map((rows) => new Set(rows.map((row) => row.userId))));
+
+  type AllowedAccount = AllowedAiAccounts.AllowedAiAccount;
+  /** One owner's allowed accounts in these Spaces, read again once on a failure. */
+  const allowedFor = (ownerUserId: UserId, spaceIds: ReadonlyArray<SpaceId>) =>
+    allowedAccounts.forSpaces(ownerUserId, spaceIds).pipe(
+      Effect.retry({ times: 1 }),
+      Effect.asSome,
+      Effect.catchCause((cause) =>
+        Effect.logWarning("AiSessionReach: could not read an owner's AI accounts", {
+          ownerUserId,
+          cause,
+        }).pipe(Effect.as(Option.none<ReadonlyMap<SpaceId, ReadonlyArray<AllowedAccount>>>())),
+      ),
+    );
+
   const reconcile = Effect.gen(function* () {
     // One read of the live sessions, from memory; then one of their Threads, one per owner.
     const live = yield* sessions.liveAiSessions;
@@ -64,26 +85,27 @@ const make = Effect.gen(function* () {
         row,
       ]),
     );
-    // Only for sessions whose Thread still matches: a Space each (owner) was started for.
     const asked = new Map<UserId, Set<SpaceId>>();
     for (const session of live) {
       const spaces = asked.get(session.facts.ownerUserId) ?? new Set<SpaceId>();
       spaces.add(session.facts.spaceId);
       asked.set(session.facts.ownerUserId, spaces);
     }
+    const removed = yield* removedOf([...asked.keys()]);
+    // Each owner on their own: one whose read fails is answered «not allowed» (fail closed).
     const allowed = new Map<string, ReadonlySet<AiAccountId>>();
     for (const [ownerUserId, spaceIds] of asked) {
-      const answer = yield* allowedAccounts.forSpaces(ownerUserId, [...spaceIds]);
-      for (const [spaceId, accounts] of answer) {
+      const answer = yield* allowedFor(ownerUserId, [...spaceIds]);
+      if (Option.isNone(answer)) continue;
+      for (const [spaceId, accounts] of answer.value) {
         allowed.set(`${ownerUserId} ${spaceId}`, new Set(accounts.map((account) => account.id)));
       }
     }
     const stale = live.filter((session) => {
-      const { ownerUserId, spaceId, accountId } = session.facts;
-      const reaches = allowed.get(`${ownerUserId} ${spaceId}`)?.has(accountId) === true;
-      if (!reaches) return true;
-      // Every Thread on it must still be in that Space, run by that owner.
-      return session.threadIds.some((threadId) => {
+      const { ownerUserId, spaceId, accountId, direct } = session.facts;
+      // Moved, handed over, gone, or a removed User: whatever it holds, it closes.
+      if (removed.has(ownerUserId)) return true;
+      const elsewhere = session.threadIds.some((threadId) => {
         const thread = facts.get(threadId);
         return (
           thread === undefined ||
@@ -93,6 +115,11 @@ const make = Effect.gen(function* () {
           UserId.make(thread.ownerUserId) !== ownerUserId
         );
       });
+      if (elsewhere) return true;
+      // Access merely lost (an allowance, a Membership): a direct credential leaves the process;
+      // a gateway key is refused per request instead, and its request in flight finishes.
+      const reaches = allowed.get(`${ownerUserId} ${spaceId}`)?.has(accountId) === true;
+      return !reaches && direct;
     });
     yield* Effect.forEach(
       stale,
@@ -136,6 +163,8 @@ const make = Effect.gen(function* () {
     );
   yield* forEachChange(yield* spaces.subscribeMembershipChanges);
   yield* forEachChange(yield* spaces.subscribeUserStatusChanges);
+  // A session that opened on a plan made before a check: checked again once it is live.
+  yield* forEachChange(yield* sessions.subscribeAiSessionOpens);
   const accountChanges = yield* Effect.serviceOption(AiAccountChanges.AiAccountChanges);
   if (Option.isSome(accountChanges)) {
     yield* forEachChange(yield* accountChanges.value.subscribe);

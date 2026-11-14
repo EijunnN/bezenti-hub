@@ -41,6 +41,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
@@ -176,6 +177,8 @@ export interface LiveAiSession {
     readonly ownerUserId: UserId;
     readonly spaceId: SpaceId;
     readonly accountId: AiAccountId;
+    /** Its process holds a direct credential (not a gateway key, refused per request). */
+    readonly direct: boolean;
   };
 }
 
@@ -183,6 +186,11 @@ export interface ProviderSessionManagerV2Shape {
   readonly shutdown: Effect.Effect<void>;
   /** Every live session started on a Hub AI account, read from memory (`AiSessionReach`). */
   readonly liveAiSessions: Effect.Effect<ReadonlyArray<LiveAiSession>>;
+  /**
+   * Signals each session started on an AI account once it is live: one whose plan was made before
+   * a reach ended is checked again (`AiSessionReach`), never missed by a check that ran meanwhile.
+   */
+  readonly subscribeAiSessionOpens: Effect.Effect<Stream.Stream<void>, never, Scope.Scope>;
   readonly open: (input: {
     readonly threadId: ThreadId;
     readonly providerSessionId: ProviderSessionId;
@@ -535,6 +543,7 @@ export const layerWithOptions = (
           }),
       );
       const sessions = yield* Ref.make(new Map<string, LiveSessionEntry>());
+      const aiSessionOpens = yield* PubSub.sliding<void>(1);
       /** What each live session last showed on its Threads, so a new account keeps its status. */
       const shownSessions = new Map<string, OrchestrationV2ProviderSession>();
       // Retry per released entry; reusing ids must not lose cleanup for earlier threads.
@@ -2637,6 +2646,7 @@ export const layerWithOptions = (
                         ownerUserId: gatewayPlan.ownerUserId,
                         spaceId: gatewayPlan.spaceId,
                         accountId: gatewayPlan.account.id as AiAccountId,
+                        direct: gatewayPlan._tag === "direct",
                       }
                     : undefined,
                 runtime,
@@ -2655,6 +2665,7 @@ export const layerWithOptions = (
                 updated.set(key, entry);
                 return updated;
               });
+              if (entry.aiFacts !== undefined) yield* PubSub.publish(aiSessionOpens, undefined);
               yield* dropReservation;
               yield* withActivityError(
                 input.providerSessionId,
@@ -2778,6 +2789,9 @@ export const layerWithOptions = (
             ),
         ),
         release: releaseEntry,
+        subscribeAiSessionOpens: PubSub.subscribe(aiSessionOpens).pipe(
+          Effect.map(Stream.fromSubscription),
+        ),
         liveAiSessions: Ref.get(sessions).pipe(
           Effect.map((current) =>
             [...current.values()].flatMap((entry): ReadonlyArray<LiveAiSession> =>

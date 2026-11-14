@@ -569,12 +569,12 @@ processes agree with it at once, in the write that ends a reach (`ai/AiAccountRe
 `ai/AiAccountReachLoss.ts`, `orchestration-v2/AiSessionReach.ts`), as Vaults do
 (docs/internals/secrets.md, «Losing reach»).
 
-| How reach is lost                                                                            | In the same transaction                                                                                                                                                                                                                                                  | Live processes                                             |
-| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------- |
-| A Project moves to another Space                                                             | each Thread's commit (`thread.space.move`): its gateway keys revoked (`thread-moved`, the old key answers 401), its `modelSelection.aiAccountId` kept if allowed to its turn owner there, else the first allowed one its driver takes, else none («needs an AI account») | closed after the commit (`reconcileAiSessions`)            |
-| A User is removed                                                                            | every key of theirs revoked (`user-inactive`, User keys audited `ai_gateway_key.revoke` by the Owner), every allowance to them and to their Personal space dropped (audited `ai_account.allow`)                                                                          | closed after the commit                                    |
-| An Organization is deleted                                                                   | its Threads go first (their keys with them); then the keys made for its Space (`space-lost`) and its allowances, audited                                                                                                                                                 | ended with its Threads                                     |
-| An allowance taken back, an account disabled or deleted, a Membership ended, a User disabled | nothing to drop: the next request is refused (a Thread key is refused, never revoked, when its turn owner merely lost access)                                                                                                                                            | closed (`AiAccountChanges`, the Space directory's watches) |
+| How reach is lost                                                                            | In the same transaction                                                                                                                                                                                                                                                  | Live processes                                                                                                                          |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| A Project moves to another Space                                                             | each Thread's commit (`thread.space.move`): its gateway keys revoked (`thread-moved`, the old key answers 401), its `modelSelection.aiAccountId` kept if allowed to its turn owner there, else the first allowed one its driver takes, else none («needs an AI account») | closed after the commit (`reconcileAiSessions`)                                                                                         |
+| A User is removed                                                                            | every key of theirs revoked (`user-inactive`, User keys audited `ai_gateway_key.revoke` by the Owner), every allowance to them and to their Personal space dropped (audited `ai_account.allow`)                                                                          | closed after the commit                                                                                                                 |
+| An Organization is deleted                                                                   | its Threads go first (their keys with them); then the keys made for its Space (`space-lost`) and its allowances, audited                                                                                                                                                 | ended with its Threads                                                                                                                  |
+| An allowance taken back, an account disabled or deleted, a Membership ended, a User disabled | nothing to drop: the next request is refused (a Thread key is refused, never revoked, when its turn owner merely lost access)                                                                                                                                            | a direct credential's process closed (`AiAccountChanges`, the Space directory's watches); a gateway session stays, its requests refused |
 
 - **The move plan** (`POST /api/projects/move-plan`, same door and rule as before) answers
   `aiAccountsLost`: each account a Thread chose that its turn owner may not use in the destination,
@@ -582,7 +582,8 @@ processes agree with it at once, in the write that ends a reach (`ai/AiAccountRe
   viewers see it there); otherwise `null`, and clients say «<Provider> account». The dialog lists
   them under «AI accounts it loses». A Thread left without one shows the composer's «AI account»
   select (ticket 08).
-- **The re-choice** runs inside the Thread's move transaction: the allowed set is read there, so an
+- **The re-choice** runs only when the Thread's Space in effect changes (one without its own is its
+  Project's), inside the Thread's move transaction, which writes nothing if the move is rejected: the allowed set is read there, so an
   allowance taken back meanwhile is seen. The catalogs that pick an account serving the model are
   read before any write (`catalogsFor`); none readable: the first compatible account. The driver is
   the Thread's last session's, else its instance's.
@@ -590,9 +591,13 @@ processes agree with it at once, in the write that ends a reach (`ai/AiAccountRe
   AI account keeps what it was started for (`aiFacts`: turn owner, Space, account; the session
   plan's). A check reads the live sessions from memory, their Threads in one query and the allowed
   accounts once per owner, and releases every session whose Thread is in another Space, has another
-  turn owner, is gone, or whose account is no longer allowed to them there. Requests coalesce (one
-  pending at most); they come from a move, a removal, Membership and User status changes, an
-  account's allowances, disablement or deletion, and each machine as it connects. A machine away
+  turn owner, is gone, or whose User was removed; a session whose account is merely no longer
+  allowed to them there closes only if it holds a direct credential (a gateway key stays refused,
+  not revoked, and its request in flight finishes). Each owner's accounts are read on their own,
+  once more on a failure, then «not allowed» (fail closed). Requests coalesce (one pending at
+  most); they come from a move (also one that failed part way, once anything moved), a removal,
+  Membership and User status changes, an account's allowances, disablement or deletion, each
+  machine as it connects, and each AI session once it is live (its plan may predate the check). A machine away
   when its session is released is told on its return (`provider.detach`, then `retired`). The next
   turn opens a new process by its fingerprint, which holds the Space. A direct credential is thus
   gone from a process's environment once its reach ends; a gateway key is refused per request anyway.

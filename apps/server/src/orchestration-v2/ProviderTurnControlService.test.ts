@@ -280,6 +280,7 @@ it.effect(
         ProviderSessionManager.ProviderSessionManagerV2.of({
           shutdown: Effect.void,
           liveAiSessions: Effect.succeed([]),
+          subscribeAiSessionOpens: Effect.succeed(Stream.never),
           open: () => Effect.die("unused open"),
           get: (providerSessionId) =>
             Effect.succeed(

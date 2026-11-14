@@ -475,6 +475,17 @@ const layerEnvironmentReturnsProvided = EnvironmentReturnService.layer.pipe(
   ),
 );
 
+// Provider processes out of their AI account's reach close (spec 4 ticket 11).
+const layerAiSessionReachProvided = AiSessionReach.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      layerProviderSessionManagerProvided,
+      layerAllowedAiAccounts,
+      SpaceDirectory.layer,
+    ),
+  ),
+);
+
 // A Project moving to another Space stops its Threads and cuts released ones off their machine.
 const layerProjectMoveThreadsProvided = ProjectMoveThreads.layer.pipe(
   Layer.provide(
@@ -487,15 +498,7 @@ const layerProjectMoveThreadsProvided = ProjectMoveThreads.layer.pipe(
       layerRemoteEnvironmentsProvided,
       layerProviderSessionManagerProvided,
       // Provider processes out of their AI account's reach close (spec 4 ticket 11).
-      AiSessionReach.layer.pipe(
-        Layer.provide(
-          Layer.mergeAll(
-            layerProviderSessionManagerProvided,
-            layerAllowedAiAccounts,
-            SpaceDirectory.layer,
-          ),
-        ),
-      ),
+      layerAiSessionReachProvided,
     ),
   ),
 );
@@ -503,6 +506,7 @@ const layerProjectMoveThreadsProvided = ProjectMoveThreads.layer.pipe(
 export const layer = Layer.mergeAll(
   layerEnvironmentReturnsProvided,
   layerProjectMoveThreadsProvided,
+  layerAiSessionReachProvided,
   layerEnvironmentExecutorsProvided,
   layerRemoteEnvironmentsProvided,
   layerCheckpointUploadsProvided,

@@ -968,6 +968,8 @@ export const make = Effect.gen(function* () {
     cache: ServesCache,
     /** The destination's catalogs, read before any write (`AiAccountReach.catalogsFor`). */
     catalogs: AiAccountReach.Catalogs,
+    /** The Project's Space before the move: a Thread without its own is in it until now. */
+    fromSpaceId: SpaceId,
   ) {
     const plan = yield* threadMovePlan(threadId, input.projectId, input.spaceId, cache);
     if (plan === undefined || !plan.changes) return { changed: false, released: undefined };
@@ -1034,7 +1036,8 @@ export const make = Effect.gen(function* () {
       });
     // Every session the Thread had there is let go, whatever the projection says of it.
     const sessionIds = encodeSessionIds(records.providerSessions.map((session) => session.id));
-    const spaceChanges = thread.spaceId !== input.spaceId;
+    // Its Space in effect: a Thread from before Spaces has none of its own, and is its Project's.
+    const spaceChanges = (thread.spaceId ?? fromSpaceId) !== input.spaceId;
     const recordRelease = (environmentId: EnvironmentId) =>
       sql`
         INSERT INTO thread_environment_releases (
@@ -1067,7 +1070,16 @@ export const make = Effect.gen(function* () {
             catalogs,
           })
         : thread.modelSelection;
-      return yield* commitThread(modelSelection);
+      const done = yield* commitThread(modelSelection);
+      // A rejected move writes nothing: no key revoked, no release recorded for it.
+      if (done.receipt.status === "rejected") {
+        return yield* new ProjectOperationError({
+          operation: "move-thread",
+          projectId: input.projectId,
+          cause: done.receipt.error ?? "The Thread move was rejected.",
+        });
+      }
+      return done;
     });
     const committed = yield* (
       releasedFrom === undefined && !spaceChanges
@@ -1267,7 +1279,14 @@ export const make = Effect.gen(function* () {
           const result = yield* threadCommands
             .withLock(
               thread.threadId,
-              moveThread({ ...input, spaceId: route.to }, thread.threadId, actor, cache, catalogs),
+              moveThread(
+                { ...input, spaceId: route.to },
+                thread.threadId,
+                actor,
+                cache,
+                catalogs,
+                route.from,
+              ),
             )
             .pipe(
               Effect.mapError((cause) =>
@@ -1297,9 +1316,6 @@ export const make = Effect.gen(function* () {
           // Shells started for the old Space close on their machines (spec 5 ticket 07); the
           // move does not wait for it, and the Hub refuses them meanwhile.
           if (cutting) yield* work.reconcileTerminals;
-          // Their provider processes started for the old Space (a direct credential, a key)
-          // close; the next turn opens one for the new Space (spec 4 ticket 11).
-          if (cutting) yield* work.reconcileAiSessions;
         }
       });
       yield* spaces.whileProjectMoves(projectId, relocate).pipe(
@@ -1307,7 +1323,11 @@ export const make = Effect.gen(function* () {
         Effect.ensuring(
           Effect.flatMap(Ref.get(moved), (any) =>
             any
-              ? spaces.projectMoved(route).pipe(
+              ? // Their provider processes started for the old Space (a direct credential, a
+                // key) close, also after a failure part way; the next turn opens one for the
+                // new Space (spec 4 ticket 11).
+                (work === undefined ? Effect.void : work.reconcileAiSessions).pipe(
+                  Effect.andThen(spaces.projectMoved(route)),
                   Effect.catch((cause) =>
                     Effect.logWarning("Could not refresh the viewers of a moved Project", {
                       cause,
