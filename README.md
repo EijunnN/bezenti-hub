@@ -1,4 +1,4 @@
-# T3 Code Hub
+# Bezenti Hub
 
 A self-hosted, multi-user home for coding agents. One Hub on your own server keeps every Thread's history, decides who may use which secret and which AI account, and sends the work to the right machine. Your team reaches it from the web, the desktop app or the phone.
 
