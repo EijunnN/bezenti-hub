@@ -2325,7 +2325,7 @@ export const layerWithOptions = (
                     detail: "This Thread's secrets or AI gateway changed.",
                   }).pipe(Effect.mapError(openFailed));
                   existing = undefined;
-                } else if (gatewayPlan._tag === "on") {
+                } else if (gatewayPlan._tag === "on" || gatewayPlan._tag === "direct") {
                   // A busy process on a login, or for another owner or account, never serves a turn
                   // that must go through the gateway as this one.
                   return yield* openFailed(
@@ -2377,16 +2377,40 @@ export const layerWithOptions = (
               // instance alone) never gets a Thread's secrets.
               // Nor a Thread's gateway key: refused before any key is issued (or an earlier rotated).
               if (
-                (secretFingerprint !== NO_SECRETS_FINGERPRINT || gatewayPlan._tag === "on") &&
+                (secretFingerprint !== NO_SECRETS_FINGERPRINT ||
+                  gatewayPlan._tag === "on" ||
+                  gatewayPlan._tag === "direct") &&
                 sharedId
               ) {
                 return yield* shared(adapter.driver);
               }
               // The values, read now that a process starts (a machine too old for them refuses).
-              const secretEnv: SecretEnv | undefined =
+              const vaultEnv: SecretEnv | undefined =
                 plan === undefined || plan.variables.length === 0 || Option.isNone(secretDelivery)
                   ? undefined
                   : yield* secretDelivery.value.resolve(plan).pipe(Effect.mapError(openFailed));
+              // Spec 4 ticket 07: a direct AI account's credential, read now and masked, as one more
+              // variable of this process only (never a terminal's): it wins over a Vault's of the
+              // same name, and the process drops every ambient AI credential (`aiCredential`).
+              const direct =
+                gatewayPlan._tag !== "direct" || Option.isNone(aiGatewaySessions)
+                  ? undefined
+                  : yield* aiGatewaySessions.value
+                      .issueDirect({ threadId: input.threadId, plan: gatewayPlan })
+                      .pipe(Effect.mapError(openFailed));
+              const secretEnv: SecretEnv | undefined =
+                direct === undefined
+                  ? vaultEnv
+                  : {
+                      fingerprint: `${vaultEnv?.fingerprint ?? NO_SECRETS_FINGERPRINT}+ai`,
+                      variables: [
+                        ...(vaultEnv?.variables ?? []).filter(
+                          (variable) => variable.name !== direct.variable.name,
+                        ),
+                        direct.variable,
+                      ],
+                      aiCredential: direct.variable.name,
+                    };
               // Spec 4 ticket 06: the Thread's key, issued now for this session (revoked with it),
               // or the refusal: never a session on a login of the machine instead.
               const gateway =
@@ -2408,7 +2432,7 @@ export const layerWithOptions = (
                           Effect.mapError(openFailed),
                         ),
                     );
-              const aiAccount = Option.isSome(gateway) ? gateway.value.account : undefined;
+              const aiAccount = Option.isSome(gateway) ? gateway.value.account : direct?.account;
               const prepared = yield* prepareMcpSession(
                 input.threadId,
                 input.modelSelection.instanceId,

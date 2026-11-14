@@ -4,6 +4,8 @@
  * drops what it already has. See docs/internals/overview.md, «Environment executors».
  */
 import {
+  AI_DIRECT_CONTRACT_VERSION,
+  AI_DIRECT_VARIABLES,
   AI_GATEWAY_CONTRACT_VERSION,
   AI_GATEWAY_FIELD,
   AiGatewaySessionError,
@@ -473,6 +475,21 @@ const make = Effect.gen(function* () {
         error: yield* outdatedRefusal(link, operation, input, "aiGateway"),
       };
     }
+    // Spec 4 ticket 07: a direct AI credential only to a machine of contract 13, which drops its
+    // ambient logins for it; an older one would run the agent with both.
+    if (
+      link.contractVersion < AI_DIRECT_CONTRACT_VERSION &&
+      typeof input === "object" &&
+      input !== null &&
+      SECRET_ENV_FIELD in input &&
+      typeof (input as { readonly secretEnv?: { readonly aiCredential?: unknown } }).secretEnv
+        ?.aiCredential === "string"
+    ) {
+      return {
+        _tag: "failed",
+        error: yield* outdatedRefusal(link, operation, input, "aiGateway"),
+      };
+    }
     const payload = yield* encodeJson(spec.input, input).pipe(Effect.orDie);
     const idempotencyKey = yield* EnvironmentExecutor.nextIdempotencyKey(operation);
     let result: ExecutorCallResult | undefined;
@@ -849,6 +866,7 @@ const make = Effect.gen(function* () {
     // Carried to the machine, whose own adapter takes them or refuses the session.
     receivesSecretEnv: true,
     usesAiGateway: true,
+    acceptsAiCredential: AI_DIRECT_VARIABLES,
     openSession: Effect.fn("RemoteEnvironments.openSession")(function* (input) {
       yield* requireSandboxSpace(link, driver, input.threadId).pipe(
         Effect.mapError(

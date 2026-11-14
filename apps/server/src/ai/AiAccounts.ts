@@ -27,6 +27,8 @@ import {
   aiAccountPrefixOf,
   type AiApiKeyProvider,
   type AiSubscriptionProvider,
+  isAiApiKeyProvider,
+  isAiDirectProvider,
   type ServerProviderUsageLimits,
   type SpaceId,
   type UserId,
@@ -54,7 +56,9 @@ import * as CommandActor from "../auth/CommandActor.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
 import { makeCliproxyApi } from "../usage/cliproxyApi.ts";
+import { heldByThread, pruneAndListHeld } from "../vaults/ThreadSecretValues.ts";
 import { AiGateway } from "./AiGateway.ts";
+import { aiCredentialValueId, credentialIdOfValueId } from "./aiCredentialValue.ts";
 import * as AllowedAiAccounts from "./AllowedAiAccounts.ts";
 import {
   type CliproxyCredential,
@@ -128,6 +132,19 @@ export class AiAccounts extends Context.Service<
     readonly importVertex: (
       input: AiAccountImportVertexInput,
     ) => Effect.Effect<AiAccountSummary, AiAccountError>;
+    /**
+     * Spec 4 ticket 07: a direct account's credential, read for the one provider process about to
+     * start with it (`AiGatewaySessions.issue`; no RPC reaches it). Its id names the value for the
+     * Thread's masker (`ai-account:<credential id>`). Not found unless the account is direct,
+     * enabled and not deleted.
+     */
+    readonly directCredential: (accountId: AiAccountId) => Effect.Effect<
+      {
+        readonly credentialId: string;
+        readonly value: Redacted.Redacted<string>;
+      },
+      AiAccountError
+    >;
   }
 >()("t3/ai/AiAccounts") {}
 
@@ -295,6 +312,8 @@ const statusOf = (
   if (row.disabled === 1) {
     return { status: "disabled", statusMessage: row.statusMessage ?? "Disabled by the Owner." };
   }
+  // A direct credential never goes through the gateway: it works whatever the gateway does.
+  if (row.type === "direct") return { status: "working", statusMessage: null };
   if (!context.running) {
     return { status: "pending", statusMessage: "The AI gateway is not running." };
   }
@@ -385,6 +404,7 @@ const unavailable = AiAccounts.of({
   loginStart: refuse,
   loginComplete: refuse,
   importVertex: refuse,
+  directCredential: refuse,
 });
 
 /** Options for tests: how often the Hub reads back refreshed tokens; how long a sign-in lasts. */
@@ -588,7 +608,10 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     for (const { credentialId } of retired) {
       if (liveCredentials.has(credentialId)) continue;
       if (tokensUnknown && isTokenId(credentialId)) continue;
-      yield* storedRemove(credentialId);
+      // Ticket 07: a direct credential a Thread received stays sealed while that Thread lives, so
+      // its masker still hides what the agent printed with it (spec 5, ticket 05).
+      const held = yield* heldByThread(sql, aiCredentialValueId(credentialId));
+      if (!held) yield* storedRemove(credentialId);
       yield* sql`DELETE FROM ai_account_retired_credentials WHERE credential_id = ${credentialId}`;
     }
     yield* sql`
@@ -1506,6 +1529,29 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     const key = Redacted.value(input.apiKey).trim();
     const problem = credentialProblem(key);
     if (problem !== undefined) return yield* fail("invalid", problem);
+    const type = input.type ?? "api-key";
+    // Ticket 07: a direct credential is an API key of a provider whose agent takes no base URL;
+    // an API key the gateway uses is one of the gateway's providers. Never the other way round.
+    if (
+      type === "direct" ? !isAiDirectProvider(input.provider) : !isAiApiKeyProvider(input.provider)
+    ) {
+      return yield* fail(
+        "invalid",
+        type === "direct"
+          ? "A direct credential is for Gemini, Vertex AI, Cursor, Kiro, Fx, Meta, Devin or xAI."
+          : "That provider takes a direct credential: choose «Direct credential».",
+      );
+    }
+    if (type === "direct" && (input.baseUrl !== undefined || input.models !== undefined)) {
+      return yield* fail("invalid", "A direct credential takes no base URL or models.");
+    }
+    // A Vertex service account is a file, never handed to an agent: a Vertex AI express key only.
+    if (type === "direct" && key.startsWith("{")) {
+      return yield* fail(
+        "invalid",
+        "A direct credential is an API key. A Vertex AI service account goes through the AI gateway («Import Vertex service account»).",
+      );
+    }
     yield* checkEndpoint(input.provider, input.baseUrl, input.models);
     if (
       input.provider === "openai-compatible" &&
@@ -1525,15 +1571,15 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
         yield* sql`
           INSERT INTO ai_accounts (account_id, name, type, provider, priority, status, disabled,
             credential_id, key_hint, base_url, models_json, created_at, updated_at, created_by)
-          VALUES (${accountId}, ${input.name}, 'api-key', ${input.provider}, ${(last[0]?.top ?? 0) + 1},
-            'pending', 0, ${credentialId}, ${hintOf(key)}, ${input.baseUrl ?? null},
-            ${encodeModels(models)}, ${at}, ${at}, ${userId})
+          VALUES (${accountId}, ${input.name}, ${type}, ${input.provider}, ${(last[0]?.top ?? 0) + 1},
+            ${type === "direct" ? "working" : "pending"}, 0, ${credentialId}, ${hintOf(key)},
+            ${input.baseUrl ?? null}, ${encodeModels(models)}, ${at}, ${at}, ${userId})
         `;
         yield* audit.record({
           actor: AuditLog.userActor(userId),
           action: "ai_account.create",
           target: { kind: "ai_account", id: accountId, name: input.name },
-          detail: { provider: input.provider, type: "api-key" },
+          detail: { provider: input.provider, type },
         });
       }),
     ).pipe(
@@ -1555,12 +1601,15 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     const userId = yield* manager;
     const row = yield* findAccount(input.accountId);
     const key = input.apiKey === undefined ? undefined : Redacted.value(input.apiKey).trim();
-    if (key !== undefined && row.type !== "api-key") {
+    if (key !== undefined && row.type === "subscription") {
       return yield* fail("invalid", "A subscription takes no API key: use «Sign in again».");
     }
     if (key !== undefined) {
       const problem = credentialProblem(key);
       if (problem !== undefined) return yield* fail("invalid", problem);
+      if (row.type === "direct" && key.startsWith("{")) {
+        return yield* fail("invalid", "A direct credential is an API key.");
+      }
     }
     yield* checkEndpoint(row.provider, input.baseUrl, input.models);
     const renamed = input.name !== undefined && input.name !== row.name;
@@ -2259,6 +2308,21 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     return yield* ownerSummaryOf(userId, accountId);
   });
 
+  const directCredential = Effect.fn("AiAccounts.directCredential")(function* (
+    accountId: AiAccountId,
+  ) {
+    const row = yield* findAccount(accountId);
+    if (row.type !== "direct" || row.disabled === 1 || row.credentialId === null) {
+      return yield* fail("not-found", NOT_FOUND);
+    }
+    const credentialId = row.credentialId;
+    const bytes = yield* credentials
+      .get(credentialId)
+      .pipe(Effect.catch(storage("read the AI account's credential")));
+    if (Option.isNone(bytes)) return yield* fail("not-found", NOT_FOUND);
+    return { credentialId, value: Redacted.make(new TextDecoder().decode(bytes.value)) };
+  });
+
   return AiAccounts.of({
     list,
     create,
@@ -2271,6 +2335,7 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     loginStart,
     loginComplete,
     importVertex,
+    directCredential,
   });
 });
 
@@ -2290,6 +2355,11 @@ const sweepCredentials = Effect.gen(function* () {
       SELECT credential_id AS "credentialId" FROM ai_accounts WHERE credential_id IS NOT NULL
     `).map((row) => row.credentialId),
   );
+  // Direct credentials a living Thread received stay for its masker (ticket 07).
+  for (const valueId of yield* pruneAndListHeld(sql)) {
+    const credentialId = credentialIdOfValueId(valueId);
+    if (credentialId !== undefined) held.add(credentialId);
+  }
   let removed = 0;
   for (const credentialId of stored) {
     if (held.has(credentialId)) continue;

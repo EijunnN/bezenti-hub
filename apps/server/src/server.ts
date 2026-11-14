@@ -499,6 +499,9 @@ const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
 
 const layerServerEnvironment = ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer));
 
+/** A Thread's masker and the sets it reads: one instance, shared by everything that masks. */
+const layerSecretMasking = SecretMasker.layer.pipe(Layer.provideMerge(EffectiveVaults.layer));
+
 const layerAuth = Layer.mergeAll(
   InvitationService.layer,
   MembershipService.layer,
@@ -510,16 +513,16 @@ const layerAuth = Layer.mergeAll(
   // What a Thread's turns, terminals and scripts receive (spec 5 ticket 03), delivered as
   // environment variables by SecretDelivery (ticket 04), whose values SecretMasker shows as
   // `[NAME]` in everything the Hub stores or sends (ticket 05).
-  SecretDelivery.layer.pipe(
-    Layer.provideMerge(SecretMasker.layer),
-    Layer.provideMerge(EffectiveVaults.layer),
-  ),
+  SecretDelivery.layer.pipe(Layer.provideMerge(layerSecretMasking)),
   // The Sandboxes' base image: built on this Hub, one build at a time.
   SandboxImage.layer,
   // CLIProxyAPI, run by the Hub on loopback (`T3CODE_AI_GATEWAY`), and the AI accounts it gets
   // at every start (spec 4 ticket 02); the gateway layer's keys and what it did (ticket 04); the
   // gateway of each provider session (ticket 06), under the orchestration that opens them.
   AiGatewaySessions.layer.pipe(
+    // Ticket 07: a direct credential is masked by the Thread's one masker (the same layer, so
+    // one instance) before its process starts.
+    Layer.provide(layerSecretMasking),
     Layer.provideMerge(AiGatewayProxy.layer),
     Layer.provideMerge(AiGatewayKeys.layer),
     // The usage log: counts what the gateway layer ends, off its path (spec 4 ticket 05).

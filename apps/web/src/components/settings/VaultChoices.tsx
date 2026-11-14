@@ -549,7 +549,9 @@ export function ThreadSecrets(props: {
               {error}
             </p>
           ) : shown === null ? null : shown.variables.length === 0 ? (
-            <p className="text-xs text-muted-foreground">This Thread receives no secrets.</p>
+            shown.aiCredential == null ? (
+              <p className="text-xs text-muted-foreground">This Thread receives no secrets.</p>
+            ) : null
           ) : (
             <ul className="flex flex-col gap-1" aria-label="Secrets this Thread receives">
               {threadSecretLines(shown).map((line) => (
@@ -564,6 +566,15 @@ export function ThreadSecrets(props: {
                 </li>
               ))}
             </ul>
+          )}
+          {shown?.aiCredential == null ? null : (
+            <p className="text-xs" aria-label="AI account credential">
+              <code className="font-mono text-xs">{shown.aiCredential.name}</code>{" "}
+              <span className="text-muted-foreground">
+                AI account credential, from {shown.aiCredential.aiAccountName}: only the agent
+                receives it, never terminals or scripts.
+              </span>
+            </p>
           )}
         </div>
       </PopoverPopup>

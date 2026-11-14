@@ -256,11 +256,16 @@ describe("every door of the Hub declares its rule", () => {
   });
 
   it("keeps AI accounts' credentials in the Hub: only AiAccounts reads them, no answer carries one", () => {
-    // The store's folder for them is read only by AiAccounts, which writes them into CLIProxyAPI.
+    // The store's folder for them is read only by AiAccounts, which writes them into CLIProxyAPI,
+    // and by the masker, which hides a direct credential a Thread's process received (ticket 07).
     const readers = files
       .filter(({ text }) => /AiAccountCredentialStore\b/u.test(text))
       .map(({ file }) => file);
-    expect(readers.toSorted()).toEqual(["ai/AiAccounts.ts", "auth/ServerSecretStore.ts"]);
+    expect(readers.toSorted()).toEqual([
+      "ai/AiAccounts.ts",
+      "auth/ServerSecretStore.ts",
+      "vaults/SecretMasker.ts",
+    ]);
     // No HTTP, raw route or MCP door for AI accounts: only the WS RPCs.
     expect(
       [
@@ -339,10 +344,18 @@ describe("every door of the Hub declares its rule", () => {
     ).toEqual([
       "orchestration-v2/Orchestrator.ts",
       "orchestration-v2/ProviderSessionManager.ts",
+      // Asks only whether Hub turns run on AI accounts, to refuse Antigravity's Google sign-in.
+      "provider/ProviderAuthService.ts",
       "server.ts",
+      // Asks only the same, to keep Antigravity's login out of titles and summaries.
+      "textGeneration/TextGeneration.ts",
     ]);
     const orchestrator = files.find(({ file }) => file === "orchestration-v2/Orchestrator.ts");
     expect(orchestrator?.text).not.toMatch(/\.forSession\(/u);
+    for (const file of ["provider/ProviderAuthService.ts", "textGeneration/TextGeneration.ts"]) {
+      const text = files.find((entry) => entry.file === file)?.text;
+      expect(text, file).not.toMatch(/\.(issue|issueDirect|plan)\(/u);
+    }
     // On the wire, the key goes only with `provider.openSession`.
     const wire = files.find(({ file }) => file === "environment/RemoteExecutorWire.ts")?.text ?? "";
     expect(wire.match(/aiGateway: Schema\.optionalKey\(AiGatewayAccess\)/gu)?.length).toBe(1);
@@ -359,6 +372,38 @@ describe("every door of the Hub declares its rule", () => {
     const relay = files.find(({ file }) => file === "environments/AiGatewayRelay.ts")?.text ?? "";
     expect(relay).toMatch(/listen\(0, "127\.0\.0\.1"/u);
     expect(relay).not.toMatch(/EnvironmentAuth|ServerSecretStore|joinedHubState|\.credential\b/u);
+  });
+
+  it("hands a direct AI account credential only to its Thread's provider process (spec 4 ticket 07)", () => {
+    // Read in one place, for a provider session about to start a process, and masked there.
+    const readers = (pattern: RegExp) =>
+      files
+        .filter(({ text }) => pattern.test(text))
+        .map(({ file }) => file)
+        .toSorted();
+    expect(readers(/\.directCredential\(/u)).toEqual(["ai/AiGatewaySessions.ts"]);
+    expect(readers(/\.issueDirect\(/u)).toEqual(["orchestration-v2/ProviderSessionManager.ts"]);
+    // On the wire it is one more `secretEnv` variable, named by `aiCredential`: no new field.
+    const wire = files.find(({ file }) => file === "environment/RemoteExecutorWire.ts")?.text ?? "";
+    expect(wire).not.toMatch(/aiCredential|directCredential/u);
+    // Terminals and setup scripts never get one.
+    for (const file of [
+      "environment/ThreadWorkspace.ts",
+      "project/ProjectSetupScriptRunner.ts",
+      "terminal/Manager.ts",
+      "vaults/SecretDelivery.ts",
+    ]) {
+      const text = files.find((entry) => entry.file === file)?.text ?? "";
+      expect(text, file).not.toMatch(/aiCredential|directCredential|issueDirect/u);
+    }
+    // No WS answer names a field that could carry it (the Secrets panel gets names only).
+    const environment = [...WsRpcGroup.requests.values()].find(
+      (rpc) => rpc._tag === "vaults.threadEnvironment",
+    );
+    expect(environment).toBeDefined();
+    for (const credential of ["apiKey", "key", "credential", "secret", "token", "value"]) {
+      expect(successFields(environment!.successSchema.ast)).not.toContain(credential);
+    }
   });
 
   it("makes, lists and revokes local CLI keys over the session's WS RPCs only: no HTTP, raw route or MCP door, the key in one answer (spec 4 ticket 10)", () => {

@@ -174,7 +174,10 @@ export const CursorDriver: ProviderDriver<
       Effect.provideService(CursorAgentSdk.CursorAgentSdkRunner, {
         ...sdkRunner,
         open: (input) =>
-          auth.requireApiKey.pipe(
+          (input.aiAccountKey === true && input.options.apiKey !== undefined
+            ? Effect.succeed(input.options.apiKey)
+            : auth.requireApiKey
+          ).pipe(
             Effect.flatMap((apiKey) =>
               Effect.acquireRelease(
                 sdkRunner

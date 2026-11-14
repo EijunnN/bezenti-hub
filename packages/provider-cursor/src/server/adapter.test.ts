@@ -26,6 +26,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
+import { openSessionWithSecrets } from "@t3tools/provider-core/server/instanceEnvironment";
 import {
   cursorMcpServers,
   cursorRuntimeAgentPolicy,
@@ -1594,6 +1595,65 @@ describe("CursorAdapterV2", () => {
         })
         .pipe(Effect.flip);
       assert.equal(makeProviderFailure({ cause: sendFailure }).message, expected);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.mergeAll(NodeServices.layer, IdAllocator.layer, McpProviderSessions.layer),
+      ),
+    ),
+  );
+
+  it.effect("runs a Hub turn on its direct AI account key, never the instance's or a login", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const workspace = yield* fileSystem.makeTempDirectoryScoped({ prefix: "cursor-v2-direct-" });
+      const instanceId = ProviderInstanceId.make("cursor");
+      const threadId = ThreadId.make("cursor-direct-thread");
+      const modelSelection = { instanceId, model: "composer-2.5" };
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: workspace,
+      });
+      const keys: Array<string | undefined> = [];
+      const adapter = yield* makeCursorAdapterV2({
+        instanceId,
+        environment: { HOME: workspace, CURSOR_API_KEY: "instance-key-must-not-be-used" },
+      }).pipe(
+        Effect.provideService(CursorAgentSdk.CursorAgentSdkRunner, {
+          assertComplete: Effect.void,
+          open: (input) =>
+            Effect.sync(() => keys.push(input.options.apiKey)).pipe(
+              Effect.as({
+                agentId: "native-cursor-direct",
+                listMessages: Effect.succeed([]),
+                close: Effect.void,
+                send: () => Effect.die("unexpected Cursor run"),
+              }),
+            ),
+        }),
+        Effect.provide(TestProviderHost.layer({ cwd: workspace })),
+      );
+      assert.deepEqual(adapter.acceptsAiCredential, ["CURSOR_API_KEY"]);
+      const open = (aiCredential: string, value: string) =>
+        openSessionWithSecrets(adapter, {
+          threadId,
+          providerSessionId: ProviderSessionId.make(`cursor-direct-${aiCredential}`),
+          modelSelection,
+          runtimePolicy,
+          secretEnv: {
+            fingerprint: "direct",
+            variables: [{ name: aiCredential, value }],
+            aiCredential,
+          },
+        });
+      const runtime = yield* open("CURSOR_API_KEY", "crsr-direct-account-key-0123456789");
+      yield* runtime.ensureThread({ threadId, modelSelection, runtimePolicy });
+      assert.deepEqual(keys, ["crsr-direct-account-key-0123456789"]);
+      // Another provider's credential is refused, never run on the instance's key.
+      const refused = yield* open("GEMINI_API_KEY", "not-for-cursor-0123456789").pipe(Effect.flip);
+      assert.equal(refused._tag, "ProviderAdapterOpenSessionError");
+      assert.deepEqual(keys, ["crsr-direct-account-key-0123456789"]);
     }).pipe(
       Effect.scoped,
       Effect.provide(

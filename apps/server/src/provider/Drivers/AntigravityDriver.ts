@@ -1,5 +1,10 @@
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
-import { AntigravitySettings, ProviderDriverKind, ProviderSetupError } from "@t3tools/contracts";
+import {
+  AiGatewaySessionError,
+  AntigravitySettings,
+  ProviderDriverKind,
+  ProviderSetupError,
+} from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import {
@@ -29,6 +34,7 @@ import { makeAntigravityAuth, type AntigravityAuth } from "../AntigravityAuth.ts
 import * as AntigravityInstallation from "../AntigravityInstallation.ts";
 import * as AntigravityUsage from "./AntigravityUsage.ts";
 import {
+  antigravityAiAccountProfile,
   antigravityAuthConfigIssue,
   antigravityAuthLabel,
   antigravityAuthUsesBrowser,
@@ -126,6 +132,10 @@ export const AntigravityDriver: ProviderDriver<
       gcpLocation: settings.gcpLocation,
     };
     const authConfigIssue = antigravityAuthConfigIssue(auth);
+    // An API-key method without a key of its own is ready for Hub turns, which bring an AI
+    // account's key (ticket 07); a session without one still says what is missing.
+    const probeIssue =
+      !antigravityAuthUsesBrowser(auth.authMethod) && auth.apiKey === "" ? null : authConfigIssue;
     const processEnvironment = yield* mergeProviderInstanceEnvironment(environment);
     const userHome = resolveAntigravityUserHome(
       yield* HostProcess.Platform,
@@ -176,13 +186,57 @@ export const AntigravityDriver: ProviderDriver<
       );
 
     const makeRuntime = Effect.fn("AntigravityDriver.makeRuntime")(function* (
-      input: Omit<AntigravityAcpRuntimeInput, "spawn" | "childProcessSpawner">,
+      input: Omit<AntigravityAcpRuntimeInput, "spawn" | "childProcessSpawner"> & {
+        readonly directCredential?: { readonly name: string; readonly value: string };
+        readonly threadId?: string;
+        readonly aiCredential?: string;
+      },
     ): Effect.fn.Return<
       AcpSessionRuntime.AcpSessionRuntime["Service"],
       AcpError | ProviderSetupError,
       Scope.Scope
     > {
-      if (authConfigIssue !== null) {
+      const {
+        directCredential: aiCredential,
+        aiCredential: _credentialName,
+        threadId,
+        ...runtimeInput
+      } = input;
+      // Spec 4 ticket 07: a Hub turn runs on its direct AI account (a Gemini API key, or a Vertex
+      // AI express key), in a profile of its own that never held a Google sign-in. An instance
+      // set to sign in with an account never starts one: the Owner's Google account is the
+      // gateway's alone.
+      if (aiCredential !== undefined && antigravityAuthUsesBrowser(settings.authMethod)) {
+        return yield* new ProviderSetupError({
+          instanceId,
+          operation: "configure",
+          detail: new AiGatewaySessionError({ reason: "login-method", provider: "Antigravity" })
+            .message,
+        });
+      }
+      const sessionAuth: AntigravityAuthConfig =
+        aiCredential === undefined
+          ? auth
+          : {
+              authMethod:
+                aiCredential.name === "GEMINI_API_KEY" ? "gemini-api-key" : "agent-platform",
+              apiKey: aiCredential.value,
+              gcpProject: settings.gcpProject,
+              gcpLocation: settings.gcpLocation,
+            };
+      // Per Thread: one Thread's conversations (what its agent printed) are never another's.
+      if (aiCredential !== undefined && threadId === undefined) {
+        return yield* new ProviderSetupError({
+          instanceId,
+          operation: "configure",
+          detail: "An AI account session of Antigravity needs its Thread.",
+        });
+      }
+      const sessionProfileDirectory =
+        aiCredential === undefined || threadId === undefined
+          ? profileDirectory
+          : antigravityAiAccountProfile(path, profileDirectory, threadId);
+      if (aiCredential === undefined && authConfigIssue !== null) {
         return yield* new ProviderSetupError({
           instanceId,
           operation: "configure",
@@ -201,9 +255,9 @@ export const AntigravityDriver: ProviderDriver<
         ),
       );
       const profile = yield* prepareAntigravityProfile({
-        profileDirectory,
+        profileDirectory: sessionProfileDirectory,
         baseEnv: processEnvironment,
-        auth,
+        auth: sessionAuth,
         userHome,
         tempDirectory: directories.runtimeTemp,
       }).pipe(
@@ -246,16 +300,16 @@ export const AntigravityDriver: ProviderDriver<
             ),
       );
       const runtime = yield* makeAntigravityAcpRuntime({
-        ...input,
+        ...runtimeInput,
         runtimeVersion: executable.version,
-        authMethod: auth.authMethod,
+        authMethod: sessionAuth.authMethod,
         childProcessSpawner: spawner,
         spawn: buildAntigravityAcpSpawnInput({
           installation: executable,
           profile,
           cwd: input.cwd,
           baseEnv: processEnvironment,
-          auth,
+          auth: sessionAuth,
           runtimeTempDirectory,
         }),
       }).pipe(Effect.provideService(SecureRandom.SecureRandom, random));
@@ -365,11 +419,11 @@ export const AntigravityDriver: ProviderDriver<
     // minute.
     const probe = Effect.gen(function* () {
       yield* modelCatalog.refreshInBackground;
-      if (authConfigIssue !== null) {
+      if (probeIssue !== null) {
         return yield* new ProviderSetupError({
           instanceId,
           operation: "configure",
-          detail: authConfigIssue,
+          detail: probeIssue,
         });
       }
       const executable = yield* installation.resolve(settings.binaryPath, processEnvironment).pipe(

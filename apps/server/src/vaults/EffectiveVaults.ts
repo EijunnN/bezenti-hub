@@ -25,6 +25,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { AI_CREDENTIAL_PREFIX_LENGTH } from "../ai/aiCredentialValue.ts";
 import * as ServerConfig from "../config.ts";
 import type * as AccessPolicy from "../auth/AccessPolicy.ts";
 import * as SpaceDirectory from "../spaces/SpaceDirectory.ts";
@@ -347,7 +348,34 @@ const make = Effect.gen(function* () {
         }),
       );
     const set = yield* forThread({ threadId: input.threadId, actingUserId: actor.value });
+    // Spec 4 ticket 07: the direct AI account credential the caller's turns last received in this
+    // Thread (or its root's), by name: «AI account credential». Never a value.
+    const credentialRows = yield* sql<{
+      readonly name: string;
+      readonly accountName: string | null;
+    }>`
+      SELECT v.name AS "name", (
+          SELECT a.name FROM ai_accounts a
+          WHERE a.credential_id = substr(v.value_id, ${AI_CREDENTIAL_PREFIX_LENGTH + 1})
+            OR a.account_id = (SELECT r.account_id FROM ai_account_retired_credentials r
+              WHERE r.credential_id = substr(v.value_id, ${AI_CREDENTIAL_PREFIX_LENGTH + 1}))
+          LIMIT 1
+        ) AS "accountName"
+      FROM thread_secret_values v
+      JOIN orchestration_v2_projection_threads t ON t.thread_id = ${input.threadId}
+      LEFT JOIN orchestration_v2_projection_threads root
+        ON root.thread_id = json_extract(t.payload_json, '$.lineage.rootThreadId')
+      WHERE v.value_id LIKE 'ai-account:%'
+        AND COALESCE(t.owner_user_id, root.owner_user_id) = ${actor.value}
+        AND v.thread_id IN (${input.threadId}, COALESCE(root.thread_id, ${input.threadId}))
+      ORDER BY v.remembered_at DESC LIMIT 1
+    `.pipe(Effect.catch(storage("read the Thread's AI account credential")));
+    const credential = credentialRows[0];
     return {
+      aiCredential:
+        credential === undefined
+          ? null
+          : { name: credential.name, aiAccountName: credential.accountName ?? "AI account" },
       threadId: ThreadId.make(set.threadId),
       spaceId: set.spaceId,
       projectId: set.projectId,

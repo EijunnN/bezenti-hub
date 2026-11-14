@@ -11,6 +11,7 @@ import type {
   AiAccountSummary,
   AiAccountUpdateInput,
   AiApiKeyProvider,
+  AiDirectProvider,
   AiSubscriptionProvider,
   EnvironmentId,
   InstallationUser,
@@ -68,11 +69,30 @@ const SUBSCRIPTION_PROVIDERS: ReadonlyArray<readonly [AiSubscriptionProvider, st
   ["devin", "Devin"],
   ["meta", "Meta"],
 ];
+/**
+ * Spec 4 ticket 07: API keys handed to an agent whose CLI takes no base URL (the agent it is for
+ * in brackets). Never a subscription login.
+ */
+const DIRECT_PROVIDERS: ReadonlyArray<readonly [AiDirectProvider, string]> = [
+  ["gemini", "Gemini API key (Antigravity)"],
+  ["vertex", "Vertex AI express key (Antigravity)"],
+  ["cursor", "Cursor API key (Cursor)"],
+  ["kiro", "Kiro API key (Kiro)"],
+  ["fx", "Vercel AI Gateway key (Fx)"],
+  ["meta", "Meta API key (Muse)"],
+  ["devin", "Devin token (Devin, ACP Registry)"],
+  ["xai", "xAI API key (Grok)"],
+];
+/** The direct credential's warning: it enters the agent's process, and so its Sandbox. */
+const DIRECT_WARNING =
+  "This credential will be visible to the agent: it enters the agent's process, and anything the agent runs can read it. Use a revocable API key or token, never a subscription login.";
 const providerLabel = (provider: AiAccountProvider, type?: AiAccountSummary["type"]) =>
   (type === "subscription"
     ? (SUBSCRIPTION_PROVIDERS.find(([value]) => value === provider)?.[1] ??
       (provider === "vertex" ? "Vertex AI (service account)" : undefined))
-    : undefined) ??
+    : type === "direct"
+      ? DIRECT_PROVIDERS.find(([value]) => value === provider)?.[1]
+      : undefined) ??
   API_KEY_PROVIDERS.find(([value]) => value === provider)?.[1] ??
   provider;
 
@@ -357,14 +377,23 @@ function NewAccountForm(props: {
   readonly onAdded: () => Promise<void>;
 }) {
   const [name, setName] = useState("");
-  const [provider, setProvider] = useState<AiApiKeyProvider>("claude");
+  const [kind, setKind] = useState<"api-key" | "direct">("api-key");
+  const [provider, setProvider] = useState<AiApiKeyProvider | AiDirectProvider>("claude");
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [models, setModels] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const compatible = provider === "openai-compatible";
-  const providerItems = API_KEY_PROVIDERS.map(([value, label]) => ({ value, label }));
+  const direct = kind === "direct";
+  const compatible = !direct && provider === "openai-compatible";
+  const providerItems = (direct ? DIRECT_PROVIDERS : API_KEY_PROVIDERS).map(([value, label]) => ({
+    value,
+    label,
+  }));
+  const kindItems = [
+    { value: "api-key", label: "Through the AI gateway" },
+    { value: "direct", label: "Direct credential" },
+  ];
   const modelList = splitModels(models);
   const ready =
     name.trim().length > 0 &&
@@ -383,6 +412,7 @@ function NewAccountForm(props: {
             environmentId: props.environmentId,
             input: {
               name: name.trim(),
+              ...(direct ? { type: "direct" as const } : {}),
               provider,
               apiKey: Redacted.make(apiKey.trim()),
               ...(compatible ? { baseUrl: baseUrl.trim(), models: modelList } : {}),
@@ -412,6 +442,30 @@ function NewAccountForm(props: {
             onChange={(event) => setName(event.currentTarget.value)}
           />
         </label>
+        <label className="flex flex-col gap-1 text-xs font-medium sm:w-56">
+          Credential type
+          <Select
+            disabled={pending}
+            items={kindItems}
+            value={kind}
+            onValueChange={(value) => {
+              if (value !== "api-key" && value !== "direct") return;
+              setKind(value);
+              setProvider(value === "direct" ? "gemini" : "claude");
+            }}
+          >
+            <SelectTrigger aria-label="Credential type">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectPopup>
+              {kindItems.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        </label>
         <label className="flex flex-col gap-1 text-xs font-medium sm:w-64">
           Provider
           <Select
@@ -419,7 +473,7 @@ function NewAccountForm(props: {
             items={providerItems}
             value={provider}
             onValueChange={(value) => {
-              if (value !== null) setProvider(value as AiApiKeyProvider);
+              if (value !== null) setProvider(value as AiApiKeyProvider | AiDirectProvider);
             }}
           >
             <SelectTrigger aria-label="Provider">
@@ -446,6 +500,11 @@ function NewAccountForm(props: {
           {...KEY_INPUT_PROPS}
         />
       </label>
+      {direct ? (
+        <p className="text-xs text-warning-foreground" role="note">
+          {DIRECT_WARNING}
+        </p>
+      ) : null}
       {compatible ? (
         <div className="flex flex-col gap-2 sm:flex-row">
           <label className="flex flex-1 flex-col gap-1 text-xs font-medium">

@@ -59,6 +59,18 @@ export const applySecretEnv = (
   if (secretEnv?.variables === undefined || secretEnv.variables.length === 0) return env;
   const windows = platform === "win32";
   const next: NodeJS.ProcessEnv = { ...env };
+  // Spec 4 ticket 07: a direct AI account's credential is the process's only AI credential: every
+  // ambient one (the machine's, an instance's) is unset first, and only the Thread's set comes
+  // back. Unset as `undefined`, not left out: `env` may be an overlay a runtime spreads over the
+  // instance's environment, and a spawn skips undefined values.
+  if (secretEnv.aiCredential !== undefined) {
+    const fold = (name: string) => (windows ? name.toUpperCase() : name);
+    const drop = new Set(AMBIENT_DIRECT_AI_VARIABLES.map(fold));
+    for (const name of Object.keys(next)) {
+      if (drop.has(fold(name))) delete next[name];
+    }
+    for (const name of drop) next[name] = undefined;
+  }
   for (const variable of secretEnv.variables ?? []) {
     const name = windows ? variable.name.toUpperCase() : variable.name;
     if (windows) {
@@ -71,14 +83,31 @@ export const applySecretEnv = (
   return next;
 };
 
-/** Whether a session would carry secrets. */
+/**
+ * Whether a session would carry secrets besides its direct AI credential (which an adapter takes
+ * by `acceptsAiCredential`, possibly without putting it in a process's environment: Cursor).
+ */
 const hasSecretEnv = (secretEnv: SecretEnv | undefined): secretEnv is SecretEnv =>
-  secretEnv?.variables !== undefined && secretEnv.variables.length > 0;
+  secretEnv?.variables !== undefined &&
+  secretEnv.variables.some((variable) => variable.name !== secretEnv.aiCredential);
+
+/** A direct AI credential the adapter does not run on, or one without a value. */
+const refusesAiCredential = (
+  adapter: ProviderAdapterV2["Service"],
+  secretEnv: SecretEnv | undefined,
+) => {
+  const name = secretEnv?.aiCredential;
+  if (name === undefined) return false;
+  return (
+    adapter.acceptsAiCredential?.includes(name) !== true || aiCredentialOf(secretEnv) === undefined
+  );
+};
 
 /**
  * Opens a session; one with secrets only on an adapter that puts them in its processes
  * (`receivesSecretEnv`), one on the AI gateway only on an adapter that points its processes at it
- * (`usesAiGateway`): never on one that would start without them, or on a login of the machine.
+ * (`usesAiGateway`), one with a direct AI credential only on an adapter that runs on it
+ * (`acceptsAiCredential`): never on one that would start without them, or on a login of the machine.
  */
 export const openSessionWithSecrets = (
   adapter: ProviderAdapterV2["Service"],
@@ -92,7 +121,8 @@ export const openSessionWithSecrets = (
           cause: new SecretDeliveryError({ reason: "provider", provider: adapter.driver }),
         }),
       )
-    : input.aiGateway !== undefined && adapter.usesAiGateway !== true
+    : (input.aiGateway !== undefined && adapter.usesAiGateway !== true) ||
+        refusesAiCredential(adapter, input.secretEnv)
       ? Effect.fail(
           new ProviderAdapterOpenSessionError({
             driver: adapter.driver,
@@ -101,6 +131,16 @@ export const openSessionWithSecrets = (
           }),
         )
       : adapter.openSession(input);
+
+/** The direct AI credential a session carries (`secretEnv.aiCredential`), with its value. */
+export const aiCredentialOf = (
+  secretEnv: SecretEnv | undefined,
+): { readonly name: string; readonly value: string } | undefined => {
+  const name = secretEnv?.aiCredential;
+  if (name === undefined) return undefined;
+  const value = secretEnv?.variables?.find((variable) => variable.name === name)?.value;
+  return value === undefined || value.length === 0 ? undefined : { name, value };
+};
 
 /**
  * A session's AI gateway, as its driver starts a process with it (spec 4 ticket 06): the Thread's
@@ -180,6 +220,24 @@ export const AMBIENT_AI_VARIABLES: ReadonlyArray<string> = [
   "AI_GATEWAY_API_KEY",
   "OPENCODE_API_KEY",
   "OPENCODE_AUTH_CONTENT",
+];
+
+/**
+ * Ticket 07: what a direct-credential process never inherits from the machine or its instance,
+ * besides the gateway's list: the other drivers' keys and sign-in hooks. Only ambient values: a
+ * Vault's of the same name (`GOOGLE_APPLICATION_CREDENTIALS` for gcloud) is set back after.
+ */
+const AMBIENT_DIRECT_AI_VARIABLES: ReadonlyArray<string> = [
+  ...AMBIENT_AI_VARIABLES,
+  "CURSOR_API_KEY",
+  "KIRO_API_KEY",
+  "META_API_KEY",
+  "DEVIN_TOKEN",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "GOOGLE_GENAI_USE_VERTEXAI",
+  "GROK_AUTH_PROVIDER_COMMAND",
+  "GROK_CLI_CHAT_PROXY_BASE_URL",
+  "GROK_XAI_API_BASE_URL",
 ];
 
 /** The provider id OpenCode, Pi and Codex know the gateway by. */

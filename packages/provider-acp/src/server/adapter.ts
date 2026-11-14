@@ -158,6 +158,13 @@ export interface AcpAdapterV2RuntimeInput {
   readonly acpMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly httpMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly processEnvironment?: NodeJS.ProcessEnv;
+  /** The Thread the process serves (a per-Thread home, spec 4 ticket 07). */
+  readonly threadId?: string;
+  /**
+   * Spec 4 ticket 07: the variable of `processEnvironment` holding the Thread's direct AI account
+   * credential: the agent signs in with it, never with a login the instance stored.
+   */
+  readonly aiCredential?: string;
   readonly resumeSessionId?: string;
   readonly interruptPromptOnCancel?: boolean;
   readonly clientCapabilities: EffectAcpSchema.InitializeRequest["clientCapabilities"];
@@ -351,6 +358,11 @@ export interface AcpAdapterV2Flavor {
    * (merged into it) reach the agent's process. Without it, a session with secrets is refused.
    */
   readonly receivesSecretEnv?: true;
+  /**
+   * Spec 4 ticket 07: the variables of a direct AI account credential the agent runs on (its
+   * process drops every ambient AI credential, `applySecretEnv`), from `processEnvironment`.
+   */
+  readonly acceptsAiCredential?: ReadonlyArray<string>;
   readonly makeRuntime: (
     input: AcpAdapterV2RuntimeInput,
   ) => Effect.Effect<
@@ -1688,6 +1700,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
     instanceId: options.instanceId,
     driver,
     ...(flavor.receivesSecretEnv === true ? { receivesSecretEnv: true as const } : {}),
+    ...(flavor.acceptsAiCredential !== undefined
+      ? { acceptsAiCredential: flavor.acceptsAiCredential }
+      : {}),
     getCapabilities: Effect.fn("AcpAdapter.getCapabilities")(function () {
       return Effect.succeed(flavor.capabilities);
     }),
@@ -2325,6 +2340,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     hostPlatform,
                   ),
                 }),
+            threadId: input.threadId,
+            ...(input.secretEnv?.aiCredential === undefined
+              ? {}
+              : { aiCredential: input.secretEnv.aiCredential }),
             ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
             interruptPromptOnCancel: flavor.interruptPromptOnCancel ?? false,
             clientCapabilities: {

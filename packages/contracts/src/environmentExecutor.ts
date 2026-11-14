@@ -22,9 +22,10 @@ import {
 /**
  * 8: Hub previews. 9: checkouts from the Hub. 10: `secretEnv`. 11: `aiGateway` in
  * `provider.openSession`. 12: shells keep and report their `facts`, and `terminal.reconcile`; the
- * Hub refuses terminals of a machine before 12.
+ * Hub refuses terminals of a machine before 12. 13: `secretEnv.aiCredential` (a direct AI
+ * account's credential, with every ambient AI credential dropped).
  */
-export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 12;
+export const ENVIRONMENT_EXECUTOR_CONTRACT_VERSION = 13;
 
 /** The first contract whose shells report their facts (spec 5 ticket 07). */
 export const SHELL_FACTS_CONTRACT_VERSION = 12;

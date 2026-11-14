@@ -51,6 +51,26 @@ export const AiApiKeyProvider = Schema.Literals(AI_API_KEY_PROVIDERS);
 export type AiApiKeyProvider = typeof AiApiKeyProvider.Type;
 
 /**
+ * The providers a direct AI account is for (ticket 07): an API key handed to an agent whose CLI
+ * takes no base URL (`AI_DIRECT_DRIVERS` names which agent gets it, under which variable). Never a
+ * subscription login.
+ */
+const AI_DIRECT_PROVIDERS = [
+  "gemini",
+  "vertex",
+  "cursor",
+  "kiro",
+  "fx",
+  "meta",
+  "devin",
+  "xai",
+] as const satisfies ReadonlyArray<AiAccountProvider>;
+export const AiDirectProvider = Schema.Literals(AI_DIRECT_PROVIDERS);
+export type AiDirectProvider = typeof AiDirectProvider.Type;
+export const isAiDirectProvider = Schema.is(AiDirectProvider);
+export const isAiApiKeyProvider = Schema.is(AiApiKeyProvider);
+
+/**
  * The providers a subscription AI account signs in to through CLIProxyAPI (OAuth), plus Vertex,
  * whose service account is imported (ticket 03).
  */
@@ -147,7 +167,13 @@ export const AI_CREDENTIAL_MAX_LENGTH = 8 * 1024;
 
 export const AiAccountCreateInput = Schema.Struct({
   name: AiAccountName,
-  provider: AiApiKeyProvider,
+  /**
+   * `api-key` (the default): used by the gateway, never enters a Sandbox. `direct`: handed to the
+   * agent as an environment variable, so it is visible to it (ticket 07); `provider` must then be
+   * an `AiDirectProvider`, and the credential an API key (never a subscription login).
+   */
+  type: Schema.optionalKey(Schema.Literals(["api-key", "direct"])),
+  provider: Schema.Literals([...new Set([...AI_API_KEY_PROVIDERS, ...AI_DIRECT_PROVIDERS])]),
   apiKey: AiCredentialInput,
   /** Required for `openai-compatible`; its `/v1` base URL. */
   baseUrl: Schema.optionalKey(AiBaseUrl),

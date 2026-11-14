@@ -43,7 +43,10 @@ import {
   makeAntigravityUserInputResponse,
   normalizeAntigravityToolCall,
 } from "../../provider/acp/AntigravityProtocol.ts";
-import { isAntigravitySignInRequiredError } from "../../provider/antigravityAuthSupport.ts";
+import {
+  antigravityAiAccountProfile,
+  isAntigravitySignInRequiredError,
+} from "../../provider/antigravityAuthSupport.ts";
 import {
   AcpProviderCapabilitiesV2,
   makeAcpAdapterV2,
@@ -74,7 +77,13 @@ export interface AntigravityAdapterV2Options {
   readonly instanceId: ProviderInstanceId;
   readonly selfInvocation: SelfInvocation;
   readonly makeRuntime: (
-    input: Omit<AntigravityAcpRuntimeInput, "spawn" | "childProcessSpawner">,
+    input: Omit<AntigravityAcpRuntimeInput, "spawn" | "childProcessSpawner"> & {
+      /**
+       * Spec 4 ticket 07: a Hub turn's direct AI account credential (`GEMINI_API_KEY` or
+       * `GOOGLE_API_KEY`): the session signs in with it, never with an account.
+       */
+      readonly directCredential?: { readonly name: string; readonly value: string };
+    },
   ) => Effect.Effect<
     AcpSessionRuntime.AcpSessionRuntime["Service"],
     EffectAcpErrors.AcpError | ProviderSetupError,
@@ -123,6 +132,9 @@ const extractAntigravitySubagentUpdate: NonNullable<AcpAdapterV2Flavor["extractS
   };
 };
 
+/** A Gemini API key, or a Vertex AI express key («Agent Platform»): never a Google account. */
+const ANTIGRAVITY_AI_CREDENTIALS: ReadonlyArray<string> = ["GEMINI_API_KEY", "GOOGLE_API_KEY"];
+
 interface AntigravityFlavorServices {
   readonly random: SecureRandom.SecureRandom["Service"];
   readonly fileSystem: FileSystem.FileSystem;
@@ -134,16 +146,39 @@ export function makeAntigravityAcpAdapterFlavor(
   options: AntigravityAdapterV2Options & AntigravityFlavorServices,
 ): AcpAdapterV2Flavor {
   const { profileDirectory } = options;
+  /** Each started session's profile: an AI-account session's is its Thread's, not the instance's. */
+  const sessionProfiles = new Map<string, string>();
   const antigravityClientFileRoots = (cwd: string | null) =>
     cwd === null ? [options.host.paths.attachmentsDir] : [cwd, options.host.paths.attachmentsDir];
   const makeRuntime = Effect.fn("AntigravityAdapterV2.makeRuntime")(
     function* (input: AcpAdapterV2RuntimeInput) {
       const scope = yield* Scope.fork(yield* Effect.scope);
+      // Only a direct credential reaches it (`acceptsAiCredential`; no Vault secret: it does not
+      // take `receivesSecretEnv`), set over the unset ambient ones by `applySecretEnv`.
+      const credentialValue =
+        input.aiCredential === undefined
+          ? undefined
+          : input.processEnvironment?.[input.aiCredential];
+      const directCredential =
+        input.aiCredential !== undefined &&
+        ANTIGRAVITY_AI_CREDENTIALS.includes(input.aiCredential) &&
+        typeof credentialValue === "string" &&
+        credentialValue.length > 0
+          ? { name: input.aiCredential, value: credentialValue }
+          : undefined;
+      // Its sessions live in the Thread's own profile: their outcome is read there.
+      const sessionProfile =
+        directCredential === undefined ||
+        input.threadId === undefined ||
+        profileDirectory === undefined
+          ? profileDirectory
+          : antigravityAiAccountProfile(options.path, profileDirectory, input.threadId);
       const runtime = yield* options
         .withProcess(
           Scope.close(scope, Exit.void),
           options.makeRuntime({
             ...input,
+            ...(directCredential === undefined ? {} : { directCredential }),
             clientFileReads: true,
             sessionSystemPromptAppend: PULL_REQUEST_LINKING_INSTRUCTIONS,
             additionalDirectories: [options.host.paths.attachmentsDir],
@@ -187,13 +222,16 @@ export function makeAntigravityAcpAdapterFlavor(
           );
         },
         start: () =>
-          runtime
-            .start()
-            .pipe(
-              Effect.tap(
-                (started) => options.onSessionStarted?.(started, input.cwd) ?? Effect.void,
-              ),
+          runtime.start().pipe(
+            Effect.tap((started) =>
+              Effect.sync(() => {
+                if (sessionProfile !== undefined) {
+                  sessionProfiles.set(started.sessionId, sessionProfile);
+                }
+              }),
             ),
+            Effect.tap((started) => options.onSessionStarted?.(started, input.cwd) ?? Effect.void),
+          ),
       } satisfies typeof runtime;
     },
     Effect.provideService(SecureRandom.SecureRandom, options.random),
@@ -207,6 +245,7 @@ export function makeAntigravityAcpAdapterFlavor(
   return {
     driver: ANTIGRAVITY_PROVIDER,
     runtimeHarness: "Antigravity",
+    acceptsAiCredential: ANTIGRAVITY_AI_CREDENTIALS,
     capabilities: AntigravityProviderCapabilitiesV2,
     // Agents that advertise HTTP MCP skip the stdio bridge process; others keep stdio.
     mcpOverHttp: true,
@@ -280,7 +319,10 @@ export function makeAntigravityAcpAdapterFlavor(
       ? {}
       : {
           watchPromptOutcome: (sessionId: string) =>
-            watchAntigravityPromptOutcome(profileDirectory, sessionId),
+            watchAntigravityPromptOutcome(
+              sessionProfiles.get(sessionId) ?? profileDirectory,
+              sessionId,
+            ),
         }),
   };
 }

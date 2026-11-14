@@ -738,5 +738,11 @@ export class ProviderAdapterV2 extends Context.Service<
     readonly receivesSecretEnv?: true;
     /** Points each process its sessions start at the Hub's AI gateway (`aiGateway`). */
     readonly usesAiGateway?: true;
+    /**
+     * Spec 4 ticket 07: the variables of a direct AI account credential (`secretEnv.aiCredential`)
+     * its sessions run on, instead of any login or key of the machine. A session with another is
+     * refused.
+     */
+    readonly acceptsAiCredential?: ReadonlyArray<string>;
   }
 >()("@t3tools/provider-core/server/ProviderAdapter/ProviderAdapterV2") {}

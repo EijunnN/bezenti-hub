@@ -83,6 +83,11 @@ export interface CursorAgentSdkOpenInput {
   readonly options: AgentOptions;
   readonly threadId: ThreadId;
   readonly providerSessionId: OrchestrationV2ProviderSession["id"];
+  /**
+   * Spec 4 ticket 07: `options.apiKey` is a Hub turn's direct AI account key: the session runs on
+   * it, never on the instance's sign-in or key.
+   */
+  readonly aiAccountKey?: true;
 }
 
 export interface CursorAgentSdkSendInput<Error> {

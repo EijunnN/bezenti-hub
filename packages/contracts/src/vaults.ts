@@ -482,5 +482,12 @@ export const VaultThreadEnvironment = Schema.Struct({
     Schema.Struct({ vaultId: VaultId, name: Schema.String, source: VaultSource }),
   ),
   variables: Schema.Array(VaultThreadVariable),
+  /**
+   * Spec 4 ticket 07: the direct AI account credential the Thread's agent last received («AI
+   * account credential»): the variable's and the account's names, never its value.
+   */
+  aiCredential: Schema.optionalKey(
+    Schema.NullOr(Schema.Struct({ name: Schema.String, aiAccountName: Schema.String })),
+  ),
 });
 export type VaultThreadEnvironment = typeof VaultThreadEnvironment.Type;

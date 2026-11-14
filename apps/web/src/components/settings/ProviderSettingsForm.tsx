@@ -43,8 +43,15 @@ export interface ProviderSettingsFieldModel {
   readonly acceptsSecretReference?: boolean | undefined;
   readonly defaultBooleanValue?: boolean | undefined;
 
-  readonly options?: ReadonlyArray<ProviderSettingsFormOption> | undefined;
+  readonly options?:
+    | ReadonlyArray<ProviderSettingsFormOption & { readonly disabledReason?: string }>
+    | undefined;
 }
+
+/** Options of a select not offered here, with why (spec 4 ticket 07: a Hub on AI accounts). */
+export type ProviderSettingsDisabledOptions = Readonly<
+  Record<string, { readonly values: ReadonlySet<string>; readonly reason: string }>
+>;
 
 function titleizeFieldKey(key: string): string {
   return key
@@ -338,6 +345,8 @@ interface ProviderSettingsFormProps {
   readonly managed?: { readonly keys: ReadonlySet<string>; readonly reason: string } | undefined;
   /** Where the secret providers offered for `SettingsSecretValue` fields are configured. */
   readonly environmentId?: EnvironmentId | undefined;
+  /** Select options not offered here, shown disabled with the reason. */
+  readonly disabledOptions?: ProviderSettingsDisabledOptions | undefined;
 }
 
 function SecretSettingsControl({
@@ -425,8 +434,14 @@ function ProviderSettingsSelect({
       </SelectTrigger>
       <SelectPopup align="start" alignItemWithTrigger={false}>
         {options.map((option) => (
-          <SelectItem key={option.value} value={option.value}>
-            {option.label}
+          <SelectItem
+            key={option.value}
+            value={option.value}
+            disabled={option.disabledReason !== undefined}
+          >
+            {option.disabledReason === undefined
+              ? option.label
+              : `${option.label} (${option.disabledReason})`}
           </SelectItem>
         ))}
       </SelectPopup>
@@ -677,8 +692,18 @@ export function ProviderSettingsForm({
   onChange,
   managed,
   environmentId,
+  disabledOptions,
 }: ProviderSettingsFormProps) {
-  const fields = deriveProviderSettingsFields(definition, value);
+  const fields = deriveProviderSettingsFields(definition, value).map((field) => {
+    const disabled = disabledOptions?.[field.key];
+    if (disabled === undefined || field.options === undefined) return field;
+    return {
+      ...field,
+      options: field.options.map((option) =>
+        disabled.values.has(option.value) ? { ...option, disabledReason: disabled.reason } : option,
+      ),
+    };
+  });
   const isLocalAcp =
     definition.driverKind === "acpRegistry" &&
     readProviderConfigString(value, "source") === "local";

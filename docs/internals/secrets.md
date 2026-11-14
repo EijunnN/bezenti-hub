@@ -400,6 +400,13 @@ requests).
 - Codex's own shell policy leaves out variables whose names contain `KEY`, `SECRET` or `TOKEN` from
   the commands it runs, unless its config says otherwise.
 
+**A direct AI account credential** (spec 4 ticket 07) rides the same `secretEnv` of
+`provider.openSession` as one more variable (`secretEnv.aiCredential` names it; it wins over a
+Vault's of that name), never a terminal's or a setup script's. It is decided by
+`AiGatewaySessions`, not by `SecretDelivery`, and masked like a Vault value: `thread_secret_values`
+holds it as `ai-account:<credential id>`, which `SecretMasker` reads from the AI accounts' credential
+store. See docs/internals/ai-gateway.md, «Direct credentials».
+
 ## Masking (`vaults/SecretMasker.ts`, spec 5 ticket 05)
 
 Every secret value that could surface in a Thread's history is stored and shown as `[NAME]`. One

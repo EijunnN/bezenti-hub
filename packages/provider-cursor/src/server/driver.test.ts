@@ -38,6 +38,7 @@ import * as CursorKeychain from "./CursorKeychain.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { openSessionWithSecrets } from "@t3tools/provider-core/server/instanceEnvironment";
 import { loadCursorSdk } from "./sdk.ts";
 
 const { Cursor } = loadCursorSdk();
@@ -189,6 +190,63 @@ it.layer(layerTest)("CursorDriver", (it) => {
         ).toBe("Failure");
         expect(openedKeys).toEqual(["instance-browser-key"]);
         expect(closed).toBe(1);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    "runs a Hub turn on its direct AI account key, with no sign-in on the machine (spec 4 ticket 07)",
+    () =>
+      Effect.gen(function* () {
+        const openedKeys: Array<string | undefined> = [];
+        const instance = yield* CursorDriver.create({
+          instanceId: ProviderInstanceId.make("cursor-direct"),
+          displayName: "Cursor",
+          enabled: true,
+          environment: [],
+          config: CursorDriver.defaultConfig(),
+        }).pipe(
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make((request) =>
+              Effect.succeed(
+                HttpClientResponse.fromWeb(request, Response.json({}, { status: 401 })),
+              ),
+            ),
+          ),
+          Effect.provideService(CursorAgentSdk.CursorAgentSdkRunner, {
+            assertComplete: Effect.void,
+            open: (request) =>
+              Effect.sync(() => {
+                openedKeys.push(request.options.apiKey);
+                return {
+                  agentId: "direct-agent",
+                  listMessages: Effect.succeed([]),
+                  send: () => Effect.die("This test only opens a session"),
+                  close: Effect.void,
+                };
+              }),
+          }),
+        );
+        const threadId = ThreadId.make("cursor-direct-thread");
+        const modelSelection = { instanceId: instance.instanceId, model: "auto" };
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const runtime = yield* openSessionWithSecrets(instance.orchestrationAdapter, {
+          threadId,
+          providerSessionId: ProviderSessionId.make("cursor-direct-session"),
+          modelSelection,
+          runtimePolicy,
+          secretEnv: {
+            fingerprint: "direct",
+            variables: [{ name: "CURSOR_API_KEY", value: "crsr-direct-account-key-0123456789" }],
+            aiCredential: "CURSOR_API_KEY",
+          },
+        });
+        yield* runtime.ensureThread({ threadId, modelSelection, runtimePolicy });
+        expect(openedKeys).toEqual(["crsr-direct-account-key-0123456789"]);
       }).pipe(Effect.scoped),
   );
 
