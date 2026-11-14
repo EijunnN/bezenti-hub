@@ -150,6 +150,11 @@ export class AiAccounts extends Context.Service<
      * only, in one transaction with its ledger row (`source`). No RPC reaches it. Already moved, or
      * the same key moved from elsewhere: no new account (`created: false`).
      */
+    /** Ticket 09: whether that account exists and holds `key`; unreadable says no. */
+    readonly holdsKey: (
+      accountId: string,
+      key: Redacted.Redacted<string>,
+    ) => Effect.Effect<boolean>;
     readonly adoptProviderKey: (
       input: AdoptProviderKeyInput,
     ) => Effect.Effect<{ readonly accountId: string; readonly created: boolean }, AiAccountError>;
@@ -410,6 +415,13 @@ const refuse = Effect.fn("AiAccounts.unavailable")(function* (_input: unknown) {
   return yield* UNAVAILABLE;
 });
 
+const holdsNothing = Effect.fn("AiAccounts.holdsNothing")(function* (
+  _accountId: string,
+  _key: Redacted.Redacted<string>,
+) {
+  return false;
+});
+
 /** A joined machine: no AI accounts, nothing written. */
 const unavailable = AiAccounts.of({
   list: Effect.fail(UNAVAILABLE),
@@ -425,6 +437,7 @@ const unavailable = AiAccounts.of({
   importVertex: refuse,
   directCredential: refuse,
   adoptProviderKey: refuse,
+  holdsKey: holdsNothing,
 });
 
 /** Options for tests: how often the Hub reads back refreshed tokens; how long a sign-in lasts. */
@@ -2453,6 +2466,24 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     return { accountId, created: true };
   });
 
+  const holdsKey = Effect.fn("AiAccounts.holdsKey")(
+    function* (accountId: string, key: Redacted.Redacted<string>) {
+      const rows = yield* sql<{
+        readonly provider: AiAccountProvider;
+        readonly type: AiAccountType;
+      }>`
+      SELECT provider, type FROM ai_accounts WHERE account_id = ${accountId} AND deleted_at IS NULL
+    `;
+      const row = rows[0];
+      if (row === undefined) return false;
+      const holder = yield* movedHolding(row.provider, row.type, Redacted.value(key).trim(), [
+        accountId,
+      ]);
+      return holder !== undefined;
+    },
+    Effect.orElseSucceed(() => false),
+  );
+
   return AiAccounts.of({
     list,
     create,
@@ -2467,6 +2498,7 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
     importVertex,
     directCredential,
     adoptProviderKey,
+    holdsKey,
   });
 });
 

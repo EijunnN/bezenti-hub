@@ -549,11 +549,15 @@ settings side `settingsAiCredentials.ts` and `ServerSettingsService` (`setAiCred
   `provider-env-*` / `provider-config-*` secret and rewrites settings.json without it. A stop in
   between leaves the key owned and still on the instance (which Hub turns ignore since tickets 06
   and 07), never live and unowned.
-- **Twice is once.** Migration **119**, `ai_account_migrated_keys` (`source` =
+- **Twice is once.** Migration **117** (the next free id after 116: a database that recorded a
+  higher id would refuse a lower one added later), `ai_account_migrated_keys` (`source` =
   `env:<instance>:<VARIABLE>` or `field:<instance>:<field>`, the account id; never the key or a hash
   of it). A source already moved whose account still holds the same key is only removed from the
   instance; any other key under it becomes a new account, so a key is never lost. Deleting an
   account deletes its ledger rows.
+- **Deleted meanwhile.** The removal asks again, under the settings write lock and right before
+  its write, whether the account still exists and holds the key (`AiAccounts.holdsKey`); an
+  account the Owner deleted in between leaves its key on the instance.
 - **Left on the instance**, named in the log by instance and variable only: a secret provider
   reference that cannot be read within 15 s (read once per pass), a value AI accounts refuse
   (spaces, control characters), or a write a managed policy locks. Settings shows each one on its

@@ -572,3 +572,31 @@ it.effect("a read error of the accounts never counts as AI accounts in use", () 
     assert.isFalse(inUse);
   }),
 );
+
+it.live.skipIf(!posix || platform === undefined)(
+  "an account deleted between its making and the removal keeps the key on the instance",
+  () =>
+    Effect.gen(function* () {
+      const { settings, sql, run } = yield* hub({ gateway: true });
+      yield* earlierState(settings);
+      // The Owner deletes every new account just before the removal's write.
+      const racing = ServerSettings.ServerSettingsService.of({
+        ...settings,
+        removeProviderCredentials: (items, stillOwned) =>
+          sql`UPDATE ai_accounts SET deleted_at = '2026-11-13T00:00:00.000Z'`.pipe(
+            Effect.orDie,
+            Effect.andThen(settings.removeProviderCredentials!(items, stillOwned)),
+          ),
+      });
+      const pass = yield* run(
+        ProviderKeyMigration.migrateProviderKeys.pipe(
+          Effect.provideService(ServerSettings.ServerSettingsService, racing),
+        ),
+      );
+      assert.equal(pass.removed, 0);
+      assert.equal(
+        (yield* settings.getSettings).providerInstances[id("codex")]?.environment?.[0]?.value,
+        OPENAI_KEY,
+      );
+    }),
+);

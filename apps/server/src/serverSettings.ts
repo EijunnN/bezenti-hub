@@ -299,11 +299,13 @@ export class ServerSettingsService extends Context.Service<
       ServerSettingsError
     >;
     /**
-     * Removes those credentials that still hold the same value, secrets included, in one write;
+     * Removes those credentials that still hold the same value, secrets included, in one write,
+     * each only if `stillOwned` (asked under the write lock) still says an AI account holds it;
      * returns what went.
      */
     readonly removeProviderCredentials?: (
       items: ReadonlyArray<ProviderCredential>,
+      stillOwned?: (item: ProviderCredential) => Effect.Effect<boolean>,
     ) => Effect.Effect<ReadonlyArray<ProviderCredential>, ServerSettingsError>;
   }
 >()("t3/serverSettings/ServerSettingsService") {
@@ -383,17 +385,29 @@ const makeTest = Effect.fn("serverSettings.makeTest")(function* (
     subscribeChanges: Effect.succeed(Stream.empty),
     setAiCredentialGuard: (inUse) => Ref.set(aiCredentialGuard, inUse),
     listProviderCredentials: getSettings.pipe(Effect.map(providerCredentialsIn)),
-    removeProviderCredentials: (items) =>
+    removeProviderCredentials: (items, stillOwned) =>
       writeSemaphore.withPermits(1)(
         Effect.gen(function* () {
           const current = yield* Ref.get(currentSettingsRef);
-          const next = withoutProviderCredentials(current, current, items);
+          const owned = yield* ownedOnly(items, stillOwned);
+          const next = withoutProviderCredentials(current, current, owned);
           yield* Ref.set(currentSettingsRef, next.settings);
           return next.removed;
         }),
       ),
   } satisfies ServerSettingsService["Service"];
 });
+
+/** The items an AI account still holds, by `stillOwned` (all of them without one). */
+const ownedOnly = (
+  items: ReadonlyArray<ProviderCredential>,
+  stillOwned: ((item: ProviderCredential) => Effect.Effect<boolean>) | undefined,
+) =>
+  stillOwned === undefined
+    ? Effect.succeed(items)
+    : Effect.forEach(items, (item) =>
+        stillOwned(item).pipe(Effect.map((owned) => (owned ? [item] : []))),
+      ).pipe(Effect.map((kept) => kept.flat()));
 
 const aiCredentialError = (
   settingsPath: string,
@@ -1319,17 +1333,25 @@ const make = Effect.gen(function* () {
   );
 
   const removeProviderCredentials = Effect.fn("serverSettings.removeProviderCredentials")(
-    function* (items: ReadonlyArray<ProviderCredential>) {
+    function* (
+      items: ReadonlyArray<ProviderCredential>,
+      stillOwned?: (item: ProviderCredential) => Effect.Effect<boolean>,
+    ) {
       if (items.length === 0) return [];
       let removed: ReadonlyArray<ProviderCredential> = [];
       yield* updateAndPersistSettings({}, (current) =>
-        materializeSettingsSecrets(current).pipe(
-          Effect.map((read) => {
-            const next = withoutProviderCredentials(current, read, items);
-            removed = next.removed;
-            return next.settings;
-          }),
-        ),
+        Effect.gen(function* () {
+          // Asked under the write lock, right before the write: an account deleted since keeps
+          // its key on the instance.
+          const owned = yield* ownedOnly(items, stillOwned);
+          const next = withoutProviderCredentials(
+            current,
+            yield* materializeSettingsSecrets(current),
+            owned,
+          );
+          removed = next.removed;
+          return next.settings;
+        }),
       );
       return removed;
     },

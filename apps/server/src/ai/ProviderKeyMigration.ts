@@ -110,6 +110,10 @@ export const migrateProviderKeys = Effect.gen(function* () {
     return nothing;
   }
   const moved: ProviderCredential[] = [];
+  const holders = new Map<
+    ProviderCredential,
+    { readonly accountId: string; readonly key: Redacted.Redacted<string> }
+  >();
   const left: string[] = [];
   let created = 0;
   for (const item of items) {
@@ -150,8 +154,15 @@ export const migrateProviderKeys = Effect.gen(function* () {
     }
     if (adopted.success.created) created += 1;
     moved.push(item);
+    holders.set(item, { accountId: adopted.success.accountId, key: key.value });
   }
-  const removed = yield* removeProviderCredentials(moved).pipe(
+  const stillOwned = (item: ProviderCredential) => {
+    const holder = holders.get(item);
+    return holder === undefined
+      ? Effect.succeed(false)
+      : accounts.holdsKey(holder.accountId, holder.key);
+  };
+  const removed = yield* removeProviderCredentials(moved, stillOwned).pipe(
     Effect.catch((error) =>
       Effect.logWarning("Moved provider keys could not be removed from their instances yet", {
         operation: error.operation,
