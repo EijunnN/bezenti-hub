@@ -1710,6 +1710,8 @@ const make = Effect.fn("AiAccounts.make")(function* (options: AiAccountsOptions)
         .withTransaction(
           Effect.gen(function* () {
             yield* sql`DELETE FROM ai_account_allowances WHERE account_id = ${row.accountId}`;
+            // Ticket 09: a key moved into it and saved again later is moved again, never lost.
+            yield* sql`DELETE FROM ai_account_migrated_keys WHERE account_id = ${row.accountId}`;
             if (row.credentialId !== null) {
               yield* sql`
                 INSERT INTO ai_account_retired_credentials (credential_id, account_id, retired_at)

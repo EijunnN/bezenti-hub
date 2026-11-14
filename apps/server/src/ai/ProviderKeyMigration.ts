@@ -4,8 +4,8 @@
  * stop half-way leaves it owned, never live and unowned. docs/internals/ai-gateway.md.
  */
 import {
-  AI_ACCOUNT_CREDENTIAL_VARIABLES,
   AI_DIRECT_DRIVERS,
+  aiAccountCredentialProviderOf,
   type AiAccountProvider,
   type AiGatewayState,
   isAiApiKeyProvider,
@@ -26,6 +26,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import type { ProviderCredential } from "../settingsAiCredentials.ts";
 import { AiAccounts } from "./AiAccounts.ts";
 import { AiGateway } from "./AiGateway.ts";
+import { hasUsableAiAccounts } from "./usableAiAccounts.ts";
 
 /** States of a gateway the Owner (or `T3CODE_AI_GATEWAY`) has not turned on. */
 const OFF_STATES: ReadonlySet<AiGatewayState> = new Set(["off", "unsupported"]);
@@ -33,20 +34,12 @@ const OFF_STATES: ReadonlySet<AiGatewayState> = new Set(["off", "unsupported"]);
 /**
  * The one condition: AI accounts are in use on this server once it has a usable AI account (the
  * condition `AiGatewaySessions.applies` uses) or its AI gateway is turned on. A desktop or dev Hub
- * (gateway off by default) with no AI account keeps its provider keys as before. Unreadable: in use.
+ * (gateway off by default) with no AI account keeps its provider keys as before, also when the
+ * accounts cannot be read.
  */
 export const aiAccountsInUse = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient;
   const gateway = yield* AiGateway;
-  const accounts = yield* sql<{ readonly found: number }>`
-    SELECT EXISTS (
-      SELECT 1 FROM ai_accounts WHERE deleted_at IS NULL AND disabled = 0
-    ) AS found
-  `.pipe(
-    Effect.map((rows) => rows[0]?.found === 1),
-    Effect.orElseSucceed(() => true),
-  );
-  if (accounts) return true;
+  if (yield* hasUsableAiAccounts) return true;
   return !OFF_STATES.has((yield* gateway.status).state);
 });
 
@@ -76,7 +69,7 @@ export const accountFor = (
       ? item.authMethod === "agent-platform"
         ? "vertex"
         : "gemini"
-      : (AI_ACCOUNT_CREDENTIAL_VARIABLES.get(item.name) ?? "codex");
+      : (aiAccountCredentialProviderOf(item.name) ?? "codex");
   const type =
     AI_DIRECT_DRIVERS.has(item.driver) && isAiDirectProvider(provider)
       ? "direct"

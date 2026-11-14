@@ -302,7 +302,7 @@ export const aiAccountPrefixOf = (accountId: string) => `acct-${accountId}`;
  * use, the Hub moves them into AI accounts at its start and settings writes refuse them; each names
  * the provider of the account it becomes.
  */
-export const AI_ACCOUNT_CREDENTIAL_VARIABLES: ReadonlyMap<string, AiAccountProvider> = new Map<
+const AI_ACCOUNT_CREDENTIAL_VARIABLES: ReadonlyMap<string, AiAccountProvider> = new Map<
   string,
   AiAccountProvider
 >([
@@ -317,6 +317,10 @@ export const AI_ACCOUNT_CREDENTIAL_VARIABLES: ReadonlyMap<string, AiAccountProvi
   ["AI_GATEWAY_API_KEY", "fx"],
   ["DEVIN_TOKEN", "devin"],
 ]);
+
+/** The provider of an AI credential variable, whatever its case (`openai_api_key` too). */
+export const aiAccountCredentialProviderOf = (name: string): AiAccountProvider | undefined =>
+  AI_ACCOUNT_CREDENTIAL_VARIABLES.get(name.toUpperCase());
 
 /** Ticket 09: provider settings fields that are AI credentials, by driver. */
 export const AI_ACCOUNT_CREDENTIAL_FIELDS: ReadonlyMap<string, ReadonlyArray<string>> = new Map([

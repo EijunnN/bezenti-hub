@@ -21,6 +21,13 @@ describe("AI credentials in the provider form (spec 4 ticket 09)", () => {
       aiCredentialAdded([stored], [{ name: "OPENAI_API_KEY", value: "", sensitive: true }]),
     ).toBeUndefined();
     expect(aiCredentialAdded([stored], [])).toBeUndefined();
+    // A new one is refused even before its value, and whatever its case.
+    expect(aiCredentialAdded([], [{ name: "OPENAI_API_KEY", value: "", sensitive: true }])).toBe(
+      "OPENAI_API_KEY",
+    );
+    expect(
+      aiCredentialAdded([], [{ name: "openai_api_key", value: "sk-3", sensitive: true }]),
+    ).toBe("openai_api_key");
     expect(
       aiCredentialAdded([], [{ name: "HTTPS_PROXY_TOKEN", value: "x", sensitive: true }]),
     ).toBeUndefined();

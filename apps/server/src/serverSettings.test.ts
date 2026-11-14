@@ -2951,3 +2951,98 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AI credentials",
     }).pipe(Effect.provide(ServerSettingsModule.layerTest())),
   );
 });
+
+// Spec 4 ticket 09, after review: the rule holds however the name is cased, across a driver change,
+// and before the Hub's AI accounts layer sets the guard (a usable account is enough).
+it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AI credentials, edges", (it) => {
+  const codex = ProviderDriverKind.make("codex");
+  const opencode = ProviderDriverKind.make("opencode");
+  const antigravity = ProviderDriverKind.make("antigravity");
+  const instanceId = ProviderInstanceId.make("work");
+
+  it.effect("refuses a reserved variable whatever its case", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      yield* service.setAiCredentialGuard!(Effect.succeed(true));
+      const refused = yield* service
+        .updateProviderInstance({
+          operation: "upsert",
+          instanceId,
+          instance: {
+            driver: codex,
+            environment: [
+              { name: "openai_api_key", value: "sk-lower-0123456789", sensitive: true },
+            ],
+          },
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused.operation, "write-ai-credential");
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect("checks Antigravity's API key against the new driver's stored key", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      yield* service.updateProviderInstance({
+        operation: "upsert",
+        instanceId,
+        instance: { driver: opencode, config: { apiKey: "AIza-under-another-driver" } },
+      });
+      yield* service.setAiCredentialGuard!(Effect.succeed(true));
+      const refused = yield* service
+        .updateProviderInstance({
+          operation: "upsert",
+          instanceId,
+          instance: { driver: antigravity, config: { apiKey: "AIza-under-another-driver" } },
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused.operation, "write-ai-credential");
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+
+  it.effect("refuses with a usable AI account before any guard is set", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        INSERT INTO ai_accounts (account_id, name, type, provider, priority, status, disabled,
+          credential_id, key_hint, base_url, models_json, created_at, updated_at, created_by)
+        VALUES ('a1', 'Claude', 'api-key', 'claude', 1, 'working', 0, NULL, NULL, NULL, '[]',
+          '2026-11-13T00:00:00.000Z', '2026-11-13T00:00:00.000Z', 'owner')
+      `;
+      const refused = yield* service
+        .updateProviderInstance({
+          operation: "upsert",
+          instanceId,
+          instance: {
+            driver: codex,
+            environment: [
+              { name: "OPENAI_API_KEY", value: "sk-early-0123456789", sensitive: true },
+            ],
+          },
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused.operation, "write-ai-credential");
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+});
+
+it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("AI credentials, empty", (it) => {
+  it.effect("refuses a new reserved variable even before its value", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      yield* service.setAiCredentialGuard!(Effect.succeed(true));
+      const refused = yield* service
+        .updateProviderInstance({
+          operation: "upsert",
+          instanceId: ProviderInstanceId.make("codex"),
+          instance: {
+            driver: ProviderDriverKind.make("codex"),
+            environment: [{ name: "OPENAI_API_KEY", value: "", sensitive: true }],
+          },
+        })
+        .pipe(Effect.flip);
+      assert.equal(refused.operation, "write-ai-credential");
+    }).pipe(Effect.provide(layerServerSettings())),
+  );
+});

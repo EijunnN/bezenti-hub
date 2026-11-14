@@ -1,12 +1,12 @@
 /**
- * Spec 4 ticket 09: AI credentials on provider instances (`AI_ACCOUNT_CREDENTIAL_VARIABLES`,
+ * Spec 4 ticket 09: AI credentials on provider instances (`aiAccountCredentialProviderOf`,
  * `AI_ACCOUNT_CREDENTIAL_FIELDS`). Where AI accounts are in use they belong in AI accounts: a
  * settings write may keep a leftover as it is or remove it, never add or change one, and the
  * Hub's start moves them out (`ai/ProviderKeyMigration.ts`). Nothing here logs or returns a value.
  */
 import {
   AI_ACCOUNT_CREDENTIAL_FIELDS,
-  AI_ACCOUNT_CREDENTIAL_VARIABLES,
+  aiAccountCredentialProviderOf,
   isSecretReference,
   type ProviderDriverKind,
   type ProviderInstanceConfig,
@@ -70,6 +70,7 @@ export interface AiCredentialSlot {
 }
 
 export interface AiCredentialFieldValue extends AiCredentialSlot {
+  readonly driver: string;
   readonly value: string;
 }
 
@@ -89,11 +90,11 @@ export function aiCredentialChanges(
   for (const [instanceId, instance] of instancesOf(next)) {
     const before = instanceOf(current, instanceId);
     for (const variable of instance.environment ?? []) {
-      if (!AI_ACCOUNT_CREDENTIAL_VARIABLES.has(variable.name)) continue;
-      if (variable.value === "" && variable.valueRedacted !== true) continue;
-      const kept = (before?.environment ?? []).some(
-        (stored) => stored.name === variable.name && keepsVariable(stored, variable),
-      );
+      if (aiAccountCredentialProviderOf(variable.name) === undefined) continue;
+      const stored = (before?.environment ?? []).filter((old) => old.name === variable.name);
+      // Clearing one kept is removing it; a new one, even empty, is refused.
+      if (variable.value === "" && variable.valueRedacted !== true && stored.length > 0) continue;
+      const kept = stored.some((old) => keepsVariable(old, variable));
       if (!kept) return { refused: { instanceId, name: variable.name }, literalFields };
     }
     const config = configOf(instance);
@@ -102,7 +103,7 @@ export function aiCredentialChanges(
       const value = config[field];
       if (holdsNoField(value)) continue;
       if (typeof value === "string") {
-        literalFields.push({ instanceId, name: field, value });
+        literalFields.push({ instanceId, driver: instance.driver, name: field, value });
         continue;
       }
       if (!(isSecretReference(value) && sameValue(value, storedConfig[field]))) {
@@ -113,9 +114,11 @@ export function aiCredentialChanges(
   return { refused: undefined, literalFields };
 }
 
-/** Whether `settings` (materialized) holds `value` in that field. */
-export const holdsFieldValue = (settings: ServerSettings, slot: AiCredentialFieldValue) =>
-  configOf(instanceOf(settings, slot.instanceId))[slot.name] === slot.value;
+/** Whether `settings` (materialized) holds `value` in that field, under the same driver. */
+export const holdsFieldValue = (settings: ServerSettings, slot: AiCredentialFieldValue) => {
+  const instance = instanceOf(settings, slot.instanceId);
+  return instance?.driver === slot.driver && configOf(instance)[slot.name] === slot.value;
+};
 
 /** One AI credential a provider instance holds, read from materialized settings. */
 export interface ProviderCredential {
@@ -157,7 +160,7 @@ export function providerCredentialsIn(settings: ServerSettings): ReadonlyArray<P
       authMethod: typeof config.authMethod === "string" ? config.authMethod : undefined,
     };
     for (const variable of instance.environment ?? []) {
-      if (!AI_ACCOUNT_CREDENTIAL_VARIABLES.has(variable.name)) continue;
+      if (aiAccountCredentialProviderOf(variable.name) === undefined) continue;
       const value = credentialOf(variable.value);
       if (value !== undefined)
         found.push({ ...base, kind: "environment", name: variable.name, value });

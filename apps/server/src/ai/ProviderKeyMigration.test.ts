@@ -29,6 +29,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { FetchHttpClient } from "effect/http";
 
 import * as AuditLog from "../audit/AuditLog.ts";
+import * as CommandActor from "../auth/CommandActor.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { bootstrapOwner, makeAuthenticator, serveAuthHttp } from "../auth/UserAuth.testkit.ts";
 import * as ServerConfig from "../config.ts";
@@ -515,7 +516,8 @@ it.live.skipIf(!posix || platform === undefined)(
       const { settings, sql, run } = yield* hub({ gateway: true });
       yield* earlierState(settings);
       yield* run(ProviderKeyMigration.migrateProviderKeys);
-      yield* sql`UPDATE ai_accounts SET deleted_at = '2026-11-13T00:00:00.000Z' WHERE provider = 'codex'`;
+      // The Owner deleted every account: with none usable, the instance takes a key again.
+      yield* sql`UPDATE ai_accounts SET deleted_at = '2026-11-13T00:00:00.000Z'`;
       const newKey = "sk-proj-saved-again-after-delete-0123456789";
       yield* settings.updateProviderInstance({
         operation: "upsert",
@@ -536,4 +538,37 @@ it.live.skipIf(!posix || platform === undefined)(
         [],
       );
     }),
+);
+
+it.live.skipIf(!posix || platform === undefined)(
+  "deleting a moved account forgets its ledger rows",
+  () =>
+    Effect.gen(function* () {
+      const { settings, sql, run, ownerId } = yield* hub({ gateway: true });
+      yield* earlierState(settings);
+      yield* run(ProviderKeyMigration.migrateProviderKeys);
+      const openAi = (yield* accountsOf(sql)).find((row) => row.provider === "codex");
+      const accounts = yield* run(AiAccounts.AiAccounts);
+      yield* accounts
+        .remove({ accountId: openAi!.accountId as never })
+        .pipe(CommandActor.actAs(ownerId!), Effect.exit);
+      const ledger = yield* sql<{ readonly n: number }>`
+        SELECT COUNT(*) AS n FROM ai_account_migrated_keys WHERE account_id = ${openAi!.accountId}
+      `;
+      assert.equal(ledger[0]?.n, 0);
+    }),
+);
+
+it.effect("a read error of the accounts never counts as AI accounts in use", () =>
+  Effect.gen(function* () {
+    const gateway = AiGateway.AiGateway.of({
+      status: Effect.succeed({ state: "off" } as never),
+    } as never);
+    const failing = (() => Effect.fail("unreadable")) as unknown as SqlClient.SqlClient;
+    const inUse = yield* ProviderKeyMigration.aiAccountsInUse.pipe(
+      Effect.provideService(AiGateway.AiGateway, gateway),
+      Effect.provideService(SqlClient.SqlClient, failing),
+    );
+    assert.isFalse(inUse);
+  }),
 );

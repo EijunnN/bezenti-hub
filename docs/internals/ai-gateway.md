@@ -516,18 +516,20 @@ as Antigravity's once AI accounts apply.
 Decisions; the rule is `ai/ProviderKeyMigration.ts` (`aiAccountsInUse`, `migrateProviderKeys`), the
 settings side `settingsAiCredentials.ts` and `ServerSettingsService` (`setAiCredentialGuard`,
 `listProviderCredentials`, `removeProviderCredentials`), the account side
-`AiAccounts.adoptProviderKey`, the list `AI_ACCOUNT_CREDENTIAL_VARIABLES` /
+`AiAccounts.adoptProviderKey`, the list `aiAccountCredentialProviderOf` /
 `AI_ACCOUNT_CREDENTIAL_FIELDS` (contracts).
 
 - **Which keys.** Provider-instance variables `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
   `OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY`, `KIRO_API_KEY`,
   `META_API_KEY`, `AI_GATEWAY_API_KEY`, `DEVIN_TOKEN` (marked sensitive or not, a value or a
-  secret provider reference) and Antigravity's `apiKey`. Every other variable stays on its instance.
+  secret provider reference; the name in any case) and Antigravity's `apiKey`. Every other variable
+  stays on its instance.
 - **Only where AI accounts are in use** (`aiAccountsInUse`, the one condition): the server has a
   usable AI account (not deleted, not disabled: what `AiGatewaySessions.applies` asks) or its AI
   gateway is turned on (any state but `off`/`unsupported`; on by default on a server Hub, off by
-  default in the desktop app and on a dev Hub). Unreadable: in use. A desktop or dev Hub with neither
-  keeps its keys and saves new ones exactly as before; nothing moves.
+  default in the desktop app and on a dev Hub). Accounts that cannot be read count as none
+  (`ai/usableAiAccounts.ts`). A desktop or dev Hub with neither keeps its keys and saves new ones
+  exactly as before; nothing moves.
 - **When.** A pass at every start (beside it, not blocking it) and again when the gateway is turned
   on; one pass at a time. It needs the Owner: before one exists nothing moves (the next pass does).
   Only the server does it: no RPC triggers it, and nobody else gains any use of a key, since each
@@ -550,8 +552,8 @@ settings side `settingsAiCredentials.ts` and `ServerSettingsService` (`setAiCred
 - **Twice is once.** Migration **119**, `ai_account_migrated_keys` (`source` =
   `env:<instance>:<VARIABLE>` or `field:<instance>:<field>`, the account id; never the key or a hash
   of it). A source already moved whose account still holds the same key is only removed from the
-  instance; any other key under it (also after the Owner deleted that account: a deleted account
-  cannot say which key it held) becomes a new account, so a key is never lost.
+  instance; any other key under it becomes a new account, so a key is never lost. Deleting an
+  account deletes its ledger rows.
 - **Left on the instance**, named in the log by instance and variable only: a secret provider
   reference that cannot be read within 15 s (read once per pass), a value AI accounts refuse
   (spaces, control characters), or a write a managed policy locks. Settings shows each one on its
@@ -559,9 +561,10 @@ settings side `settingsAiCredentials.ts` and `ServerSettingsService` (`setAiCred
   Values a managed policy supplies are not stored by the Hub and are not moved.
 - **Writes refuse them** while AI accounts are in use, in `ServerSettingsService` itself, so every
   door does: WS `server.updateSettings` (patch and provider instance mutation), the MCP tool
-  `t3_environment_preferences_update`, and the Hub's own callers. A write may keep a leftover as
-  stored (the redacted echo, the same value or reference, a field read back) or remove it; adding
-  or changing one fails with `write-ai-credential` («OPENAI_API_KEY is an AI credential: add it in
+  `t3_environment_preferences_update`, and the Hub's own callers. Until the AI accounts layer sets
+  the whole condition at boot, a usable account is enough. A write may keep a leftover as stored
+  (the redacted echo, the same value or reference, a field read back under the same driver), clear
+  it or remove it; adding one (even empty) or changing one fails with `write-ai-credential` («OPENAI_API_KEY is an AI credential: add it in
   Settings → AI accounts.»), naming the variable, never the value. No HttpApi twin exists. The web
   form says it first (with the link), hides Cursor's and Kiro's key fields and Antigravity's
   «API key» once the Hub has an enabled AI account.

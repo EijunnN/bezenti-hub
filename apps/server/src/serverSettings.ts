@@ -75,6 +75,7 @@ import {
   providerCredentialsIn,
   withoutProviderCredentials,
 } from "./settingsAiCredentials.ts";
+import { hasUsableAiAccounts } from "./ai/usableAiAccounts.ts";
 
 export {
   resolveReviewGuideModelSelection,
@@ -749,7 +750,10 @@ const make = Effect.gen(function* () {
       managedProviders.isDriverAllowed,
     );
   const writeSemaphore = yield* Semaphore.make(1);
-  const aiCredentialGuard = yield* Ref.make<Effect.Effect<boolean>>(Effect.succeed(false));
+  // Until the AI accounts layer sets the whole condition, a usable AI account is enough.
+  const aiCredentialGuard = yield* Ref.make<Effect.Effect<boolean>>(
+    Effect.provideService(hasUsableAiAccounts, SqlClient.SqlClient, sql),
+  );
   const cacheKey = "settings" as const;
   const changesPubSub = yield* PubSub.unbounded<ServerSettings>();
   const startedRef = yield* Ref.make(false);
